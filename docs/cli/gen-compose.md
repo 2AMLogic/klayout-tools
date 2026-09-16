@@ -941,6 +941,35 @@ into the circuit.)
   and is unaffected. This is the same "advisory heuristic, not a substitute
   for `klt extract`" caveat as the checks above — see "`unrouted_nets: []`
   plus a clean `klt drc` is not a connectivity guarantee either" above.
+- **A multi-hop via-drop ladder's intermediate landing pad is now compared
+  against other nets' geometry too, on its own layer (#1913, fixed).** The
+  route-vs-route collision check above (#1057/#1197) only ever compared a
+  candidate leg's drawn footprint against other legs *on the leg's own
+  primary `routing.layer_role`* — a multi-hop ladder's intermediate/far
+  landing pads (see "Multi-level via-drop" below) sit on a plane the leg's
+  own primary layer never names, so they were excluded from both sides of
+  the comparison. Two unrelated nets whose ladders both land an intermediate
+  pad on the same plane at overlapping points — e.g. a `"metal3"` signal
+  net's li1→met1→met2 ladder dropping a met1 pad exactly where an unrelated
+  `"metal2"` (met1) rail's own backbone runs — composed `unrouted_nets: []`,
+  both legs `routed: true`, with `klt drc --deck <family>` also reporting
+  clean: a metal-on-metal overlap merges into one polygon in the composed
+  GDS, a short rather than a spacing violation, so no rule deck has anything
+  to flag. **`klt drc` was never the right backstop for this failure class**
+  — only `klt extract`'s own net list could show it (the same correction
+  #1527 already made for a `blocks[].cell` endpoint's coordinate-tapped
+  short). Every via-drop's landing pad is now compared against other nets'
+  already-accepted geometry keyed to *its own* layer, not just the leg's
+  primary one, so this class of short is now reported **unroutable**
+  (`unrouted_nets[]`, a `legs[].reason` entry naming the colliding net)
+  instead of silently composing. Scoped to a literal positive-area overlap
+  only — an intermediate pad's mere *near-miss* spacing gap against another
+  net's geometry is left to `klt drc`'s own same-layer `"space"` rule for
+  that pad's layer, which (unlike an overlap) can and does still see it; this
+  also avoids over-rejecting a single-hop `routing.cross_block_layer_role`
+  retry (#1680 above), whose own bridging pad sits at a fixed pin location no
+  channel-track retry can nudge clear of a merely-nearby (not overlapping)
+  neighbor.
 
 ## Via-drop routing (metal2/via, #454)
 

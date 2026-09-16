@@ -207,6 +207,7 @@ from .gen_compose_routing import (
     _RING_GAP_PORT_PREFIX,
     _declare_only_bundle_result,
     _drawn_leg_footprint_region,
+    _drawn_leg_intermediate_pad_regions,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
     _polyline_midpoint_um,
@@ -2589,6 +2590,18 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # entirely (see the "shared pin" skip below). kdb.Region objects are not
     # JSON-serialisable, so this stays a private side list rather than living
     # on routed_geometry/nets[] themselves.
+    #
+    # Each accepted leg contributes one entry for its own primary layer (the
+    # backbone plus every pad/widen box drawn on that same layer) *and* one
+    # further entry per additional layer a multi-hop via-drop ladder's
+    # intermediate/far landing pads land on (issue #1913) -- e.g. a leg whose
+    # primary layer is "metal3" but whose ladder drops an intermediate pad on
+    # "metal2" also gets a "metal2"-keyed entry containing just that pad. A
+    # short living entirely on a plane neither net's own primary layer names
+    # is invisible to `klt drc` by construction (two overlapping shapes on
+    # one layer merge into a single polygon in the output GDS, not a spacing
+    # violation), so this collision check is the only place that can still
+    # catch it.
     accepted_route_regions: list[
         tuple[str, frozenset[tuple[str, str]], tuple[int, int] | None, Any]
     ] = []
@@ -2807,29 +2820,57 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             pads sit on layers *other* than this leg's own primary ``layer``
             -- :func:`_drawn_leg_footprint_region` excludes them here, the
             same as it always excluded a single-hop drop's *far* (port-side)
-            pad. Those intermediate pads are still checked against the
-            *same block's* own other drawn geometry by the own-block pad
-            self-notch check below (#1520) -- catching a cross-*net* short on
-            an intermediate level (two unrelated nets' ladders both landing
-            on, say, the same ``"metal2"`` role at overlapping points) is
-            left to `klt drc`, this module's own stated backstop for
-            anything beyond these heuristics (see :func:`route_two_pin`'s
-            docstring).
+            pad.
+
+            Those intermediate pads are *not* left unchecked, though (issue
+            #1913): :func:`_drawn_leg_intermediate_pad_regions` returns them
+            separately, keyed by each pad's own layer, and ``layer_checks``
+            below folds each one in as a further ``(layer, region,
+            check_spacing=False)`` entry -- compared against
+            ``accepted_route_regions`` for a literal overlap the same way as
+            the primary entry, just keyed to a different layer. This is the
+            only place that *can* catch a short living entirely on a plane
+            neither net's own primary layer names: two shapes that overlap
+            on one physical layer merge into a single polygon in the
+            composed GDS, which is a short, not a spacing violation, so
+            `klt drc` -- however complete its rule deck -- has nothing to
+            flag there. (The own-block pad self-notch check below, #1520, is
+            a distinct, narrower case: the *same* block's own other geometry
+            on a pad's layer, not a different net's.)
+
+            Intermediate entries skip the *spacing* half of the check
+            (``check_spacing=False``) that the primary entry still runs --
+            deliberately: unlike an invisible overlap, a mere near-miss
+            spacing gap on an intermediate/complementary pad *is* something
+            `klt drc` can and does still flag on the composed GDS (its
+            layer's own same-layer ``"space"`` rule sees that pad exactly
+            like any other shape on that layer), so leaving it there is an
+            honest backstop, not a wrong one. It also avoids a real
+            over-rejection: a single-hop cross-block-layer retry
+            (:func:`_retry_leg_on_cross_layer`, issue #1680) always plants
+            one such pad at the *original* pin location to bridge onto the
+            new layer, and that fixed position cannot be nudged by the
+            channel-track retry the way the backbone jog itself can -- an
+            unconditional spacing check there would make an otherwise-clean
+            cross-layer fallback permanently unrouteable against any
+            already-accepted net whose own primary-layer geometry merely
+            passes nearby, not through, that fixed point.
 
             A literal positive-area overlap is still always rejected first
             (mirrors check 4's "positive area only, not a mere edge touch"
             rule: a ``kdb.Region`` boolean AND between two backbones already
-            yields an empty region for a mere edge touch). When the two
-            regions do *not* overlap but sit closer together than the
-            resolved deck's own same-layer ``"space"`` rule for ``layer``
-            (:func:`_min_spacing_um_for_layer`), one side is grown by that
-            threshold (``kdb.Region.sized`` -- the standard "distance < d"
-              Minkowski-sum test, symmetric regardless of which side grows)
-            before the same intersection test -- catching the class of
-            violation issue #1386 reported (`nets[].legs[].routed: true`
-            legs that still failed `klt drc`'s `li1.space.1`/`met1.space.1`)
-            that the overlap-only version of this check could not see. A
-            layer with no known ``"space"`` rule keeps the overlap-only test.
+            yields an empty region for a mere edge touch). For the primary
+            entry, when the two regions do *not* overlap but sit closer
+            together than the resolved deck's own same-layer ``"space"``
+            rule for ``layer`` (:func:`_min_spacing_um_for_layer`), one side
+            is grown by that threshold (``kdb.Region.sized`` -- the standard
+            "distance < d" Minkowski-sum test, symmetric regardless of which
+            side grows) before the same intersection test -- catching the
+            class of violation issue #1386 reported (`nets[].legs[].routed:
+            true` legs that still failed `klt drc`'s
+            `li1.space.1`/`met1.space.1`) that the overlap-only version of
+            this check could not see. A layer with no known ``"space"`` rule
+            keeps the overlap-only test.
             """
             # candidate_width_um (#1620): this candidate's own drawn width --
             # cross_block_width_um when it resolved on cross_route_layer,
@@ -2847,13 +2888,25 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 _route_dbu(),
                 layer,
             )
-            spacing = _min_spacing_um_for_layer(layer)
-            inflated_region = None
-            if spacing is not None:
-                spacing_um, _rule_id = spacing
-                spacing_dbu = int(round(spacing_um / _route_dbu()))
-                if spacing_dbu > 0:
-                    inflated_region = region.sized(spacing_dbu)
+            # layer_checks (#1913): the primary (layer, region) entry (with
+            # its own spacing check, exactly as before), plus one further
+            # overlap-only entry per additional layer this leg's via-drop
+            # ladder lands an intermediate/far pad on -- see this closure's
+            # own docstring above. Empty from
+            # `_drawn_leg_intermediate_pad_regions` when `layer` is `None`:
+            # every pad is already folded into `region` itself in that case
+            # (the pre-#1567 conservative fallback), so there is nothing
+            # left to separate out.
+            layer_checks: list[tuple[tuple[int, int] | None, Any, bool]] = [
+                (layer, region, True)
+            ]
+            if layer is not None:
+                layer_checks.extend(
+                    (pad_layer, pad_region, False)
+                    for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
+                        via_drops, _route_dbu(), layer
+                    ).items()
+                )
             for (
                 other_net,
                 other_pins,
@@ -2862,26 +2915,34 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             ) in accepted_route_regions:
                 if _net_pin_set & other_pins:
                     continue  # shared pin -- an intended merge, not a short
-                if (
-                    layer is not None
-                    and other_layer is not None
-                    and layer != other_layer
-                ):
-                    continue  # different physical layers can't touch or short
-                if not (region & other_region).is_empty():
-                    return f"crosses already-routed net '{other_net}'"
-                if (
-                    inflated_region is not None
-                    and not (inflated_region & other_region).is_empty()
-                ):
-                    spacing_um, rule_id = spacing  # type: ignore[misc]
-                    return (
-                        f"comes within {spacing_um:.4g}um of already-routed "
-                        f"net '{other_net}' -- closer than the resolved "
-                        f"deck's own '{rule_id}' minimum same-layer spacing "
-                        "rule (no literal overlap, but still a real `klt "
-                        "drc` violation on the composed layout)"
-                    )
+                for cand_layer, cand_region, check_spacing in layer_checks:
+                    if (
+                        cand_layer is not None
+                        and other_layer is not None
+                        and cand_layer != other_layer
+                    ):
+                        continue  # different physical layers can't touch or short
+                    if not (cand_region & other_region).is_empty():
+                        return f"crosses already-routed net '{other_net}'"
+                    if not check_spacing:
+                        continue
+                    cand_spacing = _min_spacing_um_for_layer(cand_layer)
+                    if cand_spacing is None:
+                        continue
+                    cand_spacing_um, cand_rule_id = cand_spacing
+                    cand_spacing_dbu = int(round(cand_spacing_um / _route_dbu()))
+                    if cand_spacing_dbu <= 0:
+                        continue
+                    cand_inflated = cand_region.sized(cand_spacing_dbu)
+                    if not (cand_inflated & other_region).is_empty():
+                        return (
+                            f"comes within {cand_spacing_um:.4g}um of "
+                            f"already-routed net '{other_net}' -- closer "
+                            "than the resolved deck's own "
+                            f"'{cand_rule_id}' minimum same-layer spacing "
+                            "rule (no literal overlap, but still a real "
+                            "`klt drc` violation on the composed layout)"
+                        )
 
             # Own-block pad self-notch check (#1520): everything above
             # compares this leg's drawn footprint against a *different*
@@ -3078,6 +3139,24 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                     ),
                 )
             )
+            # Intermediate/far via-drop landing pads (issue #1913): the
+            # complement `_drawn_leg_footprint_region` excludes above --
+            # a multi-hop ladder's pad on a layer *other* than this leg's own
+            # `leg_route_layer` -- fed into `accepted_route_regions` too, one
+            # entry per additional layer, keyed to that pad's own layer. A
+            # later net's `_leg_conflict` call compares its own drawn
+            # footprint against these the same way it compares against any
+            # other accepted entry, which is what lets it catch a short that
+            # lives entirely on a plane neither net's own primary layer
+            # names (invisible to `klt drc` by construction -- see
+            # `_leg_conflict`'s own docstring).
+            if leg_route_layer is not None:
+                for pad_layer, pad_region in _drawn_leg_intermediate_pad_regions(
+                    leg["via_drops"], _route_dbu(), leg_route_layer
+                ).items():
+                    accepted_route_regions.append(
+                        (net_label, net_pin_set, pad_layer, pad_region)
+                    )
             leg_label_layer = _label_layer_for(leg_route_layer)
             routed_geometry.append(
                 {
