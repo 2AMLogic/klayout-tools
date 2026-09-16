@@ -326,6 +326,53 @@ def validate_request_shape(
     return data
 
 
+#: How many leading bytes :func:`looks_like_request_document` reads off a
+#: candidate file to decide whether it is a JSON document. A request document
+#: may legitimately start with whitespace/newlines before its opening ``{``,
+#: so this is generous relative to the single byte actually needed.
+_REQUEST_SNIFF_BYTES = 512
+
+
+def looks_like_request_document(value: str) -> bool:
+    """Is this positional CLI value a request *document* rather than an
+    input *file* path?
+
+    ``klt drc``/``klt extract`` (issue #1867) accept either shape in the same
+    positional slot -- unlike ``klt lvs``, whose positional has only ever been
+    a request document, they predate the convention and already take a layout
+    path there. argparse cannot disambiguate two optional positionals (the
+    first one always wins), so the two forms share one slot and are told apart
+    by *value shape*, never by argument position:
+
+    - ``"-"`` -- always a request document read from stdin. A layout stream is
+      never read from stdin (KLayout's reader needs a seekable file).
+    - a value whose first non-whitespace character is ``{`` -- an inline JSON
+      object string.
+    - an existing file whose first non-whitespace byte is ``{`` -- a request
+      document file. A GDSII stream starts with the binary record header
+      ``00 06 00 02`` and an OASIS stream with ``%SEMI-OASIS``, so no layout
+      this tool can read can be mistaken for one.
+
+    Everything else (including a path that does not exist) is a layout path,
+    so an unreadable/mistyped layout path still produces the same
+    "file not found" error it always has, rather than a JSON parse error.
+    """
+    if value == "-":
+        return True
+    if value.lstrip()[:1] == "{":
+        return True
+    if not os.path.isfile(value):
+        return False
+    try:
+        with open(value, "rb") as handle:
+            head = handle.read(_REQUEST_SNIFF_BYTES)
+    except OSError:
+        # Unreadable: fall through to the layout-path reader, which reports
+        # the read failure in its own vocabulary.
+        return False
+    return head.decode("utf-8", errors="replace").lstrip()[:1] == "{"
+
+
 def load_request_arg(
     value: str,
     *,

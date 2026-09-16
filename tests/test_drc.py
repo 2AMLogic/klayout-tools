@@ -8,6 +8,7 @@ in under `tests/corpus/gf180mcu/` (see `tests/corpus/README.md`).
 
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -5768,3 +5769,278 @@ def test_cli_no_file_no_check_is_a_usage_error():
     with pytest.raises(SystemExit) as exc_info:
         main(["drc", "--format", "json"])
     assert exc_info.value.code == 2
+
+
+# ---------------------------------------------------------------------------
+# Request-document input form (issue #1867)
+#
+# `klt drc` accepts its inputs either as argv flags (unchanged) or as a
+# request document -- a path to a JSON file, `-` for stdin, or an inline JSON
+# object string -- in the same positional slot, told apart by value shape.
+# The two forms are mutually exclusive; see `cli/_request_document.py`.
+# ---------------------------------------------------------------------------
+
+
+def _drc_request_document(path: Path, **fields) -> dict:
+    return {
+        "schema": "klt.drc.request/1",
+        "file": str(path),
+        "deck": "sky130",
+        **fields,
+    }
+
+
+def _run_drc_json(capsys, argv: list[str]) -> tuple[int, dict]:
+    """Run `klt drc <argv> --format json`, returning (exit code, parsed stdout)."""
+    capsys.readouterr()
+    code = main(["drc", *argv, "--format", "json"])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def _drc_error_message(capsys, argv: list[str]) -> str:
+    capsys.readouterr()
+    code = main(["drc", *argv, "--format", "json"])
+    assert code == 1
+    return json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_request_document_file_form_matches_argv(tmp_path, capsys):
+    """The whole point of the feature: a committed request document produces
+    the same report the equivalent argv line does."""
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text(json.dumps(_drc_request_document(path, top="TOP")))
+
+    argv_code, argv_report = _run_drc_json(
+        capsys, [str(path), "--deck", "sky130", "--top", "TOP"]
+    )
+    request_code, request_report = _run_drc_json(capsys, [str(request_path)])
+
+    assert argv_code == request_code == 3
+    assert request_report == argv_report
+
+
+def test_request_document_stdin_form(tmp_path, capsys, monkeypatch):
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    monkeypatch.setattr(
+        "sys.stdin", io.StringIO(json.dumps(_drc_request_document(path)))
+    )
+
+    code, report = _run_drc_json(capsys, ["-"])
+
+    assert code == 3
+    assert report["file"] == str(path)
+    assert report["deck"] == "sky130"
+
+
+def test_request_document_inline_form(tmp_path, capsys):
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+
+    code, report = _run_drc_json(capsys, [json.dumps(_drc_request_document(path))])
+
+    assert code == 3
+    assert report["file"] == str(path)
+
+
+def test_request_document_relative_paths_resolve_against_its_own_directory(
+    tmp_path, capsys, monkeypatch
+):
+    """`klt lvs`'s convention, applied verbatim: a relative path inside the
+    document anchors at the document's directory, not at the cwd."""
+    design_dir = tmp_path / "design"
+    design_dir.mkdir()
+    _make_violation_layout().write(str(design_dir / "violation.gds"))
+    request_path = design_dir / "drc.request.json"
+    request_path.write_text(
+        json.dumps(
+            {"schema": "klt.drc.request/1", "file": "violation.gds", "deck": "sky130"}
+        )
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    code, report = _run_drc_json(capsys, [str(request_path)])
+
+    assert code == 3
+    assert report["file"] == str(design_dir / "violation.gds")
+
+
+def test_request_document_stdin_relative_paths_resolve_against_cwd(
+    tmp_path, capsys, monkeypatch
+):
+    """There is no request *file* to anchor relative paths to in the stdin
+    form, so they resolve against the current working directory instead --
+    again matching `klt lvs`."""
+    _make_violation_layout().write(str(tmp_path / "violation.gds"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(json.dumps({"file": "violation.gds", "deck": "sky130"})),
+    )
+
+    code, report = _run_drc_json(capsys, ["-"])
+
+    assert code == 3
+    assert report["file"] == str(tmp_path / "violation.gds")
+
+
+def test_request_document_is_mutually_exclusive_with_argv_flags(tmp_path, capsys):
+    """The stated precedence rule (issue #1867): a request document plus one
+    of this command's own input flags is a clean error, never a silent
+    override in either direction."""
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text(json.dumps(_drc_request_document(path)))
+
+    message = _drc_error_message(capsys, [str(request_path), "--deck", "gf180mcu"])
+
+    assert "mutually exclusive" in message
+    assert "--deck" in message
+
+
+def test_request_document_tolerates_a_flag_left_at_its_default(tmp_path, capsys):
+    """A flag re-passed at exactly its parser default is indistinguishable
+    from an omitted one, so it is accepted (and has no effect) rather than
+    reported as a conflict."""
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text(json.dumps(_drc_request_document(path)))
+
+    code, report = _run_drc_json(capsys, [str(request_path), "--engine", "curated"])
+
+    assert code == 3
+    assert report["deck"] == "sky130"
+
+
+def test_request_document_format_flag_is_not_an_input_flag(tmp_path, capsys):
+    """`--format` shapes output, not the run, so it composes with a request
+    document (every other test here already relies on this)."""
+    path = tmp_path / "violation.gds"
+    _make_violation_layout().write(str(path))
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text(json.dumps(_drc_request_document(path)))
+    capsys.readouterr()
+
+    assert main(["drc", str(request_path)]) == 3
+    assert "status: violations" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        ('{"deck": "sky130"}', "missing required field: file"),
+        ('{"file": "x.gds", "nope": 1}', "unknown field(s)"),
+        ('{"file": "x.gds", "schema": "klt.drc.request/99"}', "declares schema"),
+        ('{"file": 3}', "must be a string"),
+        ('{"file": "x.gds", "timeout_s": "soon"}', "must be a number"),
+        ('{"file": "x.gds", "deck_vars": ["FEOL=true"]}', "must be a JSON object"),
+        ('{"file": "x.gds", "engine": "nope"}', "must be 'curated' or 'klayout'"),
+        ('{"file": "x.gds", "deck_vars": {"A=B": "1"}}', "cannot represent one"),
+        ('{"file": "x.gds",', "neither an existing file"),
+        ('{"not": "an object"', "neither an existing file"),
+    ],
+)
+def test_malformed_request_document_is_a_clean_error(
+    document, expected, tmp_path, capsys
+):
+    """Exit 1 with the shared error envelope, never a traceback."""
+    message = _drc_error_message(capsys, [document])
+    assert expected in message
+
+
+def test_malformed_request_document_file_is_a_clean_error(tmp_path, capsys):
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text("{ this is not JSON")
+
+    message = _drc_error_message(capsys, [str(request_path)])
+
+    assert "not valid JSON" in message
+
+
+def test_malformed_stdin_request_document_is_a_clean_error(capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin", io.StringIO("{ nope"))
+
+    message = _drc_error_message(capsys, ["-"])
+
+    assert "stdin request is not valid JSON" in message
+
+
+def test_nonexistent_layout_path_is_still_reported_as_a_missing_file(capsys):
+    """A mistyped layout path must keep producing its own "file not found"
+    error -- the request-document sniff only claims values that actually
+    look like JSON, so it can never turn this into a JSON parse error."""
+    message = _drc_error_message(capsys, ["nope.gds", "--deck", "sky130"])
+    assert "file not found: nope.gds" in message
+
+
+def test_request_document_fields_cover_every_drc_flag():
+    """Guards the request schema against drift: every `klt drc` flag must be
+    reachable from a request document (issue #1867)."""
+    from klayout_tools.cli.drc_cmd import _REQUEST_FIELD_DESTS
+    from klayout_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(["drc", "x.gds"])
+
+    assert set(_REQUEST_FIELD_DESTS.values()) == {"file", *args.request_argv_flags}
+
+
+def test_request_document_maps_every_field_onto_its_flag(tmp_path):
+    """Field-by-field mapping check for the fields whose behavior needs a
+    `klayout` engine binary to exercise end-to-end (`--engine klayout`'s
+    `deck_file`/`deck_vars`/`timeout_s`/`pdk`/`pdk_root`)."""
+    from klayout_tools.cli.drc_cmd import _apply_request
+    from klayout_tools.cli.parser import create_parser
+
+    deck_file = tmp_path / "deck.lydrc"
+    deck_file.write_text("# deck\n")
+    request_path = tmp_path / "drc.request.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "schema": "klt.drc.request/1",
+                "file": "design.gds",
+                "deck": "sky130",
+                "top": "TOP",
+                "engine": "klayout",
+                "deck_file": "deck.lydrc",
+                "deck_vars": {"FEOL": True, "STACK": "5", "MODE": "full"},
+                "timeout_s": 42,
+                "pdk": "sky130A",
+                "pdk_root": "pdks",
+            }
+        )
+    )
+
+    resolved = _apply_request(
+        create_parser().parse_args(["drc", str(request_path), "--format", "json"])
+    )
+
+    assert resolved.file == str(tmp_path / "design.gds")
+    assert resolved.deck == "sky130"
+    assert resolved.top == "TOP"
+    assert resolved.engine == "klayout"
+    assert resolved.deck_file == str(deck_file)
+    assert resolved.deck_var == ["FEOL=true", "STACK=5", "MODE=full"]
+    assert resolved.timeout_s == 42.0
+    assert resolved.pdk == "sky130A"
+    assert resolved.pdk_root == str(tmp_path / "pdks")
+
+
+def test_check_mode_still_takes_a_json_report_not_a_request(tmp_path, capsys):
+    """`--check` is unaffected by the new positional form: the report it
+    names is a JSON document too, but it arrives via the flag, so it is never
+    sniffed as a request document (issue #1867 must not regress #1106)."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))
+    report_path = tmp_path / "clean.drc.json"
+    _write_report(report_path, run_drc(str(path), "sky130"))
+    capsys.readouterr()
+
+    assert main(["drc", "--check", str(report_path), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "match"

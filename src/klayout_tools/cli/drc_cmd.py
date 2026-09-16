@@ -14,9 +14,20 @@ Exit codes (see ``docs/cli/drc.md`` for the full table):
 (``run_drc``, klt's own pip-only ``Region``-primitive deck) and the opt-in
 ``klayout`` engine (``run_drc_klayout_engine``, a subprocess wrapper around
 the standalone ``klayout`` application binary running a PDK-native DRC-DSL
-script) -- see ``docs/cli/drc.md``, "Engine". Unlike ``klt lvs``'s
-request-body ``engine`` field, ``klt drc`` has no request-document
-precedent (its flags are argv-only), so this is a CLI flag instead.
+script) -- see ``docs/cli/drc.md``, "Engine". It is a CLI flag first (it
+predates this command's request-document form); the request document's own
+``engine`` field mirrors it exactly, the same way ``klt lvs``'s request-body
+``engine`` field does.
+
+The positional input slot also accepts a **request document** (issue #1867) --
+a path to a JSON file, ``-`` for stdin, or an inline JSON object string --
+carrying every flag below as a field, so the whole stage can be committed as
+one diffable, content-hashable file the way ``klt lvs``/``klt sta``/``klt
+synthesize``/``klt place-and-route`` already are. The two forms are **mutually
+exclusive**: a request document plus any of this command's own input flags is
+a clean application error (exit 1), never a silent override -- see
+``cli/_request_document.py`` for why, and ``docs/cli/drc.md``'s "Request
+document" section for the schema.
 
 ``--check <report>`` (issue #1106) switches ``klt drc`` from running a fresh
 DRC into *verifying a previously committed* ``--format json`` report still
@@ -33,13 +44,17 @@ normal run (see ``klayout_tools._report_verify``).
 import argparse
 
 from .. import pdk as pdk_module
+from .._paths import looks_like_request_document
 from ..drc import (
+    REQUEST_SCHEMA,
     DrcError,
     check_drc_report,
+    load_request_arg,
     rerun_drc_report,
     run_drc,
     run_drc_klayout_engine,
 )
+from . import _request_document as reqdoc
 from .output import emit_error, emit_success, render_rerun_drift
 
 EXIT_CLEAN = 0
@@ -62,6 +77,12 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("drc", "--rerun requires --check <report>", args.format)
 
     try:
+        # Issue #1867: the positional slot carries either a layout path or a
+        # request document; `_apply_request` normalizes the latter into the
+        # same namespace fields the argv form produces, so `_run` below sees
+        # exactly one shape and the two forms cannot drift.
+        if args.file is not None and looks_like_request_document(args.file):
+            args = _apply_request(args)
         report = _run(args)
     except DrcError as exc:
         return emit_error("drc", str(exc), args.format)
@@ -88,6 +109,82 @@ def _run_check(args: argparse.Namespace) -> int:
     emit_success(result, args.format, text_renderer)
 
     return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+
+
+#: Every top-level field a ``klt drc`` request document may carry (issue
+#: #1867), mapped to the argparse ``dest`` it stands in for -- one entry per
+#: flag this command accepts, plus the positional ``file``. Only ``deck_vars``
+#: differs from its ``dest`` (the flag itself, ``--deck-var``, is singular
+#: because it is repeatable). ``tests/test_drc.py`` asserts this covers the
+#: subparser's whole flag surface, so a flag added later cannot silently
+#: become unreachable from the request form.
+_REQUEST_FIELD_DESTS = {
+    "file": "file",
+    "deck": "deck",
+    "top": "top",
+    "engine": "engine",
+    "deck_file": "deck_file",
+    "deck_vars": "deck_var",
+    "timeout_s": "timeout_s",
+    "pdk": "pdk",
+    "pdk_root": "pdk_root",
+}
+
+
+def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
+    """Load the request document in ``args.file`` and return a namespace with
+    its fields in place of the argv flags they mirror (issue #1867).
+
+    Relative paths inside the document (``file``, ``deck_file``, ``pdk_root``)
+    resolve against the document's own directory for the file form, or the
+    current working directory for the stdin/inline forms -- ``klt lvs``'s
+    convention, implemented by the same shared helper.
+    """
+    request, base_dir = load_request_arg(args.file)
+    reqdoc.check_schema(
+        request, expected=REQUEST_SCHEMA, verb="drc", error_cls=DrcError
+    )
+    reqdoc.check_known_fields(
+        request, tuple(_REQUEST_FIELD_DESTS), verb="drc", error_cls=DrcError
+    )
+    reqdoc.reject_argv_flags(args, verb="drc", error_cls=DrcError)
+
+    def _path(key: str) -> str | None:
+        return reqdoc.get_path(
+            request, key, base_dir=base_dir, verb="drc", error_cls=DrcError
+        )
+
+    def _str(key: str) -> str | None:
+        return reqdoc.get_str(request, key, verb="drc", error_cls=DrcError)
+
+    timeout_s = reqdoc.get_number(request, "timeout_s", verb="drc", error_cls=DrcError)
+    engine = _str("engine")
+    if engine is not None and engine not in ("curated", "klayout"):
+        raise DrcError(
+            f"`klt drc` request field 'engine' must be 'curated' or "
+            f"'klayout' (got {engine!r})"
+        )
+
+    return argparse.Namespace(
+        **{
+            **vars(args),
+            "file": _path("file"),
+            "deck": _str("deck"),
+            "top": _str("top"),
+            # `args.engine`, not a literal, for an omitted field: every flag
+            # is provably still at its parser default here (`reject_argv_flags`
+            # raised otherwise), so reusing it keeps the two forms' defaults
+            # from drifting apart.
+            "engine": engine if engine is not None else args.engine,
+            "deck_file": _path("deck_file"),
+            "deck_var": reqdoc.get_str_map_as_pairs(
+                request, "deck_vars", verb="drc", flag="--deck-var", error_cls=DrcError
+            ),
+            "timeout_s": args.timeout_s if timeout_s is None else timeout_s,
+            "pdk": _str("pdk"),
+            "pdk_root": _path("pdk_root"),
+        }
+    )
 
 
 def _run(args: argparse.Namespace) -> dict:

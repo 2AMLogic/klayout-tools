@@ -6,11 +6,17 @@ report violations as structured data.
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--format text|json]
 klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--format text|json]
+klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
 
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read; the extension is not authoritative.
+- `<request>` — a **request document** carrying every flag below as a field,
+  in the same positional slot as `<file>` (issue #1867): a path to a JSON
+  file, `-` to read the document from stdin, or an inline JSON object string.
+  Mutually exclusive with the flags it replaces — see "Request document"
+  below.
 - `--deck` — the DRC deck to run for `--engine curated` (the default);
   required in that case, ignored for `--engine klayout`. Currently: `sky130`,
   `gf180mcu`, `sg13g2`, `sg13cmos5l`. Adding a new family's curated deck (registry wiring,
@@ -38,6 +44,107 @@ klt drc --check <report.json> [--rerun] [--format text|json]
 - `--rerun` — full mode for `--check`: actually re-run the DRC deck the
   report names, instead of only re-hashing its inputs. Requires `--check`.
 - `--format` — `text` (default, a human-readable summary) or `json`.
+
+## Request document
+
+`klt drc`'s inputs can be given as argv flags (above, unchanged) **or** as a
+single JSON *request document* (issue #1867) — the same convention
+[`klt lvs`](lvs.md), [`klt sta`](sta.md), [`klt synthesize`](synthesize.md),
+and [`klt place-and-route`](place-and-route.md) already use. A committed
+request document makes this stage's inputs reviewable as data and hashable as
+a single file: the deck and deck-vars it names are exactly what a
+`status: "clean"` verdict covered, so an evidence record can cite the run's
+inputs by content hash instead of by quoting a shell line.
+
+```json
+{
+  "schema": "klt.drc.request/1",
+  "file": "design.gds",
+  "deck": "sky130",
+  "engine": "curated",
+  "top": "design"
+}
+```
+
+A `--engine klayout` run, with the native deck's own script globals:
+
+```json
+{
+  "schema": "klt.drc.request/1",
+  "file": "design.gds",
+  "engine": "klayout",
+  "deck_file": "decks/sky130A.lydrc",
+  "deck_vars": { "FEOL": true, "BEOL": true },
+  "timeout_s": 900
+}
+```
+
+| Field | Type | Flag it mirrors |
+| ----- | ---- | --------------- |
+| `schema` | string | — (optional contract identifier; omit it, or set it to `klt.drc.request/1`. A document declaring any *other* value is rejected rather than reinterpreted.) |
+| `file` | string | `<file>` — **required**; the only required field. |
+| `deck` | string | `--deck` |
+| `top` | string | `--top` |
+| `engine` | string | `--engine` (`"curated"` or `"klayout"`) |
+| `deck_file` | string | `--deck-file` |
+| `deck_vars` | object\<string, string\|number\|bool\> | repeatable `--deck-var NAME=VALUE`. JSON `true`/`3` are rendered as the strings `"true"`/`"3"`, so a deck flag can be written as a natural JSON boolean. A key containing `=` is rejected (the flag encoding cannot represent it). |
+| `timeout_s` | number | `--timeout-s` |
+| `pdk` | string | `--pdk` |
+| `pdk_root` | string | `--pdk-root` |
+
+An unknown top-level field is an application error (exit `1`), not a silently
+ignored one — a typo'd field would otherwise drop an input the caller
+believed was applied.
+
+### Which form is this positional?
+
+`klt drc` predates the request-document convention, so the layout path and the
+request document **share one positional slot** and are told apart by *value
+shape*, never by position:
+
+| Value | Read as |
+| ----- | ------- |
+| `-` | a request document on stdin (a layout stream is never read from stdin) |
+| starts with `{` | an inline JSON request document |
+| an existing file whose first non-whitespace byte is `{` | a request document file |
+| anything else | a layout path |
+
+A GDSII stream starts with the binary record header `00 06 00 02` and an
+OASIS stream with `%SEMI-OASIS`, so no readable layout can be mistaken for a
+request document; and a path that does not exist is still a layout path, so a
+mistyped layout path keeps producing its own `file not found` error rather
+than a JSON parse error.
+
+### Precedence: mutually exclusive, not "argv wins"
+
+**A request document may not be combined with any of this command's own input
+flags** (`--deck`, `--top`, `--engine`, `--deck-file`, `--deck-var`, `--pdk`,
+`--pdk-root`, `--timeout-s`). Passing both is a clean application error
+(exit `1`):
+
+```
+klt drc: `klt drc` request document is mutually exclusive with this command's
+own input flags, but --deck was also given -- move the value(s) into the
+request document instead
+```
+
+This is deliberate rather than an "argv overrides the document" merge: the
+document exists to *be* the stage's inputs, so a flag that silently overrode
+a field would make the committed file no longer authoritative and no longer
+safe to cite by hash. A flag re-passed at exactly its own default value is
+indistinguishable from an omitted one and is accepted (with no effect).
+
+`--format` is unaffected — it shapes output, not the run — and `--check` /
+`--rerun` select the separate re-verification mode described below, which
+reads its inputs from the committed report and never from a request document.
+
+### Relative paths
+
+Relative paths inside the document (`file`, `deck_file`, `pdk_root`) resolve
+against **the document's own directory** for the file form, and against the
+current working directory for the `-` (stdin) and inline-JSON forms — there is
+no request file to anchor them to in those cases. `~` and `$VAR` are expanded.
+This is `klt lvs`'s convention verbatim (both use the same shared helper).
 
 ## Engine
 

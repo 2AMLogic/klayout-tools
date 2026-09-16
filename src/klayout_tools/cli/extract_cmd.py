@@ -16,6 +16,16 @@ subcommand. A fresh (non-``--check``) extraction still has no "ran but
 found problems" outcome -- it either produces a netlist or it fails -- so
 exit code 3 is only ever reached via --check; see docs/cli/extract.md.)
 
+The positional input slot also accepts a **request document** (issue #1867) --
+a path to a JSON file, ``-`` for stdin, or an inline JSON object string --
+carrying every flag below as a field, so the whole stage can be committed as
+one diffable, content-hashable file the way ``klt lvs``/``klt sta``/``klt
+synthesize``/``klt place-and-route`` already are. The two forms are **mutually
+exclusive**: a request document plus any of this command's own input flags is
+a clean application error (exit 1), never a silent override -- see
+``cli/_request_document.py`` for why, and ``docs/cli/extract.md``'s "Request
+document" section for the schema.
+
 ``--check <report>`` (issue #1149) switches ``klt extract`` from running a
 fresh extraction into *verifying a previously committed* ``--format json``
 report still reproduces -- see ``docs/cli/extract.md``, "--check" -- and is
@@ -31,13 +41,17 @@ and diff verdict-bearing fields. Both reuse ``status: "match"`` /
 
 import argparse
 
+from .._paths import looks_like_request_document
 from ..extract import (
+    REQUEST_SCHEMA,
     ExtractError,
     check_extract_report,
     def_net_instance_pins,
+    load_request_arg,
     rerun_extract_report,
     run_extract,
 )
+from . import _request_document as reqdoc
 from ._parsing import parse_deck_options, parse_declared_pins
 from .output import emit_error, emit_success, render_rerun_drift
 
@@ -185,6 +199,150 @@ def _parse_def_pins(raw: str | None) -> frozenset[str] | None:
     return names
 
 
+#: Every top-level field a ``klt extract`` request document may carry (issue
+#: #1867), mapped to the argparse ``dest`` it stands in for -- one entry per
+#: flag this command accepts, plus the positional ``file``. Every field name
+#: is its ``dest`` verbatim (the repeatable flags already carry plural
+#: ``dest``s: ``--critical-net`` -> ``critical_nets``, ``--matched-group`` ->
+#: ``matched_groups``). ``tests/test_extract.py`` asserts this covers the
+#: subparser's whole flag surface, so a flag added later cannot silently
+#: become unreachable from the request form.
+_REQUEST_FIELD_DESTS = {
+    name: name
+    for name in (
+        "file",
+        "deck",
+        "output",
+        "top",
+        "pdk",
+        "pdk_root",
+        "parasitics",
+        "mom_net",
+        "spef",
+        "critical_nets",
+        "parasitics_nets",
+        "parasitics_top_cell_only",
+        "distributed_rc",
+        "mom_rlc_net",
+        "mom_rlc_resistance_ohm",
+        "mom_rlc_capacitance_ff",
+        "mom_rlc_inductance_nh",
+        "def_net_names",
+        "def_net_connections",
+        "top_cell_pins",
+        "pins",
+        "def_pins",
+        "pin_source_cells",
+        "deck_options",
+        "defer_resistor_fixed_offset",
+        "abstract_cells",
+        "abstract_cell_lef",
+        "matched_groups",
+    )
+}
+
+
+def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
+    """Load the request document in ``args.file`` and return a namespace with
+    its fields in place of the argv flags they mirror (issue #1867).
+
+    Relative paths inside the document (``file``, ``output``, ``spef``,
+    ``def_pins``, ``def_net_connections``, ``abstract_cell_lef``,
+    ``pdk_root``) resolve against the document's own directory for the file
+    form, or the current working directory for the stdin/inline forms --
+    ``klt lvs``'s convention, implemented by the same shared helper.
+
+    Structured fields are normalized back into the exact argv encodings
+    (``deck_options`` -> ``["KEY=VALUE", ...]``, ``matched_groups`` ->
+    ``["NAME=A,B", ...]``, ``pins`` -> ``"A,B"``) rather than short-circuiting
+    into ``run_extract``'s parameters directly, so the document form runs
+    through this module's own ``_parse_*`` validation unchanged and both
+    forms produce byte-identical reports by construction.
+    """
+    request, base_dir = load_request_arg(args.file)
+    reqdoc.check_schema(
+        request, expected=REQUEST_SCHEMA, verb="extract", error_cls=ExtractError
+    )
+    reqdoc.check_known_fields(
+        request, tuple(_REQUEST_FIELD_DESTS), verb="extract", error_cls=ExtractError
+    )
+    reqdoc.reject_argv_flags(args, verb="extract", error_cls=ExtractError)
+
+    def _str(key: str) -> str | None:
+        return reqdoc.get_str(request, key, verb="extract", error_cls=ExtractError)
+
+    def _path(key: str) -> str | None:
+        return reqdoc.get_path(
+            request, key, base_dir=base_dir, verb="extract", error_cls=ExtractError
+        )
+
+    def _bool(key: str) -> bool:
+        return reqdoc.get_bool(request, key, verb="extract", error_cls=ExtractError)
+
+    def _number(key: str) -> float | None:
+        return reqdoc.get_number(request, key, verb="extract", error_cls=ExtractError)
+
+    def _str_list(key: str, *, paths: bool = False) -> list[str] | None:
+        return reqdoc.get_str_list(
+            request,
+            key,
+            verb="extract",
+            error_cls=ExtractError,
+            base_dir=base_dir if paths else None,
+        )
+
+    def _comma_joined(key: str) -> str | None:
+        return reqdoc.get_comma_joined(
+            request, key, verb="extract", error_cls=ExtractError
+        )
+
+    return argparse.Namespace(
+        **{
+            **vars(args),
+            "file": _path("file"),
+            "deck": _str("deck"),
+            "output": _path("output"),
+            "top": _str("top"),
+            "pdk": _str("pdk"),
+            "pdk_root": _path("pdk_root"),
+            "parasitics": _bool("parasitics"),
+            "mom_net": _str("mom_net"),
+            "spef": _path("spef"),
+            "critical_nets": _str_list("critical_nets"),
+            "parasitics_nets": _str_list("parasitics_nets"),
+            "parasitics_top_cell_only": _bool("parasitics_top_cell_only"),
+            "distributed_rc": _bool("distributed_rc"),
+            "mom_rlc_net": _str("mom_rlc_net"),
+            "mom_rlc_resistance_ohm": _number("mom_rlc_resistance_ohm"),
+            "mom_rlc_capacitance_ff": _number("mom_rlc_capacitance_ff"),
+            "mom_rlc_inductance_nh": _number("mom_rlc_inductance_nh"),
+            "def_net_names": _bool("def_net_names"),
+            "def_net_connections": _path("def_net_connections"),
+            "top_cell_pins": _bool("top_cell_pins"),
+            "pins": _comma_joined("pins"),
+            "def_pins": _path("def_pins"),
+            "pin_source_cells": _comma_joined("pin_source_cells"),
+            "deck_options": reqdoc.get_str_map_as_pairs(
+                request,
+                "deck_options",
+                verb="extract",
+                flag="--deck-option",
+                error_cls=ExtractError,
+            ),
+            "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
+            "abstract_cells": _str_list("abstract_cells"),
+            "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
+            "matched_groups": reqdoc.get_group_map_as_pairs(
+                request,
+                "matched_groups",
+                verb="extract",
+                flag="--matched-group",
+                error_cls=ExtractError,
+            ),
+        }
+    )
+
+
 def run(args: argparse.Namespace) -> int:
     # `file` and `--check` are a required, mutually exclusive argparse group
     # (parser.py) -- omitting both, or giving both, is already a usage error
@@ -196,6 +354,12 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("extract", "--rerun requires --check <report>", args.format)
 
     try:
+        # Issue #1867: the positional slot carries either a layout path or a
+        # request document; `_apply_request` normalizes the latter into the
+        # same namespace fields the argv form produces, so everything below
+        # sees exactly one shape and the two forms cannot drift.
+        if args.file is not None and looks_like_request_document(args.file):
+            args = _apply_request(args)
         if not args.deck:
             raise ExtractError("argument --deck is required")
         declared_pins = _parse_declared_pins(args.pins)

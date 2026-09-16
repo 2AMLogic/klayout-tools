@@ -76,6 +76,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s and
   [`docs/cli/sta.md`](docs/cli/sta.md)'s "I/O timing constraints ... and
   `timing_status`" sections.
+- **Added**: `klt drc` and `klt extract` accept an optional **request
+  document** (issue #1867) — a path to a JSON file, `-` for stdin, or an
+  inline JSON object string, in the same positional slot as `<file>`, with
+  the new `klt.drc.request/1` and `klt.extract.request/1` schemas covering
+  every existing flag one-for-one. These were the last two physical-flow
+  stages without one (`klt synthesize`/`klt place-and-route`/`klt sta`/`klt
+  lvs` already take theirs as documents), so a flow that wants each stage
+  committed as diffable, content-hashable data no longer has to invent a
+  repo-local JSON shape plus an argv translator for exactly these two.
+  Purely additive: every existing argv invocation is unchanged, and the two
+  forms are **mutually exclusive** (a request document plus one of the
+  command's own input flags is a clean exit-1 error, never a silent
+  override). Relative paths inside the document resolve against the
+  document's own directory (file form) or the cwd (stdin/inline forms),
+  matching `klt lvs`. The positional slot tells the two apart by value shape
+  — `-`, a value starting with `{`, or an existing file whose first
+  non-whitespace byte is `{` is a request document; anything else is a
+  layout path. See [`docs/cli/drc.md`](docs/cli/drc.md) and
+  [`docs/cli/extract.md`](docs/cli/extract.md), "Request document".
 - **Added**: `klt functional-verification` gains an opt-in `options.trace`
   field (Epic #1585 Phase 3, issue #1845) — `true` turns on cocotb's own
   `Runner(waves=True)` on both the build and test steps, so the run's

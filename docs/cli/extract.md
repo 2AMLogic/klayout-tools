@@ -8,6 +8,8 @@ extraction" below).
 
 ```
 klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--format text|json]
+klt extract <request.json>|-|'{...}' [--format text|json]
+klt extract --check <report.json> [--rerun] [--format text|json]
 ```
 
 This is phase 2 of Epic #153 (`klt lvs`/`klt extract`), the build carried by
@@ -20,6 +22,11 @@ two disagree, this document (and the code) win.
 - `<file>` — path to a GDSII (`.gds`) or OASIS (`.oas`) file. KLayout
   auto-detects the stream format on read (same as `klt drc`); the extension
   is not authoritative.
+- `<request>` — a **request document** carrying every flag below as a field,
+  in the same positional slot as `<file>` (issue #1867): a path to a JSON
+  file, `-` to read the document from stdin, or an inline JSON object string.
+  Mutually exclusive with the flags it replaces — see "Request document"
+  below.
 - `--deck` — required. The connectivity + device-extraction deck to run.
   Currently: `sky130`, `gf180mcu`, `sg13g2`, `sg13cmos5l`. `sg13g2`'s device
   coverage is MOS (thin-oxide `sg13_lv_*` plus, as of issue #1231, the
@@ -138,6 +145,136 @@ two disagree, this document (and the code) win.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
+
+## Request document
+
+`klt extract`'s inputs can be given as argv flags (above, unchanged) **or** as
+a single JSON *request document* (issue #1867) — the same convention
+[`klt lvs`](lvs.md), [`klt sta`](sta.md), [`klt synthesize`](synthesize.md),
+and [`klt place-and-route`](place-and-route.md) already use. This command has
+27 input flags (as of issue #1867), several repeatable, and its
+`--abstract-cells`/`--deck-option`
+choices decide what a downstream `klt lvs` is actually comparing — exactly the
+inputs an evidence record most needs pinned. A committed request document
+makes them reviewable as data and hashable as a single file, instead of a
+shell line inside a driver script.
+
+```json
+{
+  "schema": "klt.extract.request/1",
+  "file": "design.gds",
+  "deck": "sky130",
+  "output": "design.spice",
+  "top": "design",
+  "abstract_cells": "sky130_fd_sc_hd__*",
+  "abstract_cell_lef": ["lib/sky130_fd_sc_hd.lef"],
+  "def_net_names": true,
+  "deck_options": { "poly_res": "2k" },
+  "matched_groups": { "mirror_leg": ["$1", "$2"] }
+}
+```
+
+A parasitics run, scoped to two nets:
+
+```json
+{
+  "schema": "klt.extract.request/1",
+  "file": "routed.gds",
+  "deck": "sky130",
+  "output": "routed.spice",
+  "parasitics": true,
+  "spef": "routed.spef",
+  "def_net_connections": "routed.def",
+  "parasitics_nets": ["clk", "rst"],
+  "critical_nets": ["clk"],
+  "distributed_rc": true
+}
+```
+
+Every field name is the flag's own `dest`, so the mapping is one-for-one:
+
+| Field | Type | Flag it mirrors |
+| ----- | ---- | --------------- |
+| `schema` | string | — (optional contract identifier; omit it, or set it to `klt.extract.request/1`. A document declaring any *other* value is rejected rather than reinterpreted.) |
+| `file` | string | `<file>` — **required**; the only required field. |
+| `deck` | string | `--deck` |
+| `output` | string | `-o`/`--output` |
+| `top` | string | `--top` |
+| `pdk` / `pdk_root` | string | `--pdk` / `--pdk-root` |
+| `parasitics` | bool | `--parasitics` |
+| `mom_net` | string | `--mom-net` |
+| `spef` | string | `--spef` |
+| `critical_nets` | array\<string\> \| string | repeatable `--critical-net` |
+| `parasitics_nets` | array\<string\> \| string | repeatable `--parasitics-net` |
+| `parasitics_top_cell_only` | bool | `--parasitics-top-cell-only` |
+| `distributed_rc` | bool | `--distributed-rc` |
+| `mom_rlc_net` | string | `--mom-rlc-net` |
+| `mom_rlc_resistance_ohm` / `mom_rlc_capacitance_ff` / `mom_rlc_inductance_nh` | number | the matching `--mom-rlc-*` flags |
+| `def_net_names` | bool | `--def-net-names` |
+| `def_net_connections` | string | `--def-net-connections` |
+| `top_cell_pins` | bool | `--top-cell-pins` |
+| `pins` | array\<string\> \| string | `--pins` (an array is joined with commas; an entry containing a comma is rejected, since the flag encoding cannot represent it) |
+| `def_pins` | string | `--def-pins` |
+| `pin_source_cells` | array\<string\> \| string | `--pin-source-cells` (same comma-joining rule as `pins`) |
+| `deck_options` | object\<string, string\|number\|bool\> | repeatable `--deck-option KEY=VALUE`. A key containing `=` is rejected. |
+| `defer_resistor_fixed_offset` | bool | `--defer-resistor-fixed-offset` |
+| `abstract_cells` | array\<string\> \| string | repeatable `--abstract-cells` |
+| `abstract_cell_lef` | array\<string\> \| string | repeatable `--abstract-cell-lef` |
+| `matched_groups` | object\<string, array\<string\>\> | repeatable `--matched-group NAME=A,B`. A group name containing `=`, or a member containing `,`, is rejected. |
+
+Every repeatable flag's field accepts either an array or a bare string (a
+single value is the common case). An unknown top-level field is an
+application error (exit `1`), not a silently ignored one — a typo'd field
+would otherwise drop an input the caller believed was applied.
+
+### Which form is this positional?
+
+`klt extract` predates the request-document convention, so the layout path and
+the request document **share one positional slot** and are told apart by
+*value shape*, never by position:
+
+| Value | Read as |
+| ----- | ------- |
+| `-` | a request document on stdin (a layout stream is never read from stdin) |
+| starts with `{` | an inline JSON request document |
+| an existing file whose first non-whitespace byte is `{` | a request document file |
+| anything else | a layout path |
+
+A GDSII stream starts with the binary record header `00 06 00 02` and an
+OASIS stream with `%SEMI-OASIS`, so no readable layout can be mistaken for a
+request document; and a path that does not exist is still a layout path, so a
+mistyped layout path keeps producing its own `file not found` error rather
+than a JSON parse error.
+
+### Precedence: mutually exclusive, not "argv wins"
+
+**A request document may not be combined with any of this command's own input
+flags.** Passing both is a clean application error (exit `1`):
+
+```
+klt extract: `klt extract` request document is mutually exclusive with this
+command's own input flags, but --parasitics was also given -- move the
+value(s) into the request document instead
+```
+
+This is deliberate rather than an "argv overrides the document" merge: the
+document exists to *be* the stage's inputs, so a flag that silently overrode
+a field would make the committed file no longer authoritative and no longer
+safe to cite by hash. A flag re-passed at exactly its own default value is
+indistinguishable from an omitted one and is accepted (with no effect).
+
+`--format` is unaffected — it shapes output, not the run — and `--check` /
+`--rerun` select the separate re-verification mode described below, which
+reads its inputs from the committed report and never from a request document.
+
+### Relative paths
+
+Relative paths inside the document (`file`, `output`, `spef`, `def_pins`,
+`def_net_connections`, `abstract_cell_lef`, `pdk_root`) resolve against **the
+document's own directory** for the file form, and against the current working
+directory for the `-` (stdin) and inline-JSON forms — there is no request file
+to anchor them to in those cases. `~` and `$VAR` are expanded. This is
+`klt lvs`'s convention verbatim (both use the same shared helper).
 
 ## Engine
 

@@ -45,6 +45,9 @@ from typing import Any
 
 from ._layout import load_layout
 from ._layout import select_top_cells as _select_top_cells
+from ._paths import _load_request_json
+from ._paths import load_request_arg as _shared_load_request_arg
+from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import _content_hash, build_provenance
 from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
 from ._report_verify import load_committed_report as _load_committed_report
@@ -121,6 +124,67 @@ class DrcError(Exception):
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback.
     """
+
+
+#: The one top-level field a ``klt drc`` request document must carry (issue
+#: #1867). ``deck`` is deliberately *not* required here: it is only required
+#: for ``--engine curated``, and an omitted deck is already reported as an
+#: application error (exit 1) by ``cli/drc_cmd.py``'s own ``_run`` rather than
+#: as a request-shape error.
+_REQUIRED_REQUEST_FIELDS = ("file",)
+
+#: Contract identifier a ``klt drc`` request document may declare in its
+#: optional ``schema`` field (issue #1867).
+REQUEST_SCHEMA = "klt.drc.request/1"
+
+
+def load_request(request_path: str) -> dict[str, Any]:
+    """Read and minimally validate a ``klt drc`` request JSON file.
+
+    Raises :class:`DrcError` if the file is missing/unreadable, not valid
+    JSON, or missing the required top-level ``file`` field. Does not require
+    a ``schema`` field, matching ``klt lvs``/``klt sim``'s ``load_request``
+    (user-authored input, never emitted by this tool) -- when one *is*
+    present, ``cli/drc_cmd.py`` checks it against :data:`REQUEST_SCHEMA`.
+    """
+    request = _load_request_json(request_path, DrcError)
+    return _validate_request_shape(request, "request file")
+
+
+def _validate_request_shape(data: Any, source: str) -> dict[str, Any]:
+    """Shared ``file`` shape check for a JSON-decoded ``klt drc`` request,
+    however it was sourced (file, inline JSON, stdin). ``source`` is folded
+    into the "must be a JSON object" error for context.
+    """
+    return _shared_validate_request_shape(
+        data,
+        source,
+        error_cls=DrcError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+    )
+
+
+def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
+    """Resolve a ``klt drc`` request-document argument (issue #1867) into a
+    request dict plus the directory relative paths inside it resolve against.
+
+    ``value`` is one of the same three forms every other request-taking
+    ``klt`` verb accepts (see :func:`klayout_tools._paths.load_request_arg`
+    and docs/cli/drc.md): ``"-"`` for stdin, a path to an existing request
+    JSON file, or an inline JSON object string. Relative paths inside the
+    document resolve against the document's own directory for the file form,
+    and against the current working directory for the stdin/inline forms.
+
+    Raises :class:`DrcError` for any read/parse/shape failure -- the same
+    exception type :func:`load_request` raises, so callers do not need to
+    distinguish the three forms.
+    """
+    return _shared_load_request_arg(
+        value,
+        error_cls=DrcError,
+        required_fields=_REQUIRED_REQUEST_FIELDS,
+        load_request_fn=load_request,
+    )
 
 
 def run_drc(path: str, deck_name: str, top: str | None = None) -> dict[str, Any]:
