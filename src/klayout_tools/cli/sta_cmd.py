@@ -38,16 +38,22 @@ def _print_text(report: dict) -> None:
         print(f"hdl_toplevel: {report['hdl_toplevel']}")
     print(f"status: {report['status']}")
     print()
-    print(f"worst_slack_ns: {report['worst_slack_ns']}")
-    print(f"total_negative_slack_ns: {report['total_negative_slack_ns']}")
-    print(f"worst_hold_slack_ns: {report['worst_hold_slack_ns']}")
-    print(f"total_negative_hold_slack_ns: {report['total_negative_hold_slack_ns']}")
-    print(f"fmax_mhz: {report['fmax_mhz']}")
-    print(f"setup_violation_count: {report['setup_violation_count']}")
-    print(f"hold_violation_count: {report['hold_violation_count']}")
-    print(f"clock_skew_ns: {report['clock_skew_ns']}")
-    print(f"estimated_power_mw: {report['estimated_power_mw']}")
-    print()
+
+    # Issue #1871: `request.pdk.corners` (a list) response shape -- one
+    # `corners[]` entry per requested corner, printed above the
+    # shared/hoisted fields (def_path/verilog_path/geometry_source/spef_path)
+    # every response (single- or multi-corner) carries once, at the bottom.
+    if "corners" in report:
+        for entry in report["corners"]:
+            print(f"corner: {entry['corner']}")
+            _print_slack_fields(entry, indent="  ")
+            _print_spef_annotation(entry.get("spef_annotation"), indent="  ")
+            print()
+    else:
+        _print_slack_fields(report, indent="")
+
+    if "corners" not in report:
+        print()
     print(f"def_path: {report['def_path']}")
     print(f"verilog_path: {report['verilog_path']}")
     print(f"geometry_source: {report['geometry_source']}")
@@ -56,29 +62,49 @@ def _print_text(report: dict) -> None:
         print(f"wire_load_mode: {report['wire_load_mode']}")
     print(f"spef_path: {report['spef_path']}")
 
-    annotation = report.get("spef_annotation")
-    if annotation is not None:
-        print()
-        print(
-            "spef_annotation: "
-            f"{annotation['design_nets_annotated']}/"
-            f"{annotation['design_nets_total']} design nets annotated "
-            f"(complete={annotation['annotation_complete']})"
-        )
-        print(f"  delay_changed: {annotation.get('delay_changed')}")
-        print(f"  reader_warning_count: {annotation.get('reader_warning_count')}")
-        print(
-            "  unannotated_driver_count: "
-            f"{annotation.get('unannotated_driver_count')} "
-            f"(partial: {annotation.get('partially_unannotated_driver_count')})"
-        )
-        if annotation["annotation_warning"]:
-            print(f"  warning: {annotation['annotation_warning']}")
-        missing_sample = annotation.get("design_nets_missing_sample")
-        if missing_sample:
-            print(f"  missing nets (sample): {', '.join(missing_sample)}")
-        warning_sample = annotation.get("reader_warning_sample")
-        if warning_sample:
-            print("  reader warnings (sample):")
-            for line in warning_sample:
-                print(f"    {line}")
+    if "corners" not in report:
+        _print_spef_annotation(report.get("spef_annotation"), indent="  ")
+
+
+def _print_slack_fields(fields: dict, *, indent: str) -> None:
+    print(f"{indent}worst_slack_ns: {fields['worst_slack_ns']}")
+    print(f"{indent}total_negative_slack_ns: {fields['total_negative_slack_ns']}")
+    print(f"{indent}worst_hold_slack_ns: {fields['worst_hold_slack_ns']}")
+    print(
+        f"{indent}total_negative_hold_slack_ns: "
+        f"{fields['total_negative_hold_slack_ns']}"
+    )
+    print(f"{indent}fmax_mhz: {fields['fmax_mhz']}")
+    print(f"{indent}setup_violation_count: {fields['setup_violation_count']}")
+    print(f"{indent}hold_violation_count: {fields['hold_violation_count']}")
+    print(f"{indent}clock_skew_ns: {fields['clock_skew_ns']}")
+    print(f"{indent}estimated_power_mw: {fields['estimated_power_mw']}")
+
+
+def _print_spef_annotation(annotation: dict | None, *, indent: str) -> None:
+    if annotation is None:
+        return
+    print()
+    print(
+        "spef_annotation: "
+        f"{annotation['design_nets_annotated']}/"
+        f"{annotation['design_nets_total']} design nets annotated "
+        f"(complete={annotation['annotation_complete']})"
+    )
+    print(f"{indent}delay_changed: {annotation.get('delay_changed')}")
+    print(f"{indent}reader_warning_count: {annotation.get('reader_warning_count')}")
+    print(
+        f"{indent}unannotated_driver_count: "
+        f"{annotation.get('unannotated_driver_count')} "
+        f"(partial: {annotation.get('partially_unannotated_driver_count')})"
+    )
+    if annotation["annotation_warning"]:
+        print(f"{indent}warning: {annotation['annotation_warning']}")
+    missing_sample = annotation.get("design_nets_missing_sample")
+    if missing_sample:
+        print(f"{indent}missing nets (sample): {', '.join(missing_sample)}")
+    warning_sample = annotation.get("reader_warning_sample")
+    if warning_sample:
+        print(f"{indent}reader warnings (sample):")
+        for line in warning_sample:
+            print(f"{indent}  {line}")
