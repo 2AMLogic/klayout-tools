@@ -1141,6 +1141,244 @@ def test_run_sta_response_envelope(tmp_path, monkeypatch):
     assert provenance["input"]["content_hash"] is not None
 
 
+# --------------------------------------------------------------------------- #
+# Multi-corner characterization (`request.pdk.corners`, issue #1871).
+# --------------------------------------------------------------------------- #
+
+_MULTI_CORNER_METRICS = {
+    "tt_025C_1v80": {
+        "timing__setup__ws": -0.15,
+        "timing__setup__tns": -1.2,
+        "timing__hold__ws": 0.03812,
+        "timing__hold__tns": 0.0,
+        "timing__fmax": 500_000_000.0,
+        "power__total": 0.0084,
+        "clock__skew__setup": 0.021,
+    },
+    "ss_100C_1v60": {
+        "timing__setup__ws": -0.42,
+        "timing__setup__tns": -3.5,
+        "timing__hold__ws": 0.01,
+        "timing__hold__tns": 0.0,
+        "timing__fmax": 300_000_000.0,
+        "power__total": 0.006,
+        "clock__skew__setup": 0.03,
+    },
+}
+
+
+def _setup_multi_corner_env(
+    tmp_path,
+    monkeypatch,
+    corners=("tt_025C_1v80", "ss_100C_1v60"),
+    **request_overrides,
+) -> str:
+    """Mirrors `_setup_success_env`, but fabricates a `lib/` view for every
+    name in `corners` (`_setup_success_env` only ever fabricates the one
+    scalar `pdk.corner` needs) and requests `pdk.corners` instead of the
+    scalar `pdk.corner`."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    for corner in corners:
+        _make_pdk_install(install_root, "sky130A", corner=corner)
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "top.def", "# fake routed def\n")
+    request = _base_request(
+        pdk={"cell_library": "sky130_fd_sc_hd", "corners": list(corners)},
+        **request_overrides,
+    )
+    return _write_request(tmp_path / "request.json", request)
+
+
+def _stub_openroad_multi_corner(
+    monkeypatch,
+    metrics_by_corner: dict[str, dict] | None = None,
+    *,
+    version: str = "26Q3-771-gdeadbeef",
+    mutate_def_path: str | None = None,
+    mutate_after_corner: str | None = None,
+) -> None:
+    """Stand in for one `openroad` run per requested corner -- unlike
+    `_stub_openroad_success` (always the same metrics regardless of which
+    corner/liberty the generated script actually loads), this stub picks the
+    metrics dict keyed by whichever corner name appears in the script's own
+    `read_liberty` line (`<cell_library>__<corner>.lib`), so a multi-corner
+    test can assert each `corners[]` entry carries *that* corner's own
+    distinct values -- not the same stubbed number N times over.
+
+    `mutate_def_path`/`mutate_after_corner` (both optional, and only used by
+    the content-hash-invariant regression test below): when given, appends a
+    byte to `mutate_def_path` immediately after the run for
+    `mutate_after_corner` completes -- simulating the input geometry
+    changing mid-characterization, which `_run_multi_corner`'s own
+    before/after hash check must catch.
+    """
+    metrics_by_corner = metrics_by_corner or _MULTI_CORNER_METRICS
+
+    def fake_run(cmd, **kwargs):
+        if cmd[:2] == ["openroad", "-version"]:
+            return fake_completed(stdout=f"{version} \n")
+        assert cmd[0] == "openroad"
+        metrics_path = cmd[4]
+        script_path = cmd[5]
+        script_text = Path(script_path).read_text(encoding="utf-8")
+        corner_name = next(
+            name for name in metrics_by_corner if f"__{name}.lib" in script_text
+        )
+        with open(metrics_path, "w", encoding="utf-8") as handle:
+            json.dump(metrics_by_corner[corner_name], handle)
+
+        stdout_lines = [
+            post_route_sta._SETUP_VIOLATIONS_BEGIN,
+            post_route_sta._SETUP_VIOLATIONS_END,
+            post_route_sta._HOLD_VIOLATIONS_BEGIN,
+            post_route_sta._HOLD_VIOLATIONS_END,
+        ]
+        if mutate_def_path is not None and corner_name == mutate_after_corner:
+            with open(mutate_def_path, "a", encoding="utf-8") as handle:
+                handle.write("# mutated mid-run\n")
+        return fake_completed(returncode=0, stdout="\n".join(stdout_lines))
+
+    monkeypatch.setattr(post_route_sta.subprocess, "run", fake_run)
+
+
+def test_run_sta_corners_produces_per_corner_array(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
+    _stub_openroad_multi_corner(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert report["schema_version"] == 1
+    assert report["status"] == "ok"
+    assert report["engine"] == "openroad"
+    assert report["engine_version"] == "26Q3-771-gdeadbeef"
+
+    # The single-corner-only fields must not appear on a `corners` response
+    # -- there is no one "the" slack value once N corners are characterized.
+    assert "worst_slack_ns" not in report
+    assert "spef_annotation" not in report
+
+    corners = report["corners"]
+    assert [entry["corner"] for entry in corners] == ["tt_025C_1v80", "ss_100C_1v60"]
+
+    tt_entry, ss_entry = corners
+    assert tt_entry["worst_slack_ns"] == -0.15
+    assert tt_entry["fmax_mhz"] == 500.0
+    assert tt_entry["spef_annotation"] is None
+    assert tt_entry["deck"]["name"] == "sky130_fd_sc_hd__tt_025C_1v80"
+
+    assert ss_entry["worst_slack_ns"] == -0.42
+    assert ss_entry["total_negative_slack_ns"] == -3.5
+    assert ss_entry["fmax_mhz"] == 300.0
+    assert ss_entry["deck"]["name"] == "sky130_fd_sc_hd__ss_100C_1v60"
+
+    # Structurally identical fields across every corner (issue #1871's own
+    # "def_path/provenance.input hoisted once" requirement) are hoisted to
+    # the top level -- never repeated inside a `corners[]` entry.
+    assert report["def_path"].endswith("top.def")
+    assert report["verilog_path"] is None
+    assert report["geometry_source"] == "routed"
+    assert report["spef_path"] is None
+    for entry in corners:
+        assert "def_path" not in entry
+        assert "provenance" not in entry
+
+    provenance = report["provenance"]
+    assert provenance["pdk"]["name"] == "sky130A"
+    assert provenance["input"]["content_hash"] is not None
+    # `deck` is corner-specific -- never meaningfully hoistable to the
+    # top level, so the shared `provenance` block carries none.
+    assert provenance["deck"] is None
+
+
+def test_run_sta_corners_and_corner_mutually_exclusive(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path, monkeypatch, corners=("tt_025C_1v80",)
+    )
+    # Splice a scalar `pdk.corner` back in alongside `pdk.corners`.
+    request = json.loads(Path(request_path).read_text(encoding="utf-8"))
+    request["pdk"]["corner"] = "tt_025C_1v80"
+    Path(request_path).write_text(json.dumps(request), encoding="utf-8")
+
+    with pytest.raises(
+        PostRouteStaError,
+        match="pdk.corner and request.pdk.corners are mutually exclusive",
+    ):
+        run_sta(request_path)
+
+
+@pytest.mark.parametrize(
+    "corners_value",
+    [[], "tt_025C_1v80", [1, 2], [""], ["tt_025C_1v80", ""]],
+)
+def test_run_sta_corners_must_be_nonempty_list_of_strings(
+    tmp_path, monkeypatch, corners_value
+):
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "top.def", "# fake routed def\n")
+    request = _base_request(
+        pdk={"cell_library": "sky130_fd_sc_hd", "corners": corners_value}
+    )
+    request_path = _write_request(tmp_path / "request.json", request)
+
+    with pytest.raises(
+        PostRouteStaError,
+        match="pdk.corners must be a non-empty list of non-empty strings",
+    ):
+        run_sta(request_path)
+
+
+def test_run_sta_corners_rejects_duplicate_names(tmp_path, monkeypatch):
+    request_path = _setup_multi_corner_env(
+        tmp_path,
+        monkeypatch,
+        corners=("tt_025C_1v80", "tt_025C_1v80"),
+    )
+
+    with pytest.raises(PostRouteStaError, match="must not repeat a corner name"):
+        run_sta(request_path)
+
+
+def test_run_sta_corners_single_entry_still_produces_corners_array(
+    tmp_path, monkeypatch
+):
+    """A one-element `pdk.corners` list is still the list shape (`corners:
+    [...]`), never collapsed back to the scalar response -- the caller asked
+    for the list contract, even if it only named one corner."""
+    request_path = _setup_multi_corner_env(
+        tmp_path, monkeypatch, corners=("tt_025C_1v80",)
+    )
+    _stub_openroad_multi_corner(monkeypatch)
+
+    report = run_sta(request_path)
+
+    assert "worst_slack_ns" not in report
+    assert len(report["corners"]) == 1
+    assert report["corners"][0]["corner"] == "tt_025C_1v80"
+    assert report["corners"][0]["worst_slack_ns"] == -0.15
+
+
+def test_run_sta_corners_content_hash_invariant_violation_raises(tmp_path, monkeypatch):
+    """Issue #1871's own structural guarantee: every corner in a `corners`
+    response must characterize the identical geometry. If the input file
+    changes partway through the corner loop, this must be a loud,
+    attributable error -- not a `corners` array that silently mixes two
+    different geometries under one shared `def_path`/`provenance.input`."""
+    request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
+    def_path = str(tmp_path / "top.def")
+    _stub_openroad_multi_corner(
+        monkeypatch,
+        mutate_def_path=def_path,
+        mutate_after_corner="tt_025C_1v80",
+    )
+
+    with pytest.raises(PostRouteStaError, match="geometry backing this multi-corner"):
+        run_sta(request_path)
+
+
 def test_run_sta_geometry_source_placement_estimate_echoed(tmp_path, monkeypatch):
     """Issue #1826 (gap 1): a caller analysing a pre-route DEF (e.g. `klt
     place-and-route`'s own `unrouted_def_path`) declares that explicitly via
@@ -1742,6 +1980,40 @@ def test_cli_success_exits_zero_json(tmp_path, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "ok"
     assert out["schema_version"] == 1
+
+
+def test_cli_success_exits_zero_json_multi_corner(tmp_path, monkeypatch, capsys):
+    request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
+    _stub_openroad_multi_corner(monkeypatch)
+
+    exit_code = main(["sta", request_path, "--format", "json"])
+
+    assert exit_code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "ok"
+    assert out["schema_version"] == 1
+    assert [entry["corner"] for entry in out["corners"]] == [
+        "tt_025C_1v80",
+        "ss_100C_1v60",
+    ]
+
+
+def test_cli_text_format_multi_corner(tmp_path, monkeypatch, capsys):
+    request_path = _setup_multi_corner_env(tmp_path, monkeypatch)
+    _stub_openroad_multi_corner(monkeypatch)
+
+    exit_code = main(["sta", request_path])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "status: ok" in out
+    assert "corner: tt_025C_1v80" in out
+    assert "corner: ss_100C_1v60" in out
+    assert "worst_slack_ns: -0.15" in out
+    assert "worst_slack_ns: -0.42" in out
+    assert "def_path:" in out
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)
 
 
 def test_cli_text_default_format(tmp_path, monkeypatch, capsys):
