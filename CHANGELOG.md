@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt drc`/`klt extract` no longer misclassify a bare layout
+  filename starting with `{` (e.g. `{weird}.gds`, run from its own directory)
+  as inline JSON (issue #1922). `looks_like_request_document()`
+  (`_paths.py`) checked `value.lstrip()[:1] == "{"` before checking
+  `os.path.isfile(value)`, so an existing layout whose literal name happened
+  to start with `{` produced a "request file is not valid JSON" error
+  instead of running DRC/extraction on it. The existing-file check now runs
+  first and gates content-sniffing, so an existing file is always routed to
+  the (already-correct) content-sniffing branch regardless of its name; a
+  non-existent path or a genuine inline JSON string starting with `{` is
+  unaffected. No `schema_version` bump — CLI argument disambiguation only,
+  no payload shape changed.
+
 - **Fixed**: `klt gen mos_array`/`diff_pair`'s `voltage_flavor` param now
   resolves on the `sky130` PDK family (issue #1912). `_PDK_VOLTAGE_FLAVOR_LAYERS`
   (`gen_layer_params.py`) previously had `sky130` as an empty table — this
