@@ -14,6 +14,42 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt lvs`'s `reference.form: "subckt-call"` conversion no longer
+  makes a resistor/capacitor device class impossible to pair (issue #1907).
+  The conversion writes a literal `0` into a converted `R`/`C` card's
+  positional value slot — documented, accepted behaviour, since `klt lvs` has
+  no PDK sheet-resistance/capacitance-per-area table to compute a real value
+  from. But `R`/`C` is the *primary*, compared parameter of KLayout's
+  `DeviceClassResistor`/`DeviceClassCapacitor`, and `NetlistComparer` uses
+  primary-parameter equality to seed device correspondence: a reference class
+  whose every instance read `0` against a layout side carrying real,
+  geometry-computed values did not report a per-device parameter difference,
+  it failed to pair the class *at all* — a wholesale `device.unmatched` /
+  `topology` cascade over every instance and every net touching one, even
+  with each instance on its own distinct, unambiguous net pair. That made
+  `status: "match"` unreachable for any design using a curated resistor or
+  capacitor class against a schematic-style reference — precisely the case
+  this conversion mode exists to support. `klt lvs` now excludes that one
+  placeholder parameter from the compare (on both sides' class, via
+  KLayout's own `EqualDeviceParameters.ignore`) before the comparer is
+  constructed, so topology pairs the devices exactly as an equivalent
+  hand-written `form: "plain-element"` reference carrying real values already
+  did. The exclusion is scoped to the provable placeholder — only classes the
+  conversion actually emitted, and only when *every* reference-side instance
+  reads exactly `0` — so a genuine `0` on a `form: "plain-element"`
+  reference, and a reference mixing converted and real-valued cards on one
+  class, are both still compared and still reported.
+- **Added**: a `device.placeholder_value` `mismatches[]` category (issue
+  #1907, `"engine": "klayout"` only) — one `severity: "warning"`,
+  `side: "reference"` entry per device class whose converted placeholder
+  value was excluded from the compare, naming the excluded parameter, the
+  converted family, each side's instance count, and the distinct layout-side
+  values that were *not* compared (`details.layout_values`). Additive and
+  never `error`, mirroring `device.bulk_reconciled`/
+  `device.parameter_tolerated`: it never changes `status`, it only keeps a
+  `"match"` reached with that class's value dimension unverified from being
+  indistinguishable from one where the two sides' values actually agreed. See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "`device.placeholder_value`" section.
 - **Fixed**: `klt gen-compose`'s `connectivity[]` router no longer lets a
   leg's own `_port_edge_margin_um` allowance fund a crossing on the side its
   port does not face (issue #1895). The obstacle-overlap check's per-block

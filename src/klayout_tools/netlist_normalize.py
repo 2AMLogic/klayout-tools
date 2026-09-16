@@ -114,6 +114,7 @@ source and hands a plain-element source back to the reader.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 from ._paths import _fold_spice_continuations
 from .pdk_models import (
@@ -367,6 +368,7 @@ def _convert_x_card(
     subckt_to_binding: dict[str, DeviceLookup] | None,
     device_map_names: frozenset[str] = frozenset(),
     geometry_style: str | None = None,
+    placeholder_value_classes: dict[str, str] | None = None,
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
@@ -390,6 +392,15 @@ def _convert_x_card(
     :func:`_parse_um` so a *bare* (unsuffixed) ``L``/``W``-style literal is
     interpreted per the deck's own ``.option scale`` convention instead of
     always assuming SI metres.
+
+    ``placeholder_value_classes`` (issue #1907) is an optional collector: for
+    every resistor/capacitor call converted here -- the two families whose
+    plain-element card needs a positional *value* token this module has no
+    PDK data to compute (see :func:`_convert_geometry_card`) -- the emitted
+    device-class name is recorded against its family (``"resistor"`` /
+    ``"capacitor"``), so a downstream consumer can tell that the class's
+    value token is the literal ``0`` placeholder rather than a real
+    resistance/capacitance. ``None`` (the default) records nothing.
     """
     tokens = _tokenize(line)
     if not tokens:
@@ -431,13 +442,19 @@ def _convert_x_card(
             geometry_style=geometry_style,
         )
     if lookup.kind == "resistor":
-        return _convert_geometry_card(
+        card = _convert_geometry_card(
             instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
         )
+        if placeholder_value_classes is not None:
+            placeholder_value_classes[lookup.device_class] = "resistor"
+        return card
     if lookup.kind == "capacitor":
-        return _convert_capacitor_card(
+        card = _convert_capacitor_card(
             instance, nodes, subckt_name, lookup, params, geometry_style=geometry_style
         )
+        if placeholder_value_classes is not None:
+            placeholder_value_classes[lookup.device_class] = "capacitor"
+        return card
     return _convert_bipolar_card(instance, nodes, subckt_name, lookup, params)
 
 
@@ -617,7 +634,20 @@ def _convert_geometry_card(
     carries the call's own length/width geometry onto ``L=``/``W=`` instead
     -- ``DeviceClassResistor`` natively accepts both (confirmed against the
     installed ``klayout.db`` module), the same way the MOS path carries
-    ``L=``/``W=``. Geometry is carried only when the call actually supplies
+    ``L=``/``W=``.
+
+    That placeholder is *reported*, not merely written (issue #1907): the
+    emitted device-class name is recorded in
+    :attr:`ReferenceConversion.placeholder_value_classes`, so ``klt lvs``
+    can stop ``NetlistComparer`` from comparing it as if it were a real
+    resistance. Left uncorrected, a reference-side class whose every
+    instance carries the same ``0`` fails to pair against the layout side's
+    real, geometry-computed values *at all* -- not as a per-device
+    parameter finding, but as a wholesale "device has no counterpart"
+    cascade for the entire class, even when net topology alone would
+    disambiguate the instances unambiguously.
+
+    Geometry is carried only when the call actually supplies
     it (the subcircuit's own default otherwise applies); a real curated
     resistor subcircuit is legitimately 2- or 3-terminal (see
     :data:`_CAPACITOR_TERMINALS`'s docstring note), so the terminal count is
@@ -1001,13 +1031,42 @@ def _build_subckt_map(
     return resolved or None, device_map_names
 
 
-def normalize_reference_netlist(
+class ReferenceConversion(NamedTuple):
+    """The result of one :func:`convert_reference_netlist` run.
+
+    ``text`` is the converted, plain-element-form SPICE source.
+
+    ``placeholder_value_classes`` (issue #1907) maps each emitted
+    resistor/capacitor device-class name to its family (``"resistor"`` /
+    ``"capacitor"``). Those are exactly the classes whose plain-element card
+    carries the literal ``0`` *placeholder* in the positional value slot,
+    because this module has no PDK sheet-resistance / capacitance-per-area
+    table to compute a real value from (see :func:`_convert_geometry_card`
+    and the module docstring). ``klt lvs`` consumes this to keep that
+    placeholder from being compared as if it were a real value -- an
+    all-``0`` reference-side class otherwise defeats
+    ``NetlistComparer``'s device pairing for the whole class, collapsing a
+    topologically-unambiguous compare into a wholesale "device has no
+    counterpart" cascade. Empty when the conversion emitted no
+    resistor/capacitor card at all.
+    """
+
+    text: str
+    placeholder_value_classes: dict[str, str]
+
+
+def convert_reference_netlist(
     text: str,
     *,
     deck: str | None = None,
     device_map: dict[str, object] | None = None,
-) -> str:
-    """Convert subckt-call-form SPICE ``text`` to the plain-element form.
+) -> ReferenceConversion:
+    """Convert subckt-call-form SPICE ``text`` to the plain-element form,
+    returning the converted text *plus* the conversion metadata
+    :class:`ReferenceConversion` documents.
+
+    :func:`normalize_reference_netlist` is the text-only wrapper around this
+    -- every behaviour below is shared, and described there.
 
     ``deck`` selects that registered deck's device map (``"sky130"``/
     ``"gf180mcu"``/``"sg13g2"``/``"sg13cmos5l"`` -- see
@@ -1043,6 +1102,7 @@ def normalize_reference_netlist(
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
     logical_lines = _merge_continuations(text.splitlines())
 
+    placeholder_value_classes: dict[str, str] = {}
     out: list[str] = []
     for line in logical_lines:
         stripped = line.strip()
@@ -1053,12 +1113,30 @@ def normalize_reference_netlist(
         if first and first[0] in "Xx":
             out.append(
                 _convert_x_card(
-                    line, subckt_to_binding, device_map_names, geometry_style
+                    line,
+                    subckt_to_binding,
+                    device_map_names,
+                    geometry_style,
+                    placeholder_value_classes,
                 )
             )
         else:
             out.append(line)
-    return "\n".join(out) + "\n"
+    return ReferenceConversion("\n".join(out) + "\n", placeholder_value_classes)
+
+
+def normalize_reference_netlist(
+    text: str,
+    *,
+    deck: str | None = None,
+    device_map: dict[str, object] | None = None,
+) -> str:
+    """Convert subckt-call-form SPICE ``text`` to the plain-element form.
+
+    The text-only view of :func:`convert_reference_netlist` -- identical
+    behaviour, for callers that do not need the conversion metadata.
+    """
+    return convert_reference_netlist(text, deck=deck, device_map=device_map).text
 
 
 def detect_subckt_call_devices(text: str) -> list[str]:

@@ -8892,6 +8892,285 @@ def test_run_lvs_subckt_call_reference_resistor_family_converts_and_reads(tmp_pa
 
 
 # --------------------------------------------------------------------------- #
+# Issue #1907: a `form: "subckt-call"` conversion's placeholder `0` value must
+# not block device pairing for the whole class
+#
+# `netlist_normalize.py` writes a literal `0` into a converted `R`/`C` card's
+# positional value slot (it has no PDK sheet-resistance/capacitance-per-area
+# table -- documented, accepted behaviour). But `R`/`C` is the *primary*,
+# compared parameter of KLayout's `DeviceClassResistor`/`DeviceClassCapacitor`,
+# so before this issue an all-placeholder reference class failed to pair
+# against a layout side carrying real values *at all* -- a wholesale
+# `device.unmatched` cascade over every instance and every net touching one,
+# not a per-device parameter finding, even with each instance on its own
+# unambiguous net pair.
+# --------------------------------------------------------------------------- #
+
+_PLACEHOLDER_RESISTOR_LAYOUT = """.subckt res_net A B C D E
+R1 A B 120000 res_xhigh_po L=48.2U W=1U
+R2 B C 60000 res_xhigh_po L=24.1U W=1U
+R3 C D 30000 res_xhigh_po L=12.05U W=1U
+R4 D E 15000 res_xhigh_po L=6.025U W=1U
+.ends
+"""
+
+_PLACEHOLDER_RESISTOR_REFERENCE = """.subckt res_net A B C D E
+XR1 A B sky130_fd_pr__res_xhigh_po l=48.2u w=1u
+XR2 B C sky130_fd_pr__res_xhigh_po l=24.1u w=1u
+XR3 C D sky130_fd_pr__res_xhigh_po l=12.05u w=1u
+XR4 D E sky130_fd_pr__res_xhigh_po l=6.025u w=1u
+.ends
+"""
+
+
+def _placeholder_request(tmp_path, layout_text, reference_text, top):
+    return {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_text),
+            "top": top,
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference_text),
+            "top": top,
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+    }
+
+
+def test_run_lvs_subckt_call_placeholder_resistors_pair_on_topology(tmp_path):
+    # Issue #1907's own repro shape: four `sky130_fd_pr__res_xhigh_po`
+    # instances, each a different `L=` (hence a different real resistance),
+    # each on its own distinct pair of named nets, against a layout side whose
+    # `R` cards carry real, geometry-computed ohms. Net topology alone
+    # disambiguates them, so the compare must reach `"match"` -- previously it
+    # collapsed to `0/4` devices matched.
+    report = run_lvs(
+        json.dumps(
+            _placeholder_request(
+                tmp_path,
+                _PLACEHOLDER_RESISTOR_LAYOUT,
+                _PLACEHOLDER_RESISTOR_REFERENCE,
+                "res_net",
+            )
+        )
+    )
+
+    assert report["status"] == "match"
+    # The value discrepancy is disclosed, not silently dropped -- and never as
+    # an `error`, since `status: "match"` must stay reachable for the very
+    # conversion mode this reference form exists to support.
+    assert report["error_count"] == 0
+    placeholder = [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == "device.placeholder_value"
+    ]
+    assert len(placeholder) == 1
+    entry = placeholder[0]
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "reference"
+    assert entry["device"]["class"] == "RES_XHIGH_PO"
+    assert entry["details"] == {
+        "parameter": "R",
+        "device_kind": "resistor",
+        "reference_devices": 4,
+        "layout_devices": 4,
+        "layout_values": [15000.0, 30000.0, 60000.0, 120000.0],
+    }
+    # Every other finding is gone: no leftover per-device or per-net cascade.
+    assert [entry["category"] for entry in report["mismatches"]] == [
+        "device.placeholder_value"
+    ]
+
+
+def test_run_lvs_subckt_call_placeholder_resistors_equal_geometry_pair(tmp_path):
+    # The milder symptom shape reported on issue #1907: two *equal*-geometry
+    # resistors on distinct net pairs. `NetlistComparer` already paired these
+    # before the fix -- but then reported the residual `r=0` vs `r=120000`
+    # disagreement as a `severity: "error"` `device.property` entry, which
+    # `options.parameter_tolerance` cannot bridge (it is *relative*, so no
+    # value reconciles against zero). It must now be the same
+    # `severity: "warning"` disclosure instead.
+    report = run_lvs(
+        json.dumps(
+            _placeholder_request(
+                tmp_path,
+                ".subckt res_net A B C\n"
+                "R1 A B 120000 res_xhigh_po L=48.2U W=1U\n"
+                "R2 B C 120000 res_xhigh_po L=48.2U W=1U\n"
+                ".ends\n",
+                ".subckt res_net A B C\n"
+                "XR1 A B sky130_fd_pr__res_xhigh_po l=48.2u w=1u\n"
+                "XR2 B C sky130_fd_pr__res_xhigh_po l=48.2u w=1u\n"
+                ".ends\n",
+                "res_net",
+            )
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert [entry["category"] for entry in report["mismatches"]] == [
+        "device.placeholder_value"
+    ]
+
+
+def test_run_lvs_subckt_call_placeholder_capacitors_pair_on_topology(tmp_path):
+    # `_convert_capacitor_card` shares the identical `0`-placeholder
+    # convention, so the capacitor family needs the same treatment -- here
+    # keyed off `C`, `DeviceClassCapacitor`'s own primary parameter.
+    report = run_lvs(
+        json.dumps(
+            _placeholder_request(
+                tmp_path,
+                ".subckt cap_net A B C\n"
+                "C1 A B 1e-14 sky130_fd_pr__model__cap_mim A=1e-12 P=4e-06\n"
+                "C2 B C 4e-14 sky130_fd_pr__model__cap_mim A=4e-12 P=8e-06\n"
+                ".ends\n",
+                ".subckt cap_net A B C\n"
+                "XC1 A B sky130_fd_pr__cap_mim_m3_1 l=1u w=1u\n"
+                "XC2 B C sky130_fd_pr__cap_mim_m3_1 l=2u w=2u\n"
+                ".ends\n",
+                "cap_net",
+            )
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    placeholder = [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == "device.placeholder_value"
+    ]
+    assert len(placeholder) == 1
+    assert placeholder[0]["severity"] == "warning"
+    assert placeholder[0]["details"]["parameter"] == "C"
+    assert placeholder[0]["details"]["device_kind"] == "capacitor"
+
+
+def test_run_lvs_subckt_call_placeholder_ambiguous_group_still_reports(tmp_path):
+    # Negative control: a genuinely *un*distinguishable group -- three layout
+    # resistors against two reference ones, all on the same net pair, so
+    # topology cannot disambiguate them either. Excluding the placeholder
+    # value must not turn that real defect into a false match.
+    report = run_lvs(
+        json.dumps(
+            _placeholder_request(
+                tmp_path,
+                ".subckt res_net A B\n"
+                "R1 A B 1000 res_xhigh_po L=1U W=1U\n"
+                "R2 A B 1000 res_xhigh_po L=1U W=1U\n"
+                "R3 A B 1000 res_xhigh_po L=1U W=1U\n"
+                ".ends\n",
+                ".subckt res_net A B\n"
+                "XR1 A B sky130_fd_pr__res_xhigh_po l=1u w=1u\n"
+                "XR2 A B sky130_fd_pr__res_xhigh_po l=1u w=1u\n"
+                ".ends\n",
+                "res_net",
+            )
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert report["error_count"] > 0
+    categories = {entry["category"] for entry in report["mismatches"]}
+    assert "device.unmatched" in categories
+    # The disclosure is still emitted -- the value dimension really was
+    # excluded -- but it is not what makes this a mismatch.
+    assert "device.placeholder_value" in categories
+
+
+def test_run_lvs_subckt_call_placeholder_mixed_reference_values_untouched(tmp_path):
+    # The correctness guardrail: the exclusion is scoped to a class whose
+    # *every* reference-side instance carries the conversion's placeholder. A
+    # reference that mixes a converted card with a hand-written plain-element
+    # one carrying a real value is left completely alone, so a genuine value
+    # defect on that class is still compared and still an `error`.
+    report = run_lvs(
+        json.dumps(
+            _placeholder_request(
+                tmp_path,
+                ".subckt res_net A B C\n"
+                "R1 A B 120000 res_xhigh_po L=48.2U W=1U\n"
+                "R2 B C 60000 res_xhigh_po L=24.1U W=1U\n"
+                ".ends\n",
+                ".subckt res_net A B C\n"
+                "XR1 A B sky130_fd_pr__res_xhigh_po l=48.2u w=1u\n"
+                "R2 B C 60000 res_xhigh_po L=24.1U W=1U\n"
+                ".ends\n",
+                "res_net",
+            )
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert not [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == "device.placeholder_value"
+    ]
+    assert [entry["category"] for entry in report["mismatches"]] == ["device.property"]
+
+
+def test_run_lvs_plain_element_reference_zero_value_still_compared(tmp_path):
+    # The same guardrail from the other direction: a `form: "plain-element"`
+    # reference never goes through the conversion at all, so a genuine `0` it
+    # carries is a real value that must still be compared (and still break the
+    # compare) -- the exclusion must never leak onto it.
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        ".subckt res_net A B C\n"
+        "R1 A B 120000 res_xhigh_po\n"
+        "R2 B C 60000 res_xhigh_po\n"
+        ".ends\n",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt res_net A B C\nR1 A B 0 res_xhigh_po\nR2 B C 0 res_xhigh_po\n.ends\n",
+    )
+    report = run_lvs(
+        json.dumps(
+            {
+                "layout": {"netlist": layout_path, "top": "res_net"},
+                "reference": {"netlist": reference_path, "top": "res_net"},
+            }
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert report["error_count"] > 0
+    assert not [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == "device.placeholder_value"
+    ]
+
+
+def test_convert_reference_netlist_reports_placeholder_value_classes():
+    # The conversion-side half of the contract: only the two families whose
+    # plain-element card needs a positional value token this module cannot
+    # compute are reported -- MOS and bipolar carry no such token at all.
+    from klayout_tools.netlist_normalize import convert_reference_netlist
+
+    conversion = convert_reference_netlist(
+        ".subckt mixed A B C D\n"
+        "XM1 A B C D sky130_fd_pr__nfet_01v8 l=0.15u w=1u\n"
+        "XR1 A B sky130_fd_pr__res_xhigh_po l=48.2u w=1u\n"
+        "XC1 B C sky130_fd_pr__cap_mim_m3_1 l=1u w=1u\n"
+        ".ends\n",
+        deck="sky130",
+    )
+
+    assert conversion.placeholder_value_classes == {
+        "res_xhigh_po": "resistor",
+        "sky130_fd_pr__model__cap_mim": "capacitor",
+    }
+    assert "R1 A B 0 res_xhigh_po" in conversion.text
+
+
+# --------------------------------------------------------------------------- #
 # netgen engine (issue #343): stubbed-subprocess tests
 #
 # Follows `tests/test_sim.py`'s `_stub_subprocess_run` pattern for the
