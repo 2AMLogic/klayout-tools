@@ -1257,6 +1257,45 @@ def _port_edge_margin_um(
     return 0.0  # unreachable -- direction_deg is validated before this is called
 
 
+def _port_approach_side_bbox_um(
+    port_xy: tuple[float, float], direction_deg: int, bbox_um: dict[str, float]
+) -> dict[str, float] | None:
+    """``bbox_um`` clipped to the half the port does **not** face -- the part
+    of its own block's interior a clean approach into that port never enters
+    (issue #1895).
+
+    :func:`_port_edge_margin_um` is a statement about the port's *own facing
+    direction*: how deep inside its own block a route approaching it from
+    outside unavoidably runs. :func:`route_two_pin`'s obstacle check
+    (#199/#999) spends that margin as a flat per-block allowance against the
+    backbone's *total* crossing of the block, wherever that crossing happens
+    to be -- so a backbone that never approaches from the facing side at all,
+    but tunnels in from the opposite one (e.g. reaching a north-facing gate
+    pad from the south, crossing the source strap below it), was funded by an
+    allowance describing metal on the other side of the block entirely. This
+    returns the region that allowance says nothing about, so the caller can
+    measure that crossing separately.
+
+    ``None`` when the port sits on (or past) the bbox edge opposite its
+    facing direction -- there is no such region to measure.
+    """
+    far = dict(bbox_um)
+    x, y = port_xy
+    if direction_deg == 0:  # faces east -- the west half is the far side
+        far["x1"] = min(far["x1"], x)
+    elif direction_deg == 180:
+        far["x0"] = max(far["x0"], x)
+    elif direction_deg == 90:  # faces north -- the south half is the far side
+        far["y1"] = min(far["y1"], y)
+    elif direction_deg == 270:
+        far["y0"] = max(far["y0"], y)
+    else:  # unreachable -- direction_deg is validated before this is called
+        return None
+    if far["x0"] >= far["x1"] or far["y0"] >= far["y1"]:
+        return None
+    return far
+
+
 def _segment_bbox_interior_overlap_um(
     p0: tuple[float, float], p1: tuple[float, float], bbox_um: dict[str, float]
 ) -> float:
@@ -2851,6 +2890,53 @@ def route_two_pin(
         if crossed_um > allowances_um.get(other_id, 0.0) + margin_eps_um
     }
 
+    # Far-side approach check (issue #1895): the per-block allowance above is
+    # `_port_edge_margin_um`, which measures the unavoidable approach depth on
+    # the side the port *faces*. The comparison it feeds is against the
+    # backbone's *total* crossing of that block, with no account of where in
+    # the block that crossing sits -- so a backbone that never approaches from
+    # the facing side at all, and instead tunnels in from the opposite one, is
+    # funded by an allowance describing metal on the other side of the block
+    # entirely. On a tall block that allowance is large: #1895's reproduction
+    # reaches a north-facing gate pad 6.43um below its own block's top edge by
+    # running in from the south, straight across the source strap underneath
+    # it, and passes this check with 2.96um of crossing against a 6.61um
+    # allowance -- `routed: true`, no warning, and a real drawn short `klt
+    # extract` recovers as one merged net.
+    #
+    # So measure the crossing on the *far* side of the port separately
+    # (`_port_approach_side_bbox_um`) and hold it to the inflation
+    # compensation alone (`obstacle_half_um`, #999's own half-width term --
+    # what it takes for a route running just outside the block to graze the
+    # inflated bbox), never to the facing-side margin. A normal approach --
+    # in along the port's own facing direction, however deep -- is entirely
+    # on the near side and is unaffected, so this rejects only the crossing
+    # the margin never described. Scoped exactly as the allowance itself is:
+    # a same-block self-net (no allowance; it is expected to cross its own
+    # block) and a block exempted above (#1656/#1681: it draws nothing this
+    # leg's metal can short to on this layer) are both skipped.
+    far_side_um: dict[str, float] = {}
+    if not same_block_self_net:
+        for own_id, own_point, own_dir in ((own_a, a, dir_a), (own_b, b, dir_b)):
+            if own_id in exempt_block_ids:
+                continue
+            far_bbox = _port_approach_side_bbox_um(
+                own_point, own_dir, obstacle_bboxes_um[own_id]
+            )
+            if far_bbox is None:
+                continue
+            crossed_um = sum(
+                _segment_obstacle_overlap_um(
+                    seg_p0,
+                    seg_p1,
+                    far_bbox,
+                    navigable_regions_by_block_um.get(own_id),
+                )
+                for seg_p0, seg_p1 in zip(points, points[1:], strict=False)
+            )
+            if crossed_um > obstacle_half_um + margin_eps_um:
+                far_side_um[own_id] = max(far_side_um.get(own_id, 0.0), crossed_um)
+
     # Bounded detour search (#1167): a backbone rejected *only* for crossing
     # blocks neither of its two pins sits on is not a routing failure -- it is
     # the fixed one-jog shape being the wrong shape. Before reporting the net
@@ -2907,6 +2993,30 @@ def route_two_pin(
                 "block between the two pins) was tried first, and each one "
                 "still crossed a placed block"
             )
+
+    for own_id, crossed_um in far_side_um.items():
+        own_port = pin_a["port"] if own_id == own_a else pin_b["port"]
+        own_dir = dir_a if own_id == own_a else dir_b
+        allowed_um = allowances_um.get(own_id, 0.0)
+        return {
+            "routed": False,
+            "route_length_um": None,
+            "points_um": None,
+            "reason": (
+                f"backbone's {effective_width_um}um-wide drawn path crosses "
+                f"{crossed_um:.4g}um of block '{own_id}''s interior on the side "
+                f"*away* from its own pin '{own_port}' (which faces "
+                f"{own_dir}deg) -- that pin's {allowed_um:.4g}um edge margin "
+                "only describes the approach on the side it faces, so this "
+                "route reaches the pin from behind, crossing whatever the "
+                "block draws in between (another device's terminal, a strap) "
+                "and drawing a silent short to it (issue #1895); connect this "
+                "pin from the side its port faces, supply waypoints_um that "
+                "bring the approach around to that side, or route to a "
+                "layer_role with a metal2/via stack instead (or configure "
+                "routing.cross_block_layer_role, issue #1168)"
+            ),
+        }
 
     for other_id, crossed_um in blocking_um.items():
         allowed_um = allowances_um.get(other_id, 0.0)
