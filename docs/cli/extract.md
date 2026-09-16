@@ -2798,16 +2798,29 @@ future epic):
   device class is anonymous, so KLayout already wrote them bare. Unlike the
   `R`/`Q` carve-outs above, whose trailing token *is* a usable
   consumer-supplied-`.model` reference (see `res_metal1`/`res_metal2`
-  below), a capacitor's never was. One documented consequence: reading such
-  a netlist *back* through `kdb.NetlistSpiceReader` (e.g. as `klt lvs`'s
-  pre-extracted `layout.netlist`) now yields the reader's generic `CAP`
-  device class rather than the uppercased flavour name. That path was
-  already non-functional for capacitors either way — a written 2-terminal
-  `C`-value card and a `reference.netlist`-normalized 3-terminal
-  `A=…P=…` card are structurally different devices, and compared as
-  `device.unmatched` both before and after this change — so the identity a
-  compare needs comes from re-extracting (`layout.file` + `layout.deck`,
-  where the class name comes from the deck), not from the written card.
+  below), a capacitor's never was. **The SPICE-text round trip is not a
+  gap**, as of issue #1876: `klt lvs` recovers a capacitor's real class name
+  when re-reading a `layout.netlist` pre-extracted netlist (or a
+  `reference.netlist` reference that itself passed through this same
+  writer) — from the writer's own preceding `* device instance … <class>`
+  comment, never from the bare `C` card's own text — so a two-step `klt
+  extract -o … && klt lvs` pipeline against a reference that names the
+  capacitor's class explicitly (a plain, 2-terminal `C…value…<class>` card,
+  the schematic-equivalent form this issue's own repro uses) reaches
+  `status: "match"` exactly as it did before #1558's bare-card fix. A
+  missing or hand-edited/malformed comment degrades gracefully to the
+  reader's generic `CAP` device class, exactly as before this recovery
+  existed. This is distinct from, and does not change, the guarantee
+  `devices[].class` in the JSON report already gave: that field was never
+  affected by the SPICE-text round trip in the first place. **One shape
+  remains genuinely unaffected**: a `reference.form: "subckt-call"`
+  reference's normalized 3-terminal `A=…P=…` capacitor card is a
+  structurally different device from the extracted 2-terminal `C`-value
+  card regardless of class name, and still compares as `device.unmatched`
+  — the identity a compare needs there still comes from re-extracting
+  (`layout.file` + `layout.deck`, where the class name comes from the
+  deck), not from recovering a class name onto a shape that cannot match
+  anyway.
 - **`sg13g2`'s drawn metal resistors are a verified carve-out** (`res_metal1`/
   `res_metal2`, issue #1235's classes; the carve-out itself confirmed by
   issue #1457): a real fetched IHP-Open-PDK v0.3.0 install defines no

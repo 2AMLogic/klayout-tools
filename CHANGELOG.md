@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt lvs`'s pre-extracted `layout.netlist` shape (and
+  `reference.netlist`) now recover a capacitor device's real class name
+  when re-reading a `klt extract -o`-written bare `C` card (issue #1558's
+  fix), instead of falling back to KLayout's generic/anonymous `CAP`
+  device class — issue #1876. #1558 correctly stopped writing the
+  capacitor's class name as a trailing token on the `C` card (ngspice's
+  native `C`-element parser reads that token as an unresolvable `.model`
+  reference), but left `NetlistSpiceReader` nothing to recover the class
+  from on read-back, breaking name-based device-class correspondence for
+  capacitors specifically whenever the compare's other side names the
+  class explicitly (a hand-authored/schematic-derived reference, or a
+  layout netlist extracted by a pre-#1558 `klt`). The class name is now
+  recovered from the writer's own preceding `* device instance … <class>`
+  comment — a missing or malformed comment still degrades gracefully to
+  the generic class, exactly as before this fix. The bare, value-only `C`
+  card format itself is unchanged; only how `klt lvs` re-reads it changed.
+  See `docs/cli/lvs.md`'s "Pre-extracted netlist" and `docs/cli/extract.md`'s
+  "Nothing is lost" note.
 - **Added**: `klt place-and-route`'s post-route multi-corner sweep
   (`response.corners[]`, issue #1092) gains two additive fields per corner —
   `total_negative_setup_slack_ns` / `total_negative_hold_slack_ns` (issue
