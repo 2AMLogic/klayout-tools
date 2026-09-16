@@ -185,7 +185,10 @@ documents.
 (there is no apt/brew/pip package for `openroad` — see
 `docs/cli/place-and-route.md`'s "Installing OpenROAD" section), additionally
 mounting `$PDK_ROOT` alongside `$PWD` so a real PDK install resolves inside
-the container too — see the script's own header comment for why that matters.
+the container too — falling back to `klt pdk find`'s own resolved root when
+`$PDK_ROOT` is unset, so the mount always matches what `klt
+place-and-route` will actually reference (issue #1868) — see the script's
+own header comment for why that matters.
 
 `place-and-route-smoke.sh` runs the pipeline for `gcd`/`mult8` (the only
 two designs with a committed `regenerate.sh` recipe — no `modexp` fixture

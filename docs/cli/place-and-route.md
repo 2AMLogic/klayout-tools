@@ -114,6 +114,25 @@ invocation itself — e.g. `sudo docker run ...` if your user isn't in the
 host (e.g. Apple Silicon) works but is slower, per the survey's own
 "Environment limitation" section, which hit the identical constraint.
 
+**Gotcha: this bare wrapper does not mount the PDK at all.** `klt
+place-and-route` resolves the PDK's LEF/tech-LEF/liberty files on the
+**host** and bakes those absolute paths straight into the generated Tcl
+(`read_liberty <path>`, `read_lef <path>`) — a container `openroad` can only
+open a path its wrapper explicitly bind-mounted. Export `PDK_ROOT`
+explicitly before using a container wrapper (`klt pdk find --format json |
+jq -r .root` reports the exact path if you are not sure which root `klt`
+resolved) — a PDK discovered through a search root (`~/.volare`, ciel,
+open_pdks) instead of an explicitly-set `$PDK_ROOT` will not be visible
+inside the container, and every stage fails on its first `read_liberty`
+with an opaque `cannot read file <path>` that names the file but says
+nothing about the real cause (issue #1868). `klt place-and-route` itself
+now recognizes this exact failure shape — a path `openroad` reports it
+cannot read that this process can itself still read — and appends a hint
+about mount coverage rather than passing the raw Tcl error through
+unexplained. [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)'s
+wrapper (below) already automates this fallback; only the bare snippet
+above needs it spelled out manually.
+
 ### From source
 
 No from-source build recipe is documented here yet. This is a real parity
@@ -136,7 +155,11 @@ a wrapper onto `$PATH` that shells out to it per invocation, additionally
 mounting `$PDK_ROOT` (read-only, at the identical host path) alongside
 `$PWD` — see that script's own header comment for why the bare `-v
 "$PWD":"$PWD"`-only recipe above is not sufficient once a real PDK is
-involved. It fetches a full open_pdks-layout sky130A PDK via the pinned
+involved. When `$PDK_ROOT` is unset at invocation time, the generated
+wrapper falls back to `klt pdk find --format json | jq -r .root` so the
+mount always matches whatever root `klt place-and-route` itself resolves,
+rather than mounting nothing (issue #1868 — see the "Gotcha" note above).
+It fetches a full open_pdks-layout sky130A PDK via the pinned
 `volare enable --pdk sky130 c6d73a35f524070e85faff4a6a9eef49553ebc2b`
 (matching `scripts/aws/build-remote-sim-ami.sh`'s own pin) — the full
 LEF/tech-LEF/liberty tree this command's PDK resolution needs, not the
