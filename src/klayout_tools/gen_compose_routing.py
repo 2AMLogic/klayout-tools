@@ -54,7 +54,7 @@ from .decks import (
     get_extraction_deck,
     get_nominal_dbu,
 )
-from .gen import _PDK_ROLE_LAYERS, GenError, _pdk_family
+from .gen import _PDK_ROLE_LAYERS, RING_SIDE_DIRECTIONS, GenError, _pdk_family
 
 
 def _resolve_route_layer(variant: str, layer_role: str) -> tuple[int, int]:
@@ -1138,7 +1138,12 @@ def _ring_gap_route_conflict(
     * a crossing on the gapped side must clear the opening's edges by half
       the route width plus the block's own reported ``min_spacing_um``, so the
       drawn wire fits *through* the opening rather than shorting to either cut
-      end of the ring;
+      end of the ring -- issue #1902: this is a statement about the
+      clearance-inflated *footprint* around the crossing point fitting
+      inside the opening, not about the bare point itself, so a rejection's
+      message distinguishes "the crossing point is outside the opening
+      entirely" from "the crossing point is inside the opening but too close
+      to one of its edges for the route's own footprint";
     * a segment running *along* a ring side lies on the ring's metal for its
       whole length, which is a short however wide the opening is.
 
@@ -1214,14 +1219,40 @@ def _ring_gap_route_conflict(
                 at - clearance_um < window[0] - eps
                 or at + clearance_um > window[1] + eps
             ):
+                # #1902: `at` itself can sit *inside* `window` while still
+                # being rejected -- the actual requirement is that the whole
+                # clearance-inflated footprint around `at` (half the route's
+                # own width plus the block's `min_spacing_um`, both baked
+                # into `clearance_um`) fits inside the opening, not just the
+                # bare crossing point. Report whichever of the two is
+                # actually true: a genuinely-missed opening (`at` itself
+                # outside `window`) keeps the original point-outside wording,
+                # while a crossing that lands inside `window` but too close
+                # to one of its edges for the route's own footprint gets a
+                # message that says so, rather than the self-contradictory
+                # "at 1.87um, outside [1.2, 2.2]" a reader can arithmetically
+                # disprove.
+                if at < window[0] - eps or at > window[1] + eps:
+                    return (
+                        f"backbone crosses block '{block['id']}''s ring on "
+                        f"its {side} side at {at:.4g}um, outside the "
+                        f"[{window[0]:.4g}, {window[1]:.4g}]um opening it "
+                        "declares -- widen the opening (params.ring_gap_um), "
+                        "move it (params.ring_gap_offset_um), or place the "
+                        "blocks so the route lines up with it"
+                    )
                 return (
                     f"backbone crosses block '{block['id']}''s ring on its "
-                    f"{side} side at {at:.4g}um, outside the "
+                    f"{side} side at {at:.4g}um, inside the "
                     f"[{window[0]:.4g}, {window[1]:.4g}]um opening it declares "
-                    f"(a {width_um}um-wide route needs {clearance_um:.4g}um of "
-                    "clearance inside the opening) -- widen the opening "
-                    "(params.ring_gap_um), move it (params.ring_gap_offset_um), "
-                    "or place the blocks so the route lines up with it"
+                    f"but too close to its edge for a {width_um}um-wide route: "
+                    f"it needs {clearance_um:.4g}um of clearance inside the "
+                    f"opening on both sides of the crossing (a "
+                    f"[{at - clearance_um:.4g}, {at + clearance_um:.4g}]um "
+                    "footprint), which the opening does not leave room for -- "
+                    "widen the opening (params.ring_gap_um), move it "
+                    "(params.ring_gap_offset_um), or place the blocks so the "
+                    "route lines up with it"
                 )
 
     return None
@@ -2962,14 +2993,51 @@ def route_two_pin(
             for region in local_regions
         ]
 
+    # Ring-gap reach allowance (issue #1902): `_port_edge_margin_um` alone
+    # states an own-pin allowance as if the backbone always approaches from
+    # the port's own facing side -- true for most blocks, but not for a
+    # guard/collector-ringed block whose only way in is a declared
+    # `ring_gap_side` opening (#434) on a *different* side than the port
+    # faces. `ring_pins` above already lists exactly those (pin, block)
+    # pairs, and by the time this point is reached every one of them has
+    # already cleared `_ring_gap_route_conflict` -- so the crossing from that
+    # opening's own side to the port is a validated, unavoidable path, not
+    # evidence the backbone plowed through something it shouldn't have.
+    # Widen the allowance for such a pin to the larger of the two: the
+    # port's own facing-side margin (unchanged for every other block), or
+    # the distance from the port to the *gapped* side's own edge, plus one
+    # more stub width when that side is not the one the port already faces
+    # (the backbone still draws its normal facing-direction approach stub
+    # before turning towards the opening, on top of the reach across the
+    # block -- see `manhattan_backbone`'s own per-pin stub).
+    ring_pin_blocks = {pin["block"]: block for pin, block in ring_pins}
+
+    def _own_block_allowance_um(
+        own_id: str,
+        point: tuple[float, float],
+        direction_deg: int,
+        bbox: dict[str, float],
+    ) -> float:
+        margin = max(0.0, _port_edge_margin_um(point, direction_deg, bbox))
+        ring_block = ring_pin_blocks.get(own_id)
+        if ring_block is None:
+            return margin
+        for side in _ring_gap_ports(ring_block):
+            side_dir = RING_SIDE_DIRECTIONS[side]
+            reach = max(0.0, _port_edge_margin_um(point, side_dir, bbox))
+            if side_dir != direction_deg:
+                reach += stub_um
+            margin = max(margin, reach)
+        return margin
+
     allowances_um: dict[str, float] = {}
     if not same_block_self_net:
         allowances_um[own_a] = (
-            max(0.0, _port_edge_margin_um(a, dir_a, placed_bboxes_um[own_a]))
+            _own_block_allowance_um(own_a, a, dir_a, placed_bboxes_um[own_a])
             + obstacle_half_um
         )
         allowances_um[own_b] = (
-            max(0.0, _port_edge_margin_um(b, dir_b, placed_bboxes_um[own_b]))
+            _own_block_allowance_um(own_b, b, dir_b, placed_bboxes_um[own_b])
             + obstacle_half_um
         )
 

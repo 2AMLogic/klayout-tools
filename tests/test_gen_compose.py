@@ -9833,6 +9833,133 @@ def test_compose_rejects_route_into_collector_ringed_bjt_array_without_a_gap(
     )
 
 
+def _two_ring_gapped_bjt_units(tmp_path, pdk_root, name, ring_gap_um):
+    """#1902's own repro shape: two identical single-unit bjt_arrays, each
+    with its own collector ring opened on the side facing the other, bussed
+    base-to-base through both declared openings."""
+    a = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        f"{name}_xq1",
+        rows=1,
+        cols=1,
+        ratio=1,
+        add_collector_ring=True,
+        ring_gap_side="E",
+        ring_gap_um=ring_gap_um,
+    )
+    b = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        f"{name}_xqr",
+        rows=1,
+        cols=1,
+        ratio=1,
+        add_collector_ring=True,
+        ring_gap_side="W",
+        ring_gap_um=ring_gap_um,
+    )
+    output = tmp_path / f"{name}.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "xq1", "generator_report": a},
+                {"id": "xqr", "generator_report": b},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["xq1", "xqr"],
+                # ~8um centre-to-centre for the ~6.16um-wide unit -- matches
+                # #1902's own reported repro shape.
+                "origins_um": {
+                    "xq1": {"x": 0.0, "y": 0.0},
+                    "xqr": {"x": 8.0, "y": 0.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "BASE",
+                    "pins": [
+                        {"block": "xq1", "port": "Q0_B"},
+                        {"block": "xqr", "port": "Q0_B"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": name, "output": str(output)},
+        }
+    )
+    return a, report, output
+
+
+def test_compose_buses_two_collector_ringed_bjt_units_through_opposing_ring_gaps(
+    tmp_path, pdk_root
+):
+    # #1902: routing a same-net bus between two separately guard/collector-
+    # ringed blocks through their own declared ring-gap openings used to be
+    # rejected two different ways -- a ring-crossing clearance check whose
+    # own message contradicted its numbers (finding 1), and the destination
+    # block's own obstacle-overlap allowance treating the block the route is
+    # *supposed* to terminate in as an obstacle it plowed through (finding
+    # 2), because that allowance only ever accounted for a straight-in
+    # approach on the port's own facing side, never a reach across the
+    # block's interior from a ring-gap opening on a different side. A gap
+    # wide enough for both blocks' clearance requirements now routes clean.
+    a_report, report, output = _two_ring_gapped_bjt_units(
+        tmp_path, pdk_root, "bjt_bus", ring_gap_um=1.6
+    )
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][0]["route_length_um"] > 0
+    assert output.is_file()
+
+    # ...and the drawn wire really passes through the opening rather than
+    # merging with either block's own collector ring (the short the ring
+    # check exists to prevent) -- probed in the channel between the two
+    # blocks, at the backbone's own y (Q0_B's y plus one stub width),
+    # against block "xq1"'s own ring tap.
+    offsets = {b["id"]: b["offset_um"] for b in report["blocks"]}
+    placed = {b["id"]: b["bbox_um"] for b in report["blocks"]}
+    coll_n = next(p for p in a_report["ports"] if p["name"] == "COLL_N")
+    q0_b = next(p for p in a_report["ports"] if p["name"] == "Q0_B")
+    route_point = (
+        (placed["xq1"]["x1"] + placed["xqr"]["x0"]) / 2.0,
+        q0_b["y_um"] + offsets["xq1"]["y"] + 0.17,
+    )
+    ring_point = (
+        coll_n["x_um"] + offsets["xq1"]["x"],
+        coll_n["y_um"] + offsets["xq1"]["y"],
+    )
+    assert not _shares_merged_polygon(
+        output, "bjt_bus", 67, 20, route_point, ring_point
+    )
+
+
+def test_compose_ring_gap_crossing_inside_the_opening_but_too_tight_names_the_footprint(
+    tmp_path, pdk_root
+):
+    # #1902 finding 1: a crossing point that sits *inside* the declared
+    # opening can still be rejected because the route's own clearance-
+    # inflated footprint around it does not fit -- the default-sized opening
+    # (ring_gap_um=1.0) is exactly this case for the bjt_array unit's own
+    # Q0_B geometry. The message must say the crossing is *inside* the
+    # opening but too close to its edge, never the self-contradictory "at
+    # Xum, outside [lo, hi]" wording when X arithmetically sits inside
+    # [lo, hi].
+    _, report, _ = _two_ring_gapped_bjt_units(
+        tmp_path, pdk_root, "bjt_bus_tight", ring_gap_um=1.0
+    )
+    assert report["unrouted_nets"] == ["BASE"]
+    notes = report["drc_hints"]["notes"]
+    assert any(
+        "inside the" in note and "opening it declares but too close to its edge" in note
+        for note in notes
+    ), notes
+
+
 # --------------------------------------------------------------------------- #
 # `COLL_*` (diffusion-role) collector-ring via-drop (issue #1894): a
 # `bjt_array` collector-ring `COLL_*` tap port is reported on the deck's
