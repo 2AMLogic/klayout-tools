@@ -7430,6 +7430,122 @@ def test_compose_via_drop_ladder_routes_two_hops_down_to_base_metal(tmp_path, pd
     assert bussed_net not in base_nets
 
 
+def test_compose_via_drop_ladder_intermediate_pad_shorting_an_unrelated_net_is_rejected(
+    tmp_path, pdk_root
+):
+    # Issue #1913's own repro. Three identical 1x1 `mos_array` blocks in a
+    # row: net "a" (`"metal3"`, met2) starts from li1 `U0_D` pins and takes
+    # the two-hop li1->met1->met2 ladder, dropping an intermediate met1
+    # landing pad at each of its own endpoints. Net "b" (`"metal2"`, met1)
+    # starts from li1 `U0_G` pins too, but needs only the single li1->met1
+    # hop -- so its entire backbone is drawn directly on met1 -- and its own
+    # caller-supplied `waypoints_um` steer that met1 backbone straight across
+    # the exact point where "a"'s ladder lands its met1 pad.
+    #
+    # Before this fix, `_drawn_leg_footprint_region` excluded "a"'s
+    # intermediate met1 pad from the route-vs-route collision check
+    # entirely -- it is not part of "a"'s own primary `"metal3"` footprint --
+    # so this composed `unrouted_nets: []`, both nets `routed: true`, and
+    # `klt drc --deck sky130` also reported clean, while `klt extract`
+    # silently merged the two nets onto one node (`"a|b"`): a metal-on-metal
+    # overlap merges into a single polygon in the composed GDS, a short
+    # rather than a spacing violation, so no rule deck has anything to flag.
+    # This is a real composition shape, not a contrivance -- a supply rail
+    # routed across the full width of a multi-row composition on one metal
+    # level naturally crosses the via-drop landing pads of every signal net
+    # whose pins sit on a lower level.
+    blocks = [
+        _gen_block(
+            tmp_path,
+            pdk_root,
+            "mos_array",
+            f"m{i}",
+            w_um=2.0,
+            l_um=4.0,
+            rows=1,
+            cols=1,
+            dummy=0,
+            flavor="nfet",
+            gate_contact=True,
+        )
+        for i in range(3)
+    ]
+    output = tmp_path / "via_drop_ladder_intermediate_short_repro.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b0", "generator_report": blocks[0]},
+                {"id": "b1", "generator_report": blocks[1]},
+                {"id": "b2", "generator_report": blocks[2]},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b0", "b1", "b2"],
+                "origins_um": {
+                    "b0": {"x": 0.0, "y": 0.0},
+                    "b1": {"x": 10.0, "y": 0.0},
+                    "b2": {"x": 20.0, "y": 0.0},
+                },
+            },
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "connectivity": [
+                {
+                    "net": "a",
+                    "layer_role": "metal3",
+                    "pins": [
+                        {"block": "b0", "port": "U0_D"},
+                        {"block": "b2", "port": "U0_D"},
+                    ],
+                    "waypoints_um": [[4.63, -3.0], [24.63, -3.0]],
+                },
+                {
+                    "net": "b",
+                    "layer_role": "metal2",
+                    "pins": [
+                        {"block": "b0", "port": "U0_G"},
+                        {"block": "b2", "port": "U0_G"},
+                    ],
+                    "waypoints_um": [
+                        [2.42, 1.0],
+                        [4.63, 1.0],
+                        [24.63, 1.0],
+                        [22.42, 1.0],
+                    ],
+                },
+            ],
+            "options": {
+                "cell_name": "via_drop_ladder_intermediate_short_repro",
+                "output": str(output),
+            },
+        }
+    )
+
+    # "a" routes cleanly on its own two-hop ladder; "b" is rejected rather
+    # than silently drawn through "a"'s own intermediate met1 landing pad.
+    assert report["nets"][0]["net"] == "a"
+    assert report["nets"][0]["routed"] is True
+    assert report["nets"][1]["net"] == "b"
+    assert report["nets"][1]["routed"] is False
+    assert report["unrouted_nets"] == ["b"]
+    assert "crosses already-routed net 'a'" in report["nets"][1]["legs"][0]["reason"]
+
+    # The composed output still exists (net "a" drew real metal) and stays
+    # DRC-clean -- the fix rejects the short outright instead of drawing it
+    # and leaving `klt drc` to (not) find it.
+    assert output.is_file()
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # klt extract confirms "a" and "b" no longer read back as one merged
+    # node ("a|b") -- "b"'s own leg was rejected outright, so nothing of
+    # "b" was ever drawn to merge with "a" in the first place.
+    result = extract.run_extract(
+        str(output), "sky130", top="via_drop_ladder_intermediate_short_repro"
+    )
+    assert result["merged_net_labels"] == []
+
+
 # --------------------------------------------------------------------------- #
 # Cross-block bus routing (routing.cross_block_layer_role, #1168): unlike the
 # via-drop tests above -- which route the *whole composition* on "metal2" --
