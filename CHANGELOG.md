@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose` now draws a real licon/mcon contact when a
+  `connectivity[]` net is wired to a port reported on a PDK family's
+  diffusion role — e.g. `bjt_array`'s `add_collector_ring` collector-tie
+  ports (`COLL_N`/`COLL_S`/`COLL_E`/`COLL_W`) — instead of silently drawing
+  no via at all (issue #1894). Before this fix, such a leg fell into
+  `_resolve_via_drop_layer`'s generic "unrelated role, nothing to do"
+  branch (the one an ordinary guard-ring `TAP_*` port, always reported on
+  the metals-stack `"metal"` role itself, correctly still uses) and
+  reported `routed: true` with a clean `klt drc` regardless — an open
+  collector strap `klt extract` alone could catch (recovering the
+  collector as its own unstrapped node), and a route to a second,
+  unrelated same-block net could land on/through the ring's own metal
+  undetected, since the missing via-drop left that leg's landing point
+  invisible to the same-block footprint-collision check (a short `klt
+  extract` alone could catch). The ladder now drops through the deck's
+  `contact` layer to `metals[0]`, then the ordinary metals-stack ladder up
+  to `routing.layer_role`, exactly like any other multi-hop via-drop
+  (#1567) — and that leg's landing pad is now visible to the same
+  collision check as any other. See `docs/cli/gen-compose.md`'s
+  "Diffusion-role ports" (under "Via-drop routing").
 - **Changed / Added**: `klt synthesize`'s generated top-level `.ys` script is
   now byte-for-byte scan-clean (issue #1870, completing the half #1844 scoped
   out). The resolved liberty — the one remaining absolute path, and on the

@@ -254,6 +254,9 @@ cleanly.
   whose layer has no label convention (e.g. a `bjt_array` collector-ring
   `COLL_*` tap on the diffusion layer) is a **partial success**: the pin is
   left unlabelled with a `drc_hints.notes[]` entry, never a hard failure.
+  This is unrelated to wiring the same `COLL_*` port into `connectivity[]`
+  instead — see the diffusion-role bullet under "Via-drop routing" below
+  (issue #1894) for how that path draws a real contact.
 - **Blocks this command did not generate (#1189)** — a `blocks[]` entry names
   its geometry source in exactly one of two ways. `generator_report` is a
   `klt` verb's own JSON response — [`klt gen`](gen.md), [`klt draw`](draw.md),
@@ -995,14 +998,44 @@ draw` workaround #454 was filed to replace.
 
 A pin whose own layer is not a member of the resolved family's
 `ExtractionDeck.metals` stack, but which a `routing.layer_role` shape already
-covers at that position (e.g. a guard ring's `TAP_*` port on the tap layer,
-under the ring's own metal), is left exactly as before #454 — drawn directly
-on `routing.layer_role`, no via-drop attempted, since via-drop only ever
-applies between two declared routing-metal levels.
+covers at that position (e.g. a guard ring's ordinary `TAP_*` port, always
+reported on the metals-stack `"metal"` role itself), is left exactly as
+before #454 — drawn directly on `routing.layer_role`, no via-drop attempted,
+since via-drop only ever applies between two declared routing-metal levels.
 
-One case draws a multi-level *ladder* instead of a single via, and one case
-is rejected outright, reporting the net unroutable rather than drawing
-something that does not connect:
+One case draws a *contact* ladder down to the deck's diffusion role instead of
+declining to act, one case draws a multi-level *ladder* between two metal
+levels, and one case is rejected outright, reporting the net unroutable
+rather than drawing something that does not connect:
+
+- A pin reported on the deck's **diffusion role** (`ExtractionDeck.active`) —
+  `bjt_array`'s `add_collector_ring` collector-tie tap ports, `COLL_N`/
+  `COLL_S`/`COLL_E`/`COLL_W` (issue #1894). Unlike an ordinary `TAP_*` ring
+  port above, `COLL_*` is reported this way specifically so a caller can
+  strap a **new** connection onto the ring from outside its own
+  generator-time footprint — there is no pre-existing via at the new landing
+  point, so `gen_compose` drops through `ExtractionDeck.contact` (the
+  licon/comp-contact that lands on `ExtractionDeck.metals[0]`) and, if
+  `routing.layer_role` resolves higher than that, the ordinary metals-stack
+  ladder above on top of it — one drawn contact plus every intermediate
+  landing pad, exactly like any other multi-hop drop. Before #1894 this fell
+  into the same "already covered, nothing to do" bucket the ordinary `TAP_*`
+  case above still uses: no via, no landing pad, no contact ever drawn, yet
+  the leg still reported `routed: true` and a clean `klt drc` — an open
+  collector strap (`klt extract` recovers the collector as its own
+  unstrapped node) that neither of this command's own success signals could
+  catch. Routing a `COLL_*` port together with an unrelated same-block net in
+  the same request is also now correctly checked for a short between them
+  (the missing via-drop previously left that leg's landing point invisible to
+  the same-block footprint-collision check "Route-vs-route collision is
+  spacing-aware" documents) — see `tests/test_gen_compose.py`'s
+  `test_compose_bjt_array_collector_ring_strap_draws_a_real_contact`/
+  `..._does_not_short_an_unrelated_net` for the worked repro this paragraph
+  summarizes. `pins[]`'s own diffusion-role caveat ("Top-level pins without
+  routing (`pins[]`, #210)" above) is unaffected: a `COLL_*` port named
+  there still has no label convention to attach to and stays a "partial
+  success," since `pins[]` never draws metal or a contact at all — only
+  `connectivity[]` routing gained this fix.
 
 - A pin whose layer is a *different* metals-stack level than
   `routing.layer_role`, more than one via hop away (issue #1567). Every
