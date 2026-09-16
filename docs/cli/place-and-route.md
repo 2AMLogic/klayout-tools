@@ -750,7 +750,7 @@ all (only `hold_violation_count`, a count).
 Once the `"route"` stage's own script (single-corner, unchanged) has
 written its checkpoint, a **second** OpenROAD invocation reads that
 checkpoint back, `define_corners`s every `.lib` timing corner the resolved
-`cell_library` ships (`klayout_tools.pdk.list_lib_corners`, an additive
+`cell_library` ships (`klayout_tools.pdk_cells.list_lib_corners`, an additive
 enumeration alongside the existing single-corner `_nominal_supply` pick),
 `read_liberty -corner`s each, and re-estimates parasitics
 (`estimate_parasitics -global_routing`, the same estimate the single-corner

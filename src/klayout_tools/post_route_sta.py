@@ -157,7 +157,8 @@ from ._paths import (
     validate_request_shape,
 )
 from ._provenance import build_provenance
-from .pdk import lef_files, resolve_liberty_for_cell_library
+from .pdk import lef_files
+from .pdk_cells import resolve_liberty_for_cell_library
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- versioned independently of every other verb's own

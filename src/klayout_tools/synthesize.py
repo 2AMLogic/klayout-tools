@@ -221,7 +221,7 @@ from .arith_gen import (
     normalize_architecture,
 )
 from .equiv import EquivError, run_equiv
-from .pdk import resolve_liberty_for_cell_library
+from .pdk_cells import resolve_liberty_for_cell_library
 from .restructure import RestructureError, restructure_for_timing
 from .sta import StaError, compute_critical_path
 
