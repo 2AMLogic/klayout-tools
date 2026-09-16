@@ -2084,15 +2084,37 @@ _MOS_ARRAY_WELL_TAP_NET_LABEL = "WELL_TAP"
 #: ``diff_pair`` a second, opt-in way to draw the same GDS layer without
 #: renaming or otherwise disturbing ``esd_device``'s existing role.
 #:
-#: sky130 has no entry: this deck's own transcription cites no numbered
+#: sky130's single supported flavour, ``"hvi"`` (issue #1912, unblocked by
+#: #1369's own citation), reuses ``klayout_tools.decks.sky130``'s curated
+#: *extraction* deck's ``EXTRACTION_DECK.mos_flavours``
+#: ``MOSFlavour(marker=(75, 20), flavour="hvi", ...)`` entry -- the same
+#: ``hvi.drawing`` (75/20) layer that module's own docstring cross-checks
+#: against three independent sources in a fetched install (``sky130.lvs``,
+#: ``sky130A.lyp``, ``sky130A.tech``), and the same layer
+#: ``pdk_models.py``'s ``_MOS_MODEL_FLAVOURS[("sky130", "sky130")]["hvi"]``
+#: binds to the real ``sky130_fd_pr__nfet_g5v0d10v5``/``__pfet_g5v0d10v5``
+#: subcircuits -- so requesting ``voltage_flavor="hvi"`` here draws the
+#: identical marker the deck already extracts a device-class split on,
+#: mirroring gf180mcu's/sg13g2's own "reuse the deck's own marker citation"
+#: precedent above rather than inventing a new one. Before #1912, sky130 had
+#: no entry here at all: this deck's own transcription cited no numbered
 #: medium/high-voltage transistor marker layer (the same gap
-#: :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role documents -- sky130's
-#: ``hvtr``/``hvtp`` names are cited only as unnumbered exclusions in the
-#: official ``sky130.lvs``, never with a transcribed layer/datatype pair this
-#: module could cite without guessing). A ``voltage_flavor`` request on this
-#: family resolves to no layer for *any* name -- reported via
-#: ``drc_hints.notes``, never silently dropped (see
-#: :func:`_voltage_flavor_mark_layer`).
+#: :data:`_PDK_ROLE_LAYERS`'s ``esd_mark`` role still documents -- sky130's
+#: ``hvtr``/``hvtp`` *implant* names remain cited only as unnumbered
+#: exclusions in the official ``sky130.lvs``, never with a transcribed
+#: layer/datatype pair this module could cite without guessing; ``hvi`` is a
+#: distinct, numbered *identification* layer #1369 separately transcribed and
+#: verified, not one of those two names). A ``voltage_flavor`` request naming
+#: anything other than ``"hvi"`` still resolves to no layer on this family --
+#: reported via ``drc_hints.notes``, never silently dropped (see
+#: :func:`_voltage_flavor_mark_layer`). Needs no
+#: :data:`_PDK_VOLTAGE_FLAVOR_MARK_MARGIN_UM` entry of its own: like
+#: sg13g2/sg13cmos5l's ``"hv"`` marker, no rule in this deck's own curated DRC
+#: deck reads ``hvi`` at all (`decks/sky130.py`'s own ``hvi`` layer-name
+#: comment: "no DRC rule here reads hvi, so every rule still applies its
+#: general-case threshold to geometry drawn inside hvi"), so the default
+#: :data:`WELL_ENCLOSURE_MARGIN_UM` box never needs the gf180mcu-only
+#: enlargement.
 #:
 #: ``sg13g2``/``sg13cmos5l`` (issue #1472) both share the single flavour name
 #: ``"hv"``, transcribed directly from the curated decks' own
@@ -2111,7 +2133,10 @@ _PDK_VOLTAGE_FLAVOR_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
         "medium_voltage": (55, 0),  # Dualgate -- same citation as
         # _PDK_ROLE_LAYERS's "esd_mark" entry.
     },
-    "sky130": {},
+    "sky130": {
+        "hvi": (75, 20),  # hvi.drawing -- same citation as
+        # decks.sky130.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hvi").
+    },
     "sg13g2": {
         "hv": (44, 0),  # ThickGateOx.drawing -- same citation as
         # decks.sg13g2.EXTRACTION_DECK.mos_flavours' MOSFlavour(flavour="hv").

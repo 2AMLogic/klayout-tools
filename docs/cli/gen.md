@@ -588,13 +588,18 @@ marker layer (`44/0`) — the same marker each curated deck's own
 `EXTRACTION_DECK.mos_flavours` entry keys its thick-gate-oxide
 `sg13_hv_nmos`/`sg13_hv_pmos` device class on, so a unit device drawn with
 `voltage_flavor="hv"` extracts as that class instead of the default
-thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`. **`sky130`'s curated deck cites no
-numbered medium/high-voltage transistor marker layer** — any `voltage_flavor`
-value on that family (or an unrecognised value on any family) draws nothing
-and is reported via a `drc_hints.notes` entry, never silently dropped.
-`voltage_flavor` is independent of `flavor`: requesting both `flavor="pfet"`
-and `voltage_flavor="medium_voltage"`/`"hv"` draws both the well and the
-marker with no conflict.
+thin-oxide `sg13_lv_nmos`/`sg13_lv_pmos`. `voltage_flavor="hvi"` on `sky130`
+(issue #1912) similarly draws that family's `hvi.drawing` marker layer
+(`75/20`) — the same marker `klayout_tools.decks.sky130`'s own curated
+`EXTRACTION_DECK.mos_flavours` entry keys its thick-oxide
+`sky130_fd_pr__nfet_g5v0d10v5`/`__pfet_g5v0d10v5` device class on, so a unit
+device drawn with `voltage_flavor="hvi"` extracts as that class instead of
+the default thin-oxide `sky130_fd_pr__nfet_01v8`/`__pfet_01v8`. Any other
+`voltage_flavor` value on `sky130` (or an unrecognised value on any family)
+still draws nothing and is reported via a `drc_hints.notes` entry, never
+silently dropped. `voltage_flavor` is independent of `flavor`: requesting
+both `flavor="pfet"` and `voltage_flavor="medium_voltage"`/`"hv"`/`"hvi"`
+draws both the well and the marker with no conflict.
 
 **`add_guard_ring` (issue #1493).** Encloses the array in an
 automatically-sized tap/guard ring, composed the same way `diff_pair`'s own
@@ -660,7 +665,7 @@ with their `.drc.json` reports checked in alongside).
 | `topology`     | string | `"common_centroid"`| `"array"` or `"common_centroid"` — see above. |
 | `dummy`        | int    | `1`                | Dummy unit-device columns added on each side. Must be `>= 0`. |
 | `flavor`       | string | `"nfet"`           | Device flavor: `"nfet"` (no well drawn) or `"pfet"` (unit devices enclosed in a well on PDK families that check one, plus a `WELL_TAP` well-tie tap-pad port on `sg13cmos5l` — see above). Must be `"nfet"` or `"pfet"`. |
-| `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer) or `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
+| `voltage_flavor` | string | `""`             | Optional medium-voltage/thick-oxide device-class marker: `""` (default, no marker drawn) or a name the resolved PDK family's role-layer table recognises — `"medium_voltage"` on `gf180mcu` (its `Dualgate` layer), `"hv"` on `ihp-sg13g2`/`ihp-sg13cmos5l` (their shared `ThickGateOx` layer), or `"hvi"` on `sky130` (its `hvi.drawing` layer). Any other value on any family draws nothing and is flagged via `drc_hints.notes`, never rejected outright. |
 | `gate_contact` | bool   | `false`            | Draw a contact + local-metal pad on each gate landing pad and report `U<i>_G` on the `metal` role instead of `poly` — see above. Grows the unit device by `0.4` µm to keep the gate metal clear of the S/D pads. |
 | `add_guard_ring` | bool | `false`           | Enclose the array in an automatically-sized tap/guard ring (issue #1493) — see above. Unlike `diff_pair`'s own param of the same name, defaults to `false`. |
 | `ring_gap_side` | string | `""`              | Cut one routing opening through the guard ring on this side (`""`/`"N"`/`"S"`/`"E"`/`"W"`) — see `guard_ring`'s "Ring routing openings" above. |
@@ -1239,13 +1244,15 @@ automatically-sized ring already draws its own well tie regardless of
 the same name: an opt-in, orthogonal-to-`flavor` medium-voltage/thick-oxide
 device-class marker over the device pair's own footprint. The default, an
 empty string, draws nothing; `voltage_flavor="medium_voltage"` on `gf180mcu`
-draws its `Dualgate` marker layer, and `voltage_flavor="hv"` on
+draws its `Dualgate` marker layer, `voltage_flavor="hv"` on
 `ihp-sg13g2`/`ihp-sg13cmos5l` draws their shared `ThickGateOx` marker layer
 (extracting as `sg13_hv_nmos`/`sg13_hv_pmos` instead of the default
-thin-oxide class) — either echoes the selection in
+thin-oxide class), and `voltage_flavor="hvi"` on `sky130` (issue #1912) draws
+its `hvi.drawing` marker layer (extracting as
+`sky130_fd_pr__nfet_g5v0d10v5`/`__pfet_g5v0d10v5` instead of the default
+thin-oxide class) — each echoes the selection in
 `drc_hints.voltage_flavor`/`drc_hints.voltage_flavor_mark_present` (see
-below); any other value on any family (including every value on `sky130`,
-which cites no such marker layer) draws nothing and is reported via
+below); any other value on any family draws nothing and is reported via
 `drc_hints.notes`, never silently dropped.
 
 `w_um` below `0.42` µm is rejected the same way `mos_array`'s own `w_um` is —
@@ -1265,7 +1272,7 @@ above for why, and the hand-drawn-recipe workaround.
 | `row_spacing_um`   | double | `0.4`   | Spacing between the two interleaved device rows (µm). Must be `>= 0`. Widening this grows the inter-row band both matched devices' gate contacts share (issue #484). |
 | `mirror`           | bool   | `false` | Label devices `M1`/`M2` (current mirror) instead of `Q1`/`Q2` (differential pair) — naming only. |
 | `flavor`           | string | `"nfet"`| Device flavor: `"nfet"` (no additional well drawn) or `"pfet"` (device pair enclosed in a well on PDK families that check one). Must be `"nfet"` or `"pfet"`. |
-| `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`; any other value draws nothing and is flagged via `drc_hints.notes`. |
+| `voltage_flavor`   | string | `""`    | Optional medium-voltage/thick-oxide device-class marker — same semantics as `mos_array`'s own `voltage_flavor` above. `"medium_voltage"` resolves on `gf180mcu`, `"hv"` resolves on `ihp-sg13g2`/`ihp-sg13cmos5l`, `"hvi"` resolves on `sky130`; any other value draws nothing and is flagged via `drc_hints.notes`. |
 | `gate_contact`     | bool   | `false` | Draw a contact + local-metal pad on each gate landing pad and report `*_G` on the `metal` role instead of `poly` — see `mos_array`'s equivalent note above. Grows each device row (and the automatically-sized guard ring with it) by `0.4` µm. |
 
 ### `bjt_array` (phase 4: matched vertical-bipolar / PNP array)
