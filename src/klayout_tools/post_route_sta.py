@@ -134,6 +134,43 @@ this repo's existing precedent for a provenance-bearing estimate knob
 A caller-supplied ``spef`` is rejected together with ``verilog`` -- there is
 no routed or placement geometry in this mode for a SPEF to annotate real
 parasitics onto.
+
+**Multi-corner characterization (issue #1871).** ``request.pdk.corners`` (a
+list) is the additive, multi-corner alternative to the scalar
+``request.pdk.corner`` documented throughout this module -- the two are
+mutually exclusive (:func:`_validate_corners`). Before this field existed,
+this command's own reason to exist (characterizing *one fixed geometry* at N
+corners) still required a caller to hand-roll an external loop of N separate
+``klt sta`` invocations, each re-reading the same LEF/DEF and re-parsing a
+liberty file from scratch, and none of which could itself assert the one
+invariant the whole exercise depends on: that every run actually
+characterized the *same* geometry. A single-corner response can never prove
+that -- each invocation only ever sees its own run.
+
+``pdk.corners`` closes that gap natively: :func:`_run_multi_corner` runs
+:func:`_run_corner_session` once per requested corner name (the same
+complete, fresh-session mechanics the scalar path always has), hashes
+``def``/``verilog`` once before and once after the loop to assert it never
+changed mid-run, and returns a single response with every
+structurally-shared field (``def_path``/``verilog_path``/
+``geometry_source``/``wire_load_model``/``wire_load_mode``/``spef_path``,
+``provenance.pdk``/``.input``) hoisted to the top level and a ``corners``
+array carrying each corner's own name, slack/power/violation fields, and
+``deck`` provenance. See ``docs/cli/sta.md``'s "Multi-corner
+characterization" section for the full request/response shape.
+
+This is deliberately N separate engine sessions, not one shared
+``define_corners``/``read_liberty -corner`` session with the LEF/DEF loaded
+once: ``place_and_route.py``'s own post-route corner sweep
+(``pdk.sweep_corners``, issue #1092) already established, against a real
+OpenROAD session, that ``report_worst_slack_metric`` has no way to scope its
+result back to one corner once more than one is loaded -- so recovering
+distinct per-corner numbers needs one engine invocation per corner either
+way. A deeper optimization (checkpointing the loaded LEF/DEF once via
+``write_db``/``read_db``, the way that same sweep reuses the ``"route"``
+stage's own already-loaded design, so only the liberty deck differs per
+invocation) is tracked as follow-up work, not required for this field's
+initial scope.
 """
 
 from __future__ import annotations
@@ -156,7 +193,7 @@ from ._paths import (
     _tcl_net_list,
     validate_request_shape,
 )
-from ._provenance import build_provenance
+from ._provenance import _deck_block, build_provenance, sha256_file
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 
@@ -375,6 +412,23 @@ def run_sta(
         raise PostRouteStaError(
             "request.pdk.corner must be a non-empty string when given"
         )
+    # Issue #1871: `pdk.corners` (a list) is the additive, multi-corner
+    # alternative to the scalar `pdk.corner` above -- see this module's own
+    # docstring "Multi-corner characterization" section. Shape-validated
+    # here; membership needs no further validation (unlike
+    # `place_and_route.py`'s `sweep_corners`, which narrows an
+    # already-derived shipped-corner set, `corners` here *is* the full
+    # corner selection, and an unresolvable name simply fails the same way
+    # an unresolvable scalar `pdk.corner` already does, per-corner, inside
+    # the run loop below).
+    requested_corners = _validate_corners(pdk_spec.get("corners"))
+    if requested_corner is not None and requested_corners is not None:
+        raise PostRouteStaError(
+            "request.pdk.corner and request.pdk.corners are mutually "
+            "exclusive -- give at most one: a single scalar corner for the "
+            "existing single-corner response shape, or a list for "
+            "multi-corner characterization (see docs/cli/sta.md)"
+        )
 
     (
         clock_port,
@@ -405,11 +459,6 @@ def run_sta(
         spef_path = _resolve_spef(request.get("spef"), request_dir)
         geometry_source = _validate_geometry_source(request.get("geometry_source"))
 
-    liberty_path, corner, pdk_info = _resolve_liberty(
-        cell_library, requested_corner, variant=pdk_variant, root=pdk_root
-    )
-    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
-
     output_dir = os.path.join(request_dir, ".klt", "sta")
     try:
         os.makedirs(output_dir, exist_ok=True)
@@ -421,10 +470,177 @@ def run_sta(
     input_path = def_path if has_def else verilog_path
     assert input_path is not None
     basename = os.path.splitext(os.path.basename(input_path))[0]
-    script_path = os.path.join(output_dir, f"sta_{basename}.tcl")
-    metrics_path = os.path.join(output_dir, f"{basename}_metrics.json")
+
+    # Issue #1871: `pdk.corners` (a list) is the multi-corner alternative to
+    # the scalar `pdk.corner` above -- both share every request field
+    # resolved up to this point (`def`/`verilog` are loaded fresh in *every*
+    # corner's own OpenSTA session, never modified in between), and this is
+    # the one branch point where their responses actually diverge.
+    if requested_corners is not None:
+        return _run_multi_corner(
+            requested_corners,
+            cell_library=cell_library,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            has_def=has_def,
+            def_path=def_path,
+            verilog_path=verilog_path,
+            hdl_toplevel=hdl_toplevel,
+            geometry_source=geometry_source,
+            clock_port=clock_port,
+            clock_period_ns=clock_period_ns,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
+            spef_path=spef_path,
+            wire_load_model=wire_load_model,
+            wire_load_mode=wire_load_mode,
+            output_dir=output_dir,
+            input_path=input_path,
+            basename=basename,
+        )
+
+    corner_fields, resolution = _run_corner_session(
+        corner_name=requested_corner,
+        cell_library=cell_library,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        has_def=has_def,
+        def_path=def_path,
+        verilog_path=verilog_path,
+        hdl_toplevel=hdl_toplevel,
+        clock_port=clock_port,
+        clock_period_ns=clock_period_ns,
+        input_delay_ns=input_delay_ns,
+        output_delay_ns=output_delay_ns,
+        spef_path=spef_path,
+        wire_load_model=wire_load_model,
+        wire_load_mode=wire_load_mode,
+        output_dir=output_dir,
+        script_tag=basename,
+    )
+
+    engine_version = _openroad_version()
+    deck_name = f"{cell_library}__{resolution['corner']}"
+    provenance = build_provenance(
+        deck_name=deck_name,
+        deck_path=resolution["liberty_path"],
+        pdk=resolution["pdk_info"],
+        input_path=input_path,
+    )
+
+    response: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "engine": "openroad",
+        "engine_version": engine_version,
+        "hdl_toplevel": hdl_toplevel,
+        "status": "ok",
+        "def_path": def_path,
+        # Additive field (issue #1825): `null` unless `request.verilog` was
+        # given -- the mutually-exclusive counterpart to `def_path` above.
+        "verilog_path": verilog_path,
+        # Additive field (issue #1826): echo of `request.geometry_source` --
+        # see this module's own docstring "Pre-route DEFs" section. Always
+        # present (never `null`): `"routed"` is the default when the request
+        # omits it, matching this command's pre-#1826 behaviour byte-for-
+        # byte. Issue #1825 adds the third `"netlist_estimate"` value,
+        # forced (never caller-chosen) whenever `request.verilog` is given.
+        "geometry_source": geometry_source,
+        # Additive fields (issue #1825): the wire-load estimate knob
+        # actually used, for provenance -- `null`/`null` unless
+        # `request.verilog` was given (see this module's own docstring
+        # "From-scratch netlist input" section). Never present on a
+        # `def`-mode response with anything but `null`/`null`, since a
+        # `def`-mode run's parasitics never come from a liberty wire-load
+        # model.
+        "wire_load_model": wire_load_model,
+        "wire_load_mode": wire_load_mode,
+        "spef_path": spef_path,
+        "worst_slack_ns": corner_fields["worst_slack_ns"],
+        "total_negative_slack_ns": corner_fields["total_negative_slack_ns"],
+        "worst_hold_slack_ns": corner_fields["worst_hold_slack_ns"],
+        "total_negative_hold_slack_ns": corner_fields["total_negative_hold_slack_ns"],
+        "fmax_mhz": corner_fields["fmax_mhz"],
+        # Additive field (issue #1865): `"constrained"` / `"unconstrained"` /
+        # `null` -- whether the four slack fields above are measurements at
+        # all, or OpenSTA's own unconstrained-design sentinel (`1e+39`)
+        # restated. A design whose only timing paths run input-port ->
+        # register / register -> output-port reports that sentinel unless
+        # `constraints.input_delay_ns`/`.output_delay_ns` are given, and
+        # `1e+39` is a *positive* number -- so a naive `worst_slack_ns >= 0`
+        # gate would otherwise report "timing closed" on a design that was
+        # never timed. Check this field before trusting any slack number in
+        # this response.
+        "timing_status": corner_fields["timing_status"],
+        "setup_violation_count": corner_fields["setup_violation_count"],
+        "hold_violation_count": corner_fields["hold_violation_count"],
+        "clock_skew_ns": corner_fields["clock_skew_ns"],
+        "estimated_power_mw": corner_fields["estimated_power_mw"],
+        "provenance": provenance,
+    }
+
+    response["spef_annotation"] = corner_fields["spef_annotation"]
+
+    return response
+
+
+def _run_corner_session(
+    *,
+    corner_name: str | None,
+    cell_library: str,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    has_def: bool,
+    def_path: str | None,
+    verilog_path: str | None,
+    hdl_toplevel: str | None,
+    clock_port: str,
+    clock_period_ns: float,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+    spef_path: str | None,
+    wire_load_model: str | None,
+    wire_load_mode: str | None,
+    output_dir: str,
+    script_tag: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run one complete, fresh OpenSTA session (``read_lef`` x2, ``read_def``
+    or ``read_verilog``/``link_design``, ``read_liberty``, ``create_clock``,
+    optionally ``read_spef``) at ``corner_name`` (the nominal corner when
+    ``None``), exactly like :func:`run_sta`'s single-corner path always has.
+
+    Both the original scalar (``request.pdk.corner``) path and issue #1871's
+    additive multi-corner (``request.pdk.corners``) path call this once per
+    corner -- this is the extraction point that lets the latter reuse the
+    former's exact engine-invocation/metrics-parsing logic instead of a
+    second, independently-drifting copy.
+
+    Returns ``(corner_fields, resolution)``:
+
+    - ``corner_fields`` -- every field this command's response has always
+      reported *per corner* (``worst_slack_ns``, ..., ``spef_annotation``) --
+      the exact dict this module built inline before this refactor, now
+      returned instead of assembled directly into ``response``.
+    - ``resolution`` -- ``{"corner": str, "liberty_path": str, "pdk_info":
+      dict}``, everything the caller needs to build its own
+      ``provenance``/``deck`` block(s); kept separate from ``corner_fields``
+      because the multi-corner caller hoists ``pdk_info`` to the top-level
+      response once (shared across every corner) while nesting only
+      ``deck`` per corner (see :func:`_run_multi_corner`).
+
+    Raises :class:`PostRouteStaError` for an unresolvable
+    ``cell_library``/``corner_name``/LEF, or an OpenROAD engine failure --
+    identical to this command's pre-#1871 single-corner behaviour.
+    """
+    liberty_path, corner, pdk_info = _resolve_liberty(
+        cell_library, corner_name, variant=pdk_variant, root=pdk_root
+    )
+    tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info)
+
+    script_path = os.path.join(output_dir, f"sta_{script_tag}.tcl")
+    metrics_path = os.path.join(output_dir, f"{script_tag}_metrics.json")
 
     if has_def:
+        assert def_path is not None
         spef_net_names = _spef_net_names(spef_path) if spef_path is not None else None
         lines = _sta_script_lines(
             tech_lef=tech_lef,
@@ -476,42 +692,7 @@ def run_sta(
     power_w = metrics.get("power__total")
     clock_skew = metrics.get("clock__skew__setup")
 
-    engine_version = _openroad_version()
-    deck_name = f"{cell_library}__{corner}"
-    provenance = build_provenance(
-        deck_name=deck_name,
-        deck_path=liberty_path,
-        pdk=pdk_info,
-        input_path=input_path,
-    )
-
-    response: dict[str, Any] = {
-        "schema_version": SCHEMA_VERSION,
-        "engine": "openroad",
-        "engine_version": engine_version,
-        "hdl_toplevel": hdl_toplevel,
-        "status": "ok",
-        "def_path": def_path,
-        # Additive field (issue #1825): `null` unless `request.verilog` was
-        # given -- the mutually-exclusive counterpart to `def_path` above.
-        "verilog_path": verilog_path,
-        # Additive field (issue #1826): echo of `request.geometry_source` --
-        # see this module's own docstring "Pre-route DEFs" section. Always
-        # present (never `null`): `"routed"` is the default when the request
-        # omits it, matching this command's pre-#1826 behaviour byte-for-
-        # byte. Issue #1825 adds the third `"netlist_estimate"` value,
-        # forced (never caller-chosen) whenever `request.verilog` is given.
-        "geometry_source": geometry_source,
-        # Additive fields (issue #1825): the wire-load estimate knob
-        # actually used, for provenance -- `null`/`null` unless
-        # `request.verilog` was given (see this module's own docstring
-        # "From-scratch netlist input" section). Never present on a
-        # `def`-mode response with anything but `null`/`null`, since a
-        # `def`-mode run's parasitics never come from a liberty wire-load
-        # model.
-        "wire_load_model": wire_load_model,
-        "wire_load_mode": wire_load_mode,
-        "spef_path": spef_path,
+    corner_fields: dict[str, Any] = {
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
         "worst_hold_slack_ns": (
@@ -521,16 +702,6 @@ def run_sta(
             round(hold_tns, 5) if hold_tns is not None else None
         ),
         "fmax_mhz": round(fmax_hz / 1e6, 4) if fmax_hz is not None else None,
-        # Additive field (issue #1865): `"constrained"` / `"unconstrained"` /
-        # `null` -- whether the four slack fields above are measurements at
-        # all, or OpenSTA's own unconstrained-design sentinel (`1e+39`)
-        # restated. A design whose only timing paths run input-port ->
-        # register / register -> output-port reports that sentinel unless
-        # `constraints.input_delay_ns`/`.output_delay_ns` are given, and
-        # `1e+39` is a *positive* number -- so a naive `worst_slack_ns >= 0`
-        # gate would otherwise report "timing closed" on a design that was
-        # never timed. Check this field before trusting any slack number in
-        # this response.
         "timing_status": _timing_status((worst_slack, worst_hold_slack)),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
@@ -538,15 +709,143 @@ def run_sta(
         "estimated_power_mw": (
             round(power_w * 1000, 4) if power_w is not None else None
         ),
-        "provenance": provenance,
     }
-
     if spef_path is not None:
-        response["spef_annotation"] = _spef_annotation_block(completed, spef_net_names)
+        corner_fields["spef_annotation"] = _spef_annotation_block(
+            completed, spef_net_names
+        )
     else:
-        response["spef_annotation"] = None
+        corner_fields["spef_annotation"] = None
 
-    return response
+    resolution = {"corner": corner, "liberty_path": liberty_path, "pdk_info": pdk_info}
+    return corner_fields, resolution
+
+
+def _run_multi_corner(
+    corners: list[str],
+    *,
+    cell_library: str,
+    pdk_variant: str | None,
+    pdk_root: str | None,
+    has_def: bool,
+    def_path: str | None,
+    verilog_path: str | None,
+    hdl_toplevel: str | None,
+    geometry_source: str,
+    clock_port: str,
+    clock_period_ns: float,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+    spef_path: str | None,
+    wire_load_model: str | None,
+    wire_load_mode: str | None,
+    output_dir: str,
+    input_path: str,
+    basename: str,
+) -> dict[str, Any]:
+    """Issue #1871: ``request.pdk.corners`` -- characterize the *same*
+    loaded ``def``/``verilog`` geometry at every corner in ``corners``, one
+    :func:`_run_corner_session` call per corner (each its own complete, fresh
+    OpenSTA session -- this command has no checkpoint/``read_db`` mechanism
+    of its own to share a loaded session across corners the way
+    ``place_and_route.py``'s own post-route corner sweep does; see this
+    module's own docstring "Multi-corner characterization" section for why
+    that is an acceptable, explicitly-deferred first implementation rather
+    than a blocking gap), returning the unified multi-corner response shape
+    ``docs/cli/sta.md`` documents:
+
+    - Every request-level field that cannot vary across corners (``def_path``/
+      ``verilog_path``/``geometry_source``/``wire_load_model``/
+      ``wire_load_mode``/``spef_path``, plus ``provenance.pdk``/``.input``)
+      is hoisted to the **top level**, computed once.
+    - ``corners`` is a list of per-corner entries, each carrying that
+      corner's own name plus the exact same per-corner fields the
+      single-corner (``request.pdk.corner``) response already has
+      (``worst_slack_ns`` .. ``spef_annotation``), plus its own ``deck``
+      provenance block (the one field that *does* vary per corner).
+
+    **Verifies the shared-geometry invariant** this command exists to
+    provide (docs/cli/sta.md's own "Why this exists" section): ``def``/
+    ``verilog`` is hashed once before the corner loop and re-hashed once
+    after it, raising :class:`PostRouteStaError` on a mismatch -- turning a
+    hypothetical concurrent mutation of the input file mid-run (or a future
+    refactor that stops holding this invariant) into a loud, attributable
+    error instead of a `corners` array that silently characterizes more than
+    one piece of geometry, the exact failure mode a caller's own hand-rolled
+    N-subprocess loop could never itself detect.
+    """
+    input_hash_before = sha256_file(input_path)
+
+    engine_version = _openroad_version()
+    shared_pdk_info: dict[str, Any] | None = None
+    corner_entries: list[dict[str, Any]] = []
+    for corner_name in corners:
+        corner_fields, resolution = _run_corner_session(
+            corner_name=corner_name,
+            cell_library=cell_library,
+            pdk_variant=pdk_variant,
+            pdk_root=pdk_root,
+            has_def=has_def,
+            def_path=def_path,
+            verilog_path=verilog_path,
+            hdl_toplevel=hdl_toplevel,
+            clock_port=clock_port,
+            clock_period_ns=clock_period_ns,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
+            spef_path=spef_path,
+            wire_load_model=wire_load_model,
+            wire_load_mode=wire_load_mode,
+            output_dir=output_dir,
+            script_tag=f"{basename}__{corner_name}",
+        )
+        if shared_pdk_info is None:
+            shared_pdk_info = resolution["pdk_info"]
+        deck_name = f"{cell_library}__{resolution['corner']}"
+        corner_entries.append(
+            {
+                "corner": resolution["corner"],
+                **corner_fields,
+                "deck": _deck_block(deck_name, resolution["liberty_path"]),
+            }
+        )
+
+    input_hash_after = sha256_file(input_path)
+    if input_hash_after != input_hash_before:
+        raise PostRouteStaError(
+            "the geometry backing this multi-corner characterization "
+            f"({input_path}) changed while characterizing corners "
+            + ", ".join(corners)
+            + " -- a klt sta corners response is only meaningful when every "
+            "corner analyses the identical geometry, so this run cannot be "
+            "reported"
+        )
+
+    provenance = build_provenance(
+        deck_name=None,
+        deck_path=None,
+        pdk=shared_pdk_info,
+        input_path=input_path,
+    )
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "engine": "openroad",
+        "engine_version": engine_version,
+        "hdl_toplevel": hdl_toplevel,
+        "status": "ok",
+        "def_path": def_path,
+        "verilog_path": verilog_path,
+        "geometry_source": geometry_source,
+        "wire_load_model": wire_load_model,
+        "wire_load_mode": wire_load_mode,
+        "spef_path": spef_path,
+        "provenance": provenance,
+        # Additive field (issue #1871): one entry per requested
+        # `request.pdk.corners` name, in the same order the request gave
+        # them -- see this function's own docstring for the exact shape.
+        "corners": corner_entries,
+    }
 
 
 def _spef_annotation_block(
@@ -770,6 +1069,61 @@ def _validate_io_delay(value: Any, which: str) -> float | None:
             f"request.constraints.{which}_delay_ns must be a non-negative number"
         )
     return float(value)
+
+
+def _validate_corners(value: Any) -> list[str] | None:
+    """Optional ``request.pdk.corners`` (issue #1871) -- the additive,
+    multi-corner alternative to the scalar ``request.pdk.corner``: a list of
+    corner names to characterize the *same* loaded geometry against, in one
+    request/response round trip, instead of a caller hand-rolling an
+    external loop of N single-corner ``klt sta`` invocations (each of which
+    re-reads the same LEF/DEF from scratch and can never itself assert that
+    the N runs shared identical geometry).
+
+    ``None`` (omitted, the default) preserves this command's original
+    scalar-only behaviour exactly -- :func:`run_sta` falls back to
+    ``request.pdk.corner`` (or the nominal corner when that is also
+    omitted).
+
+    Unlike ``place_and_route.py``'s ``request.pdk.sweep_corners`` (which
+    *narrows* an already-enumerated shipped-corner set, so an explicit
+    ``[]`` meaningfully means "sweep zero of them"), this field *is* the
+    primary corner selection for a command whose only other option is a
+    single scalar corner -- there is no broader set for ``[]`` to narrow.
+    An empty list is therefore rejected outright as a request error, not
+    treated as "characterize nothing".
+
+    Raises :class:`PostRouteStaError` for anything other than a non-empty
+    list of non-empty, mutually-distinct strings -- a duplicate corner name
+    would silently run (and pay for) the identical OpenSTA session twice
+    under two identical ``corners[]`` entries, which is never what a caller
+    asking to characterize N *distinct* corners meant.
+    """
+    if value is None:
+        return None
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(isinstance(item, str) and item for item in value)
+    ):
+        raise PostRouteStaError(
+            "request.pdk.corners must be a non-empty list of non-empty strings"
+        )
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for name in value:
+        if name in seen:
+            if name not in duplicates:
+                duplicates.append(name)
+        else:
+            seen.add(name)
+    if duplicates:
+        raise PostRouteStaError(
+            "request.pdk.corners must not repeat a corner name (duplicate(s): "
+            + ", ".join(duplicates)
+            + ")"
+        )
+    return value
 
 
 def _validate_geometry_source(geometry_source: Any) -> str:
