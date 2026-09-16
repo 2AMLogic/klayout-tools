@@ -133,6 +133,11 @@ def _print_text(report: dict) -> None:
     # dict repr here.
     print(f"netlist_path: {render_path_field(report['netlist_path'])}")
     print(f"script_path: {render_path_field(report['script_path'])}")
+    # Issue #1870: only worth a line when it differs from `script_path` --
+    # they are the same file unless the liberty was written as a
+    # `$PDK_ROOT`-relative token and a rehydrated sibling had to be emitted.
+    if report.get("run_script_path") not in (None, report["script_path"]):
+        print(f"run_script_path: {render_path_field(report['run_script_path'])}")
 
     baseline = report.get("baseline")
     if baseline is not None:
