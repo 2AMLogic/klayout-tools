@@ -208,6 +208,7 @@ from .gen_compose_routing import (
     _declare_only_bundle_result,
     _drawn_leg_footprint_region,
     _drawn_leg_intermediate_pad_regions,
+    _leg_block_spacing_violation_um,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
     _polyline_midpoint_um,
@@ -3032,6 +3033,77 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         "sits close to; move the declared port further along "
                         "its own wire, away from the corner)"
                     )
+
+            # Own-block approach spacing check (#1904): everything above is
+            # either a route-vs-route comparison or a *pad*-sized one. Nothing
+            # yet held the leg's own backbone to the resolved deck's same-layer
+            # `"space"` rule against the blocks its own pins sit on. The only
+            # own-block model route_two_pin has for that is check 5's bbox
+            # crossing measured against `_port_edge_margin_um` -- a flat
+            # per-block *margin* allowance ("this is how deep inside my own
+            # block my port sits"), not a rule lookup -- so an approach that
+            # threads a gap in the block's own drawn geometry narrower than the
+            # deck's own minimum spacing is modelled as legal and composes
+            # `routed: true` with no warning. #1904's reproduction is exactly
+            # that: `diff_pair`'s `Q1_1_G` gate pad sits sandwiched between the
+            # two interleaved rows' own S/D metal columns, so an external leg
+            # dropping onto it runs down a generator-drawn channel with ~0.01um
+            # of clearance on each side against gf180mcu's own 0.23um
+            # `metal1.space.1` -- two real violations `klt drc` reports against
+            # the `diff_pair` instance, on a block that is DRC-clean standalone.
+            #
+            # This is the same generalisation #1386 made for the route-vs-route
+            # half of this very function (overlap-only -> spacing-rule aware),
+            # applied to the route-vs-own-block case, and it reuses the same
+            # `_min_spacing_um_for_layer` deck lookup rather than a second,
+            # private threshold. Scoped to the blocks *this net's own pins sit
+            # on* -- the blocks a leg is guaranteed to draw an approach stub
+            # inside, and the ones check 5 deliberately funds an allowance for;
+            # every other block stays check 5's business. Deliberately *not*
+            # restricted to `blocks[].cell` blocks the way #1527's own-block
+            # escape check is: that scoping exists because an *overlap* with a
+            # `generator_report` block's unreported-but-legitimate geometry
+            # (`mos_array`'s dummy matching columns) is not a real short, and
+            # `_leg_block_spacing_violation_um` excludes every overlapped shape
+            # for exactly that reason -- what is left is a near miss, which is a
+            # real `klt drc` finding against dummy metal the same as against any
+            # other drawn shape, since a rule-deck `"space"` check is
+            # net-agnostic.
+            own_spacing = (
+                _min_spacing_um_for_layer(layer) if layer is not None else None
+            )
+            if own_spacing is not None and layer is not None:
+                own_spacing_um, own_rule_id = own_spacing
+                for block_id in sorted({block for block, _port in _net_pin_set}):
+                    own_geometry = _own_block_layer_geometry(block_id, layer)
+                    if own_geometry is None:
+                        continue
+                    violation_um = _leg_block_spacing_violation_um(
+                        points_um,
+                        candidate_width_um,
+                        via_drops,
+                        stub_widen,
+                        layer,
+                        own_geometry,
+                        own_spacing_um,
+                    )
+                    if violation_um is not None:
+                        return (
+                            f"this leg's drawn {candidate_width_um:.4g}um metal "
+                            f"comes within {violation_um:.4g}um of block "
+                            f"'{block_id}''s own drawn geometry on layer "
+                            f"{layer} -- closer than the resolved deck's own "
+                            f"'{own_rule_id}' minimum same-layer spacing rule "
+                            "(no overlap, so no short, but a real `klt drc` "
+                            "violation on the composed layout, issue #1904). "
+                            "The approach threads a gap in that block's own "
+                            "drawn metal too narrow for this route: reach the "
+                            "net at a port that is not recessed between the "
+                            "block's own drawn geometry, route this net on "
+                            "another plane (connectivity[].layer_role, or "
+                            "routing.cross_block_layer_role), or supply "
+                            "waypoints_um that approach from a clear side"
+                        )
             return None
 
         # Bundle (>2-pin) nets route as a spanning tree of two-pin legs

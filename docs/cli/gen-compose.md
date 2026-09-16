@@ -286,7 +286,7 @@ cleanly.
   below) found no *problem they know how to look for*; it is not an
   exhaustive DRC pass, and every `klt gen-compose` release to date has fixed
   at least one class of violation that heuristic set previously missed (#453,
-  #1057, #1197, #1386). Two independently DRC-clean input blocks composed
+  #1057, #1197, #1386, #1904). Two independently DRC-clean input blocks composed
   together, or two individually-routed nets that each look fine in
   isolation, are not guaranteed to stay DRC-clean together once placed
   side by side — a caller pipeline that treats `routed: true` as "this leg
@@ -898,6 +898,48 @@ into the circuit.)
   block's own drawn shapes on the route layer, not a substitute for `klt
   extract` — see "`unrouted_nets: []` plus a clean `klt drc` is not a
   connectivity guarantee either" above.
+- **A leg's approach into its own block is spacing-rule-aware, not just
+  overlap-aware (#1904, fixed).** Every own-block check above tests for
+  *contact*: a positive-area overlap (#453/#469 and #1527's own-block escape
+  check) or a `bbox_um` crossing beyond `_port_edge_margin_um` — a flat
+  per-block **margin** allowance ("this is how deep inside its own block my
+  port sits"), not a rule lookup. So an approach that threads a gap in the
+  block's *own generator-drawn geometry* narrower than the resolved deck's
+  own same-layer `"space"` rule overlapped nothing, stayed inside its
+  allowance, and composed `routed: true` with no warning — leaving a real
+  `metal1.space.1`/`li1.space.1` violation for a downstream `klt drc` run to
+  discover. The reproduction: a `diff_pair` (`splits: 1`) draws its two
+  gate landing pads asymmetrically — `Q2_1_G`'s sits at the block's own
+  outer edge, reachable with no obstruction, while `Q1_1_G`'s sits
+  sandwiched between the two interleaved rows' own S/D metal columns,
+  reachable only by threading that channel. An external bundle net dropping
+  onto `Q1_1_G` ran down it with ~0.01µm of clearance against gf180mcu's
+  own 0.23µm `metal1.space.1`, on a `diff_pair` block that is DRC-clean
+  standalone. The same spacing-rule lookup #1386 introduced
+  (`_min_spacing_um_for_layer`, reading `klt drc --deck <family>`'s own rule
+  table) is now applied to a leg's whole drawn footprint against **the
+  blocks its own pins sit on**, so such a leg is reported (`routed: false`,
+  a `legs[].reason` entry naming the block, the violated rule id, and the
+  measured clearance) rather than drawn. Two classes of shape are
+  deliberately exempt: whatever the leg's own endpoints land on (the leg is
+  *meant* to merge with the block's wire there — a self-notch in that merged
+  shape is #1520's business, above), and anything the footprint literally
+  **overlaps** — that is a *short* question, owned by the checks above and
+  deliberately not flagged for a `generator_report` block's
+  legitimately-drawn-but-unreported geometry (`mos_array`'s dummy matching
+  columns, the false-positive class #1527 had to scope around). Merged metal
+  has no gap left to violate a `"space"` rule, so excluding it keeps this
+  check from re-litigating that decision; what remains is a genuine near
+  miss, which is a real `klt drc` finding against dummy metal exactly as it
+  is against any other drawn shape, since a rule-deck `"space"` check is
+  net-agnostic. A caller who needs to reach a recessed port like `Q1_1_G`
+  anyway has the usual escapes: route that net on another plane
+  (`connectivity[].layer_role`, or `routing.cross_block_layer_role`, which
+  this leg now retries onto automatically when configured), supply
+  `waypoints_um` that approach from a clear side, or reach the net at a port
+  that is not recessed between the block's own drawn metal. As with the
+  checks above, this is an advisory heuristic against the block's own drawn
+  shapes on the route layer, not a substitute for `klt drc`.
 - **Two inter-block nets sharing one row channel can now both route via a
   channel track retry (#1467), but only when their spans nest — a
   genuinely crossing pair is still a capability ceiling.** Before this

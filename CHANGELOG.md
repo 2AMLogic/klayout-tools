@@ -45,6 +45,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   default. No `schema_version` bump — additive per-family coverage of an
   existing field, no shape changed.
 
+- **Fixed**: `klt gen-compose` no longer reports `nets[].legs[].routed: true`
+  for a leg whose approach into its own block violates the resolved deck's own
+  same-layer minimum-spacing rule (issue #1904). Every own-block check the
+  router ran tested for *contact* — a positive-area overlap (#453/#469,
+  #1527) or a `bbox_um` crossing measured against `_port_edge_margin_um`, a
+  flat per-block margin allowance rather than a rule lookup (#199's check 5) —
+  so an approach that threads a gap in the block's own generator-drawn
+  geometry narrower than that rule overlapped nothing, stayed inside its
+  allowance, and composed `routed: true` with no warning, leaving a real
+  `metal1.space.1`/`li1.space.1` violation for a downstream `klt drc` run to
+  discover. The reproduction: a `diff_pair` (`splits: 1`) sandwiches
+  `Q1_1_G`'s gate landing pad between the two interleaved rows' own S/D metal
+  columns, so an external bundle net dropping onto it ran down that channel
+  with ~0.01µm of clearance against gf180mcu's own 0.23µm `metal1.space.1`, on
+  a block that is DRC-clean standalone. `compose()`'s own leg-conflict check
+  now applies the same `"space"`-rule lookup issue #1386 introduced for the
+  route-vs-route case to a leg's whole drawn footprint against the blocks its
+  own pins sit on: such a leg is reported (`routed: false`, a `legs[].reason`
+  naming the block, the violated rule id and the measured clearance, and — when
+  `routing.cross_block_layer_role` is configured — retried on that plane
+  first) instead of drawn. Shapes the leg's endpoints land on, and shapes its
+  footprint literally overlaps, are both exempt: the former is the merge the
+  leg exists to make (a self-notch there is already #1520's check), and the
+  latter is a *short* question deliberately left unflagged for a
+  `generator_report` block's legitimately-drawn-but-unreported geometry
+  (`mos_array`'s dummy matching columns, #1527) — merged metal has no gap left
+  to violate a space rule, so only a genuine near miss is reported, which is a
+  real `klt drc` finding against dummy metal exactly as against any other
+  drawn shape. Nets that were correctly `routed: true` are unaffected;
+  `klt drc` remains the rule-compliance authority either way.
 - **Fixed**: `klt lvs`'s `reference.form: "subckt-call"` conversion no longer
   makes a resistor/capacitor device class impossible to pair (issue #1907).
   The conversion writes a literal `0` into a converted `R`/`C` card's
