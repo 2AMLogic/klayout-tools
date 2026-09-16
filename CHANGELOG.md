@@ -50,6 +50,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   `"match"` reached with that class's value dimension unverified from being
   indistinguishable from one where the two sides' values actually agreed. See
   [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "`device.placeholder_value`" section.
+- **Fixed**: `klt extract --abstract-cells` no longer corrupts net names
+  elsewhere in the design when the abstracted cell type has a port that
+  resolves only through the deck's synthesized substrate global (issue
+  #1911) — e.g. an untapped NMOS body with no drawn substrate tie of its
+  own. Erasing the black-boxed cell's `nwell` (and `substrate_isolation`)
+  geometry previously also perturbed the whole-layout `tap - nwell`
+  body-identity classification those layers double as, so a well tie drawn
+  *outside* the abstracted cell could silently flip to a substrate tie and,
+  via `connect_global`, merge its net with every other substrate-tied net
+  in the design — several physically unrelated nets in unrelated cells
+  collapsing into one bogus composite name (`net_a|net_b|...`). The
+  matched instances' own pre-erasure `nwell`/`substrate_isolation` cover is
+  now unioned back into that classification (never into the erased
+  conductor region), so `--abstract-cells` reports the same net names for
+  every net that does not touch the abstracted cell as a flat extraction
+  does. Separately, a global-net-only port that cannot be resolved from
+  in-cell labels (or a LEF `PORT`) and is dropped from the black box's pin
+  list is no longer silent — a `warnings[]` entry now names the cell type,
+  the unresolved port count, and the resolved pin count. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Global-net-only ports"
+  and "Abstraction never changes net identity outside the black box"
+  sections.
 - **Fixed**: `klt gen-compose`'s `connectivity[]` router no longer lets a
   leg's own `_port_edge_margin_um` allowance fund a crossing on the side its
   port does not face (issue #1895). The obstacle-overlap check's per-block

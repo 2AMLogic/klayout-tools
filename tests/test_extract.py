@@ -10056,6 +10056,199 @@ def test_abstract_cells_warns_when_one_instance_ties_two_declared_pins(tmp_path)
     assert x_line.split()[1:3] == ["TIED", "TIED"], x_line
 
 
+def _make_global_net_port_layout() -> kdb.Layout:
+    """Issue #1911's reproduction layout: three independent cells, one of
+    which draws a wide ``nwell`` that the other two do not depend on
+    electrically.
+
+    - ``WELL_MACRO`` -- a PMOS inside its own wide ``nwell``, with two
+      in-cell li1 pin labels (``PS``/``PD``) so it resolves cleanly under
+      ``--abstract-cells``. Its ``nwell`` also happens to *cover* the well
+      tie drawn by ``WELL_TIE`` below, which is the whole point: a well is a
+      field layer, not a per-cell private one.
+    - ``WELL_TIE`` -- a tap + licon + labelled li1 pad placed inside
+      ``WELL_MACRO``'s well footprint, so ``tap - nwell`` classifies it as a
+      **well** tie (not a substrate tie).
+    - ``SUB_TIE`` -- the same shape placed far away, outside every well, so
+      it is a genuine **substrate** tie and joins the deck's synthesized
+      ``vsubs`` global.
+
+    Flat, these are three separate, singly-labelled nets. The bug: erasing
+    ``WELL_MACRO``'s well for black-boxing reclassified ``WELL_TIE`` as a
+    substrate tie, and because ``connect_global`` is not geometric that one
+    flip merged it with ``SUB_TIE`` -- a physically unrelated net in a
+    different cell 6 um away -- into the single composite net
+    ``VDDTAP|VSSG``.
+    """
+    layout = kdb.Layout()
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(cell, layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    well_macro = layout.create_cell("WELL_MACRO")
+    draw(well_macro, 64, 20, kdb.Box(-500, -500, 12000, 3000))  # nwell
+    draw(well_macro, 65, 20, kdb.Box(0, 0, 2000, 1000))  # diff
+    draw(well_macro, 66, 20, kdb.Box(800, -200, 1200, 1200))  # poly (gate)
+    draw(well_macro, 66, 44, kdb.Box(100, 300, 300, 700))  # licon1
+    draw(well_macro, 66, 44, kdb.Box(1700, 300, 1900, 700))  # licon1
+    draw(well_macro, 67, 20, kdb.Box(0, 200, 400, 800))  # li1
+    draw(well_macro, 67, 20, kdb.Box(1600, 200, 2000, 800))  # li1
+    label(well_macro, 67, 5, "PS", 200, 500)
+    label(well_macro, 67, 5, "PD", 1800, 500)
+
+    def tie_cell(name, text):
+        cell = layout.create_cell(name)
+        draw(cell, 65, 44, kdb.Box(0, 0, 800, 800))  # tap
+        draw(cell, 66, 44, kdb.Box(300, 300, 500, 500))  # licon1
+        draw(cell, 67, 20, kdb.Box(0, 0, 800, 800))  # li1
+        label(cell, 67, 5, text, 400, 400)
+        return cell
+
+    well_tie = tie_cell("WELL_TIE", "VDDTAP")
+    sub_tie = tie_cell("SUB_TIE", "VSSG")
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(well_macro.cell_index(), kdb.Trans()))
+    top.insert(
+        kdb.CellInstArray(well_tie.cell_index(), kdb.Trans(kdb.Vector(4000, 1000)))
+    )
+    top.insert(
+        kdb.CellInstArray(sub_tie.cell_index(), kdb.Trans(kdb.Vector(4000, -6000)))
+    )
+    return layout
+
+
+def test_abstract_cells_does_not_merge_unrelated_nets_onto_the_global_net(tmp_path):
+    """Issue #1911: black-boxing a cell must not change the net names of
+    nets that do not touch it.
+
+    ``--abstract-cells`` erases a matched cell's ``nwell`` along with the
+    rest of its device-recognition geometry. ``nwell`` is also the
+    right-hand side of the whole-layout ``tap_substrate = tap - nwell``
+    classification, so erasing it flipped a well tie drawn *outside* the
+    abstracted cell into a substrate tie -- and ``connect_global`` is not
+    geometric, so that one flip merged an unrelated net in a different cell
+    onto the deck's design-wide ``vsubs`` net, comma-joining both drawn
+    labels into the bogus composite ``VDDTAP|VSSG``.
+
+    Asserted three ways, which is what makes the regression tight: flat
+    extraction, abstracting the *other* (fully-resolvable) cell, and
+    abstracting the well-drawing cell must all report the same names for the
+    two tie nets, and no composite name may appear for either.
+    """
+    layout = _make_global_net_port_layout()
+    path = _write_gds(layout, tmp_path / "global_net_port.gds")
+
+    def tie_net_names(tag, patterns):
+        report = run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / f"{tag}.spice"),
+            abstract_cell_patterns=patterns,
+        )
+        names = {net["name"] for net in report["nets"]}
+        return report, names
+
+    flat_report, flat_names = tie_net_names("flat", ())
+    assert {"VDDTAP", "VSSG"} <= flat_names
+    assert flat_report["merged_net_labels"] == []
+
+    other_report, other_names = tie_net_names("other", ("SUB_TIE",))
+    assert "VDDTAP" in other_names
+    assert other_report["merged_net_labels"] == []
+
+    well_report, well_names = tie_net_names("well", ("WELL_MACRO",))
+    # The corrupted composite name must be gone entirely -- neither as a net
+    # name nor as a `merged_net_labels[]` entry.
+    assert "VDDTAP|VSSG" not in well_names
+    assert well_report["merged_net_labels"] == []
+    # ... and both unrelated nets keep exactly the names flat extraction
+    # gives them.
+    assert {"VDDTAP", "VSSG"} <= well_names
+
+    (entry,) = well_report["abstracted_cells"]
+    assert entry["cell"] == "WELL_MACRO"
+    assert entry["resolution_source"] == "in_cell_labels"
+
+
+def test_abstract_cells_warns_when_a_port_only_resolves_via_the_global_net(tmp_path):
+    """Issue #1911: a port that only ever resolves through the deck's
+    synthesized substrate global is dropped from the black box's pin list --
+    but no longer silently.
+
+    ``_make_abstract_leaf_cell`` draws an NMOS with no substrate tie of its
+    own, so its body terminal reaches ``vsubs`` purely through
+    ``connect_global`` and has no drawn conductor anywhere in the cell for a
+    label (or a LEF ``PORT``) to name. Before this fix the only signal was
+    ``abstracted_cells[].pin_count`` coming back one lower than the macro's
+    true port count, which a caller can only notice by independently knowing
+    that count.
+    """
+    layout = _make_abstract_cells_layout()
+    path = _write_gds(layout, tmp_path / "global_net_warn.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "global_net_warn.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+    )
+
+    (warning,) = [
+        item
+        for item in report["warnings"]
+        if "resolve only through the deck's synthesized global net" in item
+    ]
+    assert "cell type 'SC_BUF'" in warning
+    assert "1 port(s)" in warning
+    assert "'vsubs'" in warning
+    assert "2 pin(s) resolved" in warning
+
+    # Still only a warning: the two label-resolved pins wire in as before.
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == 2
+
+
+def test_abstract_cells_no_global_net_warning_when_cell_draws_its_own_tie(tmp_path):
+    """Issue #1911: the global-net-port warning is specific to an *untapped*
+    substrate-formed body, not to "this cell has an NMOS".
+
+    A cell that draws its own substrate tie has a real drawn conductor for
+    that terminal -- nameable by an ordinary in-cell label and reachable by
+    the parent through the contact/metal layers abstraction deliberately
+    leaves un-erased -- so it goes through the already-supported resolution
+    path and must not be warned about.
+    """
+    layout = _make_abstract_cells_layout()
+    leaf = layout.cell("SC_BUF")
+    # A substrate tie of the cell's own: tap + licon1 + a labelled li1 pad,
+    # drawn clear of the transistor above it.
+    leaf.shapes(layout.layer(65, 44)).insert(kdb.Box(0, -1200, 2000, -400))
+    leaf.shapes(layout.layer(66, 44)).insert(kdb.Box(800, -1000, 1200, -600))
+    leaf.shapes(layout.layer(67, 20)).insert(kdb.Box(700, -1100, 1300, -500))
+    leaf.shapes(layout.layer(67, 5)).insert(kdb.Text("VB", kdb.Trans(1000, -800)))
+
+    path = _write_gds(layout, tmp_path / "own_tie.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "own_tie.spice"),
+        abstract_cell_patterns=("SC_BUF",),
+    )
+
+    assert not [
+        item
+        for item in report["warnings"]
+        if "resolve only through the deck's synthesized global net" in item
+    ]
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == 3
+
+
 def test_abstract_cells_present_in_cli_json(tmp_path, capsys):
     """`abstracted_cells` is part of the JSON contract and is emitted by the
     CLI, via the repeatable `--abstract-cells` flag."""

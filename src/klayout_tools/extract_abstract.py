@@ -217,6 +217,129 @@ def _abstract_cell_mask_layers(deck: ExtractionDeck) -> set[tuple[int, int]]:
     }
 
 
+def _abstract_cell_body_identity_cover(
+    layout: kdb.Layout,
+    deck: ExtractionDeck,
+    instances: list[tuple[int, kdb.ICplxTrans]],
+) -> tuple[kdb.Region, kdb.Region]:
+    """The well / substrate-isolation **cover** every ``--abstract-cells``
+    instance contributes, in top-cell coordinates -- issue #1911.
+
+    Returns ``(nwell cover, substrate-isolation cover)``. Must be computed
+    **before** :func:`_erase_abstracted_cell_geometry` mutates ``layout``
+    (the caller -- :func:`~klayout_tools.extract.run_extract_klayout_engine`
+    -- already guarantees this, alongside
+    :func:`_local_pin_candidate_points`).
+
+    **Why an abstracted cell's well is not just "erased geometry".**
+    ``deck.nwell``/``deck.substrate_isolation`` are *field* layers: nothing
+    downstream reads them only as "this cell's own shapes". They are the
+    right-hand side of whole-layout **classification** expressions that
+    decide, for geometry anywhere in the design, which body identity it
+    belongs to -- ``tap_substrate = tap - nwell`` (a well tie vs. a
+    substrate tie, issue #490), the derived-tap split for a deck with no
+    drawn ``tap`` layer (``tap_nplus``/``tap_pplus``, issue #1084), and the
+    per-isolated-region substrate identities ``substrate_isolation`` mints
+    (issue #1128). Erasing an abstracted cell's well therefore does **not**
+    stay inside that cell's black box: a tap drawn *outside* the cell but
+    inside the well the cell happened to draw silently flips from "well tie"
+    to "substrate tie" and is ``connect_global``-ed onto the deck's
+    synthesized ``substrate_net``.
+
+    That flip is not a local degradation, because ``connect_global`` is not
+    geometric: the substrate net spans the whole design, so one
+    misclassified tie merges its net with *every* other substrate-tied net
+    anywhere in the layout, and KLayout comma-joins all of their drawn
+    labels into one composite ``Net.name`` (reported as ``a|b|c|...`` after
+    :func:`~klayout_tools.extract_parasitics.spice_safe_net_name`). That is
+    the corruption issue #1911 reports -- unrelated, physically distant nets
+    in other macros collapsing into one bogus composite name purely because
+    a *different* macro was black-boxed. Reproduced directly: a cell drawing
+    a wide ``nwell``, a well tie in a second cell inside that well, and a
+    substrate tie in a third cell far away extract as three clean nets flat
+    (and with either of the other two cells abstracted), but collapse to
+    ``VDDTAP|VSSG`` as soon as the well-drawing cell is abstracted.
+
+    So the cover is captured here, pre-erasure, and unioned back into the
+    *classification* side only (see ``_extract_netlist``'s
+    ``nwell_body_cover``/``isolation_region``). The erased, post-abstraction
+    ``nwell`` region stays the **conductor**: an abstracted cell is still a
+    black box (its well is not a wire the parent can route through, and
+    ``_probe_abstract_pin_net`` still cannot bind a pin onto it), and the
+    PMOS ``"W"`` terminal still reads the conductor region, so no device can
+    be recognised with a body terminal that has no geometry.
+    """
+    import klayout.db as kdb
+
+    def cover_for(layer: tuple[int, int] | None) -> kdb.Region:
+        cover = kdb.Region()
+        if layer is None:
+            return cover
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            return cover
+        # One recursive read per *cell type*, reused across every instance
+        # of it (a macro is commonly placed many times).
+        local: dict[int, kdb.Region] = {}
+        for cell_index, trans in instances:
+            shapes = local.get(cell_index)
+            if shapes is None:
+                shapes = kdb.Region(
+                    layout.cell(cell_index).begin_shapes_rec(layer_index)
+                )
+                local[cell_index] = shapes
+            cover += shapes.transformed(trans)
+        return cover.merged()
+
+    return cover_for(deck.nwell), cover_for(deck.substrate_isolation)
+
+
+def _abstract_cell_global_net_ports(
+    layout: kdb.Layout, cell: kdb.Cell, deck: ExtractionDeck
+) -> int:
+    """How many of ``cell``'s own ports can only ever resolve through the
+    deck's synthesized ``substrate_net`` global -- issue #1911.
+
+    ``0`` or ``1``: a cell ties to at most one deck-wide substrate identity,
+    so there is at most one such port. Must be called **before**
+    :func:`_erase_abstracted_cell_geometry` (the geometry it reads is
+    exactly what that function erases).
+
+    ``1`` when the cell draws at least one **substrate-formed MOS body**
+    (``(active - nwell) & poly`` -- an NMOS, whose ``"W"`` terminal
+    ``_extract_netlist`` resolves through the empty ``nfet_body`` placeholder
+    and ``connect_global(..., deck.substrate_net)``, never through drawn
+    geometry) but draws **no substrate tie of its own** (no ``tap`` outside
+    every ``nwell``, or -- for a deck with no drawn ``tap`` layer -- no
+    ``tap_pplus``-covered diffusion outside every ``nwell``). Such a body
+    terminal has no conductor anywhere in the cell for a
+    ``well_label``/``poly_label``/``metal_labels`` text to sit on, so
+    :func:`_resolve_abstract_cell_pins` structurally cannot resolve it from
+    in-cell labels, and it is dropped from the black box's ``.SUBCKT`` pin
+    list with no other caller-visible signal than a ``pin_count`` one lower
+    than the macro's true port count. :func:`_wire_abstract_cells` turns a
+    non-zero result into an explicit ``warnings[]`` entry.
+
+    A cell that *does* draw its own substrate tie scores ``0``: that tie is
+    real drawn conductor, so the port is nameable by an ordinary in-cell
+    label (and reachable by the parent's routing through the contact/metal
+    layers abstraction deliberately leaves un-erased), which is the
+    already-supported resolution path rather than a gap.
+    """
+    active = _region(layout, cell, deck.active)
+    poly = _region(layout, cell, deck.poly)
+    nwell = _region(layout, cell, deck.nwell)
+    if ((active - nwell) & poly).is_empty():
+        return 0
+    if deck.tap is not None:
+        ties = _region(layout, cell, deck.tap) - nwell
+    else:
+        # Derived-tap deck (issue #1084): the substrate-tie half of
+        # `_extract_netlist`'s own `tap_pplus & (active - nwell) - poly`.
+        ties = (_region(layout, cell, deck.tap_pplus) & (active - nwell)) - poly
+    return 0 if not ties.is_empty() else 1
+
+
 def _erase_abstracted_cell_geometry(
     layout: kdb.Layout,
     cell_indices: Iterable[int],
@@ -1121,6 +1244,7 @@ def _wire_abstract_cells(
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
     probe_layers: list[tuple[str, kdb.Region]],
     local_candidates_by_cell: dict[int, dict[str, list[kdb.Point]]] | None = None,
+    global_net_ports_by_cell: dict[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
     black-box ``kdb.SubCircuit`` (issue #620), and return the JSON response's
@@ -1187,6 +1311,20 @@ def _wire_abstract_cells(
     ran -- ``None`` (the default) disables the extra-candidate lookup
     entirely, matching this function's pre-#1183 behaviour exactly. Passed
     straight through to :func:`_resolve_abstract_cell_pins` per cell type.
+
+    ``global_net_ports_by_cell`` (issue #1911) is ``{<cell index>:
+    <_abstract_cell_global_net_ports() result>}``, likewise computed by the
+    caller before erasure. A non-zero entry means that cell type has a port
+    that resolves *only* through the deck's synthesized ``substrate_net``
+    global (an untapped device body with no drawn substrate tie), which
+    neither pin source can name -- so it is dropped from the black box's
+    ``.SUBCKT`` pin list. Until this issue that drop was completely silent;
+    it now produces one ``warnings[]`` entry per affected cell type naming
+    the cell, the unresolved port count, and the resolved pin count. Purely
+    additive: ``None`` (the default) or a zero entry warns about nothing,
+    and the dropped port's *effect* on net naming elsewhere in the design is
+    fixed separately, in
+    :func:`_abstract_cell_body_identity_cover`.
     """
     import klayout.db as kdb
 
@@ -1214,6 +1352,31 @@ def _wire_abstract_cells(
                 "metal_labels layers, and no --abstract-cell-lef declares a "
                 f"MACRO named '{cell.name}' -- pass at least one pin source "
                 "for this cell type, or narrow --abstract-cells to exclude it"
+            )
+
+        # Issue #1911: a port that only ever resolves through the deck's
+        # synthesized `substrate_net` global is structurally invisible to
+        # both pin sources (it has no drawn conductor in the cell for a
+        # label to sit on, and a LEF `PORT` rectangle would have no geometry
+        # to land on either), so it is dropped from the black box's pin
+        # list. That drop used to be entirely silent -- `pin_count` came
+        # back one lower than the macro's true port count, and only a caller
+        # who independently knew that count could tell.
+        global_net_ports = (global_net_ports_by_cell or {}).get(cell_index, 0)
+        if global_net_ports:
+            warnings.append(
+                f"--abstract-cells cell type '{cell.name}' "
+                f"({len(transforms)} instance(s)): {global_net_ports} port(s) "
+                "resolve only through the deck's synthesized global net "
+                f"'{deck.substrate_net}' -- the cell draws a substrate-formed "
+                "device body (an untapped NMOS) with no substrate tie of its "
+                "own, so no in-cell well_label/poly_label/metal_labels text "
+                "and no --abstract-cell-lef PORT can name that terminal. It "
+                f"is dropped from the black box's pin list ({len(pins)} pin(s) "
+                "resolved), so the abstracted instance carries no connection "
+                "for that net. Draw and label a substrate tie in the cell, or "
+                "declare the port via --abstract-cell-lef, if a downstream "
+                "`klt lvs` compare needs it"
             )
 
         black_box_circuit = kdb.Circuit()
