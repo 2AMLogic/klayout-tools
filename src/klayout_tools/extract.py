@@ -4517,6 +4517,44 @@ def _exclude_capacitor_top_via_overlap(
     ]
 
 
+def mom_capacitor_device_class(name: str) -> kdb.DeviceClass:
+    """Build the ``kdb.DeviceClass`` one
+    :class:`~klayout_tools.decks.MomCapacitorDevice` entry named ``name``
+    registers -- two terminals ``A``/``B`` (declared
+    EQUIVALENT, order is arbitrary -- see ``MomCapacitorDevice``'s
+    docstring), plus ``W``/``L`` geometry parameters and deliberately no
+    capacitance parameter at all (the real device's ``C`` is supplied by the
+    SPICE/Verilog-A model, not computed here -- see ``docs/json-contract
+    .md``'s "MoM capacitor devices" note for the resulting
+    ``devices[].params`` shape). ``W``/``L`` (uppercase) match KLayout's own
+    MOS convention so ``extract.py``'s ``_describe_devices`` reports them as
+    ``w_um``/``l_um`` with no code change needed there.
+
+    Shared by :func:`_build_mom_capacitor_extractor`'s own
+    ``GenericDeviceExtractor.setup()`` (the layout-extraction side, which
+    calls this once per fresh instance and reads the ids it needs back off
+    the returned object's own terminal/parameter definitions) and
+    :mod:`klayout_tools.netlist_capacitor_recovery`'s round-trip reader-side
+    recognition (issue #1942) -- both sides register a structurally
+    identical ``DeviceClass`` for the same ``name``, one call to build it, so
+    they cannot silently drift apart.
+    """
+    import klayout.db as kdb
+
+    device_class = kdb.DeviceClass()
+    device_class.name = name
+    terminal_a = kdb.DeviceTerminalDefinition("A", "Terminal A")
+    device_class.add_terminal(terminal_a)
+    terminal_b = kdb.DeviceTerminalDefinition("B", "Terminal B")
+    device_class.add_terminal(terminal_b)
+    device_class.equivalent_terminal_id(terminal_a.id(), terminal_b.id())
+    param_w = kdb.DeviceParameterDefinition("W", "Width")
+    device_class.add_parameter(param_w)
+    param_l = kdb.DeviceParameterDefinition("L", "Length")
+    device_class.add_parameter(param_l)
+    return device_class
+
+
 def _build_mom_capacitor_extractor(
     name: str, metal_count: int
 ) -> kdb.GenericDeviceExtractor:
@@ -4590,38 +4628,22 @@ def _build_mom_capacitor_extractor(
                 self.define_layer(f"m{metal_number}p", f"Metal{metal_number} pin ports")
             self.define_layer("dev_mk", "Device marker")
 
-            # `DeviceCustomMIM`'s shape (`custom_mim_extractor.lvs`): two
-            # terminals, declared EQUIVALENT (order is arbitrary -- see
-            # `MomCapacitorDevice`'s docstring), plus `W`/`L` geometry
-            # parameters and deliberately no capacitance parameter at all
-            # (the real device's `C` is supplied by the SPICE/Verilog-A
-            # model, not computed here -- see `docs/json-contract.md`'s "MoM
-            # capacitor devices" note for the resulting `devices[].params`
-            # shape). `W`/`L` (uppercase) match KLayout's own MOS
-            # convention so `extract.py`'s `_describe_devices` reports them
-            # as `w_um`/`l_um` with no code change needed there.
-            device_class = kdb.DeviceClass()
-            terminal_a = kdb.DeviceTerminalDefinition("A", "Terminal A")
-            device_class.add_terminal(terminal_a)
+            # `DeviceCustomMIM`'s shape (`custom_mim_extractor.lvs`) --
+            # built by `mom_capacitor_device_class` (shared with the
+            # round-trip reader-side recognition `netlist_capacitor_
+            # recovery.py` registers for the same name, issue #1942) so
+            # both sides agree on the exact same terminal/parameter shape.
+            # Terminal/parameter ids are read back off the returned
+            # object's own definitions rather than assumed, mirroring
+            # `mom_capacitor_device_class`'s own docstring note on why
+            # (`add_terminal()`/`add_parameter()` write the id onto the
+            # *argument* object, not the call's own return value).
+            device_class = mom_capacitor_device_class(self._extractor_name)
+            terminal_a, terminal_b = device_class.terminal_definitions()
             self._terminal_a = terminal_a.id()
-            terminal_b = kdb.DeviceTerminalDefinition("B", "Terminal B")
-            device_class.add_terminal(terminal_b)
             self._terminal_b = terminal_b.id()
-            device_class.equivalent_terminal_id(self._terminal_a, self._terminal_b)
-            # `add_parameter()`/`add_terminal()` return the owning
-            # `DeviceClass` (for chaining), not the definition object -- the
-            # id is written back onto the *argument* object passed in
-            # (per `DeviceClass.add_parameter`'s own docstring), so it must
-            # be read off that same object afterward rather than off the
-            # call's own return value. Captured explicitly here rather than
-            # assumed inline at the `set_parameter()` call sites below, so a
-            # future reordering of these two lines cannot silently swap
-            # `w_um`/`l_um`.
-            param_w = kdb.DeviceParameterDefinition("W", "Width")
-            device_class.add_parameter(param_w)
+            param_w, param_l = device_class.parameter_definitions()
             self._param_w = param_w.id()
-            param_l = kdb.DeviceParameterDefinition("L", "Length")
-            device_class.add_parameter(param_l)
             self._param_l = param_l.id()
             self.register_device_class(device_class)
 

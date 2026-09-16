@@ -12260,3 +12260,250 @@ def test_reference_netlist_bare_capacitor_card_also_recovers_class(tmp_path):
     )
     assert report["status"] == "match"
     assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+
+
+# --------------------------------------------------------------------------- #
+# A custom (`kdb.GenericDeviceExtractor`-shaped) device class round-tripped
+# through an `X ... PARAMS:` card -- sg13g2's `cap_cmomi` MoM capacitor is
+# `klt extract`'s only device class with no native SPICE element letter, so
+# `kdb.NetlistSpiceWriter` writes it as a subcircuit call. Issue #1942
+# extends #1466's recognition to `klt lvs`'s own round-trip reads (a
+# pre-extracted `layout.netlist` and/or a `reference.netlist`), so the
+# device reaches the ordinary device-level compare instead of degrading into
+# a mangled abstract-circuit-name comparison.
+# --------------------------------------------------------------------------- #
+
+
+def _make_sg13g2_mom_capacitor_gds(path) -> str:
+    """A single sg13g2 `cap_cmomi` MoM capacitor -- a 10x4um `Recog.mom`
+    (99/39) marker with two side-by-side `Metal1.pin` (8/2) ports, mirroring
+    `test_sg13g2_deck.py`'s own `_make_sg13g2_mom_layout` fixture (kept
+    self-contained here per this module's existing convention of not
+    cross-importing test fixtures)."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("capblock")
+
+    def draw(layer_datatype: tuple[int, int], box: kdb.Box) -> None:
+        top.shapes(layout.layer(*layer_datatype)).insert(box)
+
+    def label(layer_datatype: tuple[int, int], text: str, x: float, y: float) -> None:
+        top.shapes(layout.layer(*layer_datatype)).insert(
+            kdb.Text(text, kdb.Trans(round(x / 0.001), round(y / 0.001)))
+        )
+
+    draw((99, 39), _box_um(0, 0, 10, 4))  # Recog.mom marker, 10x4um
+    draw((8, 2), _box_um(0, 0, 1, 1))  # Metal1.pin, PLUS
+    draw((8, 2), _box_um(9, 3, 10, 4))  # Metal1.pin, MINUS
+    draw((8, 0), _box_um(-2, 0, 0, 1))  # Metal1 routing stub off PLUS
+    draw((8, 0), _box_um(10, 3, 12, 4))  # Metal1 routing stub off MINUS
+    label((8, 25), "PLUS_NET", -1, 0.5)
+    label((8, 25), "MINUS_NET", 11, 3.5)
+
+    layout.write(str(path))
+    return str(path)
+
+
+def test_custom_device_classes_for_deck_reports_mom_capacitors():
+    """:func:`custom_device_classes_for_deck` reports every `mom_capacitors`
+    entry, upper-cased key -> canonical (deck-cased) name -- the table
+    `make_capacitor_class_recovery_reader`'s `custom_device_classes`
+    parameter wants."""
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.netlist_capacitor_recovery import (
+        custom_device_classes_for_deck,
+    )
+
+    deck = get_extraction_deck("sg13g2")
+    assert custom_device_classes_for_deck(deck) == {
+        "CAP_CMOMI": "cap_cmomi",
+        "CAP_CMOMF": "cap_cmomf",
+    }
+    assert custom_device_classes_for_deck(None) == {}
+
+
+def test_custom_device_class_recovery_reader_recognises_x_card_as_a_device(tmp_path):
+    """`make_capacitor_class_recovery_reader(..., custom_device_classes=...)`
+    reattaches a round-tripped `X ... PARAMS:` card naming a custom device
+    class to a real `Device` of that class -- not the mangled-name abstract
+    circuit KLayout's own default reading would otherwise synthesise -- and
+    leaves an `X` card naming anything else untouched."""
+    import klayout.db as kdb
+
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+    )
+
+    text = """
+.SUBCKT TOP A B
+XD1 A B cap_cmomi PARAMS: W=1.5 L=3.0
+XD2 A B unknown_subckt
+.ENDS TOP
+"""
+    path = _write(tmp_path / "custom_device_class_recovery_reader.spice", text)
+    netlist = kdb.Netlist()
+    reader = make_capacitor_class_recovery_reader(
+        {}, custom_device_classes={"CAP_CMOMI": "cap_cmomi"}
+    )
+    netlist.read(path, reader)
+
+    top = next(c for c in netlist.each_circuit() if c.name == "TOP")
+    devices = {device.name: device for device in top.each_device()}
+    assert set(devices) == {"D1"}
+    device = devices["D1"]
+    assert device.device_class().name == "cap_cmomi"
+    param_by_name = {p.name: p for p in device.device_class().parameter_definitions()}
+    assert device.parameter(param_by_name["W"].id()) == pytest.approx(1.5)
+    assert device.parameter(param_by_name["L"].id()) == pytest.approx(3.0)
+
+    # `XD2`'s undefined subcircuit is untouched -- still the pre-#1942
+    # mangled abstract-circuit fallback, never a device.
+    assert "D2" not in devices
+
+
+def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
+    """The issue's own motivating scenario end to end: `klt extract`'s own
+    SPICE writer round-trips `cap_cmomi` as an `X ... PARAMS:` card, and a
+    hand-authored reference netlist -- the "reference must emit the
+    identical X ... PARAMS: card" shape the issue calls out -- gives
+    `layout.deck`/`reference.deck` so both sides recognise the class. The
+    device now reaches the ordinary device census (`counts.devices`) instead
+    of vanishing into a subcircuit call."""
+    from klayout_tools.extract import run_extract
+
+    gds = _make_sg13g2_mom_capacitor_gds(tmp_path / "cap.gds")
+    spice_path = str(tmp_path / "cap.spice")
+    extracted = run_extract(gds, "sg13g2", output=spice_path)
+    assert extracted["device_counts"] == {"cap_cmomi": 1}
+    top_name = extracted["top"]
+
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt capblock PLUS_NET MINUS_NET\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi PARAMS: W=4.0 L=10.0\n"
+        ".ends capblock\n",
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": spice_path,
+                    "deck": "sg13g2",
+                    "top": top_name,
+                },
+                "reference": {
+                    "netlist": reference_path,
+                    "top": "capblock",
+                    "deck": "sg13g2",
+                },
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+
+
+def test_mom_capacitor_parameter_tolerance_now_reaches_the_device(tmp_path):
+    """Before issue #1942, an X-card round-tripped `cap_cmomi` compared by
+    mangled circuit-name equality, so `options.parameter_tolerance` could
+    never absorb a small W/L delta and a genuine mismatch degraded to a
+    generic `topology` finding with no device name. With `layout.deck`/
+    `reference.deck` given, a small W delta now reaches the device: absorbed
+    under a 0.1% tolerance (`status: "match"`, `device.parameter_tolerated`),
+    and a hard, *device*-named `device.property` mismatch -- not `topology`
+    -- with no tolerance given."""
+    from klayout_tools.extract import run_extract
+
+    gds = _make_sg13g2_mom_capacitor_gds(tmp_path / "cap.gds")
+    spice_path = str(tmp_path / "cap.spice")
+    extracted = run_extract(gds, "sg13g2", output=spice_path)
+    top_name = extracted["top"]
+
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt capblock PLUS_NET MINUS_NET\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi PARAMS: W=4.0036 L=10.0\n"
+        ".ends capblock\n",
+    )
+
+    def _run(tolerance):
+        request = {
+            "layout": {"netlist": spice_path, "deck": "sg13g2", "top": top_name},
+            "reference": {
+                "netlist": reference_path,
+                "top": "capblock",
+                "deck": "sg13g2",
+            },
+        }
+        if tolerance is not None:
+            request["options"] = {"parameter_tolerance": tolerance}
+        return run_lvs(_write_request(tmp_path / f"request_{tolerance}.json", request))
+
+    absorbed = _run(0.001)
+    assert absorbed["status"] == "match"
+    assert absorbed["category_counts"] == {lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED: 1}
+
+    default_report = _run(None)
+    assert default_report["status"] == "mismatch"
+    # This minimal cell hits the same degraded-pairing path
+    # `test_parameter_tolerance_minimal_cell_out_of_tolerance_still_mismatches`
+    # documents (collateral `device.unmatched`/`net.unmatched`) -- the load-
+    # bearing assertion is that the *root cause* is a named, actionable
+    # `device.property` entry naming the device and its class, not the
+    # pre-#1942 generic, un-named `topology`/`circuit could not be matched`
+    # finding.
+    assert default_report["category_counts"]["device.property"] == 1
+    assert "topology" not in default_report["category_counts"]
+    (property_entry,) = [
+        entry
+        for entry in default_report["mismatches"]
+        if entry["category"] == "device.property"
+    ]
+    assert property_entry["device"]["class"] == "cap_cmomi"
+    assert property_entry["property"]["name"] == "w_um"
+    assert property_entry["property"]["layout"] == pytest.approx(4.0)
+    assert property_entry["property"]["reference"] == pytest.approx(4.0036)
+
+
+def test_mom_capacitor_without_deck_still_degrades_to_the_pre_1942_fallback(
+    tmp_path,
+):
+    """Documents the residual gap (`docs/cli/lvs.md`, "Custom device
+    classes"): omitting `layout.deck`/`reference.deck` on the pre-extracted
+    shapes leaves the pre-#1942 behaviour completely unchanged -- the
+    device is invisible in `counts.devices` and a real mismatch degrades to
+    a generic, un-named finding rather than `device.property`."""
+    from klayout_tools.extract import run_extract
+
+    gds = _make_sg13g2_mom_capacitor_gds(tmp_path / "cap.gds")
+    spice_path = str(tmp_path / "cap.spice")
+    extracted = run_extract(gds, "sg13g2", output=spice_path)
+    top_name = extracted["top"]
+
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt capblock PLUS_NET MINUS_NET\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi PARAMS: W=4.0036 L=10.0\n"
+        ".ends capblock\n",
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": spice_path, "top": top_name},
+                "reference": {"netlist": reference_path, "top": "capblock"},
+            },
+        )
+    )
+
+    # No deck on either side -- the device never becomes a `Device` at all,
+    # so it is absent from the device census entirely (a `SubCircuit`
+    # reference to a synthesised abstract circuit, not a device).
+    assert report["counts"]["devices"]["layout"] == 0
+    assert report["status"] == "mismatch"
+    assert "device.property" not in report["category_counts"]
