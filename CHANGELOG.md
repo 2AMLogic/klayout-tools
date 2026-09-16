@@ -46,6 +46,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   `critical`, behaves exactly as before. No `schema_version` bump. See
   [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Critical-metric
   consumption" section.
+- **Added**: `klt place-and-route` and `klt sta` gain I/O timing constraints
+  and an explicit unconstrained-sentinel signal (issue #1865). Both commands'
+  `request.constraints` now accept `input_delay_ns` / `output_delay_ns` —
+  independently optional non-negative scalars emitted as `set_input_delay <ns>
+  -clock <clock_port>` over every **non-clock** input port and
+  `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Before this, the
+  entire constraint surface was a single `create_clock`, which is enough only
+  for a design whose paths are all register-to-register: a design whose paths
+  are *input port → register* / *register → output port* (a pipeline stage, a
+  registered interface adapter, a boundary/IO block) had no constrained
+  startpoint or endpoint at all, and every slack field degraded to OpenSTA's
+  unconstrained sentinel (`1e+39`/`0`). Omitting both fields leaves each
+  command's generated Tcl byte-identical to before. Independently, both
+  responses gain **`timing_status`** (`"constrained"` | `"unconstrained"` |
+  `null`) — at top level, per `stages[]` entry, per `corners[]` entry, and
+  inside `spef_sta` — so a caller can tell "genuinely timed, zero negative
+  slack" from "never had a constrained path to measure" without special-casing
+  `1e+39` by value. `1e+39` is a *positive* number, so a naive `worst_slack_ns
+  >= 0` gate previously reported "timing closed with maximum confidence" on a
+  design that was never timed. The slack fields themselves are unchanged and
+  still report exactly what OpenROAD/OpenSTA reported, sentinel included — no
+  `schema_version` bump on either command, per
+  [`docs/json-contract.md`](docs/json-contract.md)'s additive-envelope policy
+  (retyping `worst_slack_ns` to `number | null` would have been the breaking
+  alternative). Per-port delay maps and a full caller-supplied SDC passthrough
+  (`read_sdc`, which would also cover false paths / multicycle paths / clock
+  uncertainty) remain out of scope. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s and
+  [`docs/cli/sta.md`](docs/cli/sta.md)'s "I/O timing constraints ... and
+  `timing_status`" sections.
 - **Added**: `klt functional-verification` gains an opt-in `options.trace`
   field (Epic #1585 Phase 3, issue #1845) — `true` turns on cocotb's own
   `Runner(waves=True)` on both the build and test steps, so the run's

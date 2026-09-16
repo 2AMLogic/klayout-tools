@@ -633,6 +633,111 @@ citations and findings.
   many times, unconditionally (no Tcl-level early exit on a zero-violation
   `check_antennas` result).
 
+## I/O timing constraints (`input_delay_ns`, `output_delay_ns`) and `timing_status` (issue #1865)
+
+Before issue #1865, this command's entire timing-constraint surface was
+`constraints.clock_port` + `.clock_period_ns` — one `create_clock` line in the
+generated Tcl and nothing else. That is enough for a design whose timing paths
+are all **register-to-register**. It is not enough for a design whose paths are
+**input port → register** and **register → output port**: a pipeline stage, a
+registered interface adapter, a boundary/IO block, or the first slice of any
+design built bottom-up.
+
+With no arrival time on the inputs and no required time on the outputs, OpenSTA
+has no constrained startpoint or endpoint at all, so every timing field in the
+response degrades to its unconstrained-design sentinel:
+
+```
+worst_slack_ns            = 1e+39
+total_negative_slack_ns   = 0
+worst_hold_slack_ns       = 1e+39
+setup_violation_count     = 0
+hold_violation_count      = 0
+```
+
+**`1e+39` is a positive number.** This command has no pass/fail concept of its
+own (a caller wanting a timing gate composes this contract into `klt eval`), so
+a naive gate reading `worst_slack_ns >= 0 && total_negative_slack_ns == 0`
+reports "timing closed with maximum confidence" on a design that was never
+timed at all.
+
+**Two independent halves close that gap, and both are in this response.**
+
+### Constrain the boundary: `input_delay_ns` / `output_delay_ns`
+
+Each is an optional non-negative scalar applied to *all* ports on its side of
+the design, and each requires `clock_port`/`clock_period_ns` (both SDC commands
+are defined relative to a named clock). Given
+
+```json
+"constraints": {
+  "clock_port": "clk",
+  "clock_period_ns": 10.0,
+  "input_delay_ns": 2.0,
+  "output_delay_ns": 2.0
+}
+```
+
+the generated Tcl gains, immediately after `create_clock`:
+
+```tcl
+set klt_clock_port [get_ports clk]
+set klt_non_clock_inputs [lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]
+set_input_delay 2.0 -clock clk $klt_non_clock_inputs
+set_output_delay 2.0 -clock clk [all_outputs]
+```
+
+Two details are deliberate:
+
+- **The clock port is excluded from the input set.** `all_inputs` includes it,
+  and an *arrival time* on the clock port is not what a caller asking for
+  "input delay" means. The non-clock set is computed with the same plain-Tcl
+  `lsearch` idiom OpenROAD-flow-scripts' own `constraint.sdc` templates use,
+  rather than a `remove_from_collection` this repo has not verified against the
+  OpenSTA builds it targets.
+- **The constraints are re-emitted in every generated session**, not just the
+  stage scripts: the post-route corner sweep and the `post_route_spef` STA pass
+  are separate `openroad` processes seeded from a `read_db`, and `read_db` does
+  not carry SDC state across a process boundary any more than it carries linked
+  library state. Without re-emission, the stage scripts would be constrained
+  and the swept corners would not.
+
+Omitting both fields emits neither line and leaves the generated Tcl
+byte-identical to before this field existed.
+
+**Still out of scope, deliberately**: per-port delay maps, and a full
+caller-supplied SDC passthrough (`read_sdc`) — which would also cover false
+paths, multicycle paths, and clock uncertainty, none of which have a surface
+here today. Both are tracked as follow-on work to issue #1865 rather than
+folded into it.
+
+### Detect the sentinel mechanically: `timing_status`
+
+Independent of whether a caller sets any I/O constraint, this command now never
+reports the raw sentinel *as if it were a measurement*. Every scope that
+carries slack numbers also carries a `timing_status`:
+
+| Scope | Field |
+|---|---|
+| Top level | `timing_status` |
+| Per stage | `stages[].timing_status` |
+| Per swept corner | `corners[].timing_status` |
+| SPEF re-report | `spef_sta.timing_status` |
+
+`"constrained"` means every slack value in that scope is a real measurement.
+`"unconstrained"` means at least one is the sentinel — the conservative
+reading on purpose, so a gate can require `timing_status == "constrained"` once
+rather than reason about which of four numbers it may trust. `null` means the
+scope reported no slack metric at all (e.g. a stage whose own OpenROAD reports
+populate no timing key); it is "nothing to classify", not a claim either way.
+
+This is **additive**: the slack fields themselves still report exactly what
+OpenROAD reported, sentinel included (`docs/json-contract.md`'s additive
+posture — retyping `worst_slack_ns` to `number | null` would be a breaking
+change and would earn a `schema_version` bump, which this change deliberately
+does not need). A consumer that has been special-casing `1e+39` by value keeps
+working unchanged; a consumer that keys on `timing_status` no longer has to.
+
 ## Multi-corner setup/hold sweep (`worst_setup_slack_ns`, `worst_hold_slack_ns`)
 
 Issue #949 (Epic #700 Phase 3's post-route-STA survey, `docs/design/
@@ -700,7 +805,10 @@ classification is needed on the Python side.
   `worst_setup_slack_ns`, and `worst_hold_slack_ns` all correctly report
   OpenSTA's own unconstrained-design sentinel (`1e+39`) identically, a real
   regression check that the sweep does not fabricate a number where none
-  exists.
+  exists. Since issue #1865 that run additionally reports `timing_status:
+  "unconstrained"` (top level, per stage, and on every `corners[]` entry),
+  so a consumer no longer has to recognise `1e+39` by value to know those
+  three fields are not measurements.
 - **Only runs for the `"route"` stage.** A `target_stage` before `"route"`
   never reaches the sweep — `worst_setup_slack_ns`/`worst_hold_slack_ns`
   are `null`, the same convention `route_drc_violation_count` already
@@ -1389,8 +1497,10 @@ own 4 net-name-unmatched nets' fanout (`spef_sta.design_nets_annotated` /
 not a defect this issue tracks) — see "`*CONN` device-terminal pin
 correlation" above for the full live-verification log and the exact fix.
 `mult8` is unaffected regardless (purely combinational, both post-route
-rungs report OpenSTA's own unconstrained `1e+39` sentinel either way, so
-there is no rung-3-vs-rung-2 comparison to make there).
+rungs report OpenSTA's own unconstrained `1e+39` sentinel either way — and,
+since issue #1865, `timing_status: "unconstrained"` alongside it, at top
+level and inside `spef_sta` — so there is no rung-3-vs-rung-2 comparison to
+make there).
 
 Historical note, retained for context: as measured on 2026-08-14 (issue
 #951, pre-`*CONN`-correlation at all — before either #961 increment), rung 3
@@ -1483,6 +1593,8 @@ live re-measurement above.
 | `constraints.max_transition_ns` | number \| omitted | Additive field (issue #1709) → `set_max_transition <ns> [current_design]`. Positive number when given. Emitted right after the clock constraint (`create_clock`), before `repair_design`/`repair_timing`, aiming that already-generated optimiser at a caller-given max-slew target instead of only whatever limit the resolved liberty deck declares. Omitted (the default) emits no `set_max_transition` line, byte-identical to this command's behavior before this field existed. |
 | `constraints.max_capacitance_pf` | number \| omitted | Additive field (issue #1709) → `set_max_capacitance <pf> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. |
 | `constraints.max_fanout` | number \| omitted | Additive field (issue #1709) → `set_max_fanout <n> [current_design]`. Positive number when given; same emission point and omitted-default behavior as `max_transition_ns` above. Useful for standard-cell libraries that declare no fanout limit of their own (`default_max_fanout`/per-pin `max_fanout` absent from the liberty), where `repair_design` would otherwise have nothing to aim at for fanout. Note the response reports **no** fanout violation count to go with it — see "Design-rule-check verdict" for the `sta::max_fanout_violation_count` SIGSEGV that rules one out. |
+| `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful — "the port is valid exactly at the clock edge"); **requires** `constraints.clock_port`/`.clock_period_ns`, since `set_input_delay` is defined relative to a named clock. Omitted (the default) emits no `set_input_delay` line, byte-identical to this command's behavior before this field existed. Without it, a design whose only timing paths run *input port → register* has no constrained startpoint and every slack field degrades to the unconstrained sentinel — see "I/O timing constraints" below. |
+| `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation, same clock requirement, and same omitted-default behavior as `input_delay_ns` above; the two are independently optional (either alone is valid). Covers the *register → output port* half of the same gap. |
 | `seed` | integer | Placement/routing seed. **Required** — P&R is genuinely stochastic; a stored result must be reproducible. Echoed unchanged in the response. |
 | `target_stage` | string | One of `"floorplan"`, `"place"`, `"cts"`, `"route"` (default) — how far this run is asked to go. See "Partial completion" below. |
 | `route_critical_nets_percentage` | integer \| omitted | 0–100, default `0` (no flag emitted). Percentage of worst-slack nets `global_route` treats as timing-critical during congestion-removal iterations (`-critical_nets_percentage`, issue #939). `0` reproduces this command's prior behaviour exactly — the A/B disable path. Not evaluated with a real OpenROAD A/B run as of this field's introduction; see `place_and_route.py`'s module docstring for the audit methodology and its limitations. |
@@ -1532,6 +1644,7 @@ unsure).
   "wirelength_um": 9616.0,
   "worst_slack_ns": -2.18828,
   "total_negative_slack_ns": -82.8171,
+  "timing_status": "constrained",
   "fmax_mhz": 304.11,
   "setup_violation_count": 3,
   "hold_violation_count": 1,
@@ -1543,9 +1656,9 @@ unsure).
   "max_transition_violation_count": 2,
   "max_capacitance_violation_count": 0,
   "corners": [
-    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011, "total_negative_setup_slack_ns": -12.4103, "total_negative_hold_slack_ns": 0.0, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 },
-    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882, "total_negative_setup_slack_ns": -82.8171, "total_negative_hold_slack_ns": 0.0, "max_transition_violation_count": 2, "max_capacitance_violation_count": 0 },
-    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421, "total_negative_setup_slack_ns": -35.2841, "total_negative_hold_slack_ns": 0.0, "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 }
+    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011, "total_negative_setup_slack_ns": -12.4103, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 },
+    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882, "total_negative_setup_slack_ns": -82.8171, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 2, "max_capacitance_violation_count": 0 },
+    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421, "total_negative_setup_slack_ns": -35.2841, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 }
   ],
   "estimated_power_mw": 11.6,
   "clock_skew_ns": 0.0421,
@@ -1575,6 +1688,7 @@ unsure).
     "sdf_path": "/abs/path/.klt/place-and-route/gcd_route.sdf",
     "worst_slack_ns": -1.72532,
     "total_negative_slack_ns": -63.8855,
+    "timing_status": "constrained",
     "setup_violation_count": 50,
     "hold_violation_count": 0,
     "nets_annotated": 537,
@@ -1638,7 +1752,8 @@ unsure).
 | `interconnect_corner` | string | Additive field (issue #1100). The tech-LEF parasitic-extraction corner actually resolved (`"min"`/`"nom"`/`"max"`) — echo of `request.pdk.interconnect_corner`, or `"nom"` when omitted. Distinct from the liberty (device) corner, which `provenance.deck.name` encodes; the two can differ in the same response (e.g. `interconnect_corner: "max"` alongside a `deck.name` ending in `__ss_125C_3v00`). |
 | `die_area_um2` / `core_area_um2` / `utilization_pct` | number | From `initialize_floorplan`/`report_design_area_metrics`, at `stage_reached`. |
 | `wirelength_um` | number \| null | HPWL at `stage_reached`; `null` before placement. |
-| `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. |
+| `worst_slack_ns` / `total_negative_slack_ns` | number | WNS/TNS at `stage_reached`. Negative values are expected, not an error — a caller wanting a pass/fail gate on timing composes this contract into `klt eval`. A `target_stage: "floorplan"` request with no `constraints` (a clock is not required until `"place"`, see below) reports OpenROAD's own unconstrained-design sentinel (`1e+39`/`0`) rather than a real number — a `constraints`-less floorplan-only run has no clock to measure slack against, and this field is never fabricated to hide that. **That sentinel is not the only way to reach it** — a fully-constrained, fully-routed run of a design with no register-to-register path reports the identical `1e+39`/`0`. Check `timing_status` below before treating this number as a measurement. |
+| `timing_status` | string \| null | Additive field (issue #1865). `"constrained"` \| `"unconstrained"` \| `null` — whether the slack fields in this response are *measurements* at all, or OpenSTA's unconstrained-design sentinel (`1e+39`) restated. `"unconstrained"` whenever **any** slack field in scope carries the sentinel; `null` when the stage reported no slack metric at all (nothing to classify — not a claim either way). **A pass/fail gate on timing must require `timing_status == "constrained"` before reading any slack number**: `1e+39` is a positive value, so `worst_slack_ns >= 0` on its own reports "timing closed with maximum confidence" on a design that was never timed. The sentinel values themselves are reported verbatim and unchanged — this field is additive and retypes nothing. Restated per stage in `stages[]` and per corner in `corners[]` (and inside `spef_sta`), each computed from that entry's own slack values. See "I/O timing constraints" below for the most common way to *fix* an `"unconstrained"` result rather than merely detect it. |
 | `fmax_mhz` | number \| null | `null` before placement (floorplan-stage ideal-clock STA reports no `fmax`). |
 | `setup_violation_count` / `hold_violation_count` | integer \| null | `null` at the floorplan stage (no placement-aware timing yet). |
 | `nominal_hold_slack_ns` | number \| null | Additive field (issue #1826). The single, nominal-corner hold WNS (`report_worst_slack_metric -hold`), mirroring `worst_slack_ns` above's setup-side value — a real slack-in-ns margin, not just the pass/fail count `hold_violation_count` already provides. `null` at the floorplan stage, matching `hold_violation_count`'s own gating. Named `nominal_hold_slack_ns` (not `worst_hold_slack_ns`) specifically to avoid colliding with the corner-swept `worst_hold_slack_ns` aggregate below — the two are independent fields that never replace one another, the same way `worst_slack_ns` and `worst_setup_slack_ns` already coexist (issue #949). |
@@ -1646,7 +1761,7 @@ unsure).
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), parsed from the report's per-violation `"violation type: ..."` header lines. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
 | `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate the max-transition (OpenSTA `-max_slew`) and max-capacitance limits in force at those decks, from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given — without them the verdict is against the loaded decks' own declared limits; with them, it additionally says whether the `repair_design` pass aimed at the caller's tighter target actually hit it. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
-| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ...}` (the two `max_*_violation_count` fields added by issue #1709; the two `total_negative_*_slack_ns` fields added by issue #1866). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
+| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "timing_status": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ...}` (the two `max_*_violation_count` fields added by issue #1709; the two `total_negative_*_slack_ns` fields added by issue #1866; `timing_status` added by issue #1865 — computed from that corner's own two slack values, so a corner OpenSTA could not time is never mistaken for a clean one). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |
@@ -1657,7 +1772,7 @@ unsure).
 | `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
 | `def_net_names` | object \| null | Additive field (issue #1488). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own unrouted-single-pin net-name marker pass — see "Unrouted single-pin net names" above. `single_pin_markers` — how many marker shapes were synthesized (one per unrouted single-pin net whose pin geometry resolved); `0` is the normal value for a design with no tie-cell-style nets, and says nothing is missing. `unresolved_single_pin_nets` — every single-pin net the pass could **not** resolve, by DEF net name (sorted): no layer-map file to translate the LEF `PORT` layer name through, a macro or pin the LEF never declares, or a pin centre not covered by drawn conductor. Those nets keep extraction's synthesized `$<id>` name under `klt extract --def-net-names`, exactly as before this field existed — never a merge failure. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
-| `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
+| `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `timing_status` (issue #1865) — the same constrained/unconstrained verdict the top-level field carries, computed from this block's own `worst_slack_ns`. `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
 | `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
 

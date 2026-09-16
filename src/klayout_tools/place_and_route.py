@@ -515,7 +515,12 @@ import re
 import subprocess
 from typing import Any
 
-from ._openroad_engine import _count_violations, _openroad_version, _run_openroad
+from ._openroad_engine import (
+    _count_violations,
+    _openroad_version,
+    _run_openroad,
+    _timing_status,
+)
 
 # `_count_spef_nets_annotated`/`_tcl_net_list` are `_paths.py`-hosted helpers
 # that only the STA subsystem calls after the issue #1808 split; they are
@@ -1217,6 +1222,11 @@ _TOP_LEVEL_METRIC_KEYS = (
     # deck's own max-transition/max-capacitance limits.
     "max_transition_violation_count",
     "max_capacitance_violation_count",
+    # Additive (issue #1865): `"constrained"` / `"unconstrained"` / `null` --
+    # whether the slack fields above are measurements at all, or OpenSTA's
+    # own unconstrained-design sentinel (`1e+39`) restated. See
+    # `_extract_stage_metrics` and `_timing_status`.
+    "timing_status",
 )
 
 
@@ -1347,6 +1357,8 @@ def run_place_and_route(
         max_transition_ns,
         max_capacitance_pf,
         max_fanout,
+        input_delay_ns,
+        output_delay_ns,
     ) = _validate_constraints(request.get("constraints"))
     seed = _validate_seed(request["seed"])
     target_stage = _validate_target_stage(request.get("target_stage", "route"))
@@ -1493,6 +1505,8 @@ def run_place_and_route(
             max_transition_ns=max_transition_ns,
             max_capacitance_pf=max_capacitance_pf,
             max_fanout=max_fanout,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
             cell_library=cell_library,
             seed=seed,
             output_dir=output_dir,
@@ -1582,6 +1596,8 @@ def run_place_and_route(
                 max_transition_ns=max_transition_ns,
                 max_capacitance_pf=max_capacitance_pf,
                 max_fanout=max_fanout,
+                input_delay_ns=input_delay_ns,
+                output_delay_ns=output_delay_ns,
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
             )
@@ -1658,6 +1674,8 @@ def run_place_and_route(
                 max_transition_ns=max_transition_ns,
                 max_capacitance_pf=max_capacitance_pf,
                 max_fanout=max_fanout,
+                input_delay_ns=input_delay_ns,
+                output_delay_ns=output_delay_ns,
                 checkpoint_in=checkpoint_path,
                 # Issue #1002: `write_sdf` inside that same session, right
                 # after its `read_spef` -- see `_validate_post_route_sdf`.
@@ -2421,21 +2439,37 @@ def _reject_wired_port_less_pins(
 
 def _validate_constraints(
     constraints: Any,
-) -> tuple[str | None, float | None, float | None, float | None, float | None]:
+) -> tuple[
+    str | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+    float | None,
+]:
     """Validate ``request.constraints``.
 
     Returns ``(clock_port, clock_period_ns, max_transition_ns,
-    max_capacitance_pf, max_fanout)``. The first two are the pre-existing
-    clock fields -- required together, `None`/`None` when both are
-    omitted (unchanged behavior). The three design-rule-constraint fields
-    (issue #1709) are each independently optional regardless of clock
-    presence: a caller may set e.g. `max_fanout` alone, or alongside the
-    clock fields, or not at all -- `None` per field when omitted, matching
-    this function's own pre-existing "omitted preserves prior behavior
-    exactly" convention.
+    max_capacitance_pf, max_fanout, input_delay_ns, output_delay_ns)``. The
+    first two are the pre-existing clock fields -- required together,
+    `None`/`None` when both are omitted (unchanged behavior). The three
+    design-rule-constraint fields (issue #1709) are each independently
+    optional regardless of clock presence: a caller may set e.g.
+    `max_fanout` alone, or alongside the clock fields, or not at all --
+    `None` per field when omitted, matching this function's own pre-existing
+    "omitted preserves prior behavior exactly" convention.
+
+    The last two (issue #1865) are the **I/O timing** constraints:
+    `input_delay_ns` is the arrival time of every non-clock input port
+    relative to the clock, `output_delay_ns` the required time at every
+    output port. Each is independently optional -- but, unlike the
+    design-rule fields, each *requires* `clock_port`/`clock_period_ns`,
+    since `set_input_delay`/`set_output_delay` are both defined relative to
+    a named clock and have no meaning without one.
     """
     if constraints is None:
-        return None, None, None, None, None
+        return None, None, None, None, None, None, None
     if not isinstance(constraints, dict):
         raise PlaceAndRouteError("request.constraints must be a JSON object")
 
@@ -2490,13 +2524,49 @@ def _validate_constraints(
             )
         max_fanout = float(max_fanout)
 
+    # Issue #1865: I/O timing constraints. Both are plain non-negative
+    # numbers (0 is a meaningful, commonly-written value -- "the port is
+    # valid exactly at the clock edge" -- so unlike the design-rule fields
+    # above these are `>= 0`, not `> 0`), and both are relative to
+    # `clock_port`, so neither can be honoured without one.
+    input_delay_ns = _validate_io_delay(constraints.get("input_delay_ns"), "input")
+    output_delay_ns = _validate_io_delay(constraints.get("output_delay_ns"), "output")
+    if (input_delay_ns is not None or output_delay_ns is not None) and (
+        clock_port is None
+    ):
+        raise PlaceAndRouteError(
+            "request.constraints.input_delay_ns/output_delay_ns require "
+            "request.constraints.clock_port/clock_period_ns -- set_input_delay/"
+            "set_output_delay are defined relative to a named clock"
+        )
+
     return (
         clock_port,
         clock_period_ns,
         max_transition_ns,
         max_capacitance_pf,
         max_fanout,
+        input_delay_ns,
+        output_delay_ns,
     )
+
+
+def _validate_io_delay(value: Any, which: str) -> float | None:
+    """One of ``request.constraints.input_delay_ns``/``.output_delay_ns``
+    (issue #1865): optional, and a non-negative number when given."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or value < 0
+        or value != value  # NaN
+        or value in (float("inf"), float("-inf"))
+    ):
+        raise PlaceAndRouteError(
+            f"request.constraints.{which}_delay_ns must be a non-negative number"
+        )
+    return float(value)
 
 
 def _validate_seed(seed: Any) -> int:
@@ -2868,6 +2938,61 @@ def _design_rule_constraint_lines(
     return lines
 
 
+def _io_delay_lines(
+    clock_port: str | None,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
+) -> list[str]:
+    """``set_input_delay``/``set_output_delay`` -- issue #1865's
+    ``request.constraints.input_delay_ns``/``.output_delay_ns``.
+
+    Without these, a design whose only timing paths run *input port ->
+    register* and *register -> output port* (a pipeline stage, a registered
+    interface adapter, an IO/boundary block, the first slice of any design
+    built bottom-up) has no constrained startpoint or endpoint at all: every
+    slack field in this command's response degrades to OpenSTA's own
+    unconstrained sentinel (``1e+39``), which is a *positive* number and so
+    reads to a naive pass/fail gate as "timing closed with enormous margin"
+    on a design that was never timed. ``create_clock`` alone -- the only
+    constraint surface this command had before #1865 -- is enough only for a
+    design whose paths are all register-to-register.
+
+    A scalar applies to *every* port on that side of the design, which is
+    the overwhelmingly common case for a boundary block (per-port maps are
+    deliberately out of scope here -- see the issue). The non-clock input
+    set is computed with the same plain-Tcl ``lsearch`` idiom
+    OpenROAD-flow-scripts' own ``constraint.sdc`` templates use, rather than
+    a ``remove_from_collection`` this repo has not verified against the
+    OpenSTA builds it targets: ``all_inputs`` includes the clock port
+    itself, and an arrival time on the clock port is not what a caller
+    asking for "input delay" means.
+
+    Mirrors :func:`_clock_lines`/:func:`_design_rule_constraint_lines`'s
+    shape exactly: threaded through the same call sites, emitted
+    immediately after them, and each field emits its own line(s) only when
+    given -- a request with neither field set produces Tcl byte-identical
+    to before this function existed. ``clock_port`` is never ``None`` when
+    either delay is set (:func:`_validate_constraints` rejects that
+    combination); the guard is defensive only.
+    """
+    if clock_port is None:
+        return []
+    lines: list[str] = []
+    if input_delay_ns is not None:
+        lines += [
+            f"set klt_clock_port [get_ports {clock_port}]",
+            "set klt_non_clock_inputs "
+            "[lsearch -inline -all -not -exact [all_inputs] $klt_clock_port]",
+            f"set_input_delay {input_delay_ns} -clock {clock_port} "
+            "$klt_non_clock_inputs",
+        ]
+    if output_delay_ns is not None:
+        lines.append(
+            f"set_output_delay {output_delay_ns} -clock {clock_port} [all_outputs]"
+        )
+    return lines
+
+
 def _floorplan_init_lines(floorplan: dict[str, Any]) -> list[str]:
     method = floorplan["method"]
     if method == "def":
@@ -3221,6 +3346,8 @@ def _stage_script_lines(
     max_transition_ns: float | None,
     max_capacitance_pf: float | None,
     max_fanout: float | None,
+    input_delay_ns: float | None,
+    output_delay_ns: float | None,
     cell_library: str,
     seed: int,
     output_dir: str,
@@ -3249,6 +3376,7 @@ def _stage_script_lines(
         lines += _design_rule_constraint_lines(
             max_transition_ns, max_capacitance_pf, max_fanout
         )
+        lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
         lines += _floorplan_init_lines(floorplan)
         # `place_macro` fixes each declared hard-macro instance at its
         # caller-given location -- must run after the floorplan's own die/
@@ -3284,6 +3412,7 @@ def _stage_script_lines(
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
+    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
 
     if stage == "place":
         assert io_spec is not None
@@ -3990,6 +4119,24 @@ def _extract_stage_metrics(
             entry["max_transition_violation_count"] = max_transition_violation_count
         if max_capacitance_violation_count is not None:
             entry["max_capacitance_violation_count"] = max_capacitance_violation_count
+
+    # Issue #1865: whether the slack fields above are measurements at all.
+    # OpenSTA reports the worst slack of a design with no constrained
+    # startpoint/endpoint as `1e+39` -- a *positive* number, which a naive
+    # `worst_slack_ns >= 0` gate reads as "timing closed with enormous
+    # margin" on a design that was never timed. This field states the
+    # difference mechanically, so no consumer has to special-case `1e+39` by
+    # value. Computed over every slack field this stage actually reported
+    # (TNS is excluded deliberately: an unconstrained run reports `0` there,
+    # which is indistinguishable by value from a genuinely clean one).
+    entry["timing_status"] = _timing_status(
+        (
+            entry.get("worst_slack_ns"),
+            entry.get("nominal_hold_slack_ns"),
+            entry.get("worst_setup_slack_ns"),
+            entry.get("worst_hold_slack_ns"),
+        )
+    )
 
     return entry
 

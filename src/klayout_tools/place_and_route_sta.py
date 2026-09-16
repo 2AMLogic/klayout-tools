@@ -50,7 +50,7 @@ import os
 import re
 from typing import Any
 
-from ._openroad_engine import _count_violations, _run_openroad
+from ._openroad_engine import _count_violations, _run_openroad, _timing_status
 from ._paths import _count_spef_nets_annotated, _tcl_net_list
 
 
@@ -64,6 +64,8 @@ def _corner_sweep_script_lines(
     max_transition_ns: float | None = None,
     max_capacitance_pf: float | None = None,
     max_fanout: float | None = None,
+    input_delay_ns: float | None = None,
+    output_delay_ns: float | None = None,
 ) -> list[str]:
     """Tcl for the post-route multi-corner setup/hold sweep (issue #949,
     ``docs/design/post-route-sta-survey.md`` section 4.2) -- a **second**,
@@ -147,6 +149,7 @@ def _corner_sweep_script_lines(
         _clock_lines,
         _design_rule_check_lines,
         _design_rule_constraint_lines,
+        _io_delay_lines,
     )
 
     lines = [f"read_db {checkpoint_in}"]
@@ -158,6 +161,13 @@ def _corner_sweep_script_lines(
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
+    # Issue #1865: the same `set_input_delay`/`set_output_delay` pair the
+    # `"route"` stage's own script already emitted. `read_db` does not carry
+    # SDC state across the process boundary (see this function's own
+    # docstring), so without re-emitting them here every swept corner would
+    # report the unconstrained sentinel for a design whose only paths are
+    # input-port -> register / register -> output-port.
+    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     lines += [
         f"set_wire_rc -layer {io_spec['layer_v']}",
         "estimate_parasitics -global_routing",
@@ -187,6 +197,8 @@ def _spef_sta_script_lines(
     max_transition_ns: float | None = None,
     max_capacitance_pf: float | None = None,
     max_fanout: float | None = None,
+    input_delay_ns: float | None = None,
+    output_delay_ns: float | None = None,
 ) -> list[str]:
     """Build the Tcl script for the second, ``post_route_spef``-only
     ``openroad`` invocation (issue #948, Epic #700 Phase 3) -- a fresh
@@ -252,6 +264,7 @@ def _spef_sta_script_lines(
         _SPEF_NET_CHECK_END,
         _clock_lines,
         _design_rule_constraint_lines,
+        _io_delay_lines,
         _metrics_report_lines,
         _violation_count_lines,
     )
@@ -261,6 +274,10 @@ def _spef_sta_script_lines(
     lines += _design_rule_constraint_lines(
         max_transition_ns, max_capacitance_pf, max_fanout
     )
+    # Issue #1865: re-emitted here for the same reason `_clock_lines` above
+    # is -- this is a fresh OpenSTA session seeded from a `read_db`, which
+    # carries no SDC state of its own.
+    lines += _io_delay_lines(clock_port, input_delay_ns, output_delay_ns)
     lines += [
         f"set klt_spef_nets [list {_tcl_net_list(net_names)}]",
         "set klt_spef_annotated 0",
@@ -415,6 +432,8 @@ def _post_route_spef_metrics(
     max_transition_ns: float | None = None,
     max_capacitance_pf: float | None = None,
     max_fanout: float | None = None,
+    input_delay_ns: float | None = None,
+    output_delay_ns: float | None = None,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
     Phase 3): extract real per-net R/C from the just-merged routed GDS via
@@ -433,6 +452,7 @@ def _post_route_spef_metrics(
             "sdf_path": str | None,
             "worst_slack_ns": float | None,
             "total_negative_slack_ns": float | None,
+            "timing_status": str | None,
             "setup_violation_count": int,
             "hold_violation_count": int,
             "nets_annotated": int,
@@ -654,6 +674,8 @@ def _post_route_spef_metrics(
         max_transition_ns=max_transition_ns,
         max_capacitance_pf=max_capacitance_pf,
         max_fanout=max_fanout,
+        input_delay_ns=input_delay_ns,
+        output_delay_ns=output_delay_ns,
     )
     _write_script(script_path, lines)
 
@@ -725,6 +747,10 @@ def _post_route_spef_metrics(
         "sdf_path": sdf_path,
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
+        # Additive (issue #1865): whether this block's own `worst_slack_ns`
+        # is a measurement or OpenSTA's unconstrained sentinel (`1e+39`) --
+        # the same field, computed the same way, as the top-level one.
+        "timing_status": _timing_status((worst_slack,)),
         "setup_violation_count": setup_violation_count,
         "hold_violation_count": hold_violation_count,
         "nets_annotated": nets_annotated,
@@ -748,6 +774,8 @@ def _run_corner_sweep(
     max_transition_ns: float | None = None,
     max_capacitance_pf: float | None = None,
     max_fanout: float | None = None,
+    input_delay_ns: float | None = None,
+    output_delay_ns: float | None = None,
 ) -> tuple[float | None, float | None, list[dict[str, Any]], int | None, int | None]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
@@ -790,10 +818,10 @@ def _run_corner_sweep(
 
     The third element is issue #1092's own addition: a per-corner
     breakdown, ``[{"name": ..., "setup_slack_ns": ..., "hold_slack_ns":
-    ...}, ...]``, naming which corner produced each of the two aggregates
-    above -- closing the "response never names the corner that decided
-    either one" gap #1092 reports. Each entry also carries
-    ``total_negative_setup_slack_ns``/``total_negative_hold_slack_ns``
+    ..., "timing_status": ...}, ...]``, naming which corner produced each
+    of the two aggregates above -- closing the "response never names the
+    corner that decided either one" gap #1092 reports. Each entry also
+    carries ``total_negative_setup_slack_ns``/``total_negative_hold_slack_ns``
     (issue #1866): the matching *total*-negative-slack pair alongside the
     *worst*-slack pair above, from that same corner's own
     ``report_tns_metric -setup``/``-hold`` call
@@ -803,7 +831,11 @@ def _run_corner_sweep(
     (``total_negative_slack_ns``/``total_negative_hold_slack_ns``) but
     spells both sides explicitly here, since ``corners[]`` already has both
     an explicit ``setup_slack_ns`` and ``hold_slack_ns`` sitting next to
-    each other. Deliberately **not** derived by adding a
+    each other. ``timing_status`` (issue #1865) is that corner's *own*
+    constrained/unconstrained verdict, computed from its own two
+    worst-slack values rather than copied from the aggregate, so a corner
+    OpenSTA could not time is never mistaken for a clean one. Deliberately
+    **not** derived by adding a
     ``-corner`` argument to ``report_worst_slack_metric`` inside the
     existing combined session: this module's own live-verified finding
     (``docs/cli/place-and-route.md``'s "Multi-corner setup/hold sweep"
@@ -861,6 +893,8 @@ def _run_corner_sweep(
         max_transition_ns=max_transition_ns,
         max_capacitance_pf=max_capacitance_pf,
         max_fanout=max_fanout,
+        input_delay_ns=input_delay_ns,
+        output_delay_ns=output_delay_ns,
     )
     _write_script(script_path, lines)
 
@@ -911,6 +945,10 @@ def _run_corner_sweep(
                 "hold_slack_ns": worst_hold,
                 "total_negative_setup_slack_ns": tns_setup,
                 "total_negative_hold_slack_ns": tns_hold,
+                # Issue #1865: per-corner counterpart of the top-level
+                # `timing_status` -- a corner whose slack pair is OpenSTA's
+                # unconstrained sentinel never looks like a clean corner.
+                "timing_status": _timing_status((worst_setup, worst_hold)),
                 "max_transition_violation_count": max_transition_violations,
                 "max_capacitance_violation_count": max_capacitance_violations,
             }
@@ -941,6 +979,8 @@ def _run_corner_sweep(
             max_transition_ns=max_transition_ns,
             max_capacitance_pf=max_capacitance_pf,
             max_fanout=max_fanout,
+            input_delay_ns=input_delay_ns,
+            output_delay_ns=output_delay_ns,
         )
         _write_script(corner_script_path, corner_lines)
 
@@ -963,15 +1003,15 @@ def _run_corner_sweep(
         # below is.
         corner_tns_setup_raw = corner_metrics.get("timing__setup__tns")
         corner_tns_hold_raw = corner_metrics.get("timing__hold__tns")
+        corner_setup = (
+            round(corner_setup_raw, 5) if corner_setup_raw is not None else None
+        )
+        corner_hold = round(corner_hold_raw, 5) if corner_hold_raw is not None else None
         corner_breakdown.append(
             {
                 "name": corner_name,
-                "setup_slack_ns": (
-                    round(corner_setup_raw, 5) if corner_setup_raw is not None else None
-                ),
-                "hold_slack_ns": (
-                    round(corner_hold_raw, 5) if corner_hold_raw is not None else None
-                ),
+                "setup_slack_ns": corner_setup,
+                "hold_slack_ns": corner_hold,
                 "total_negative_setup_slack_ns": (
                     round(corner_tns_setup_raw, 5)
                     if corner_tns_setup_raw is not None
@@ -982,6 +1022,8 @@ def _run_corner_sweep(
                     if corner_tns_hold_raw is not None
                     else None
                 ),
+                # Issue #1865: see the single-corner branch above.
+                "timing_status": _timing_status((corner_setup, corner_hold)),
                 # Issue #1709: this corner's *own* design-rule verdict, from
                 # its own single-corner invocation's stdout -- the per-corner
                 # counterpart of the combined aggregates above, letting a
