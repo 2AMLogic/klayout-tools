@@ -1719,6 +1719,102 @@ def _pad_self_notch_violation_um(
     return min(edge_pair.distance() for edge_pair in violations) * dbu
 
 
+def _leg_block_spacing_violation_um(
+    points_um: list[tuple[float, float]],
+    width_um: float,
+    via_drops: list[dict[str, Any]],
+    stub_widen: list[dict[str, Any]],
+    route_layer: tuple[int, int] | None,
+    geometry: dict[str, Any],
+    spacing_um: float,
+) -> float | None:
+    """Whether one leg's *whole drawn footprint* comes within ``spacing_um``
+    of a block's own drawn shapes on the leg's own route layer, without
+    touching them (issue #1904).
+
+    ``geometry`` is :func:`read_block_layer_geometry`'s result for the block
+    to check against, already translated into the composed frame (the same
+    input :func:`_self_net_drawn_short` and
+    :func:`_pad_self_notch_violation_um` take). The compared footprint is
+    :func:`_drawn_leg_footprint_region` -- backbone plus via-drop landing pads
+    plus stub-widen boxes -- so this check and
+    ``_write_composed_gds``'s actual output cannot disagree about what the
+    leg draws.
+
+    **Spacing, not overlap.** Two shapes that never touch can still sit closer
+    together than the resolved deck's own same-layer ``"space"`` rule (e.g.
+    sky130's ``li1.space.1``, gf180mcu's ``metal1.space.1``) allows -- a real,
+    net-agnostic `klt drc` violation. The existing own-block checks all test
+    for *contact*: :func:`_self_net_drawn_short` (positive-area overlap, checks
+    4 and #1527's own-block escape check) and :func:`route_two_pin`'s check 5
+    (a bbox crossing beyond :func:`_port_edge_margin_um`'s flat per-block
+    allowance, which is a *margin heuristic*, not a rule lookup). So an
+    approach that threads a gap in the block's own drawn geometry narrower
+    than the deck's minimum spacing -- ``diff_pair``'s ``Q1_1_G`` gate pad
+    sandwiched between the two interleaved rows' own S/D metal columns being
+    the reproduction #1904 filed -- passed every one of them and composed
+    ``routed: true`` with no warning, leaving a downstream `klt drc` run as the
+    only thing that caught it. This is the same generalisation issue #1386
+    already applied to the route-vs-route check (overlap-only -> spacing-rule
+    aware), applied to the route-vs-its-own-block case.
+
+    Two classes of shape are deliberately **not** obstacles here:
+
+    * whatever the leg's own endpoints land on -- the leg is *meant* to
+      terminate on (and merge with) the block's own wire there, the same
+      exemption :func:`_self_net_drawn_short` makes. A self-notch inside that
+      merged shape is a separate question, already owned by
+      :func:`_pad_self_notch_violation_um` (#1520).
+    * anything the drawn footprint literally *overlaps*. An overlap is a
+      *short* question, owned by the checks above -- and deliberately left
+      unflagged for a ``generator_report`` block's legitimately-drawn-but-
+      unreported geometry (``mos_array``'s dummy matching columns, the
+      false-positive class #1527 had to guard against). Excluding it here
+      keeps this check from re-litigating that decision through a different
+      door: once two shapes merge there is no gap between them to violate a
+      space rule anyway. Only a genuine *near miss* is reported -- which is a
+      real DRC finding against dummy metal exactly as it is against any other
+      drawn shape, since a rule-deck ``"space"`` check is net-agnostic.
+
+    Returns the closest offending distance (um), or ``None`` when nothing on
+    this block's layer comes closer than ``spacing_um`` (including when
+    ``spacing_um`` is non-positive at the resolution ``geometry["dbu"]``
+    provides, or the leg draws nothing).
+    """
+    import klayout.db as kdb
+
+    if not points_um:
+        return None
+    dbu = geometry["dbu"]
+    spacing_dbu = int(round(spacing_um / dbu))
+    if spacing_dbu <= 0:
+        return None
+
+    drawn = _drawn_leg_footprint_region(
+        points_um, width_um, via_drops, stub_widen, dbu, route_layer
+    )
+    if drawn.is_empty():
+        return None
+
+    endpoints = kdb.Region()
+    for x_um, y_um in (points_um[0], points_um[-1]):
+        px = int(round(x_um / dbu))
+        py = int(round(y_um / dbu))
+        endpoints.insert(kdb.Box(px - 1, py - 1, px + 1, py + 1))
+
+    obstacles = geometry["region"].not_interacting(endpoints)
+    if obstacles.is_empty():
+        return None
+    obstacles = obstacles.not_interacting(drawn)
+    if obstacles.is_empty():
+        return None
+
+    violations = obstacles.separation_check(drawn, spacing_dbu)
+    if violations.is_empty():
+        return None
+    return min(edge_pair.distance() for edge_pair in violations) * dbu
+
+
 def _self_net_drawn_short(
     points_um: list[tuple[float, float]],
     geometry: dict[str, Any],

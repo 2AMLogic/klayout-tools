@@ -13736,3 +13736,300 @@ def test_compose_per_leg_width_um_alone_keeps_the_cross_block_fallback(
     # `width_um` governs the plane the leg was asked to draw on, exactly as a
     # net-level `width_um` does -- it does not widen the fallback plane.
     assert met1_paths[0].path.width * layout.dbu == pytest.approx(0.14)
+
+
+# --------------------------------------------------------------------------- #
+# Own-block approach spacing (issue #1904): every own-block check a leg ran
+# against the blocks its own pins sit on tested for *contact* -- a positive-
+# area overlap (`_self_net_drawn_short`, checks 3/4 and #1527's own-block
+# escape check) or a bbox crossing measured against `_port_edge_margin_um`,
+# a flat per-block *margin* allowance rather than a rule lookup (check 5).
+# None of them held the leg to the resolved deck's own same-layer `"space"`
+# rule, so an approach threading a gap in the block's own drawn geometry
+# narrower than that rule composed `routed: true` with no warning and left a
+# real `metal1.space.1`/`li1.space.1` violation for a downstream `klt drc`
+# run to find. `compose()`'s own `_leg_conflict` now applies the same
+# spacing-rule lookup (#1386's `_min_spacing_um_for_layer`) it already
+# applies route-vs-route to the route-vs-its-own-block case.
+# --------------------------------------------------------------------------- #
+
+
+def _diff_pair_recessed_gate_request(both_pdk_root, tmp_path, port, output):
+    """#1904's reproduction, generically: a `diff_pair` (`splits: 1`) whose
+    two interleaved rows sandwich `Q1_1_G`'s gate landing pad between their
+    own S/D metal columns, reached by an external multi-block bundle net from
+    far enough away that the router picks a channel-then-drop approach rather
+    than a short local jog. ``port`` selects which of the block's two gate
+    pads the bundle reaches: `Q1_1_G` (the recessed one -- only reachable by
+    threading that generator-drawn channel) or `Q2_1_G` (the control: its pad
+    sits at the block's own outer edge, reachable with no obstruction).
+    """
+    dp = _gen_block_variant(
+        tmp_path,
+        both_pdk_root,
+        "gf180mcuD",
+        "diff_pair",
+        "dp1904",
+        splits=1,
+        add_guard_ring=False,
+        gate_contact=True,
+    )
+    others = [
+        _gen_block_variant(
+            tmp_path,
+            both_pdk_root,
+            "gf180mcuD",
+            "mos_array",
+            f"m1904_{index}",
+            rows=1,
+            cols=1,
+            dummy=0,
+            gate_contact=True,
+        )
+        for index in range(2)
+    ]
+    return dp, {
+        "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+        "blocks": [
+            {"id": "b1", "generator_report": others[0]},
+            {"id": "b2", "generator_report": others[1]},
+            {"id": "dp", "generator_report": dp},
+        ],
+        "placement": {
+            "strategy": "row",
+            "order": ["b1", "b2", "dp"],
+            "spacing_um": 3.0,
+        },
+        "connectivity": [
+            {
+                "net": "GBUS",
+                "pins": [
+                    {"block": "b1", "port": "U0_G"},
+                    {"block": "b2", "port": "U0_G"},
+                    {"block": "dp", "port": port},
+                ],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.38},
+        "options": {"cell_name": "compose1904", "output": str(output)},
+    }
+
+
+def test_compose_rejects_a_recessed_gate_approach_that_violates_deck_spacing(
+    tmp_path, both_pdk_root
+):
+    # The exact case #1904 filed. Before the fix every leg reaching `Q1_1_G`
+    # composed `routed: true`, `unrouted_nets == []`, `warnings == []` -- and
+    # `klt drc` reported exactly two `metal1.space.1` violations (the left and
+    # right margin edges of the same offending approach) sourced from the
+    # `diff_pair` instance, on a block that is DRC-clean standalone.
+    output = tmp_path / "recessed_gate_1904.gds"
+    dp, request = _diff_pair_recessed_gate_request(
+        both_pdk_root, tmp_path, "Q1_1_G", output
+    )
+
+    # The block itself is clean: whatever the composition draws is what
+    # introduces the violation, not the generator's own geometry.
+    assert run_drc(dp["gds_path"], "gf180mcu")["status"] == "clean"
+
+    report = compose(request)
+
+    # The leg is now reported rather than silently drawn ...
+    assert report["unrouted_nets"] == ["GBUS"]
+    net = report["nets"][0]
+    assert net["routed"] is False
+    offending = [leg for leg in net["legs"] if not leg["routed"]]
+    assert offending, net["legs"]
+    # ... and the reason names the *real* conflict: the deck's own same-layer
+    # spacing rule, the block it is measured against, and the issue.
+    for leg in offending:
+        assert "metal1.space.1" in leg["reason"], leg["reason"]
+        assert "'dp'" in leg["reason"], leg["reason"]
+        assert "#1904" in leg["reason"], leg["reason"]
+
+    # The composed layout agrees -- the violating approach was never drawn.
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_still_routes_the_same_blocks_unobstructed_gate(
+    tmp_path, both_pdk_root
+):
+    # The control the issue itself draws: `Q2_1_G`'s pad sits at the block's
+    # own outer edge with no obstruction, so the identical composition must
+    # still route it. The spacing check must reject the approach that is
+    # actually illegal, not every approach into a `diff_pair`'s gates.
+    output = tmp_path / "outer_gate_1904.gds"
+    _dp, request = _diff_pair_recessed_gate_request(
+        both_pdk_root, tmp_path, "Q2_1_G", output
+    )
+    report = compose(request)
+
+    assert report["unrouted_nets"] == []
+    net = report["nets"][0]
+    assert net["routed"] is True
+    assert all(leg["routed"] for leg in net["legs"]), net["legs"]
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_compose_own_block_spacing_check_does_not_reject_dummy_column_routes(
+    tmp_path, pdk_root
+):
+    # The false-positive class #1527 had to scope its own-block escape check
+    # around: a `generator_report` block draws real, unreported metal (here
+    # `mos_array`'s own `dummy` matching columns, flanking the array and
+    # excluded from the netlist by `klt extract`'s dummy-suppression
+    # convention) that an approach stub legitimately runs over. The spacing
+    # check must not turn those previously-and-correctly `routed: true` legs
+    # into failures: an overlapped shape is excluded from it precisely because
+    # merged metal has no gap left to violate a `"space"` rule.
+    blocks = [
+        _gen_block(
+            tmp_path,
+            pdk_root,
+            "mos_array",
+            f"md{index}",
+            rows=1,
+            cols=2,
+            dummy=1,
+            gate_contact=True,
+        )
+        for index in range(2)
+    ]
+    output = tmp_path / "dummy_columns_1904.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "b1", "generator_report": blocks[0]},
+                {"id": "b2", "generator_report": blocks[1]},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["b1", "b2"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "LINK",
+                    "pins": [
+                        {"block": "b1", "port": "U1_D"},
+                        {"block": "b2", "port": "U0_S"},
+                    ],
+                },
+                {
+                    "net": "GATE",
+                    "pins": [
+                        {"block": "b1", "port": "U0_G"},
+                        {"block": "b2", "port": "U1_G"},
+                    ],
+                },
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "dummy_columns_1904", "output": str(output)},
+        }
+    )
+
+    # Both nets still route -- the dummy columns their approach stubs run past
+    # are not treated as an obstacle they must clear.
+    assert report["unrouted_nets"] == []
+    assert all(net["routed"] for net in report["nets"]), report["nets"]
+    # And the drawn result is clean: before this check the same composition
+    # reported `routed: true` while `klt drc` found `li1.space.1` violations
+    # against the approach's own margins -- the check steers the leg onto a
+    # channel track that clears the rule instead.
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def _spacing_probe_geometry(boxes_um, dbu=0.005):
+    """A `read_block_layer_geometry`-shaped result built from plain um boxes
+    -- the pure-geometry half of the #1904 check, with no PDK involved."""
+    import klayout.db as kdb
+
+    region = kdb.Region()
+    for x0, y0, x1, y1 in boxes_um:
+        region.insert(
+            kdb.Box(
+                int(round(x0 / dbu)),
+                int(round(y0 / dbu)),
+                int(round(x1 / dbu)),
+                int(round(y1 / dbu)),
+            )
+        )
+    return {"region": region, "dbu": dbu}
+
+
+def test_leg_block_spacing_violation_um_reports_a_threaded_gap():
+    # Two columns 0.4um apart with a 0.2um route down the middle: 0.1um of
+    # clearance each side, against a 0.2um rule.
+    geometry = _spacing_probe_geometry([(0.0, 0.0, 1.0, 4.0), (1.4, 0.0, 2.4, 4.0)])
+    violation = gen_compose._leg_block_spacing_violation_um(
+        [(1.2, 5.0), (1.2, 2.0)],
+        0.2,
+        [],
+        [],
+        (67, 20),
+        geometry,
+        0.2,
+    )
+    assert violation == pytest.approx(0.1)
+
+
+def test_leg_block_spacing_violation_um_clears_a_wide_enough_gap():
+    # The same route through a 1.0um gap -- 0.4um each side, clear of the rule.
+    geometry = _spacing_probe_geometry([(0.0, 0.0, 1.0, 4.0), (2.0, 0.0, 3.0, 4.0)])
+    assert (
+        gen_compose._leg_block_spacing_violation_um(
+            [(1.5, 5.0), (1.5, 2.0)],
+            0.2,
+            [],
+            [],
+            (67, 20),
+            geometry,
+            0.2,
+        )
+        is None
+    )
+
+
+def test_leg_block_spacing_violation_um_ignores_shapes_the_leg_overlaps():
+    # A shape the drawn metal runs straight over is a *short* question, owned
+    # by `_self_net_drawn_short`/check 5 -- and deliberately not flagged for a
+    # generator's own dummy geometry (#1527). Merged metal has no gap left to
+    # violate a `"space"` rule, so this check must stay silent about it.
+    geometry = _spacing_probe_geometry([(1.0, 1.0, 1.4, 4.0)])
+    assert (
+        gen_compose._leg_block_spacing_violation_um(
+            [(1.2, 5.0), (1.2, 0.0)],
+            0.2,
+            [],
+            [],
+            (67, 20),
+            geometry,
+            0.2,
+        )
+        is None
+    )
+
+
+def test_leg_block_spacing_violation_um_exempts_the_shape_the_leg_lands_on():
+    # The leg is *meant* to terminate on (and merge with) the block's own wire
+    # at its endpoint -- that shape is never an obstacle, the same exemption
+    # `_self_net_drawn_short` makes. Here the route ends on the pad and there
+    # is nothing else on the layer, so nothing is reported even though the
+    # pad's own edges sit well inside the rule distance of the route.
+    geometry = _spacing_probe_geometry([(0.8, 1.6, 1.6, 2.4)])
+    assert (
+        gen_compose._leg_block_spacing_violation_um(
+            [(1.2, 5.0), (1.2, 2.0)],
+            0.2,
+            [],
+            [],
+            (67, 20),
+            geometry,
+            0.2,
+        )
+        is None
+    )

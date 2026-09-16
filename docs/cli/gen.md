@@ -1221,6 +1221,27 @@ outermost active edge — or, if a one-column-per-net grid is mandatory, place
 two independent `mos_array` singles side by side and give up the
 common-centroid interleave.
 
+**The two gate pads are not equally reachable from outside (#1904).** The same
+interleave that shares an x column per terminal also places the two rows' gate
+landing pads asymmetrically: the outer row's gate (`Q2_1_G` at `splits=1`) sits
+at the block's own outer edge, reachable from directly outside the footprint
+with no obstruction, while the inner row's (`Q1_1_G`) sits **sandwiched between
+the two rows' own S/D metal columns** — reachable on the routing plane only by
+threading the horizontal gap between them. That gap is generator-drawn geometry
+sized by the unit device, not by anything the caller passes to
+[`klt gen-compose`](gen-compose.md), and on a real deck it is narrower than the
+target PDK's own minimum same-layer spacing once a route is laid down it (the
+issue's reproduction: ~0.01µm of clearance against gf180mcu's 0.23µm
+`metal1.space.1`). `klt gen-compose` rejects such a leg outright since #1904
+(`routed: false`, a `legs[].reason` naming the deck rule) rather than drawing a
+silent violation — so a composition that reaches `Q1_1_G` from outside on the
+primary routing plane will report the net unroutable. Reach it on a second
+plane instead (`connectivity[].layer_role`, or `routing.cross_block_layer_role`,
+which that leg retries onto automatically), supply `waypoints_um` that approach
+from a clear side, or floorplan the gate net around `Q2_1_G`. Widening
+`row_spacing_um` does **not** help: it grows the band *between* the rows, not
+the S-to-D gap inside a row that the approach actually threads.
+
 This is inherent to common-centroid interleaving, not a fixable oversight,
 and in particular it is *not* removable by a per-leg x offset: pushing one
 leg off the shared column by a constant shifts that leg's x centroid
