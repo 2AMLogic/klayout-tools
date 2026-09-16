@@ -11651,3 +11651,263 @@ def test_real_gf180mcu_library_resolves_pin_order_from_the_installed_file():
         "VSS",
     ]
     assert lookup("gf180mcu_fd_sc_mcu9t5v0__not_a_real_cell") is None
+
+
+# --------------------------------------------------------------------------- #
+# Capacitor device-class recovery across a bare-`C`-card SPICE round trip
+# (issue #1876)
+#
+# #1558 made `klt extract -o netlist.spice` write an unbound capacitor's `C`
+# card bare and value-only (no trailing device-class-name token), which is
+# correct for simulatability but left `kdb.NetlistSpiceReader` nothing to
+# recover the capacitor's real class from on read-back -- it fell back to
+# KLayout's own generic/anonymous `CAP` class, breaking `klt lvs`'s
+# name-based device-class correspondence for capacitors specifically
+# whenever the *other* side of the compare names the class explicitly.
+# `netlist_capacitor_recovery.py` fixes this by recovering the class from
+# the writer's own preceding `* device instance ... <class>` comment.
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_capacitor_class_comments_recovers_named_class():
+    from klayout_tools.netlist_capacitor_recovery import (
+        parse_capacitor_class_comments,
+    )
+
+    text = """
+* cell TOP
+.SUBCKT TOP
+* device instance $1 r0 *1 5,5 cap_mim_1f0_m4m5_noshield
+C$1 a b 1.19e-13
+* device instance _1 r0 *1 0,0
+C_1 a c 1e-15
+.ENDS TOP
+"""
+    assert parse_capacitor_class_comments(text) == {
+        ("TOP", "$1"): "cap_mim_1f0_m4m5_noshield"
+    }
+
+
+def test_parse_capacitor_class_comments_ignores_malformed_or_missing_comment():
+    """A hand-edited SPICE file whose comment doesn't match the writer's own
+    convention (or has none at all) must degrade gracefully -- no entry
+    recorded, no exception -- never a crash on genuinely malformed input."""
+    from klayout_tools.netlist_capacitor_recovery import (
+        parse_capacitor_class_comments,
+    )
+
+    no_comment = """
+.SUBCKT TOP
+C$1 a b 1.19e-13
+.ENDS TOP
+"""
+    assert parse_capacitor_class_comments(no_comment) == {}
+
+    unrelated_comment = """
+.SUBCKT TOP
+* not a device-instance comment at all
+C$1 a b 1.19e-13
+.ENDS TOP
+"""
+    assert parse_capacitor_class_comments(unrelated_comment) == {}
+
+
+def test_parse_capacitor_class_comments_requires_matching_device_name():
+    """A comment naming a different device than the card immediately
+    following it (a hand-edited file, or two cards reordered) must not be
+    misattributed -- the association is by strict adjacency plus a
+    same-name sanity check."""
+    from klayout_tools.netlist_capacitor_recovery import (
+        parse_capacitor_class_comments,
+    )
+
+    text = """
+.SUBCKT TOP
+* device instance $1 r0 *1 5,5 some_class
+C$2 a b 1.19e-13
+.ENDS TOP
+"""
+    assert parse_capacitor_class_comments(text) == {}
+
+
+def test_parse_capacitor_class_comments_scopes_by_circuit():
+    """The same device name (`$1`) in two different `.SUBCKT` blocks --
+    the normal shape of a composed, multi-macro pre-extracted netlist --
+    recovers its own circuit's own class, never the other macro's."""
+    from klayout_tools.netlist_capacitor_recovery import (
+        parse_capacitor_class_comments,
+    )
+
+    text = """
+.SUBCKT MACRO_A
+* device instance $1 r0 *1 5,5 class_a
+C$1 a b 1e-15
+.ENDS MACRO_A
+.SUBCKT MACRO_B
+* device instance $1 r0 *1 5,5 class_b
+C$1 a b 2e-15
+.ENDS MACRO_B
+"""
+    assert parse_capacitor_class_comments(text) == {
+        ("MACRO_A", "$1"): "class_a",
+        ("MACRO_B", "$1"): "class_b",
+    }
+
+
+def test_capacitor_class_recovery_reader_reattaches_recovered_class(tmp_path):
+    """`make_capacitor_class_recovery_reader` reattaches the recovered class
+    to the matching bare `C` card's device, leaves an anonymous-comment (or
+    comment-less) bare `C` card on KLayout's own generic `CAP` class exactly
+    as before, and leaves every non-capacitor device (a resistor here)
+    completely untouched."""
+    import klayout.db as kdb
+
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+        parse_capacitor_class_comments,
+    )
+
+    text = """
+.SUBCKT TOP
+* device instance $1 r0 *1 5,5 cap_mim_1f0_m4m5_noshield
+C$1 a b 1.19e-13
+* device instance _1 r0 *1 0,0
+C_1 a c 1e-15
+* device instance _2 r0 *1 0,0
+R_2 a c 500
+.ENDS TOP
+"""
+    path = _write(tmp_path / "recover.spice", text)
+    recovered = parse_capacitor_class_comments(text)
+
+    netlist = kdb.Netlist()
+    reader = make_capacitor_class_recovery_reader(recovered)
+    netlist.read(path, reader)
+
+    devices = {
+        device.name: device
+        for circuit in netlist.each_circuit()
+        for device in circuit.each_device()
+    }
+    recovered_device = devices["$1"]
+    assert recovered_device.device_class().name == "cap_mim_1f0_m4m5_noshield"
+    assert recovered_device.parameter("C") == pytest.approx(1.19e-13)
+
+    anonymous_device = devices["_1"]
+    assert anonymous_device.device_class().name == "CAP"  # unchanged fallback
+
+    # Resistor names get KLayout's own default-reader uppercasing -- an
+    # unrelated, pre-existing quirk this fix must not perturb.
+    resistor_device = next(
+        device
+        for device in devices.values()
+        if isinstance(device.device_class(), kdb.DeviceClassResistor)
+    )
+    assert resistor_device.device_class().name == "RES"
+
+
+def _box_um(x0, y0, x1, y1, dbu=0.001):
+    """A `kdb.Box` from micrometre coordinates -- mirrors
+    `test_extract.py`'s own helper of the same name (1nm/unit convention)."""
+    import klayout.db as kdb
+
+    return kdb.Box(round(x0 / dbu), round(y0 / dbu), round(x1 / dbu), round(y1 / dbu))
+
+
+def _make_sky130_mim_layout_for_lvs():
+    """A minimal sky130 MiM cap (met3/capm) -- just enough geometry for
+    `sky130.py`'s deck to recognise and extract one
+    `sky130_fd_pr__model__cap_mim` device. Mirrors
+    `test_extract.py::_make_sky130_mim_layout`, kept local here so this
+    file's own capacitor-recovery tests stay self-contained."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(70, 20, _box_um(-20, -20, 20, 20))  # met3.drawing (bottom plate)
+    draw(89, 44, _box_um(0, 0, 10, 5))  # capm.drawing (top plate)
+    return layout
+
+
+def test_pre_extracted_layout_netlist_recovers_capacitor_class_for_lvs_match(
+    tmp_path,
+):
+    """End-to-end (issue #1876): a two-step `klt extract -o netlist.spice`
+    then `klt lvs` pipeline (the `layout.netlist` pre-extracted shape) on a
+    sky130 MiM capacitor reaches `status: "match"` against a reference
+    netlist that names the capacitor's class explicitly on its own `C`
+    card -- the schematic-equivalent, hand-authored shape #1558's bare-card
+    fix could otherwise never match again. Confirmed to actually depend on
+    the fix: reading the same pair with a plain, unpatched
+    `kdb.NetlistSpiceReader()` (simulating pre-fix behavior) reports a
+    genuine `NetlistComparer.compare()` mismatch for this exact fixture."""
+    from klayout_tools.extract import run_extract
+
+    layout = _make_sky130_mim_layout_for_lvs()
+    gds = str(tmp_path / "mim.gds")
+    layout.write(gds)
+
+    spice_path = str(tmp_path / "mim.spice")
+    extracted = run_extract(gds, "sky130", output=spice_path)
+    top_name = extracted["top"]
+    device = extracted["devices"][0]
+    device_class = device["class"]
+    capacitance_f = device["params"]["c_f"]
+
+    # A bare `C` card is not simulatable here (no trailing model token) --
+    # naming the class explicitly is not KLayout's own default writer
+    # behaviour, so this reference is deliberately hand-authored the way a
+    # schematic-derived reference commonly is (issue #1876's own repro
+    # shape), independent of net names (the layout side promotes no pins).
+    reference_spice = f"""
+.subckt {top_name}
+C1 n1 n2 {capacitance_f:.9e} {device_class}
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": spice_path, "top": top_name},
+                "reference": {"netlist": reference_path, "top": top_name},
+            },
+        )
+    )
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+
+
+def test_reference_netlist_bare_capacitor_card_also_recovers_class(tmp_path):
+    """The reference-side read path (`_read_reference_netlist`) needs the
+    identical recovery, not just the layout-side pre-extracted shape: a
+    reference netlist that itself was produced by a prior `klt extract`
+    round trip (bare `C` card + comment, issue #1876's own "symmetric"
+    scenario) must still resolve against an inline-extracted layout side,
+    whose in-memory `kdb.Netlist` keeps its real device class untouched."""
+    from klayout_tools.extract import run_extract
+
+    layout = _make_sky130_mim_layout_for_lvs()
+    gds = str(tmp_path / "mim.gds")
+    layout.write(gds)
+
+    spice_path = str(tmp_path / "mim.spice")
+    extracted = run_extract(gds, "sky130", output=spice_path)
+    top_name = extracted["top"]
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": gds, "deck": "sky130"},
+                "reference": {"netlist": spice_path, "top": top_name},
+            },
+        )
+    )
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}

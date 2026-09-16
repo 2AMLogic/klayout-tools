@@ -174,6 +174,10 @@ from .lvs_netgen import (
     _resolve_netgen_setup,
     _run_netgen_lvs,
 )
+from .netlist_capacitor_recovery import (
+    make_capacitor_class_recovery_reader,
+    parse_capacitor_class_comments,
+)
 from .pdk import PdkNotFoundError, find_pdk
 from .verilog_netlist import (
     VerilogNetlistError,
@@ -2208,8 +2212,21 @@ def _resolve_layout(
         return netlist, layout_spec["file"], layout_file, extracted_netlist_path
 
     layout_netlist_path = _require_path(layout_spec, "netlist", "layout", request_dir)
+    # Issue #1876: recover a capacitor's real device-class name across the
+    # bare-`C`-card round trip issue #1558 introduced -- see
+    # `netlist_capacitor_recovery.py`'s module docstring. Falls back to
+    # KLayout's own generic capacitor class exactly as before whenever the
+    # recovery comment is missing or malformed.
+    try:
+        with open(layout_netlist_path, encoding="utf-8", errors="replace") as handle:
+            layout_netlist_text = handle.read()
+    except OSError as exc:
+        raise LvsError(
+            f"could not parse layout netlist '{layout_netlist_path}': {exc}"
+        ) from exc
+    recovered_capacitor_classes = parse_capacitor_class_comments(layout_netlist_text)
     netlist = kdb.Netlist()
-    reader = kdb.NetlistSpiceReader()
+    reader = make_capacitor_class_recovery_reader(recovered_capacitor_classes)
     try:
         netlist.read(layout_netlist_path, reader)
     except Exception as exc:
@@ -2295,6 +2312,13 @@ def _read_reference_netlist(
         raise LvsError(f"could not read reference netlist '{path}': {exc}") from exc
 
     read_path = path
+    # Issue #1876: the recovery scan below runs over whichever text is
+    # actually handed to `NetlistSpiceReader` -- the original file for the
+    # default (already-plain-element) form, or the *converted* text for the
+    # two conversion forms, since a converted reference is not expected to
+    # carry `klt extract`'s own device-instance comments but could, in
+    # principle, if a caller's own upstream tooling produced one that does.
+    read_text = text
     tmp_path: str | None = None
 
     if form == "subckt-call":
@@ -2315,6 +2339,7 @@ def _read_reference_netlist(
             tmp.write(converted)
             tmp_path = tmp.name
         read_path = tmp_path
+        read_text = converted
     elif form == "gate-level-verilog":
         if pin_orders is None:
             pin_orders = _resolve_gate_level_pin_orders(library, pdk_variant, pdk_root)
@@ -2335,6 +2360,7 @@ def _read_reference_netlist(
             tmp.write(converted)
             tmp_path = tmp.name
         read_path = tmp_path
+        read_text = converted
     else:
         offending = detect_subckt_call_devices(text)
         if offending:
@@ -2351,7 +2377,8 @@ def _read_reference_netlist(
             )
 
     netlist = kdb.Netlist()
-    reader = kdb.NetlistSpiceReader()
+    recovered_capacitor_classes = parse_capacitor_class_comments(read_text)
+    reader = make_capacitor_class_recovery_reader(recovered_capacitor_classes)
     try:
         netlist.read(read_path, reader)
     except Exception as exc:
