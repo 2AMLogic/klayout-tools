@@ -176,6 +176,8 @@ from .decks import (
 # `klayout_tools.extract` by name.
 from .extract_abstract import _DEF_NET_NAME_PROPERTY_ID as _DEF_NET_NAME_PROPERTY_ID
 from .extract_abstract import (
+    _abstract_cell_body_identity_cover,
+    _abstract_cell_global_net_ports,
     _abstract_cell_mask_layers,
     _apply_def_net_name_overrides,
     _collect_abstract_instances,
@@ -3253,6 +3255,8 @@ def extract_netlist_from_layout(
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] = []
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] = {}
     abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] = {}
+    abstract_cell_global_net_ports: dict[int, int] = {}
+    abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     if abstract_cell_patterns:
         abstract_instances = _collect_abstract_instances(
             layout, top_cell, abstract_cell_patterns
@@ -3273,6 +3277,24 @@ def extract_netlist_from_layout(
             # case this issue reports).
             abstract_cell_local_candidates = {
                 cell_index: _local_pin_candidate_points(
+                    layout, layout.cell(cell_index), deck
+                )
+                for cell_index in matched_cell_indices
+            }
+            # Also computed *before* erasure (issue #1911): the well /
+            # substrate-isolation cover the matched instances contribute
+            # (`_abstract_cell_body_identity_cover` -- reunioned into
+            # `_extract_netlist`'s whole-layout *classification* split so
+            # erasing a black box's well cannot silently reclassify a tie
+            # drawn outside it onto the deck's global substrate net), and
+            # the per-cell-type count of ports that only ever resolve
+            # through that global (`_abstract_cell_global_net_ports` --
+            # warned about instead of silently dropped).
+            abstract_body_identity_cover = _abstract_cell_body_identity_cover(
+                layout, deck, abstract_instances
+            )
+            abstract_cell_global_net_ports = {
+                cell_index: _abstract_cell_global_net_ports(
                     layout, layout.cell(cell_index), deck
                 )
                 for cell_index in matched_cell_indices
@@ -3305,6 +3327,8 @@ def extract_netlist_from_layout(
         abstract_instances=abstract_instances,
         lef_macros=lef_macros,
         abstract_cell_local_candidates=abstract_cell_local_candidates,
+        abstract_cell_global_net_ports=abstract_cell_global_net_ports,
+        abstract_body_identity_cover=abstract_body_identity_cover,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
@@ -5222,6 +5246,8 @@ def _extract_netlist(
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] | None = None,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] | None = None,
     abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] | None = None,
+    abstract_cell_global_net_ports: dict[int, int] | None = None,
+    abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
@@ -5387,6 +5413,22 @@ def _extract_netlist(
     computed by the same caller from the *pre*-erasure geometry -- passed
     straight through to :func:`_wire_abstract_cells`; ``None`` (the default)
     disables the extra-candidate lookup entirely.
+
+    ``abstract_body_identity_cover``/``abstract_cell_global_net_ports``
+    (issue #1911) are likewise computed by the same caller from the
+    *pre*-erasure geometry. The first is
+    :func:`_abstract_cell_body_identity_cover`'s ``(nwell cover,
+    substrate-isolation cover)`` pair, unioned back into the whole-layout
+    **body-identity classification** split below (``nwell_body_cover`` /
+    ``isolation_region``) -- never into the conductor ``nwell`` region -- so
+    black-boxing a cell that draws a well cannot silently reclassify a tie
+    drawn *outside* it from "well tie" to "substrate tie" and merge its net,
+    via ``connect_global``, with every other substrate-tied net in the
+    design. The second is :func:`_abstract_cell_global_net_ports`' per-cell
+    count of ports that only ever resolve through that same global, passed
+    through to :func:`_wire_abstract_cells` for its ``warnings[]`` entry.
+    Both ``None`` (the default) restore this function's pre-#1911
+    behaviour exactly.
     """
     import klayout.db as kdb
 
@@ -5459,6 +5501,40 @@ def _extract_netlist(
         metal_labels,
     )
 
+    # Body-identity *classification* cover (issue #1911). `nwell` is read
+    # below in two structurally different roles, and `--abstract-cells`
+    # erasure must only affect one of them:
+    #
+    # - as a **conductor** (`l2n.connect(nwell, ...)`, the PMOS "W"
+    #   terminal, `probe_layers`) -- the erased region is correct there: a
+    #   black box's well is not a wire the parent may route through, and a
+    #   device may not be recognised with a body terminal whose geometry was
+    #   erased;
+    # - as the right-hand side of a whole-layout **classification** split --
+    #   `tap - nwell` (well tie vs. substrate tie, #490), the derived-tap
+    #   split for a deck with no drawn `tap` layer (#1084), and (via
+    #   `substrate_isolation`) the per-isolated-region substrate identities
+    #   (#1128). These decide the *body identity* of geometry anywhere in
+    #   the design, including geometry drawn outside the abstracted cell
+    #   that merely happens to sit inside the well that cell drew.
+    #
+    # Using the erased region for the second role is what issue #1911
+    # reports: an outside well tie flips to a substrate tie and joins the
+    # deck's `substrate_net` global -- and `connect_global` is not
+    # geometric, so that one flip merges its net with *every* other
+    # substrate-tied net in the design and KLayout comma-joins all of their
+    # drawn labels into one `a|b|c|...` composite name. Unioning the matched
+    # cells' own pre-erasure cover back in here keeps the classification
+    # exactly what a flat (un-abstracted) extraction computes.
+    abstract_nwell_cover, abstract_isolation_cover = (
+        abstract_body_identity_cover
+        if abstract_body_identity_cover is not None
+        else (kdb.Region(), kdb.Region())
+    )
+    nwell_body_cover = (
+        nwell if abstract_nwell_cover.is_empty() else nwell + abstract_nwell_cover
+    )
+
     # Dummy-device marker layer (issue #295, extended to resistors/bipolars
     # in #462): resolved *before* `_resolve_resistors` below so a resistor
     # recognition pass can subtract it from a candidate body the same way
@@ -5522,8 +5598,14 @@ def _extract_netlist(
     if deck.tap is None and (deck.tap_nplus is not None or deck.tap_pplus is not None):
         tap_nplus_region = _region(layout, top_cell, deck.tap_nplus)
         tap_pplus_region = _region(layout, top_cell, deck.tap_pplus)
+        # `nwell_body_cover`, not `nwell` (issue #1911): this is a
+        # body-identity *classification* -- which doping side of the well a
+        # tie strip sits on -- so it must read the well as *drawn*, not as
+        # `--abstract-cells` erasure left it (see `nwell_body_cover`'s own
+        # comment above).
         tap = (
-            (tap_nplus_region & active & nwell) | (tap_pplus_region & (active - nwell))
+            (tap_nplus_region & active & nwell_body_cover)
+            | (tap_pplus_region & (active - nwell_body_cover))
         ) - poly
         # Exclude the derived tie geometry from `active` before the NMOS/
         # PMOS source/drain split just below, so a tie strip is never also
@@ -5592,7 +5674,17 @@ def _extract_netlist(
     # a deck that leaves this field `None` (every deck as of this field's
     # introduction until gf180mcu's own module sets it), or a layout that
     # draws no shapes on a deck's declared isolation layer at all.
-    isolation_region = _region(layout, top_cell, deck.substrate_isolation)
+    # Unioned with the `--abstract-cells` cover for the same reason
+    # `nwell_body_cover` is (issue #1911): an isolation island is a
+    # body-identity *classification* for every NMOS body and substrate tie
+    # inside it, so erasing a black-boxed cell's isolation layer would fold
+    # an isolated block's `<substrate_net>_iso<n>` identity back into the
+    # deck-wide `substrate_net` global -- merging the two, and every net on
+    # them, design-wide. Empty (and inert) unless `--abstract-cells` matched
+    # a cell drawing on this layer.
+    isolation_region = (
+        _region(layout, top_cell, deck.substrate_isolation) + abstract_isolation_cover
+    )
     isolation_islands: list[kdb.Region] = sorted(
         (kdb.Region(component) for component in isolation_region.merged().each()),
         key=lambda region: (
@@ -5818,7 +5910,12 @@ def _extract_netlist(
     # identity as before this fix.
     nfet_body = kdb.Region()
     l2n.register(nfet_body, "nfet_body")
-    tap_substrate = tap - nwell
+    # `nwell_body_cover`, not `nwell` (issue #1911): "which side of the well
+    # is this tie on" is a body-identity classification, and getting it
+    # wrong here is the single most damaging way `--abstract-cells` erasure
+    # can leak, because the answer feeds `connect_global` -- see
+    # `nwell_body_cover`'s own comment above for the full derivation.
+    tap_substrate = tap - nwell_body_cover
     l2n.register(tap_substrate, "tap_substrate")
 
     # Per-isolated-region body placeholders (issue #1128): one additional,
@@ -6585,6 +6682,7 @@ def _extract_netlist(
             lef_macros or {},
             probe_layers,
             abstract_cell_local_candidates,
+            abstract_cell_global_net_ports,
         )
         warnings = warnings + abstract_cell_warnings
 

@@ -652,6 +652,35 @@ every occurrence of that type):
    matching LEF macro is an application error naming the cell type — never a
    silently dropped pin or an unconnected instance.
 
+**Global-net-only ports (issue #1911).** Steps 1 and 2 both resolve a pin
+from *drawn geometry*. A terminal that reaches its net only through the
+deck's synthesized substrate global (`ExtractionDeck.substrate_net`,
+`vsubs`) has none: the canonical case is an **untapped** NMOS body, whose
+`"W"` terminal `klt extract` resolves via `connect_global` against a
+permanently empty placeholder region rather than any shape in the cell. Such
+a port is structurally unnameable by either source — there is no conductor
+in the cell for a label to sit on, and a LEF `PORT` rectangle would have
+nothing to land on — so it is **dropped** from the black box's `.SUBCKT` pin
+list, leaving `abstracted_cells[].pin_count` one lower than the macro's true
+port count.
+
+That drop is no longer silent: a matched cell type that draws a
+substrate-formed device body but **no substrate tie of its own** gets one
+`warnings[]` entry naming the cell type, the unresolved port count, the
+global net (`vsubs`), and how many pins did resolve. A cell that draws its
+own substrate tie is not warned about — that tie is real drawn conductor,
+nameable by an ordinary in-cell label (step 1) and reachable by the parent's
+routing, so it goes through the normal resolution path.
+
+To carry such a terminal into the black box, either draw and label a
+substrate tie inside the cell, or declare the port via `--abstract-cell-lef`
+with `PORT` geometry that lands on drawn conductor.
+
+Dropping the port only loses *that terminal's* connectivity on *that*
+instance. It must not perturb anything else, and since issue #1911 it does
+not — see "Abstraction never changes net identity outside the black box"
+below for the whole-design corruption that used to accompany it.
+
 **What gets erased vs. preserved inside an abstracted cell.** Every
 device-recognition layer this deck's connectivity graph reads
 (`ExtractionDeck.connectivity_layers` — MOS-recognition layers, and any
@@ -673,6 +702,36 @@ happens to be one of the deck's own `metals` (a real but rare deck
 configuration — no PDK shipped in this repo does this) is not erased, since
 that layer is routing. Neither `sky130` nor `gf180mcu` declares a
 resistor/capacitor body on a `metals[]` layer today.
+
+**Abstraction never changes net identity outside the black box (issue
+#1911).** The erasure above is scoped to the matched cell's own definition,
+but two of the erased layers — `nwell` and `substrate_isolation` — are
+*field* layers that the extraction deck also reads as the right-hand side of
+**whole-layout** body-identity classifications: `tap - nwell` (well tie vs.
+substrate tie), the derived-tap split for a deck with no drawn `tap` layer
+(`tap_nplus`/`tap_pplus`), and the per-isolated-region substrate identities
+`substrate_isolation` mints. Those classifications decide the body identity
+of geometry *anywhere* in the design, including geometry drawn outside the
+abstracted cell that merely sits inside the well that cell happened to draw.
+
+Left unhandled, that leaked badly out of proportion to the abstraction: a
+well tie drawn outside the black box flipped to a *substrate* tie, and
+because `connect_global` is not geometric, that single flip merged its net
+with **every** other substrate-tied net in the design. KLayout comma-joins
+all the drawn labels on one net, so several physically unrelated nets in
+unrelated cells collapsed into one bogus composite name
+(`net_a|net_b|net_c|...`, reported in `merged_net_labels[]` — see "Merged
+net labels" below), purely because a *different* macro was black-boxed.
+
+So the matched instances' own pre-erasure `nwell`/`substrate_isolation`
+cover is unioned back into the **classification** side only. The erased
+region remains the **conductor**: a black box's well is still not a wire the
+parent can route through, `--abstract-cell-lef` pin probing still cannot
+bind a pin onto it, and the PMOS body terminal still reads the conductor
+region so no device can be recognised with a body terminal whose geometry
+was erased. The practical contract: **extracting with `--abstract-cells` on
+one cell type must report the same net names for every net that does not
+touch that cell as a flat (no-`--abstract-cells`) extraction does.**
 
 **Output.** Every distinct matched cell type becomes its own
 `.SUBCKT <cell type> <pins...> ... .ENDS` block in the written SPICE (empty
