@@ -996,7 +996,9 @@ def test_pdk_resolved_leaves_res_metal1_as_bare_r_card(tmp_path: Path):
     table entry (issue #1457's verified finding -- the real fetched install
     defines no `.subckt`/`.model` for it at all, unlike `rsil`/`rppd`/
     `rhigh`), so it stays the bare `R`-card form under `--pdk`, exactly like
-    without `--pdk` -- never a guessed subcircuit call."""
+    without `--pdk` -- never a guessed subcircuit call. The card still gains
+    its own `L=`/`W=` geometry suffix (issue #1927) even though the trailing
+    model-name token is unchanged."""
     path = _write_gds(_make_metal_resistor_layout(8, 8, 8), tmp_path / "res_metal1.gds")
     out = str(tmp_path / "res_metal1.spice")
     report = run_extract(
@@ -1014,7 +1016,10 @@ def test_pdk_resolved_leaves_res_metal1_as_bare_r_card(tmp_path: Path):
     ]
     (card,) = device_lines
     assert card.startswith("R")
-    assert card.endswith("res_metal1")
+    tokens = card.split()
+    assert tokens[-3] == "res_metal1"
+    assert tokens[-2].startswith("L=")
+    assert tokens[-1].startswith("W=")
 
 
 # --------------------------------------------------------------------------- #

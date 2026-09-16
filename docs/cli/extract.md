@@ -1250,6 +1250,20 @@ extract` itself — no combine step involved — applies the correction unless
 `--defer-resistor-fixed-offset` asks it not to; see "Deferring the fixed
 resistor offset" below.)
 
+The written `R` card also carries the same `L`/`W` geometry
+`devices[].params.l_um`/`w_um` reports, as an ` L=...U W=...U` suffix
+(issue #1927 — matching the MOS path's own `M` card, which KLayout's
+default writer already suffixes this way): `R$1 A B 289.2 res_generic_po
+L=6U W=1U`. Before this, the plain `R` card carried only the resistance
+value, dropping the geometry the very same run's own JSON report measured —
+a pre-extracted `layout.netlist` (the documented two-step `klt extract` ->
+`klt lvs` flow) then read back with `l_um=0`/`w_um=0`, disagreeing with the
+`layout.file` inline-extraction flow on the identical layout. Scoped to a
+*named* (deck-declared) resistor class only: `--parasitics`' own injected
+`R`/`C` elements stay bare, value-only cards with no `L=`/`W=` (they never
+measure a real length/width in the first place — see "Verified compatible
+with `klt sim`'s netlist convention" above).
+
 Three consequences worth knowing:
 
 - **Unmarked conductor is never reclassified.** A resistor-*shaped* poly bar
@@ -2608,11 +2622,11 @@ byte-identical apart from their synthesized names:
 
 ```
 .SUBCKT TOP RA RA$1 RA$2 RA$3 RA$4 RB RB$1 RB$2 RB$3 RB$4
-R$1 RA   RB   289.2 res_generic_po
-R$2 RA$1 RB$1 289.2 res_generic_po
-R$3 RA$2 RB$2 289.2 res_generic_po
-R$4 RA$3 RB$3 289.2 res_generic_po
-R$5 RA$4 RB$4 482   res_generic_po
+R$1 RA   RB   289.2 res_generic_po L=6U W=1U
+R$2 RA$1 RB$1 289.2 res_generic_po L=6U W=1U
+R$3 RA$2 RB$2 289.2 res_generic_po L=6U W=1U
+R$4 RA$3 RB$3 289.2 res_generic_po L=6U W=1U
+R$5 RA$4 RB$4 482   res_generic_po L=10U W=1U
 .ENDS TOP
 ```
 
@@ -4902,11 +4916,15 @@ when `ngspice` is not installed).
 
 That testbench supplies the `.model` cards for the deck's device-class names
 (e.g. `.model nfet nmos level=1`) — the same convention applies to a drawn
-resistor, which is written as `R$1 A B 289.2 res_generic_po`: the extracted
-resistance plus the device-class name as a model token, so the testbench adds
-a matching `.model res_generic_po r`. (Unrelated to `--parasitics`, whose
-injected R/C elements are deliberately emitted as *bare* `R`/`C` cards with
-no model token.)
+resistor, which is written as `R$1 A B 289.2 res_generic_po L=6U W=1U`: the
+extracted resistance plus the device-class name as a model token, plus the
+device's own measured `L=`/`W=` geometry (issue #1927 — carried through so a
+pre-extracted `layout.netlist` stays a faithful serialization of the same
+`devices[].params.l_um`/`w_um` the JSON report already carries), so the
+testbench adds a matching `.model res_generic_po r`. (Unrelated to
+`--parasitics`, whose injected R/C elements are deliberately emitted as
+*bare* `R`/`C` cards with no model token and no `L=`/`W=` — see "Drawn
+resistors" below for the scope of the geometry suffix.)
 
 **No substrate tie needs hand-authoring (issue #1263), and it reaches every
 instantiation (issue #1503).** A `--parasitics` extraction carries its own DC

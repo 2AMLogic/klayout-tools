@@ -5557,7 +5557,9 @@ def test_pdk_resolved_leaves_sky130_metal_resistor_as_bare_r_card(tmp_path):
     `decks/sky130.py`'s provenance comment), so it stays the bare `R`-card
     form under `--pdk`, exactly like without `--pdk` -- never a guessed
     subcircuit call. Mirrors sg13g2's
-    `test_pdk_resolved_leaves_res_metal1_as_bare_r_card`."""
+    `test_pdk_resolved_leaves_res_metal1_as_bare_r_card`. The card still
+    gains its own `L=`/`W=` geometry suffix (issue #1927) even though the
+    trailing model-name token is unchanged."""
     path = _write_gds(
         _make_sky130_metal_resistor_layout(68), tmp_path / "res_generic_m1.gds"
     )
@@ -5577,7 +5579,10 @@ def test_pdk_resolved_leaves_sky130_metal_resistor_as_bare_r_card(tmp_path):
     ]
     (card,) = device_lines
     assert card.startswith("R")
-    assert card.endswith("res_generic_m1")
+    tokens = card.split()
+    assert tokens[-3] == "res_generic_m1"
+    assert tokens[-2].startswith("L=")
+    assert tokens[-1].startswith("W=")
 
 
 # --------------------------------------------------------------------------- #

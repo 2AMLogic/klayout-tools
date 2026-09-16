@@ -12472,6 +12472,73 @@ C1 n1 n2 {capacitance_f:.9e} {device_class}
     assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
 
 
+def test_pre_extracted_layout_netlist_carries_resistor_geometry_for_lvs_match(
+    tmp_path,
+):
+    """End-to-end (issue #1927): a two-step `klt extract -o netlist.spice`
+    then `klt lvs` pipeline (the `layout.netlist` pre-extracted shape) on a
+    gf180mcu drawn poly resistor reaches `status: "match"`, with no
+    `device.property` findings for `l_um`/`w_um`, against a reference that
+    carries the identical `L=`/`W=` geometry the extraction's own JSON
+    report measured. Before the fix, `klt extract`'s written `R` card
+    dropped that geometry entirely -- reading it back through the
+    documented two-step flow produced a device with `l_um=0`/`w_um=0`, a
+    false `device.property` mismatch against any reference with real
+    geometry, even though the layout was extracted correctly (confirmed by
+    the same run's own JSON `devices[].params`)."""
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.extract import run_extract
+    from klayout_tools.pdk_models import _format_um
+
+    gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
+    spice_path = str(tmp_path / "poly_res.spice")
+    extracted = run_extract(
+        gds, "gf180mcu", output=spice_path, deck_options={"poly_res": "2k"}
+    )
+    top_name = extracted["top"]
+    device = extracted["devices"][0]
+    device_class = device["class"]
+    r_ohm = device["params"]["r_ohm"]
+    l_um = device["params"]["l_um"]
+    w_um = device["params"]["w_um"]
+    assert l_um > 0.0
+    assert w_um > 0.0
+
+    # The written netlist itself must carry the geometry the JSON report
+    # measured -- not just an assertion about the round trip below.
+    written_text = Path(spice_path).read_text()
+    assert f"L={_format_um(l_um)} W={_format_um(w_um)}" in written_text
+
+    substrate_net = get_extraction_deck("gf180mcu").substrate_net
+    r_card = (
+        f"R1 RA RB {substrate_net} {r_ohm:.5f} {device_class} "
+        f"L={_format_um(l_um)} W={_format_um(w_um)}"
+    )
+    reference_spice = f"""
+.subckt {top_name} RA RB {substrate_net}
+{r_card}
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": spice_path, "deck": "gf180mcu", "top": top_name},
+                "reference": {"netlist": reference_path, "top": top_name},
+            },
+        )
+    )
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+    assert not [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == "device.property"
+    ]
+
+
 def test_reference_netlist_bare_capacitor_card_also_recovers_class(tmp_path):
     """The reference-side read path (`_read_reference_netlist`) needs the
     identical recovery, not just the layout-side pre-extracted shape: a

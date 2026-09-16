@@ -35,6 +35,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/lvs.md`](docs/cli/lvs.md)'s `options.compare_parameters` and
   `device.parameter_excluded` sections.
 
+- **Fixed**: `klt extract`'s written SPICE netlist no longer drops a drawn
+  resistor's `L`/`W` geometry (issue #1927). KLayout's own default
+  `NetlistSpiceWriter` writes a `DeviceClassResistor`/`WithBulk` device's
+  plain `R` card with only its resistance value as the positional token
+  (`R$1 a b 120000 res_xhigh_po`) — unlike the MOS path, whose plain `M`
+  card natively carries `L=`/`W=` — even though the extractor's own JSON
+  report already carries the same device's `l_um`/`w_um` alongside `r_ohm`
+  in `devices[].params`. Read back through the documented two-step `klt
+  extract` -> `klt lvs` flow (`layout.netlist`), that dropped geometry made
+  the layout read as `l_um=0`/`w_um=0` — a false `device.property` finding
+  against any reference that carries real geometry (e.g. a `form:
+  "subckt-call"` reference, whose own conversion already writes `L=`/`W=`),
+  even though the extraction itself was correct. `klt extract`'s SPICE
+  writer (`pdk_models.py`'s `create_model_binding_delegate`) now appends
+  the same `` L=...U W=...U`` suffix the MOS path and
+  `netlist_normalize._convert_geometry_card` (the reference-side
+  equivalent) already write, for any *named* (deck-declared) resistor
+  device — scoped away from `--parasitics`' own anonymous shunt/leg/DC-tie
+  resistors, which never carry a real `L`/`W` measurement. The two
+  documented `klt lvs` flows (`layout.file` inline extraction and
+  pre-extracted `layout.netlist`) now agree on the same layout. No
+  `schema_version` bump — the written SPICE gains an additive suffix on an
+  existing card; `devices[].params` (the JSON report) is unchanged.
+
 - **Fixed**: `klt lvs` now recognises a round-tripped `X ... PARAMS:` card
   naming a custom (`kdb.GenericDeviceExtractor`-shaped) device class --
   today, sg13g2's `cap_cmomi`/`cap_cmomf` MoM capacitors (issue #1466) -- as
