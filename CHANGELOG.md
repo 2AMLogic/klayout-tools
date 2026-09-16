@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose`'s `connectivity[]` router no longer lets a
+  leg's own `_port_edge_margin_um` allowance fund a crossing on the side its
+  port does not face (issue #1895). The obstacle-overlap check's per-block
+  allowance is a statement about the approach depth on the side a pin
+  *faces* — but it was compared against a leg's *total* crossing of that
+  pin's own block, with no account of where in the block the crossing sits,
+  so a leg that tunnelled in from the opposite side entirely (e.g. reaching
+  a north-facing gate pad from the south, across the source strap
+  underneath it) was funded by an allowance describing metal on the other
+  side of the block. On a tall block that allowance is large enough to pay
+  for crossing straight over another device's terminal: two unrelated nets
+  could both report `routed: true` with no `warnings[]` entry while `klt
+  extract` recovered them as one shorted node — most visibly when
+  `routing.cross_block_layer_role` moved an already-routed self-net's bus
+  off the primary plane and onto the very pad the offending leg crossed.
+  `route_two_pin()` now measures a leg's crossing of the *far* side of each
+  of its own pins' blocks separately and holds it to the check's own
+  half-width inflation term alone; an ordinary approach along a port's own
+  facing direction never enters that region and is unaffected. See
+  [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Known limitations"
+  section.
 - **Fixed**: `klt gen-compose` now draws a real licon/mcon contact when a
   `connectivity[]` net is wired to a port reported on a PDK family's
   diffusion role — e.g. `bjt_array`'s `add_collector_ring` collector-tie

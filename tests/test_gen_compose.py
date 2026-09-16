@@ -8095,6 +8095,176 @@ def test_compose_cross_block_layer_role_metal2_routes_and_stays_drc_clean_sg13cm
 
 
 # --------------------------------------------------------------------------- #
+# Far-side approach check (issue #1895). route_two_pin()'s obstacle check
+# (#199/#999) gives each of a leg's own two pins an allowance equal to that
+# port's `_port_edge_margin_um` -- the unavoidable approach depth measured
+# along the direction the port *faces* -- and then compares it against the
+# backbone's *total* crossing of that block, wherever in the block that
+# crossing sits. A leg that never approaches from the facing side at all, and
+# instead reaches the pin from the opposite one, was therefore funded by an
+# allowance describing metal on the other side of the block entirely: on a
+# tall block it is large enough to pay for tunnelling straight across another
+# device's terminal, drawn as a real short while the leg reports
+# `routed: true`.
+#
+# #1895 reported this through `routing.cross_block_layer_role`, which is what
+# made the short *visible*: the cross-layer fallback moved a same-block
+# self-net's bus off the primary plane, removing the already-routed metal
+# whose route-vs-route collision (#1057) had been incidentally rejecting the
+# offending leg, and then landed that bus's own label on the very pad the leg
+# crossed -- so `klt extract` recovered the two nets as one `BUS|FAN` node
+# while `gen-compose` reported both `routed: true` with no `warnings[]` entry.
+# --------------------------------------------------------------------------- #
+
+
+def _far_side_approach_fixture(dst_port):
+    """Two blocks in a row. `src`'s only port faces east, toward `dst`;
+    `dst`'s own port is the parameter under test.
+
+    `dst` is deliberately *tall* (30um) so that a north-facing port low in it
+    has a large `_port_edge_margin_um` -- the allowance #1895's reproduction
+    spends on the wrong side of the block.
+    """
+    blocks = {
+        "src": {
+            "id": "src",
+            "port_names": {"Y"},
+            "ports": {"Y": {"x_um": 10.0, "y_um": 2.0, "direction_deg": 0}},
+        },
+        "dst": {"id": "dst", "port_names": {"G"}, "ports": {"G": dst_port}},
+    }
+    bboxes = {
+        "src": {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 30.0},
+        "dst": {"x0": 12.0, "y0": 0.0, "x1": 22.0, "y1": 30.0},
+    }
+    offsets = {block_id: {"x": 0.0, "y": 0.0} for block_id in blocks}
+    return (
+        blocks,
+        offsets,
+        bboxes,
+        {"block": "src", "port": "Y"},
+        {"block": "dst", "port": "G"},
+    )
+
+
+def test_route_two_pin_rejects_an_approach_from_the_side_the_port_does_not_face():
+    # `G` faces north from (17, 5) -- 25um below its own block's top edge, so
+    # its `_port_edge_margin_um` allowance is 25um. The fixed backbone reaches
+    # it from `src` in the west: east along y=2, then north up the inside of
+    # `dst` to y=5. Every one of those 8.15um sits *below* the port, on the
+    # side it does not face -- metal the 25um allowance never described, drawn
+    # straight across whatever `dst` puts between its own bottom edge and its
+    # gate (in #1895's real reproduction, the source strap underneath it).
+    blocks, offsets, bboxes, pin_a, pin_b = _far_side_approach_fixture(
+        {"x_um": 17.0, "y_um": 5.0, "direction_deg": 90}
+    )
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is False
+    assert result["points_um"] is None
+    assert "on the side *away* from its own pin 'G'" in result["reason"]
+    assert "issue #1895" in result["reason"]
+
+
+def test_route_two_pin_allows_a_normal_approach_along_the_ports_own_facing():
+    # The control for the test above, same fixture: a port that faces *back*
+    # toward the approach (west, at dst's own near edge) is reached without
+    # ever entering the far side, so nothing about this check touches the
+    # ordinary case -- it still routes, exactly as before #1895.
+    blocks, offsets, bboxes, pin_a, pin_b = _far_side_approach_fixture(
+        {"x_um": 12.2, "y_um": 2.0, "direction_deg": 180}
+    )
+    result = gen_compose.route_two_pin(pin_a, pin_b, blocks, offsets, bboxes, 0.3)
+    assert result["routed"] is True, result["reason"]
+    assert result["points_um"] == [(10.0, 2.0), (12.2, 2.0)]
+
+
+def test_compose_cross_block_bus_no_longer_shorts_an_unrelated_net_1895(
+    tmp_path, pdk_root
+):
+    # #1895's reproduction, distilled to two blocks: `BUS` is a same-block
+    # self-net across `n2`'s two source straps (the documented
+    # `routing.cross_block_layer_role` case -- it falls back to met1), and
+    # `FAN` is an unrelated net reaching `n2`'s north-facing gate pad from
+    # `n1` in the west, i.e. from *below* the gate, across the Q1_1_S strap
+    # `BUS` itself lands on.
+    #
+    # Before the fix both nets reported `routed: true`, `unrouted_nets == []`
+    # and `warnings == []`, while `klt extract` recovered them as one
+    # `BUS|FAN` node carrying 6 device terminals. The composed GDS is the
+    # ground truth here, so this test asserts against `klt extract` directly:
+    # whatever `gen-compose` reports, the two labels must never end up on one
+    # extracted net.
+    n1 = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "n1", add_guard_ring=False, gate_contact=True
+    )
+    n2 = _gen_block(
+        tmp_path, pdk_root, "diff_pair", "n2", add_guard_ring=False, gate_contact=True
+    )
+    output = tmp_path / "cross_block_short_1895.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "n1", "generator_report": n1},
+                {"id": "n2", "generator_report": n2},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["n1", "n2"],
+                "spacing_um": 2.0,
+            },
+            "connectivity": [
+                {
+                    "net": "BUS",
+                    "pins": [
+                        {"block": "n2", "port": "Q1_1_S"},
+                        {"block": "n2", "port": "Q2_1_S"},
+                    ],
+                },
+                {
+                    "net": "FAN",
+                    "pins": [
+                        {"block": "n1", "port": "Q1_1_D"},
+                        {"block": "n2", "port": "Q1_1_G"},
+                    ],
+                },
+            ],
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+                "cross_block_width_um": 0.17,
+            },
+            "options": {
+                "cell_name": "cross_block_short_1895",
+                "output": str(output),
+            },
+        }
+    )
+
+    # The documented cross-block bus still routes -- the fix must not cost
+    # `routing.cross_block_layer_role` its own intended use case (#1168).
+    bus = next(net for net in report["nets"] if net["net"] == "BUS")
+    assert bus["routed"] is True, bus
+    # The offending leg is now reported, not drawn -- and says why.
+    fan = next(net for net in report["nets"] if net["net"] == "FAN")
+    assert fan["routed"] is False
+    assert "FAN" in report["unrouted_nets"]
+    assert "on the side *away* from its own pin 'Q1_1_G'" in fan["legs"][0]["reason"]
+
+    # The composed GDS agrees: two labels, two nets, no silent merge.
+    result = extract.run_extract(str(output), "sky130", top="cross_block_short_1895")
+    assert result["merged_net_labels"] == []
+    net_names = {net["name"] for net in result["nets"] if net.get("name")}
+    assert "BUS|FAN" not in net_names
+    assert "BUS" in net_names
+    # BUS reaches exactly the two source terminals it declared -- not the
+    # gate/drain terminals it absorbed through the short before the fix.
+    bus_net = next(net for net in result["nets"] if net["name"] == "BUS")
+    assert bus_net["device_count"] == 2
+
+
+# --------------------------------------------------------------------------- #
 # More than one same-block self-net crossing per block (#1393). #1168's
 # cross-layer fallback only ever fires from route_two_pin()'s checks 3/4 (a
 # leg crossing another of its *own block's pads*), so it had no visibility
@@ -13004,7 +13174,14 @@ def test_compose_per_leg_layer_role_defaults_to_the_nets_own_plane(tmp_path, pdk
         {"block": "u1", "port": "U0_D"},
     ]
     assert named_leg["routed"] is False
-    assert "through its own pin's block 'u1'" in named_leg["reason"]
+    # Rejected for reaching u1's east-facing U0_D from the west -- i.e. across
+    # the far side of u1's own interior. Issue #1895 moved this same-facing
+    # pair's rejection from the whole-block obstacle check's flat
+    # `_port_edge_margin_um` allowance (whose message named "its own pin's
+    # block 'u1'") to the far-side approach check that now measures that
+    # crossing separately; the leg is rejected either way, with a reason that
+    # names the same block and now also says which side of it.
+    assert "block 'u1''s interior on the side *away* from" in named_leg["reason"]
 
     import klayout.db as kdb
 
@@ -13176,7 +13353,13 @@ def test_compose_per_leg_layer_role_rejected_on_its_named_plane_is_not_rerouted(
     # rejected-then-accepted duplicate.
     assert len(entries_for_pinned_pair) == 1, net["legs"]
     assert entries_for_pinned_pair[0]["routed"] is False
-    assert "through its own pin's block 'u1'" in entries_for_pinned_pair[0]["reason"]
+    # Same rejection as the test above, re-attributed by issue #1895's far-side
+    # approach check: this same-facing pair reaches u1's east-facing U0_D from
+    # the west, across u1's own interior on the side its port does not face.
+    assert (
+        "block 'u1''s interior on the side *away* from"
+        in entries_for_pinned_pair[0]["reason"]
+    )
 
     # Blocking the named pair is scoped to that pair: the net may still reach
     # those two pins *indirectly* (u0->u2->u1 here), which is an ordinary

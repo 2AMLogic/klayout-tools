@@ -925,6 +925,22 @@ into the circuit.)
   (see "Routing same-facing port pairs with waypoints_um" below) or a
   second routing plane (`routing.cross_block_layer_role`, below) for one
   of the two nets.
+- **A pin's own `_port_edge_margin_um` allowance no longer funds a crossing
+  on the side its port does not face (#1895, fixed).** The whole-block bbox
+  check (#199) above compares a leg's *total* crossing of its own pin's
+  block against that pin's edge margin, with no account of where in the
+  block the crossing sits — so a leg that never approaches from the side its
+  port faces at all, and instead tunnels in from the opposite one, was
+  funded by an allowance describing metal on the other side of the block
+  entirely (on a tall block, enough to cross straight over another device's
+  terminal undetected). `route_two_pin()` now also measures a leg's crossing
+  of the *far* side of each of its own pins' blocks — the half the port does
+  not face — separately, and holds that to the check's own half-width
+  inflation term alone, never to the facing-side margin; an ordinary
+  approach along the port's own facing direction never enters that region
+  and is unaffected. This is the same "advisory heuristic, not a substitute
+  for `klt extract`" caveat as the checks above — see "`unrouted_nets: []`
+  plus a clean `klt drc` is not a connectivity guarantee either" above.
 
 ## Via-drop routing (metal2/via, #454)
 
