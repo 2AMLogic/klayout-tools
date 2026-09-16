@@ -38,6 +38,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged: fully absolute, directly runnable, no sibling. See
   [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s "Embedded paths"
   section.
+- **Fixed**: `klt functional-verification`'s `options.sdf` now rejects (exit
+  1, clear message) an SDF `INTERCONNECT` entry naming an escaped identifier
+  that contains a literal occurrence of the file's own `DIVIDER` character
+  (e.g. `g\[0\]\.sub\/x.a` with `(DIVIDER .)`) instead of reaching
+  `$sdf_annotate` and crashing `vvp` outright with a bare `SIGABRT`/core
+  dump (`ERROR: NULL handle passed to vpi_scan.`) — issue #1890. This exact
+  shape is what synthesis/place-and-route produces whenever RTL uses a
+  `generate` block to instantiate an array of sub-modules and the backend
+  flattens that hierarchy into one module (Yosys `flatten`; OpenROAD's
+  post-route `write_verilog`/`write_sdf`), so it made the documented SDF
+  back-annotation flow unusable end to end on any such design. Root-caused
+  (live against Icarus 13.0) to Icarus's own `INTERCONNECT` path splitter
+  not honoring a backslash-escaped occurrence of the `DIVIDER` character — a
+  genuine upstream limitation no generated shim/wrapper can work around, so
+  it is now guarded at request-validation time instead. See
+  `docs/cli/functional-verification.md`'s "SDF back-annotation" section.
 - **Fixed**: `klt lvs`'s pre-extracted `layout.netlist` shape (and
   `reference.netlist`) now recover a capacitor device's real class name
   when re-reading a `klt extract -o`-written bare `C` card (issue #1558's

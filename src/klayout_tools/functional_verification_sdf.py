@@ -597,6 +597,134 @@ def _split_sdf_bus_port_interconnects(
     return safe_text, deferred_text
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1890: an `INTERCONNECT` entry whose endpoint is an escaped Verilog
+# identifier containing a literal occurrence of the SDF file's own `DIVIDER`
+# character (e.g. `g\[0\]\.sub\/x.a` with `DIVIDER .` -- exactly what a
+# `generate`-block array of sub-modules becomes once synthesis/place-and-
+# route flattens it: Yosys `flatten`, OpenROAD's post-route
+# `write_verilog`/`write_sdf`) crashes `vvp` outright: `ERROR: NULL handle
+# passed to vpi_scan.` / an `Assertion `0' failed` SIGABRT, confirmed live
+# against Icarus 13.0 (stable).
+#
+# Root-caused (live bisection against raw `iverilog`/`vvp`, not just through
+# this module) to Icarus's own `INTERCONNECT` path splitter: it tokenizes an
+# endpoint on every literal occurrence of the DIVIDER character, without
+# honoring a preceding backslash-escape that (per the same escaped-identifier
+# convention Verilog itself uses) marks that occurrence as *data*, not a
+# hierarchy separator. That produces one extra, nonexistent intermediate
+# scope reference, and the VPI resolution code that walks it calls
+# `vpi_scan` on the resulting NULL handle without checking for NULL first --
+# an assertion failure the caller cannot catch, only avoid triggering.
+#
+# This is independent of hierarchy depth, of the top-level-port wrapper
+# (issue #1056), of `-ginterconnect`, and of which of the two DIVIDER
+# characters (`.` or `/`) is in play -- verified by isolating each variable
+# in turn: an escaped occurrence of the character the file's own `(DIVIDER
+# ...)` header declares reproduces the crash; an escaped occurrence of the
+# *other* legal divider character, or an escaped bracket alone with no
+# embedded divider character, does not. There is therefore no generated
+# shim/wrapper shape (unlike #1056's nested-DUT wrapper, which worked around
+# a *scope-resolution* failure) that can dodge this: the crash is entirely a
+# function of the SDF file's own `INTERCONNECT` text, decided before
+# `$sdf_annotate` ever sees a scope argument. This is a genuine Icarus
+# upstream limitation -- guarded here with a clear, request-validation-time
+# error instead of a bare `vvp` assertion abort/core dump.
+# --------------------------------------------------------------------------- #
+
+
+def _reject_sdf_escaped_divider_interconnects(sdf_path: str) -> None:
+    """Fail loud, before any build artifact is written, when ``sdf_path``
+    has an ``INTERCONNECT`` entry whose endpoint is an escaped identifier
+    containing a literal occurrence of the file's own ``DIVIDER`` character
+    -- the shape that crashes Icarus's ``$sdf_annotate`` outright (issue
+    #1890; see the module comment above for the confirmed root cause).
+
+    Only ``INTERCONNECT`` entries are scanned: the same escaped identifier
+    used as a plain ``CELL``/``(INSTANCE ...)`` field for an ``IOPATH``
+    entry does not crash (it fails to resolve, a separate and non-fatal
+    diagnostic :func:`_scan_sdf_diagnostics` already surfaces) -- confirmed
+    live, and consistent with the root cause being specific to
+    ``INTERCONNECT``'s own path-splitting code.
+
+    Never raises on a malformed/unreadable SDF file -- that is
+    :func:`_split_sdf_bus_port_interconnects` and the simulator's own
+    parser's job to report; this function only adds a *narrower*,
+    *earlier* diagnosis for the one shape that would otherwise reach a
+    bare abort.
+    """
+    from .functional_verification import FunctionalVerificationError
+
+    try:
+        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return
+
+    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
+    divider = divider_match.group(1) if divider_match else "."
+    # The two SDF-legal divider characters are `.` and `/` -- anything else
+    # in a `(DIVIDER ...)` header is not a shape this crash's mechanism
+    # (escaping *the* divider character) can apply to.
+    if divider not in (".", "/"):
+        return
+    escaped_divider_re = re.compile(r"\\" + re.escape(divider))
+
+    offenders: list[str] = []
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        cell_start = cell_match.start()
+        try:
+            cell_end = _sdf_matching_paren(text, cell_start) + 1
+        except Exception:
+            continue
+        cell_text = text[cell_start:cell_end]
+        delay_match = re.search(r"\(DELAY\b", cell_text)
+        if delay_match is None:
+            continue
+        delay_start = cell_start + delay_match.start()
+        try:
+            delay_end = _sdf_matching_paren(text, delay_start) + 1
+            delay_type_spans = _sdf_top_level_clauses(
+                text, delay_start + 1, delay_end - 1
+            )
+        except Exception:
+            continue
+        for type_start, type_end in delay_type_spans:
+            entry_spans = _sdf_top_level_clauses(text, type_start + 1, type_end - 1)
+            for entry_start, entry_end in entry_spans:
+                entry_text = text[entry_start:entry_end]
+                interconnect_match = re.match(
+                    r"\(INTERCONNECT\s+(\S+)\s+(\S+)", entry_text
+                )
+                if interconnect_match is None:
+                    continue
+                for token in interconnect_match.groups():
+                    if escaped_divider_re.search(token):
+                        offenders.append(token)
+
+    if not offenders:
+        return
+
+    examples = ", ".join(sorted(set(offenders))[:3])
+    raise FunctionalVerificationError(
+        "options.sdf: this SDF has an INTERCONNECT entry naming an escaped "
+        f"identifier that contains a literal '{divider}' -- the file's own "
+        f"DIVIDER character (e.g. {examples}). This is a known Icarus "
+        "Verilog upstream limitation, not something klt's generated "
+        "$sdf_annotate wrapper can work around: Icarus's INTERCONNECT path "
+        "splitter does not honor the backslash-escape on that character, "
+        "which crashes vvp outright ('ERROR: NULL handle passed to "
+        "vpi_scan.', SIGABRT) rather than failing to resolve the entry. "
+        "This shape is produced whenever synthesis/place-and-route "
+        "flattens a `generate` block array of sub-modules into one escaped "
+        "Verilog identifier (e.g. Yosys 'flatten', OpenROAD's post-route "
+        "write_verilog/write_sdf) -- avoid flattening that hierarchy "
+        "before generating the SDF this option consumes, or annotate a "
+        "netlist whose corresponding generate-block instances are not "
+        "collapsed into one escaped identifier"
+    )
+
+
 def _check_sdf_engine_capability(version: str | None) -> None:
     """Reject an ``options.sdf`` request the resolved Icarus cannot serve
     (issue #1004's finding, folded into #1002's own implementation).
