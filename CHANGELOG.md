@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen mos_array`/`diff_pair`'s `voltage_flavor` param now
+  resolves on the `sky130` PDK family (issue #1912). `_PDK_VOLTAGE_FLAVOR_LAYERS`
+  (`gen_layer_params.py`) previously had `sky130` as an empty table — this
+  deck's own transcription cited no numbered medium/high-voltage transistor
+  marker layer, so any `voltage_flavor` request on `sky130` always resolved to
+  no marker layer and silently drew the default thin-oxide device, reported
+  only via a `drc_hints.notes` entry a caller could easily miss. Issue #1369
+  separately added and verified the missing citation (the curated deck's
+  `EXTRACTION_DECK.mos_flavours` `MOSFlavour(marker=(75, 20), flavour="hvi",
+  ...)` entry, cross-checked against three independent sources in a fetched
+  install), so `sky130` now resolves `voltage_flavor="hvi"` to that same
+  `hvi.drawing` (75/20) marker — the marker the deck's own `mos_flavours`
+  entry keys its `sky130_fd_pr__nfet_g5v0d10v5`/`__pfet_g5v0d10v5`
+  device-class split on, so `voltage_flavor="hvi"` now round-trips through
+  `klt extract --pdk` to the real thick-oxide model instead of the thin-oxide
+  default. No `schema_version` bump — additive per-family coverage of an
+  existing field, no shape changed.
+
 - **Fixed**: `klt lvs`'s `reference.form: "subckt-call"` conversion no longer
   makes a resistor/capacitor device class impossible to pair (issue #1907).
   The conversion writes a literal `0` into a converted `R`/`C` card's

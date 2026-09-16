@@ -1395,6 +1395,78 @@ def test_mos_array_voltage_flavor_and_flavor_pfet_both_drawn_and_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+#: sky130's thick-oxide ("hvi") marker (issue #1912) -- the same `(75, 20)`
+#: `hvi.drawing` citation `klayout_tools.decks.sky130.EXTRACTION_DECK
+#: .mos_flavours`' single `MOSFlavour(flavour="hvi", ...)` entry keys its
+#: `sky130_fd_pr__nfet_g5v0d10v5`/`sky130_fd_pr__pfet_g5v0d10v5` device-class
+#: split on.
+_SKY130_VOLTAGE_FLAVOR_MARK_LAYER = (75, 20)  # hvi.drawing
+
+
+def test_mos_array_voltage_flavor_hvi_draws_marker_and_is_drc_clean(tmp_path, pdk_root):
+    """`voltage_flavor="hvi"` draws sky130's `hvi.drawing` marker over the
+    unit device(s) and reports the selection in `drc_hints`, staying
+    DRC-clean (issue #1912, the sky130 family-coverage follow-on to
+    #1054/gf180mcu's `medium_voltage` and #1472's sg13g2/sg13cmos5l `hv`)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "mos_array_voltage_flavor_sky130_hvi.gds"
+    report = generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "pfet", "voltage_flavor": "hvi"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
+    assert report["drc_hints"]["voltage_flavor"] == "hvi"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+def test_mos_array_voltage_flavor_hvi_extracts_as_g5v0d10v5_pfet(tmp_path, pdk_root):
+    """The round-trip acceptance criterion of issue #1912: a `pfet` unit
+    device drawn with `voltage_flavor="hvi"` extracts bound to the real
+    `sky130_fd_pr__pfet_g5v0d10v5` model under `klt extract --deck sky130`,
+    not the thin-oxide `sky130_fd_pr__pfet_01v8` the same request draws
+    without `voltage_flavor` -- closing the silent generate/extract mismatch
+    the issue's repro demonstrated."""
+    from pathlib import Path
+
+    output = tmp_path / "mos_array_voltage_flavor_sky130_hvi_extract.gds"
+    generate(
+        {
+            "generator": "mos_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {"flavor": "pfet", "voltage_flavor": "hvi"},
+            "options": {"output": str(output)},
+        }
+    )
+
+    report = run_extract(
+        str(output),
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=str(pdk_root),
+    )
+
+    assert report["device_counts"].get("pfet", 0) > 0
+    cards = Path(report["netlist_path"]).read_text().splitlines()
+    device_cards = [line for line in cards if line and line[0] in ("M", "X")]
+    assert any(" sky130_fd_pr__pfet_g5v0d10v5 " in line for line in device_cards)
+    assert not any(" sky130_fd_pr__pfet_01v8 " in line for line in device_cards)
+
+
 def _layer_bbox(gds_path, layer, datatype):
     """Merged bounding box (in um) of one layer across the whole cell tree."""
     import klayout.db as kdb
@@ -4855,12 +4927,45 @@ def test_diff_pair_voltage_flavor_medium_voltage_draws_marker_and_is_drc_clean(
     assert drc_report["status"] == "clean", drc_report["violations"]
 
 
+def test_diff_pair_voltage_flavor_hvi_draws_marker_and_is_drc_clean(
+    tmp_path, both_pdk_root
+):
+    """`voltage_flavor='hvi'` draws sky130's `hvi.drawing` marker over the
+    device pair's own footprint and reports the selection in `drc_hints`,
+    staying DRC-clean (issue #1912)."""
+    import klayout.db as kdb
+
+    output = tmp_path / "diff_pair_voltage_flavor_sky130_hvi.gds"
+    report = generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "sky130A", "root": str(both_pdk_root)},
+            "params": {"voltage_flavor": "hvi"},
+            "options": {"output": str(output)},
+        }
+    )
+    layout = kdb.Layout()
+    layout.read(str(output))
+    present = {
+        (layout.get_info(i).layer, layout.get_info(i).datatype)
+        for i in layout.layer_indexes()
+    }
+    assert _SKY130_VOLTAGE_FLAVOR_MARK_LAYER in present
+    assert report["drc_hints"]["voltage_flavor"] == "hvi"
+    assert report["drc_hints"]["voltage_flavor_mark_present"] is True
+    assert report["drc_hints"]["notes"] == []
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 def test_diff_pair_voltage_flavor_unsupported_on_sky130_notes_not_drawn(
     tmp_path, both_pdk_root
 ):
     """sky130's curated deck cites no medium/high-voltage transistor marker
-    layer -- a `voltage_flavor` request resolves to no layer and is reported
-    via `drc_hints.notes`, never silently dropped (issue #1054)."""
+    layer for any other name -- a `voltage_flavor` request resolves to no
+    layer and is reported via `drc_hints.notes`, never silently dropped
+    (issue #1054)."""
     output = tmp_path / "diff_pair_voltage_flavor_sky130.gds"
     report = generate(
         {
