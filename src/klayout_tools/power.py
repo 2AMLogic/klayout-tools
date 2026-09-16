@@ -89,7 +89,7 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
-from .ir_solver import solve_ir_drop
+from .ir_solver import solve_ir_drop, worst_deviation
 
 if TYPE_CHECKING:
     import klayout.db as kdb
@@ -852,15 +852,9 @@ def _solve_ir_drop(
             solved_node_total += solved_nodes
             unsolved_node_total += unsolved_nodes
 
-            island_worst_id: str | None = None
-            island_worst_droop = 0.0
-            for node in island["nodes"]:
-                deviation = solution["deviations"][node["id"]]
-                if deviation is None:
-                    continue
-                if island_worst_id is None or abs(deviation) > island_worst_droop:
-                    island_worst_id = node["id"]
-                    island_worst_droop = abs(deviation)
+            island_worst_id, island_worst_droop = worst_deviation(
+                solution["deviations"], [node["id"] for node in island["nodes"]]
+            )
 
             reason = unsolved_components[0]["reason"] if unsolved_components else None
             if unsolved_components:
