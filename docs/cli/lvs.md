@@ -294,7 +294,13 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   area/perimeter (capacitor: `area = L*W`, `perimeter = 2*(L+W)` —
   elementary geometry, not a PDK-specific coefficient). Geometry is carried
   only when the call actually supplies it; the subcircuit's own default
-  geometry applies otherwise.
+  geometry applies otherwise. **The card's positional *value* token is a
+  literal `0` placeholder** — `klt lvs` has no PDK sheet-resistance /
+  capacitance-per-area table to compute a real resistance/capacitance from
+  the call's geometry. That value is therefore excluded from the compare on
+  both sides (otherwise it defeats `NetlistComparer`'s device pairing for the
+  whole class, issue #1907) and disclosed as a `severity: "warning"`
+  `device.placeholder_value` entry — see "`device.placeholder_value`" below.
 - **Bipolar** converts to a plain `Q` card. It carries no length/width-style
   parameter at all (sky130's fixed-geometry `pnp_05v5` cells are selected
   purely by subcircuit name); its only real call-site parameter is an
@@ -993,14 +999,14 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.property`, `device.parameter_tolerated`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `topology.power_only_pruned`, `hints.rejected`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.placeholder_value`, `device.property`, `device.parameter_tolerated`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `topology.power_only_pruned`, `hints.rejected`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.placeholder_value` entry (see below) is always `"warning"` for the same reason — it discloses that a `reference.form: "subckt-call"` conversion's placeholder `0` resistance/capacitance was excluded from the compare, so it never changes `status` either. Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
 | `device` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>, "class": <string\|null>}` when a device is involved. |
 | `property` | object \| `null` | `{"name": <string>, "layout": <value>, "reference": <value>}` for a `device.property` mismatch, and for a `device.parameter_tolerated` disclosure (whose `reference` is always the reference netlist's *original* value, never the snapped one). `name` is `w_um`/`l_um` for the width/length parameters (matching `klt extract`'s own convention); every other declared device-class parameter is reported under its own lower-cased name. |
-| `details` | object \| `null` | Engine-specific/category-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Populated for every `"klayout"`-engine `device.class_arity` entry (see below) with `{"layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}`, and for every `device.bulk_reconciled` entry (see below) with `{"terminal": <string>, "reference_net": <string>, "reference_net_created": <bool>, "devices": <integer>, "layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}` (`reference_terminals` is the pre-reconciliation list), and for every `device.parameter_tolerated` entry (see below) with `{"relative_delta": <number>, "tolerance": <number>}` (the observed `|layout - reference| / max(|layout|, |reference|)` and the effective `options.parameter_tolerance` it was accepted under). Also populated by the `"netgen"` engine for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `null` for every other entry (including `"netgen"`-engine device-class-arity mismatches, which this issue's fix does not cover — see "`device.class_arity`" below). |
+| `details` | object \| `null` | Engine-specific/category-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Populated for every `"klayout"`-engine `device.class_arity` entry (see below) with `{"layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}`, and for every `device.bulk_reconciled` entry (see below) with `{"terminal": <string>, "reference_net": <string>, "reference_net_created": <bool>, "devices": <integer>, "layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}` (`reference_terminals` is the pre-reconciliation list), and for every `device.placeholder_value` entry (see below) with `{"parameter": <string>, "device_kind": "resistor"\|"capacitor", "reference_devices": <integer>, "layout_devices": <integer>, "layout_values": [<number>, ...]}` (the excluded parameter's name, the converted family, how many instances each side has, and the distinct layout-side values that were *not* compared, sorted ascending), and for every `device.parameter_tolerated` entry (see below) with `{"relative_delta": <number>, "tolerance": <number>}` (the observed `|layout - reference| / max(|layout|, |reference|)` and the effective `options.parameter_tolerance` it was accepted under). Also populated by the `"netgen"` engine for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `null` for every other entry (including `"netgen"`-engine device-class-arity mismatches, which this issue's fix does not cover — see "`device.class_arity`" below). |
 | `circuit` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the circuit (module) involved, for a `topology` entry from an unmatched *circuit* (the circuit itself has no counterpart) or an unmatched subcircuit *instance* (the circuit **containing** the instance, not the instance's own name — see `instance`/`subcircuit` below). `null` for every other entry, matching `net`/`device`'s own "populated only on the categories that involve one" convention. Currently only the `"klayout"` engine populates this field — the `"netgen"`-engine `net.unmatched`/`device.unmatched` entries (see `details` above) do not name a circuit, since netgen's own report does not structure one out. |
 | `instance` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the subcircuit instance's own name (e.g. `"Xfill_1_0"`), populated only for an unmatched-subcircuit-*instance* `topology` entry. `null` for an unmatched-*circuit* entry (there is no instance — the whole circuit definition has no counterpart) and for every other category. |
 | `subcircuit` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the name of the circuit the unmatched instance refers to (its "cell type", e.g. `"sky130_fd_sc_hd__fill_1"`), populated only alongside `instance` above. `null` everywhere `instance` is `null`. |
@@ -1194,6 +1200,92 @@ Notes on the semantics:
   reference-side class is combined as the two-terminal element the reference
   netlist actually declares, then reconciled up to the layout's arity for the
   compare.
+
+#### `device.placeholder_value`: a converted resistor/capacitor class's value was excluded from the compare
+
+Only possible with `reference.form: "subckt-call"` (issue #1907,
+`"engine": "klayout"` only). The conversion writes a literal `0` into a
+converted `R`/`C` card's positional *value* slot — `klt lvs` has no PDK
+sheet-resistance / capacitance-per-area table to compute a real resistance or
+capacitance from a call's `l`/`w` geometry (that data lives in the extraction
+decks, deliberately not a dependency of the converter). Geometry is still
+carried (`L=`/`W=` for a resistor, a derived `A=`/`P=` for a capacitor); only
+the value is a placeholder.
+
+That placeholder is not a cosmetic difference: `R` and `C` are the **primary**
+(compared) parameters of KLayout's `DeviceClassResistor` /
+`DeviceClassCapacitor`, and `NetlistComparer` uses primary-parameter equality
+to seed device correspondence. Left in the compare, a reference class whose
+every instance reads `0` against a layout side carrying real,
+geometry-computed values does not produce a per-device parameter finding — it
+fails to pair the class *at all*, collapsing into a wholesale
+`device.unmatched` / `topology` cascade over every instance and every net that
+touches one, even when each instance sits on its own distinct, unambiguous net
+pair. So `klt lvs` excludes that one parameter from the compare (on **both**
+sides' class — the comparer consults each side's own class) before
+`NetlistComparer` is constructed, letting topology pair the devices exactly as
+an equivalent hand-written `form: "plain-element"` reference carrying real
+values already does.
+
+Every excluded class is disclosed in-band as one `severity: "warning"`,
+`category: "device.placeholder_value"`, `side: "reference"` entry — the same
+discipline `device.bulk_reconciled` applies to a reconciled bulk terminal. A
+`"match"` reached this way is never silently indistinguishable from one where
+the two sides' values actually agreed:
+
+```json
+{
+  "category": "device.placeholder_value",
+  "severity": "warning",
+  "description": "reference device class 'RES_XHIGH_PO' was converted from a subcircuit call (request.reference.form: \"subckt-call\"), so its 'R' value is the literal 0 placeholder on all 4 reference instance(s) -- klt lvs has no PDK sheet-resistance/capacitance-per-area data to compute a real one. 'R' was therefore excluded from this compare on both sides (layout: 4 instance(s), R 15000..120000) and the two sides were paired on topology alone -- that dimension of the compare is not independently verified. Supply a reference in the plain-element form carrying real 'R' values to compare it (see docs/cli/lvs.md, 'device.placeholder_value')",
+  "side": "reference",
+  "net": null,
+  "device": {"layout": null, "reference": null, "class": "RES_XHIGH_PO"},
+  "property": null,
+  "details": {
+    "parameter": "R",
+    "device_kind": "resistor",
+    "reference_devices": 4,
+    "layout_devices": 4,
+    "layout_values": [15000.0, 30000.0, 60000.0, 120000.0]
+  }
+}
+```
+
+Notes on the semantics:
+
+- **It never changes `status`.** The entry is always `severity: "warning"`, so
+  a request whose only finding is this one reports `status: "match"` with a
+  nonzero `mismatch_count` — the same relationship `device.bulk_reconciled`
+  and `device.parameter_tolerated` have to a clean compare.
+- **It is scoped to the provable placeholder, never to a coincidental zero.**
+  Only a class the `"subckt-call"` conversion actually emitted is considered
+  (a `"plain-element"` reference never goes through the conversion, so a
+  genuine `0` it carries is still compared and still an error), and only when
+  *every* reference-side instance of that class reads exactly `0` — the
+  invariant the conversion guarantees by construction. A reference that mixes
+  a converted card with a hand-written one carrying a real value on the same
+  class is left completely alone, so a genuine value defect there is still
+  compared and still reported as `device.property`.
+- **Only the value parameter is excluded**, not the class's geometry. `L`/`W`
+  (resistor) and `A`/`P` (capacitor) are *secondary* parameters KLayout does
+  not compare by default either way, so nothing else about the compare
+  changes: terminal count, device class, and full net topology are all still
+  checked exactly as before.
+- **It does not create matches out of ambiguity.** Excluding the value only
+  removes a parameter from the equivalence test; a group the two sides
+  genuinely cannot distinguish (e.g. three layout resistors against two
+  reference ones on the same net pair) still reports `device.unmatched` and
+  `status: "mismatch"`, with this disclosure alongside rather than instead.
+- **To verify the value dimension**, supply the reference in the plain-element
+  form with real `R`/`C` values (`details.layout_values` reports what the
+  layout side measured, so a reference can be written against it), or compare
+  the extracted values separately with `klt extract`. Pair a rounded
+  design-level reference value with `options.parameter_tolerance` — see
+  "`device.parameter_tolerated`" immediately below. Note that
+  `options.parameter_tolerance` cannot substitute for this exclusion: it is a
+  *relative* tolerance and is rejected at `>= 1.0` by design, so no value ever
+  reconciles against zero.
 
 #### `device.parameter_tolerated`: `options.parameter_tolerance` absorbed a numeric difference
 

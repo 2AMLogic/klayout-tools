@@ -225,6 +225,14 @@ CATEGORY_DEVICE_CLASS_ARITY = "device.class_arity"
 #: connectivity read from the reference netlist (see
 #: `_apply_reference_device_bulk`).
 CATEGORY_DEVICE_BULK_RECONCILED = "device.bulk_reconciled"
+#: Issue #1907: `reference.form: "subckt-call"` converted a resistor/capacitor
+#: class whose plain-element value token is the literal `0` *placeholder*
+#: (`netlist_normalize.py` has no PDK sheet-resistance/capacitance-per-area
+#: table to compute a real one from), so that one parameter was excluded from
+#: the compare -- the disclosure that the class's resistance/capacitance
+#: dimension was never verified, and that pairing rests on topology and
+#: geometry alone (see `_apply_reference_placeholder_values`).
+CATEGORY_DEVICE_PLACEHOLDER_VALUE = "device.placeholder_value"
 CATEGORY_DEVICE_PROPERTY = "device.property"
 #: Issue #589: `options.parameter_tolerance` absorbed a matched device pair's
 #: parameter difference -- the disclosure that a `"match"` verdict rests on a
@@ -544,6 +552,17 @@ def run_lvs(request: str) -> dict[str, Any]:
     ``device.bulk_reconciled`` ``mismatches[]`` entry, so a ``"match"``
     reached through the hook is never silently indistinguishable from one
     reached independently.
+
+    ``request.reference.form: "subckt-call"`` carries a third instance of the
+    same discipline (issue #1907): the conversion has no PDK sheet-resistance/
+    capacitance-per-area data, so a converted resistor/capacitor card's
+    positional value is a literal ``0`` placeholder -- and ``R``/``C`` being
+    those classes' *primary*, compared parameter, leaving it in the compare
+    stops ``NetlistComparer`` pairing the class at all. That one parameter is
+    therefore excluded from the compare on both sides (see
+    :func:`_apply_reference_placeholder_values`) and every excluded class
+    yields its own ``severity: "warning"`` ``device.placeholder_value``
+    ``mismatches[]`` entry.
 
     ``options.parameter_tolerance`` (issue #589, ``"engine": "klayout"``
     only) is the same discipline applied to device *parameters*: an opt-in
@@ -869,6 +888,11 @@ def run_lvs(request: str) -> dict[str, Any]:
             reference_spec.get("pdk"),
             reference_spec.get("pdk_root"),
         )
+    # Issue #1907: populated by the `form: "subckt-call"` conversion with every
+    # resistor/capacitor device class it wrote the literal `0` placeholder
+    # value onto -- consumed by `_apply_reference_placeholder_values` below,
+    # empty for every other reference form.
+    reference_placeholder_classes: dict[str, str] = {}
     reference_netlist = _read_reference_netlist(
         reference_netlist_path,
         form=reference_form,
@@ -878,6 +902,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         pdk_variant=reference_spec.get("pdk"),
         pdk_root=reference_spec.get("pdk_root"),
         pin_orders=reference_pin_orders,
+        placeholder_value_classes=reference_placeholder_classes,
     )
 
     if reference_form == "gate-level-verilog":
@@ -1215,6 +1240,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             apply_resistor_fixed_offset_corrections(layout_netlist, layout_deck)
 
     bulk_warnings: list[dict[str, Any]] = []
+    placeholder_warnings: list[dict[str, Any]] = []
     tolerance_warnings: list[dict[str, Any]] = []
 
     if engine == "klayout":
@@ -1229,6 +1255,20 @@ def run_lvs(request: str) -> dict[str, Any]:
         # disclosure entries appended to `mismatches[]` further down.
         bulk_warnings = _apply_reference_device_bulk(
             reference_device_bulk,
+            layout_netlist,
+            reference_netlist,
+        )
+
+        # Issue #1907: same placement rationale as `_apply_reference_device_bulk`
+        # just above -- a `form: "subckt-call"` conversion's placeholder `0`
+        # value has to be taken out of the comparison *before* the comparer is
+        # constructed, since `NetlistComparer` reads each device class's
+        # `equal_parameters` when it builds its device-equivalence seeding.
+        # Runs after `combine_devices()` for the same reason too (combining
+        # still sees each side's unmodified classes), and returns the
+        # `severity: "warning"` disclosure entries appended further down.
+        placeholder_warnings = _apply_reference_placeholder_values(
+            reference_placeholder_classes,
             layout_netlist,
             reference_netlist,
         )
@@ -1483,6 +1523,17 @@ def run_lvs(request: str) -> dict[str, Any]:
         # fully independent one.
         mismatches.extend(bulk_warnings)
 
+    if placeholder_warnings:
+        # Issue #1907: same rationale again -- a `device.placeholder_value`
+        # disclosure records a *request-side* normalisation (one parameter of
+        # a converted reference class excluded from the compare) applied
+        # before the compare, not a `NetlistComparer` event, so it is appended
+        # here rather than folded into `_build_mismatches`. Always
+        # `severity: "warning"`: it never changes `status`, it only keeps a
+        # match reached with that class's value dimension unverified from
+        # being indistinguishable from one where the two values agreed.
+        mismatches.extend(placeholder_warnings)
+
     if tolerance_warnings:
         # Issue #589: same rationale once more -- a `parameter_tolerance`
         # disclosure records a value this run deliberately absorbed *between*
@@ -1519,6 +1570,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         or combine_warnings
         or combine_per_circuit_warnings
         or bulk_warnings
+        or placeholder_warnings
         or tolerance_warnings
         or flatten_warnings
         or power_only_pruning_warnings
@@ -2258,6 +2310,7 @@ def _read_reference_netlist(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     pin_orders: dict[str, list[str]] | None = None,
+    placeholder_value_classes: dict[str, str] | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280, extended by issue #1336).
@@ -2276,6 +2329,16 @@ def _read_reference_netlist(
     :mod:`klayout_tools.netlist_normalize`), resolving device names through the
     curated :mod:`klayout_tools.pdk_models` table (via ``deck`` and/or
     ``device_map``), then reads the converted text.
+
+    ``placeholder_value_classes`` (issue #1907) is an optional *output*
+    collector, populated only for ``form="subckt-call"``: the converter's own
+    :attr:`~klayout_tools.netlist_normalize.ReferenceConversion.placeholder_value_classes`
+    map, naming every emitted resistor/capacitor device class whose
+    positional value token is the literal ``0`` placeholder rather than a
+    real resistance/capacitance. ``run_lvs`` hands it to
+    :func:`_apply_reference_placeholder_values`; every other caller can
+    ignore it (``None``, the default, records nothing and leaves behaviour
+    byte-identical).
 
     ``form="gate-level-verilog"`` (issue #1336) treats ``path`` as a `klt
     place-and-route` `verilog_path` gate-level Verilog netlist instead of
@@ -2307,8 +2370,8 @@ def _read_reference_netlist(
 
     from .netlist_normalize import (
         NormalizeError,
+        convert_reference_netlist,
         detect_subckt_call_devices,
-        normalize_reference_netlist,
     )
 
     try:
@@ -2334,7 +2397,7 @@ def _read_reference_netlist(
 
     if form == "subckt-call":
         try:
-            converted = normalize_reference_netlist(
+            conversion = convert_reference_netlist(
                 text, deck=deck, device_map=device_map
             )
         except NormalizeError as exc:
@@ -2342,6 +2405,9 @@ def _read_reference_netlist(
                 f"could not convert subckt-call reference netlist "
                 f"'{path}' to plain-element form: {exc}"
             ) from exc
+        converted = conversion.text
+        if placeholder_value_classes is not None:
+            placeholder_value_classes.update(conversion.placeholder_value_classes)
         import tempfile
 
         with tempfile.NamedTemporaryFile(
@@ -3716,6 +3782,177 @@ def _apply_reference_device_bulk(
         )
 
     return entries
+
+
+#: Issue #1907: the *primary* (compared) parameter of each device family whose
+#: `form: "subckt-call"` conversion writes a literal `0` placeholder into the
+#: plain-element card's positional value slot -- `DeviceClassResistor`'s `R`
+#: and `DeviceClassCapacitor`'s `C` (each class's only primary parameter;
+#: `L`/`W`/`A`/`P` are secondary and are not compared by default either way).
+#: Keyed by the family name `netlist_normalize.ReferenceConversion`
+#: reports.
+_PLACEHOLDER_VALUE_PARAMETER = {"resistor": "R", "capacitor": "C"}
+
+
+def _apply_reference_placeholder_values(
+    spec: dict[str, str],
+    layout_netlist: Any,
+    reference_netlist: Any,
+) -> list[dict[str, Any]]:
+    """Exclude a converted reference class's placeholder ``0`` value from the
+    compare, so the class can still pair on topology (issue #1907).
+
+    ``spec`` is the ``form: "subckt-call"`` conversion's own
+    :attr:`~klayout_tools.netlist_normalize.ReferenceConversion.placeholder_value_classes`
+    -- ``{"<device class>": "resistor"|"capacitor"}``, one entry per
+    resistor/capacitor class the conversion emitted. Those cards carry the
+    literal ``0`` placeholder in their positional value slot because
+    :mod:`klayout_tools.netlist_normalize` has no PDK sheet-resistance /
+    capacitance-per-area table to compute a real value from (deliberately --
+    see that module's docstring).
+
+    **Why this is not merely a cosmetic parameter difference.** ``R``
+    (resp. ``C``) is the *primary*, compared parameter of KLayout's
+    ``DeviceClassResistor``/``DeviceClassCapacitor``. ``NetlistComparer``
+    uses primary-parameter equality to seed device correspondence, so a
+    reference class whose every instance reads ``0`` against a layout side
+    carrying real, geometry-computed values does not report a per-device
+    parameter finding -- it fails to pair the class *at all*, collapsing into
+    a wholesale ``device.unmatched``/``topology`` cascade over every instance
+    and every net that touches one, even when each instance sits on its own
+    distinct, unambiguous net pair. Excluding that one parameter (KLayout's
+    own ``EqualDeviceParameters.ignore``, applied to **both** sides' class --
+    the comparer consults each side's own class, so ignoring it on the
+    reference alone changes nothing) lets topology do the pairing it always
+    could have, exactly as an equivalent hand-written ``form:
+    "plain-element"`` reference carrying the real values already does.
+
+    **Scoped to the provable placeholder, never to a coincidental zero.**
+    Only classes this conversion actually emitted are considered (a
+    ``form: "plain-element"`` reference carries real values and never reaches
+    here at all), and only when *every* reference-side instance of the class
+    reads exactly ``0`` -- the invariant the conversion guarantees by
+    construction. A class whose reference-side instances carry any nonzero
+    value is left completely alone, so a genuine value defect on a mixed
+    reference is still compared and still reported.
+
+    Returns one ``severity: "warning"``
+    :data:`CATEGORY_DEVICE_PLACEHOLDER_VALUE` entry per excluded class, which
+    ``run_lvs`` appends to ``mismatches[]``. The disclosure is the point,
+    exactly as for :func:`_apply_reference_device_bulk`: the resistance /
+    capacitance dimension of that class was *not* verified by this compare,
+    so a ``"match"`` reached this way is never silently indistinguishable
+    from one where the two sides' values actually agreed.
+
+    Never raises: unlike ``reference.device_bulk`` (a caller assertion, where
+    an inapplicable entry is a request error), ``spec`` is derived
+    internally, so a class that does not resolve on both sides -- or whose
+    reference instances are not all placeholders -- is simply left alone and
+    diagnosed by the ordinary compare.
+    """
+    entries: list[dict[str, Any]] = []
+    if not spec:
+        return entries
+
+    import klayout.db as kdb
+
+    for model, kind in sorted(spec.items()):
+        parameter = _PLACEHOLDER_VALUE_PARAMETER.get(kind)
+        if parameter is None:
+            continue
+        reference_class = _find_device_class(reference_netlist, model)
+        layout_class = _find_device_class(layout_netlist, model)
+        if reference_class is None or layout_class is None:
+            # The class is not instantiated on one of the two sides; there is
+            # nothing to pair and the ordinary compare already says so.
+            continue
+        if not reference_class.has_parameter(
+            parameter
+        ) or not layout_class.has_parameter(parameter):
+            continue
+
+        reference_parameter_id = reference_class.parameter_id(parameter)
+        reference_values = [
+            device.parameter(reference_parameter_id)
+            for circuit in reference_netlist.each_circuit()
+            for device in circuit.each_device()
+            if device.device_class().name == reference_class.name
+        ]
+        if not reference_values or any(value != 0.0 for value in reference_values):
+            # Not (or not only) the conversion's placeholder -- leave the
+            # class's value comparison exactly as it was.
+            continue
+
+        layout_parameter_id = layout_class.parameter_id(parameter)
+        layout_values = [
+            device.parameter(layout_parameter_id)
+            for circuit in layout_netlist.each_circuit()
+            for device in circuit.each_device()
+            if device.device_class().name == layout_class.name
+        ]
+
+        reference_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+            reference_parameter_id
+        )
+        layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
+            layout_parameter_id
+        )
+
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_PLACEHOLDER_VALUE,
+                "warning",
+                f"reference device class '{reference_class.name}' was "
+                f"converted from a subcircuit call (request.reference.form: "
+                f"\"subckt-call\"), so its '{parameter}' value is the literal "
+                f"0 placeholder on all {len(reference_values)} reference "
+                f"instance(s) -- klt lvs has no PDK sheet-resistance/"
+                f"capacitance-per-area data to compute a real one. "
+                f"'{parameter}' was therefore excluded from this compare on "
+                f"both sides (layout: {len(layout_values)} instance(s)"
+                + (
+                    f", {parameter} "
+                    + (
+                        f"{_format_placeholder_value(layout_values[0])}"
+                        if len(set(layout_values)) == 1
+                        else f"{_format_placeholder_value(min(layout_values))}"
+                        f"..{_format_placeholder_value(max(layout_values))}"
+                    )
+                    if layout_values
+                    else ""
+                )
+                + f") and the two sides were paired on topology alone -- that "
+                f"dimension of the compare is not independently verified. "
+                f"Supply a reference in the plain-element form carrying real "
+                f"'{parameter}' values to compare it (see docs/cli/lvs.md, "
+                "'device.placeholder_value')",
+                "reference",
+                device={
+                    "layout": None,
+                    "reference": None,
+                    "class": reference_class.name,
+                },
+                details={
+                    "parameter": parameter,
+                    "device_kind": kind,
+                    "reference_devices": len(reference_values),
+                    "layout_devices": len(layout_values),
+                    "layout_values": sorted(set(layout_values)),
+                },
+            )
+        )
+
+    return entries
+
+
+def _format_placeholder_value(value: float) -> str:
+    """A compact, round-trippable rendering of one layout-side device value
+    for a :data:`CATEGORY_DEVICE_PLACEHOLDER_VALUE` description -- an integral
+    value without its trailing ``.0`` (``120000`` rather than ``120000.0``),
+    everything else via ``repr``."""
+    if value == int(value):
+        return str(int(value))
+    return repr(value)
 
 
 # --------------------------------------------------------------------------- #
