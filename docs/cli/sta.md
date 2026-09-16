@@ -119,7 +119,8 @@ A request naming both, or neither, is a request error.
 | `verilog` | string \| omitted | (Issue #1825.) A synthesized structural Verilog netlist to link directly, with **no DEF at all** — see "From-scratch netlist input" below. Mutually exclusive with `def`; exactly one of the two is required. Resolved relative to the request file's own directory. |
 | `hdl_toplevel` | string \| omitted | The design's top module name. For a `def`-mode request this is informational/echo purposes only — this command's Tcl script does not run `link_design` in that mode and never needs it; `null` in the response when omitted. For a `verilog`-mode request this is **required** — it is `link_design`'s own argument. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
-| `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def`/`verilog` above stays byte-identical across every run in the sweep. |
+| `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. This is the field a corner sweep varies across runs — the `def`/`verilog` above stays byte-identical across every run in the sweep. Mutually exclusive with `pdk.corners` below (issue #1871) — a request giving both is a request error. |
+| `pdk.corners` | array of string \| omitted | Additive field (issue #1871). A **list** of corner names to characterize the *same* loaded geometry against, in one request/response round trip, instead of a caller hand-rolling an external loop of N single-corner requests (see "Multi-corner characterization" below). Mutually exclusive with the scalar `pdk.corner` above. Must be a non-empty list of non-empty, mutually-distinct strings — unlike `klt place-and-route`'s `pdk.sweep_corners` (which *narrows* an already-enumerated shipped-corner set, so `[]` meaningfully means "sweep zero of them"), `corners` here *is* the primary corner selection, so an empty list is a request error, not "characterize nothing". |
 | `constraints.clock_port` / `.clock_period_ns` | string / number | Clock port name + target period (ns). **Both required** — unlike `klt place-and-route` (where a clock is optional until `target_stage` reaches `"place"`), a standalone STA run has no meaning without one; there is no earlier stage to fall back to. |
 | `constraints.input_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_input_delay <ns> -clock <clock_port>` on every **non-clock** input port. Non-negative number when given (`0` is valid and meaningful). Omitted (the default) emits no `set_input_delay` line, leaving this command's generated Tcl byte-identical to before this field existed. Validated and emitted **here**, independently of `klt place-and-route` — this command can run standalone against an externally-produced DEF/netlist with no place-and-route request anywhere upstream, so nothing is inherited. See "I/O timing constraints" below. |
 | `constraints.output_delay_ns` | number \| omitted | Additive field (issue #1865) → `set_output_delay <ns> -clock <clock_port> [all_outputs]`. Same validation and omitted-default behavior as `input_delay_ns`; the two are independently optional. |
@@ -182,7 +183,121 @@ A request naming both, or neither, is a request error.
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
-| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def`. |
+| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def`. On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
+
+## Multi-corner characterization (`pdk.corners`, issue #1871)
+
+`klt sta`'s own reason to exist ("Why this exists" above) is characterizing
+**one fixed piece of geometry** at N corners. Until this field existed, the
+scalar `pdk.corner` above meant that characterization required a caller to
+hand-roll an *external* loop of N `klt sta` invocations — each one re-reading
+the same LEF/DEF and re-parsing a liberty file from scratch, then stitching N
+standalone envelopes into its own ad-hoc summary. Worse, a single-corner
+response can never itself assert the one invariant the whole exercise depends
+on: that all N runs actually characterized the *same* geometry (the same
+`provenance.input.content_hash`) — each invocation only ever sees its own run.
+
+`pdk.corners` (a list, mutually exclusive with the scalar `pdk.corner`)
+closes that gap natively:
+
+```json
+{
+  "def": "gcd.def",
+  "hdl_toplevel": "gcd",
+  "pdk": {
+    "cell_library": "sky130_fd_sc_hd",
+    "corners": ["ss_100C_1v60", "tt_025C_1v80", "ff_n40C_1v95"]
+  },
+  "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 }
+}
+```
+
+```json
+{
+  "schema_version": 1,
+  "engine": "openroad",
+  "engine_version": "26Q3-771-g7cfb2105c9",
+  "hdl_toplevel": "gcd",
+  "status": "ok",
+  "def_path": "/abs/path/gcd.def",
+  "verilog_path": null,
+  "geometry_source": "routed",
+  "wire_load_model": null,
+  "wire_load_mode": null,
+  "spef_path": null,
+  "provenance": {
+    "klt_version": "0.2.0",
+    "klayout_version": "0.30.10",
+    "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
+    "deck": null,
+    "input": { "content_hash": "sha256:<hex>" }
+  },
+  "corners": [
+    {
+      "corner": "ss_100C_1v60",
+      "worst_slack_ns": -0.31842,
+      "total_negative_slack_ns": -2.41112,
+      "worst_hold_slack_ns": 0.02011,
+      "total_negative_hold_slack_ns": 0.0,
+      "timing_status": "constrained",
+      "fmax_mhz": 401.552,
+      "setup_violation_count": 5,
+      "hold_violation_count": 0,
+      "clock_skew_ns": 0.0512,
+      "estimated_power_mw": 13.2,
+      "spef_annotation": null,
+      "deck": { "name": "sky130_fd_sc_hd__ss_100C_1v60", "content_hash": "sha256:<hex>", "released": true }
+    },
+    { "corner": "tt_025C_1v80", "...": "..." },
+    { "corner": "ff_n40C_1v95", "...": "..." }
+  ]
+}
+```
+
+**Fields that cannot vary across corners are hoisted to the top level, once**
+— `def_path`/`verilog_path`/`geometry_source`/`wire_load_model`/
+`wire_load_mode`/`spef_path`, plus `provenance.pdk`/`provenance.input`
+(the shared-geometry `content_hash` this whole feature exists to let a
+caller trust). They are never repeated inside a `corners[]` entry. The one
+field that *does* vary per corner — the resolved liberty deck — moves from
+the top-level `provenance.deck` (`null` on a `corners` response) into each
+`corners[]` entry's own `deck` field, alongside that corner's own
+`worst_slack_ns`/`total_negative_slack_ns`/`worst_hold_slack_ns`/
+`total_negative_hold_slack_ns`/`timing_status`/`fmax_mhz`/
+`setup_violation_count`/`hold_violation_count`/`clock_skew_ns`/
+`estimated_power_mw`/`spef_annotation` — the exact same per-corner fields
+the scalar `pdk.corner` response already reports, one entry per requested
+name, in request order.
+
+**The single-corner (`pdk.corner`) response is unchanged.** `pdk.corners` is
+a purely additive alternative — a request naming the scalar `pdk.corner` (or
+omitting both, which still resolves the nominal corner exactly as before)
+gets the flat response shape documented above, byte-for-byte; there is no
+`schema_version` bump. `corners` only ever appears when the request gave
+`pdk.corners`, and the flat `worst_slack_ns`/etc. top-level fields only ever
+appear when it did not — a response never carries both shapes at once.
+
+**Verifies the shared-geometry invariant.** `def`/`verilog` is hashed once
+before the corner loop and re-hashed once after every corner has run; a
+mismatch (the input file changed mid-characterization) is a loud
+`PostRouteStaError`, never a silently-inconsistent `corners` array.
+
+**Implementation note.** Each corner in `pdk.corners` runs its own complete,
+fresh OpenSTA session (`read_lef` x2, `read_def`/`read_verilog`,
+`read_liberty`, `create_clock`, ...) — the exact same per-corner mechanics
+the scalar `pdk.corner` path always has, just run N times internally instead
+of externally. This is deliberately the pragmatic first implementation:
+`klt place-and-route`'s own post-route corner sweep (`pdk.sweep_corners`)
+established, via a real OpenROAD session, that OpenSTA's
+`report_worst_slack_metric` has no way to scope its result back to one
+corner once more than one is loaded into the same session — so a shared,
+single-session sweep still needs one engine invocation per corner to recover
+distinct per-corner numbers, same as this. A deeper optimization (e.g.
+checkpointing the loaded LEF/DEF once via `write_db`/`read_db`, as the
+`place-and-route` sweep does over its own already-loaded design, so only the
+liberty deck differs per invocation) is tracked as follow-up work, not
+required for this field's initial scope — see the issue tracker for the
+follow-up.
 
 ## Annotation evidence (`spef_annotation`)
 
@@ -506,10 +621,30 @@ JSON
 klt sta sta_request.json --format json
 ```
 
-Sweeping corners: change only `pdk.corner` between runs. Because `def`
-never changes, every run in the sweep analyses the identical placed-and-
-routed geometry — a real characterization of one design, not of N different
-place-and-route outcomes.
+Sweeping corners: prefer `pdk.corners` (a list, issue #1871) over N external
+`klt sta` invocations — see "Multi-corner characterization" above. It is
+both cheaper (one request/response round trip, `def`/`verilog` resolved
+once) and structurally stronger (the response itself asserts every corner
+characterized identical geometry, via `provenance.input.content_hash`, a
+guarantee no per-invocation response can make on its own):
+
+```json
+{
+  "def": "/abs/path/.klt/place-and-route/gcd.def",
+  "hdl_toplevel": "gcd",
+  "pdk": {
+    "cell_library": "sky130_fd_sc_hd",
+    "corners": ["ss_100C_1v60", "tt_025C_1v80", "ff_n40C_1v95"]
+  },
+  "constraints": { "clock_port": "clk", "clock_period_ns": 1.1 }
+}
+```
+
+The scalar `pdk.corner` form above still works unchanged — change only
+`pdk.corner` between runs to reproduce the original external-loop pattern.
+Because `def` never changes either way, every corner analyses the identical
+placed-and-routed geometry — a real characterization of one design, not of N
+different place-and-route outcomes.
 
 ## Exit codes
 
