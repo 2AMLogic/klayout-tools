@@ -1495,8 +1495,9 @@ def build_tier_report(
 
     An item's ``status`` is ``"met"`` only when its ``evidence`` entry
     resolves to a *readable* ``klt`` JSON envelope, classifiable as one of
-    ``drc``/``lvs``/``extract``/``sim``/``yield``/``pex``/``power``/``generic``
-    (:func:`_classify`), whose own check passed (:func:`_check_passed`) --
+    ``drc``/``lvs``/``extract``/``sim``/``yield``/``pex``/``power``/``sta``/
+    ``functional-verification``/``generic`` (:func:`_classify`), whose own
+    check passed (:func:`_check_passed`) --
     though a ``"power"``-classified citation never actually reaches
     ``"met"`` for any item today (see "No T1 item accepts 'power' evidence"
     below) --
@@ -1515,16 +1516,24 @@ def build_tier_report(
     item does not accept) also renders ``"unmet"``: this phase never infers
     a ``"met"`` verdict for an item with no runnable check behind it.
 
-    **Item 7 is kind-restricted** (issue #871, Phase 2b of epic #706): every
-    other T1 item accepts any recognised, passing envelope kind, but item 7
-    ("Post-layout verification") only accepts a ``"pex"``-kind citation --
+    **Item 7 is kind-restricted, per block kind** (issue #871, Phase 2b of
+    epic #706; made per-block-kind by issue #1959): every other T1 item
+    accepts any recognised, passing envelope kind, but item 7 ("Post-layout
+    verification") accepts only the kind(s) named by
+    :data:`_ITEM_ALLOWED_KINDS` for the partition kind being graded
+    (:func:`_allowed_kinds_for`) -- for an analog partition (or a
+    mixed-signal block's analog partition), only a ``"pex"``-kind citation,
     the schematic-vs-extracted-netlist re-simulation delta a `klt pex`
     (Epic #709, issue #801, ``src/klayout_tools/pex.py``) run produces (see
     this module's "Post-layout binding" docstring section, and
-    ``docs/cli/pex.md`` for `klt pex`'s own contract). A
-    ``drc``/``lvs``/``sim``/``extract``/``yield``/``generic`` citation for
-    item 7 -- even a genuinely passing one -- renders ``"unmet"`` with
-    ``reason: "wrong_kind"``, never a borrowed pass.
+    ``docs/cli/pex.md`` for `klt pex`'s own contract); for a digital
+    partition, ``"pex"`` *or* a ``"functional-verification"`` citation that
+    ran with back-annotated SDF timing (see "Digital-flow evidence" above --
+    an unannotated run renders ``reason: "not_post_layout"``, not
+    ``"wrong_kind"``). A ``drc``/``lvs``/``sim``/``extract``/``yield``/
+    ``sta``/``generic`` citation for item 7 -- even a genuinely passing one
+    -- renders ``"unmet"`` with ``reason: "wrong_kind"``, never a borrowed
+    pass.
 
     **Only item 8 accepts ``"generic"`` evidence** (issue #1152): a
     ``"generic"``-kind citation (see "Generic evidence ingestion" above)
@@ -1579,14 +1588,24 @@ def build_tier_report(
       pinned ``content_hash`` -- the check ran against a different layout
       revision than the one being claimed.
     - ``"wrong_kind"`` (issue #871, extended by issue #1152, extended by
-      issue #1321) -- the evidence resolved to a recognised, *passing*
-      envelope, but its classified kind is not one this item accepts:
-      either item 7's ``"pex"``-only restriction (see "Item 7 is
-      kind-restricted" above), a ``"generic"``-kind citation for any item
-      other than item 8 (see "Only item 8 accepts 'generic' evidence"
-      above), or a ``"power"``-kind citation for *any* item (see "No T1
-      item accepts 'power' evidence" above). The cited check did not fail
-      on its own terms; it simply does not prove what this item requires.
+      issue #1321, made per-block-kind by issue #1959) -- the evidence
+      resolved to a recognised, *passing* envelope, but its classified kind
+      is not one this item accepts: either item 7's per-block-kind
+      restriction (see "Item 7 is kind-restricted, per block kind" above),
+      a ``"generic"``-kind citation for any item other than item 8 (see
+      "Only item 8 accepts 'generic' evidence" above), or a
+      ``"power"``-kind citation for *any* item (see "No T1 item accepts
+      'power' evidence" above). The cited check did not fail on its own
+      terms; it simply does not prove what this item requires.
+    - ``"not_post_layout"`` (issue #1959) -- the evidence resolved to a
+      recognised, *passing* envelope of a kind this item does accept, but
+      it does not prove a **post-layout** run (:func:`_is_post_layout_evidence`,
+      see "Post-layout binding" above): today, only item 7's digital
+      partition can render this -- a `klt functional-verification` citation
+      that passed but ran without back-annotated SDF timing. Distinct from
+      ``"wrong_kind"`` per issue #826's invariant: ``"wrong_kind"`` means
+      "cite a different artifact"; ``"not_post_layout"`` means "re-run
+      *this* artifact against the layout".
     - ``"tier_not_supported"`` -- a T2-T4 ladder row (see below): this
       repository has no mechanism to run a T2+ check at all.
 
