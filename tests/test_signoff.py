@@ -857,6 +857,45 @@ def test_lvs_match_with_power_connectivity_mismatch_fails(tmp_path):
     assert check["detail"]["power_connectivity_status"] == "mismatch"
 
 
+def test_cli_text_format_names_power_connectivity_on_lvs_fail(tmp_path, capsys):
+    """Issue #1978: `--format text` (the default) must not print a bare
+    `[FAIL] lvs ... status=match` for a check that only failed because of
+    `power_connectivity.status == "mismatch"` -- the line's own `status=`
+    field is the *signal*-connectivity verdict, which stays `"match"`
+    (see `test_lvs_match_with_power_connectivity_mismatch_fails` above),
+    so without naming the real reason the printed line reads as a
+    contradiction."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_MISMATCH_ENVELOPE)
+
+    exit_code = main(["signoff", path])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "status: fail" in out
+    assert "[FAIL] lvs" in out
+    assert "status=match" in out
+    assert "(power_connectivity: mismatch)" in out
+    # The suffix belongs on the FAIL line itself, not floating free.
+    fail_line = next(line for line in out.splitlines() if line.startswith("[FAIL] lvs"))
+    assert fail_line.endswith("(power_connectivity: mismatch)")
+
+
+def test_cli_text_format_omits_power_connectivity_suffix_on_ordinary_mismatch(
+    tmp_path, capsys
+):
+    """Issue #1978: an ordinary signal mismatch (no power-connectivity
+    involvement at all) must not gain the new suffix -- it is additive
+    only for the specific `power_connectivity: "mismatch"` cause."""
+    path = _write(tmp_path, "lvs.json", LVS_MISMATCH_ENVELOPE)
+
+    exit_code = main(["signoff", path])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "[FAIL] lvs" in out
+    assert "power_connectivity" not in out
+
+
 def test_lvs_match_with_power_connectivity_match_passes(tmp_path):
     path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
 

@@ -215,9 +215,22 @@ def _print_text(result: dict) -> None:
     print()
     for check in result["checks"]:
         marker = "PASS" if check["passed"] else "FAIL"
-        print(
-            f"[{marker}] {check['kind']:<8} {check['source']}  status={check['status']}"
-        )
+        line = f"[{marker}] {check['kind']:<8} {check['source']}"
+        line += f"  status={check['status']}"
+        # Issue #1978: an `lvs`-kind check's top-level `status` is the
+        # signal-connectivity verdict only (see `_check_passed`/`_detail` in
+        # signoff.py) -- it stays `"match"` even when a `power_connectivity`
+        # mismatch is the sole reason `passed` is `False`, which otherwise
+        # reads as a bare contradiction ("FAIL ... status=match"). Name the
+        # actual reason on the same line rather than leaving a reader to go
+        # re-open the source envelope.
+        if (
+            check["kind"] == "lvs"
+            and not check["passed"]
+            and check["detail"].get("power_connectivity_status") == "mismatch"
+        ):
+            line += " (power_connectivity: mismatch)"
+        print(line)
 
 
 def _print_tier_report_text(result: dict) -> None:

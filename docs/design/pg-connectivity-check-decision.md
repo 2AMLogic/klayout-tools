@@ -163,6 +163,14 @@ Two design details fall out of this and are worth recording:
   obvious one. In sky130, `VPWR` and `VPB` legitimately share a net, as do
   `VGND` and `VNB`; "two distinct power pins of one instance must be on
   distinct nets" would fire on every correctly-wired cell in the PDK.
+  Re-affirmed by issue #1978's first-tester report, which surfaced the same
+  `VPB`/`VPWR` (and `VGND`/`VNB`) duplication as a rough edge: it is this
+  same deliberate design decision, not a bug, and stays out of scope for
+  that issue's fixes (remedy-text wording, `expected_nets` validation, and
+  the `klt signoff --format text` print) — a per-library well-tie map that
+  could collapse same-net pin pairs for readability would need new modeling
+  this codebase does not carry today, and is a separate, lower-priority
+  follow-up rather than a correctness fix.
 
 The invariant has one blind spot by construction: a design in which *every*
 instance is miswired the same way is self-consistent. `options.

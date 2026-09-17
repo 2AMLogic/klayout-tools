@@ -140,6 +140,18 @@ def _print_text(report: dict) -> None:
         print(f"power_connectivity: {power['status']}")
         if power.get("reason"):
             print(f"  ({power['reason']})")
+        # Issue #1978: `expected_nets` naming a pin nothing was observed on
+        # matches zero findings and would otherwise print identically to "no
+        # such pin exists to worry about" -- name it explicitly so a text
+        # reader can tell the two cases apart.
+        unchecked_expected = power.get("unchecked_expected_pins") or []
+        if unchecked_expected:
+            print(
+                "  unchecked_expected_pins: "
+                f"{', '.join(unchecked_expected)} (named in "
+                "options.power_connectivity.expected_nets but never "
+                "observed on any layout-side instance)"
+            )
         for finding in power["findings"]:
             print(
                 f"  [{finding['severity']}] {finding['rule']}  {finding['description']}"

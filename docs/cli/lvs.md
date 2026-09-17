@@ -715,8 +715,8 @@ compare *against*. The check does not need one. It needs:
 
 | `findings[].rule` | Fires when |
 | --- | --- |
-| `power.inconsistent_pin_net` | One power/ground pin name reaches **more than one distinct net** across the design's instances — the single-power-domain invariant, violated. One finding per offending *pin name*, naming every net and the instances on each. It deliberately does **not** nominate which net is correct: with two instances disagreeing there is no majority to appeal to. Declare `options.power_connectivity.expected_nets` to get a verdict that does. |
-| `power.unexpected_pin_net` | `options.power_connectivity.expected_nets` names this pin and at least one instance reaches a **different net than declared**. Strictly stronger than the rule above — it also catches a design in which *every* instance is miswired the same way, which no amount of cross-instance agreement can. Replaces the consistency rule for any pin the mapping names. |
+| `power.inconsistent_pin_net` | One power/ground pin name reaches **more than one distinct net** across the design's instances — the single-power-domain invariant, violated. One finding per offending *pin name*, naming every net and the instances on each. It deliberately does **not** nominate which net is correct: with two instances disagreeing there is no majority to appeal to. Declare `options.power_connectivity.expected_nets` to get a verdict that does. **This same signature — every instance's supply pin landing on its own distinct net — is also exactly what a layout with no power distribution network routed at all produces** (issue #1978's first-tester report); the finding's `description` names `request.power` in `klt place-and-route` as the more likely fix for that case, alongside `expected_nets`/`power_connectivity: false`. |
+| `power.unexpected_pin_net` | `options.power_connectivity.expected_nets` names this pin and at least one instance reaches a **different net than declared**. Strictly stronger than the rule above — it also catches a design in which *every* instance is miswired the same way, which no amount of cross-instance agreement can. Replaces the consistency rule for any pin the mapping names. As with the rule above, the finding's `description` also names a missing `request.power` block as a possible cause, alongside re-checking `expected_nets` itself. |
 | `power.unconnected_pin` | An instance's power/ground pin resolved to **no net at all** — it never landed on routed conductor. Reported separately because the defect differs in kind: not "wired to the wrong rail" but "wired to nothing". |
 
 Every finding is `severity: "error"`. These are `findings[].rule` values on a
@@ -750,6 +750,7 @@ would silently exempt them.
   "power_pins": ["VGND", "VNB", "VPB", "VPWR"],
   "instance_count": 462,
   "expected_nets": null,
+  "unchecked_expected_pins": [],
   "findings": [
     {
       "rule": "power.inconsistent_pin_net",
@@ -785,6 +786,7 @@ would silently exempt them.
 | `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
 | `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
+| `unchecked_expected_pins` | array\<string\> | Issue #1978. `expected_nets` keys that named a power/ground pin no layout-side instance was actually observed to carry — a typo, or a PDK standard cell whose tie pin has no in-cell label/LEF port at all. Such a pin matches zero rows in `_power_pin_connections` and so produces zero findings, which reads identically to "checked and found correct" unless this field is consulted; a non-empty list means at least one declared expectation was never exercised by this run. `[]` on a clean check, and always `[]` when `status` is `"unchecked"`. |
 | `findings` | array\<object\> | One entry per offending **pin name** (never per instance) — see the rule table above. `[]` on a clean check. |
 | `finding_count` | integer | `len(findings)`. |
 | `findings[].nets[]` | array\<object\> | Per finding, the nets that pin reached, each with the exact untruncated `instance_count` and a bounded `instances` sample (at most 10 `{circuit, instance, cell}` entries, with `instances_truncated` saying whether anything was left out). A real routed block puts hundreds of instances on one rail; a finding that dumped all of them would bury the few that differ. A `net` of `null` is an unconnected pin. |
@@ -810,6 +812,15 @@ A genuinely multi-domain design — one that routes the same pin name to two
 different nets by design — should set `"power_connectivity": false` and say
 so; the response records that opt-out in `reason` rather than reporting an
 empty result that reads like a clean one.
+
+**Check `unchecked_expected_pins` alongside `findings`, not just
+`status`.** Declaring `expected_nets` for a pin name and then reading
+`status: "match"` is not, on its own, proof that pin was verified — if the
+layout never actually carried an instance with that pin (see the field
+table above), `status` is `"match"` because there was nothing to disagree
+with, not because the pin was checked and found correct. A signoff gate
+that wants "every pin I named was actually exercised" should additionally
+assert `power_connectivity.unchecked_expected_pins == []`.
 
 ## Negative controls: two independent corruptions
 

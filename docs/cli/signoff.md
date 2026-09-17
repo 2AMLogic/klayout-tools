@@ -224,6 +224,16 @@ absent) is echoed in the check's `detail.power_connectivity_status` field
 so a `"fail"` caused by a power miswire is distinguishable from an
 ordinary signal mismatch without re-opening the source envelope.
 
+**`--format text` names the reason on the same line (issue #1978).** The
+line's own `status=` field is `check['status']` — the compare's
+*signal*-connectivity `status`, always `"match"` for exactly the case this
+section describes — so a bare `[FAIL] lvs ... status=match` reads as a
+contradiction unless a reader already knows to go check `detail` in the
+JSON output. When an `lvs`-kind check's `passed` is `False` *and*
+`detail.power_connectivity_status == "mismatch"`, the printed line appends
+`" (power_connectivity: mismatch)"` so the reason is visible without
+switching to `--format json`.
+
 An opt-in flag to keep today's weaker (`status`-only) behavior, or a
 disclosure-only mode that surfaces the mismatch without failing the check,
 were both considered and rejected: a `klt signoff` check labeled `lvs`
