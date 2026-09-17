@@ -3253,3 +3253,74 @@ def test_cli_fleet_invalid_block_entry_exits_one(tmp_path, capsys):
     assert exit_code == 1
     err = json.loads(capsys.readouterr().err)
     assert "block" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# The committed worked example (`examples/signoff/`, issue #1954).
+#
+# `examples/signoff/` is the copy-paste starting point a block author adapts:
+# a block manifest citing T1 items 3 and 4 against real, committed `klt
+# drc`/`klt lvs` envelopes, with every other item deliberately uncited. These
+# tests pin the mixed `met`/`unmet` shape its README documents, so the example
+# cannot silently rot into "everything unmet" (or, worse, "everything met").
+# --------------------------------------------------------------------------- #
+
+_SIGNOFF_EXAMPLES_DIR = _REPO_ROOT / "examples" / "signoff"
+
+
+@pytest.mark.skipif(
+    not (_SIGNOFF_EXAMPLES_DIR / "manifest.json").exists(),
+    reason="examples/signoff/manifest.json not present in this checkout",
+)
+def test_committed_example_manifest_grades_items_3_and_4_met(monkeypatch):
+    # The manifest's file-backed evidence paths are repo-root-relative,
+    # because a manifest resolves them against the invoking process's cwd.
+    monkeypatch.chdir(_REPO_ROOT)
+    manifest = json.loads(
+        (_SIGNOFF_EXAMPLES_DIR / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    result = build_tier_report(manifest)
+
+    assert result["kind"] == "analog"
+    assert result["t1_met_count"] == 2
+    met = {item["id"] for item in result["items"] if item["status"] == "met"}
+    assert met == {3, 4}
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["citation"]["kind"] == "drc"
+    assert item_3["citation"]["check_status"] == "clean"
+    # The manifest pins the layout revision it is claiming against, and the
+    # committed envelope still matches it -- a stale pin would render unmet.
+    assert (
+        item_3["citation"]["content_hash"] == manifest["evidence"]["3"]["content_hash"]
+    )
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["citation"]["kind"] == "lvs"
+    assert item_4["citation"]["check_status"] == "match"
+
+    # Every other T1 item is visibly uncited, never silently assumed met.
+    for item in result["items"]:
+        if item["tier"] == "T1" and item["id"] not in {3, 4}:
+            assert item["status"] == "unmet"
+            assert item["reason"] == "no_evidence"
+
+
+@pytest.mark.skipif(
+    not (_SIGNOFF_EXAMPLES_DIR / "fleet.json").exists(),
+    reason="examples/signoff/fleet.json not present in this checkout",
+)
+def test_committed_example_fleet_manifest_rolls_up_the_one_block(monkeypatch):
+    monkeypatch.chdir(_REPO_ROOT)
+    fleet = json.loads(
+        (_SIGNOFF_EXAMPLES_DIR / "fleet.json").read_text(encoding="utf-8")
+    )
+
+    result = build_fleet_report(fleet)
+
+    assert result["block_count"] == 1
+    block = result["blocks"][0]
+    assert block["block"] == "example-current-mirror"
+    assert block["t1_met_count"] == 2
+    assert block["tier"] is None

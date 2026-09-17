@@ -1,0 +1,11 @@
+* Layout-side netlist for `examples/signoff/`.
+*
+* Hand-written, standing in for `klt extract` output (see this directory's
+* README.md, "Why synthetic"). Deliberately names its devices differently
+* from schematic.spice and lists them in the other order, so `klt lvs`'s
+* NetlistComparer has to match the two by graph topology rather than by
+* line-for-line coincidence.
+.subckt current_mirror vin vout vss
+MB vout vin vss vss nfet L=1U W=4U
+MA vin  vin vss vss nfet L=1U W=4U
+.ends

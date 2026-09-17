@@ -62,6 +62,16 @@ artifact's provenance (input hashes, netlist/layout revision) matches the
 block's current sources — a passing report against last week's netlist is
 evidence of nothing.
 
+**Not every item has a tool behind it.** Items 3-7 each name a `klt` verb
+that can mechanically grade them, and item 8 has a purpose-built generic
+evidence envelope — but items **1**, **2**, **9**, and **10** have none.
+`klt signoff --manifest` therefore grades those four on whether *some*
+passing envelope was cited at all, not on whether the cited evidence is
+topically relevant to the claim; see
+[`docs/cli/signoff.md`](cli/signoff.md)'s "Items 1, 2, 9, and 10: `klt
+signoff` cannot check topical relevance". Citing them honestly is the
+claimant's responsibility, not something the tool verifies.
+
 ### Block kind
 
 A T1 claim states the block's **kind**: `analog`, `digital`, or

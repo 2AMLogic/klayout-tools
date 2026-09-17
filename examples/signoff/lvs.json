@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "engine": "klayout",
+  "layout": "layout.spice",
+  "reference": "schematic.spice",
+  "top": "CURRENT_MIRROR",
+  "reference_top": "CURRENT_MIRROR",
+  "parameter_tolerance": null,
+  "options": {
+    "combine_devices": false,
+    "combine_devices_per_circuit": null,
+    "flatten_layout": false,
+    "flatten_reference": false,
+    "netgen_setup": null,
+    "parameter_tolerance": null,
+    "compare_parameters": null
+  },
+  "status": "match",
+  "mismatch_count": 0,
+  "error_count": 0,
+  "category_counts": {},
+  "category_error_counts": {},
+  "counts": {
+    "nets": {
+      "layout": 3,
+      "reference": 3,
+      "matched": 3
+    },
+    "devices": {
+      "layout": 2,
+      "reference": 2,
+      "matched": 2
+    },
+    "pins": {
+      "layout": 3,
+      "reference": 3,
+      "matched": 3
+    }
+  },
+  "device_classes": null,
+  "environment": {
+    "engine": "klayout",
+    "engine_version": "0.30.10",
+    "layout_sha256": "1bc1899ad636c1bac4c903b45d7fecd99112056a2bf633cf50c13b5bd93ba692",
+    "reference_sha256": "b3db003a75370b595c42edd12c525cfec7d6595b0b63fb312c1c46fd70aacb99",
+    "extracted_netlist": null
+  },
+  "provenance": {
+    "klt_version": "0.5.0",
+    "klayout_version": "0.30.10",
+    "pdk": null,
+    "deck": null,
+    "input": null,
+    "klayout_version_mismatch": false
+  },
+  "mismatches": [],
+  "net_correspondence": [
+    {
+      "layout": "VIN",
+      "reference": "VIN",
+      "pin": true
+    },
+    {
+      "layout": "VOUT",
+      "reference": "VOUT",
+      "pin": true
+    },
+    {
+      "layout": "VSS",
+      "reference": "VSS",
+      "pin": true
+    }
+  ]
+}

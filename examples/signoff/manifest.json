@@ -1,0 +1,11 @@
+{
+  "block": "example-current-mirror",
+  "kind": "analog",
+  "evidence": {
+    "3": {
+      "file": "examples/signoff/drc.json",
+      "content_hash": "sha256:b30592298bfc55e02c4ce717ee3bba0ec44c15ed98534d71fe9c9069a9c16387"
+    },
+    "4": "examples/signoff/lvs.json"
+  }
+}

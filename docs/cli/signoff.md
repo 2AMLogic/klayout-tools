@@ -296,6 +296,41 @@ tiers.md`'s T1 checklist has no item for power-grid evidence yet, so a
 `power` citation is never graded `"met"` here (see "No T1 item accepts
 `power` evidence" below).
 
+### Items 1, 2, 9, and 10: `klt signoff` cannot check topical relevance
+
+**These four items have no `klt` verb behind them, and the tool does not
+pretend otherwise.** Items 3-7 each have a natural verb a well-formed
+manifest is expected to cite (`klt drc`, `klt lvs`, `klt sim`, `klt yield`,
+`klt pex`), and item 8 has the purpose-built `generic` envelope. Items **1**
+(Design sources), **2** (Layout), **9** (Testbenches shipped), and **10**
+(Repo hygiene) have none — they are claims about what a repository
+*contains*, not about a check that can be run.
+
+The grading consequence is blunt and worth stating plainly: any recognised,
+*native* envelope kind (`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`) whose own
+check passed renders these four items `"met"`, **even if it is topically
+unrelated to what the item actually claims**. Citing the same clean `klt
+drc` report for item 3 and again for item 10 produces two `MET` rows, and
+`klt signoff` has no basis on which to object. (The two existing
+restrictions still apply: a `generic` citation satisfies item 8 only, and a
+`power` citation satisfies no item at all — so neither can be used here.)
+
+What `klt signoff` *does* verify for these items is what it verifies
+everywhere: that the evidence resolves to a readable, recognised envelope;
+that the check it reports actually passed; and that it is fresh against any
+`content_hash` the manifest pinned. What it cannot verify is **relevance** —
+whether the cited artifact has anything to do with the claim. For items 1,
+2, 9, and 10 that gap is structural, not an oversight to be fixed by a
+future phase: there is no verb to bind them to.
+
+**So citing these four honestly is the manifest author's responsibility, not
+something this command enforces.** The safest default is to leave them
+uncited — an `UNMET`/`no_evidence` row is an accurate statement that no
+check backs the claim, which is exactly the failure mode this verb exists to
+make visible (see "Proving a skipped check is caught, not silently passed"
+below). `examples/signoff/` follows that default: it cites items 3 and 4
+only, and leaves the rest visibly `UNMET`.
+
 ### Where the tier doc comes from
 
 Both doc-parsing modes (`--manifest` and `--fleet`) resolve
