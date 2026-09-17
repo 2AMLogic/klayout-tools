@@ -93,15 +93,18 @@ from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entrie
 from ._provenance import build_provenance
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
-#: (#861), Phase 3 (#908), and issue #1968 all add fields additively -- no
-#: bump needed, per docs/cli/erc.md's "Phase scope" and
-#: docs/json-contract.md's additive-envelope design: `pdk`/
-#: `gates[].antenna_verdict`/`levels[].antenna_ratio`/
+#: (#861), Phase 3 (#908), issue #1968, and issue #1979 all add fields/
+#: optional spec keys additively -- no bump needed, per docs/cli/erc.md's
+#: "Phase scope" and docs/json-contract.md's additive-envelope design:
+#: `pdk`/`gates[].antenna_verdict`/`levels[].antenna_ratio`/
 #: `levels[].antenna_ratio_max`/`levels[].antenna_ratio_source`/
 #: `levels[].verdict` (Phase 1b), `erc_findings`/`erc_finding_count`
-#: (Phase 1c), `levels[].remedy` (Phase 3), and `status`/`provenance`
+#: (Phase 1c), `levels[].remedy` (Phase 3), `status`/`provenance`
 #: (issue #1968 -- the two fields `klt signoff` grading needs, see that
-#: issue and docs/json-contract.md's "Shared `provenance` block").
+#: issue and docs/json-contract.md's "Shared `provenance` block"), and the
+#: optional `stackup[0].active_layer` spec field (issue #1979 -- true
+#: `poly ∩ diff` gate-area computation, opt-in, legacy raw-poly-area
+#: behaviour preserved when omitted).
 SCHEMA_VERSION = 1
 
 
@@ -206,6 +209,15 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
     metal role and must not repeat ``role: "gate"``. At least one metal
     role beyond the gate itself is required, or "layer-by-layer
     accumulation" has nothing to accumulate.
+
+    ``stackup[0]`` may additionally set ``"active_layer"`` (issue #1979,
+    optional, ``"<layer>/<datatype>"``, same shape as ``label_layer``): the
+    diffusion/active layer used to compute *true* gate area as ``poly ∩
+    diff`` rather than raw poly-net area -- see ``run_erc``'s gate-region
+    computation and ``docs/cli/erc.md``'s "Spec file" section for the full
+    rationale (a tie-cell/decap/filler-cell poly resistor has poly area but
+    no gate oxide, since it never overlaps diffusion). Only meaningful on
+    the gate role itself; rejected on any other entry.
     """
     raw = spec.get("stackup")
     if not isinstance(raw, list) or len(raw) < 2:
@@ -240,6 +252,20 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
                 ErcError,
             )
 
+        active_layer = None
+        if entry.get("active_layer") is not None:
+            if i != 0:
+                raise ErcError(
+                    f"spec '{spec_path}': stackup[{i}].active_layer is only "
+                    "valid on stackup[0] (the gate role)"
+                )
+            active_layer = _parse_layer_datatype(
+                str(entry["active_layer"]),
+                spec_path,
+                f"stackup[{i}].active_layer",
+                ErcError,
+            )
+
         role = entry.get("role")
         if role is not None and role != "gate":
             raise ErcError(
@@ -262,6 +288,7 @@ def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, An
                 "name": name,
                 "layer": layer,
                 "label_layer": label_layer,
+                "active_layer": active_layer,
                 "role": role,
             }
         )
@@ -727,7 +754,13 @@ def run_erc(
     - ``stackup`` (required, >= 2 entries): fabrication order from the gate
       layer up. Each entry is ``{"name", "layer": "<layer>/<datatype>",
       "label_layer": "<layer>/<datatype>" (optional)}``; ``stackup[0]``
-      additionally sets ``"role": "gate"``.
+      additionally sets ``"role": "gate"`` and may optionally set
+      ``"active_layer": "<layer>/<datatype>"`` (issue #1979) -- the
+      diffusion/active layer used to compute true gate area as ``poly ∩
+      diff`` rather than raw poly-net area, so a tie-cell/decap/filler-cell
+      poly resistor (no diffusion under it) is correctly excluded from
+      ``gates[]`` instead of producing a false antenna-ratio violation.
+      Omitted -> today's raw-poly-area behaviour, unchanged.
     - ``vias`` (optional array, default ``[]``): each entry bridges two
       ``stackup`` names -- ``{"name" (optional, defaults to "via<index>"),
       "layer": "<layer>/<datatype>", "between": ["<role>", "<role>"]}``.
@@ -849,6 +882,22 @@ def run_erc(
     gate_layer_index = layer_index[gate_role]
     dbu2_um2 = dbu * dbu
 
+    # `active_layer` (issue #1979, optional): when the spec supplies a
+    # diffusion/active layer on `stackup[0]`, gate identification and the
+    # antenna-ratio denominator below are computed from `poly ∩ diff` --
+    # true gate (oxide) area -- rather than raw poly-net area. This is a
+    # plain geometric intersection against the whole-layout active region,
+    # *not* a connectivity-graph registration: diffusion never needs to be
+    # traced for connectivity here, only intersected against each gate net's
+    # own merged poly region. When omitted, `active_region` stays `None` and
+    # every net's raw poly area is used unchanged (today's behaviour) -- see
+    # docs/cli/erc.md's "Spec file" section for the documented caveat this
+    # leaves for tie/decap/filler-cell nets.
+    active_layer = stackup[0]["active_layer"]
+    active_region = (
+        _region(layout, top_cell, active_layer) if active_layer is not None else None
+    )
+
     # Every distinct net (cluster) is already one electrically-connected
     # island by construction (`LayoutToNetlist` clusters connected geometry
     # into one `Net` per cluster id) -- unlike `klt power`'s caller-named
@@ -863,11 +912,24 @@ def run_erc(
     gates: list[dict[str, Any]] = []
     # Parallel to `gates` (same order/length) -- each gate's own merged
     # gate-role region, kept only for `_floating_gate_findings`'s `bbox`
-    # (not part of the `gates[]` JSON schema itself).
+    # (not part of the `gates[]` JSON schema itself). Always the *raw* poly
+    # region regardless of `active_layer` -- only the area used for
+    # membership/the antenna-ratio denominator below changes with the fix.
     gate_regions: list[Any] = []
     for net in candidates:
-        gate_region = l2n.polygons_of_net(net, gate_layer_index).merged()
-        gate_area_um2 = gate_region.area() * dbu2_um2
+        gate_poly_region = l2n.polygons_of_net(net, gate_layer_index).merged()
+
+        # `gate_area_um2` (issue #1979): true gate (oxide) area is `poly ∩
+        # diff` when `active_layer` was supplied -- a tie-cell/decap/
+        # filler-cell poly resistor has `poly ∩ diff == 0` (no gate oxide)
+        # and is correctly excluded below by the existing zero-area skip.
+        # Falls back to raw poly-net area (today's behaviour) when
+        # `active_layer` is omitted.
+        if active_region is not None:
+            gate_area_region = (gate_poly_region & active_region).merged()
+        else:
+            gate_area_region = gate_poly_region
+        gate_area_um2 = gate_area_region.area() * dbu2_um2
         if gate_area_um2 <= 0:
             continue
 
@@ -945,7 +1007,7 @@ def run_erc(
                 "levels": levels,
             }
         )
-        gate_regions.append(gate_region)
+        gate_regions.append(gate_poly_region)
 
     if not gates:
         raise ErcError(
