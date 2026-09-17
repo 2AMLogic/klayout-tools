@@ -241,6 +241,66 @@ should mean the same thing `klt lvs` itself and `docs/cli/lvs.md` already
 tell callers it means, and a default that stays silently weaker than the
 evidence it aggregates would perpetuate exactly the gap this issue closes.
 
+### DRC coverage is reported, not graded
+
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a
+DRC claim to enumerate its deck's coverage gaps, quoting three fields from
+the cited envelope's own `coverage` block ([`drc.md`](drc.md)):
+`layers_in_stream_without_rules` (layers this stream draws that the deck has
+no rule for), `rules_skipped` (rules the deck carries that this run did not
+evaluate), and `deck_scope` (which chapters of the foundry DRM the deck
+transcribes at all).
+
+Issue #2002 makes `klt signoff` **report** all three, in every mode:
+
+| Mode | Where |
+| ---- | ----- |
+| Envelope aggregation | `checks[].detail.coverage` on a `drc`-kind check |
+| Tier-verdict report (`--manifest`) | `citation.coverage` on a `"met"` `drc`-kind citation — item 3's own artifact |
+| Fleet roll-up (`--fleet`) | `blocks[].drc_coverage`, one row per such citation |
+
+```
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 3) | {status, coverage: .citation.coverage}'
+{
+  "status": "met",
+  "coverage": {
+    "layers_in_stream_without_rules": ["70/20", "71/20"],
+    "rules_skipped": ["met5.4", "met5.5"],
+    "deck_scope": ["5.x", "6.x"]
+  }
+}
+$ klt signoff --manifest manifest.json --format text
+...
+[MET  ] T1 #3 DRC clean
+        cite: drc.json (kind=drc, status=clean, content_hash=sha256:..., exit_status=0)
+        coverage: layers_in_stream_without_rules=2 (70/20, 71/20), rules_skipped=2 (met5.4, met5.5), deck_scope=2 (5.x, 6.x)
+```
+
+`--format text` prints the same three fields — entry counts first, then the
+entries by name — under the `cite:` line they qualify, and (in `--fleet`)
+beside a block whose deck actually left a gap.
+
+**No verdict changes.** A `drc` check still passes on `status: "clean"`
+alone: a deck with twenty rule-free drawn layers and sixteen skipped rules
+grades exactly like a fully-covering one, and no claim that was `met` before
+this change becomes `unmet` because of it. This is deliberate — surfacing
+the gaps is not enforcing their disclosure. `klt signoff` still cannot tell
+a *disclosed* gap from an *undisclosed* one, because a claim states its
+disclosure in a block README/manifest this command has no field to compare
+against, so **item 3's disclosure requirement remains claimant-enforced**: a
+`met` verdict is not evidence that the gaps were disclosed, only that they
+are now printed next to the claim that has to disclose them.
+
+Absent entirely — no `coverage` key in the detail/citation, no
+`drc_coverage` row — for DRC evidence committed before `klt drc` reported
+coverage, and for every non-`drc` kind. An absent coverage statement means
+"this artifact reported no coverage", never "this deck has no gaps"; a
+`--fleet` run mixing pre- and post-`coverage` evidence renders both without
+error. `klt lvs`'s own coverage-shaped disclosures (warnings-only
+mismatches, `power_connectivity: "unchecked"`) get no equivalent treatment
+for item 4 — that, and whether a non-empty gap should ever change item 3's
+verdict, are open questions #2002 deliberately left unanswered.
+
 ## Tier-verdict report (`--manifest`)
 
 `klt signoff --manifest <file>` renders the **T1-T4 evidence-tier item
@@ -800,7 +860,12 @@ required.
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:...",
-        "exit_status": 0
+        "exit_status": 0,
+        "coverage": {
+          "layers_in_stream_without_rules": ["70/20"],
+          "rules_skipped": ["met5.4"],
+          "deck_scope": ["5.x", "6.x"]
+        }
       }
     },
     {
@@ -852,7 +917,7 @@ required.
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`. |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one. |
 
 #### `citation` fields
 
@@ -864,6 +929,7 @@ required.
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
+| `coverage`      | object          | **`drc` citations only**, and only when the cited envelope carries a `coverage` block (issue #2002): `{"layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`, quoted verbatim from it — the three fields [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a DRC claim to disclose. **Absent** for any other kind, and for DRC evidence committed before `klt drc` reported coverage — an absent `coverage` means "this artifact reported no coverage", never "this deck has no gaps". See "DRC coverage is reported, not graded" above. |
 
 #### `reason` values
 
@@ -949,7 +1015,16 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
       "tier": "T1",
       "t1_item_count": 10,
       "t1_met_count": 10,
-      "blocking_item": null
+      "blocking_item": null,
+      "drc_coverage": [
+        {
+          "item": 3,
+          "partition": null,
+          "layers_in_stream_without_rules": ["70/20"],
+          "rules_skipped": ["met5.4"],
+          "deck_scope": ["5.x", "6.x"]
+        }
+      ]
     },
     {
       "block": "gf180-bandgap",
@@ -963,7 +1038,8 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
         "title": "LVS clean",
         "partition": null,
         "reason": "no_evidence"
-      }
+      },
+      "drc_coverage": []
     }
   ]
 }
@@ -989,6 +1065,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 | `t1_item_count` | integer              | This block's rendered T1 item count (10, or 20 for `mixed-signal`).                      |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the first unmet T1 item — see below.                 |
+| `drc_coverage`  | array\<object\>      | What this block's DRC evidence reported it did *not* check (issue #2002): one entry per `"met"` `drc`-kind citation whose envelope carries a `coverage` block, shaped `{"item", "partition", "layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`. `[]` when no such citation exists — an unmet item 3, a pre-`coverage` envelope, or a block whose evidence is not DRC — so `[]` means "nothing reported", never "no gaps". Reduced from this block's own tier report, never re-graded; it changes no block's `tier`. |
 
 #### `blocking_item` fields
 
@@ -1030,7 +1107,14 @@ all `klt` commands (`schema_version`, error shape, exit codes).
       "kind": "drc",
       "status": "clean",
       "passed": true,
-      "detail": {"file": "design.gds", "deck": "sky130", "violation_count": 0},
+      "detail": {
+        "file": "design.gds", "deck": "sky130", "violation_count": 0,
+        "coverage": {
+          "layers_in_stream_without_rules": ["70/20"],
+          "rules_skipped": ["met5.4"],
+          "deck_scope": ["5.x", "6.x"]
+        }
+      },
       "provenance": {"...": "the source envelope's own provenance block"}
     },
     {
@@ -1079,7 +1163,7 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"generic"`, or `"error"` — see "What it does" above. |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
-| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. |
+| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
 ## Exit codes and errors

@@ -233,6 +233,40 @@ def _print_text(result: dict) -> None:
         print(line)
 
 
+#: How many entries of each `coverage` list the text rendering names before
+#: summarising the rest as `+N more`. The JSON output always carries every
+#: entry -- this cap only keeps a terminal line readable for a deck with
+#: dozens of rule-free layers.
+_COVERAGE_PREVIEW = 4
+
+
+def _format_coverage(coverage: dict) -> str:
+    """One line summarising a `drc` citation's three disclosed `coverage`
+    fields (issue #2002): each field's entry count, plus the first few
+    entries by name.
+
+    Counts first so a non-zero gap is visible without reading the names, and
+    every field is always shown -- including a `0` -- because "this deck
+    skipped no rules" is exactly the statement item 3 asks a claim to make,
+    and it must not be indistinguishable from a field that went unreported
+    (an envelope with no `coverage` block at all prints no coverage line at
+    all; see the call site).
+    """
+    parts = []
+    for field in (
+        "layers_in_stream_without_rules",
+        "rules_skipped",
+        "deck_scope",
+    ):
+        entries = coverage.get(field) or []
+        shown = ", ".join(str(entry) for entry in entries[:_COVERAGE_PREVIEW])
+        if len(entries) > _COVERAGE_PREVIEW:
+            shown += f", +{len(entries) - _COVERAGE_PREVIEW} more"
+        suffix = f" ({shown})" if entries else ""
+        parts.append(f"{field}={len(entries)}{suffix}")
+    return ", ".join(parts)
+
+
 def _print_tier_report_text(result: dict) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
@@ -266,6 +300,14 @@ def _print_tier_report_text(result: dict) -> None:
                 f"content_hash={citation['content_hash']}, "
                 f"exit_status={citation['exit_status']})"
             )
+            # Issue #2002: a `drc` citation's own coverage statement, shown
+            # beside the "clean" it qualifies -- item 3's doc text requires
+            # the claim to disclose these, and `klt signoff` does not grade
+            # them, so a reviewer needs them in the artifact they read. Absent
+            # for evidence committed before `klt drc` reported coverage.
+            coverage = citation.get("coverage")
+            if coverage:
+                print(f"        coverage: {_format_coverage(coverage)}")
         elif item["reason"]:
             # Loud, not silent: an unmet item always names *why* -- "no
             # runnable check exists" (e.g. no_evidence) reads distinctly
@@ -300,6 +342,20 @@ def _print_fleet_report_text(result: dict) -> None:
                 f"        {_RED}blocking: #{blocking_item['id']}{partition} "
                 f"{blocking_item['title']} (reason: {blocking_item['reason']})"
                 f"{_RESET}"
+            )
+        # Issue #2002: what each block's DRC evidence said it did *not*
+        # check, beside its tier. Printed only for a row that actually
+        # reported a gap -- the roll-up's job is "what is worth looking at",
+        # and a fully-covering (or unreported) deck adds a line of noise per
+        # block to a fleet-wide listing. The JSON always carries every
+        # `drc_coverage` row, gaps or not.
+        for row in block.get("drc_coverage") or []:
+            if not row["layers_in_stream_without_rules"] and not row["rules_skipped"]:
+                continue
+            row_partition = f" [{row['partition']}]" if row["partition"] else ""
+            print(
+                f"        coverage: #{row['item']}{row_partition} "
+                f"{_format_coverage(row)}"
             )
 
     print()

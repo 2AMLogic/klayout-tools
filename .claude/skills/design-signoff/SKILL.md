@@ -136,7 +136,15 @@ With the kind resolved:
    blocked this way names the offending metric(s) in
    `detail.critical_metric_blockers`; cite that list alongside `status`
    rather than treating a passing `status` as sufficient on its own.
-3. **Carry coverage caveats into the verdict.** Deck coverage metadata
+3. **Carry coverage caveats into the verdict.** For item 3 the DRC deck's
+   own coverage metadata no longer has to be re-derived by hand: since issue
+   #2002 `klt signoff` reports it on the citation itself
+   (`citation.coverage.layers_in_stream_without_rules` / `.rules_skipped` /
+   `.deck_scope`; `checks[].detail.coverage` in envelope-aggregation mode),
+   quote those fields verbatim. It is still *reported*, not graded — item 3
+   grades `met` on `status: "clean"` alone, so a non-empty gap left out of
+   the claim is your caveat to name, not something the tool caught. Deck
+   coverage metadata
    (rule-free layers, skipped rules), warning-level LVS mismatches,
    MC legs not combined with process corners, known false negatives
    documented in repo READMEs — each becomes a named caveat on that item,

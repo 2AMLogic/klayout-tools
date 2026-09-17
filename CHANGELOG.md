@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt signoff` now reports the cited DRC envelope's `coverage`
+  block (issue #2002). `docs/design-evidence-tiers.md` item 3 requires a claim
+  to enumerate its deck's coverage gaps and, since issue #1982, names the
+  exact fields that disclosure must quote — `coverage.layers_in_stream_without_rules`,
+  `coverage.rules_skipped`, `coverage.deck_scope` — but `klt signoff` read
+  none of them, so a deck with twenty rule-free drawn layers and sixteen
+  skipped rules produced exactly the artifact a fully-covering deck did. All
+  three are now surfaced verbatim in `checks[].detail.coverage`
+  (envelope-aggregation mode), in a `"met"` item's `citation.coverage`
+  (tier-report mode — item 3's own artifact), and in `blocks[].drc_coverage`
+  (fleet roll-up), plus the `--format text` rendering of the latter two.
+  **No verdict changes**: a `drc` check still passes on `status: "clean"`
+  alone, so no claim that graded `met` before this change grades differently
+  after it — this is report-before-enforce, and item 3's disclosure
+  requirement remains claimant-enforced (nothing compares the reported gaps
+  against what a claim actually disclosed). Purely additive and back-compatible:
+  the key is absent for every non-`drc` kind and for DRC evidence committed
+  before `klt drc` reported coverage, so an absent coverage statement reads as
+  "this artifact reported no coverage", never "this deck has no gaps", and a
+  `--fleet` run mixing pre- and post-`coverage` evidence renders both without
+  error. Whether a non-empty gap should ever change item 3's verdict, where a
+  claimant would state a disclosure for `klt signoff` to compare against, and
+  whether `klt lvs`'s own coverage-shaped disclosures deserve the same
+  treatment for item 4 are open questions #2002 deliberately left unanswered.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the

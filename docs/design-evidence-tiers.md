@@ -170,10 +170,16 @@ every block.
    unstated, or that never states the `deck_scope` its "clean" was measured
    inside, has not satisfied this item however clean the `status` is.
    **This disclosure is claimant-enforced, not tool-enforced**: `klt
-   signoff` grades item 3 on `status: "clean"` alone and reads no `coverage`
-   field (#2002), so a `met` verdict from `klt signoff` is not evidence that
-   the gaps were disclosed — a reviewer must read the `coverage` block
-   against the claim themselves.
+   signoff` grades item 3 on `status: "clean"` alone — a deck with rule-free
+   drawn layers or skipped rules grades `met` exactly like a fully-covering
+   one. Since #2002 it does *report* all three fields (item 3's citation
+   carries a `coverage` block quoting them verbatim, `docs/cli/signoff.md` →
+   "DRC coverage is reported, not graded"), so a reviewer no longer has to
+   re-open the DRC envelope to find them — but reporting is not enforcing:
+   nothing compares them against what the claim actually disclosed, so a
+   `met` verdict from `klt signoff` is still not evidence that the gaps were
+   disclosed. A reviewer must read the reported `coverage` against the claim
+   themselves.
 4. **LVS clean** — latest LVS report `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,
    synthesized/routed gate-level netlist for digital), **and that same
