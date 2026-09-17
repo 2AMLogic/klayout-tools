@@ -4995,6 +4995,50 @@ def test_run_drc_density_check_requires_window_size(tmp_path, monkeypatch):
         run_drc(str(path), "synthetic")
 
 
+@pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu", "sg13g2", "sg13cmos5l"])
+def test_no_shipped_deck_authors_a_density_rule(deck_name):
+    """Issue #1975: leaving the `"density"` check kind unused by every
+    shipped deck is a recorded decision, not an unnoticed gap.
+
+    The open PDKs' own density decks are not windowed: sky130's
+    `libs.tech/klayout/drc/met_min_ca_density.lydrc` (and gf180mcu's
+    `gf180mcu_density.lydrc` beside it) compute one whole-design ratio
+    against `chip_boundary = input(235, 4)` (`prBoundary`) and report a
+    single design-level verdict, while `sky130A_mr.drc` -- the deck this
+    repo transcribes from -- carries no density rule at all. Transcribing
+    one against `_run_density_check`'s drawn-extent tiling would have to
+    invent a window size the source rule does not have, so it was rejected
+    rather than shipped with a caveat. See "No deck authors a `"density"`
+    rule" under `docs/cli/drc.md`'s Coverage section for the full rationale
+    and the precondition for revisiting it.
+
+    This test is the mechanism that keeps the decision honest: adding a
+    `"density"` rule to a shipped deck must fail here until that section is
+    rewritten to say why.
+    """
+    offenders = [rule.id for rule in get_deck(deck_name) if rule.check == "density"]
+    assert offenders == [], (
+        f"deck '{deck_name}' authors {len(offenders)} \"density\" rule(s) "
+        f"({', '.join(offenders)}), but no shipped deck is supposed to -- see "
+        'the "No deck authors a `"density"` rule" note in docs/cli/drc.md\'s '
+        "Coverage section (issue #1975). If that decision has been revisited, "
+        "update the note and this test together."
+    )
+
+
+def test_drc_doc_records_the_density_coverage_decision():
+    """Issue #1975: the companion half of the check above -- the rationale
+    it points at must actually be in `docs/cli/drc.md`, so deleting the
+    decision from the docs cannot leave the assertion pointing at nothing.
+    """
+    doc = (REPO_ROOT / "docs" / "cli" / "drc.md").read_text(encoding="utf-8")
+    assert 'No deck authors a `"density"` rule' in doc
+    # The specific upstream evidence the decision rests on: the unwindowed,
+    # boundary-scoped shape of the real sky130 density deck.
+    assert "met_min_ca_density.lydrc" in doc
+    assert "input(235, 4)" in doc
+
+
 def test_run_drc_synthetic_antenna_check_violation(tmp_path, monkeypatch):
     """`check="antenna"`: a flat, connectivity-free area-ratio approximation
     -- `layer`'s total merged area over `other_layer`'s exceeds
