@@ -526,9 +526,12 @@ them.
 Three more check kinds exist alongside `"width"`/`"space"`/`"notch"`/
 `"isolated"` (single-layer) and
 `"separation"`/`"enclosing"`/`"enclosed"`/`"overlap"` (two-layer) above.
-None of the shipped `sky130`/`gf180mcu` decks author a
-rule of any of these three kinds yet — that's a separate follow-on issue;
-this section documents the primitives themselves.
+The `sky130` deck authors five `"area"`-kind rules (issue #1955 — see
+"Coverage" below); `"density"`/`"antenna"` remain unused by either shipped
+deck, and `"density"` in particular is deliberately deferred (this
+engine's windowed implementation has no floorplan-boundary concept — see
+its own paragraph below), a separate follow-on from #1955's area-only
+scope.
 
 **`"area"`** — single-layer, minimum and/or maximum polygon area. Driven by
 `klayout.db.Region.with_area(min_area, max_area, inverse=True)`, which
@@ -582,8 +585,8 @@ no per-net isolation) than it actually has.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 47
-rules — width, spacing, and enclosure checks across the `poly`, `diff`,
+design rule manual (which spans hundreds of rules). It currently covers 52
+rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
 `nwell` (issue #1420) layers — transcribed directly from the official
@@ -597,6 +600,22 @@ ids/values for every rule already curated here (`poly.1a`, `li.1`, `li.3`,
 confirming it carries the same content. Each rule in
 `src/klayout_tools/decks/sky130.py` cites the exact source rule id (e.g.
 `"poly.1a"`) and comment it was transcribed from.
+
+Broken down by check kind:
+
+| kind         | count |
+| ------------ | ----: |
+| `width`      |    15 |
+| `space`      |    13 |
+| `isolated`   |     1 |
+| `enclosing`  |    16 |
+| `separation` |     2 |
+| `area`       |     5 |
+| **total**    |**52** |
+
+(`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
+five `met{1..5}.area.1` minimum-area rules, issue #1955 — see the next
+paragraph.)
 
 `nwell.width.1`/`nwell.space.1` (issue #1420) close this deck's original
 gap on the well layer: before these two rules, `DECK` had *zero* rules
@@ -627,12 +646,7 @@ support — the same class of approximation `met1.enclosing.mcon.1` and
 gf180mcu's `contact.width.1` already make. Every approximation is called
 out explicitly in its rule's docstring; the threshold *values* used are
 always the real, unmodified source values, with exactly one documented
-exception described next. The official deck's `m2.6`
-(minimum met2 area, 0.0676 um²) is **not** transcribed: authoring it (and
-any other `"area"`/`"density"`/`"antenna"` rule) is out of scope for the
-check-primitive work that added those three kinds (issue #812, see
-"`"area"`/`"density"`/`"antenna"` check kinds" above) — tracked as a
-candidate follow-on rather than silently dropped.
+exception described next.
 
 `li1.enclosing.licon1.1` (issue #551) is that one exception, and the only
 rule in either deck whose threshold is deliberately *not* its source value.
@@ -652,6 +666,31 @@ entirely by the zero-overlap escape term described above. That catches the
 defect class the issue reports (a conductor missing part of its cut) with no
 false positives on correct geometry; the 0.08 um two-adjacent-edges half
 stays uncovered, like the end-of-line variants noted for gf180mcu below.
+
+`met1.area.1`/`met2.area.1`/`met3.area.1`/`met4.area.1`/`met5.area.1`
+(issue #1955) are the five `"area"`-kind rules the kind-breakdown table
+above counts: a minimum-area check for every metal layer this deck already
+covers with a width/space rule, transcribed from the same real sky130A
+install cited above — `sky130A_mr.drc`'s `m1.6`/`m2.6`/`m3.6`/`m4.4a`/
+`m5.4`. Before these, the deck had no `"area"`-kind rule at all (the check
+primitive existed since issue #812, but no rule used it), so a
+minimum-area violation — a routine defect class in automated P&R output —
+passed `klt drc` with a bare `status: "clean"` verdict and no rule having
+looked at it. Each layer's holes-area sibling (`m1.7`/`m2.7`/`m3.7`/
+`m4.7`/`m5.7`, scoped to `Region.holes`, a concept this engine's `DrcRule`
+vocabulary cannot express) remains out of scope, and `"density"`/
+`"antenna"` remain unused entirely — density in particular stays a
+separate follow-on, since a real density check scopes to a floorplan
+boundary this engine's windowed `"density"` implementation has no concept
+of (see "`"area"`/`"density"`/`"antenna"` check kinds" above).
+
+Antenna coverage, unlike density, is **not** a gap in the toolset — it is
+simply a different verb. `klt erc` (issue #860) produces a per-gate
+antenna-ratio verdict against a sky130 limit table on a routed layout, with
+the per-net connectivity a real process-antenna-area-ratio check needs and
+`klt drc`'s purely-geometric `"antenna"` primitive (above) deliberately does
+not have. See [`docs/cli/erc.md`](erc.md); this deck's *not* authoring an
+`"antenna"`-kind `DrcRule` is a scoping choice, not missing capability.
 
 The `gf180mcu` deck is likewise a **curated starter subset**: 46 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
@@ -1405,11 +1444,13 @@ same way `scope` was before `coverage.deck_scope` aggregated it.
 As of issue #747, `provenance` was populated only for the 37 piloted
 width/space rules. As of issue #904, it is populated for **all** of
 gf180mcu's `DrcRule` entries (42 then, 44 as of issue #1110, 46 as of issue
-#1688) — sky130's own remaining (non-width/space)
+#1688) — sky130's own remaining `enclosing`/`separation`
 rules still leave it `None` (the default), an unpopulated field, not a
 claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this
-field existed).
+field existed). sky130's five `met{1..5}.area.1` rules (issue #1955) each
+carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
+(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), so 34 of its 52 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 

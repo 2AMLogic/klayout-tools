@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: the curated `sky130` DRC deck now checks every routing metal's
+  own **minimum area** — `met1.area.1`, `met2.area.1`, `met3.area.1`,
+  `met4.area.1`, `met5.area.1` (issue #1955), the deck's first rules of the
+  `"area"` check kind (the primitive itself has existed since issue #812, but
+  no shipped deck authored a rule against it). Thresholds are transcribed from
+  the same pinned `volare` sky130A install every other sky130 rule cites
+  (`fossi-foundation/open-pdks` @ `c6d73a3`,
+  `sky130/klayout/sky130A_mr.drc`): `m1.6` 0.083 um², `m2.6` 0.0676 um²,
+  `m3.6` 0.240 um², `m4.4a` 0.240 um², `m5.4` 4.0 um² — carried on `DrcRule`'s
+  `area_min_dbu2` field as 83 000 / 67 600 / 240 000 / 240 000 / 4 000 000
+  dbu². Before this, a metal sliver below its official minimum area — a
+  routine output of an automated P&R flow — came back `clean` rather than
+  reported. Each rule also carries a populated `provenance` citing its own
+  upstream rule id. The sky130 deck is now 52 rules (was 47), `coverage.
+  rules_skipped` gains the five new ids on a stream with no geometry on the
+  corresponding metal, and `provenance.deck.content_hash` changes accordingly.
+  Each layer's *holes*-area sibling (`m1.7`-`m5.7`) stays untranscribed
+  (issue #1976 — `DrcRule` has no way to name a polygon's holes), and the
+  `"density"` check kind stays unused (this engine's windowed implementation
+  has no floorplan-boundary concept). See `docs/cli/drc.md`'s "Coverage"
+  section for the full per-kind breakdown.
 - **Changed**: `klt gen-compose`'s closed guard/collector-ring rejection is now
   **plane-aware** instead of identity-only (issue #1960). Previously the check
   fired from block/port identity alone — *this block reports a

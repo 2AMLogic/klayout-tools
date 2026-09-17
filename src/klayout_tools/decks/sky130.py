@@ -170,13 +170,14 @@ cross-checking: every rule id/value this module already cites --
 ``poly.1a``, ``li.1``, ``li.3``, ``m1.1``, ``m1.2``, ``m1.4``,
 ``licon.5``/``licon.8``, ``ct.2`` -- appears in ``sky130A_mr.drc`` with the
 identical id and threshold value). ``m2.6`` (minimum met2 area, 0.0676
-um^2) is a real rule in that same source but is **not** transcribed: no
-``"area"`` check primitive exists anywhere in this engine's ``DrcRule``
-vocabulary (``drc.py``'s ``_SINGLE_LAYER_CHECKS``/``_TWO_LAYER_CHECKS``
-support only ``width``/``space``/``notch``/``separation``/``enclosing``/
-``enclosed``/``overlap``) -- adding it would require a new check primitive,
-out of scope for this "extend the deck with existing-shape rules" issue; see
-#513 for a candidate follow-on.
+um^2) is a real rule in that same source; at the time this note was
+written no ``"area"`` check primitive existed anywhere in this engine's
+``DrcRule`` vocabulary, so it was left untranscribed pending one (tracked
+as #513's own candidate follow-on). That primitive now exists (issue #812,
+``drc.py``'s ``_AREA_CHECKS``/``_run_area_check``) and ``m2.6`` is
+transcribed below as ``met2.area.1`` -- see the "met1-met5 minimum-area
+rule coverage" note further down for the full closure (issue #1955), which
+does the same for the analogous ``m1.6``/``m3.6``/``m4.4a``/``m5.4`` rules.
 
 met3/met4/met5 connectivity (issue #619, closing the gap ``place_and_route.py``'s
 ``_ROUTING_LAYER_RANGE`` exposed: it already told OpenROAD signal routing
@@ -229,10 +230,13 @@ boolean-expression narrowing, so it transcribes to our engine's own
 ``"separation"`` check kind exactly, with no approximation.
 
 Not modelled, for the same reasons the met1/met2 sections above already
-document: ``m3.6``/``m3.7`` (met3 area/holes-area), ``m4.4a``/``m4.7``
-(met4 area/holes-area), ``m5.4``/``m5.7`` (met5 area/holes-area) -- no
-``"area"`` check primitive exists in this engine's vocabulary, the same gap
-``m2.6`` left unmodelled above; ``m3.3cd``/``m4.5ab`` (wide-metal spacing
+document: ``m3.7`` (met3 holes-area), ``m4.7`` (met4 holes-area), ``m5.7``
+(met5 holes-area) -- each is scoped to ``m{3,4,5}.holes`` (the *interior
+notches* of a metal polygon, not the polygon itself), a derived-region
+concept (``Region.holes``) this deck's single-layer/two-layer ``DrcRule``
+vocabulary has no way to express, distinct from (and not closed by) the
+``"area"`` check primitive #1955 uses for the plain-polygon minimum-area
+siblings below; ``m3.3cd``/``m4.5ab`` (wide-metal spacing
 exceptions, the met3/met4 analogues of ``m1.3ab``/``m2.3ab``); ``via2.5``/
 ``via3.5`` (2-adjacent-edges-relaxed enclosure refinements, the analogues
 of ``via.5a``/``m2.5``); and ``capm.2b``/``capm.2b_a``/``capm.11``/
@@ -246,6 +250,32 @@ compound-layer notes above document (``met3.enclosing.capm.1``/
 rule instead -- ``m3.enclosing(capm, ...)``/``m4.enclosing(cap2m, ...)`` --
 exactly as ``capm.3``'s own source-deck comment already prefers that
 formulation over its commented-out compound predecessor).
+
+met1-met5 minimum-area rule coverage (issue #1955, closing the gap the
+met2/via #513 note above explicitly deferred, and that the met3/met4/met5
+#776 note above deferred again without ever revisiting met1): before this,
+``DECK`` had no ``"area"``-kind rule at all, even though the check
+primitive itself has existed since #812/#824 -- a caller who routed a
+sliver of metal below its official minimum area (a routine automated-P&R
+defect class) got ``status: "clean"`` with no rule having looked at it.
+``met1.area.1``/``met2.area.1``/``met3.area.1``/``met4.area.1``/
+``met5.area.1`` below close that gap for every metal layer this deck
+already covers with a width/space rule, transcribed from the same real
+sky130A install (volare) already cited above -- ``sky130A_mr.drc``'s
+``m1.6``/``m2.6``/``m3.6``/``m4.4a``/``m5.4`` -- each a plain
+``m{N}.with_area(0..threshold)`` check on the layer's own drawn shapes, no
+compound-layer narrowing, so it transcribes to this engine's ``"area"``
+check kind exactly. ``m1.6`` in particular was not merely deferred but
+never previously cited anywhere in this module: unlike ``m2.6``/``m3.6``/
+``m4.4a``/``m5.4``, which each had an explicit "not modelled, no area
+primitive" note in an earlier issue, met1's minimum-area rule was simply
+overlooked until this issue's own re-audit of ``sky130A_mr.drc`` found it.
+Each layer's holes-area sibling (``m1.7``/``m2.7``/``m3.7``/``m4.7``/
+``m5.7``) remains out of scope -- see the ``Region.holes`` note just above,
+tracked separately as issue #1976 -- and density (``"density"`` check kind)
+remains out of scope entirely for this issue, per ``docs/cli/drc.md``'s own
+floorplan-boundary limitation on this engine's windowed density
+implementation.
 
 nwell (well-layer) rule coverage (issue #1420): before this, ``DECK`` had
 *zero* rules referencing ``nwell`` (64/20), even though ``EXTRACTION_DECK``
@@ -449,6 +479,22 @@ DECK: list[DrcRule] = [
         scope="m1",  # sky130.lydrc "m1.*" rule-id family (#566)
     ),
     DrcRule(
+        id="met1.area.1",
+        description="minimum met1 area",
+        layer=(68, 20),  # met1.drawing
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=83_000,  # 0.083 um^2 (83000 dbu^2 at dbu_um = 0.001)
+        # sky130A_mr.drc rule "m1.6": m1.with_area(0..0.083)
+        # -> "m1.6 : min. m1 area : 0.083um²" (issue #1955; before this rule
+        # the deck had no area check anywhere -- see the module docstring's
+        # own #1955 note for why this metal level was previously overlooked
+        # entirely, unlike met2-met5's own area rules, which were at least
+        # cited and explicitly deferred).
+        scope="m1",  # sky130A_mr.drc "m1.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m1.6"),
+    ),
+    DrcRule(
         id="diff.enclosing.licon.1",
         description="minimum diff enclosure of licon1",
         layer=(65, 20),  # diff.drawing
@@ -610,6 +656,21 @@ DECK: list[DrcRule] = [
         # approximation as met1.enclosing.via.1 above.)
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
     ),
+    DrcRule(
+        id="met2.area.1",
+        description="minimum met2 area",
+        layer=(69, 20),  # met2.drawing
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=67_600,  # 0.0676 um^2 (67600 dbu^2 at dbu_um = 0.001)
+        # sky130A_mr.drc rule "m2.6": m2.with_area(0..0.0676)
+        # -> "m2.6 : min. m2 area : 0.0676um²" (issue #1955, closing the gap
+        # the "met2/via rule coverage" note above originally left open --
+        # this rule was previously cited but not transcribed, since no
+        # "area" check primitive existed yet).
+        scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.6"),
+    ),
     # met3/via2 rule coverage (issue #776), mirroring the met2/via rule
     # shapes above -- see the module docstring's own #776 note for
     # source/provenance and the m3.6/m3.7/m3.3cd/via2.5 scope-outs.
@@ -694,6 +755,22 @@ DECK: list[DrcRule] = [
         # their own sibling refinements.)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
     ),
+    DrcRule(
+        id="met3.area.1",
+        description="minimum met3 area",
+        layer=(70, 20),  # met3.drawing
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=240_000,  # 0.240 um^2 (240000 dbu^2 at dbu_um = 0.001)
+        # sky130A_mr.drc rule "m3.6": m3.with_area(0..0.240)
+        # -> "m3.6 : min. m3 area : 0.240um²" (issue #1955; "m3.7", the
+        # holes-area sibling on `m3.holes`, is still not modelled -- this
+        # engine has no primitive for a region's holes, the same class of
+        # gap the module docstring's "Not modelled" note below already
+        # documents for m4.7/m5.7).
+        scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.6"),
+    ),
     # met4/via3 rule coverage (issue #776), mirroring the met3/via2 rule
     # shapes just above.
     DrcRule(
@@ -776,6 +853,20 @@ DECK: list[DrcRule] = [
         # -> "m4.3 : min. m4 enclosure of via3 : 0.065um"
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
     ),
+    DrcRule(
+        id="met4.area.1",
+        description="minimum met4 area",
+        layer=(71, 20),  # met4.drawing
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=240_000,  # 0.240 um^2 (240000 dbu^2 at dbu_um = 0.001)
+        # sky130A_mr.drc rule "m4.4a": m4.with_area(0..0.240)
+        # -> "m4.4a : min. m4 area : 0.240um²" (issue #1955; "m4.7", the
+        # holes-area sibling on `m4.holes`, is still not modelled -- same
+        # gap as met3.area.1's own note above).
+        scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.4a"),
+    ),
     # met5/via4 rule coverage (issue #776), mirroring the met4/via3 rule
     # shapes just above.
     DrcRule(
@@ -850,6 +941,20 @@ DECK: list[DrcRule] = [
         # sky130A_mr.drc rule "m5.3": m5.enclosing(via4, 0.31, euclidian)
         # -> "m5.3 : min. m5 enclosure of via4 : 0.31um"
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="met5.area.1",
+        description="minimum met5 area",
+        layer=(72, 20),  # met5.drawing
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=4_000_000,  # 4.0 um^2 (4000000 dbu^2 at dbu_um = 0.001)
+        # sky130A_mr.drc rule "m5.4": m5.with_area(0..4.0)
+        # -> "m5.4 : min. m5 area : 4.0um²" (issue #1955; "m5.7", the
+        # holes-area sibling on `m5.holes`, is still not modelled -- same
+        # gap as met3.area.1's own note above).
+        scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.4"),
     ),
     # capm (met3 MiM-cap top plate) rule coverage (issue #776). capm.3's
     # commented-out compound variant and capm.2b/capm.2b_a/capm.11 (each
