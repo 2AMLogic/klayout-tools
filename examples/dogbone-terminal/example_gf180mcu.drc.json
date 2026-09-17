@@ -37,7 +37,9 @@
       "33/0",
       "34/0"
     ],
-    "layers_in_stream_without_rules": [],
+    "layers_in_stream_without_rules": [
+      "32/0"
+    ],
     "rules_skipped": [
       "bjt.separation.comp.1",
       "comp.space.mv.1",

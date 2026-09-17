@@ -63,3 +63,12 @@ Regenerate all four with:
 ```bash
 uv run python3 examples/dogbone-terminal/generate.py
 ```
+
+The generated GDS is byte-reproducible (GDS2 wall-clock write timestamps
+suppressed), and
+`tests/test_gen.py::test_dogbone_terminal_example_regenerates_byte_identical`
+holds the committed streams to it — so a change to `klt gen mos_array` that
+moves this example's composed unit device (or merely adds a PCell
+parameter, which lands in the stream's context-info properties) fails at the
+commit that causes it. When it does, rerun the command above and review the
+resulting fixture diff as a deliberate update.

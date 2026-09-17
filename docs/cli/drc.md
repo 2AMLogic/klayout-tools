@@ -1683,8 +1683,27 @@ successfully and the documented success payload *is* on stdout.
 See `examples/drc/`: `generate.py` builds `example.gds` (a poly bar
 narrower than the minimum width, and a diff shape under-enclosing a licon1
 contact — two seeded violations — plus one clean, wide met1 shape), and
-`example.drc.json` is the exact expected output of:
+`example.drc.json` is the expected output of:
 
 ```
 klt drc examples/drc/example.gds --deck sky130 --format json
 ```
+
+minus its `provenance` block, whose `klt_version`/`klayout_version` are
+environment-dependent and therefore deliberately kept out of the committed
+fixture (the block's own shape is covered by `docs/json-contract.md` and
+`tests/test_drc.py::test_json_contract` instead).
+
+Regenerate **both** files with the one script — never by redirecting `klt
+drc --format json` into the fixture, which keeps `provenance` and fails the
+drift guard `tests/test_drc.py::test_example_gds_matches_committed_json`:
+
+```
+uv run python3 examples/drc/generate.py
+```
+
+It writes `example.gds` byte-reproducibly (GDS2 wall-clock write timestamps
+suppressed) and `example.drc.json` with `provenance` stripped, so a
+regeneration on an unchanged tree leaves `git status` clean —
+`tests/test_drc.py::test_example_generator_reproduces_committed_fixtures`
+guards exactly that.
