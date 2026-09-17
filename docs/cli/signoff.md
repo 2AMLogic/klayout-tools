@@ -88,7 +88,10 @@ combines them into one verdict in two steps:
    wrong-but-confident verdict is worse than a loud refusal. See
    "Provenance consistency" below for the exact comparison rules.
 2. **Per-check pass/fail**, only once provenance is consistent: `klt drc`
-   passes on `status: "clean"`, `klt lvs` on `status: "match"`, `klt sim` on
+   passes on `status: "clean"`, `klt lvs` on `status: "match"` **and**
+   `power_connectivity.status` not `"mismatch"` (issue #1965 — closing the
+   gap left by #1952/#1964's additive `power_connectivity` block; see
+   "`klt lvs` power/ground connectivity" below), `klt sim` on
    `status: "pass"`, `klt yield` on `status: "pass"` or `status: "reported"`
    (no measurement declared a `target_yield`, so nothing could fail —
    [`yield.md`](yield.md#exit-codes)), `klt pex` on `status: "pass"` (every
@@ -179,6 +182,42 @@ report; envelope-aggregation mode is the mechanical building block
 underneath the checklist items ("DRC clean", "LVS clean", "post-layout
 verification") that this verb *can* check today, and refuses to guess at
 the ones it can't (a spec-diff) rather than fabricate a verdict for them.
+
+### `klt lvs` power/ground connectivity
+
+Issue #1952/#1964 added an additive `power_connectivity` block to every
+`klt lvs` envelope, deliberately reported *beside* `status` rather than
+folded into it — see [`lvs.md`](lvs.md#power-ground-connectivity-issue-1952) for the
+full field table. Issue #1965 makes `klt signoff`'s `lvs` pass rule read
+that block: a check whose top-level `status` is `"match"` but whose
+`power_connectivity.status` is `"mismatch"` (a `reference.form:
+"gate-level-verilog"` compare with a power/ground pin wired to the wrong
+net) is a **hard fail**, not a pass — matching #1952's own motivation that
+a signoff citing "gate-level LVS clean" should mean the compare *and* the
+power/ground wiring were both actually clean, per
+[`lvs.md`](lvs.md#power-ground-connectivity-issue-1952)'s guidance that a caller
+wanting full LVS on a digital block gates on both fields.
+
+`power_connectivity.status: "unchecked"` still counts as passing — every
+non-`gate-level-verilog` reference reports it (the check does not apply
+there; that reference's power pins already take part in the ordinary
+signal compare), and so does a `gate-level-verilog` reference with the
+check explicitly disabled via `options.power_connectivity: false` — both
+mean "not verified because it does not apply or was turned off", not "an
+undiagnosed miswire". An envelope committed before #1964 landed, which
+carries no `power_connectivity` key at all, is treated the same as
+`"unchecked"` rather than raising or retroactively failing old evidence.
+The resulting `power_connectivity.status` (or `null` when the key is
+absent) is echoed in the check's `detail.power_connectivity_status` field
+so a `"fail"` caused by a power miswire is distinguishable from an
+ordinary signal mismatch without re-opening the source envelope.
+
+An opt-in flag to keep today's weaker (`status`-only) behavior, or a
+disclosure-only mode that surfaces the mismatch without failing the check,
+were both considered and rejected: a `klt signoff` check labeled `lvs`
+should mean the same thing `klt lvs` itself and `docs/cli/lvs.md` already
+tell callers it means, and a default that stays silently weaker than the
+evidence it aggregates would perpetuate exactly the gap this issue closes.
 
 ## Tier-verdict report (`--manifest`)
 
@@ -897,7 +936,7 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"generic"`, or `"error"` — see "What it does" above. |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
-| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. |
+| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
 ## Exit codes and errors

@@ -137,6 +137,117 @@ LVS_MISMATCH_ENVELOPE = {
     ],
 }
 
+#: Issue #1965: `power_connectivity` block shapes, mirroring
+#: `_power_connectivity_report`/`_power_connectivity_unchecked`
+#: (`src/klayout_tools/lvs.py`) for a `reference.form:
+#: "gate-level-verilog"` compare -- exercised against `_check_passed`'s
+#: `lvs` rule below, which must fail on a `"mismatch"` verdict even when
+#: the envelope's own top-level `status` is `"match"`.
+POWER_CONNECTIVITY_MATCH = {
+    "status": "match",
+    "reason": None,
+    "power_pins": ["VGND", "VPWR"],
+    "instance_count": 4,
+    "expected_nets": None,
+    "findings": [],
+    "finding_count": 0,
+}
+
+POWER_CONNECTIVITY_MISMATCH = {
+    "status": "mismatch",
+    "reason": None,
+    "power_pins": ["VGND", "VPWR"],
+    "instance_count": 4,
+    "expected_nets": None,
+    "findings": [
+        {
+            "rule": "power.inconsistent_pin_net",
+            "severity": "error",
+            "pin": "VGND",
+            "expected_net": None,
+            "description": (
+                "standard-cell power/ground pin 'VGND' reaches 2 distinct "
+                "nets across 2 instance(s)"
+            ),
+            "instance_count": 2,
+            "nets": [
+                {
+                    "net": "VGND",
+                    "instance_count": 1,
+                    "instances": [
+                        {"circuit": "TOP", "instance": "1", "cell": "MYLIB__INV_1"}
+                    ],
+                    "instances_truncated": False,
+                },
+                {
+                    "net": "VPWR",
+                    "instance_count": 1,
+                    "instances": [
+                        {"circuit": "TOP", "instance": "2", "cell": "MYLIB__BUF_1"}
+                    ],
+                    "instances_truncated": False,
+                },
+            ],
+        }
+    ],
+    "finding_count": 1,
+}
+
+POWER_CONNECTIVITY_UNCHECKED = {
+    "status": "unchecked",
+    "reason": "reference.form is 'plain-element', whose reference netlist "
+    "carries its own power/ground pins and nets",
+    "power_pins": [],
+    "instance_count": 0,
+    "expected_nets": None,
+    "findings": [],
+    "finding_count": 0,
+}
+
+#: Issue #1965 test plan: `options.power_connectivity: false` (explicitly
+#: disabled) must produce the same `"unchecked"` treatment as a reference
+#: form the check does not apply to at all -- not a mismatch.
+POWER_CONNECTIVITY_UNCHECKED_DISABLED = {
+    "status": "unchecked",
+    "reason": "power_connectivity check disabled by options.power_connectivity",
+    "power_pins": [],
+    "instance_count": 0,
+    "expected_nets": None,
+    "findings": [],
+    "finding_count": 0,
+}
+
+#: A `reference.form: "gate-level-verilog"` LVS envelope whose ordinary
+#: signal compare is clean (`status: "match"`) but whose power/ground
+#: connectivity check found a mismatch -- the exact shape #1952/#1964 added
+#: and #1965's `_check_passed` gate must catch.
+LVS_MATCH_POWER_MISMATCH_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "power_connectivity": POWER_CONNECTIVITY_MISMATCH,
+}
+
+LVS_MATCH_POWER_MATCH_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "power_connectivity": POWER_CONNECTIVITY_MATCH,
+}
+
+LVS_MATCH_POWER_UNCHECKED_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "power_connectivity": POWER_CONNECTIVITY_UNCHECKED,
+}
+
+LVS_MATCH_POWER_UNCHECKED_DISABLED_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "power_connectivity": POWER_CONNECTIVITY_UNCHECKED_DISABLED,
+}
+
+#: Pre-#1964 committed evidence: no `power_connectivity` key at all --
+#: `LVS_MATCH_ENVELOPE` itself already has this shape (defined above,
+#: before #1964 landed the key). Named separately here purely so the
+#: intent ("this is deliberately testing the missing-key case") is visible
+#: at each call site below.
+LVS_MATCH_NO_POWER_CONNECTIVITY_KEY_ENVELOPE = LVS_MATCH_ENVELOPE
+
 EXTRACT_ENVELOPE = {
     "schema_version": 2,
     "file": "design.gds",
@@ -497,6 +608,80 @@ def test_lvs_mismatch_check_fails(tmp_path):
 
     assert result["status"] == "fail"
     assert result["checks"][0]["passed"] is False
+
+
+def test_lvs_match_with_power_connectivity_mismatch_fails(tmp_path):
+    """Issue #1965: a `status: "match"` LVS envelope whose
+    `power_connectivity.status` is `"mismatch"` must no longer count as
+    passing -- closing the gap #1952/#1964 left open in `klt signoff`."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_MISMATCH_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["kind"] == "lvs"
+    assert check["passed"] is False
+    # The underlying compare (`status`) is still reported as `"match"` --
+    # only the aggregated `passed` verdict changes, exactly as
+    # `docs/cli/signoff.md`'s "`klt lvs` power/ground connectivity" section
+    # documents.
+    assert check["status"] == "match"
+    assert check["detail"]["power_connectivity_status"] == "mismatch"
+
+
+def test_lvs_match_with_power_connectivity_match_passes(tmp_path):
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert check["detail"]["power_connectivity_status"] == "match"
+
+
+def test_lvs_match_with_power_connectivity_unchecked_passes(tmp_path):
+    """`"unchecked"` means "does not apply to this reference form", not
+    "not verified" -- it must still count as passing, matching today's
+    behavior for every non-`gate-level-verilog` reference."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_UNCHECKED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert check["detail"]["power_connectivity_status"] == "unchecked"
+
+
+def test_lvs_match_with_power_connectivity_disabled_by_options_passes(tmp_path):
+    """`options.power_connectivity: false` produces `status: "unchecked"`
+    with a disabled-by-options reason -- confirm it is treated identically
+    to the "doesn't apply to this form" unchecked case, not as a
+    mismatch."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_UNCHECKED_DISABLED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert check["detail"]["power_connectivity_status"] == "unchecked"
+
+
+def test_lvs_match_with_no_power_connectivity_key_passes(tmp_path):
+    """Pre-#1964 committed evidence has no `power_connectivity` key at
+    all -- `_check_passed` must not raise on it, and must not
+    retroactively fail signoff for evidence that predates the check."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_NO_POWER_CONNECTIVITY_KEY_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert check["detail"]["power_connectivity_status"] is None
 
 
 def test_sim_pass_check_passes(tmp_path):
