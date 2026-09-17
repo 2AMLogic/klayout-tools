@@ -3294,6 +3294,51 @@ def test_example_gds_matches_committed_json():
     assert actual == expected
 
 
+def test_example_generator_reproduces_committed_fixtures(tmp_path):
+    """Generator-level drift guard (issue #1977): re-running
+    `examples/drc/generate.py`'s own `build_example()` reproduces *both*
+    committed fixtures exactly -- the GDS byte-for-byte, the report
+    field-for-field.
+
+    `test_example_gds_matches_committed_json` above only re-runs `run_drc`
+    against the *committed* GDS, so it cannot see the generator itself drift
+    away from the artifact it is supposed to produce. Without this test,
+    following the documented regeneration procedure could leave `git status`
+    dirty and nothing would catch it.
+
+    The GDS compare is exact: `build_example()` suppresses the GDS2
+    wall-clock write timestamps (#320), so a regression back to
+    non-reproducible bytes fails here rather than surfacing as unexplained
+    fixture churn. The report's `"file"` field is the one legitimately
+    path-dependent value (`run_drc` echoes the path string it is given), so
+    it is normalised before comparing; everything else must match.
+    """
+    generate_module = _load_example_generator()
+
+    gds_path, json_path = generate_module.build_example(str(tmp_path))
+
+    assert Path(gds_path).read_bytes() == (REPO_ROOT / EXAMPLE_GDS).read_bytes()
+
+    actual = json.loads(Path(json_path).read_text())
+    expected = json.loads(EXAMPLE_DRC_JSON.read_text())
+    assert "provenance" not in actual  # stripped by the generator
+    actual["file"] = expected["file"]  # path-dependent by construction
+    assert actual == expected
+
+
+def _load_example_generator():
+    """Import `examples/drc/generate.py` as a module (it lives outside the
+    installed package, so it has no importable name of its own)."""
+    import importlib.util
+
+    script = REPO_ROOT / "examples" / "drc" / "generate.py"
+    spec = importlib.util.spec_from_file_location("_klt_drc_example_gen", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 # ---------------------------------------------------------------------------
 # dbu invariance (#172): the same physical geometry must produce the same
 # DRC verdict regardless of the stream's own database unit. Rule thresholds

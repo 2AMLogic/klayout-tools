@@ -7794,6 +7794,48 @@ def test_dogbone_terminal_example_matches_committed_json(family):
     assert actual == expected
 
 
+def _load_dogbone_example_generator():
+    """Import `examples/dogbone-terminal/generate.py` as a module (it lives
+    outside the installed package, so it has no importable name of its own)."""
+    import importlib.util
+
+    script = _DOGBONE_EXAMPLE_DIR / "generate.py"
+    spec = importlib.util.spec_from_file_location("_klt_dogbone_example_gen", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("family", ["sky130", "gf180mcu"])
+def test_dogbone_terminal_example_regenerates_byte_identical(tmp_path, family):
+    """Generator-level drift guard (issue #1977): re-running
+    `examples/dogbone-terminal/generate.py`'s own `build_example()` still
+    reproduces the committed `example_<family>.gds` byte-for-byte.
+
+    `test_dogbone_terminal_example_matches_committed_json` above only
+    re-runs `run_drc` against the *committed* GDS, so it cannot see the
+    generator itself drift -- which is exactly what happened before #1977:
+    `mos_array`'s gf180mcu unit device gained a source/drain implant
+    (`Nplus`, 32/0 -- #1581's `DF.12` fix) and its PCell parameter list grew
+    on both families, silently invalidating the committed streams while
+    every existing test stayed green.
+
+    A byte compare (rather than a geometry compare) is deliberate: the GDS
+    carries `mos_array`'s PCell context-info properties too, so a parameter
+    added to the generator drifts the fixture without moving a single
+    polygon. When this fails, regenerate with
+    `uv run --extra dev python3 examples/dogbone-terminal/generate.py` and
+    review the resulting diff as a deliberate fixture update.
+    """
+    generate_module = _load_dogbone_example_generator()
+
+    gds_path, _ = generate_module.build_example(family, str(tmp_path))
+
+    committed = _DOGBONE_EXAMPLE_DIR / f"example_{family}.gds"
+    assert Path(gds_path).read_bytes() == committed.read_bytes()
+
+
 def test_dogbone_terminal_example_channel_narrower_than_pads():
     """The example's dog-bone unit device actually draws a narrower
     gate-crossing channel than its source/drain pads -- i.e. it is a real
