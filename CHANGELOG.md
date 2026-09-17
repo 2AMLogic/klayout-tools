@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
+  #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
+  both the `klayout` and `netgen` engines. It was always `null` before, on the
+  deliberate reasoning (issue #335) that `environment.layout_sha256`/
+  `reference_sha256` already covered the same files — but `klt signoff
+  --manifest`'s staleness gate reads `provenance.input.content_hash`
+  *generically*, across every check kind, and cannot see an LVS-only
+  `environment.*` field. The consequence was that a T1 item 4 ("LVS clean")
+  citation pinning an expected `content_hash` always rendered
+  `unmet`/`stale_evidence` — a pinned hash can never match `None` — whether or
+  not the layout had actually moved. `environment.layout_sha256` is unchanged
+  (still a bare hex digest, no prefix); `klt lvs --check` gains no new
+  `checks[]` entry, since a moved layout is already a hash-integrity failure
+  under `environment.layout_sha256`. `klt signoff`'s cross-check now includes
+  `klt lvs` in the `input.content_hash` comparison group, so an LVS report
+  signed off against a *different* layout than its DRC/extract siblings is
+  reported as a provenance mismatch rather than passing unnoticed.
+- **Fixed**: the `netgen` engine's report text is now stripped of ANSI escape
+  sequences before it is folded into any `klt lvs` report field (issue #1969).
+  `klt lvs` emits no colour of its own, but netgen's text is foreign input and
+  one channel carries it verbatim (`_describe_netgen_property_delta`'s
+  documented "pass any other wording through" fallback lands it in a printed
+  `mismatches[].description`), so a colourising netgen build would have put
+  raw escape bytes on a non-TTY `--format text` stdout *and* into `--format
+  json` string fields. Sanitized at the fold-in boundary rather than with an
+  `isatty()` gate in the CLI: a JSON field has no terminal to check, and a
+  gate would contradict `klt signoff`'s deliberate always-emit convention.
+  Unrecognised netgen wording is still passed through, just without the
+  escapes.
 - **Fixed**: the curated `sky130` DRC deck now checks every routing metal's
   own **minimum area** — `met1.area.1`, `met2.area.1`, `met3.area.1`,
   `met4.area.1`, `met5.area.1` (issue #1955), the deck's first rules of the

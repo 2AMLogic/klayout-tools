@@ -324,9 +324,18 @@ def build_provenance(
     against; when given, its content hash is recorded as ``provenance.input``
     (the same ``{content_hash}`` shape as ``deck``) so a stale committed
     report is a one-line diff against a freshly computed hash. Pass ``None``
-    (the default) when the verb has no single input layout to pin (or already
-    covers this itself, as ``klt lvs`` does via
-    ``environment.layout_sha256``/``reference_sha256``).
+    (the default) only when the verb genuinely has no single input stream to
+    pin. A verb that pins its input under a *verb-specific* key of its own is
+    **not** such a case: ``klt lvs`` carries
+    ``environment.layout_sha256``/``reference_sha256`` and was originally
+    (issue #331) left with ``input: null`` on exactly that reasoning, but
+    ``klt signoff --manifest``'s staleness gate reads
+    ``provenance.input.content_hash`` generically across every check kind and
+    cannot see an LVS-only field -- so a ``content_hash``-pinned "LVS clean"
+    citation always graded ``stale_evidence``. Issue #1969 reversed that:
+    ``klt lvs`` now passes its layout-side hash source here too, and the
+    per-verb duplication is the intended cost of a field generic consumers
+    can actually read.
     ``deck_options`` (issue #595) is echoed onto ``provenance.deck.options``
     via :func:`_deck_block` when non-empty -- see that function's docstring.
     ``klt_version``/``klayout_version`` are read at call time.

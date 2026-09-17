@@ -162,7 +162,7 @@ klt signoff drc.json lvs.json extract.json sim.json --format json
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | All checks that populate it, together |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | All checks that populate it, together |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 A check with no `provenance` block (an `error`-kind entry, a `klt yield`
@@ -176,8 +176,12 @@ check still counts toward `passed_count`/`failed_count` on its own
 cross-check above. See
 [`../json-contract.md`](../json-contract.md#shared-provenance-block) for
 which fields each verb populates and why some are `null` by design (e.g.
-`klt lvs`'s `provenance.input`, which already covers its two netlist inputs
-via its own `environment.layout_sha256`/`reference_sha256` fields).
+`klt drc`'s `provenance.pdk`, `null` unless `--pdk`/`--pdk-root` was given).
+`klt lvs`'s `provenance.input` was one of those by-design `null`s until issue
+#1969 — it was considered covered by that verb's own
+`environment.layout_sha256`/`reference_sha256`, which this generic gate cannot
+read — and now carries the layout side's `sha256:`-prefixed hash like every
+other populating verb.
 
 ### What this does not do yet
 
