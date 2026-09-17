@@ -2269,6 +2269,20 @@ before this flag existed. `klt lvs` exposes the same control as the
 `layout.declared_pins` request field (a JSON array of net name strings —
 see [`docs/cli/lvs.md`](lvs.md)).
 
+**A declared name can match more than one physically disconnected net**
+(issue #2000). Because the reconciliation above demotes by net *name*, two
+electrically disjoint nets that happen to carry the identical drawn label
+(e.g. a power rail split by a routing gap into two separate islands, each
+independently labelled `VDD`) both survive whenever that shared name is
+declared — neither is demoted, since demoting by name would remove *both* or
+neither, and dropping one arbitrarily would risk hiding a genuine split-net
+connectivity defect from a downstream `klt lvs` reference netlist. `nets[]`
+carries both as distinct entries (their own `net_id`s), `pin_count` can
+therefore exceed `len(declared_pins)`, and the written `.SUBCKT` disambiguates
+the repeated name with KLayout's own `$1` suffix (e.g. `VDD VDD$1`). A
+dedicated `warnings` entry names any declared pin hit this way, so the
+condition is visible without diffing the `.SUBCKT` port list by hand.
+
 **Matching is per-label, not per whole net name** (issue #1687). KLayout's
 flat extraction joins every distinct text label found on one electrical net
 into a single, comma-separated `Net.name` (see
@@ -2326,7 +2340,11 @@ net whenever **any** of its joined component labels is a declared DEF pin
 name, not only when the whole joined name matches verbatim — every other
 currently-promoted net is demoted, exactly as `--pins` demotes on a miss.
 A `warnings` entry lists any net demoted this way, and a separate entry
-lists any `--def-pins` name that matched no promoted net's label set.
+lists any `--def-pins` name that matched no promoted net's label set. A
+third entry mirrors `--pins`'s own (issue #2000): any `--def-pins` name that
+matches 2+ physically disconnected nets sharing a drawn label — see
+["Declared pin set"](#declared-pin-set---pins-514) above for the full
+mechanism and why neither net is demoted in that case.
 
 ```
 $ klt place-and-route pnr_request.json --format json | jq -r .def_path

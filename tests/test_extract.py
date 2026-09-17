@@ -2215,6 +2215,116 @@ def test_def_pins_applied_after_declared_pins(tmp_path):
     assert {"VGND", "VPWR", "VPB", "Y"}.issubset(pins)
 
 
+# --------------------------------------------------------------------------- #
+# A declared pin name matching 2+ physically disconnected nets that happen to
+# carry the identical drawn label (issue #2000).
+#
+# Both `declared_pins`/`def_pins` demote by net *name*
+# (`_reconcile_top_pins`), so when two disconnected nets share a declared
+# name, neither is demoted -- each is a genuinely distinct electrical node
+# (its own `Net.cluster_id`), and dropping either would risk silently hiding
+# a real split-net connectivity defect from a downstream `klt lvs` reference
+# netlist. `pin_count` can therefore exceed the declared set's size; a
+# dedicated `warnings[]` entry makes that visible instead of leaving a
+# caller to notice only via the written `.SUBCKT` port list's KLayout-
+# generated `$1`-suffixed disambiguation of the repeated name. Reuses
+# `_make_inverter_layout`'s `substrate_tap_label` axis -- passing the same
+# text as an existing pad's label draws a second, physically separate,
+# fully-contacted island carrying that identical label.
+# --------------------------------------------------------------------------- #
+
+
+def test_declared_pins_duplicate_label_on_disconnected_islands_both_stay_promoted(
+    tmp_path,
+):
+    """The core regression fixture: a `--pins`-declared name ("VPWR") that
+    also happens to label a second, physically disconnected island keeps
+    *both* nets promoted -- `pin_count` exceeds `len(declared_pins)` -- and a
+    dedicated warning names the offending declared pin."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="VPWR"),
+        tmp_path / "dup_label_declared.gds",
+    )
+    declared = frozenset({"VGND", "VPWR", "VPB", "Y", "A"})
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "dup_label_declared.spice"),
+        declared_pins=declared,
+    )
+
+    pins = [n["name"] for n in report["nets"] if n["pin"]]
+    assert pins.count("VPWR") == 2
+    assert report["pin_count"] > len(declared)
+
+    warning = next(
+        (
+            w
+            for w in report["warnings"]
+            if "physically disconnected nets" in w and "--pins" in w
+        ),
+        None,
+    )
+    assert warning is not None
+    assert "VPWR" in warning
+
+
+def test_def_pins_duplicate_label_on_disconnected_islands_both_stay_promoted(
+    tmp_path,
+):
+    """Same regression as `declared_pins`'s own test above, for `--def-pins`
+    (issue #2000)."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="VPWR"),
+        tmp_path / "dup_label_def.gds",
+    )
+    def_pins = frozenset({"VGND", "VPWR", "VPB", "Y", "A"})
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "dup_label_def.spice"),
+        def_pins=def_pins,
+    )
+
+    pins = [n["name"] for n in report["nets"] if n["pin"]]
+    assert pins.count("VPWR") == 2
+    assert report["pin_count"] > len(def_pins)
+
+    warning = next(
+        (
+            w
+            for w in report["warnings"]
+            if "physically disconnected nets" in w and "--def-pins" in w
+        ),
+        None,
+    )
+    assert warning is not None
+    assert "VPWR" in warning
+
+
+def test_declared_pins_no_duplicate_label_warning_on_ordinary_fixture(tmp_path):
+    """The new duplicate-match diagnostic does not fire when no declared
+    name actually collides across disconnected nets -- guards against a
+    false positive on the ordinary (non-duplicated) fixture every other
+    `declared_pins`/`def_pins` test in this file already exercises. "Y" is
+    deliberately left out of the declared set here: `_make_inverter_layout`
+    labels the NMOS and PMOS drain pads "Y" on two nets that are not
+    physically tied together in this synthetic fixture (no drawn geometry
+    connects them), so declaring "Y" would itself hit the very condition
+    under test -- exactly `test_declared_pins_duplicate_label_...`'s own
+    fixture reuses on purpose, just via a second island instead of this
+    fixture's own pre-existing "Y" pair."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "no_dup.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "no_dup.spice"),
+        declared_pins=frozenset({"VGND", "VPWR", "VPB", "A"}),
+        def_pins=frozenset({"VGND", "VPWR", "VPB", "A"}),
+    )
+    assert not any("physically disconnected nets" in w for w in report["warnings"])
+
+
 def test_cli_def_pins_flag_derives_pins_from_a_def_file(tmp_path, capsys):
     """The `--def-pins` flag wires through the CLI, parsing a routed DEF's
     own `PINS` section instead of requiring a hand-derived `--pins` list."""

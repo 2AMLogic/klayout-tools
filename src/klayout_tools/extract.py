@@ -836,7 +836,13 @@ def run_extract(
     currently-promoted pin name whose component-label set does not
     intersect ``declared_pins``. A ``warnings`` entry lists any net demoted
     this way, and a separate entry lists any declared name that matched no
-    promoted net's label set (a likely typo, not silently ignored). ``None``
+    promoted net's label set (a likely typo, not silently ignored). A third
+    entry (issue #2000) lists any declared name that matches 2+ physically
+    disconnected nets that happen to carry the identical drawn label -- both
+    stay promoted (demoting either would risk hiding a genuine split-net
+    connectivity defect from a downstream ``klt lvs`` reference netlist), so
+    ``pin_count`` can exceed ``len(declared_pins)`` in that case; see
+    :func:`_duplicated_declared_pin_names`'s own docstring. ``None``
     (the default) skips this reconciliation entirely -- byte-identical to
     today's behavior, same invariant ``top_cell_pins_only``'s own default
     preserves. Applied after ``top_cell_pins_only``'s own reconciliation,
@@ -873,7 +879,11 @@ def run_extract(
     currently-promoted net is demoted, exactly as ``declared_pins`` demotes
     on a plain miss. A ``warnings`` entry lists any net demoted this way,
     and a separate entry lists any ``def_pins`` name that matched no
-    promoted net's label set. Applied *after* ``declared_pins``'s own
+    promoted net's label set. A third entry (issue #2000) mirrors
+    ``declared_pins``'s own: any ``def_pins`` name matching 2+ physically
+    disconnected nets that happen to share a drawn label, since both stay
+    promoted and ``pin_count`` can then exceed ``len(def_pins)``. Applied
+    *after* ``declared_pins``'s own
     reconciliation (when both are given), so it can only further restrict.
     ``None`` (the default) skips this reconciliation entirely --
     byte-identical to today's behavior. See ``docs/cli/extract.md``'s
@@ -3738,6 +3748,49 @@ def _reconcile_top_pins(
         circuit.remove_pin(pin_id)
 
     return sorted(affected)
+
+
+def _duplicated_declared_pin_names(
+    netlist: kdb.Netlist, top_name: str, declared: frozenset[str]
+) -> list[str]:
+    """Return the sorted, de-duplicated subset of ``declared`` whose
+    any-component-label match (issue #1390/#1687) hits 2+ *physically
+    disconnected* nets in the top circuit's currently-promoted pins --
+    issue #2000.
+
+    ``declared_pins``/``def_pins`` demote by net *name*
+    (``_reconcile_top_pins``), so when two disconnected nets happen to carry
+    the identical drawn text label and that shared name is declared, both
+    independently survive their own reconciliation pass: each is a
+    genuinely distinct electrical node (a different ``Net.cluster_id``), not
+    a duplicate reading of the same one. Demoting either would risk silently
+    hiding a real split-net connectivity defect from a downstream `klt lvs`
+    reference netlist -- the same trade-off `ignored_layers[]`'s own
+    "extracts as multiple disconnected nets instead of one" warning
+    documents for an undeclared-connectivity-layer split, a few hundred
+    lines up in :func:`run_extract`. So this does not change which nets are
+    promoted -- it only lets a caller see that a single declared name now
+    maps to more than one promoted pin, which is otherwise invisible short
+    of diffing the written ``.SUBCKT`` port list for KLayout's own
+    ``$1``-suffixed disambiguation of the repeated net name.
+
+    Call *after* the caller's own demotion pass for ``declared`` has already
+    run, so this only sees nets that are still promoted pins.
+    """
+    circuit = netlist.circuit_by_name(top_name)
+    if circuit is None or not declared:
+        return []
+
+    name_net_ids: dict[str, set[int]] = {}
+    for pin in circuit.each_pin():
+        net = circuit.net_for_pin(pin.id())
+        if net is None or not net.name:
+            continue
+        for component in net.name.split(","):
+            if component in declared:
+                name_net_ids.setdefault(component, set()).add(net.cluster_id)
+
+    return sorted(name for name, ids in name_net_ids.items() if len(ids) > 1)
 
 
 def _pin_source_cell_net_names(
@@ -6835,6 +6888,30 @@ def _extract_netlist(
                 f"layout: {joined}"
             )
 
+        # Issue #2000: a declared name can also match *more than one*
+        # promoted net -- two physically disconnected islands that happen to
+        # carry the identical drawn label. Both stay pins (see
+        # `_duplicated_declared_pin_names`'s own docstring for why demoting
+        # either is unsafe), so `pin_count` can exceed `len(declared_pins)`
+        # with no other signal short of diffing the written `.SUBCKT` port
+        # list -- surface it explicitly instead.
+        duplicated_declared_pins = _duplicated_declared_pin_names(
+            netlist, top_cell.name, declared_pins
+        )
+        if duplicated_declared_pins:
+            joined = ", ".join(duplicated_declared_pins)
+            count = len(duplicated_declared_pins)
+            plural = "s" if count != 1 else ""
+            warnings.append(
+                f"{count} declared pin name{plural} (--pins / "
+                f"layout.declared_pins) each matched 2+ physically "
+                f"disconnected nets in the layout: {joined} -- every "
+                f"matching net is kept promoted (demoting one would risk "
+                f"hiding a genuine split-net connectivity defect from a "
+                f"downstream `klt lvs` reference netlist), so pin_count can "
+                f"exceed the declared set's size -- issue #2000"
+            )
+
     # Issue #1390: `def_pins`'s own DEF-merge-aware declared-pin
     # reconciliation -- the *automatic* counterpart to `declared_pins`
     # above, for a layout `klt place-and-route`'s DEF->GDS merge produced.
@@ -6901,6 +6978,25 @@ def _extract_netlist(
             warnings.append(
                 f"{count} declared DEF PINS name{plural} (--def-pins) "
                 f"matched no promoted net's label set in the layout: {joined}"
+            )
+
+        # Issue #2000: same duplicate-match diagnostic as `declared_pins`'s
+        # own pass above, for `--def-pins` -- see
+        # `_duplicated_declared_pin_names`'s docstring.
+        duplicated_def_pins = _duplicated_declared_pin_names(
+            netlist, top_cell.name, def_pins
+        )
+        if duplicated_def_pins:
+            joined = ", ".join(duplicated_def_pins)
+            count = len(duplicated_def_pins)
+            plural = "s" if count != 1 else ""
+            warnings.append(
+                f"{count} declared DEF PINS name{plural} (--def-pins) each "
+                f"matched 2+ physically disconnected nets in the layout: "
+                f"{joined} -- every matching net is kept promoted (demoting "
+                f"one would risk hiding a genuine split-net connectivity "
+                f"defect from a downstream `klt lvs` reference netlist), so "
+                f"pin_count can exceed the declared set's size -- issue #2000"
             )
 
     # Issue #1513: `pin_source_cells`'s own probe-based declared-pin
