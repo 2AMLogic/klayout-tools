@@ -129,6 +129,22 @@ def _print_text(report: dict) -> None:
             f"matched={c['matched']}"
         )
 
+    # Issue #1952: the power/ground half of a `gate-level-verilog` compare,
+    # printed as its own verdict right under the signal-connectivity one --
+    # a text reader who sees only `status: match` would otherwise have no
+    # way to tell a signal-only compare from a full one. Printed
+    # unconditionally (including `unchecked`, with its reason) for exactly
+    # that reason: silence would read as "nothing to report".
+    power = report.get("power_connectivity")
+    if isinstance(power, dict):
+        print(f"power_connectivity: {power['status']}")
+        if power.get("reason"):
+            print(f"  ({power['reason']})")
+        for finding in power["findings"]:
+            print(
+                f"  [{finding['severity']}] {finding['rule']}  {finding['description']}"
+            )
+
     category_counts = report["category_counts"]
     if category_counts:
         print()

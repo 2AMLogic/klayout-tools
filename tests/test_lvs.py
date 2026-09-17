@@ -36,6 +36,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -10812,6 +10813,8 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "netgen_setup": None,
         "parameter_tolerance": None,
         "compare_parameters": None,
+        # Issue #1952: `null` when the option was omitted.
+        "power_connectivity": None,
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
     # `schema_version` bump (docs/json-contract.md, "additive envelope").
@@ -11737,24 +11740,16 @@ def test_run_lvs_gate_level_verilog_tolerates_layout_side_power_pins(tmp_path):
     assert "pin.unmatched" not in report["category_counts"]
 
 
-def test_run_lvs_gate_level_verilog_power_miswire_is_not_detectable(tmp_path):
-    """The other side of the coin above, pinned deliberately: a layout whose
-    `VGND` pin is wired to the power rail still reports `"match"`.
-
-    A gate-level-Verilog reference has no power connectivity to contradict
-    the layout's, so this compare proves *signal* connectivity only. This
-    test exists so the limitation is a measured, enforced fact rather than a
-    prose caveat -- if a future change made power connectivity comparable,
-    this test fails and the claim in `docs/cli/lvs.md` must be updated with
-    it.
-    """
+def _gate_level_power_request(tmp_path, layout_spice, **options):
+    """A `reference.form: "gate-level-verilog"` request against the
+    power-pin-carrying fixtures, with an optional `options` block (issue
+    #1952)."""
+    tmp_path = Path(tmp_path)
+    tmp_path.mkdir(parents=True, exist_ok=True)
     root = _make_fake_pdk_library(
         tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
     )
-    miswired = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
-        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VPWR mylib__inv_1"
-    )
-    layout_path = _write(tmp_path / "layout.spice", miswired)
+    layout_path = _write(tmp_path / "layout.spice", layout_spice)
     reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
     request = {
         "layout": {"netlist": layout_path, "top": "top"},
@@ -11767,8 +11762,222 @@ def test_run_lvs_gate_level_verilog_power_miswire_is_not_detectable(tmp_path):
             "pdk_root": root,
         },
     }
+    if options:
+        request["options"] = options
+    return request
+
+
+#: The power-pin-carrying layout with one real power defect: `X1`'s `VGND`
+#: pin is wired to the power rail (`VPWR`) instead of ground. `X2`'s is
+#: wired correctly, so the two instances' `VGND` pins disagree -- the
+#: single-power-domain invariant `power.inconsistent_pin_net` checks.
+_GATE_LEVEL_LAYOUT_SPICE_POWER_MISWIRED = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+    "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VPWR mylib__inv_1"
+)
+
+
+def test_run_lvs_gate_level_verilog_power_miswire_leaves_signal_status_match(tmp_path):
+    """The signal-connectivity half of the compare is unchanged by issue
+    #1952: a layout whose `VGND` pin is wired to the power rail still
+    reports the top-level `status: "match"`.
+
+    This is the negative control this file has always carried (formerly
+    `test_run_lvs_gate_level_verilog_power_miswire_is_not_detectable`),
+    kept deliberately: `status` is, and stays, exactly
+    `NetlistComparer.compare()`'s own signal-connectivity result -- a
+    gate-level-Verilog reference has no power connectivity to contradict the
+    layout's, so nothing about the *signal* verdict may change. What issue
+    #1952 adds is a second, separate verdict beside it; see
+    `test_run_lvs_gate_level_verilog_power_miswire_is_detected` immediately
+    below, which is the positive control that the defect is now caught.
+    """
+    request = _gate_level_power_request(
+        tmp_path, _GATE_LEVEL_LAYOUT_SPICE_POWER_MISWIRED
+    )
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+    assert report["error_count"] == 0
+
+
+def test_run_lvs_gate_level_verilog_power_miswire_is_detected(tmp_path):
+    """Issue #1952: the miswire the signal-only compare above cannot see is
+    caught by the `power_connectivity` check, which runs by default for a
+    `gate-level-verilog` reference."""
+    request = _gate_level_power_request(
+        tmp_path, _GATE_LEVEL_LAYOUT_SPICE_POWER_MISWIRED
+    )
+    report = run_lvs(json.dumps(request))
+    power = report["power_connectivity"]
+    assert power["status"] == "mismatch"
+    assert power["reason"] is None
+    assert power["finding_count"] == 1
+    assert power["instance_count"] == 2
+    assert power["power_pins"] == ["VGND", "VPWR"]
+
+    (finding,) = power["findings"]
+    assert finding["rule"] == "power.inconsistent_pin_net"
+    assert finding["severity"] == "error"
+    assert finding["pin"] == "VGND"
+    assert finding["expected_net"] is None
+    assert finding["instance_count"] == 2
+    assert [group["net"] for group in finding["nets"]] == ["VGND", "VPWR"]
+    assert [group["instance_count"] for group in finding["nets"]] == [1, 1]
+    # `NetlistSpiceReader` strips the `X` subcircuit-call prefix, so the
+    # layout netlist's `X1` is reported under its own name, `1`.
+    assert finding["nets"][1]["instances"] == [
+        {"circuit": "TOP", "instance": "1", "cell": "MYLIB__INV_1"}
+    ]
+    assert finding["nets"][1]["instances_truncated"] is False
+
+
+def test_run_lvs_gate_level_verilog_power_connectivity_clean_layout(tmp_path):
+    """Issue #1952: the correctly-wired layout reports
+    `power_connectivity.status: "match"` -- the check does not fire on the
+    normal case, and the block records which pins it actually checked."""
+    request = _gate_level_power_request(tmp_path, _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER)
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    power = report["power_connectivity"]
+    assert power["status"] == "match"
+    assert power["findings"] == []
+    assert power["finding_count"] == 0
+    assert power["power_pins"] == ["VGND", "VPWR"]
+    assert power["instance_count"] == 2
+    assert power["expected_nets"] is None
+
+
+def test_run_lvs_gate_level_verilog_power_connectivity_expected_nets(tmp_path):
+    """Issue #1952: `options.power_connectivity.expected_nets` turns the
+    relative consistency check into an absolute one -- a design whose
+    instances all *agree* with each other but reach the wrong net is
+    invisible to the consistency check and caught by this one."""
+    # Both instances wired the same (consistent) way, with VGND and VPWR
+    # swapped relative to what the caller declares. Cross-instance
+    # consistency holds, so only the declared expectation can catch it.
+    swapped = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VGND mylib__inv_1"
+    ).replace("X2 mid out VGND VPWR mylib__buf_1", "X2 mid out VPWR VGND mylib__buf_1")
+
+    consistent_only = run_lvs(
+        json.dumps(_gate_level_power_request(tmp_path / "a", swapped))
+    )
+    assert consistent_only["power_connectivity"]["status"] == "match"
+
+    declared = run_lvs(
+        json.dumps(
+            _gate_level_power_request(
+                tmp_path / "b",
+                swapped,
+                power_connectivity={"expected_nets": {"VPWR": "VPWR", "VGND": "VGND"}},
+            )
+        )
+    )
+    power = declared["power_connectivity"]
+    assert power["status"] == "mismatch"
+    assert power["expected_nets"] == {"VGND": "VGND", "VPWR": "VPWR"}
+    assert {finding["rule"] for finding in power["findings"]} == {
+        "power.unexpected_pin_net"
+    }
+    assert {finding["pin"] for finding in power["findings"]} == {"VGND", "VPWR"}
+    vgnd = next(f for f in power["findings"] if f["pin"] == "VGND")
+    assert vgnd["expected_net"] == "VGND"
+    assert [group["net"] for group in vgnd["nets"]] == ["VPWR"]
+    assert vgnd["nets"][0]["instance_count"] == 2
+
+
+def test_run_lvs_gate_level_verilog_power_connectivity_can_be_disabled(tmp_path):
+    """Issue #1952: `options.power_connectivity: false` is the opt-out for a
+    genuinely multi-domain design, and says so in the report rather than
+    silently reporting nothing."""
+    request = _gate_level_power_request(
+        tmp_path, _GATE_LEVEL_LAYOUT_SPICE_POWER_MISWIRED, power_connectivity=False
+    )
+    report = run_lvs(json.dumps(request))
+    power = report["power_connectivity"]
+    assert power["status"] == "unchecked"
+    assert "options.power_connectivity: false" in power["reason"]
+    assert power["findings"] == []
+    assert report["options"]["power_connectivity"] is False
+
+
+def test_run_lvs_power_connectivity_unchecked_for_non_gate_level_reference(tmp_path):
+    """Issue #1952: every report carries the block, so "was power
+    connectivity verified?" is answerable from the report alone -- a
+    plain-element reference carries its own power nets and pins, which the
+    ordinary compare already checks, so the block says `"unchecked"` and
+    explains why rather than being omitted."""
+    layout_path = _write(tmp_path / "layout.spice", _RESISTOR_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _RESISTOR_LAYOUT_SPICE)
+    report = run_lvs(
+        json.dumps(
+            {
+                "layout": {"netlist": layout_path, "top": "rblock"},
+                "reference": {"netlist": reference_path, "top": "rblock"},
+            }
+        )
+    )
+    power = report["power_connectivity"]
+    assert power["status"] == "unchecked"
+    assert "plain-element" in power["reason"]
+    assert report["options"]["power_connectivity"] is None
+
+
+def test_run_lvs_power_connectivity_checks_filler_cells_before_pruning(tmp_path):
+    """Issue #1952: a filler/tap cell is pruned from the *signal* compare
+    (issue #1622) because it has no counterpart there -- but its power
+    connectivity is the only thing about it any check could ever verify
+    (issue #1442's unconditional filler placement shorting `VPWR`/`VGND`
+    onto a signal net is the concrete defect class). The check therefore
+    runs before the prune, so a miswired filler is still caught."""
+    miswired_filler = _GATE_LEVEL_LAYOUT_SPICE_WITH_FILLER.replace(
+        "XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1",
+        "XTAP0 VPWR mid VPWR VGND mylib__tapvpwrvgnd_1",
+    )
+    request = _gate_level_power_request(tmp_path, miswired_filler)
+    report = run_lvs(json.dumps(request))
+    # The signal compare is still clean -- the filler was pruned out of it.
+    assert report["status"] == "match"
+    assert report["category_counts"].get("topology.power_only_pruned") == 1
+
+    power = report["power_connectivity"]
+    assert power["status"] == "mismatch"
+    (finding,) = power["findings"]
+    assert finding["rule"] == "power.inconsistent_pin_net"
+    assert finding["pin"] == "VGND"
+    assert {group["net"] for group in finding["nets"]} == {"VGND", "MID"}
+    mid = next(group for group in finding["nets"] if group["net"] == "MID")
+    assert mid["instances"] == [
+        {"circuit": "TOP", "instance": "TAP0", "cell": "MYLIB__TAPVPWRVGND_1"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "value, message",
+    [
+        (["VPWR"], "must be a boolean or a JSON object"),
+        ({"nope": 1}, "accepts only 'expected_nets'"),
+        ({"expected_nets": {}}, "must be a non-empty JSON object"),
+        ({"expected_nets": {"VPWR": ""}}, "must be non-empty net-name strings"),
+        ({"expected_nets": {" ": "VPWR"}}, "must be non-empty power/ground pin-name"),
+    ],
+)
+def test_run_lvs_power_connectivity_rejects_malformed_option(tmp_path, value, message):
+    """Issue #1952: a wrong-shaped `options.power_connectivity` is a clean
+    request error, matching every other option parser in this module --
+    never a silent no-op or a traceback further down."""
+    layout_path = _write(tmp_path / "layout.spice", _RESISTOR_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _RESISTOR_LAYOUT_SPICE)
+    with pytest.raises(LvsError, match=re.escape(message)):
+        run_lvs(
+            json.dumps(
+                {
+                    "layout": {"netlist": layout_path, "top": "rblock"},
+                    "reference": {"netlist": reference_path, "top": "rblock"},
+                    "options": {"power_connectivity": value},
+                }
+            )
+        )
 
 
 #: The same power-pin-carrying layout, plus one filler/tap-cell instance

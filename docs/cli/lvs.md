@@ -610,15 +610,26 @@ comparing, disclosing what it removed as a `severity: "warning"`,
 `--abstract-cells` yourself.
 
 What that costs is real and must not be misread: **a power-net defect is
-invisible to this compare**. A standard cell whose `VGND` pin is wired to
+invisible to `status`**. A standard cell whose `VGND` pin is wired to
 the power rail in the layout still reports `status: "match"`, because the
 reference has no power connectivity to contradict it (verified directly —
 see `tests/test_lvs.py`'s
-`test_run_lvs_gate_level_verilog_power_miswire_is_not_detectable`). A
-gate-level-Verilog reference proves the routed layout implements the
-netlist's *signal* connectivity; power-grid correctness is a separate
-check (`klt power`'s IR-drop/EM analysis, `klt drc`'s deck rules), not
-something this form can or claims to establish.
+`test_run_lvs_gate_level_verilog_power_miswire_leaves_signal_status_match`).
+A gate-level-Verilog reference proves the routed layout implements the
+netlist's *signal* connectivity, and `status` says exactly that and nothing
+more.
+
+**Since issue #1952, that is no longer the whole report.** The power/ground
+half is checked separately and reported in its own `power_connectivity`
+block — the same miswire above is caught there, while `status` stays
+`"match"` (see `test_run_lvs_gate_level_verilog_power_miswire_is_detected`).
+Read "Power/ground connectivity" below before citing a gate-level LVS report
+as evidence: **a caller wanting full LVS on a digital block gates on both
+`status` and `power_connectivity.status`.** Power-*grid* correctness in the
+physical sense — rail continuity, IR drop, electromigration — is still a
+separate check (`klt power`'s IR-drop/EM analysis, `klt ring-check`'s
+annulus assertion, `klt drc`'s deck rules), and neither this form nor that
+block claims to establish it.
 
 **Deliberately narrow, deliberately loud**, mirroring `"subckt-call"`'s own
 discipline: only the constructs a flattened, technology-mapped netlist
@@ -646,6 +657,159 @@ a multi-bit range-slice connection, a general expression, `always`/`case`/
 other behavioral statements, an ANSI-style inline port declaration — is an
 application error (exit 1) naming the offending construct, never a silent
 best-effort guess.
+
+## Power/ground connectivity (issue #1952)
+
+The section above is the *signal* half of a digital compare. This is the
+other half: **`power_connectivity`**, a report block that verifies, per
+abstracted standard-cell instance, that every pin the PDK library declares
+as power/ground actually lands on the net it should.
+
+The full design record — why this lives on `klt lvs` rather than `klt erc`
+or a new `klt pg-check` verb, what was measured about each option, and the
+contract decisions behind the shape below — is
+[`docs/design/pg-connectivity-check-decision.md`](../design/pg-connectivity-check-decision.md).
+
+### What it checks, and what it does not
+
+**In scope: per-cell-instance pin-to-net verification.** For every
+subcircuit instance in the layout netlist, every power/ground pin its master
+declares must reach the net it is supposed to reach.
+
+**Out of scope: rail/grid continuity.** Whether the `VPWR` rail is
+geometrically unbroken across the die is a different question, answered
+elsewhere — `klt ring-check` (is this guard/tap ring a single closed
+annulus?) and `klt power` (does the grid carry the current without
+excessive droop?). It needs the routed *geometry*, which `klt lvs` never
+sees: by the time this compare runs, the layout side is already abstracted
+to black-box cells.
+
+In practice the pin-to-net question catches most of what people mean by "the
+power grid doesn't connect what it should", because the extraction probes
+each pin against the actually-routed conductor: a broken rail segment, a
+filler cell shorting a rail onto a signal net (issue #1442), or a via-less
+tie all surface as *some instance's power pin reaching a different net than
+its peers'*.
+
+### Why it is checkable when the reference is signal-only
+
+The reference Verilog carries no power connectivity, so there is nothing to
+compare *against*. The check does not need one. It needs:
+
+- **which pins are power/ground** — derived from the resolved standard-cell
+  library's own `.subckt` pin orders (the same structural derivation issue
+  #1622's power-only pruning already uses: the library's full pin order
+  minus the reference's signal-pin universe). No hardcoded per-PDK power-pin
+  table, no `fill_*`/`tap*` cell-name glob.
+- **what each instance's power pins are connected to** — the layout netlist
+  already carries it. `klt extract --abstract-cells` resolves and probes
+  *every* declared pin, power pins included; the signal-only compare simply
+  ignores the power ones.
+
+…plus one **invariant** the layout must satisfy on its own:
+
+> In a single-power-domain block (what `klt place-and-route` produces),
+> every instance's same-named supply pin must reach the same net.
+
+### The three finding rules
+
+| `findings[].rule` | Fires when |
+| --- | --- |
+| `power.inconsistent_pin_net` | One power/ground pin name reaches **more than one distinct net** across the design's instances — the single-power-domain invariant, violated. One finding per offending *pin name*, naming every net and the instances on each. It deliberately does **not** nominate which net is correct: with two instances disagreeing there is no majority to appeal to. Declare `options.power_connectivity.expected_nets` to get a verdict that does. |
+| `power.unexpected_pin_net` | `options.power_connectivity.expected_nets` names this pin and at least one instance reaches a **different net than declared**. Strictly stronger than the rule above — it also catches a design in which *every* instance is miswired the same way, which no amount of cross-instance agreement can. Replaces the consistency rule for any pin the mapping names. |
+| `power.unconnected_pin` | An instance's power/ground pin resolved to **no net at all** — it never landed on routed conductor. Reported separately because the defect differs in kind: not "wired to the wrong rail" but "wired to nothing". |
+
+Every finding is `severity: "error"`. These are `findings[].rule` values on a
+new field, **not** `mismatches[].category` values — `category_counts` and
+`category_error_counts` are untouched, and every existing consumer keyed on
+them sees no change.
+
+**Note what is deliberately *not* a rule: two distinct power pins of one
+instance landing on the same net.** It looks like an obvious short, and it
+is not — sky130's `VPWR`/`VPB` legitimately share a net, as do `VGND`/`VNB`,
+so such a rule would fire on every correctly-wired cell in the PDK.
+
+### Checked before filler/tap pruning, not after
+
+Issue #1622's `_prune_power_only_layout_circuits` removes every layout-side
+circuit whose entire pin list is power/ground — fillers, taps, decaps —
+because a signal-only reference never instantiates them (see
+"`topology.power_only_pruned`" below). This check runs **before** that
+prune, deliberately: those cells are precisely the ones whose power
+connectivity is the *only* thing about them any check could ever verify, and
+issue #1442's unconditional filler placement shorting `VPWR`/`VGND` onto
+signal nets is exactly that defect class. A check running after the prune
+would silently exempt them.
+
+### Report shape
+
+```json
+"power_connectivity": {
+  "status": "mismatch",
+  "reason": null,
+  "power_pins": ["VGND", "VNB", "VPB", "VPWR"],
+  "instance_count": 462,
+  "expected_nets": null,
+  "findings": [
+    {
+      "rule": "power.inconsistent_pin_net",
+      "severity": "error",
+      "pin": "VGND",
+      "expected_net": null,
+      "description": "standard-cell power/ground pin 'VGND' reaches 2 distinct nets across 462 instance(s) -- ...",
+      "instance_count": 462,
+      "nets": [
+        {
+          "net": "VGND",
+          "instance_count": 461,
+          "instances": [{"circuit": "TOP", "instance": "1", "cell": "SKY130_FD_SC_HD__INV_1"}],
+          "instances_truncated": true
+        },
+        {
+          "net": "VPWR",
+          "instance_count": 1,
+          "instances": [{"circuit": "TOP", "instance": "417", "cell": "SKY130_FD_SC_HD__BUF_1"}],
+          "instances_truncated": false
+        }
+      ]
+    }
+  ],
+  "finding_count": 1
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `status` | `"match"` \| `"mismatch"` \| `"unchecked"` | The power/ground verdict, **independent of the report's top-level `status`** (which stays exactly `NetlistComparer.compare()`'s own signal-connectivity result). `"match"` when the check ran and found nothing; `"mismatch"` when it produced findings; `"unchecked"` when it did not run — never a clean verdict on absent evidence. |
+| `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
+| `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
+| `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
+| `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
+| `findings` | array\<object\> | One entry per offending **pin name** (never per instance) — see the rule table above. `[]` on a clean check. |
+| `finding_count` | integer | `len(findings)`. |
+| `findings[].nets[]` | array\<object\> | Per finding, the nets that pin reached, each with the exact untruncated `instance_count` and a bounded `instances` sample (at most 10 `{circuit, instance, cell}` entries, with `instances_truncated` saying whether anything was left out). A real routed block puts hundreds of instances on one rail; a finding that dumped all of them would bury the few that differ. A `net` of `null` is an unconnected pin. |
+
+### Recommended usage
+
+Run the default (consistency-only) check on any gate-level compare — it
+costs nothing and catches the asymmetric miswires. For a block being taken
+to signoff, additionally declare `expected_nets`, which is the only form
+that catches a *uniformly* miswired design:
+
+```json
+"options": {
+  "power_connectivity": {
+    "expected_nets": {
+      "VPWR": "VPWR", "VGND": "VGND", "VPB": "VPWR", "VNB": "VGND"
+    }
+  }
+}
+```
+
+A genuinely multi-domain design — one that routes the same pin name to two
+different nets by design — should set `"power_connectivity": false` and say
+so; the response records that opt-out in `reason` rather than reporting an
+empty result that reads like a clean one.
 
 ## Negative controls: two independent corruptions
 
@@ -915,6 +1079,7 @@ each resolves relative paths inside the document.
 | `options.combine_devices_per_circuit` | object\<string, boolean\> | Issue #1552. A per-macro alternative to the single, whole-request `options.combine_devices` above, for a **composed** design whose own macros were each already independently verified under their own — possibly *opposite* — `combine_devices` setting: `{ "<circuit-name-glob>": <boolean> }`, applied via `klayout.db.Circuit.combine_devices()` (not the whole-netlist `Netlist.combine_devices()`) to each side's own matching circuits, **before** `options.flatten_layout`/`options.flatten_reference` run — see "Composing macros with opposing `combine_devices` needs" below for the full worked example and why the whole-request boolean cannot satisfy two such macros at once. Keys are `fnmatch`-style glob patterns matched **case-sensitively** against each side's own circuit names — `NetlistSpiceReader` upper-cases circuit names read back from SPICE (a `.subckt macroa` declaration reads back as circuit `"MACROA"`), so a pattern written in the source SPICE's own case will not match; a pattern matching zero circuits on a side is a `severity: "warning"`, `category: "combine_devices_per_circuit.unmatched"` entry (not an application error — a pattern legitimately naming a circuit that exists on only one side, e.g. a reference-only lumped macro, is not itself a mistake) — see "`combine_devices_per_circuit.unmatched`" below. Applied in **declaration order**: the first pattern that matches a given circuit name wins, so listing specific circuit names ahead of a catch-all `"*"` gets "combine everything except these", while listing only the circuits that need combining gets "combine nothing except these" (every unmatched circuit's own default). Mutually exclusive with a truthy `options.combine_devices` (a clean application error, exit 1) — an explicit `combine_devices: false` alongside it is a harmless no-op. Meaningful only for circuits that already exist as separate circuits on that side: a `layout.file` inline extraction is always a single flat circuit (no subcircuit boundary yet — see `options.flatten_layout` below), so it is a no-op there — **and the same is true for a pre-extracted `layout.netlist`, whenever that netlist was itself produced by `klt extract` against a `klt gen-compose`d, multi-macro GDS.** `klt extract` has no hierarchical extraction mode (issue #1085 was closed without adding one — see `klt extract`'s own "flat, not hierarchical" limitation note), so its written/returned netlist is always exactly **one flat `.SUBCKT`** regardless of how many macros the source GDS composed or which of `layout.file`/`layout.netlist` reads it back — there is no per-macro subcircuit boundary on the layout side for this option's glob patterns to match against in that shape either. A hierarchical, pre-extracted `layout.netlist` is only useful here when it comes from somewhere *other* than `klt extract` (hand-written, or produced by a tool that preserves per-macro subcircuit boundaries) — each macro its own subcircuit is where this option has something real to scope against. A composed-macro caller who hits this — exactly the `klt gen-compose` + top-level `klt lvs` workflow this option was filed to help (issue #1552) — should reach for issue #1552's option 3 instead: extract the layout side with `klt extract --abstract-cells` (see "Digital gate-level LVS" above for the full worked sequence) so each macro becomes its own black-box circuit, paired with a matching hand-authored reference at the same per-macro granularity. See also "Composing macros with opposing `combine_devices` needs" below, which notes this same limitation where it first arises. Each named circuit gets its own independent `options.combine_devices_max_attempts`-bounded retry (issue #1185's nondeterminism mitigation, scoped per circuit) and its own `device.combine_incomplete` warning on exhaustion — but, unlike the whole-request `options.combine_devices`'s symmetric degrade (issue #1370), an exhausted circuit is simply left uncombined and reported, never rolled back alongside every other circuit's already-successful combine, since each circuit's own combine choice is already an independent, caller-declared decision. **Carries the same post-combine corrections as `options.combine_devices` (issue #1557):** the fixed-offset resistor correction (issue #559/#585, above) and the capacitor `C` sum-conservation check (issue #1497, above) both apply here too, scoped to just the circuit(s) that combined *cleanly* on that side (an exhausted circuit's devices are left untouched, so neither correction runs against a fold that never completed) — see those two sections above for the mechanism; only the scoping differs. Not echoed as `null`\|`{}` interchangeably — `null` when the option was omitted, the resolved mapping otherwise, both in the response's `options` block and (when non-empty) reconstructed verbatim by `--check --rerun`. |
 | `options.parameter_tolerance` | number | Optional relative tolerance for numeric device parameters, expressed as a **fraction** (`0.001` is 0.1%), applied to every parameter of every device class (issue #589). `"engine": "klayout"` only. Omit (or `null`) for today's exact compare — the default is unchanged and no existing verdict moves unless a caller opts in. When given, a device pair whose *every* differing parameter is within the tolerance is compared as if those values agreed, so a physically-clean design whose extracted value is a deck's 5–6-significant-figure model fit can reach `status: "match"` against a schematic reference rounded to 2–3 figures. Each absorbed difference is disclosed as a `severity: "warning"`, `category: "device.parameter_tolerated"` entry carrying both original values — see "`device.parameter_tolerated`" below, which also documents the mechanism and its limits. Must be a number in `[0, 1)`; anything else (a string, a per-parameter object, a negative value, `1.0` or above) is an application error (exit 1), not a silent fallback to the default. |
 | `options.compare_parameters` | object\<string, array\<string\>\> | Issue #1928. Scopes *which* device-class parameters take part in the compare at all: `{ "<device-class name>": [<parameter name>, ...] }`. Every numeric parameter a device class declares is compared by default (`klayout.db.NetlistComparer` reads each `DeviceClass`'s own primary-parameter set), with no request-level way to narrow that — so a single always-compared parameter neither side can state identically (e.g. a geometry-derived layout-side value a reference netlist's own device cards never carry at all) makes `status: "match"` unreachable, and `options.parameter_tolerance` cannot help: it is a *relative* tolerance and can never call a zero-vs-nonzero structural difference equal (`_relative_delta()` returns `1.0` whenever exactly one side is zero). For each named class, `klt lvs` enables exactly the listed parameters and disables every other parameter that class declares via `klayout.db.DeviceClass.enable_parameter(name, false)`, on **both** sides' own class object (`NetlistComparer` consults each device's own class, not a single shared one — the same reason `reference.device_bulk`/the `subckt-call` placeholder-value exclusion also touch both sides), before the comparer runs. `"engine": "klayout"` only — the `netgen` engine has no equivalent per-parameter compare-scoping hook, so a `netgen` request with this option set is an application error (exit 1), same boundary as `options.parameter_tolerance`/`hints`/`reference.device_bulk` above. Class names are matched case-insensitively against both netlists' registered device classes (`NetlistSpiceReader` upper-cases class names read back from SPICE while a deck-declared class keeps its own casing), and parameter names are matched case-insensitively against that class's own declared parameters. **Validation, never a silent no-op:** a device-class name present in **neither** netlist, or a parameter name not declared by that class on either side it resolves on, is a clean application error (exit 1) naming the typo and what is actually available — the same "typo must be visible" discipline `hints.same_nets` and `options.combine_devices`'s array form already apply (a silently-ignored typo here would look exactly like a device class whose every parameter happens to agree, which is far more dangerous than a typo that simply does nothing). A class named here but present on only one side is legitimate (mirrors `options.combine_devices`'s own "present on just one side is not an error" rule) and is scoped on that side alone. Every parameter this option disables is disclosed as its own `severity: "warning"`, `category: "device.parameter_excluded"` entry — see "`device.parameter_excluded`" below — so a `"match"` reached this way is never silently indistinguishable from a full parameter compare. This option does not compute or reconcile a value for the excluded parameter on either side (unlike `reference.device_bulk`'s terminal reconciliation) — it only removes that parameter from the compare; teaching one side to state the missing parameter correctly is explicitly out of scope, narrower, and not what this option does. The resolved mapping is echoed back verbatim under `options.compare_parameters` in the response (`null` when the option was omitted) and reconstructed verbatim by `--check --rerun`, the same always-present-but-nullable convention `options.combine_devices_per_circuit` already follows. |
+| `options.power_connectivity` | boolean \| object | Issue #1952. Controls the **power/ground connectivity check** that pairs with a signal-only `reference.form: "gate-level-verilog"` compare — see "Power/ground connectivity" below for what it verifies and why it can be verified at all when the reference carries no power connectivity. Three accepted shapes: omitted (the default — the cross-instance consistency check runs), `false` (opt out entirely; the intended setting for a genuinely multi-domain design, recorded in the response's `power_connectivity.reason` rather than silently producing nothing), `true` (identical to omitting it, stated explicitly so a committed request document records that the check was wanted), or `{"expected_nets": {"<PIN>": "<NET>", ...}}` (declare which net each power/ground pin name must reach, which upgrades the *relative* consistency check to an *absolute* one — see `power.unexpected_pin_net` below). Declaring a subset of pins is fine: every pin the mapping does not name still gets the consistency check. Pin and net names are matched case-insensitively (`NetlistSpiceReader` upper-cases what it reads; a netlist handed over in-process from `klt extract` does not). Honored only for `reference.form: "gate-level-verilog"` — every other form's reference is arbitrary SPICE that carries its own power pins and nets, which the ordinary compare already checks, so there is no signal-only gap for this option to fill (the response's `power_connectivity.reason` says so explicitly rather than leaving the field absent). A wrong-shaped value is a clean application error (exit 1), never a silent no-op. Echoed back verbatim under `options.power_connectivity` in the response (`null` when the option was omitted) and reconstructed verbatim by `--check --rerun`, the same always-present-but-nullable convention `options.compare_parameters` follows. |
 | `options.netgen_setup` | string | Only used with `"engine": "netgen"`. Path to a netgen LVS setup `.tcl` file — see "Engine" -> `"netgen"` above. Omit to run with netgen's own default setup. |
 | `options.netgen_timeout_s` | number | Only used with `"engine": "netgen"`. Wall-clock budget (seconds) for the `netgen` subprocess. Default `300`. |
 | `options.flatten_reference` | boolean | When `true`, calls `klayout.db.Netlist.flatten()` on the **reference** netlist in-process, right after it is read and before circuit selection (issue #1085). `klt extract` always extracts a *flat* layout-side netlist — a single top circuit, no subcircuit calls (see `klt extract`'s "flat, not hierarchical" limitation note) — so a hierarchical reference (one leaf `.subckt` plus N instance calls of it, the shape a macro built by tiling one verified leaf cell naturally takes) can never structurally match it: `NetlistComparer` compares circuit-by-circuit, and the flat layout side simply has no subcircuit-call circuit to pair against the reference's, producing an undiagnosable `topology` "circuit could not be matched to a counterpart" mismatch on both sides. Flattening the reference first collapses every subcircuit-call instance in place, so only its top-level circuit(s) remain — directly comparable against the already-flat layout side. Default `false` (today's unconditional per-circuit matching, unchanged) — a caller who genuinely wants a hierarchy-preserving compare (e.g. because both sides are hierarchical, see `tests/test_lvs.py`'s `test_net_correspondence_scopes_dedup_by_circuit`) is never silently flattened out from under them. A `reference.top` name that only existed as an interior circuit flatten would inline away no longer resolves after flattening — pass the name of whatever remains a genuine top-level circuit. Each side that is actually flattened (its circuit count changes) is disclosed as a `severity: "warning"`, `category: "topology.flattened"` entry — see "`topology.flattened`" below — so a `"match"` reached after flattening is never silently indistinguishable from one reached against the netlist's original hierarchy; a netlist that already had only its top circuit(s) (nothing to flatten) adds no such entry. |
@@ -1040,8 +1205,9 @@ section this engine buckets rather than fully structures:
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
-| `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), and `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input). |
+| `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted), and `power_connectivity` (boolean \| object \| `null`, issue #1952 — the caller's own `options.power_connectivity` value verbatim, or `null` when the option was omitted; note that `null` here means the check ran under its default-on setting, *not* that it was skipped — read `power_connectivity.status` for that). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input). |
 | `status` | `"match"` \| `"mismatch"` \| `"inconclusive"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. `"inconclusive"` (issue #1370) is the third outcome: the compare the request asked for could **not** be performed, so this run reached no verdict about the design. It has exactly one cause today — `options.combine_devices` was requested and `combine_devices()` exhausted its retry budget on at least one side, so both sides were rolled back to their uncombined state (the symmetric degrade described under `options.combine_devices`) and the resulting engine `"mismatch"` was downgraded. A `"match"` is never downgraded. This mirrors `klt equiv`'s own `"inconclusive"` vocabulary and gets its own exit code (`4`, the same value `klt equiv` uses) so an automation gate can tell "the design differs" from "the comparison could not be performed". Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). This is always the engine's own verdict, including when `options.parameter_tolerance` is in force — that option is implemented by re-running a real `compare()` on values snapped into agreement, never by re-deriving the verdict from this command's own findings (see "`device.parameter_tolerated`" below). |
+| `power_connectivity` | object | Issue #1952. The **power/ground half** of the verdict, reported beside `status` rather than folded into it — see "Power/ground connectivity" above for the full field table, what the check verifies, and the invariant it rests on. Always present, for every `reference.form`: `status` is `"match"`/`"mismatch"` when the check ran, and `"unchecked"` (with a human-readable `reason`) when it did not, so "was power connectivity verified by this run?" is answerable from any `klt lvs` report on its own. **A caller wanting full LVS on a digital block gates on both `status == "match"` and `power_connectivity.status == "match"`** — this field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`, all of which stay exactly the signal-connectivity compare's own results. |
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
 | `error_count` | integer | Issue #1132: the number of `mismatches[]` entries with `severity: "error"` — `sum(category_error_counts.values())`. `mismatch_count` alone cannot tell a caller this without re-reading every entry, since a nonzero `mismatch_count` can be entirely `severity: "warning"` (e.g. a report whose only finding is a `device.bulk_reconciled` disclosure). `0` on a `status: "match"` report exactly (a `"match"` verdict never carries an `error` entry). |
 | `category_counts` | object\<string, int\> | Per-category mismatch counts (`error` and `warning` entries combined), keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
@@ -2270,6 +2436,22 @@ request that does not set `options.combine_devices` can never produce it, so
 every previously-shipped `klt lvs` invocation keeps its original `0`/`3`
 behaviour. `klt equiv`'s own version of this outcome is documented in
 [`docs/cli/equiv.md`](equiv.md)'s "Timeout and the inconclusive verdict".
+
+**The exit code reflects the *signal* verdict only — `power_connectivity`
+never changes it** (issue #1952). A run whose signal compare matched but
+whose power/ground check found a defect exits `0` with `status: "match"` and
+`power_connectivity.status: "mismatch"`. This is deliberate and is the same
+additive discipline the field itself follows: the check is on by default, so
+folding it into the exit code would silently turn a previously-green CI gate
+red on a design the tool has never checked before (including on a genuinely
+multi-domain design, where the consistency invariant does not hold — see
+"Power/ground connectivity" above). **An automation gate that wants full LVS
+on a digital block must read the JSON and assert both:**
+
+```bash
+klt lvs req.json --format json > report.json || exit 1
+jq -e '.status == "match" and .power_connectivity.status == "match"' report.json
+```
 
 On error (exit `1`), a concise message is written to **stderr** and nothing
 is written to stdout. No Python traceback is printed.
