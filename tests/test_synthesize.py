@@ -660,6 +660,7 @@ def _stub_yosys_success(
     abc_log_lines: str | None = None,
     yosys_log: str = "",
     baseline_module_stats: dict | None = None,
+    netlist_body: str | None = None,
 ) -> None:
     """Stub `synthesize.subprocess.run` for a successful `run_synthesize`.
 
@@ -674,9 +675,19 @@ def _stub_yosys_success(
     a request carries `baseline.netlist_path` -- recognised by its script
     filename (`_baseline.ys`, never emitted by the main synthesis path) so
     one stub serves both scripts in the same test.
+
+    ``netlist_body`` (issue #1973) is written verbatim to the main script's
+    own `netlist_path` instead of the default `"// fake mapped netlist\n"`
+    -- lets a test stand in for what a real Yosys would have emitted (e.g. a
+    lingering `signed` declaration) without requiring the real binary, so
+    `run_synthesize`'s own post-write `_strip_signed_qualifiers` rewrite can
+    be exercised against a stubbed run.
     """
     stats = module_stats if module_stats is not None else _GCD_MODULE_STATS
     abc_log = _ABC_STIME_LINE if abc_log_lines is None else abc_log_lines
+    netlist_text = (
+        netlist_body if netlist_body is not None else "// fake mapped netlist\n"
+    )
 
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["yosys", "-V"]:
@@ -711,7 +722,7 @@ def _stub_yosys_success(
         with open(stats_path, "w", encoding="utf-8") as handle:
             json.dump({"modules": {f"\\{hdl_toplevel}": stats}}, handle)
         with open(netlist_path, "w", encoding="utf-8") as handle:
-            handle.write("// fake mapped netlist\n")
+            handle.write(netlist_text)
         abc_log_path = _script_abc_log_path(script_path, cwd=cwd)
         if abc_log_path is not None:
             with open(abc_log_path, "w", encoding="utf-8") as handle:
@@ -2489,6 +2500,155 @@ def test_tie_cell_table_entries_are_hi_then_lo(tmp_path):
         assert (hi_cell, hi_port) != (lo_cell, lo_port)
 
 
+# --------------------------------------------------------------------------- #
+# X-constant resolution (`setundef`, issue #1973): sequenced immediately
+# before the existing `hilomap` pass so a dangling-argument `x` bit gets
+# mapped onto a tie cell exactly like a literal `1'b0`/`1'b1` already is.
+# --------------------------------------------------------------------------- #
+
+
+def _script_setundef_index(script_path: str) -> int | None:
+    for i, line in enumerate(_script_lines(script_path)):
+        if line == "setundef -zero":
+            return i
+    return None
+
+
+def test_generated_script_runs_setundef_before_hilomap(tmp_path, monkeypatch):
+    """`sky130_fd_sc_hd` has a tie-cell table entry, so the generated script
+    carries `setundef -zero` immediately before the existing `hilomap` pass
+    -- resolving every `x` bit `hilomap` alone cannot see to a concrete `0`
+    first, so it then gets tie-cell-mapped identically to a literal
+    constant (issue #1973)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    lines = _script_lines(_abs_path(report["script_path"], tmp_path))
+    setundef_index = _script_setundef_index(_abs_path(report["script_path"], tmp_path))
+    hilomap_index = next(
+        i for i, line in enumerate(lines) if line.startswith("hilomap")
+    )
+
+    assert setundef_index is not None
+    assert setundef_index == hilomap_index - 1
+
+
+def test_cell_library_without_tie_cell_entry_emits_no_setundef(tmp_path, monkeypatch):
+    """A `cell_library` with no `_TIE_CELLS` entry gets no `setundef` pass
+    either -- `setundef -zero` is scoped to the same tie-cell-table
+    condition as `hilomap` since, with no tie cell to map the resolved bit
+    onto, converting a bare `x` into a bare `0` would just swap one
+    already-known bare-constant limitation for another rather than fixing
+    anything (see `_write_script`'s own docstring)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(pdk={"cell_library": "acme_sc_hd", "corner": "tt_025C_1v80"}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert _script_setundef_index(_abs_path(report["script_path"], tmp_path)) is None
+
+
+# --------------------------------------------------------------------------- #
+# `signed`-qualifier stripping (issue #1973 Failure 1): a pure text rewrite
+# on the emitted netlist, run after `write_verilog` -- Yosys has no
+# `write_verilog` flag and no separate pass to suppress a wire's `signed`
+# attribute.
+# --------------------------------------------------------------------------- #
+
+
+def test_strip_signed_qualifiers_removes_input_port():
+    text = "input signed [3:0] a;\nwire signed [3:0] a;\n"
+    result = synthesize._strip_signed_qualifiers(text)
+    assert "signed" not in result
+    assert result == "input [3:0] a;\nwire [3:0] a;\n"
+
+
+def test_strip_signed_qualifiers_removes_output_port():
+    text = "output signed [15:0] sample;\n"
+    assert synthesize._strip_signed_qualifiers(text) == "output [15:0] sample;\n"
+
+
+def test_strip_signed_qualifiers_removes_bare_wire_declaration():
+    """The test plan's own edge case: a `signed` *wire*, not just a port."""
+    text = "wire signed [7:0] mid;\n"
+    assert synthesize._strip_signed_qualifiers(text) == "wire [7:0] mid;\n"
+
+
+def test_strip_signed_qualifiers_removes_combined_output_reg_signed():
+    text = "output reg signed [7:0] foo;\n"
+    assert synthesize._strip_signed_qualifiers(text) == "output reg [7:0] foo;\n"
+
+
+def test_strip_signed_qualifiers_leaves_signed_cast_untouched():
+    """`$signed(...)` is a cast used in an expression, not a declaration --
+    fully supported downstream and RTL's own recommended replacement for a
+    `signed` port/wire. Never matched: `$signed(` is never immediately
+    preceded by one of the declaration keywords plus whitespace."""
+    text = "assign y = $signed(x) + $signed(z);\n"
+    assert synthesize._strip_signed_qualifiers(text) == text
+
+
+def test_strip_signed_qualifiers_leaves_identifier_substring_untouched():
+    """A word boundary guards against a false match on an identifier that
+    merely contains `signed` as a substring."""
+    text = "wire mysigned_flag;\n"
+    assert synthesize._strip_signed_qualifiers(text) == text
+
+
+def test_strip_signed_qualifiers_leaves_unsigned_declaration_untouched():
+    text = "input [3:0] a;\nwire [3:0] b;\n"
+    assert synthesize._strip_signed_qualifiers(text) == text
+
+
+def test_run_synthesize_strips_signed_from_emitted_netlist(tmp_path, monkeypatch):
+    """End-to-end (stubbed Yosys): `run_synthesize` rewrites the netlist
+    file it wrote so no `signed` qualifier survives, even though the stub
+    (standing in for the writing Yosys) left one in place -- confirms the
+    post-write rewrite actually lands on disk, not just that the pure
+    `_strip_signed_qualifiers` function works in isolation."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(
+        monkeypatch,
+        netlist_body=(
+            "module gcd(clk, sample);\n"
+            "  input clk;\n"
+            "  output signed [15:0] sample;\n"
+            "  wire signed [15:0] sample;\n"
+            "endmodule\n"
+        ),
+    )
+
+    report = run_synthesize(request_path)
+
+    with open(_abs_path(report["netlist_path"], tmp_path), encoding="utf-8") as handle:
+        netlist_text = handle.read()
+    assert "signed" not in netlist_text
+    assert "output [15:0] sample;" in netlist_text
+
+
+def test_run_synthesize_leaves_netlist_untouched_when_no_signed(tmp_path, monkeypatch):
+    """No rewrite at all -- not even a no-op byte-identical write -- when
+    the emitted netlist never carried `signed` in the first place (the
+    common case)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    with open(_abs_path(report["netlist_path"], tmp_path), encoding="utf-8") as handle:
+        netlist_text = handle.read()
+    assert netlist_text == "// fake mapped netlist\n"
+
+
 def test_timing_reports_the_maximum_over_every_stime_report(tmp_path, monkeypatch):
     """Yosys invokes ABC once per combinational region, so a multi-region
     run prints several `stime` summaries -- the reported critical path is
@@ -3787,6 +3947,105 @@ endmodule
 #: in a mapped netlist -- what issue #854's fix must leave none of.
 _BARE_CONSTANT_RE = re.compile(r"\d+'[bdho][0-9a-fxzA-FXZ_]+")
 
+#: Matches a bare X-valued Verilog constant literal specifically (`5'hxx`,
+#: `4'bxxxx`, `1'bx`) -- requires at least one `x`/`X` digit, so an ordinary
+#: resolved constant (`4'h5`) never matches. What issue #1973's `setundef`
+#: fix must leave none of.
+_X_CONSTANT_RE = re.compile(r"\d+'[sS]?[bBoOdDhH][0-9a-fA-F_]*[xX][0-9a-fA-FxX_]*")
+
+#: RTL whose synthesized netlist provably needs `signed`-stripping: a
+#: `signed` input port, a `signed` output port, *and* a `signed` wire (issue
+#: #1973's Failure 1, plus the test plan's own "signed wire, not just a
+#: port" edge case). Measured live (Yosys 0.69 + real sky130 liberty): all
+#: three constructs' `signed` qualifiers survive through `dfflibmap`/`abc`/
+#: `clean` and reach `write_verilog` unchanged -- exactly what OpenSTA's
+#: Verilog reader (`klt place-and-route`'s floorplan stage) rejects outright.
+#:
+#: The module is deliberately named `sgn_top`, not `signed_top`: the tests
+#: below assert the *substring* `signed` is absent from the whole emitted
+#: netlist body (the strictest possible form of "no `signed` declaration
+#: survives"), so a module name containing it would defeat the assertion
+#: with a match that is not a qualifier at all.
+_SIGNED_RTL = """\
+module sgn_top (
+    input  wire              clk,
+    input  wire signed [3:0] a,
+    output reg  signed [7:0] sample
+);
+    wire signed [7:0] mid;
+    assign mid = a;
+    always @(posedge clk) sample <= mid;
+endmodule
+"""
+
+#: RTL whose synthesized netlist provably needs X-constant resolution: a
+#: Verilog `function`'s own argument wire is left dangling -- the `default`
+#: case arm assigns it a bare `2'bxx` that Yosys's function-inlining leaves
+#: connected to nothing else -- exactly issue #1973's Failure 2 shape (the
+#: original report's own `5'hxx` dangling-argument example, reproduced here
+#: at 2 bits instead of 5 purely to keep the fixture small). Measured live
+#: (Yosys 0.69 + real sky130 liberty): without a `setundef` pass ahead of
+#: `hilomap`, the mapped netlist carries a bare `assign
+#: \\pick$func$...:17$2.sel = 2'hx;` -- the exact shape OpenSTA's Verilog
+#: reader turns into the `zero_`-typed net TritonRoute rejects with
+#: `DRT-0305`, indistinguishable from an unmapped `1'b0` literal.
+_DANGLING_FUNCTION_ARG_RTL = """\
+module dangling_arg (
+    input  wire       clk,
+    input  wire       rst_n,
+    input  wire [3:0] d,
+    output reg  [5:0] q
+);
+    function [1:0] pick;
+        input [1:0] sel;
+        begin
+            case (sel)
+                2'b00: pick = 2'b01;
+                default: pick = 2'bxx;
+            endcase
+        end
+    endfunction
+
+    wire [1:0] extra = pick(d[1:0]);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) q <= 6'b0;
+        else        q <= {extra, d};
+    end
+endmodule
+"""
+
+#: Both defects in one design (test plan's "both defects at once" edge
+#: case): `_SIGNED_RTL`'s `signed` port/wire, layered onto
+#: `_DANGLING_FUNCTION_ARG_RTL`'s dangling-argument `function`. Named
+#: `sgn_and_dangling_arg` for the same reason `_SIGNED_RTL`'s module is
+#: `sgn_top` -- see its own comment.
+_SIGNED_AND_DANGLING_ARG_RTL = """\
+module sgn_and_dangling_arg (
+    input  wire              clk,
+    input  wire              rst_n,
+    input  wire signed [3:0] d,
+    output reg  signed [7:0] q
+);
+    function [1:0] pick;
+        input [1:0] sel;
+        begin
+            case (sel)
+                2'b00: pick = 2'b01;
+                default: pick = 2'bxx;
+            endcase
+        end
+    endfunction
+
+    wire [1:0] extra = pick(d[1:0]);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) q <= 8'sb0;
+        else        q <= {extra, d, 2'b0};
+    end
+endmodule
+"""
+
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
 @pytest.mark.skipif(
@@ -3829,6 +4088,125 @@ def test_integration_real_yosys_constant_ties_become_tie_cells(tmp_path, monkeyp
     )
     assert report["instance_counts_by_type"]["sky130_fd_sc_hd__conb_1"] >= 1
     assert "sky130_fd_sc_hd__conb_1" in netlist_text
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_VARIANT is None,
+    reason="no real sky130_fd_sc_hd liberty resolves via list_pdks() on this machine",
+)
+def test_integration_real_yosys_strips_signed_from_netlist(tmp_path, monkeypatch):
+    """Issue #1973 Failure 1, end to end against a real Yosys and a real
+    sky130 install: a design with a `signed` input port, a `signed` output
+    port, *and* a `signed` wire (the test plan's own edge case -- a signed
+    wire, not just a port) synthesizes to a netlist with **zero** `signed`
+    qualifiers.
+
+    Root cause: Yosys's `write_verilog` preserves every port/wire's
+    `signed` attribute verbatim with no flag to suppress it, and OpenSTA's
+    Verilog reader (`klt place-and-route`'s floorplan stage) rejects the
+    keyword outright with a raw syntax error."""
+    root, variant = _REAL_SKY130_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+    _write(tmp_path / "sgn_top.v", _SIGNED_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(sources=["sgn_top.v"], hdl_toplevel="sgn_top"),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    with open(_abs_path(report["netlist_path"], tmp_path), encoding="utf-8") as handle:
+        netlist_text = handle.read()
+
+    body = "\n".join(
+        line for line in netlist_text.splitlines() if not line.lstrip().startswith("//")
+    )
+    assert "signed" not in body, (
+        "mapped netlist still carries a `signed` qualifier -- OpenSTA's "
+        "Verilog reader would reject it outright with a raw syntax error"
+    )
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_VARIANT is None,
+    reason="no real sky130_fd_sc_hd liberty resolves via list_pdks() on this machine",
+)
+def test_integration_real_yosys_x_constant_becomes_tie_cell(tmp_path, monkeypatch):
+    """Issue #1973 Failure 2, end to end against a real Yosys and a real
+    sky130 install: a design whose Verilog `function` leaves its own
+    argument wire dangling (assigned a bare `x` in the case statement's
+    `default` arm -- the original report's own `5'hxx` shape, reproduced at
+    2 bits) synthesizes to a netlist with **zero** bare X-valued constants,
+    every one of them replaced by a real `sky130_fd_sc_hd__conb_1` tie-cell
+    instance -- exactly like issue #854 already does for literal
+    `1'b0`/`1'b1` constants.
+
+    Before this fix (no `setundef` pass ahead of `hilomap`), this design's
+    mapped netlist carried a bare `assign ...sel = 2'hx;` -- OpenSTA's
+    Verilog reader turns that into an unroutable `GROUND`-typed net exactly
+    like an unmapped `1'b0` would (`DRT-0305`), indistinguishable from
+    issue #854's own already-fixed defect except that `hilomap` alone never
+    recognised the `x` bit as a constant to map at all."""
+    root, variant = _REAL_SKY130_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+    _write(tmp_path / "dangling_arg.v", _DANGLING_FUNCTION_ARG_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(sources=["dangling_arg.v"], hdl_toplevel="dangling_arg"),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    with open(_abs_path(report["netlist_path"], tmp_path), encoding="utf-8") as handle:
+        netlist_text = handle.read()
+
+    body = "\n".join(
+        line for line in netlist_text.splitlines() if not line.lstrip().startswith("//")
+    )
+    assert _X_CONSTANT_RE.search(body) is None, (
+        "mapped netlist still carries a bare X-valued constant -- OpenSTA's "
+        "Verilog reader would build a `zero_`-typed net from it and "
+        "`detailed_route` would abort with DRT-0305"
+    )
+    assert report["instance_counts_by_type"]["sky130_fd_sc_hd__conb_1"] >= 1
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_VARIANT is None,
+    reason="no real sky130_fd_sc_hd liberty resolves via list_pdks() on this machine",
+)
+def test_integration_real_yosys_both_defects_at_once(tmp_path, monkeypatch):
+    """Test plan edge case: a single design with both a `signed` port/wire
+    *and* a dangling-argument `function` synthesizes to a netlist with
+    **neither** defect -- the two fixes (post-write `signed`-stripping,
+    `setundef` ahead of `hilomap`) are independent and compose cleanly."""
+    root, variant = _REAL_SKY130_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+    _write(tmp_path / "combo.v", _SIGNED_AND_DANGLING_ARG_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(sources=["combo.v"], hdl_toplevel="sgn_and_dangling_arg"),
+    )
+
+    report = run_synthesize(request_path)
+
+    assert report["status"] == "ok"
+    with open(_abs_path(report["netlist_path"], tmp_path), encoding="utf-8") as handle:
+        netlist_text = handle.read()
+
+    body = "\n".join(
+        line for line in netlist_text.splitlines() if not line.lstrip().startswith("//")
+    )
+    assert "signed" not in body
+    assert _X_CONSTANT_RE.search(body) is None
 
 
 # --------------------------------------------------------------------------- #
