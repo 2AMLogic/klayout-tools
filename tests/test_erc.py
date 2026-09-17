@@ -11,6 +11,7 @@ precedent: a sibling connectivity-only Phase 1a verb built on the same
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import klayout.db as kdb
@@ -24,6 +25,17 @@ DBU = 0.001
 
 def _um(v: float) -> int:
     return int(round(v / DBU))
+
+
+def _sha256_file(path) -> str:
+    """Freshly computed sha256 hex digest of `path`, for cross-checking
+    `provenance.input.content_hash` (issue #1968) against an independent
+    computation rather than `klayout_tools._provenance.sha256_file` itself."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _basic_fixture(path) -> None:
@@ -167,6 +179,19 @@ def test_run_erc_reports_two_gates(tmp_path):
     assert report["spec"] == str(spec)
     assert report["gate_role"] == "poly"
     assert report["gate_count"] == 2
+
+    # issue #1968: `status`/`provenance` are always present, with the
+    # expected shape. `_basic_fixture`'s Gate B is unstrapped, so the
+    # always-on `erc.floating_gate` check finds one violation here even with
+    # no `nets`/`ties` declared -- `status` reflects that.
+    assert report["status"] == "violations"
+    assert report["erc_finding_count"] == 1
+    expected_hash = f"sha256:{_sha256_file(gds)}"
+    assert report["provenance"]["input"]["content_hash"] == expected_hash
+    assert report["provenance"]["pdk"] is None
+    assert report["provenance"]["deck"] is None
+    assert "klt_version" in report["provenance"]
+    assert "klayout_version" in report["provenance"]
 
 
 def test_run_erc_accumulates_connected_area_layer_by_layer(tmp_path):
@@ -478,6 +503,83 @@ def test_antenna_golden_violate_pass_pair_per_layer(
     assert pass_level["antenna_ratio_max"] == pytest.approx(limit)
     assert pass_level["verdict"] == "pass"
     assert pass_report["gates"][0]["antenna_verdict"] == "pass"
+
+
+# --- run_erc: top-level `status` roll-up (issue #1968) -----------------------
+
+
+def test_status_clean_when_no_findings_and_no_antenna_violation(tmp_path):
+    """Both violation signals clean -> `status == "clean"`."""
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "pass.gds"
+    _antenna_fixture(gds, li1_um2=0.2, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    assert report["erc_finding_count"] == 0
+    assert not any(
+        level["verdict"] == "violate"
+        for gate in report["gates"]
+        for level in gate["levels"]
+    )
+    assert report["status"] == "clean"
+
+
+def test_status_reflects_antenna_violation_even_with_zero_erc_findings(tmp_path):
+    """The key nuance issue #1968 calls out: `erc_finding_count == 0` (no
+    `nets`/`ties` declared, so no `erc_findings` are computed at all) but a
+    gate has an antenna `"violate"` level -- `status` must still read
+    `"violations"`, not `"clean"`. A `status` derived only from
+    `erc_finding_count` would miss this."""
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "li1_violate.gds"
+    _antenna_fixture(gds, li1_um2=80.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    assert report["erc_finding_count"] == 0
+    assert any(
+        level["verdict"] == "violate"
+        for gate in report["gates"]
+        for level in gate["levels"]
+    )
+    assert report["status"] == "violations"
+
+
+def test_status_reflects_erc_findings_even_with_no_antenna_check(tmp_path):
+    """The inverse case: no `--pdk` (every antenna verdict is `"unchecked"`,
+    never `"violate"`) but a real `erc_findings` violation (an unstrapped/
+    floating gate) -- `status` must still read `"violations"`."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec))
+    assert report["erc_finding_count"] > 0
+    assert not any(
+        level["verdict"] == "violate"
+        for gate in report["gates"]
+        for level in gate["levels"]
+    )
+    assert report["status"] == "violations"
+
+
+def test_provenance_pdk_populated_only_when_pdk_given(tmp_path):
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+
+    no_pdk_report = run_erc(str(gds), str(spec))
+    assert no_pdk_report["provenance"]["pdk"] is None
+
+    pdk_report = run_erc(str(gds), str(spec), pdk="sky130")
+    assert pdk_report["provenance"]["pdk"] == {
+        "name": "sky130",
+        "source": "built-in",
+        "version": None,
+    }
 
 
 # --- run_erc: antenna-violation fix guidance (issue #908, epic #713 Phase 3)
@@ -1189,6 +1291,8 @@ def test_cli_json_contract(tmp_path, capsys):
         "gates",
         "erc_findings",
         "erc_finding_count",
+        "status",
+        "provenance",
     }
     assert data["schema_version"] == 1
     assert data["pdk"] is None
