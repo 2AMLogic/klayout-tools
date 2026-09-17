@@ -32,15 +32,18 @@ also include `enclosing`/`separation` (see `generate_golden_deck.py`'s
 `area`/`density`/`antenna` rules to omit, so `enclosing`+`separation`
 completes its full 44-rule `DECK`. sky130's own manifest is deliberately left
 at its original width/space pilot scope (`generate_golden_deck.py`'s
-`ALLOWED_CHECKS` is per-deck): extending sky130's enclosure coverage is a
-separate, unscoped follow-on issue #904 (a gf180mcu-focused phase) does not
-fold in as a side effect of sharing one generator. sg13g2 (issue #905/#911,
-Epic #711 Phase 3b, landed independently of #904) made the same "width/space
-via this manifest, enclosing/separation as hand-written `test_drc.py` pairs"
-choice for its own deck, so `ALLOWED_CHECKS["sg13g2"]` is `("width",
-"space")` too. The `area`/`density`/`antenna` check kinds still don't exist
-in this engine at all (see `DrcRule`'s docstring) -- out of scope for every
-deck.
+`ALLOWED_CHECKS` is per-deck): extending sky130's enclosure (or, since issue
+#1955, area) coverage is a separate, unscoped follow-on -- issue #904 (a
+gf180mcu-focused phase) does not fold either one in as a side effect of
+sharing one generator. sg13g2 (issue #905/#911, Epic #711 Phase 3b, landed
+independently of #904) made the same "width/space via this manifest,
+enclosing/separation as hand-written `test_drc.py` pairs" choice for its own
+deck, so `ALLOWED_CHECKS["sg13g2"]` is `("width", "space")` too. The
+`area`/`density`/`antenna` check kinds exist in this engine (issue #812) --
+sky130's `DECK` uses `"area"` as of issue #1955 (see `tests/test_drc.py`'s
+own hand-written violate/clean pairs for those five rules) -- but none of
+the three is covered by this manifest for any deck yet; `generate_golden_deck.py`
+has no `_area_pair`/`_density_pair`/`_antenna_pair` builder.
 
 ## File layout
 

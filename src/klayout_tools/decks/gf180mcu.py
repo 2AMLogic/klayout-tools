@@ -92,9 +92,10 @@ Their **end-of-line** companions (``CO.6a``/``CO.6b``, ``Vn.3c``/``Vn.3d``,
 in the PDK deck via ``first_edges``/``second_edges``/``extended_in``
 edge-set operations that :class:`~klayout_tools.decks.DrcRule`'s
 (layer, other_layer, check, threshold) vocabulary cannot express at all --
-the same class of gap as sky130's un-transcribed ``m2.6`` area rule, and
-left for a follow-on that extends the vocabulary rather than approximated
-with a wrong threshold.
+the same class of gap as sky130's untranscribed holes-area rules
+(``m1.7``/``m2.7``/``m3.7``/``m4.7``/``m5.7``), and left for a follow-on
+that extends the vocabulary rather than approximated with a wrong
+threshold.
 
 Provenance note (why this deck isn't transcribed from a ``.lydrc`` script
 the way ``sky130.py`` was): the companion KLayout-runnable DRC deck lives in

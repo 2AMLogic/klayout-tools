@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+from collections import Counter
 from pathlib import Path
 
 import klayout.db as kdb
@@ -4465,6 +4466,277 @@ def test_run_drc_sky130_capm2_separation_via4_violation(tmp_path):
     assert violation["layer"] == "capm2.drawing"
 
 
+# ---------------------------------------------------------------------------
+# sky130 met1-met5 minimum-area rule coverage (#1955)
+#
+# `m2.6` (and its met1/met3/met4/met5 siblings, `m1.6`/`m3.6`/`m4.4a`/
+# `m5.4`) were real rules in the source deck this module already cites, but
+# were left untranscribed for lack of an `"area"` check primitive -- that
+# primitive has existed since #812, but no rule used it until this issue
+# closed the gap for every metal layer already covered by a width/space
+# rule: `met1.area.1`, `met2.area.1`, `met3.area.1`, `met4.area.1`,
+# `met5.area.1`. Each fixture below sizes its polygon's shorter dimension
+# above that layer's own `width.1` threshold, so the area check is the only
+# rule exercised.
+# ---------------------------------------------------------------------------
+
+
+def test_run_drc_sky130_met1_area_violation(tmp_path):
+    """A met1 polygon smaller than the 83_000 dbu^2 (0.083 um^2)
+    `met1.area.1` threshold trips exactly one violation. 200x200 dbu is
+    wide enough (>= the 140 dbu `met1.width.1` threshold) to isolate the
+    area violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(68, 20)
+    layout.set_info(met1, kdb.LayerInfo(68, 20, "met1.drawing"))
+    top.shapes(met1).insert(kdb.Box(0, 0, 200, 200))  # 40_000 dbu^2 < 83_000
+    path = tmp_path / "met1_area_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met1.area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met1.area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met1.drawing"
+
+
+def test_run_drc_sky130_met1_area_clean(tmp_path):
+    """A met1 polygon at/above the 83_000 dbu^2 `met1.area.1` threshold
+    passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(68, 20)
+    layout.set_info(met1, kdb.LayerInfo(68, 20, "met1.drawing"))
+    top.shapes(met1).insert(kdb.Box(0, 0, 300, 300))  # 90_000 dbu^2 >= 83_000
+    path = tmp_path / "met1_area_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met2_area_violation(tmp_path):
+    """A met2 polygon smaller than the 67_600 dbu^2 (0.0676 um^2)
+    `met2.area.1` threshold trips exactly one violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    top.shapes(met2).insert(kdb.Box(0, 0, 200, 200))  # 40_000 dbu^2 < 67_600
+    path = tmp_path / "met2_area_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met2.area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met2.area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met2.drawing"
+
+
+def test_run_drc_sky130_met2_area_clean(tmp_path):
+    """A met2 polygon at/above the 67_600 dbu^2 `met2.area.1` threshold
+    passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met2 = layout.layer(69, 20)
+    layout.set_info(met2, kdb.LayerInfo(69, 20, "met2.drawing"))
+    top.shapes(met2).insert(kdb.Box(0, 0, 300, 300))  # 90_000 dbu^2 >= 67_600
+    path = tmp_path / "met2_area_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met3_area_violation(tmp_path):
+    """A met3 polygon smaller than the 240_000 dbu^2 (0.240 um^2)
+    `met3.area.1` threshold trips exactly one violation. 310x700 dbu keeps
+    both dimensions >= the 300 dbu `met3.width.1` threshold."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met3 = layout.layer(70, 20)
+    layout.set_info(met3, kdb.LayerInfo(70, 20, "met3.drawing"))
+    top.shapes(met3).insert(kdb.Box(0, 0, 310, 700))  # 217_000 dbu^2 < 240_000
+    path = tmp_path / "met3_area_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met3.area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met3.area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met3.drawing"
+
+
+def test_run_drc_sky130_met3_area_clean(tmp_path):
+    """A met3 polygon at/above the 240_000 dbu^2 `met3.area.1` threshold
+    passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met3 = layout.layer(70, 20)
+    layout.set_info(met3, kdb.LayerInfo(70, 20, "met3.drawing"))
+    top.shapes(met3).insert(kdb.Box(0, 0, 500, 500))  # 250_000 dbu^2 >= 240_000
+    path = tmp_path / "met3_area_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met4_area_violation(tmp_path):
+    """A met4 polygon smaller than the 240_000 dbu^2 (0.240 um^2)
+    `met4.area.1` threshold trips exactly one violation. 310x700 dbu keeps
+    both dimensions >= the 300 dbu `met4.width.1` threshold."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met4 = layout.layer(71, 20)
+    layout.set_info(met4, kdb.LayerInfo(71, 20, "met4.drawing"))
+    top.shapes(met4).insert(kdb.Box(0, 0, 310, 700))  # 217_000 dbu^2 < 240_000
+    path = tmp_path / "met4_area_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met4.area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met4.area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met4.drawing"
+
+
+def test_run_drc_sky130_met4_area_clean(tmp_path):
+    """A met4 polygon at/above the 240_000 dbu^2 `met4.area.1` threshold
+    passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met4 = layout.layer(71, 20)
+    layout.set_info(met4, kdb.LayerInfo(71, 20, "met4.drawing"))
+    top.shapes(met4).insert(kdb.Box(0, 0, 500, 500))  # 250_000 dbu^2 >= 240_000
+    path = tmp_path / "met4_area_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met5_area_violation(tmp_path):
+    """A met5 polygon smaller than the 4_000_000 dbu^2 (4.0 um^2)
+    `met5.area.1` threshold trips exactly one violation. 1800x1800 dbu is
+    wide enough (>= the 1600 dbu `met5.width.1` threshold) to isolate the
+    area violation."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met5 = layout.layer(72, 20)
+    layout.set_info(met5, kdb.LayerInfo(72, 20, "met5.drawing"))
+    top.shapes(met5).insert(kdb.Box(0, 0, 1800, 1800))  # 3_240_000 < 4_000_000
+    path = tmp_path / "met5_area_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met5.area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met5.area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met5.drawing"
+
+
+def test_run_drc_sky130_met5_area_clean(tmp_path):
+    """A met5 polygon at/above the 4_000_000 dbu^2 `met5.area.1` threshold
+    passes."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    met5 = layout.layer(72, 20)
+    layout.set_info(met5, kdb.LayerInfo(72, 20, "met5.drawing"))
+    top.shapes(met5).insert(kdb.Box(0, 0, 2100, 2100))  # 4_410_000 >= 4_000_000
+    path = tmp_path / "met5_area_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_sky130_deck_check_kind_breakdown():
+    """Structural regression for the deck's own `docs/cli/drc.md` "Coverage"
+    kind-breakdown table (#1955): 52 rules total -- 15 `width`, 13 `space`,
+    1 `isolated`, 16 `enclosing`, 2 `separation`, 5 `area`. Fails loudly (at
+    the exact number that changed) if a future rule addition/removal drifts
+    from that table without updating it."""
+    deck = get_deck("sky130")
+
+    assert len(deck) == 52
+    counts = Counter(rule.check for rule in deck)
+    assert counts == {
+        "width": 15,
+        "space": 13,
+        "isolated": 1,
+        "enclosing": 16,
+        "separation": 2,
+        "area": 5,
+    }
+
+
+def test_sky130_area_rules_cite_pinned_sky130a_mr_drc():
+    """Every `"area"`-kind sky130 rule carries a `provenance` citation naming
+    the official `sky130A_mr.drc` rule id it was transcribed from, at the same
+    pinned open_pdks commit the rest of the deck cites (#1955). The
+    `area_min_dbu2` values are the source deck's own um^2 thresholds converted
+    at the deck's nominal dbu (0.001 um => 1 um^2 == 1_000_000 dbu^2):
+
+      m1.6   m1.with_area(0..0.083)   -> 83_000 dbu^2
+      m2.6   m2.with_area(0..0.0676)  -> 67_600 dbu^2
+      m3.6   m3.with_area(0..0.240)   -> 240_000 dbu^2
+      m4.4a  m4.with_area(0..0.240)   -> 240_000 dbu^2
+      m5.4   m5.with_area(0..4.0)     -> 4_000_000 dbu^2
+    """
+    expected = {
+        "met1.area.1": ("m1.6", 83_000, (68, 20)),
+        "met2.area.1": ("m2.6", 67_600, (69, 20)),
+        "met3.area.1": ("m3.6", 240_000, (70, 20)),
+        "met4.area.1": ("m4.4a", 240_000, (71, 20)),
+        "met5.area.1": ("m5.4", 4_000_000, (72, 20)),
+    }
+
+    area_rules = {rule.id: rule for rule in get_deck("sky130") if rule.check == "area"}
+    assert set(area_rules) == set(expected)
+
+    for rule_id, (source_rule_id, area_min_dbu2, layer) in expected.items():
+        rule = area_rules[rule_id]
+        assert rule.layer == layer
+        assert rule.area_min_dbu2 == area_min_dbu2
+        # A minimum-area rule only: `_run_area_check` accepts a min-only rule,
+        # and the source `with_area(0..X)` form has no upper bound.
+        assert rule.area_max_dbu2 is None
+        assert rule.provenance is not None, f"sky130/{rule_id}: no provenance"
+        assert rule.provenance.source_repo == "fossi-foundation/open-pdks"
+        assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
+        assert rule.provenance.rule_id == source_rule_id
+        # sky130.py's own `_OPEN_PDKS_COMMIT` -- the pinned open_pdks revision
+        # of the volare sky130A install every other sky130 rule cites.
+        assert rule.provenance.commit == "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+
+
 # --- nwell.width.1 / nwell.space.1 (issue #1420) ------------------------
 
 
@@ -4721,11 +4993,15 @@ def test_sky130_capm_capm2_have_at_least_one_drc_rule():
 # --------------------------------------------------------------------------- #
 # "area" / "density" / "antenna" check kinds (issue #812)
 #
-# Neither shipped deck (`sky130`/`gf180mcu`) authors a rule of any of these
-# three kinds yet -- that's explicitly out of scope for this issue (a
-# separate follow-on). Each is exercised here against a minimal synthetic
-# one-rule deck via monkeypatch, mirroring
-# `test_run_drc_synthetic_enclosed_check_flags_zero_overlap` above.
+# At the time this section was written, neither shipped deck authored a rule
+# of any of these three kinds -- that was explicitly out of scope for #812
+# itself (a separate follow-on). `sky130` now authors five `"area"`-kind
+# rules (issue #1955, see the `met{1..5}.area.1` tests above);
+# `"density"`/`"antenna"` remain unused by either deck. Each kind is
+# exercised here against a minimal synthetic one-rule deck via monkeypatch,
+# mirroring `test_run_drc_synthetic_enclosed_check_flags_zero_overlap`
+# above -- this generic coverage is independent of, and still needed
+# alongside, the real-deck `met{1..5}.area.1` fixtures.
 # --------------------------------------------------------------------------- #
 
 
