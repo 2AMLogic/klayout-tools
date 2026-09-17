@@ -27,9 +27,9 @@ convergence criteria), and these guides say whether what they produced is any
 good. They compose rather than overlap — D5's exit criteria cite the
 mechanical evidence the "Evidence mapping" table below names, and D5's
 model-class rationale rests directly on this table's `*(none yet)*` rows
-(CDC structure, protocol conformance, side-channel behaviour), which are the
-concerns no `klt` verb checks and that therefore survive D6 through D10
-untouched.
+(security/side-channel findings, spec-quoted behavioral claims, CDC structural
+issues), which are the concerns no `klt` verb checks and that therefore survive
+D6 through D10 untouched.
 
 ## When each guide applies
 
