@@ -56,6 +56,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   falls back to its own declared access point. A tie output the parent
   genuinely routes to the rail still binds to it (that connection is drawn
   outside the cell and survives abstraction). No JSON shape change.
+- **Fixed**: `klt equiv --engine yosys-sequential` no longer drops a
+  top-level port whose name is a Verilog **escaped identifier** (issue
+  #1999) — the leading-`\` spelling a synthesis/P&R flow uses for a name
+  containing `.`, `[`, `]` or `/`, e.g. a flattened hierarchical output
+  `\q.x` or a bit-blasted bus bit `\q[0]`. Such an identifier is terminated
+  by whitespace, so Yosys writes its declaration as `output \q.x ;` (a space
+  before the semicolon) and the stage-1 port-list parser did not match it at
+  all. The port was therefore misclassified as an internal wire and
+  blacklisted by the cut-point refinement loop (issue #1353), deleting the
+  one proof obligation that distinguishes the two designs: two netlists
+  differing **only** on an escaped top-level port were reported
+  `"equivalent"` (verified live on Yosys 0.69). Escaped ports are now
+  recognised, never blacklisted, and carried into stage 2's counterexample
+  dump and the `iverilog`/`vvp` confirmation testbench under their plain,
+  unescaped name (`counterexample.diverging_outputs`, and each cycle's
+  `inputs`/`gold_outputs`/`gate_outputs` keys). No JSON shape change — an
+  affected run's `status` simply stops being wrong.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the

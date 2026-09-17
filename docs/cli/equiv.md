@@ -302,6 +302,21 @@ entry with the count and `artifacts.stage1_blacklist_path` records the
 exact list, so the weakened obligation set can be audited rather than
 taken on trust.
 
+"Minus any top-level port" includes ports whose names are Verilog
+**escaped identifiers** — the leading-`\` spelling a synthesis/P&R flow
+uses for a name containing `.`, `[`, `]` or `/`, such as a flattened
+hierarchical output `\q.x` or a bit-blasted bus bit `\q[0]`. An escaped
+identifier is terminated by *whitespace* rather than by the next
+non-identifier character, so Yosys writes its declaration as `output \q.x ;`
+— with a space before the semicolon. Before issue #1999 the port-list parser
+did not allow for that space, so such a port was invisible to it, was
+mistaken for an internal wire, and was blacklisted: two netlists differing
+*only* on an escaped top-level port could be reported `"equivalent"`. They
+are now recognised, never blacklisted, and reported by their plain
+(unescaped) name everywhere in the JSON report — in
+`counterexample.diverging_outputs` and in each cycle's `inputs` /
+`gold_outputs` / `gate_outputs` keys.
+
 ### Sequential counterexample shape (`"yosys-sequential"` only)
 
 Present when `status == "counterexample"`, and also — exactly as the
