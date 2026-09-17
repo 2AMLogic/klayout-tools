@@ -1362,6 +1362,10 @@ def run_lvs(request: str) -> dict[str, Any]:
     placeholder_warnings: list[dict[str, Any]] = []
     tolerance_warnings: list[dict[str, Any]] = []
     compare_parameter_warnings: list[dict[str, Any]] = []
+    # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
+    # branch below rejects any `request.hints` outright (no equivalent hook
+    # in that engine's scope), so this stays empty for every netgen run.
+    equivalent_pins_applied: dict[str, list[list[str]]] = {}
 
     if engine == "klayout":
         # Issue #506: normalise the reference side's device classes up to the
@@ -1416,7 +1420,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         # circuits (issue #231). Safe unconditionally: there is no other
         # circuit either one could be confused with post-pruning.
         comparer.same_circuits(layout_circuit, reference_circuit)
-        same_nets_hints = _apply_hints(
+        same_nets_hints, equivalent_pins_applied = _apply_hints(
             comparer, request.get("hints") or {}, layout_circuit, reference_circuit
         )
 
@@ -1451,7 +1455,7 @@ def run_lvs(request: str) -> dict[str, Any]:
                 # the second pass would otherwise silently drop the caller's
                 # hints. Re-validation cannot raise here (the first call above
                 # already accepted every hint against these same circuits).
-                same_nets_hints = _apply_hints(
+                same_nets_hints, equivalent_pins_applied = _apply_hints(
                     comparer,
                     request.get("hints") or {},
                     layout_circuit,
@@ -1840,6 +1844,19 @@ def run_lvs(request: str) -> dict[str, Any]:
             # request document it came from.
             "power_connectivity": power_connectivity_echo,
         },
+        # Issue #1998: every `hints.equivalent_pins` grouping actually passed
+        # to `NetlistComparer.equivalent_pins()` for this run, keyed by
+        # (reference-side) subcircuit name -- unlike `hints.same_nets`,
+        # which the comparer can refuse (surfaced as a `hints.rejected`
+        # mismatch entry, see `_build_mismatches`), a swappable-pin group has
+        # no rejection outcome to report, so without this field a caller
+        # reading only the response has no way to tell whether an
+        # `equivalent_pins` hint changed the verdict at all. `null` when
+        # `request.hints.equivalent_pins` was omitted (or resolved to no
+        # groups), matching `options.compare_parameters`'
+        # always-present-but-nullable convention for an optional dict-shaped
+        # echo -- never a spuriously present empty `{}`.
+        "hints_applied": (equivalent_pins_applied if equivalent_pins_applied else None),
         "status": status,
         # Issue #1952: the power/ground half of a `reference.form:
         # "gate-level-verilog"` compare, reported as its own verdict beside
@@ -3775,7 +3792,7 @@ def _apply_hints(
     hints: dict[str, Any],
     layout_circuit: kdb.Circuit,
     reference_circuit: kdb.Circuit,
-) -> list[tuple[str, str]]:
+) -> tuple[list[tuple[str, str]], dict[str, list[list[str]]]]:
     """Wire ``request.hints`` into the comparer, per spike section 2b.
 
     ``same_nets``: ``[[layout_net_name, reference_net_name], ...]`` -- ties a
@@ -3792,15 +3809,26 @@ def _apply_hints(
     reference netlist in this module's ``compare(layout, reference)`` call
     order -- see ``run_lvs``).
 
-    Returns the declared ``same_nets`` pairs as ``(layout_net.expanded_name(),
-    reference_net.expanded_name())`` tuples (issue #499) -- the caller passes
-    this to :func:`_build_mismatches` so it can tell, after ``compare()``
-    runs, which of these hard assertions the comparer actually confirmed
-    (``must_match=True`` is passed unconditionally above, so a hint the
-    comparer disagrees with is a real finding, not a no-op). Deliberately
-    excludes ``equivalent_pins``: it declares swappable pins, not an
-    assertion about a specific pairing, so it has no "rejected" outcome to
-    detect.
+    Returns a 2-tuple:
+
+    - The declared ``same_nets`` pairs as ``(layout_net.expanded_name(),
+      reference_net.expanded_name())`` tuples (issue #499) -- the caller
+      passes this to :func:`_build_mismatches` so it can tell, after
+      ``compare()`` runs, which of these hard assertions the comparer
+      actually confirmed (``must_match=True`` is passed unconditionally
+      above, so a hint the comparer disagrees with is a real finding, not a
+      no-op).
+    - The ``equivalent_pins`` groupings actually passed to
+      ``NetlistComparer.equivalent_pins()``, keyed by subcircuit name,
+      verbatim as given in the request (issue #1998) -- unlike
+      ``same_nets``, a swappable-pin group has no "rejected" outcome to
+      detect (it declares an equivalence the comparer either uses or has no
+      occasion to use, never one it can refuse), so this dict is the only
+      record that the hint was applied at all. A subcircuit name is only
+      added once every one of its groups has resolved without error, so a
+      request that fails validation partway through never leaves a partial
+      entry in the returned dict (the caller never sees it either, since
+      :class:`LvsError` propagates out of this function first).
     """
     same_nets_declared: list[tuple[str, str]] = []
     same_nets = hints.get("same_nets") or []
@@ -3822,6 +3850,7 @@ def _apply_hints(
         same_nets_declared.append((net_a.expanded_name(), net_b.expanded_name()))
 
     equivalent_pins = hints.get("equivalent_pins") or {}
+    equivalent_pins_applied: dict[str, list[list[str]]] = {}
     for subcircuit_name, pin_groups in equivalent_pins.items():
         reference_netlist = reference_circuit.netlist()
         target_circuit = reference_netlist.circuit_by_name(subcircuit_name)
@@ -3830,6 +3859,7 @@ def _apply_hints(
                 f"hints.equivalent_pins: circuit '{subcircuit_name}' not found "
                 "in reference netlist"
             )
+        applied_groups: list[list[str]] = []
         for group in pin_groups:
             pin_ids = []
             for pin_name in group:
@@ -3841,8 +3871,14 @@ def _apply_hints(
                     )
                 pin_ids.append(pin.id())
             comparer.equivalent_pins(target_circuit, pin_ids)
+            applied_groups.append(list(group))
+        # Only recorded once every group for this subcircuit resolved cleanly
+        # (issue #1998) -- a `pin_by_name` miss above raises before this
+        # assignment runs, so a malformed request never leaves a partial
+        # entry behind for the caller to (mis)report as fully applied.
+        equivalent_pins_applied[subcircuit_name] = applied_groups
 
-    return same_nets_declared
+    return same_nets_declared, equivalent_pins_applied
 
 
 # --------------------------------------------------------------------------- #
