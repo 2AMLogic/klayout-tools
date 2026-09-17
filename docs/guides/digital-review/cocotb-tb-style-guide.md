@@ -11,6 +11,12 @@
 > assumptions into this repo's `klt` verbs and request/response fields; the
 > style content carries over unchanged in substance. See
 > [`README.md`](README.md) for when this guide applies.
+>
+> **Added beyond the ported text:** §3's sampling rule (`await ReadOnly()`
+> before comparing), its `ReadOnly()`-is-not-a-driving-phase corollary, and
+> the `impl="gpi"` clock note are **new substance added in this repo**
+> (issue #1972) — not a rewording of booley's guide, which has no sampling
+> rule.
 
 Canonical style guide for cocotb (Python) testbenches that
 `klt functional-verification` runs (see
@@ -99,12 +105,53 @@ A test passes when its coroutine returns, fails when it raises (an
 ## 3. Clock, reset, and timing
 
 - Start clocks with `cocotb.start_soon(Clock(...).start())` in a shared
-  `init()`; never hand-toggle in a loop.
+  `init()`; never hand-toggle in a loop. On a long regression, pass
+  `impl="gpi"` so the clock runs inside the simulator rather than as a
+  Python coroutine (see "Icarus notes" in
+  [`docs/cli/functional-verification.md`](../../cli/functional-verification.md)).
 - Reset synchronously and wait a settle edge before driving stimulus (see
   the layout example) so every test starts from a known state — a
   `request.testbench.testcase` selection of multiple tests still shares
   one sim process (batched execution), and tests MUST NOT depend on
   running order or residual state.
+- **Never sample in the same delta as the edge that woke you.** The
+  drive-side rule above has a sample-side twin. An edge trigger resolves in
+  Verilog's *active* region — before the nonblocking assignments that same
+  edge schedules have settled — so a DUT output read immediately after it
+  is a race, not a value:
+
+  ```python
+  await RisingEdge(dut.clk)
+  got = int(dut.sample.value)  # WRONG — unsettled read, engine-dependent
+  ```
+
+  ```python
+  await RisingEdge(dut.clk)
+  await ReadOnly()  # NBAs have settled here
+  got = int(dut.sample.value)  # RIGHT — same answer on every engine
+  ```
+
+  `await ReadOnly()` — or waiting one further `Timer`/clock edge before
+  comparing — is the whole fix. *Which* wrong answer an unsettled read
+  produces depends on the engine's scheduler and on which signal you
+  awaited, so the failure presents as a wrong DUT output rather than as a
+  testbench race, and a bench can pass under one engine and fail under the
+  other (issue #1972: five tests green under `verilator`, all five failing
+  under `icarus` with `DUT sample 0`). Re-measured 2026-09-17 with cocotb
+  2.1.0 / Icarus 13.0 / Verilator 5.052, the clock-edge form above read the
+  *pre-edge* value on **both** engines and the `ReadOnly()` form read the
+  settled value on both — the engines agreed there, which is exactly why
+  the rule is "the unsettled read is never something to rely on", not "this
+  engine reads new and that one reads old". Running a bench under both
+  engines is the mechanical detector — see
+  [`cocotb-tb-review.md`](cocotb-tb-review.md) check #8 and "Run both
+  engines on a bench that matters" in
+  [`docs/cli/functional-verification.md`](../../cli/functional-verification.md).
+- **`ReadOnly()` is a sampling phase, not a driving one.** Setting any
+  handle value after `await ReadOnly()` raises `RuntimeError: Attempting
+  settings a value during the ReadOnly phase.` (verified, cocotb 2.1.0).
+  Drive in the active region, sample in the read-only one: drive before the
+  sample point, and await the next trigger before driving again.
 - **Await sim-time triggers, never wall-clock sleeps.** `time.sleep()` /
   blocking I/O stalls the whole simulator; use `Timer`, `ClockCycles`,
   `RisingEdge`, `with_timeout`.
@@ -147,6 +194,10 @@ Same bar as the SV guide: every stimulus needs a checked expectation.
   being checked.
 - Compare on every transaction/sample, not only at end-of-test; accumulate
   and assert per item so the failure names the first mismatch.
+- Sample the DUT per §3's rule (`await ReadOnly()` after the triggering
+  edge) before comparing — an independent golden model compared against an
+  unsettled read still produces a false verdict. Timing and comparison
+  independence are separate concerns; both have to hold.
 - Convert handle values explicitly (`int(dut.count.value)`) before
   comparing — `LogicArray` equality with Python ints has resolution
   pitfalls around `X`/`Z`; deciding how `X` should compare is part of the

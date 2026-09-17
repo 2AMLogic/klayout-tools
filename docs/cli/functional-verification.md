@@ -71,6 +71,44 @@ The Verilator tax is fixed per invocation, so it **compounds** inside a
 design-space-exploration loop (N candidates × that build cost) in a way it
 does not for a single per-PR run — budget it accordingly.
 
+### Run both engines on a bench that matters
+
+"The testbench is simulator-agnostic Python" is the premise, and **sampling
+timing is where it leaks**. A testbench that reads a DUT output in the same
+delta as the edge that woke it — no `await ReadOnly()` in between, see
+"never sample in the same delta as the edge that woke you" in
+[`cocotb-tb-style-guide.md`](../guides/digital-review/cocotb-tb-style-guide.md)
+§3 — has an **engine-dependent verdict**, and it fails as a wrong DUT value
+rather than as an obvious testbench race (issue #1972: a bench green under
+`verilator`, all tests failing under `icarus`).
+
+Running the *same* request twice, once with `"engine": "icarus"` and once
+with `"engine": "verilator"`, is a mechanical detector for that whole
+class: the divergence itself is the signal, with no rule for the author to
+remember. The extra cost is one more row of the table above — near-free on
+Icarus, the fixed compile tax on Verilator — which makes it a sensible
+per-PR habit for a bench that gates a result, and a poor fit inside a
+design-space-exploration loop. See
+[`cocotb-tb-review.md`](../guides/digital-review/cocotb-tb-review.md) #8 for
+the reviewer-side check.
+
+### Icarus notes
+
+- **Keep the clock inside the simulator.** cocotb's `Clock` defaults to
+  `impl="auto"`, which falls back to the *Python coroutine* implementation
+  unless `COCOTB_TRUST_INERTIAL_WRITES` is set — every clock edge then
+  costs a Python round-trip. Passing `impl="gpi"` to `Clock(...)` uses
+  cocotb's C++ clock instead. Measured 2026-09-17 on a trivial DUT (cocotb
+  2.1.0, Icarus 13.0): ~68k cycles/s with `impl="gpi"` vs. ~16k with the
+  Python clock, a ~4x speedup; issue #1972 reports ~12.5x (1.32M vs. 106k
+  cycles/s) on a larger design, where the clock dominates more.
+- **An `Unexpected sys.executable` error from a bundled `vvp` is benign.**
+  OSS CAD Suite's `bin/vvp` exports a `PYTHONHOME` pointing at its own
+  bundled Python, so cocotb logs an `Unexpected sys.executable` error at
+  startup even though the run proceeds and writes `results_<engine>.xml`
+  normally. It is alarming and its cause is non-obvious, but it is not the
+  verdict — read the verdict from the results file, as always.
+
 ### Requirements
 
 - **cocotb** (`pip install cocotb`). It is deliberately *not* a `klt`

@@ -13,6 +13,11 @@
 > carry over unchanged. See [`README.md`](README.md) for when this guide
 > applies and which `klt` verb (if any) supplies the tool evidence it asks
 > a reviewer to check.
+>
+> **Added beyond the ported text:** CRITICAL check #8 ("sampling in the
+> active region") is **new substance added in this repo** (issue #1972) —
+> not a rewording of booley's checklist, which has no equivalent check.
+> Checks #9–#17 are the ported checks, renumbered by its insertion.
 
 This guide applies to **cocotb (Python) testbenches** — the kind
 `klt functional-verification` actually runs (see
@@ -79,7 +84,7 @@ higher-confidence findings — never CRITICAL/MAJOR with LOW confidence.
 
 ## Review checklist
 
-### CRITICAL — false-pass risks (7 checks, must-fix)
+### CRITICAL — false-pass risks (8 checks, must-fix)
 
 | # | Check | Look for |
 |---|-------|----------|
@@ -90,22 +95,23 @@ higher-confidence findings — never CRITICAL/MAJOR with LOW confidence.
 | 5 | **Swallowed exceptions** | `try/except` around checks that logs and continues; `except Exception: pass`; failures downgraded to warnings — the test returns normally and `results.xml` records a pass. |
 | 6 | **Unresolved-value blindness** | Comparisons that coerce `X`/`Z` silently (e.g. `str()` compares, or `.integer` on a resolvable-only path) so an undriven DUT output "equals" the expected 0; no explicit decision on how unresolved bits should compare. |
 | 7 | **Blocking sleeps / unbounded waits** | `time.sleep()`, blocking file/network I/O, or a bare `await` on a handshake that may never fire with no `with_timeout` — the run burns its whole wall-clock budget and every remaining test times out. |
+| 8 | **Sampling in the active region** | A DUT output read in the same delta as the edge that woke the coroutine — `await RisingEdge(...)` (or `ClockCycles`/`Edge`) followed immediately by `int(dut.<out>.value)` with no `await ReadOnly()` and no intervening trigger. The edge resolves *before* the nonblocking assignments it schedules settle, so the read can return the pre-edge value, and *which* value it returns is a property of the engine's scheduler — the same bench can pass under `verilator` and fail under `icarus` (issue #1972), presenting as a wrong DUT output rather than as a testbench race. **Passing on one engine is not evidence**: re-run the same request under the other engine, since the divergence is the detector (see "Run both engines on a bench that matters" in [`docs/cli/functional-verification.md`](../../cli/functional-verification.md)). Fix and rationale: "never sample in the same delta as the edge that woke you" in [`cocotb-tb-style-guide.md`](cocotb-tb-style-guide.md) §3. |
 
 ### MAJOR — correctness/robustness (6 checks)
 
 | # | Check | Look for |
 |---|-------|----------|
-| 8 | **Test-order coupling** | Tests share module-level mutable state, or depend on DUT state left by an earlier test (no reset/re-init in the test or shared `init()`); a batched `testbench.testcase` selection runs the selected set in ONE sim process — every test must own its bring-up. |
-| 9 | **Missing timeout discipline** | Long-running loops with no bound; polling without a cycle cap; no `with_timeout` on externally-driven conditions. |
-| 10 | **Hand-rolled BFMs where `cocotbext-*` exists** | A bespoke AXI/UART driver re-implementing what the widely-used `cocotbext-axi`/`cocotbext-uart` packages provide — more code to review, more false-pass surface. (SPI is the exception: as of this port there is no cocotb-2.x-compatible `cocotbext-spi` release — a vendored SPI BFM is expected.) |
-| 11 | **No edge-case vectors** | Only random inputs, no deterministic boundary testing (0, max, near-overflow, identity, asymmetric). |
-| 12 | **No randomized vectors** | Only hand-picked inputs; no `random`/numpy sweep to exercise the interior of the input space. Seed via `options.random_seed` (see "Reproducibility: `random_seed`" in [`docs/cli/functional-verification.md`](../../cli/functional-verification.md)) rather than a hardcoded seed that hides input-space diversity — the effective seed is always echoed back in `environment.random_seed`, so a specific failing run is reproducible either way. |
-| 13 | **Insufficient stimulus diversity** | Fewer than 4 distinct input patterns, or only one operating scenario (one key for crypto, one coefficient set for a filter, one packet type for protocol). `options.coverage: true` (Verilator only) makes this measurable via `coverage.line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` — see the index's evidence table. Minimum bar: ≥4 deterministic vectors spanning distinct input regions plus a randomized sweep of ≥8 iterations. |
+| 9 | **Test-order coupling** | Tests share module-level mutable state, or depend on DUT state left by an earlier test (no reset/re-init in the test or shared `init()`); a batched `testbench.testcase` selection runs the selected set in ONE sim process — every test must own its bring-up. |
+| 10 | **Missing timeout discipline** | Long-running loops with no bound; polling without a cycle cap; no `with_timeout` on externally-driven conditions. |
+| 11 | **Hand-rolled BFMs where `cocotbext-*` exists** | A bespoke AXI/UART driver re-implementing what the widely-used `cocotbext-axi`/`cocotbext-uart` packages provide — more code to review, more false-pass surface. (SPI is the exception: as of this port there is no cocotb-2.x-compatible `cocotbext-spi` release — a vendored SPI BFM is expected.) |
+| 12 | **No edge-case vectors** | Only random inputs, no deterministic boundary testing (0, max, near-overflow, identity, asymmetric). |
+| 13 | **No randomized vectors** | Only hand-picked inputs; no `random`/numpy sweep to exercise the interior of the input space. Seed via `options.random_seed` (see "Reproducibility: `random_seed`" in [`docs/cli/functional-verification.md`](../../cli/functional-verification.md)) rather than a hardcoded seed that hides input-space diversity — the effective seed is always echoed back in `environment.random_seed`, so a specific failing run is reproducible either way. |
+| 14 | **Insufficient stimulus diversity** | Fewer than 4 distinct input patterns, or only one operating scenario (one key for crypto, one coefficient set for a filter, one packet type for protocol). `options.coverage: true` (Verilator only) makes this measurable via `coverage.line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` — see the index's evidence table. Minimum bar: ≥4 deterministic vectors spanning distinct input regions plus a randomized sweep of ≥8 iterations. |
 
 ### MINOR — style/coverage (3 checks, report only)
 
 | # | Check | Look for |
 |---|-------|----------|
-| 14 | **Assertion messages lack context** | Bare `assert got == want` with no message naming the operand values, iteration, or scenario — the failure text is the only per-test evidence the JSON response's `tests[].error_message` field carries forward. |
-| 15 | **Deep hierarchy pokes** | Tests reaching deep into `dut.<a>.<b>.<c>` internals instead of the port interface — couples the TB to implementation detail and breaks on refactor. |
-| 16 | **Waveform writes from Python** | The TB opens VCD/trace files itself (e.g. via `pyvcd`) instead of relying on whichever mechanism owns the run's trace lifecycle — currently `options.coverage: true`'s Verilator `--trace` build arg (see "Coverage" in [`docs/cli/functional-verification.md`](../../cli/functional-verification.md)); a TB-authored dump can collide with it. |
+| 15 | **Assertion messages lack context** | Bare `assert got == want` with no message naming the operand values, iteration, or scenario — the failure text is the only per-test evidence the JSON response's `tests[].error_message` field carries forward. |
+| 16 | **Deep hierarchy pokes** | Tests reaching deep into `dut.<a>.<b>.<c>` internals instead of the port interface — couples the TB to implementation detail and breaks on refactor. |
+| 17 | **Waveform writes from Python** | The TB opens VCD/trace files itself (e.g. via `pyvcd`) instead of relying on whichever mechanism owns the run's trace lifecycle — currently `options.coverage: true`'s Verilator `--trace` build arg (see "Coverage" in [`docs/cli/functional-verification.md`](../../cli/functional-verification.md)); a TB-authored dump can collide with it. |
