@@ -11,6 +11,14 @@ under `guides/`. What those surveys and other mined resources actually
 changed here — one entry per resource, with impact links — is indexed in
 [`library/README.md`](library/README.md).
 
+**`cli/` reflects `main`, not necessarily the latest PyPI release.** A verb
+documented under `cli/` can land on `main` before it ships in a tagged
+release — check [`RELEASING.md`](../RELEASING.md)'s "Release cadence"
+section for the policy bounding that gap, and
+[`CHANGELOG.md`](../CHANGELOG.md)'s `## Unreleased` section for exactly
+what has landed since the latest tag, before assuming a `cli/` page
+describes what `pip install`/`uv tool install klayout-tools` gives you today.
+
 ## Layout
 
 ```
@@ -64,6 +72,7 @@ docs/
     trajectory.md
     version.md
     wave.md
+    yield-campaign.md
     yield-sensitivity.md
     yield.md
   design/                # design notes, spikes, and upstream surveys
