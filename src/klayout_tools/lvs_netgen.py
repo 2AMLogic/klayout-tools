@@ -53,6 +53,52 @@ if TYPE_CHECKING:
 #: single SPICE corner. Overridable per request via ``options.netgen_timeout_s``.
 _NETGEN_DEFAULT_TIMEOUT_S = 300.0
 
+#: ANSI escape sequences, stripped from every piece of netgen text before it
+#: is folded into a ``klt lvs`` report field (:func:`_strip_ansi`, issue
+#: #1969). Covers the two shapes a terminal-colouring program emits -- CSI
+#: (``ESC [ ... <final byte>``, the ``\033[1;31m`` SGR form) and OSC
+#: (``ESC ] ... BEL``/``ESC \``) -- plus the two-character ``ESC <char>``
+#: form. A lone ``ESC`` that matches none of these is dropped separately, so
+#: the invariant :func:`_strip_ansi` guarantees is the simple, checkable one:
+#: **no ``ESC`` byte survives into a report field.**
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-?]*[ -/]*[@-~]"  # CSI (SGR colour, cursor moves, ...)
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC (title/hyperlink)
+    r"|\x1b[@-_]"  # two-character escapes
+)
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from netgen-produced ``text``.
+
+    Issue #1969, Finding 2. ``klt lvs`` emits no colour of its own -- the
+    only ANSI in the whole CLI lives in ``cli/signoff_cmd.py``, which does it
+    by explicit design. But the netgen engine folds netgen's *own* report
+    text into ``klt lvs``'s report fields, and one of those channels is
+    verbatim: :func:`_describe_netgen_property_delta` documents that it
+    "passes any other wording through verbatim rather than dropping the
+    line", landing netgen's text directly in a ``mismatches[].description``
+    that ``cli/lvs_cmd.py``'s ``--format text`` renderer prints. With no
+    sanitization, a colourising netgen build would put raw escape bytes on a
+    non-TTY stdout (and into the ``--format json`` payload) -- reproduced in
+    ``tests/test_lvs.py``'s
+    ``test_netgen_engine_text_format_emits_no_ansi_to_non_tty_stdout``.
+
+    Sanitizing here, at the fold-in boundary, is deliberately *not* an
+    ``isatty()`` gate in ``lvs_cmd.py``: gating output on a TTY would
+    contradict ``signoff_cmd.py``'s documented always-emit convention, and
+    would leave the escapes in the JSON contract's own string fields, where
+    no terminal check applies at all. The text is foreign input; it is
+    cleaned on the way in, once, for every consumer.
+
+    No known netgen build colourises ``comp.out`` today (netgen 1.5.323 and
+    1.5.133 both write plain text), so this is a defence against foreign
+    output rather than a fix for an observed netgen release -- exactly the
+    posture the same text deserves for being outside this project's control.
+    """
+    return _ANSI_ESCAPE_RE.sub("", text).replace("\x1b", "")
+
+
 #: netgen's own startup banner (``tclnetgen.c``'s ``netgen_AppInit``, verified
 #: against a from-source build of netgen 1.5.323 for this issue): ``"Netgen
 #: 1.5.323 compiled on <date>"``, printed to stdout on every invocation --
@@ -293,7 +339,10 @@ def _run_netgen_lvs(
             raise LvsError(
                 "netgen did not produce a report file -- it likely failed to "
                 "read one of the input netlists. netgen's own output:\n"
-                + (completed.stdout or completed.stderr or "").strip()
+                # Issue #1969: netgen's text reaches the caller here too (as
+                # the error envelope's `message`), so it gets the same
+                # fold-in sanitization `_parse_netgen_report` applies.
+                + _strip_ansi(completed.stdout or completed.stderr or "").strip()
             )
         try:
             with open(log_path, encoding="utf-8", errors="replace") as handle:
@@ -399,6 +448,15 @@ def _parse_netgen_report(
         CATEGORY_TOPOLOGY,
         LvsError,
     )
+
+    # Issue #1969: strip ANSI escapes from *both* netgen text sources before
+    # anything is parsed out of them, so every field this function can
+    # populate -- a structured `description`/`property` value, a bucketed
+    # `details.raw`, the raw report tail embedded in the unparseable-verdict
+    # error below -- is clean by construction rather than per-field. See
+    # `_strip_ansi`.
+    log_text = _strip_ansi(log_text)
+    stdout = _strip_ansi(stdout) if stdout else stdout
 
     verdict = _locate_netgen_verdict(log_text)
     source_text = log_text

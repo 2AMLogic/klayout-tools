@@ -267,11 +267,18 @@ section 2 and [`docs/cli/wave.md`](cli/wave.md).
   `{content_hash}` (same shape as `deck`). `content_hash` is a
   `sha256:`-prefixed hex digest of the file, so a stale committed report is a
   one-line diff against a freshly computed hash instead of being
-  byte-identical to a current run. Populated by `drc` and `extract`; `null`
-  when a verb has no single input layout to pin this way, including `lvs`,
-  which already covers its two inputs via its own
-  `environment.layout_sha256`/`reference_sha256` fields (predates this block
-  and is intentionally not folded into it).
+  byte-identical to a current run. Populated by `drc`, `extract`, and (since
+  issue #1969) `lvs`, which records the hash of the layout side it compared —
+  the same file and the same digest its own `environment.layout_sha256`
+  records, in the `sha256:`-prefixed form this block uses. `lvs` deliberately
+  populated `null` here until #1969, on the reasoning that
+  `environment.layout_sha256`/`reference_sha256` already covered it; that was
+  wrong for `klt signoff --manifest`, whose staleness gate reads
+  `provenance.input.content_hash` generically across every check kind and
+  cannot see an LVS-only field, so every `content_hash`-pinned "LVS clean"
+  citation graded `stale_evidence`. `environment.layout_sha256` is unchanged
+  (still a bare hex digest, no `sha256:` prefix). `input` is still `null` for
+  a verb with no single input stream to pin this way.
 
 Fields that can't be resolved are `null` per the envelope convention — never
 silently fabricated. The block is built once in

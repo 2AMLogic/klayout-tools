@@ -608,10 +608,15 @@ def test_clean_self_compare_reports_match(tmp_path):
     # involves no extraction deck, so `deck` is null (mirrors device_classes).
     assert prov["pdk"] is None
     assert prov["deck"] is None
-    # Issue #331: `lvs` already pins its two inputs via its own
-    # `environment.layout_sha256`/`reference_sha256` above (unchanged by this
-    # issue), so `provenance.input` stays null rather than duplicating that.
-    assert prov["input"] is None
+    # Issue #1969 (reversing issue #331): `provenance.input` pins the layout
+    # side of the compare, the `sha256:`-prefixed form of the same digest
+    # `environment.layout_sha256` above records for the same file. The
+    # duplication is deliberate -- `klt signoff --manifest`'s staleness gate
+    # reads `provenance.input.content_hash` generically and cannot see an
+    # LVS-only `environment.*` field.
+    assert prov["input"] == {
+        "content_hash": "sha256:" + report["environment"]["layout_sha256"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -10241,6 +10246,125 @@ def test_netgen_engine_default_engine_still_klayout(tmp_path, monkeypatch):
     report = run_lvs(path)
 
     assert report["engine"] == "klayout"
+
+
+def test_netgen_engine_populates_provenance_input_content_hash(tmp_path, monkeypatch):
+    """Issue #1969: `provenance.input.content_hash` pins the layout side for
+    the `netgen` engine too, not just `klayout`.
+
+    Both engines converge on the same single `build_provenance(...)` call,
+    and `layout_hash_source` is resolved *before* the engine branch -- this
+    test is the executable proof of that, so the field can never end up
+    engine-conditional. `klt signoff --manifest`'s item-4 staleness gate does
+    not know or care which comparator produced a `klt lvs` envelope.
+    """
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_MATCH_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["engine"] == "netgen"
+    assert report["provenance"]["input"] == {
+        "content_hash": "sha256:" + report["environment"]["layout_sha256"]
+    }
+
+
+#: A `netgen` `comp.out` whose property-error qualifier carries raw ANSI SGR
+#: escapes, used by the Finding-2 re-verification test below. `klt lvs` never
+#: emits colour itself, so the only way an ESC byte could reach a non-TTY
+#: `--format text` stdout is by being *carried in* from netgen's own report
+#: text -- and the widest such channel is
+#: `_describe_netgen_property_delta`'s documented "pass any other wording
+#: through verbatim" fallback, which lands netgen's text directly in a
+#: `mismatches[].description` that `_print_text` prints. This fixture is
+#: deliberately *not* verbatim netgen output (no netgen build is known to
+#: colourise `comp.out`); it is a synthetic worst case, since the defect is
+#: the *absence of sanitization at the fold-in boundary* rather than any
+#: particular netgen release's behaviour.
+_NETGEN_ANSI_PROPERTY_LOG = _NETGEN_STRING_PROPERTY_LOG.replace(
+    "(exact match req'd)", "(\033[1;31mexact match req'd\033[0m)"
+)
+
+
+def test_netgen_engine_text_format_emits_no_ansi_to_non_tty_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    """Issue #1969, Finding 2 (re-verification): `klt lvs --format text` must
+    not emit ANSI escapes to a non-TTY stdout via the `netgen` engine.
+
+    Curation established Finding 2 does **not** reproduce for the default
+    `klayout` engine -- `grep -rn $'\\033\\['` over `src/klayout_tools/cli/`
+    finds ANSI in exactly one file, `signoff_cmd.py`, which does it by
+    explicit design (its module docstring: never gated on `isatty()`, so a
+    piped agent still gets a greppable marker per line). Nothing in
+    `lvs_cmd.py` or `cli/output.py` emits colour, and `git log -S` shows none
+    ever did.
+
+    The one path curation could not test was `netgen`, whose report text is
+    folded into `klt lvs`'s own fields. This test closes that gap *without*
+    needing a netgen binary, by feeding an ANSI-laced `comp.out` through the
+    stubbed-subprocess harness along the widest carry-in channel there is
+    (`_describe_netgen_property_delta`'s verbatim-passthrough fallback,
+    surfacing in a printed `mismatches[].description`).
+
+    It **does** reproduce: before `lvs_netgen._strip_ansi`, this test failed
+    with `\\033[1;31mexact match req'd\\033[0m` printed straight to a
+    non-TTY stdout. Per the issue's own guidance the fix is the
+    string-sanitization step at the fold-in boundary (`_parse_netgen_report`)
+    -- *not* an `isatty()` gate in `lvs_cmd.py`, which would contradict
+    `signoff_cmd.py`'s deliberate always-emit convention and would leave the
+    escapes in the `--format json` payload's string fields besides, where no
+    terminal check applies at all.
+    """
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_ANSI_PROPERTY_LOG)
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "netgen",
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    exit_code = main(["lvs", request_path])
+
+    captured = capsys.readouterr()
+    # The run really did surface netgen's property error (otherwise this
+    # asserts cleanliness of an empty report and proves nothing).
+    assert exit_code == 3
+    assert "device.property" in captured.out
+    assert "\033" not in captured.out, "ANSI escape reached a non-TTY stdout"
+    assert "\033" not in captured.err
+    # The qualifier still reaches the description -- sanitized, not dropped.
+    # `_describe_netgen_property_delta`'s verbatim passthrough exists so an
+    # unfamiliar netgen wording still yields a structured entry; stripping
+    # the escapes must not cost that.
+    assert "exact match req'd" in captured.out
+
+
+def test_netgen_engine_json_payload_carries_no_ansi_escapes(tmp_path, monkeypatch):
+    """Issue #1969, Finding 2 (JSON half): the sanitization is at the
+    fold-in boundary, so the `--format json` payload is clean too.
+
+    This is the half an `isatty()` gate in `cli/lvs_cmd.py` could not have
+    fixed -- a JSON string field has no terminal to check against, and an
+    escape byte there corrupts any consumer that later renders it. Asserted
+    over the serialized envelope rather than field-by-field, so a future
+    field that starts carrying netgen text is covered without updating this
+    test.
+    """
+    _stub_netgen_subprocess(monkeypatch, log_text=_NETGEN_ANSI_PROPERTY_LOG)
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    assert report["status"] == "mismatch"
+    (mismatch,) = report["mismatches"]
+    assert mismatch["category"] == "device.property"
+    assert "\033" not in json.dumps(report)
+    assert mismatch["description"].endswith("(exact match req'd)")
 
 
 # --------------------------------------------------------------------------- #

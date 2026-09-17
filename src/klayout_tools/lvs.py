@@ -1874,6 +1874,23 @@ def run_lvs(request: str) -> dict[str, Any]:
             # a PDK (see `reference_pdk_info` above) -- `None` for a plain
             # SPICE-vs-SPICE reference, which genuinely involves no PDK.
             pdk=reference_pdk_info,
+            # Issue #1969: pin the layout side under `provenance.input`, the
+            # shared block's own field, for *both* engines (this call is
+            # reached after the `klayout`/`netgen` branch converges, and
+            # `layout_hash_source` is resolved before it). This deliberately
+            # reverses issue #331's original call: `environment.layout_sha256`
+            # above records the same digest of the same file (both go through
+            # `sha256_file`), but only under an LVS-specific key no generic
+            # consumer reads. `klt signoff --manifest`'s T1 item-4 staleness
+            # gate reads `provenance.input.content_hash` generically across
+            # every kind, so leaving this `null` made *every* content-hash-
+            # pinned "LVS clean" citation render `stale_evidence` -- a pinned
+            # hash can never match `None`. `environment.layout_sha256` is a
+            # bare hex digest and stays exactly as it was (a report-shape
+            # contract of its own); `provenance.input.content_hash` is the
+            # `sha256:`-prefixed form, so the two are redundant in content
+            # but not interchangeable in shape.
+            input_path=layout_hash_source,
             # Issue #600: echo the resolved `layout.deck_options` mapping
             # under `provenance.deck.options`, matching `klt extract`'s
             # shape exactly (`_deck_block` omits the key entirely when

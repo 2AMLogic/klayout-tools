@@ -115,7 +115,13 @@ LVS_MATCH_ENVELOPE = {
         # deck -- see EXTRACT_ENVELOPE's comment on why a real, unmodified
         # checkout always agrees here.
         "deck": {"name": "sky130", "content_hash": "sha256:drcdeck"},
-        "input": None,
+        # Issue #1969: `klt lvs` populates `provenance.input` too, pinning the
+        # layout side of the compare. Same hash as DRC_CLEAN_ENVELOPE /
+        # EXTRACT_ENVELOPE's input for the same reason their decks agree: a
+        # real T1 package signs off DRC, extraction, and LVS against one
+        # layout, so the cross-check (`input.content_hash`) is expected to
+        # find them identical.
+        "input": {"content_hash": "sha256:layoutA"},
     },
 }
 
@@ -1346,6 +1352,36 @@ def test_mismatched_input_hash_is_refused(tmp_path):
     assert values[extract_path] == "sha256:layoutB"
 
 
+def test_lvs_joins_the_input_hash_cross_check(tmp_path):
+    """Issue #1969: now that `klt lvs` populates `provenance.input`, it
+    participates in the `input.content_hash` cross-check like every other
+    populating verb -- an LVS report signed off against a *different* layout
+    than its DRC sibling is refused rather than passing unnoticed.
+
+    This is a second, independent benefit of populating the field, distinct
+    from the item-4 staleness gate: the cross-check is envelope-aggregation
+    mode, and previously had no LVS value to compare at all.
+    """
+    other_layout_lvs = {
+        **LVS_MATCH_ENVELOPE,
+        "provenance": {
+            **LVS_MATCH_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:layoutB"},
+        },
+    }
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", other_layout_lvs)
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[drc_path] == "sha256:layoutA"
+    assert values[lvs_path] == "sha256:layoutB"
+
+
 def test_mismatched_pdk_name_is_refused(tmp_path):
     other_pdk_sim = {
         **SIM_PASS_ENVELOPE,
@@ -1841,9 +1877,50 @@ def test_lvs_evidence_populates_lvs_kind_check(tmp_path):
     item_4 = next(item for item in result["items"] if item["id"] == 4)
     assert item_4["status"] == "met"
     assert item_4["citation"]["kind"] == "lvs"
-    # klt lvs's provenance.input is always null (docs/json-contract.md) --
-    # the citation still carries the field, just unpopulated.
-    assert item_4["citation"]["content_hash"] is None
+    # Issue #1969: `klt lvs` now populates `provenance.input.content_hash`
+    # (it was always null before, which is exactly what made a pinned item-4
+    # citation ungradeable -- see the two tests below).
+    assert item_4["citation"]["content_hash"] == "sha256:layoutA"
+
+
+def test_lvs_matching_pinned_content_hash_renders_met(tmp_path):
+    """Issue #1969: a T1 item-4 citation pinning an expected `content_hash`
+    against a `klt lvs` report grades `met` when the hash matches.
+
+    Before #1969 this was unreachable: `klt lvs`'s `provenance.input` was
+    always `null`, so `_grade_evidence` found `actual_hash: None` and *no*
+    pinned hash could ever match -- every pinned "LVS clean" citation graded
+    `stale_evidence` regardless of whether the layout had actually moved.
+    """
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={"4": {"file": lvs_path, "content_hash": "sha256:layoutA"}})
+    )
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["status"] == "met"
+    assert item_4["reason"] is None
+    assert item_4["citation"]["content_hash"] == "sha256:layoutA"
+
+
+def test_lvs_stale_pinned_content_hash_renders_unmet(tmp_path):
+    """The other half of #1969: populating the hash must not turn the
+    staleness gate into a rubber stamp. A pinned hash that does *not* match
+    the report's own still grades `stale_evidence` -- the fix removes a false
+    negative, it does not introduce a false pass."""
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"4": {"file": lvs_path, "content_hash": "sha256:stale-revision"}}
+        )
+    )
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["status"] == "unmet"
+    assert item_4["reason"] == "stale_evidence"
+    assert item_4["citation"] is None
 
 
 # --------------------------------------------------------------------------- #
