@@ -72,6 +72,29 @@ topically relevant to the claim; see
 signoff` cannot check topical relevance". Citing them honestly is the
 claimant's responsibility, not something the tool verifies.
 
+### What a T1 claim is scoped to
+
+**T1 is block-scoped.** Every item is evidence about *this block*, at its
+own boundary, on its own. Nothing in the checklist says anything about the
+chip the block is later integrated into, or about conditions imposed on the
+block from outside that boundary — supply quality at its pins, the
+integrating design's floorplan, a neighbour's injected noise. A block at T1
+is a block whose own artifacts are complete, fresh, and passing; it is not a
+certificate that a design containing it will work.
+
+**T1 is toolchain-scoped.** Each item is graded by the open-source tools it
+names, at those tools' actual current coverage. An item is satisfied when
+those tools report clean — which is not the same claim as "no defect of this
+class exists in this block". A deck with rule-free layers (item 3), a
+compare whose `power_connectivity` came back `unchecked` (item 4), a corner
+set the cited run itself declared (item 5): every verdict is bounded by the
+question the tool actually asked. **A defect class that no `klt` verb
+detects — or that a verb detects but `klt signoff` cannot read as a failing
+check — is outside every T1 item by construction, and a T1 claim asserts
+nothing about it.** This is why "Coverage honesty" is a verification rule
+below, and why items 3 and 4 require their coverage gaps to be disclosed
+*with* the claim rather than folded silently into a pass.
+
 ### Block kind
 
 A T1 claim states the block's **kind**: `analog`, `digital`, or
@@ -136,13 +159,54 @@ every block.
    with the deck identified (content hash). Known deck coverage gaps
    (rule-free layers, skipped rules) must be enumerated in the claim, not
    hidden behind "clean" — a clean verdict from a deck with undisclosed
-   holes is a false claim.
+   holes is a false claim. The report already states its own gaps, so the
+   disclosure is those fields quoted from the cited envelope's `coverage`
+   block (`docs/cli/drc.md`), not prose written from memory:
+   `coverage.layers_in_stream_without_rules` (layers drawn in this stream
+   that the deck has no rule for), `coverage.rules_skipped` (rules the deck
+   carries but this run did not evaluate), and `coverage.deck_scope` (which
+   chapters of the foundry DRM the deck transcribes at all). A claim that
+   leaves a non-empty `layers_in_stream_without_rules` or `rules_skipped`
+   unstated, or that never states the `deck_scope` its "clean" was measured
+   inside, has not satisfied this item however clean the `status` is.
+   **This disclosure is claimant-enforced, not tool-enforced**: `klt
+   signoff` grades item 3 on `status: "clean"` alone and reads no `coverage`
+   field (#2002), so a `met` verdict from `klt signoff` is not evidence that
+   the gaps were disclosed — a reviewer must read the `coverage` block
+   against the claim themselves.
 4. **LVS clean** — latest LVS report `status: match`, fresh, engine named,
    checked against the netlist from item 1 (schematic netlist for analog,
-   synthesized/routed gate-level netlist for digital). Warnings-only
-   mismatches must be listed with the claim. A second, independent engine's
-   concurring verdict (#343) strengthens this from "one toolchain agrees
-   with itself" to a cross-checked result.
+   synthesized/routed gate-level netlist for digital), **and that same
+   report's `power_connectivity.status` not `"mismatch"`**. Those are two
+   verdicts, not one: `klt lvs`'s top-level `status` is the *signal*-
+   connectivity compare's own result, and since issue #1952 the
+   power/ground half is reported beside it in its own `power_connectivity`
+   block (`docs/cli/lvs.md` → "Power/ground connectivity"). `klt signoff`
+   already grades this item on both — an `lvs`-kind check passes only on
+   `status == "match"` **and** `power_connectivity.status != "mismatch"`
+   (issue #1965) — so a claim resting on `status: match` alone is weaker
+   than the tool that grades it. What the check verifies is
+   per-standard-cell-instance *pin-to-net* correctness: on every abstracted
+   instance, each pin the PDK library declares power/ground must reach the
+   net the caller declared (`options.power_connectivity.expected_nets`) or,
+   absent a declaration, the same net every other instance's same-named pin
+   reaches; a disagreement renders `power.inconsistent_pin_net` /
+   `power.unexpected_pin_net`, and a pin on no net at all renders
+   `power.unconnected_pin`. **The check's reach is narrower than "the power
+   grid is verified", and a claim must not say otherwise.** A
+   `power_connectivity.status` of `"unchecked"` — every `reference.form`
+   other than `gate-level-verilog`, an explicit `options.power_connectivity:
+   false`, or a layout whose instances declare no PG pins at all — means the
+   question was never asked; this item and `klt signoff` both read it as
+   "does not apply here", never as "verified", so a fleet policy of "re-run
+   LVS, look for `match`" is not by itself power-connectivity evidence
+   (#1985). And even where it does run it is *not* a geometric rail/grid
+   continuity check: whether a rail is an unbroken annulus, and whether the
+   grid carries the current, stay `klt ring-check`, `klt power`, and the DRC
+   deck's business — see "Power/IR-drop + EM evidence" below for what is and
+   is not covered. Warnings-only mismatches must be listed with the claim.
+   A second, independent engine's concurring verdict (#343) strengthens this
+   from "one toolchain agrees with itself" to a cross-checked result.
 5. **Full corner verification vs a ratified spec**
    - *Analog* — PVT corner-matrix simulation results covering every spec
      row at its bound corners, with per-row pass/fail and the binding
@@ -242,13 +306,43 @@ every block.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 
+**Power delivery asks two questions, and only one of them is deferred
+here.** There is an *analysis* question — how far does the supply droop
+under load, and does any segment exceed its EM current-density limit — and a
+*structural* question — is the supply actually connected to what it powers.
+This section defers the analysis question only. An earlier revision of it
+called power-grid evidence "orthogonal to the DRC/LVS/corner/Monte-Carlo/
+post-layout checklist"; that was true of the analysis question and wrong
+about the structural one, which is item 4's own subject matter and is graded
+there today (`power_connectivity`, issues #1952/#1965). Read nothing in this
+section as deferring the structural question.
+
 `klt power` (Epic #712, issues #844/#845/#846 —
 [`docs/cli/power.md`](cli/power.md)) reports a routed design's static
 IR-drop map (`worst_case_droop_mv`) and a per-net electromigration (EM)
-current-density verdict (`em_verdict`). None of the T1 items above name
-power-grid IR-drop/EM evidence — it is orthogonal to the DRC/LVS/corner/
-Monte-Carlo/post-layout checklist, and extending the itemized T1 list to
-cover it is a separate, larger decision this doc does not make yet.
+current-density verdict (`em_verdict`). **No T1 item above sets an IR-drop
+or EM bound**, and extending the itemized T1 list to add one is a separate,
+larger decision this doc does not make yet. Note that no new item is needed
+for a block whose *own ratified spec* carries a droop or current-density
+row: item 5 ("every spec row, per-row pass/fail") already makes such a row
+binding through machinery that exists — the same mechanism the
+"Area-efficiency spec convention" section below relies on.
+
+**What the structural question is, and is not, covered by today.** Item 4's
+`power_connectivity` covers per-cell-instance pin-to-net correctness, and
+only for a `gate-level-verilog` compare (see item 4 for its exact reach and
+for what `"unchecked"` does and does not mean). It does not cover geometric
+rail/grid continuity, and **no T1 item requires a power grid to exist as
+such**: a routed digital block with zero straps and zero PDN vias is caught
+above only to the extent item 4's `power_connectivity` verdict catches it —
+which is not at all when that verdict is `"unchecked"`, and never on the
+grounds of the missing grid itself. Whether the checklist should gain an item
+requiring a connected power delivery network is a live question this doc
+deliberately does not settle — adding one would change `t1_item_count` and
+therefore what every existing T1 claim means, which makes it an operator
+decision rather than a tooling one (#1982). Until it is settled, a T1 claim
+on a digital block says nothing about the block's power grid beyond what
+item 4's `power_connectivity` verdict states on its own terms.
 
 `klt signoff` (issue #1321, Phase 2 of epic #712) recognises a `klt power`
 JSON envelope as a `"power"`-kind check **in envelope-aggregation mode
