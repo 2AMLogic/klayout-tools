@@ -317,9 +317,10 @@ class DrcRule:
     default to ``None``; at least one must be set for an ``"area"`` rule
     (``run_drc()`` raises :class:`~klayout_tools.drc.DrcError` for an
     ``"area"`` rule with neither set) -- a rule needs only a floor (a
-    minimum-area rule, e.g. sky130's un-transcribed ``m2.6``), only a
-    ceiling, or both. Driven by ``klayout.db.Region.with_area(min_area,
-    max_area, inverse=True)``, which returns exactly the *violating*
+    minimum-area rule, e.g. sky130's ``met2.area.1``, transcribed from
+    ``m2.6``), only a ceiling, or both. Driven by
+    ``klayout.db.Region.with_area(min_area, max_area, inverse=True)``,
+    which returns exactly the *violating*
     polygons (area below the minimum or at/above the maximum) directly --
     unlike every check above, this returns a ``Region`` (polygons), not an
     ``EdgePairs`` collection, so ``run_drc()`` reports each returned polygon

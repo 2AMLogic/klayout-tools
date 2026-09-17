@@ -567,7 +567,8 @@ DECK: list[DrcRule] = [
     ),
     # met2/via rule coverage (issue #513), mirroring the met1/mcon rule
     # shapes just above -- see the module docstring's own #513 note for
-    # source/provenance and the m2.6 (area) scope-out.
+    # source/provenance; m2.6 (area) is transcribed separately below as
+    # met2.area.1 (issue #1955).
     DrcRule(
         id="met2.width.1",
         description="minimum met2 width",
