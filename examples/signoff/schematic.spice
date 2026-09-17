@@ -1,0 +1,10 @@
+* Reference (schematic) netlist for `examples/signoff/`.
+*
+* A two-device NMOS current mirror, in the schematic-equivalent
+* plain-element device form `klt lvs` requires (see docs/cli/lvs.md's
+* "Netlist form") -- a leading device letter and geometric literals, not a
+* PDK subcircuit call.
+.subckt current_mirror vin vout vss
+M1 vin  vin vss vss nfet L=1U W=4U
+M2 vout vin vss vss nfet L=1U W=4U
+.ends

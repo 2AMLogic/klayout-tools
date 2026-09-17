@@ -1,0 +1,11 @@
+{
+  "schema": "klt.lvs.request/1",
+  "layout": {
+    "netlist": "layout.spice",
+    "top": "current_mirror"
+  },
+  "reference": {
+    "netlist": "schematic.spice",
+    "top": "current_mirror"
+  }
+}

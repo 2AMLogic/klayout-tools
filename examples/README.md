@@ -26,6 +26,10 @@ directory has its own README, start there.
   test (`test_gcd.py`) they run, including a Verilator coverage variant.
 - [`kb/`](kb/) — knowledge-base worked examples (bandgap, LDO, oscillator,
   spiral inductor). See its README.
+- [`signoff/`](signoff/) — a minimal, runnable block manifest for `klt
+  signoff --manifest` (plus a one-block `--fleet` manifest), citing T1 items
+  3 and 4 against real committed `klt drc`/`klt lvs` envelopes and leaving
+  the rest visibly unmet; `generate.py` regenerates. See its README.
 - [`sim/`](sim/) — `klt sim` corner-matrix and Monte Carlo requests with
   their SPICE testbenches and corner lib; `generate.py` regenerates.
 - [`sim-remote/`](sim-remote/) — the same sim matrix run on the local and
