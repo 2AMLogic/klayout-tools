@@ -73,6 +73,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   unescaped name (`counterexample.diverging_outputs`, and each cycle's
   `inputs`/`gold_outputs`/`gate_outputs` keys). No JSON shape change — an
   affected run's `status` simply stops being wrong.
+- **Fixed**: the curated `sky130` DRC deck now also checks each routing
+  metal's **holes-area** minimum — `met1.holes_area.1`, `met2.holes_area.1`,
+  `met3.holes_area.1`, `met4.holes_area.1`, `met5.holes_area.1` (issue
+  #1976), the holes-area companion of the plain `met{1..5}.area.1` rules
+  below. Each is scoped to the checked layer's **holes** — the
+  interior voids enclosed by a merged metal region, e.g. a slot in a wide
+  plate or a fill pattern — rather than the metal polygon itself, via a new
+  `DerivedLayer` `"holes"` mode (`klayout.db.Region.holes()`). Thresholds
+  are transcribed from the same pinned `volare` sky130A install cited
+  below: `m1.7`/`m2.7`/`m5.7` 0.14 um², `m3.7`/`m4.7` 0.2 um² — carried on
+  `DrcRule`'s `area_min_dbu2` field as 140 000 / 200 000 dbu². Before this,
+  a too-small slot cut into a wide metal plate or MiM-cap plate — a real
+  manufacturability defect — came back `clean` rather than reported. A
+  plate with no holes at all correctly stays `clean`, not an error (an
+  empty `Region.holes()` result is not a violation). Each rule also
+  carries a populated `provenance` citing its own upstream rule id. The
+  sky130 deck is now 57 rules (was 52), and `provenance.deck.content_hash`
+  changes accordingly. See `docs/cli/drc.md`'s "Coverage" section for the
+  full per-kind breakdown.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the
@@ -156,11 +175,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   upstream rule id. The sky130 deck is now 52 rules (was 47), `coverage.
   rules_skipped` gains the five new ids on a stream with no geometry on the
   corresponding metal, and `provenance.deck.content_hash` changes accordingly.
-  Each layer's *holes*-area sibling (`m1.7`-`m5.7`) stays untranscribed
-  (issue #1976 — `DrcRule` has no way to name a polygon's holes), and the
-  `"density"` check kind stays unused (this engine's windowed implementation
-  has no floorplan-boundary concept). See `docs/cli/drc.md`'s "Coverage"
-  section for the full per-kind breakdown.
+  Each layer's *holes*-area sibling (`m1.7`-`m5.7`) is transcribed separately
+  by issue #1976 (see above), and the `"density"` check kind stays unused
+  (this engine's windowed implementation has no floorplan-boundary concept).
+  See `docs/cli/drc.md`'s "Coverage" section for the full per-kind breakdown.
 - **Changed**: `klt gen-compose`'s closed guard/collector-ring rejection is now
   **plane-aware** instead of identity-only (issue #1960). Previously the check
   fired from block/port identity alone — *this block reports a

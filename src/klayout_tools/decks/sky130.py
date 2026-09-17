@@ -230,16 +230,10 @@ boolean-expression narrowing, so it transcribes to our engine's own
 ``"separation"`` check kind exactly, with no approximation.
 
 Not modelled, for the same reasons the met1/met2 sections above already
-document: ``m3.7`` (met3 holes-area), ``m4.7`` (met4 holes-area), ``m5.7``
-(met5 holes-area) -- each is scoped to ``m{3,4,5}.holes`` (the *interior
-notches* of a metal polygon, not the polygon itself), a derived-region
-concept (``Region.holes``) this deck's single-layer/two-layer ``DrcRule``
-vocabulary has no way to express, distinct from (and not closed by) the
-``"area"`` check primitive #1955 uses for the plain-polygon minimum-area
-siblings below; ``m3.3cd``/``m4.5ab`` (wide-metal spacing
-exceptions, the met3/met4 analogues of ``m1.3ab``/``m2.3ab``); ``via2.5``/
-``via3.5`` (2-adjacent-edges-relaxed enclosure refinements, the analogues
-of ``via.5a``/``m2.5``); and ``capm.2b``/``capm.2b_a``/``capm.11``/
+document: ``m3.3cd``/``m4.5ab`` (wide-metal spacing exceptions, the
+met3/met4 analogues of ``m1.3ab``/``m2.3ab``); ``via2.5``/``via3.5``
+(2-adjacent-edges-relaxed enclosure refinements, the analogues of
+``via.5a``/``m2.5``); and ``capm.2b``/``capm.2b_a``/``capm.11``/
 ``cap2m.2b``/``cap2m.2b_a``/``cap2m.11``/``capm.3`` (the commented-out
 compound variant)/``cap2m.3`` -- each defined on a compound
 ``capm.and(m3)``/``m3.not_interacting(...)``-style boolean layer expression
@@ -270,12 +264,28 @@ never previously cited anywhere in this module: unlike ``m2.6``/``m3.6``/
 ``m4.4a``/``m5.4``, which each had an explicit "not modelled, no area
 primitive" note in an earlier issue, met1's minimum-area rule was simply
 overlooked until this issue's own re-audit of ``sky130A_mr.drc`` found it.
-Each layer's holes-area sibling (``m1.7``/``m2.7``/``m3.7``/``m4.7``/
-``m5.7``) remains out of scope -- see the ``Region.holes`` note just above,
-tracked separately as issue #1976 -- and density (``"density"`` check kind)
-remains out of scope entirely for this issue, per ``docs/cli/drc.md``'s own
-floorplan-boundary limitation on this engine's windowed density
-implementation.
+
+met1-met5 holes-area rule coverage (issue #1976, closing the gap the note
+above -- and the "Not modelled" paragraph before it, in an earlier revision
+of this module -- explicitly deferred): each metal layer's plain minimum-
+area rule above has a holes-area *companion* in the same source file --
+``m1.7``/``m2.7``/``m3.7``/``m4.7``/``m5.7`` -- scoped to
+``m{1..5}.holes`` (the *interior voids* of a merged metal polygon: an
+enclosed slot in a wide plate or a fill pattern, not the metal polygon
+itself). Closing this required a derivation this deck's ``DrcRule``
+vocabulary had no way to express until now:
+:class:`~klayout_tools.decks.DerivedLayer` gained a ``"holes"`` mode
+(routed through ``klayout.db.Region.holes()`` in ``drc.py``), and
+``met1.holes_area.1``-``met5.holes_area.1`` below pair it with the
+``"area"`` check kind (the same primitive #1955 uses for the plain-polygon
+siblings) to check each hole polygon's own area against the same real
+sky130A install's thresholds -- met1/met2/met5 at 0.14um², met3/met4 at
+0.2um². An unslotted plate (no holes at all) derives an *empty* region
+under ``"holes"`` mode, which stays clean, not an error -- see
+:class:`DerivedLayer`'s own docstring for the full derivation and that
+negative-control case. Density (``"density"`` check kind) remains out of
+scope entirely, per ``docs/cli/drc.md``'s own floorplan-boundary limitation
+on this engine's windowed density implementation.
 
 nwell (well-layer) rule coverage (issue #1420): before this, ``DECK`` had
 *zero* rules referencing ``nwell`` (64/20), even though ``EXTRACTION_DECK``
@@ -320,6 +330,7 @@ from __future__ import annotations
 from . import (
     BipolarDevice,
     CapacitorDevice,
+    DerivedLayer,
     DrcRule,
     ExtractionDeck,
     LayerRC,
@@ -493,6 +504,29 @@ DECK: list[DrcRule] = [
         # cited and explicitly deferred).
         scope="m1",  # sky130A_mr.drc "m1.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m1.6"),
+    ),
+    DrcRule(
+        id="met1.holes_area.1",
+        description="minimum area of met1's holes (enclosed voids)",
+        layer=(68, 20),  # met1.drawing (reporting identity, see DerivedLayer)
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=140_000,  # 0.14 um^2 (140000 dbu^2 at dbu_um = 0.001)
+        derived_layer=DerivedLayer(
+            base=(68, 20),  # met1.drawing
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # sky130A_mr.drc rule "m1.7": m1.holes.with_area(0..0.14)
+        # -> "m1.7 : min. m1 with holes area : 0.14um²" (issue #1976, the
+        # holes-area sibling of met1.area.1's "m1.6" above; each interior
+        # void of the merged met1 region -- a slot in a wide plate or a
+        # fill pattern -- must itself be at least 0.14um², not the metal
+        # polygon it's cut into. `DerivedLayer(mode="holes")` supplies
+        # `Region.holes()` as the checked region; an unslotted plate derives
+        # an empty region, which stays clean, not an error.)
+        scope="m1",  # sky130A_mr.drc "m1.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m1.7"),
     ),
     DrcRule(
         id="diff.enclosing.licon.1",
@@ -672,6 +706,25 @@ DECK: list[DrcRule] = [
         scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.6"),
     ),
+    DrcRule(
+        id="met2.holes_area.1",
+        description="minimum area of met2's holes (enclosed voids)",
+        layer=(69, 20),  # met2.drawing (reporting identity, see DerivedLayer)
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=140_000,  # 0.14 um^2 (140000 dbu^2 at dbu_um = 0.001)
+        derived_layer=DerivedLayer(
+            base=(69, 20),  # met2.drawing
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # sky130A_mr.drc rule "m2.7": m2.holes.with_area(0..0.14)
+        # -> "m2.7 : min. m2 holes area : 0.14um²" (issue #1976, the
+        # holes-area sibling of met2.area.1's "m2.6" above -- see
+        # met1.holes_area.1's own note above for the shared derivation).
+        scope="m2",  # sky130A_mr.drc "m2.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m2.7"),
+    ),
     # met3/via2 rule coverage (issue #776), mirroring the met2/via rule
     # shapes above -- see the module docstring's own #776 note for
     # source/provenance and the m3.6/m3.7/m3.3cd/via2.5 scope-outs.
@@ -764,13 +817,28 @@ DECK: list[DrcRule] = [
         threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
         area_min_dbu2=240_000,  # 0.240 um^2 (240000 dbu^2 at dbu_um = 0.001)
         # sky130A_mr.drc rule "m3.6": m3.with_area(0..0.240)
-        # -> "m3.6 : min. m3 area : 0.240um²" (issue #1955; "m3.7", the
-        # holes-area sibling on `m3.holes`, is still not modelled -- this
-        # engine has no primitive for a region's holes, the same class of
-        # gap the module docstring's "Not modelled" note below already
-        # documents for m4.7/m5.7).
+        # -> "m3.6 : min. m3 area : 0.240um²" (issue #1955)
         scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.6"),
+    ),
+    DrcRule(
+        id="met3.holes_area.1",
+        description="minimum area of met3's holes (enclosed voids)",
+        layer=(70, 20),  # met3.drawing (reporting identity, see DerivedLayer)
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=200_000,  # 0.2 um^2 (200000 dbu^2 at dbu_um = 0.001)
+        derived_layer=DerivedLayer(
+            base=(70, 20),  # met3.drawing
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # sky130A_mr.drc rule "m3.7": m3.holes.with_area(0..0.2)
+        # -> "m3.7 : min. m3 holes area : 0.2um²" (issue #1976, the
+        # holes-area sibling of met3.area.1's "m3.6" above -- see
+        # met1.holes_area.1's own note above for the shared derivation).
+        scope="m3",  # sky130A_mr.drc "m3.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m3.7"),
     ),
     # met4/via3 rule coverage (issue #776), mirroring the met3/via2 rule
     # shapes just above.
@@ -862,11 +930,28 @@ DECK: list[DrcRule] = [
         threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
         area_min_dbu2=240_000,  # 0.240 um^2 (240000 dbu^2 at dbu_um = 0.001)
         # sky130A_mr.drc rule "m4.4a": m4.with_area(0..0.240)
-        # -> "m4.4a : min. m4 area : 0.240um²" (issue #1955; "m4.7", the
-        # holes-area sibling on `m4.holes`, is still not modelled -- same
-        # gap as met3.area.1's own note above).
+        # -> "m4.4a : min. m4 area : 0.240um²" (issue #1955)
         scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.4a"),
+    ),
+    DrcRule(
+        id="met4.holes_area.1",
+        description="minimum area of met4's holes (enclosed voids)",
+        layer=(71, 20),  # met4.drawing (reporting identity, see DerivedLayer)
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=200_000,  # 0.2 um^2 (200000 dbu^2 at dbu_um = 0.001)
+        derived_layer=DerivedLayer(
+            base=(71, 20),  # met4.drawing
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # sky130A_mr.drc rule "m4.7": m4.holes.with_area(0..0.2)
+        # -> "m4.7 : min. m4 holes area : 0.2um²" (issue #1976, the
+        # holes-area sibling of met4.area.1's "m4.4a" above -- see
+        # met1.holes_area.1's own note above for the shared derivation).
+        scope="m4",  # sky130A_mr.drc "m4.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m4.7"),
     ),
     # met5/via4 rule coverage (issue #776), mirroring the met4/via3 rule
     # shapes just above.
@@ -951,11 +1036,28 @@ DECK: list[DrcRule] = [
         threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
         area_min_dbu2=4_000_000,  # 4.0 um^2 (4000000 dbu^2 at dbu_um = 0.001)
         # sky130A_mr.drc rule "m5.4": m5.with_area(0..4.0)
-        # -> "m5.4 : min. m5 area : 4.0um²" (issue #1955; "m5.7", the
-        # holes-area sibling on `m5.holes`, is still not modelled -- same
-        # gap as met3.area.1's own note above).
+        # -> "m5.4 : min. m5 area : 4.0um²" (issue #1955)
         scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
         provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.4"),
+    ),
+    DrcRule(
+        id="met5.holes_area.1",
+        description="minimum area of met5's holes (enclosed voids)",
+        layer=(72, 20),  # met5.drawing (reporting identity, see DerivedLayer)
+        check="area",
+        threshold_dbu=0,  # unused by "area" -- see area_min_dbu2 below
+        area_min_dbu2=140_000,  # 0.14 um^2 (140000 dbu^2 at dbu_um = 0.001)
+        derived_layer=DerivedLayer(
+            base=(72, 20),  # met5.drawing
+            sized_by_um=0.0,  # unused by "holes" mode
+            mode="holes",
+        ),
+        # sky130A_mr.drc rule "m5.7": m5.holes.with_area(0..0.14)
+        # -> "m5.7 : min. m5 holes area : 0.14um²" (issue #1976, the
+        # holes-area sibling of met5.area.1's "m5.4" above -- see
+        # met1.holes_area.1's own note above for the shared derivation).
+        scope="m5",  # sky130A_mr.drc "m5.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130A_mr.drc", "m5.7"),
     ),
     # capm (met3 MiM-cap top plate) rule coverage (issue #776). capm.3's
     # commented-out compound variant and capm.2b/capm.2b_a/capm.11 (each
