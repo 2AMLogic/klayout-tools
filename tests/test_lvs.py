@@ -11901,6 +11901,96 @@ def test_run_lvs_gate_level_verilog_power_connectivity_can_be_disabled(tmp_path)
     assert report["options"]["power_connectivity"] is False
 
 
+def test_run_lvs_gate_level_verilog_power_connectivity_remedy_names_place_and_route(
+    tmp_path,
+):
+    """Issue #1978 (first-tester feedback): a no-PDN layout produces the
+    exact same `power.inconsistent_pin_net` signature as a genuine
+    cross-instance miswire -- every instance's supply pin landing on its
+    own distinct net. The existing remedy text (`expected_nets`/
+    `power_connectivity: false`) points a caller at the wrong fix for that
+    case; the finding's `description` must also name `request.power`
+    (`klt place-and-route`) as a possible cause."""
+    request = _gate_level_power_request(
+        tmp_path, _GATE_LEVEL_LAYOUT_SPICE_POWER_MISWIRED
+    )
+    report = run_lvs(json.dumps(request))
+    (finding,) = report["power_connectivity"]["findings"]
+    assert finding["rule"] == "power.inconsistent_pin_net"
+    assert "request.power" in finding["description"]
+    assert "klt place-and-route" in finding["description"]
+    # The pre-existing advice must still be present alongside the new one.
+    assert "options.power_connectivity.expected_nets" in finding["description"]
+    assert "options.power_connectivity: false" in finding["description"]
+
+
+def test_run_lvs_gate_level_verilog_power_connectivity_unexpected_net_remedy(
+    tmp_path,
+):
+    """Issue #1978: the strictly-stronger `power.unexpected_pin_net` finding
+    (fired when `expected_nets` names a pin and every instance is
+    uniformly miswired) also names `request.power` as a possible cause,
+    not just "your `expected_nets` may be wrong"."""
+    swapped = _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER.replace(
+        "X1 in mid VGND VPWR mylib__inv_1", "X1 in mid VPWR VGND mylib__inv_1"
+    ).replace("X2 mid out VGND VPWR mylib__buf_1", "X2 mid out VPWR VGND mylib__buf_1")
+    request = _gate_level_power_request(
+        tmp_path,
+        swapped,
+        power_connectivity={"expected_nets": {"VPWR": "VPWR", "VGND": "VGND"}},
+    )
+    report = run_lvs(json.dumps(request))
+    findings = report["power_connectivity"]["findings"]
+    assert findings
+    assert all(finding["rule"] == "power.unexpected_pin_net" for finding in findings)
+    for finding in findings:
+        assert "request.power" in finding["description"]
+        assert "klt place-and-route" in finding["description"]
+
+
+def test_run_lvs_gate_level_verilog_power_connectivity_flags_unchecked_expected_pin(
+    tmp_path,
+):
+    """Issue #1978: `expected_nets` naming `VNB` -- a pin the reference
+    library declares but that this particular layout's own subcircuit
+    definitions never declare at all (no in-cell label resolved it) --
+    must not be silently accepted as "checked and fine". `VNB` matches
+    zero rows in `_power_pin_connections`, so without this field a caller
+    reading `status: "match"` cannot tell "VNB was checked and is
+    correctly wired" apart from "VNB was never checked at all"."""
+    request = _gate_level_power_request(
+        tmp_path,
+        _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER,
+        power_connectivity={"expected_nets": {"VNB": "VGND"}},
+    )
+    report = run_lvs(json.dumps(request))
+    power = report["power_connectivity"]
+    # VNB is not among the pins this layout's own subcircuit definitions
+    # declare (only VGND/VPWR -- see `_GATE_LEVEL_LAYOUT_SPICE_WITH_POWER`),
+    # so it produces no finding either way -- but it must be flagged.
+    assert power["power_pins"] == ["VGND", "VPWR"]
+    assert power["unchecked_expected_pins"] == ["VNB"]
+    assert power["findings"] == []
+
+
+def test_run_lvs_gate_level_verilog_power_connectivity_unchecked_expected_empty(
+    tmp_path,
+):
+    """Issue #1978: the new field must not misfire on the ordinary case --
+    every `expected_nets` key that *does* correspond to an observed pin
+    leaves `unchecked_expected_pins` empty, exactly as before this
+    change."""
+    request = _gate_level_power_request(
+        tmp_path,
+        _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER,
+        power_connectivity={"expected_nets": {"VPWR": "VPWR", "VGND": "VGND"}},
+    )
+    report = run_lvs(json.dumps(request))
+    power = report["power_connectivity"]
+    assert power["unchecked_expected_pins"] == []
+    assert power["status"] == "match"
+
+
 def test_run_lvs_power_connectivity_unchecked_for_non_gate_level_reference(tmp_path):
     """Issue #1952: every report carries the block, so "was power
     connectivity verified?" is answerable from the report alone -- a

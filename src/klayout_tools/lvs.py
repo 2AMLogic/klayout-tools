@@ -5029,7 +5029,13 @@ def _power_connectivity_findings(
                             f"reach net {expected!r} "
                             "(options.power_connectivity.expected_nets) but "
                             f"{len(offending)} instance(s) reach a different "
-                            f"net -- {_describe_power_net_groups(groups)}"
+                            f"net -- {_describe_power_net_groups(groups)}. "
+                            "Confirm expected_nets still names the net this "
+                            "design's power domain actually uses; if this "
+                            "design has no power distribution network "
+                            "routed at all, the more likely fix is "
+                            "request.power in klt place-and-route rather "
+                            "than this option"
                         ),
                         "instance_count": len(entries),
                         "nets": groups,
@@ -5056,7 +5062,12 @@ def _power_connectivity_findings(
                         "options.power_connectivity.expected_nets to state "
                         "which one is correct, or set "
                         "options.power_connectivity: false if this design is "
-                        "genuinely multi-domain"
+                        "genuinely multi-domain. If this design has no power "
+                        "distribution network routed at all -- every "
+                        "instance's supply pin landing on its own net is "
+                        "the same signature as no PDN having been added -- "
+                        "the more likely fix is request.power in klt "
+                        "place-and-route rather than either option above"
                     ),
                     "instance_count": len(entries),
                     "nets": groups,
@@ -5082,6 +5093,7 @@ def _power_connectivity_unchecked(reason: str) -> dict[str, Any]:
         "power_pins": [],
         "instance_count": 0,
         "expected_nets": None,
+        "unchecked_expected_pins": [],
         "findings": [],
         "finding_count": 0,
     }
@@ -5127,6 +5139,19 @@ def _power_connectivity_report(
     when no instance in the layout carries a power/ground pin -- "no
     evidence" is never reported as a clean verdict, mirroring
     :func:`_is_power_only_circuit`'s own missing-evidence discipline.
+
+    **``expected_nets`` naming a pin nothing was observed on is surfaced,
+    not silently accepted (issue #1978).** ``expected_nets`` is validated
+    only for shape by :func:`_parse_power_connectivity`, before any netlist
+    is loaded -- it cannot yet know which pin names the layout/library pair
+    will actually resolve. :func:`_power_connectivity_findings` only ever
+    produces a finding for a pin name that appears in ``rows``, so an
+    ``expected_nets`` key naming a pin :func:`_power_pin_connections` never
+    resolved (a typo, or a PDK standard cell whose tie pin carries no
+    in-cell label/LEF port at all) matches zero rows and produces zero
+    findings -- indistinguishable, without this field, from "checked and
+    found correct". ``unchecked_expected_pins`` below names exactly those
+    keys, so a caller can tell the two cases apart.
     """
     power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
     if not power_pin_names:
@@ -5144,12 +5169,16 @@ def _power_connectivity_report(
             "carries no power connectivity to check"
         )
     findings = _power_connectivity_findings(rows, expected_nets)
+    observed_pins = {row["pin"] for row in rows}
     return {
         "status": POWER_STATUS_MISMATCH if findings else POWER_STATUS_MATCH,
         "reason": None,
-        "power_pins": sorted({row["pin"] for row in rows}),
+        "power_pins": sorted(observed_pins),
         "instance_count": len({(row["circuit"], row["instance"]) for row in rows}),
         "expected_nets": dict(sorted(expected_nets.items())) if expected_nets else None,
+        "unchecked_expected_pins": (
+            sorted(set(expected_nets) - observed_pins) if expected_nets else []
+        ),
         "findings": findings,
         "finding_count": len(findings),
     }
