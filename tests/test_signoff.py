@@ -83,6 +83,31 @@ DRC_VIOLATIONS_ENVELOPE = {
     ],
 }
 
+#: Issue #2002: a `status: "clean"` DRC run whose deck did *not* cover
+#: everything the stream draws -- two drawn layers with no rule at all, two
+#: rules the deck carries but this run skipped, and the DRM chapters the
+#: deck transcribes. This is the case docs/design-evidence-tiers.md item 3
+#: requires a claim to disclose, and the case `klt signoff` previously
+#: rendered identically to a fully-covering deck.
+DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": {
+        "deck_layers": ["65/20", "68/20"],
+        "layers_checked": ["65/20"],
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "voltage_domain_warnings": [],
+        "deck_scope": ["5.x", "6.x"],
+    },
+}
+
+#: Issue #2002 back-compat: DRC evidence committed before `klt drc` reported
+#: a `coverage` block at all. It must grade exactly as it always did, and
+#: must not be rendered as a deck that reported zero gaps.
+DRC_CLEAN_NO_COVERAGE_ENVELOPE = {
+    key: value for key, value in DRC_CLEAN_ENVELOPE.items() if key != "coverage"
+}
+
 LVS_MATCH_ENVELOPE = {
     "schema_version": 1,
     "engine": "klayout",
@@ -1019,6 +1044,288 @@ def test_extract_check_always_passes(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# DRC coverage surfacing (issue #2002): the three `coverage` fields
+# docs/design-evidence-tiers.md item 3 requires a claim to disclose are
+# reported by `klt signoff` -- in the aggregation mode's `checks[].detail`,
+# in a tier report's item citation, and in the fleet roll-up -- while
+# changing no verdict anywhere. Report before enforce: the four design
+# questions in #2002 (hard-fail semantics, what "disclosed" is compared
+# against, and whether `klt lvs`'s own disclosures get the same treatment
+# for item 4) are deliberately left open.
+# --------------------------------------------------------------------------- #
+
+
+def test_drc_detail_surfaces_the_three_coverage_fields(tmp_path):
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["detail"]["coverage"] == {
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "deck_scope": ["5.x", "6.x"],
+    }
+
+
+def test_drc_coverage_gaps_do_not_change_the_verdict(tmp_path):
+    """The whole point of this increment: a deck with rule-free drawn layers
+    and skipped rules still grades exactly as a fully-covering one does. A
+    claim that was `met` before #2002 is still `met` after it -- surfacing
+    the gaps is not enforcing their disclosure."""
+    gappy = _write(tmp_path, "gappy.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    full = _write(tmp_path, "full.json", DRC_CLEAN_ENVELOPE)
+
+    gappy_result = build_signoff([gappy])
+    full_result = build_signoff([full])
+
+    assert gappy_result["status"] == full_result["status"] == "pass"
+    assert gappy_result["checks"][0]["passed"] is True
+    assert full_result["checks"][0]["passed"] is True
+
+
+def test_drc_detail_omits_coverage_for_a_pre_coverage_envelope(tmp_path):
+    """Back-compat: evidence committed before `klt drc` reported coverage
+    renders exactly as before -- no crash, and no `coverage` key claiming
+    zero gaps for a run that never measured any."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "coverage" not in check["detail"]
+    assert check["detail"] == {
+        "file": "design.gds",
+        "deck": "sky130",
+        "violation_count": 0,
+    }
+
+
+def test_non_drc_kinds_never_carry_a_coverage_disclosure(tmp_path):
+    """`klt lvs`'s own coverage-shaped disclosures (item 4) are explicitly
+    out of scope for #2002 -- nothing here fabricates a `coverage` key for a
+    kind whose envelope does not report one."""
+    lvs = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    extract = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+
+    result = build_signoff([lvs, extract])
+
+    assert all("coverage" not in check["detail"] for check in result["checks"])
+
+
+def test_tier_report_item_3_citation_surfaces_coverage_gaps(tmp_path):
+    """Item 3's citation quotes the gaps verbatim, and the item is still
+    `met` -- the artifact a reviewer reads now carries both halves of the
+    claim doc item 3 asks for."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    assert item_3["citation"]["coverage"] == {
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "deck_scope": ["5.x", "6.x"],
+    }
+
+
+def test_tier_report_item_3_citation_omits_coverage_for_legacy_evidence(tmp_path):
+    """Back-compat on the tier-report path: a pre-`coverage` envelope still
+    renders item 3 `met`, with a citation shaped exactly as before."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"] == {
+        "file": path,
+        "command": None,
+        "kind": "drc",
+        "check_status": "clean",
+        "content_hash": "sha256:layoutA",
+        "exit_status": 0,
+    }
+
+
+def test_command_backed_drc_evidence_surfaces_coverage(monkeypatch):
+    """The coverage disclosure is read off the envelope the command printed,
+    not off a file -- both evidence bindings behave identically."""
+
+    def fake_run(command, **kwargs):
+        return fake_completed(
+            returncode=0,
+            stdout=json.dumps(DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE),
+        )
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"command": ["klt", "drc", "design.gds"]}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["coverage"]["rules_skipped"] == ["met5.4", "met5.5"]
+
+
+def test_malformed_coverage_block_is_normalised_not_crashed(tmp_path):
+    """A `coverage` block whose fields are the wrong type (a hand-edited or
+    future-shaped envelope) renders empty lists rather than raising -- and
+    still does not change the verdict."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "coverage": {
+            "layers_in_stream_without_rules": "70/20",
+            "rules_skipped": None,
+        },
+    }
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert check["detail"]["coverage"] == {
+        "layers_in_stream_without_rules": [],
+        "rules_skipped": [],
+        "deck_scope": [],
+    }
+
+
+def test_fleet_rollup_reports_each_blocks_drc_coverage(tmp_path):
+    """The `--fleet` path surfaces the same disclosure, reduced from each
+    block's own tier report -- and a block whose deck has gaps still rolls up
+    at exactly the tier it did before."""
+    gappy = _write(tmp_path, "gappy.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    fleet = {
+        "blocks": [
+            _fleet_block_manifest("gappy-block", evidence={"3": gappy}),
+        ]
+    }
+    result = build_fleet_report(fleet)
+
+    block = result["blocks"][0]
+    assert block["drc_coverage"] == [
+        {
+            "item": 3,
+            "partition": None,
+            "layers_in_stream_without_rules": ["70/20", "71/20"],
+            "rules_skipped": ["met5.4", "met5.5"],
+            "deck_scope": ["5.x", "6.x"],
+        }
+    ]
+    # Unchanged verdict: item 3 is met, the block is simply not T1 yet for
+    # the usual reason (items 1-2 have no evidence), never because of a gap.
+    assert block["t1_met_count"] == 1
+    assert block["blocking_item"]["id"] == 1
+
+
+def test_fleet_rollup_mixes_pre_and_post_coverage_evidence(tmp_path):
+    """A fleet spanning old (no `coverage`) and new (coverage-bearing)
+    evidence renders both without crashing: the legacy block simply
+    contributes no `drc_coverage` row, which reads as "reported nothing",
+    not "reported no gaps"."""
+    legacy = _write(tmp_path, "legacy.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+    modern = _write(tmp_path, "modern.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    fleet = {
+        "blocks": [
+            _fleet_block_manifest("legacy-block", evidence={"3": legacy}),
+            _fleet_block_manifest("modern-block", evidence={"3": modern}),
+        ]
+    }
+    result = build_fleet_report(fleet)
+
+    by_block = {block["block"]: block for block in result["blocks"]}
+    assert by_block["legacy-block"]["drc_coverage"] == []
+    assert by_block["modern-block"]["drc_coverage"][0]["rules_skipped"] == [
+        "met5.4",
+        "met5.5",
+    ]
+    assert by_block["legacy-block"]["t1_met_count"] == 1
+    assert by_block["modern-block"]["t1_met_count"] == 1
+
+
+def test_fleet_rollup_drc_coverage_is_empty_when_item_3_is_unmet(tmp_path):
+    """No citation, no disclosure: a failing DRC check contributes no
+    `drc_coverage` row even though its envelope carries a coverage block --
+    the roll-up only reduces what the tier report actually cited."""
+    failing = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
+
+    fleet = {"blocks": [_fleet_block_manifest("failing", evidence={"3": failing})]}
+    result = build_fleet_report(fleet)
+
+    assert result["blocks"][0]["drc_coverage"] == []
+
+
+def test_cli_manifest_text_shows_coverage_beside_the_citation(tmp_path, capsys):
+    """The terminal rendering a reviewer actually reads names the gaps --
+    counts first, then the entries -- right under the `cite:` line whose
+    "clean" they qualify."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"3": drc_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    coverage_line = next(
+        line for line in out.splitlines() if line.strip().startswith("coverage:")
+    )
+    assert "layers_in_stream_without_rules=2 (70/20, 71/20)" in coverage_line
+    assert "rules_skipped=2 (met5.4, met5.5)" in coverage_line
+    assert "deck_scope=2 (5.x, 6.x)" in coverage_line
+
+
+def test_cli_manifest_text_omits_coverage_for_legacy_evidence(tmp_path, capsys):
+    """A pre-`coverage` envelope prints no coverage line at all -- an absent
+    statement must not read as "this deck reported no gaps"."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"3": drc_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "cite:" in out
+    assert "coverage:" not in out
+
+
+def test_cli_fleet_text_flags_blocks_whose_deck_left_gaps(tmp_path, capsys):
+    """Fleet text names a gap-bearing block's coverage beside its tier, and
+    stays quiet for a block that reported none."""
+    gappy = _write(tmp_path, "gappy.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    full = _write(tmp_path, "full.json", DRC_CLEAN_ENVELOPE)
+    fleet_path = _fleet_write(
+        tmp_path,
+        [
+            _fleet_block_manifest("gappy-block", evidence={"3": gappy}),
+            _fleet_block_manifest("full-block", evidence={"3": full}),
+        ],
+    )
+
+    main(["signoff", "--fleet", fleet_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    coverage_lines = [
+        line for line in out.splitlines() if line.strip().startswith("coverage:")
+    ]
+    assert len(coverage_lines) == 1
+    assert "#3 layers_in_stream_without_rules=2" in coverage_lines[0]
+
+
+# --------------------------------------------------------------------------- #
 # Critical-metric consumption (issue #1850): a declared `critical: true`
 # metric (klayout_tools.metrics.REGISTRY) mechanically blocks signoff
 # independent of the envelope's own `status`, per its own declared
@@ -1839,6 +2146,15 @@ def test_met_item_carries_a_citation_with_file_hash_and_exit_status(tmp_path):
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
         "exit_status": 0,
+        # Issue #2002: item 3's citation also quotes the three `coverage`
+        # fields docs/design-evidence-tiers.md requires the claim to
+        # disclose. `deck_scope` is `[]` because this fixture's coverage
+        # block predates that field, not because the deck declares no scope.
+        "coverage": {
+            "layers_in_stream_without_rules": [],
+            "rules_skipped": [],
+            "deck_scope": [],
+        },
     }
     assert result["t1_met_count"] == 1
 
@@ -2596,6 +2912,15 @@ def test_command_evidence_runs_and_grades_met(monkeypatch):
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
         "exit_status": 0,
+        # Issue #2002: a command-backed `drc` citation quotes the coverage
+        # block off the envelope the command actually printed, exactly like
+        # the file-backed path -- `deck_scope` is `[]` here because
+        # DRC_CLEAN_ENVELOPE's fixture coverage block predates that field.
+        "coverage": {
+            "layers_in_stream_without_rules": [],
+            "rules_skipped": [],
+            "deck_scope": [],
+        },
     }
     assert calls == [
         {

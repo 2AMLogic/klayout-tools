@@ -341,6 +341,50 @@ through :func:`_grade_evidence`, which already delegates to the same
 function. The offending metric(s), when any block a check, are named in
 :func:`build_signoff`'s ``checks[].detail.critical_metric_blockers``.
 
+## DRC coverage surfacing (issue #2002)
+
+``docs/design-evidence-tiers.md`` item 3 requires a DRC claim to enumerate
+the cited deck's coverage gaps -- and, since issue #1982, names the exact
+fields that disclosure must quote: ``coverage.layers_in_stream_without_rules``,
+``coverage.rules_skipped``, and ``coverage.deck_scope`` (``docs/cli/drc.md``).
+This module read none of them: item 3 graded on ``status == "clean"``
+alone, so a deck with twenty rule-free drawn layers and sixteen skipped
+rules produced exactly the artifact a fully-covering deck did.
+
+This phase is deliberately **report, not enforce**. :func:`_check_passed`
+is unchanged -- a ``drc`` envelope still passes on ``status == "clean"``,
+whatever its coverage block says, so no existing claim's verdict moves --
+but the three fields are now surfaced verbatim, off the envelope the claim
+actually cites, in every artifact a reviewer reads:
+
+- :func:`build_signoff`'s ``checks[].detail.coverage`` (envelope-aggregation
+  mode), alongside the existing ``file``/``deck``/``violation_count``.
+- A ``"met"`` item's ``citation.coverage`` (tier-report mode, which is where
+  item 3's verdict is produced) -- so the disclosure a claim owes and the
+  numbers it owes it about sit in the same artifact.
+- :func:`build_fleet_report`'s ``blocks[].drc_coverage`` -- the same
+  reduction-not-re-grading discipline the roll-up already applies to
+  ``blocking_item``: it reads the per-block tier report's own item-3
+  citations and never re-opens an envelope.
+
+See :func:`_drc_coverage_disclosure`. Purely additive everywhere: the key
+is present only for a ``drc``-kind envelope that actually carries a
+``coverage`` block, so evidence committed before ``coverage`` existed (and
+a ``--fleet`` run mixing pre- and post-``coverage`` envelopes) renders
+exactly as it did before -- no crash, and no fabricated "no gaps" claim for
+an envelope that never reported any.
+
+**What this does not do.** Surfacing is not enforcement: this module still
+cannot tell a *disclosed* gap from an *undisclosed* one, because a claim
+states its disclosure in a block README/manifest that `klt signoff` has no
+field to compare against. Whether a non-empty
+``layers_in_stream_without_rules`` should change item 3's verdict at all,
+where a claimant would state the disclosure for it to be compared against,
+and whether `klt lvs`'s own coverage-shaped disclosures (warnings-only
+mismatches, ``power_connectivity: "unchecked"``) deserve the same treatment
+for item 4, are all open questions issue #2002 left open on purpose -- not
+answered here.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -1057,7 +1101,13 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     over every kind and every declared critical metric, not specific to
     ``drc``.
 
-    - ``drc`` passes on ``status == "clean"``.
+    - ``drc`` passes on ``status == "clean"``. Its ``coverage`` block is
+      **not** consulted (issue #2002): a "clean" verdict from a deck with
+      rule-free drawn layers or skipped rules passes exactly like one from a
+      fully-covering deck. Those fields are surfaced, not graded -- see
+      :func:`_drc_coverage_disclosure` and this module's "DRC coverage
+      surfacing" docstring section for why the disclosure ``docs/design-
+      evidence-tiers.md`` item 3 requires stays claimant-enforced.
     - ``lvs`` passes on ``status == "match"`` *and* (issue #1965, closing the
       gap left by #1952/#1964's additive ``power_connectivity`` block) its
       ``power_connectivity.status`` is not ``"mismatch"``. ``"unchecked"``
@@ -1158,6 +1208,49 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     return passed
 
 
+def _drc_coverage_disclosure(
+    kind: str, envelope: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The three ``coverage`` fields ``docs/design-evidence-tiers.md`` item 3
+    requires a DRC claim to disclose, quoted verbatim off the cited envelope
+    (issue #2002) -- or ``None`` when there is nothing to quote.
+
+    ``None`` in exactly two cases, and they mean the same thing to a reader
+    ("this artifact makes no coverage statement"), never "the deck has no
+    gaps":
+
+    - ``kind != "drc"``. No other envelope kind carries a ``coverage`` block
+      of this shape, and item 3 is the only item whose doc text names these
+      fields. (`klt lvs`'s own coverage-shaped disclosures are deliberately
+      out of scope -- see this module's "DRC coverage surfacing" docstring
+      section.)
+    - The envelope has no ``coverage`` key at all, or a non-object one:
+      evidence committed before ``klt drc`` reported coverage. Back-compat is
+      the whole reason this is ``None`` rather than a dict of empty lists --
+      an old envelope must not read as a deck that checked everything.
+
+    Individual fields are normalised to a list (``[]`` for a missing or
+    non-list value) so a consumer never has to re-do that check; this is a
+    *shape* normalisation of a present ``coverage`` block, not a fabricated
+    coverage claim for an absent one.
+    """
+    if kind != "drc":
+        return None
+    coverage = envelope.get("coverage")
+    if not isinstance(coverage, dict):
+        return None
+
+    def _field(name: str) -> list[Any]:
+        value = coverage.get(name)
+        return list(value) if isinstance(value, list) else []
+
+    return {
+        "layers_in_stream_without_rules": _field("layers_in_stream_without_rules"),
+        "rules_skipped": _field("rules_skipped"),
+        "deck_scope": _field("deck_scope"),
+    }
+
+
 def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
     """A small, kind-specific excerpt of the source envelope -- not a
     re-export of the full contract (a consumer that wants the raw
@@ -1179,6 +1272,14 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "deck": envelope.get("deck"),
             "violation_count": envelope.get("violation_count"),
         }
+        # Issue #2002: what this "clean" was measured *inside*, quoted from
+        # the envelope's own `coverage` block -- reported, never graded on
+        # (see this module's "DRC coverage surfacing" docstring section).
+        # Omitted entirely for an envelope committed before `coverage`
+        # existed, so old evidence renders exactly as it did before.
+        coverage = _drc_coverage_disclosure(kind, envelope)
+        if coverage is not None:
+            detail["coverage"] = coverage
     elif kind == "lvs":
         detail = {
             "layout": envelope.get("layout"),
@@ -1486,6 +1587,13 @@ def build_tier_report(
                         "check_status": "clean",
                         "content_hash": "sha256:...",
                         "exit_status": 0,
+                        # `drc` citations only, and only when the cited
+                        # envelope reports coverage (issue #2002)
+                        "coverage": {
+                            "layers_in_stream_without_rules": ["met4/0"],
+                            "rules_skipped": ["met5.4"],
+                            "deck_scope": ["5.x", "6.x"],
+                        },
                     },
                 },
                 ...  # items 1-10 (doubled per partition for mixed-signal),
@@ -2017,7 +2125,7 @@ def _grade_evidence(
     if expected_hash is not None and actual_hash != expected_hash:
         return "unmet", _REASON_STALE_EVIDENCE, None
 
-    citation = {
+    citation: dict[str, Any] = {
         "file": file_label,
         "command": command_label,
         "kind": check_kind,
@@ -2025,6 +2133,14 @@ def _grade_evidence(
         "content_hash": actual_hash,
         "exit_status": exit_status,
     }
+    # Issue #2002: a `drc` citation also carries the three `coverage` fields
+    # item 3's doc text requires the claim to disclose -- so the disclosure a
+    # claim owes and the numbers it owes it about are in the same artifact.
+    # Present only when the cited envelope actually reports coverage, and
+    # never consulted above: the verdict is still `status == "clean"` alone.
+    coverage = _drc_coverage_disclosure(check_kind, envelope)
+    if coverage is not None:
+        citation["coverage"] = coverage
     return "met", None, citation
 
 
@@ -2181,6 +2297,15 @@ def build_fleet_report(
                     "t1_item_count": 10,
                     "t1_met_count": 10,
                     "blocking_item": None,
+                    "drc_coverage": [
+                        {
+                            "item": 3,
+                            "partition": None,
+                            "layers_in_stream_without_rules": ["met4/0"],
+                            "rules_skipped": ["met5.4"],
+                            "deck_scope": ["5.x", "6.x"],
+                        }
+                    ],
                 },
                 {
                     "block": "gf180-bandgap",
@@ -2195,6 +2320,7 @@ def build_fleet_report(
                         "partition": None,
                         "reason": "no_evidence",
                     },
+                    "drc_coverage": [],
                 },
                 ...
             ],
@@ -2210,6 +2336,13 @@ def build_fleet_report(
     read or graded here beyond what :func:`build_tier_report` already did --
     this function only reduces its output, so a block's roll-up row and its
     full tier report can never disagree about *why* it isn't T1 yet.
+
+    ``drc_coverage`` (issue #2002) is the same kind of reduction over that
+    per-block report's ``drc``-kind citations: what deck coverage each
+    block's DRC evidence itself reported, so a fleet-wide "which canaries are
+    at T1" answer also shows what each of those "clean" verdicts was measured
+    inside -- see :func:`_drc_coverage_rows`. It changes no block's tier: a
+    block with rule-free drawn layers rolls up exactly as it did before.
 
     Raises :class:`SignoffError` if ``fleet`` is not a JSON object, its
     ``blocks`` field is missing, not a JSON array, or empty; if any
@@ -2269,6 +2402,7 @@ def build_fleet_report(
                 "t1_item_count": tier_report["t1_item_count"],
                 "t1_met_count": tier_report["t1_met_count"],
                 "blocking_item": blocking_item,
+                "drc_coverage": _drc_coverage_rows(tier_report["items"]),
             }
         )
 
@@ -2296,6 +2430,44 @@ def _read_fleet_block_manifest(raw_entry: Any, index: int) -> tuple[str | None, 
         f"fleet manifest blocks[{index}] must be a JSON object or a file "
         f"path string, got {type(raw_entry).__name__}"
     )
+
+
+def _drc_coverage_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The coverage disclosure carried by every ``"met"`` ``drc``-kind
+    citation in one block's rendered items (issue #2002), one row per
+    citation: ``{"item", "partition", "layers_in_stream_without_rules",
+    "rules_skipped", "deck_scope"}``.
+
+    A list rather than a single object because a mixed-signal block renders
+    item 3 once per partition, and because a row is identified by the item it
+    backs, not assumed to be item 3 -- nothing here hard-codes which item a
+    DRC citation may appear under.
+
+    Empty when no item resolved to a coverage-reporting `klt drc` envelope:
+    an unmet item 3, a cited envelope committed before ``coverage`` existed,
+    or a fleet whose blocks predate it entirely. **Empty therefore means "no
+    coverage was reported", never "the deck covered everything"** -- the same
+    distinction :func:`_drc_coverage_disclosure` draws by returning ``None``.
+
+    Reduces the per-block tier report this roll-up already computed; it reads
+    no evidence of its own, so a block's roll-up row and its full tier report
+    can never disagree about what the deck covered -- the same discipline
+    :func:`_first_unmet_t1_item` follows.
+    """
+    rows: list[dict[str, Any]] = []
+    for item in items:
+        citation = item.get("citation") or {}
+        coverage = citation.get("coverage")
+        if not isinstance(coverage, dict):
+            continue
+        rows.append(
+            {
+                "item": item["id"],
+                "partition": item["partition"],
+                **coverage,
+            }
+        )
+    return rows
 
 
 def _first_unmet_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
