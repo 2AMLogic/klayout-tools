@@ -804,6 +804,38 @@ instance's input nets (the input is wired first, for the same reason). Two
 connectivity: both are already real, externally-routed nets, and which one is
 larger says nothing about which one this pin's geometry belongs to.
 
+**Candidate discovery stops at a second declared pin** (issue #1994). The
+"named beats unnamed" rule above is only as good as the candidate list it is
+handed, and the walk that discovers extra candidates — the cell's own
+pre-erasure poly/diffusion connectivity — is also how a real standard cell
+ties one of its pins to another *inside* the black box. A tie/constant
+generator is the worked example: `sky130_fd_sc_hd__conb_1` draws no diffusion
+at all and produces its constants by tying `HI` to the `VPWR` rail (and `LO`
+to `VGND`) through a plain poly strip, so walking out from the `HI` label
+reaches the cell's own supply rail. Offered that candidate, the ranking has no
+way to refuse it: a supply rail always carries a name, and a genuinely
+*unused* tie output's own island never does, so every unused `HI` bound
+straight onto `VPWR`.
+
+The practical failure that produced was backwards — a design extracted
+`match` while its power grid was **missing** (no rail geometry, so no named
+candidate for the pin to lose to) and turned into dozens of false `klt lvs`
+errors the moment the grid was *added*, all of them pointing at cells working
+exactly as intended. So candidate discovery now checks whether the cell-local
+net it walked onto carries **another declared pin's label** (scanned across
+every label layer the deck declares, so a rail labelled on `met1` is still
+seen from a signal pin labelled on `li1`). If it does, the walk has crossed a
+pin boundary, the net's unlabelled fragments can no longer be attributed to
+either pin, and only fragments carrying *this* pin's own label are kept — so
+the pin falls back to its own declared access point rather than to a wrong
+answer. An abstracted cell's interior tie is not something a black box is
+allowed to expose in the first place; that is exactly why abstraction erases
+the poly/diffusion carrying it before the real extraction pass runs.
+
+A tie output the parent genuinely *does* route to the supply rail is
+unaffected: that connection is drawn outside the cell, survives erasure, and
+resolves through the pin's own primary access point like any other routed pin.
+
 **Self-check: two declared pins on one net.** After wiring, any abstracted
 instance that resolved two or more of its *separately declared* pins onto
 the same net produces one aggregated `warnings[]` entry naming the instance,

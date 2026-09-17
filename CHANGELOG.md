@@ -38,6 +38,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   claimant would state a disclosure for `klt signoff` to compare against, and
   whether `klt lvs`'s own coverage-shaped disclosures deserve the same
   treatment for item 4 are open questions #2002 deliberately left unanswered.
+- **Fixed**: `klt extract --abstract-cells` no longer binds an abstracted
+  cell's **unused tie output** to the design's named supply net (issue #1994).
+  The extra pin access points discovered by walking a cell's own pre-erasure
+  poly/diffusion connectivity could cross from one declared pin to another —
+  for a tie/constant generator such as `sky130_fd_sc_hd__conb_1`, which ties
+  `HI` to `VPWR` (and `LO` to `VGND`) through a plain poly strip with no
+  diffusion at all, the walk handed the signal pin a candidate sitting on the
+  cell's own supply rail. The documented "a named net beats an unnamed one"
+  ranking then preferred it over the pin's own (correctly unnamed, because
+  genuinely unrouted) island. The effect was backwards: a design extracted
+  `match` while its power grid was *missing* and produced dozens of false
+  `klt lvs` errors the moment the grid was fixed. Candidate discovery now
+  stops at a second declared pin — when the cell-local net it walked onto
+  carries another pin's label (scanned across every label layer the deck
+  declares), only fragments carrying this pin's own label are kept, so the pin
+  falls back to its own declared access point. A tie output the parent
+  genuinely routes to the rail still binds to it (that connection is drawn
+  outside the cell and survives abstraction). No JSON shape change.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the
