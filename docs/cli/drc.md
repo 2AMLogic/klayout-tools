@@ -549,9 +549,11 @@ rescaling. At least one of the two must be set. `other_layer`/
 **`"density"`** — single-layer, windowed area-fill fraction. No native
 `Region` primitive computes this, so `run_drc` tiles the checked layer's own
 drawn extent (`region.bbox()` — there is no chip-boundary layer concept in
-this engine, unlike a real density-check flow that scopes to a floorplan
-boundary) into non-overlapping `density_window_um` x `density_window_um`
-squares and flags any window whose covered-area fraction falls outside
+this engine, unlike the real density decks the open PDKs ship, which scope
+their one ratio to a `prBoundary` polygon; see "No deck authors a
+`"density"` rule" under [Coverage](#coverage)) into non-overlapping
+`density_window_um` x `density_window_um` squares and flags any window
+whose covered-area fraction falls outside
 `[density_min, density_max]` (either bound may be omitted for "no
 floor"/"no ceiling"; at least one must be set). Each violating window is
 reported as one `violations[]` entry, `bbox`/`polygon` set to the window's
@@ -647,6 +649,66 @@ gf180mcu's `contact.width.1` already make. Every approximation is called
 out explicitly in its rule's docstring; the threshold *values* used are
 always the real, unmodified source values, with exactly one documented
 exception described next.
+
+**No deck authors a `"density"` rule, and that is a decision, not an
+unstated gap (issue #1975).** The `"density"` check kind exists (issue #812,
+documented above) but no rule in any shipped deck uses it, and none is
+planned until the precondition at the end of this note is met. The reasoning
+comes from reading what the open PDKs' own density decks actually do, in the
+same pinned install this deck's rule values are verified against
+(`fossi-foundation/open-pdks` at
+`c6d73a35f524070e85faff4a6a9eef49553ebc2b`, i.e. `volare enable sky130
+c6d73a35f524070e85faff4a6a9eef49553ebc2b`):
+
+- **`sky130A_mr.drc` — the deck this repo transcribes from — contains no
+  density rules at all.** The only density-shaped rules anywhere in its
+  sibling `sky130A.lydrc` are `vpp.5a`/`vpp.5b`/`vpp.5c`, which bound
+  met3/met4/met5 coverage *inside each `vpp` (vertical-parallel-plate
+  capacitor) marker polygon* at 0.25/0.3/0.4 via `with_area(0 ..
+  area(vpp.and(mN)) * ratio)` — a per-polygon ratio between two layers, not
+  a windowed density, and not expressible by the `"density"` primitive
+  either.
+- **The one real sky130 density deck is not windowed.**
+  `libs.tech/klayout/drc/met_min_ca_density.lydrc` computes a *single*
+  whole-design ratio per layer, with `chip_boundary = input(235, 4)`
+  (`prBoundary`; magic's `BOUND`) as the denominator — `full_area =
+  chip_boundary.area` — and reports its verdict on `chip_boundary` itself,
+  one violation for the whole design. There is no window size in that file
+  to transcribe. Its companion `gf180mcu_density.lydrc`, shipped in the same
+  directory, has exactly the same shape (one `comp` ratio against
+  `input(235, 4)`, `0.7` max).
+- **Its bounds are inverted, and include fill.** Each rule is written on the
+  *complementary-area* ("ca") density, `1 - metal_area / full_area`, with a
+  floor: `li1.pd.1d`, `m1.pd.1d`, `m2.pd.1d`, `m3.pd.1d`, `m4.pd.1d` at
+  `0.4`, `m5.pd.1d` at `0.24` — algebraically *maximum* metal densities of
+  0.6 and 0.76. The numerator unions each metal with its own fill layer
+  (`li1fill` 56/28, `m1fill` 36/28, `m2fill` 41/28, `m3fill` 34/28, `m4fill`
+  51/28, `m5fill` 59/28) and excludes the via datatype (44) from the metal
+  wildcard.
+
+So the windowed primitive is not merely a loose approximation of these
+rules — it is the wrong shape for them. Transcribing `m1.pd.1d` against it
+would require inventing a window size the source rule does not have,
+reporting N per-window violations where the source reports at most one
+design-level one, and dropping the fill term; the resulting rule would
+borrow an official id for geometry the official deck never evaluates. That
+violates this section's own standing convention that transcribed thresholds
+are "always the real, unmodified source values," so a caveated transcription
+was rejected rather than shipped with a warning attached.
+
+The engine change that *would* make these transcribable is therefore not a
+floorplan-*windowed* tiler but a boundary-scoped **whole-region** ratio: a
+`DrcRule` that names a boundary layer, sums the checked layer (optionally
+unioned with a fill layer) inside it, and compares the single fraction
+against `density_min`/`density_max`. That is deferred because it would be
+inert here today: **nothing this repo produces or ships draws 235/4.**
+Verified across `examples/`, `blocks/`, and `tests/corpus/` — the sky130
+standard cells carry 236/0 (`OUTLINE`) and 81/4 (`areaid.standardc`), the
+generator and routing outputs carry neither, and no `klt` verb emits a
+`prBoundary`. A boundary-scoped rule added now would silently check nothing
+on every layout in the corpus. The precondition for revisiting is a
+chip-level assembly step that emits a real `prBoundary` — at which point the
+rule ids, bounds, and fill layers above are the transcription source.
 
 `li1.enclosing.licon1.1` (issue #551) is that one exception, and the only
 rule in either deck whose threshold is deliberately *not* its source value.
