@@ -1191,7 +1191,6 @@ def _leg_plane_clears_ring(
     endpoints: tuple[tuple[dict[str, Any], dict[str, Any], tuple[float, float]], ...],
     route_layers: tuple[tuple[int, int] | None, ...],
     deck: ExtractionDeck | None,
-    width_um: float,
 ) -> bool:
     """Whether this leg is drawn entirely on plane(s) that fly *over*
     ``block``'s guard/collector ring instead of merging with it (issue
@@ -2669,13 +2668,6 @@ def route_two_pin(
                 if cross_block_route_layer is not None
                 else (route_layer,),
                 extraction_deck,
-                # The widest this leg could end up being drawn at -- the
-                # same-layer-short retry (#1168/#1620) can switch it to
-                # cross_block_width_um after this check runs, so the pad
-                # clearance below must be sized for whichever is larger.
-                max(width_um, cross_block_width_um)
-                if cross_block_width_um is not None
-                else width_um,
             ):
                 continue
             if _ring_gap_ports(block):
