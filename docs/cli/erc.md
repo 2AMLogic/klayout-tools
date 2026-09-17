@@ -65,13 +65,19 @@ or layer jumping — naming the specific net and layer, so the violation is
 directly actionable rather than just flagged. See "Antenna-violation fix
 guidance" below.
 
-**Issue #1968 (this document's current state) additively delivers a
-top-level `status` and the shared `provenance` block** — split out of
-#1959's correction comment, since without either field this command's
-output could not be graded by `klt signoff`. See "JSON schema" below.
+**Issue #1968 additively delivers a top-level `status` and the shared
+`provenance` block** — split out of #1959's correction comment, since
+without either field this command's output could not be graded by `klt
+signoff`. See "JSON schema" below.
+
+**Issue #1979 (this document's current state) additively delivers the
+optional `stackup[0].active_layer` spec field**: true `poly ∩ diff`
+gate-area computation, correctly excluding tie-cell/decap/filler-cell poly
+resistors (no gate oxide) from `gates[]` and the antenna-ratio denominator.
+See "Gate area: `poly ∩ diff` vs. raw poly area" below.
 
 Per [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
-design, none of 1b's, 1c's, Phase 3's, or #1968's fields needed a
+design, none of 1b's, 1c's, Phase 3's, #1968's, or #1979's fields needed a
 **`schema_version` bump**: every field 1a's own version of this document
 promised is still exactly as documented, unchanged.
 
@@ -92,6 +98,15 @@ power`'s caller-named `power_nets`, `klt erc` auto-discovers every gate net
 directly from connectivity. A `stackup` entry's `label_layer` is optional
 purely for readability (a gate's `net` field is `null` when nothing labels
 it — see `gates[].net` below).
+
+**"Includes the declared gate-role layer" is a layer test, not a "has gate
+oxide" test.** By default, any net with poly on it qualifies as a `gates[]`
+entry, whether or not that poly ever overlaps diffusion — a tie-cell
+substrate/well-tap resistor body is drawn in poly and has no gate oxide at
+all, but is indistinguishable from a real transistor gate by layer alone
+(issue #1979). Supplying `stackup[0].active_layer` narrows gate
+identification to `poly ∩ diff` instead, correctly excluding these —
+see "Gate area: `poly ∩ diff` vs. raw poly area" below.
 
 ## Spec file
 
@@ -128,6 +143,54 @@ The spec file is a JSON object:
     "'Per gate' means..." above) — populates `gates[].net` when a gate's
     net happens to carry a label on this layer; a `klt erc` run with no
     `label_layer` anywhere still reports every gate, just with `net: null`.
+  - `active_layer` (string, `"<layer>/<datatype>"`, **optional, `stackup[0]`
+    only**, issue #1979) — the diffusion/active layer. When supplied, gate
+    identification and the antenna-ratio denominator (`gates[].gate_area_um2`)
+    are computed from **`poly ∩ diff`** (a `klayout.db.Region` boolean AND
+    between the net's own merged gate-role geometry and the whole-layout
+    `active_layer` region) instead of raw poly-net area — see "Gate area:
+    `poly ∩ diff` vs. raw poly area" below.
+
+### Gate area: `poly ∩ diff` vs. raw poly area
+
+By default (`active_layer` omitted), `gates[].gate_area_um2` is a net's own
+raw merged area on the gate-role layer — **any** net that touches the
+declared gate role is treated as a gate, including a poly shape that never
+overlaps diffusion at all. That includes tie-cell substrate/well-tap
+resistor bodies, decap-cell poly, and filler-cell poly bars: real,
+intentional poly shapes with no gate oxide and therefore no antenna
+mechanism, but indistinguishable from a real transistor gate net by layer
+alone. On a routed design this produces **false antenna-ratio violations** —
+a rail shared by one or two tie cells can report a `levels[].antenna_ratio`
+well above a real gate's, purely because the tie cell's tiny poly-resistor
+"gate area" makes an ordinary amount of connected metal look
+disproportionately large (issue #1979).
+
+Supplying `stackup[0].active_layer` fixes this: `gate_area_um2` (and
+therefore every `levels[].antenna_ratio` for that net) is computed from
+`poly ∩ diff` instead. A poly resistor with zero overlap against diffusion
+gets `gate_area_um2 == 0` and is **excluded from `gates[]` entirely** — the
+same zero-area skip that already excludes a net with no gate-role geometry
+at all. A real transistor gate (poly over diffusion) is unaffected: its
+`poly ∩ diff` area is the genuine gate-oxide area PAAR methodology actually
+measures, so its ratio is unchanged (or, in practice, only ever shrinks
+toward the physically correct value — raw poly area is always `>=`
+`poly ∩ diff` area for the same net).
+
+Only `gates[].gate_area_um2` and `gates[]` membership are affected.
+`levels[0]` (the gate role's own fabrication-step entry — `step_area_um2`/
+`cumulative_area_um2` at the gate level) is **not** changed by
+`active_layer`: it still reports the net's raw poly area, matching every
+other `stackup` level's step-area convention (see "Connectivity model"
+below).
+
+**Omitting `active_layer` leaves today's behaviour unchanged, with a caveat:
+tie/decap/filler-cell antenna ratios reported this way are not physical.**
+They do not indicate a real antenna-charge risk and should not be used to
+justify a real P&R fix (diode insertion, layer jumping) — only that a poly
+shape exists on a net with connected metal above it. Supplying
+`active_layer` is the only way to get a genuinely physical gate-area
+denominator from `klt erc`.
 - `vias` (optional array, default `[]`) — each entry bridges two `stackup`
   roles:
   - `name` (string, optional, defaults to `"via<index>"`) — echoed nowhere
@@ -187,7 +250,11 @@ gate-role layer (`stackup[0]`):
 
 1. **`gate_area_um2`** is that net's own merged area on the gate-role
    layer (`LayoutToNetlist.polygons_of_net`, merged into maximal polygons,
-   scaled by the layout's own `dbu`).
+   scaled by the layout's own `dbu`) — or, when `stackup[0].active_layer`
+   is supplied, that same region intersected with the active/diffusion
+   layer (`poly ∩ diff`, issue #1979; see "Gate area: `poly ∩ diff` vs.
+   raw poly area" above). A net whose resulting area is `<= 0` is not a
+   gate at all and is excluded from `gates[]` entirely.
 2. **`levels[]`** walks `stackup` in array order — the declared fabrication
    order — and for each role reports:
    - `step_area_um2` — that net's own merged area on this role's layer
@@ -256,14 +323,19 @@ level's own role `name`:
   role the selected PDK's table defines (see "Sky130 antenna-ratio
   limits" below for the exact names it recognises).
 
-**The gate role itself (`stackup[0]`) is always `"unchecked"`.** Its
-`antenna_ratio` is trivially `1.0` (`cumulative_area_um2 == gate_area_um2`
-at that level by construction), and the source PDK table's own gate-layer
-rule measures a different quantity (poly *perimeter*, not cumulative
-connected *area*) that this area-only connectivity model does not compute
-— comparing a always-`1.0` ratio against that table's numeric limit would
-be meaningless, so it is left uncompared rather than reported as a
-misleading trivial pass.
+**The gate role itself (`stackup[0]`) is always `"unchecked"`.** Without
+`active_layer`, its `antenna_ratio` is trivially `1.0`
+(`cumulative_area_um2 == gate_area_um2` at that level by construction) —
+and the source PDK table's own gate-layer rule measures a different
+quantity (poly *perimeter*, not cumulative connected *area*) that this
+area-only connectivity model does not compute, so it is left uncompared
+rather than reported as a misleading trivial pass regardless. With
+`active_layer` supplied, `levels[0]`'s own `step_area_um2`/
+`cumulative_area_um2` still report the net's *raw* poly area (unchanged by
+the fix — see "Gate area: `poly ∩ diff` vs. raw poly area" above), while
+`gate_area_um2` is the smaller `poly ∩ diff` area, so this ratio is no
+longer trivially `1.0`; it remains `"unchecked"` regardless, for the same
+poly-perimeter-vs-area reason above.
 
 Each `gates[]` entry also reports an aggregate `antenna_verdict`: `
 "violate"` if any of its `levels[]` violate, else `"pass"` if any level
@@ -488,13 +560,13 @@ forward regardless (a `diode_insertion` remedy):
 | `gates`          | array\<object\> | One entry per net with nonzero area on the gate-role layer — see below.                          |
 | `gates[].gate_id`| string          | `"gate<index>"`, ascending in internal net-id order (stable within one run, not guaranteed stable across `klt`/KLayout versions). |
 | `gates[].net`    | string \| null  | The net's own label text, if any `stackup` role's `label_layer` carries one; `null` if unlabelled. |
-| `gates[].gate_area_um2` | number   | This net's own merged area on the gate-role layer, in µm². Identical to `levels[0].cumulative_area_um2`. |
+| `gates[].gate_area_um2` | number   | This net's own merged area on the gate-role layer, in µm² — or, when `stackup[0].active_layer` is supplied, that area intersected with the active/diffusion layer (`poly ∩ diff`, issue #1979). Identical to `levels[0].cumulative_area_um2` only when `active_layer` is omitted. |
 | `gates[].antenna_verdict` | string | `"violate"` if any `levels[]` entry violates, else `"pass"` if any level passed, else `"unchecked"`. |
 | `gates[].levels` | array\<object\> | One entry per `stackup` role, in fabrication order — see below.                                  |
 | `levels[].layer` | string          | The contributing `stackup` role's own `name`.                                                     |
 | `levels[].step_area_um2` | number   | This net's own merged area on this role's layer, in µm².                                         |
 | `levels[].cumulative_area_um2` | number | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm².     |
-| `levels[].antenna_ratio` | number   | `cumulative_area_um2 / gate_area_um2` for this level. `1.0` at `stackup[0]` (the gate level) by construction. |
+| `levels[].antenna_ratio` | number   | `cumulative_area_um2 / gate_area_um2` for this level. `1.0` at `stackup[0]` (the gate level) when `active_layer` is omitted; otherwise reflects the raw-poly-vs-`poly ∩ diff` area difference (see "Gate area: `poly ∩ diff` vs. raw poly area" above) — always `"unchecked"` there regardless. |
 | `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
 | `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
 | `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
@@ -559,8 +631,11 @@ ingestion harness exists is a natural follow-on.
 - [#908](https://github.com/2AMLogic/klayout-tools/issues/908) — Phase 3,
   antenna-violation fix guidance ("Antenna-violation fix guidance" above).
 - [#1968](https://github.com/2AMLogic/klayout-tools/issues/1968) — the
-  top-level `status` and shared `provenance` block ("JSON schema" above),
-  shipped in this document's current form.
+  top-level `status` and shared `provenance` block ("JSON schema" above).
+- [#1979](https://github.com/2AMLogic/klayout-tools/issues/1979) — the
+  optional `stackup[0].active_layer` `poly ∩ diff` gate-area fix ("Gate
+  area: `poly ∩ diff` vs. raw poly area" above), shipped in this document's
+  current form.
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet
   implemented (see "Cross-checked against klayout's own built-in antenna

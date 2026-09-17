@@ -1402,3 +1402,324 @@ def test_cli_json_error_shape(tmp_path, capsys):
     assert err["schema_version"] == 1
     assert err["error"]["command"] == "erc"
     assert "spec file not found" in err["error"]["message"]
+
+
+# --- run_erc: `poly ∩ diff` gate-area fix (issue #1979) ---------------------
+#
+# `klt erc`'s antenna check previously counted *any* net touching the
+# declared gate-role layer as a gate, including a tie-cell/decap/filler-cell
+# poly resistor body that never overlaps diffusion (no gate oxide, no
+# antenna mechanism). `stackup[0].active_layer` (optional) fixes this by
+# computing gate identification and the antenna-ratio denominator from
+# `poly ∩ diff` instead of raw poly-net area. These fixtures are
+# constructed programmatically rather than reusing a checked-in real
+# `sky130_fd_sc_hd__conb_1`/`inv_1` GDS (no such fixture is in this repo's
+# corpus -- `tests/corpus/sky130/` has only `sky130_fd_sc_hd__inv_1.gds`,
+# no `conb_1`), but the "conb1-like" reproduction below uses the exact
+# ~1.2048 um^2 gate area and 81-87 antenna-ratio band issue #1979 itself
+# reports from the real cell.
+
+
+def _antenna_spec_variant(*, active_layer: str | None) -> dict:
+    """A minimal poly->li1 stackup (no met1/met2 needed -- every test below
+    only cares about the li1-level antenna ratio, matching the real
+    tie-cell defect the issue reports), with `stackup[0].active_layer` set
+    to `active_layer` when given, omitted entirely otherwise.
+    """
+    stackup0: dict = {"name": "poly", "layer": "1/0", "role": "gate"}
+    if active_layer is not None:
+        stackup0["active_layer"] = active_layer
+    return {
+        "stackup": [
+            stackup0,
+            {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
+        ],
+        "vias": [
+            {"name": "licon", "layer": "2/0", "between": ["poly", "li1"]},
+        ],
+    }
+
+
+def _tie_cell_and_real_gate_fixture(path, *, li1_um2: float = 80.0) -> None:
+    """Two independent gate nets sharing the exact same (deliberately
+    antenna-violating, `li1_um2` wide) li1 rail width, in separate y-bands
+    so they never physically touch:
+
+    - **`REAL`** (y = [0, 1]) -- poly gate fully covered by diffusion (layer
+      8/0): a genuine transistor gate, `poly ∩ diff == poly`.
+    - **`TIE`** (y = [10, 11]) -- poly resistor body with no diffusion
+      anywhere: the tie-cell/decap/filler-cell case issue #1979 fixes,
+      `poly ∩ diff == 0`.
+
+    Without `active_layer`, both report the identical (false, for `TIE`)
+    li1 antenna-ratio violation -- issue #1979's bug, preserved as
+    documented legacy behaviour when the field is omitted. With it, `REAL`'s
+    verdict is unchanged (the required positive control) while `TIE` is
+    excluded from `gates[]` entirely.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(1, 0)
+    licon = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    li1_label = layout.layer(3, 5)
+    diff = layout.layer(8, 0)
+
+    # REAL: poly gate fully over diffusion.
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(diff).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(licon).insert(kdb.Box.new(_um(0.02), _um(0.02), _um(0.05), _um(0.05)))
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(li1_um2), _um(1)))
+    top.shapes(li1_label).insert(kdb.Text("REAL", kdb.Trans(_um(0.5), _um(0.5))))
+
+    # TIE: poly resistor body, no diffusion anywhere -- offset in y so its
+    # own li1 rail never touches REAL's.
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(10), _um(1), _um(11)))
+    top.shapes(licon).insert(kdb.Box.new(_um(0.02), _um(10.02), _um(0.05), _um(10.05)))
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(10), _um(li1_um2), _um(11)))
+    top.shapes(li1_label).insert(kdb.Text("TIE", kdb.Trans(_um(0.5), _um(10.5))))
+
+    layout.write(str(path))
+
+
+def test_active_layer_omitted_reproduces_false_tie_cell_violation(tmp_path):
+    """Baseline/regression: without `active_layer`, a poly-only tie-cell
+    resistor sharing a wide, genuinely-violating li1 rail is reported as a
+    `gates[]` entry and produces the exact same false `violate` verdict as
+    the real gate on the same rail width -- issue #1979's bug, preserved as
+    documented legacy behaviour when the field is omitted.
+    """
+    gds = tmp_path / "fixture.gds"
+    spec = tmp_path / "spec.json"
+    _tie_cell_and_real_gate_fixture(gds, li1_um2=80.0)
+    _write_spec(spec, _antenna_spec_variant(active_layer=None))
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    assert report["gate_count"] == 2
+
+    tie = next(g for g in report["gates"] if g["net"] == "TIE")
+    assert tie["gate_area_um2"] == pytest.approx(1.0)
+    tie_li1 = next(lvl for lvl in tie["levels"] if lvl["layer"] == "li1")
+    assert tie_li1["verdict"] == "violate"
+    assert tie["antenna_verdict"] == "violate"
+
+    real = next(g for g in report["gates"] if g["net"] == "REAL")
+    real_li1 = next(lvl for lvl in real["levels"] if lvl["layer"] == "li1")
+    assert real_li1["verdict"] == "violate"
+
+
+def test_active_layer_excludes_tie_cell_resistor_from_gates(tmp_path):
+    """AC: with `stackup[0].active_layer` supplied, the tie-cell's poly
+    resistor (`poly ∩ diff == 0`) is no longer in `gates[]` and no longer
+    produces a `violate` verdict.
+    """
+    gds = tmp_path / "fixture.gds"
+    spec = tmp_path / "spec.json"
+    _tie_cell_and_real_gate_fixture(gds, li1_um2=80.0)
+    _write_spec(spec, _antenna_spec_variant(active_layer="8/0"))
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert report["gate_count"] == 1
+    assert all(g["net"] != "TIE" for g in report["gates"])
+
+
+def test_active_layer_leaves_positive_control_gate_violating_before_and_after(
+    tmp_path,
+):
+    """AC: a real gate net (`poly ∩ diff > 0`) is unaffected -- a positive-
+    control regression that must still violate whether or not
+    `active_layer` is supplied, so the fix cannot silently stop catching
+    genuine antenna violations.
+    """
+    gds = tmp_path / "fixture.gds"
+    _tie_cell_and_real_gate_fixture(gds, li1_um2=80.0)
+
+    no_active_spec = tmp_path / "no_active.json"
+    _write_spec(no_active_spec, _antenna_spec_variant(active_layer=None))
+    before = run_erc(str(gds), str(no_active_spec), pdk="sky130")
+    real_before = next(g for g in before["gates"] if g["net"] == "REAL")
+    assert real_before["antenna_verdict"] == "violate"
+
+    active_spec = tmp_path / "active.json"
+    _write_spec(active_spec, _antenna_spec_variant(active_layer="8/0"))
+    after = run_erc(str(gds), str(active_spec), pdk="sky130")
+    real_after = next(g for g in after["gates"] if g["net"] == "REAL")
+    assert real_after["antenna_verdict"] == "violate"
+    # Diffusion fully covers this gate's poly, so its area is unchanged.
+    assert real_after["gate_area_um2"] == pytest.approx(real_before["gate_area_um2"])
+
+
+def _conb1_like_fixture(path, *, poly_width_um: float, li1_width_um: float) -> None:
+    """A single-net poly-resistor-plus-rail layout sized to land in the same
+    order of magnitude as the real `sky130_fd_sc_hd__conb_1` measurements
+    issue #1979 reports (net `'HI,VPWR'`, gate area ~1.2048 um^2, li1
+    antenna ratio in the 81-87 band) -- not a replay of the literal corpus
+    GDS (not checked into this repo), but the same shape of defect.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(1, 0)
+    licon = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    li1_label = layout.layer(3, 5)
+
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(poly_width_um), _um(1)))
+    top.shapes(licon).insert(kdb.Box.new(_um(0.02), _um(0.02), _um(0.05), _um(0.05)))
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(li1_width_um), _um(1)))
+    top.shapes(li1_label).insert(kdb.Text("HI,VPWR", kdb.Trans(_um(0.5), _um(0.5))))
+
+    layout.write(str(path))
+
+
+def test_active_layer_conb1_like_reproduction_violates_without_active_layer(tmp_path):
+    gds = tmp_path / "conb1_like.gds"
+    # `antenna_ratio` is `cumulative_area_um2 / gate_area_um2`, and
+    # `cumulative_area_um2` at the li1 level includes the gate (poly) level's
+    # own area too (see `run_erc`'s running-sum accumulation) -- so
+    # `li1_width_um` here is sized to land the *combined* poly+li1
+    # cumulative area, not the li1 rail area alone, in the reported 81-87
+    # ratio band.
+    _conb1_like_fixture(gds, poly_width_um=1.2048, li1_width_um=103.22)
+
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _antenna_spec_variant(active_layer=None))
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    gate = report["gates"][0]
+    assert gate["net"] == "HI,VPWR"
+    # DBU is 0.001 um, so the drawn 1.2048 um width snaps to the nearest
+    # grid point (1.205) -- assert against that same tolerance.
+    assert gate["gate_area_um2"] == pytest.approx(1.2048, abs=2e-3)
+    li1_level = next(lvl for lvl in gate["levels"] if lvl["layer"] == "li1")
+    assert 81.0 <= li1_level["antenna_ratio"] <= 87.0
+    assert li1_level["verdict"] == "violate"
+
+
+def test_active_layer_conb1_like_reproduction_excluded_with_active_layer(tmp_path):
+    """No diffusion is drawn anywhere in this fixture -- with
+    `active_layer` supplied, the poly resistor net is excluded entirely,
+    leaving no gate net at all in this single-net layout.
+    """
+    gds = tmp_path / "conb1_like.gds"
+    _conb1_like_fixture(gds, poly_width_um=1.2048, li1_width_um=103.22)
+
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _antenna_spec_variant(active_layer="8/0"))
+
+    with pytest.raises(ErcError, match="no net"):
+        run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def _mixed_gate_and_resistor_fixture(path) -> None:
+    """One net with two poly shapes tied together by a single continuous
+    li1 strip: a real gate portion (0,0)-(0.5,1), over diffusion, and a
+    separate resistor-body portion (2,0)-(2.5,1), with no diffusion under
+    it. Raw poly area on this net is 1.0 um^2; `poly ∩ diff` is only
+    0.5 um^2 -- the "mixed" edge case from issue #1979's test plan: a net
+    with both a resistor body and a genuine gate tied together must still
+    count as a gate, with its antenna ratio computed off the intersection
+    only, not the combined raw poly area.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(1, 0)
+    licon = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    diff = layout.layer(8, 0)
+
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(0.5), _um(1)))
+    top.shapes(diff).insert(kdb.Box.new(_um(0), _um(0), _um(0.5), _um(1)))
+    top.shapes(poly).insert(kdb.Box.new(_um(2), _um(0), _um(2.5), _um(1)))
+
+    top.shapes(licon).insert(kdb.Box.new(_um(0.1), _um(0.1), _um(0.2), _um(0.2)))
+    top.shapes(licon).insert(kdb.Box.new(_um(2.1), _um(0.1), _um(2.2), _um(0.2)))
+    # One continuous li1 strip spans and connects both poly shapes into a
+    # single net.
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(2.5), _um(1)))
+
+    layout.write(str(path))
+
+
+def test_active_layer_mixed_gate_and_resistor_net_counts_only_intersection(tmp_path):
+    gds = tmp_path / "mixed.gds"
+    spec = tmp_path / "spec.json"
+    _mixed_gate_and_resistor_fixture(gds)
+    _write_spec(spec, _antenna_spec_variant(active_layer="8/0"))
+
+    report = run_erc(str(gds), str(spec))
+    assert report["gate_count"] == 1
+    # Only the 0.5 um^2 gate portion overlaps diffusion -- the other 0.5
+    # um^2 resistor-body portion of the same net contributes nothing.
+    assert report["gates"][0]["gate_area_um2"] == pytest.approx(0.5)
+
+
+def test_active_layer_omitted_mixed_net_uses_raw_combined_poly_area(tmp_path):
+    """Without `active_layer`, the same net's `gate_area_um2` is the full
+    1.0 um^2 combined raw poly area (both the gate and resistor-body
+    portions) -- confirming the fixture change above is attributable to
+    the fix, not the fixture itself.
+    """
+    gds = tmp_path / "mixed.gds"
+    spec = tmp_path / "spec.json"
+    _mixed_gate_and_resistor_fixture(gds)
+    _write_spec(spec, _antenna_spec_variant(active_layer=None))
+
+    report = run_erc(str(gds), str(spec))
+    assert report["gate_count"] == 1
+    assert report["gates"][0]["gate_area_um2"] == pytest.approx(1.0)
+
+
+def test_active_layer_rejected_on_non_gate_stackup_entry(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0", "active_layer": "8/0"},
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match=r"active_layer is only valid on stackup\[0\]"):
+        run_erc(str(gds), str(spec))
+
+
+def test_active_layer_malformed_layer_string_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {
+                    "name": "poly",
+                    "layer": "1/0",
+                    "role": "gate",
+                    "active_layer": "nope",
+                },
+                {"name": "li1", "layer": "3/0"},
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match="active_layer"):
+        run_erc(str(gds), str(spec))
+
+
+def test_active_layer_does_not_change_schema_version(tmp_path):
+    gds = tmp_path / "fixture.gds"
+    spec = tmp_path / "spec.json"
+    _tie_cell_and_real_gate_fixture(gds, li1_um2=80.0)
+    _write_spec(spec, _antenna_spec_variant(active_layer="8/0"))
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    assert report["schema_version"] == 1
