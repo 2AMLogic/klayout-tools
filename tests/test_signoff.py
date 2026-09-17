@@ -2223,18 +2223,54 @@ def test_command_evidence_pex_wrong_kind_renders_unmet(monkeypatch):
     assert item_7["citation"] is None
 
 
-def test_items_other_than_7_are_unaffected_by_the_kind_restriction(tmp_path):
-    """Regression: items 1-6 and 8-10 still accept any recognised, passing
-    envelope kind -- only item 7 is kind-restricted."""
+def test_items_other_than_3_4_and_7_are_unaffected_by_the_kind_restriction(
+    tmp_path,
+):
+    """Regression: items 1, 2, 5, 6 and 8-10 still accept any recognised,
+    passing envelope kind -- only items 3, 4 (issue #1987) and 7 are
+    kind-restricted."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
 
-    evidence = {str(i): drc_path for i in range(1, 11) if i != 7}
+    evidence = {str(i): drc_path for i in range(1, 11) if i not in (4, 7)}
     result = build_tier_report(_manifest(evidence=evidence))
 
     for item in result["items"]:
-        if item["tier"] == "T1" and item["id"] != 7:
+        if item["tier"] == "T1" and item["id"] not in (4, 7):
             assert item["status"] == "met", item["id"]
             assert item["citation"]["kind"] == "drc"
+
+
+@pytest.mark.parametrize("kind", ["analog", "digital"])
+def test_items_3_and_4_reject_a_passing_extract_envelope(tmp_path, kind):
+    """Issue #1987: `klt extract` cannot fail (`_check_passed` is always True
+    for it), so it must never stand in for "DRC clean" or "LVS clean"."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"3": extract_path, "4": extract_path})
+    )
+    for item_id in (3, 4):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "unmet", item_id
+        assert item["reason"] == "wrong_kind", item_id
+        assert item["citation"] is None
+
+    # The right kind still satisfies each item, and a drc report does not
+    # satisfy item 4 (nor an lvs report item 3).
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"3": lvs_path, "4": drc_path})
+    )
+    for item_id in (3, 4):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["reason"] == "wrong_kind", item_id
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"3": drc_path, "4": lvs_path})
+    )
+    for item_id in (3, 4):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "met", item_id
 
 
 # --------------------------------------------------------------------------- #

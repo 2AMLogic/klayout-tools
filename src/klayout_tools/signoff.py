@@ -431,6 +431,12 @@ _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 #:   doc's own Digital column names, and is additionally required to be
 #:   SDF-annotated (see :data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE`).
 _ITEM_ALLOWED_KINDS: dict[int, dict[str, set[str]]] = {
+    # Issue #1987: items 3 ("DRC clean") and 4 ("LVS clean") name their
+    # verb in docs/design-evidence-tiers.md, so only that verb's own
+    # envelope may satisfy them -- in particular never a `klt extract`
+    # report, which `_check_passed` counts as passing unconditionally.
+    3: {"analog": {"drc"}, "digital": {"drc"}},
+    4: {"analog": {"lvs"}, "digital": {"lvs"}},
     7: {
         "analog": {"pex"},
         "digital": {"pex", "functional-verification"},
@@ -1516,6 +1522,12 @@ def build_tier_report(
     item does not accept) also renders ``"unmet"``: this phase never infers
     a ``"met"`` verdict for an item with no runnable check behind it.
 
+    **Items 3 and 4 are kind-restricted** (issue #1987): item 3 ("DRC
+    clean") accepts only a ``"drc"`` citation and item 4 ("LVS clean") only
+    an ``"lvs"`` citation, for every block kind -- any other recognised,
+    passing kind (notably ``"extract"``, which :func:`_check_passed` never
+    fails) renders ``"unmet"`` with ``reason: "wrong_kind"``.
+
     **Item 7 is kind-restricted, per block kind** (issue #871, Phase 2b of
     epic #706; made per-block-kind by issue #1959): every other T1 item
     accepts any recognised, passing envelope kind, but item 7 ("Post-layout
@@ -1739,7 +1751,8 @@ def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
     mixed-signal block's digital partition as to a pure ``"digital"`` block,
     with no separate wiring.
 
-    ``None`` means unrestricted (every item but 7 today). An item present in
+    ``None`` means unrestricted (every item but 3, 4 and 7 today). An item
+    present in
     :data:`_ITEM_ALLOWED_KINDS` but with no entry for this partition kind
     falls back to the ``"analog"`` (strictest) set rather than becoming
     silently unrestricted -- an unrecognised partition kind must never
@@ -2052,8 +2065,8 @@ def _build_tier_item(
     "wrong_kind"`` and no citation. ``None`` (the default) means no
     restriction, preserving Phase 0/1's original behaviour where any
     recognised, passing envelope kind satisfies any item -- every T1 item
-    except item 7 still passes ``None`` (see :data:`_ITEM_ALLOWED_KINDS`
-    and :func:`_allowed_kinds_for`).
+    except items 3, 4 and 7 still passes ``None`` (see
+    :data:`_ITEM_ALLOWED_KINDS` and :func:`_allowed_kinds_for`).
 
     ``require_post_layout`` (issue #1959) is forwarded to
     :func:`_grade_evidence` for the items in
