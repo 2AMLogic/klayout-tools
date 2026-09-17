@@ -417,11 +417,23 @@ jobs:
     # exercise of the compiled `klt-techmap` binary (issue #875's
     # `--verify-equivalence` gate) happens in the `test` job below, which
     # already provisions a real `yosys`/`iverilog` `klt equiv` needs.
-    # Heavy jobs run on the dedicated CI runner (2AMLogic/2am#29). The
-    # expression routes same-repo runs to it and sends fork PRs back to
-    # GitHub-hosted instead of skipping them, so required checks never go
-    # missing and no outside fork ever executes on our host.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","heavy"]') || 'ubuntu-latest' }}
+    #
+    # ubuntu-latest, not the dedicated heavy runner (issue #1971): #1246
+    # originally routed this job to `[self-hosted, heavy]` (2AMLogic/2am#29)
+    # as a proving PR for the runner itself, but the job does ~12-25s of
+    # real work (fmt + clippy + test on one small binary crate, no maturin
+    # build, no PDK) and real job telemetry showed it queuing 3-6 minutes
+    # behind the rest of this workflow's self-hosted legs for that -- the
+    # same "seconds of compute, minutes-to-hours of queue" shape #1971
+    # measured on sky130-pll/sky130-ldo's headless repo-check jobs, just at
+    # this repo's smaller scale. `native-wave` below is the structurally
+    # identical case (plain cargo build/test binary crate, no pyo3, no PDK)
+    # and already runs on ubuntu-latest directly -- this brings
+    # native-techmap in line with that precedent instead of the self-hosted
+    # pool the genuinely heavy jobs below (the pyo3-extension `native`/
+    # `native-statime` legs and the full `test` matrix, which builds
+    # Yosys/Verilator/Icarus from source) still need.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
       run:
