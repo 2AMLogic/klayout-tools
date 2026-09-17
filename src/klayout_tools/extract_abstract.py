@@ -561,6 +561,47 @@ def _local_pin_candidate_points(
     strictly additive: a design with no disjoint-metal-fragment pins is
     unaffected (every label's own point was already the sole candidate, and
     still is).
+
+    **A walk that reaches a *second declared pin* is not a second fragment
+    of the first (issue #1994).** Walking the cell's own pre-erasure
+    poly/diffusion connectivity is exactly what makes the ``#1183`` rescue
+    above possible, but that same connectivity is also how a real standard
+    cell ties one pin to another *inside* the black box -- and for such a
+    cell the walk hands the signal pin a candidate point sitting on the
+    cell's own **power rail**. ``sky130_fd_sc_hd__conb_1`` is the reference
+    case: it draws no diffusion at all, generating its constants by tying
+    ``HI`` to the ``VPWR`` rail (and ``LO`` to ``VGND``) through a plain
+    poly strip, so the pre-erasure walk from the ``HI`` li1 label reaches
+    the ``VPWR`` li1/met1 rail and used to contribute an interior point of
+    it as a ``HI`` candidate. That candidate is the *whole design's* supply
+    net once the layout carries a power grid, so
+    :func:`_abstract_pin_net_score`'s "a named net beats an unnamed one"
+    rule -- correct on its own terms, since a supply net always carries a
+    name and a genuinely unrouted pin's island never does -- bound every
+    unused ``HI`` output straight onto ``VPWR``. The practical effect was
+    backwards: a design extracted ``match`` while its PDN was missing (no
+    rail geometry, so no named candidate to lose to) and turned into dozens
+    of false ``klt lvs`` errors the moment the PDN was *fixed*.
+
+    So before contributing a net's fragments to a pin, this checks whether
+    that same cell-local net carries any **other** label string (scanned
+    across ``poly_label`` and every ``metal_labels`` level, so a rail
+    labelled on a different layer than the signal pin is still seen). If it
+    does, the walk has crossed a declared-pin boundary and the net's
+    unlabelled fragments can no longer be attributed to either pin -- only
+    the fragments carrying this pin's *own* label are kept, which for the
+    ``conb_1`` shape leaves exactly the label's own pad and drops the rail.
+    A pin in that state degrades to its pre-#1183 single-point resolution
+    rather than to a wrong answer; the black box's own interior tie is not
+    something an abstracted cell is allowed to expose anyway, which is
+    precisely why :func:`_erase_abstracted_cell_geometry` severs it for the
+    real extraction pass.
+
+    Deliberately *not* fixed in :func:`_abstract_pin_net_score` instead: the
+    score is presented with a candidate that genuinely does resolve onto
+    ``VPWR``, and nothing at that layer can tell it apart from a pin the
+    design really does route to the supply. The bad candidate must not be
+    produced in the first place.
     """
     import klayout.db as kdb
 
@@ -591,6 +632,33 @@ def _local_pin_candidate_points(
             l2n.connect(metals[index + 1])
     l2n.extract_netlist()
 
+    # Every label this cell draws on a conductor the local graph above
+    # reaches, grouped by the cell-local net it sits on (issue #1994).
+    # `label_points` is the same scan indexed the other way round, so the
+    # second pass can ask "which shapes on this layer carry *this* pin's own
+    # label?" without re-probing.
+    labelled_regions: list[tuple[tuple[int, int] | None, kdb.Region]] = [
+        (deck.poly_label, poly)
+    ] + [
+        (layer, metals[index])
+        for index, layer in enumerate(deck.metal_labels)
+        if index < len(metals)
+    ]
+    names_by_net: dict[int, set[str]] = {}
+    label_points: dict[tuple[int, str], list[kdb.Point]] = {}
+    for layer, region in labelled_regions:
+        if layer is None:
+            continue
+        layer_index = layout.find_layer(*layer)
+        if layer_index is None:
+            continue
+        for text in kdb.Texts(cell.shapes(layer_index)).each():
+            point = kdb.Point(text.x, text.y)
+            label_points.setdefault((layer_index, text.string), []).append(point)
+            net = l2n.probe_net(region, point)
+            if net is not None:
+                names_by_net.setdefault(net.cluster_id, set()).add(text.string)
+
     extra_points: dict[str, list[kdb.Point]] = {}
     for metal_index, layer in enumerate(deck.metal_labels):
         if layer is None or metal_index >= len(metals):
@@ -604,10 +672,18 @@ def _local_pin_candidate_points(
             net = l2n.probe_net(target_region, point)
             if net is None:
                 continue
+            # Issue #1994: this walk crossed from one *declared pin* to
+            # another, so the net's shapes can no longer all be attributed
+            # to `text.string` -- keep only the fragments carrying this
+            # pin's own label. See this function's docstring.
+            crossed = names_by_net.get(net.cluster_id, set()) - {text.string}
+            own_points = label_points.get((layer_index, text.string), [point])
             shapes = kdb.Shapes()
             l2n.shapes_of_net(net, target_region, True, shapes)
             points = extra_points.setdefault(text.string, [])
             for polygon in kdb.Region(shapes).merged().each():
+                if crossed and not any(polygon.inside(own) for own in own_points):
+                    continue
                 candidate = _polygon_interior_point(polygon)
                 if candidate not in points:
                     points.append(candidate)

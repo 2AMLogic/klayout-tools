@@ -29,7 +29,7 @@ from typing import Any
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import pdk
+from klayout_tools import extract_abstract, pdk
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     DiodeDevice,
@@ -9746,6 +9746,180 @@ def test_abstract_cells_in_cell_label_resolves_disjoint_fragment_to_routed_net(
     (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
     tokens = x_line.split()
     assert tokens[1] == "ROUTED", x_line
+
+
+def _make_tie_constant_leaf_cell(layout: kdb.Layout, name: str) -> kdb.Cell:
+    """A ``sky130_fd_sc_hd__conb_1``-shaped constant generator: an ``OUT``
+    li1 pad tied to the cell's own ``VPWR`` rail through a plain poly strip,
+    with no diffusion anywhere (issue #1994).
+
+    This is the real cell's topology, reduced to the layers that matter. In
+    ``sky130_fd_sc_hd__conb_1`` the ``HI`` li1 pad and the ``VPWR`` li1 rail
+    stub are contacted to opposite ends of one ``poly.drawing`` box, and the
+    rail is mcon'd up to the cell's own labelled ``met1`` rail -- so the
+    cell-local connectivity walk
+    :func:`~klayout_tools.extract_abstract._local_pin_candidate_points`
+    performs *before* abstraction erases poly reaches the supply rail from
+    the signal pin's label.
+    """
+    cell = layout.create_cell(name)
+
+    def draw(layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # The constant-generating tie: one poly strip, contacted to the OUT pad
+    # at one end and to the VPWR rail stub at the other. No diff.drawing at
+    # all -- exactly like the real conb_1.
+    draw(66, 20, kdb.Box(1000, 900, 3000, 1100))  # poly.drawing
+    draw(66, 44, kdb.Box(1100, 900, 1300, 1100))  # licon1 (OUT side)
+    draw(66, 44, kdb.Box(2700, 900, 2900, 1100))  # licon1 (rail side)
+
+    draw(67, 20, kdb.Box(1000, 700, 1400, 1300))  # li1 OUT pad
+    label(67, 5, "OUT", 1200, 1000)
+
+    # The cell's own supply rail: li1 stub -> mcon -> met1 rail, labelled
+    # on met1 (a *different* label layer from the signal pin's -- the real
+    # sky130 convention, and the reason a same-layer-only check would miss
+    # the crossing).
+    draw(67, 20, kdb.Box(2600, 700, 3000, 1300))  # li1 rail stub
+    draw(67, 44, kdb.Box(2700, 900, 2900, 1100))  # mcon
+    draw(68, 20, kdb.Box(2400, 600, 3200, 1400))  # met1 rail
+    label(68, 5, "VPWR", 2800, 1000)
+    return cell
+
+
+def test_abstract_cells_unused_tie_output_does_not_bind_to_named_supply(tmp_path):
+    """Issue #1994: an abstracted tie cell's *unused* output must not bind
+    to the design's named supply net just because the cell ties them
+    together internally.
+
+    ``sky130_fd_sc_hd__conb_1`` generates its constants by tying ``HI`` to
+    ``VPWR`` (and ``LO`` to ``VGND``) through a poly strip, so
+    :func:`~klayout_tools.extract_abstract._local_pin_candidate_points`'s
+    pre-erasure connectivity walk used to hand the signal pin a candidate
+    access point sitting on the cell's own power rail. Once the layout
+    carries a real power grid that rail is a *named* net, and
+    :func:`~klayout_tools.extract_abstract._abstract_pin_net_score`'s "a
+    named net beats an unnamed one" rule then preferred it over the pin's
+    own (correctly unnamed, because genuinely unrouted) island -- turning a
+    clean `klt lvs` match into a pile of false errors on cells that were
+    working exactly as intended, and doing so *only* once a missing PDN was
+    fixed.
+    """
+    layout = kdb.Layout()
+    leaf = _make_tie_constant_leaf_cell(layout, "TIE_CONST")
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+
+    # The power grid: a top-level met1 strap over the cell's own rail,
+    # named by a top-level label. This is the geometry whose *absence* used
+    # to mask the bug -- with no PDN there is no named candidate to lose to.
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2400, 600, 6000, 1400))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("VPWR", kdb.Trans(5000, 1000)))
+    # `OUT` receives no external routing whatsoever.
+
+    path = _write_gds(layout, tmp_path / "tie_const.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "tie_const.spice"),
+        abstract_cell_patterns=("TIE_CONST",),
+    )
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "TIE_CONST"
+    assert entry["pin_count"] == 2  # OUT, VPWR
+    assert entry["resolution_source"] == "in_cell_labels"
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    tokens = x_line.split()
+    # Pins are wired in sorted name order: OUT, then VPWR.
+    assert tokens[2] == "VPWR", x_line
+    assert tokens[1] != "VPWR", (
+        "the unused tie output must keep its own unrouted island, not snap "
+        f"onto the named supply rail: {x_line}"
+    )
+
+    # ...and the "two declared pins on one net" self-check must therefore
+    # stay quiet: before the fix it fired with `OUT, VPWR -> net 'VPWR'`.
+    assert not [w for w in report["warnings"] if "separately declared pins" in w], (
+        report["warnings"]
+    )
+
+
+def test_abstract_cells_tie_output_still_binds_when_really_routed(tmp_path):
+    """Issue #1994's edge case: suppressing the *internal* tie path must not
+    stop a tie cell's output from binding to the supply rail when the design
+    genuinely routes it there.
+
+    Same cell as
+    :func:`test_abstract_cells_unused_tie_output_does_not_bind_to_named_supply`,
+    but the parent lands real mcon+met1 routing on the ``OUT`` pad and
+    carries it into the power strap -- so ``OUT`` and ``VPWR`` are one net in
+    the *drawn, post-erasure* layout rather than only through the black
+    box's severed interior, and the binding is correct.
+    """
+    layout = kdb.Layout()
+    leaf = _make_tie_constant_leaf_cell(layout, "TIE_CONST")
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2400, 600, 6000, 1400))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("VPWR", kdb.Trans(5000, 1000)))
+    # Parent-drawn routing from the OUT pad into the strap: mcon up to met1,
+    # then a met1 wire abutting the strap.
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(1100, 900, 1300, 1100))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(1000, 800, 2500, 1200))
+
+    path = _write_gds(layout, tmp_path / "tie_const_routed.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "tie_const_routed.spice"),
+        abstract_cell_patterns=("TIE_CONST",),
+    )
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    tokens = x_line.split()
+    assert tokens[1] == "VPWR", x_line
+    assert tokens[2] == "VPWR", x_line
+
+
+def test_local_pin_candidate_points_stops_at_a_second_declared_pin():
+    """Issue #1994 at the unit level: every extra candidate
+    :func:`~klayout_tools.extract_abstract._local_pin_candidate_points`
+    derives for a pin must lie on a fragment carrying that pin's *own*
+    label once the cell-local walk has reached a second declared pin.
+
+    Asserted directly on the candidate points rather than only through a
+    full extraction, because the geometric claim ("the derived point sits on
+    the supply rail, 1400 dbu away from the pin's own pad") is the actual
+    root cause and is otherwise only visible as a downstream net name.
+    """
+    layout = kdb.Layout()
+    leaf = _make_tie_constant_leaf_cell(layout, "TIE_CONST")
+    deck = get_extraction_deck("sky130")
+
+    candidates = extract_abstract._local_pin_candidate_points(layout, leaf, deck)
+
+    out_pad = kdb.Box(1000, 700, 1400, 1300)
+    rail = kdb.Box(2600, 700, 3000, 1300)
+    assert candidates["OUT"], candidates
+    for point in candidates["OUT"]:
+        assert out_pad.contains(point), f"{point.to_s()} escaped the OUT pad"
+        assert not rail.contains(point), f"{point.to_s()} landed on the supply rail"
+    # The supply pin's own candidates are untouched -- its met1 label sits on
+    # the rail, which is where its candidates belong.
+    assert candidates["VPWR"]
 
 
 def test_abstract_cells_local_candidate_does_not_bind_to_unrelated_instance(
