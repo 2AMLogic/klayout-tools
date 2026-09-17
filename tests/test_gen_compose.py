@@ -9833,6 +9833,305 @@ def test_compose_rejects_route_into_collector_ringed_bjt_array_without_a_gap(
     )
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1960: the closed-ring rejection is decided from the *plane* the leg is
+# drawn on, not from block/port identity alone. A backbone that physically
+# flies over the ring (no shared conductor, every via-drop landing pad clear of
+# the ring's trace) routes; a same-plane one keeps the identical rejection.
+# --------------------------------------------------------------------------- #
+
+
+def _closed_collector_ring_escape(tmp_path, pdk_root, name, layer_role):
+    """This issue's own repro: a two-unit `bjt_array` keeping its default
+    *closed* collector ring, with both base pins bussed out to a stub block
+    placed clear of the array, on ``layer_role``."""
+    bjt = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        f"{name}_q",
+        emitter_um=3.4,
+        rows=1,
+        cols=2,
+        dummy=0,
+        topology="common_centroid",
+        ratio=1,
+        add_collector_ring=True,
+    )
+    stub_gds = _write_empty_library_gds(tmp_path / f"{name}_stub.gds", f"{name}_stub")
+    output = tmp_path / f"{name}.gds"
+    return output, compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "array", "generator_report": bjt},
+                {
+                    "id": "stub",
+                    "cell": {
+                        "gds_path": stub_gds,
+                        "cell_name": f"{name}_stub",
+                        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 0.34},
+                        "ports": [
+                            {
+                                "name": "CONN",
+                                "layer": {"layer": 67, "datatype": 20},
+                                "x_um": 0.5,
+                                "y_um": 0.0,
+                                "width_um": 0.17,
+                                "direction_deg": 270,
+                            },
+                            {
+                                "name": "PAD",
+                                "layer": {"layer": 67, "datatype": 20},
+                                "x_um": 0.5,
+                                "y_um": 0.34,
+                                "width_um": 0.17,
+                                "direction_deg": 90,
+                            },
+                        ],
+                    },
+                },
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["array", "stub"],
+                "origins_um": {
+                    "array": {"x": 0.0, "y": 0.0},
+                    "stub": {"x": 5.82, "y": 7.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "vss",
+                    "pins": [
+                        {"block": "array", "port": "Q0_B"},
+                        {"block": "array", "port": "Q1_B"},
+                        {"block": "stub", "port": "CONN"},
+                    ],
+                }
+            ],
+            "pins": [{"net": "vss", "block": "stub", "port": "PAD"}],
+            "routing": {"layer_role": layer_role, "width_um": 0.17},
+            "options": {"cell_name": name, "output": str(output)},
+        }
+    )
+
+
+def test_compose_routes_over_a_closed_collector_ring_on_a_higher_plane(
+    tmp_path, pdk_root
+):
+    # #1960's repro: a `metal3`-role (met2) backbone leaving a *closed*
+    # collector ring's enclosed base pins. The ring is drawn on the diffusion
+    # role plus li1 -- two via levels below met2 -- so the backbone shares no
+    # conductor with it and the escape is a routing-layer decision, not a
+    # reason to break the ring with `params.ring_gap_side`.
+    output, report = _closed_collector_ring_escape(
+        tmp_path, pdk_root, "ringfly", "metal3"
+    )
+
+    assert report["unrouted_nets"] == []
+    assert all(net["routed"] is True for net in report["nets"])
+    assert not any(
+        "closed guard/collector ring" in note for note in report["drc_hints"]["notes"]
+    )
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # ...and the drawn result really keeps the two nets apart, which is the
+    # whole point of the ring check: both PNPs' bases come back on the routed
+    # `vss` net, while their collectors stay on the ring's own (substrate)
+    # node. A merge would have put them on one node.
+    result = extract.run_extract(str(output), "sky130", top="ringfly")
+    base_nets = {device["nets"]["b"] for device in result["devices"]}
+    collector_nets = {device["nets"]["c"] for device in result["devices"]}
+    assert base_nets == {"vss"}
+    assert collector_nets and not (collector_nets & base_nets)
+
+
+def test_compose_still_rejects_a_same_plane_route_out_of_a_closed_ring(
+    tmp_path, pdk_root
+):
+    # The identical composition on the ring's *own* plane (the `metal` role,
+    # li1 -- the level `bjt_array` draws its collector ring's metal loop on
+    # alongside the diffusion its COLL_* ports report) is still the genuine
+    # merge #199 case 2 rejects, with the message unchanged. This is the
+    # companion half of the test above: the difference between the two is
+    # purely `routing.layer_role`.
+    _output, report = _closed_collector_ring_escape(
+        tmp_path, pdk_root, "ringsame", "metal"
+    )
+
+    assert report["unrouted_nets"] == ["vss"]
+    reasons = [leg.get("reason") or "" for leg in report["nets"][0]["legs"]]
+    assert [
+        reason
+        for reason in reasons
+        if "closed guard/collector ring" in reason and "Q0_B" in reason
+    ] == [
+        "block 'array' has a closed guard/collector ring (reports a "
+        "TAP_*/COLL_* port and no GAP_* opening) -- a route to its non-tap "
+        "port 'Q0_B' would cross the ring's own metal loop and merge this net "
+        "with the ring's tap net; route to the ring's own tap port instead, "
+        "regenerate the block with a routing opening in the ring "
+        "(params.ring_gap_side/ring_gap_um), or regenerate it with "
+        "add_guard_ring/add_collector_ring: false"
+    ]
+
+
+def _hand_ringed_cell_block(
+    tmp_path, pdk_root, name, *, tap_layer, port_x_um, port_y_um
+):
+    """A `blocks[].cell` block declaring a closed ring by hand: four
+    `COLL_<side>` tap ports on ``tap_layer`` locating a 4x4um ring, plus one
+    non-tap `SIG` port at ``(port_x_um, port_y_um)``.
+
+    Hand-crafted rather than generated so the two things #1960's plane-aware
+    check must still reject can be expressed exactly: a tap layer the deck
+    cannot connect to the backbone at all, and a pin sitting *outside* the
+    ring the block declares.
+    """
+    gds = _write_empty_library_gds(tmp_path / f"{name}.gds", name)
+    ring_ports = [
+        ("COLL_N", 2.0, 4.0, 90),
+        ("COLL_S", 2.0, 0.0, 270),
+        ("COLL_E", 4.0, 2.0, 0),
+        ("COLL_W", 0.0, 2.0, 180),
+    ]
+    ports = [
+        {
+            "name": port_name,
+            "layer": dict(tap_layer),
+            "x_um": x,
+            "y_um": y,
+            "width_um": 0.42,
+            "direction_deg": direction,
+        }
+        for port_name, x, y, direction in ring_ports
+    ]
+    ports.append(
+        {
+            "name": "SIG",
+            "layer": {"layer": 67, "datatype": 20},
+            "x_um": port_x_um,
+            "y_um": port_y_um,
+            "width_um": 0.17,
+            "direction_deg": 90,
+        }
+    )
+    return {
+        "id": "ringed",
+        "cell": {
+            "gds_path": gds,
+            "cell_name": name,
+            "bbox_um": {"x0": -0.5, "y0": -0.5, "x1": 4.5, "y1": 4.5},
+            "ports": ports,
+        },
+    }
+
+
+def _hand_ringed_escape_report(tmp_path, pdk_root, name, ringed_block):
+    """Route ``ringed_block``'s `SIG` pin out to a stub above it, on the
+    `metal3` role (met2) -- the plane that clears an li1/diffusion ring."""
+    stub_gds = _write_empty_library_gds(tmp_path / f"{name}_stub.gds", f"{name}_stub")
+    return compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                ringed_block,
+                {
+                    "id": "stub",
+                    "cell": {
+                        "gds_path": stub_gds,
+                        "cell_name": f"{name}_stub",
+                        "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 0.34},
+                        "ports": [
+                            {
+                                "name": "CONN",
+                                "layer": {"layer": 67, "datatype": 20},
+                                "x_um": 0.5,
+                                "y_um": 0.0,
+                                "width_um": 0.17,
+                                "direction_deg": 270,
+                            }
+                        ],
+                    },
+                },
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["ringed", "stub"],
+                "origins_um": {
+                    "ringed": {"x": 0.0, "y": 0.0},
+                    "stub": {"x": 1.5, "y": 7.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "N1",
+                    "pins": [
+                        {"block": "ringed", "port": "SIG"},
+                        {"block": "stub", "port": "CONN"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal3", "width_um": 0.17},
+            "options": {
+                "cell_name": name,
+                "output": str(tmp_path / f"{name}.gds"),
+            },
+        }
+    )
+
+
+def test_compose_rejects_higher_plane_ring_escape_when_a_via_drop_pad_lands_on_the_ring(
+    tmp_path, pdk_root
+):
+    # The via-drop-ladder case: `metal3` (met2) clears both of the ring's own
+    # conductors on the endpoint-layer comparison alone, but the ladder that
+    # carries the backbone down to this li1 pin lands an intermediate pad on
+    # li1 -- one of the layers the ring's loop is drawn on -- and the pin sits
+    # *outside* the ring the block declares, i.e. on the ring's own trace
+    # rather than inside its enclosure. Comparing only the two endpoint layers
+    # would have silently allowed it.
+    ringed = _hand_ringed_cell_block(
+        tmp_path,
+        pdk_root,
+        "ringpad",
+        tap_layer={"layer": 65, "datatype": 20},
+        port_x_um=2.0,
+        port_y_um=4.0,  # on the ring's own N side centre line
+    )
+    report = _hand_ringed_escape_report(tmp_path, pdk_root, "ringpad_top", ringed)
+
+    assert report["unrouted_nets"] == ["N1"]
+    assert "closed guard/collector ring" in report["nets"][0]["legs"][0]["reason"]
+
+
+def test_compose_rejects_higher_plane_ring_escape_when_the_deck_cannot_resolve_the_ring(
+    tmp_path, pdk_root
+):
+    # Edge case: a ring whose taps report a layer the deck has no via ladder
+    # to (sky130's bare poly, 66/20 -- `_resolve_via_drop_layer` returns
+    # `(None, reason)` for it). "The deck cannot connect these two" is not
+    # evidence the planes are isolated, so the check falls back to today's
+    # reject-by-default rather than assuming clearance.
+    ringed = _hand_ringed_cell_block(
+        tmp_path,
+        pdk_root,
+        "ringpoly",
+        tap_layer={"layer": 66, "datatype": 20},
+        port_x_um=2.0,
+        port_y_um=2.0,  # well inside the ring
+    )
+    report = _hand_ringed_escape_report(tmp_path, pdk_root, "ringpoly_top", ringed)
+
+    assert report["unrouted_nets"] == ["N1"]
+    assert any(
+        "closed guard/collector ring" in note for note in report["drc_hints"]["notes"]
+    )
+
+
 def _two_ring_gapped_bjt_units(tmp_path, pdk_root, name, ring_gap_um):
     """#1902's own repro shape: two identical single-unit bjt_arrays, each
     with its own collector ring opened on the side facing the other, bussed

@@ -14,6 +14,38 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed**: `klt gen-compose`'s closed guard/collector-ring rejection is now
+  **plane-aware** instead of identity-only (issue #1960). Previously the check
+  fired from block/port identity alone — *this block reports a
+  `TAP_*`/`COLL_*` port and no `GAP_*` opening, therefore no route may touch
+  its other ports* — so a backbone flying two via levels **above** the ring
+  (e.g. `routing.layer_role: "metal3"` over a `bjt_array` collector ring whose
+  taps report the diffusion role) was refused with the same message, and the
+  same three remedies, as one laid on the ring's own metal. The only way to
+  give an enclosed net an externally reachable pad was to *break* the ring
+  (`params.ring_gap_side`/`ring_gap_um`), trading away the substrate isolation
+  the ring exists to provide, for what is a routing-layer decision.
+  `route_two_pin()` now admits such a leg when **every shape it draws** is
+  provably clear of the ring's own conductor: the backbone's plane (and the
+  `routing.cross_block_layer_role` plane it could be retried onto) differs from
+  every ring conductor layer and is separated from each by at least one via in
+  the resolved PDK family's own `ExtractionDeck` `metals`/`vias` stack (through
+  the same `_resolve_via_drop_layer` the via-drop check already uses), and
+  every via-drop landing pad the leg itself draws on a ring conductor layer
+  sits clear of the ring's trace. The ring's conductor layers are the union of
+  its ports' reported layers **plus** the deck's `metals[0]`, so a collector
+  ring whose `COLL_*` taps name only diffusion is still correctly seen as an
+  li1 loop too. Every "cannot be shown to clear" answer — a same-plane leg, a
+  layer pair the deck cannot resolve, a ring that does not report where its
+  sides run or how wide its trace is, a composition with no resolved routing
+  layer/extraction deck — keeps the existing rejection **verbatim**, so this
+  only ever *adds* admissible routes. Pre-1.0 value-set caveat per
+  [`docs/json-contract.md`](docs/json-contract.md): the set of legs that report
+  `routed: true` versus the existing closed-ring `reason` string widens; the
+  `reason` text itself is unchanged and no `schema_version` bumps. See
+  [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Routing *over* a
+  closed ring on a higher plane (#1960, fixed)".
+
 - **Added**: `klt lvs` now reports a **power/ground connectivity verdict**
   alongside the signal-connectivity one for `reference.form:
   "gate-level-verilog"` compares (issue #1952). That form is signal-only by
