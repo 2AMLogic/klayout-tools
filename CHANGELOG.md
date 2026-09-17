@@ -14,6 +14,39 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt lvs` now reports a **power/ground connectivity verdict**
+  alongside the signal-connectivity one for `reference.form:
+  "gate-level-verilog"` compares (issue #1952). That form is signal-only by
+  construction — a `klt place-and-route` `verilog_path` is written without
+  `-include_pwr_gnd`, so the reference has no power connectivity to
+  contradict the layout's, and a cell whose `VGND` pin was wired to the power
+  rail still reported `status: "match"`. The new, additive top-level
+  `power_connectivity` block closes that: it verifies, per abstracted
+  standard-cell instance, that every pin the PDK library declares as
+  power/ground reaches the net it should — three finding rules
+  (`power.inconsistent_pin_net`, `power.unexpected_pin_net`,
+  `power.unconnected_pin`), derived from data `klt lvs` already reads (the
+  library's own `.subckt` pin orders for *which* pins are power, the layout
+  netlist's `klt extract --abstract-cells` pin resolution for *what they
+  connect to*) — no new verb, no new input file, no per-PDK power-pin table.
+  It runs **before** issue #1622's filler/tap pruning, so a miswired filler
+  (issue #1442's defect class) is still caught. The report's own `status`,
+  `mismatch_count`, `error_count`, `category_counts` and
+  `category_error_counts` are **unchanged** — they stay exactly
+  `NetlistComparer.compare()`'s signal-connectivity result, so **a caller
+  wanting full LVS on a digital block gates on both `status` and
+  `power_connectivity.status`**. The block is emitted for every reference
+  form, carrying `status: "unchecked"` plus a `reason` when the check did not
+  run, so "was power connectivity verified by this run?" is answerable from
+  any report. Default-on, with `options.power_connectivity: false` as the
+  opt-out for a genuinely multi-domain design and
+  `options.power_connectivity.expected_nets` to upgrade the cross-instance
+  consistency check to an absolute one. No `schema_version` bump (purely
+  additive, per [`docs/json-contract.md`](docs/json-contract.md)). See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "Power/ground connectivity" and the
+  design record in
+  [`docs/design/pg-connectivity-check-decision.md`](docs/design/pg-connectivity-check-decision.md).
+
 - **Fixed**: `klt drc --engine klayout` no longer reports a
   partially-executed deck as `"status": "clean"` (issue #1941). A PDK-native
   deck typically calls `report(...)` near the top and appends rules as they

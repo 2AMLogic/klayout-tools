@@ -289,6 +289,50 @@ CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.un
 #: reference -- see `_prune_power_only_layout_circuits`.
 CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
 
+#: Issue #1952: ``power_connectivity.status`` values. Deliberately a
+#: *separate* verdict from the report's top-level ``status``, which stays
+#: exactly what it has always been -- ``NetlistComparer.compare()``'s own
+#: signal-connectivity result. A caller that wants full LVS on a
+#: ``reference.form: "gate-level-verilog"`` compare gates on both. See
+#: :func:`_power_connectivity_report` and
+#: ``docs/design/pg-connectivity-check-decision.md``.
+POWER_STATUS_MATCH = "match"
+POWER_STATUS_MISMATCH = "mismatch"
+POWER_STATUS_UNCHECKED = "unchecked"
+
+#: ``power_connectivity.findings[].rule``: one standard-cell power/ground pin
+#: name reaches more than one distinct net across the design's instances --
+#: the single-power-domain invariant a ``klt place-and-route`` block is built
+#: on, violated. One finding per offending pin name (never per instance): the
+#: check reports the *disagreement*, and deliberately does not nominate a
+#: winner, because with two instances disagreeing there is no majority to
+#: appeal to. Declare ``options.power_connectivity.expected_nets`` to get the
+#: stronger, absolute form (:data:`RULE_POWER_UNEXPECTED_PIN_NET`) instead.
+RULE_POWER_INCONSISTENT_PIN_NET = "power.inconsistent_pin_net"
+
+#: ``power_connectivity.findings[].rule``: the caller declared which net this
+#: power/ground pin name must reach (``options.power_connectivity.
+#: expected_nets``) and at least one instance's pin reaches a different one.
+#: Strictly stronger than :data:`RULE_POWER_INCONSISTENT_PIN_NET` -- it also
+#: catches a design where *every* instance is miswired the same way, which no
+#: amount of cross-instance agreement can.
+RULE_POWER_UNEXPECTED_PIN_NET = "power.unexpected_pin_net"
+
+#: ``power_connectivity.findings[].rule``: a standard-cell instance's
+#: power/ground pin resolved to no net at all -- the pin never landed on
+#: routed conductor (the extraction could not probe it to a net). Reported
+#: separately from the two net-identity rules above because the defect is
+#: different in kind: not "connected to the wrong rail" but "connected to
+#: nothing".
+RULE_POWER_UNCONNECTED_PIN = "power.unconnected_pin"
+
+#: How many individual instances each ``power_connectivity.findings[].nets[]``
+#: group names before truncating (``instances_truncated: true``). A real
+#: routed block has hundreds of standard-cell instances on one rail, and a
+#: finding that dumped all of them would bury the few that actually differ;
+#: the group's own ``instance_count`` is always the exact, untruncated total.
+_POWER_INSTANCE_SAMPLE_LIMIT = 10
+
 #: Substring KLayout's own ``Netlist.combine_devices()`` internal-consistency
 #: ``RuntimeError`` always carries (issue #466) -- e.g. "Internal error:
 #: Terminal still connected after removing device in device combination:
@@ -765,6 +809,18 @@ def run_lvs(request: str) -> dict[str, Any]:
     # each netlist is resolved (`_apply_compare_parameters`, further down),
     # the same two-stage split `options.combine_devices`'s list shape uses.
     compare_parameters = _parse_compare_parameters(options)
+    # Issue #1952: the per-cell-instance power/ground pin-to-net check that
+    # pairs with a signal-only `reference.form: "gate-level-verilog"`
+    # compare -- see `_power_connectivity_report`. Parsed unconditionally
+    # (like `combine_devices_max_attempts` above) so a malformed value is a
+    # clean request error for every reference form, but only consulted for
+    # `gate-level-verilog`, the one form whose reference structurally cannot
+    # carry power connectivity of its own.
+    (
+        power_connectivity_enabled,
+        power_connectivity_expected_nets,
+        power_connectivity_echo,
+    ) = _parse_power_connectivity(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
     # extract` is always flat, so a hierarchical reference/pre-extracted
@@ -881,6 +937,22 @@ def run_lvs(request: str) -> dict[str, Any]:
             f"{', '.join(repr(f) for f in _REFERENCE_FORMS)}; got "
             f"{reference_form!r}"
         )
+    # Issue #1952: the `power_connectivity` report block, replaced below for
+    # a `gate-level-verilog` reference. Every other form's reference is
+    # arbitrary SPICE that carries its own power nets and pins, so the
+    # comparer already checks them as ordinary connectivity -- there is no
+    # signal-only gap for this check to fill, and nothing licenses calling
+    # any pin name a power pin (the same restriction that scopes
+    # `_prune_power_only_layout_circuits`). Emitted as an explicit
+    # `"unchecked"` carrying a reason rather than omitted, so the question
+    # "did this run verify power connectivity?" is answerable from any
+    # `klt lvs` report on its own.
+    power_connectivity: dict[str, Any] = _power_connectivity_unchecked(
+        f"reference.form is {reference_form!r}, whose reference netlist "
+        "carries its own power/ground pins and nets -- they take part in "
+        "the ordinary compare, so this check (which exists to cover the "
+        "signal-only 'gate-level-verilog' form) does not apply"
+    )
     reference_device_map = reference_spec.get("device_map")
     if reference_device_map is not None and not isinstance(reference_device_map, dict):
         raise LvsError("request.reference.device_map must be a JSON object")
@@ -937,6 +1009,22 @@ def run_lvs(request: str) -> dict[str, Any]:
     )
 
     if reference_form == "gate-level-verilog":
+        # Issue #1952: the power/ground half of the compare, run *before*
+        # the power-only prune below -- see `_power_pin_connections`'s
+        # docstring for why that order is load-bearing (the prune removes
+        # exactly the filler/tap instances whose power connectivity is the
+        # only thing about them any check could verify).
+        if power_connectivity_enabled:
+            power_connectivity = _power_connectivity_report(
+                layout_netlist,
+                reference_netlist,
+                reference_pin_orders,
+                expected_nets=power_connectivity_expected_nets,
+            )
+        else:
+            power_connectivity = _power_connectivity_unchecked(
+                "disabled by options.power_connectivity: false"
+            )
         # Issue #1622: a `gate-level-verilog` reference never instantiates a
         # power-only cell (filler/tap) at all -- see
         # `_prune_power_only_layout_circuits`'s docstring for why this must
@@ -1743,8 +1831,26 @@ def run_lvs(request: str) -> dict[str, Any]:
             # same always-present-but-nullable convention
             # `combine_devices_per_circuit`/`netgen_setup` already follow.
             "compare_parameters": compare_parameters,
+            # Issue #1952: `null` when the option was omitted (the check
+            # still runs -- omitting it is the default-on case), else the
+            # caller's own `true`/`false`/`{"expected_nets": {...}}` value
+            # verbatim. Same always-present-but-nullable convention
+            # `combine_devices_per_circuit`/`netgen_setup` follow; echoed
+            # unresolved so a committed report round-trips back into the
+            # request document it came from.
+            "power_connectivity": power_connectivity_echo,
         },
         "status": status,
+        # Issue #1952: the power/ground half of a `reference.form:
+        # "gate-level-verilog"` compare, reported as its own verdict beside
+        # `status` rather than folded into it. `status` is, and stays,
+        # exactly `NetlistComparer.compare()`'s own signal-connectivity
+        # result (see this module's docstring) -- so a caller that wants
+        # full LVS on a digital block gates on
+        # `status == "match" and power_connectivity["status"] == "match"`.
+        # See `_power_connectivity_report` and
+        # `docs/design/pg-connectivity-check-decision.md`.
+        "power_connectivity": power_connectivity,
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
@@ -2023,6 +2129,17 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         options["compare_parameters"] = {
             key: list(value) for key, value in compare_parameters.items()
         }
+    # Issue #1952: re-assert the caller's own `power_connectivity` value
+    # verbatim when the committed report carried one. `None` (the option was
+    # omitted) is left out entirely rather than reconstructed as `true`:
+    # omitting it is already the default-on case, so the reconstructed
+    # request stays as close to the original as the echo allows -- the same
+    # discipline the option re-assertions above follow.
+    power_connectivity = echoed.get("power_connectivity")
+    if isinstance(power_connectivity, bool):
+        options["power_connectivity"] = power_connectivity
+    elif isinstance(power_connectivity, dict):
+        options["power_connectivity"] = dict(power_connectivity)
     if options:
         request["options"] = options
     return request
@@ -2101,8 +2218,20 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     fresh = run_lvs(json.dumps(request))
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
     exclude.update(
-        (field,) for field in ("reference_top", "options") if field not in committed
+        (field,)
+        for field in ("reference_top", "options", "power_connectivity")
+        if field not in committed
     )
+    # Issue #1952: the same "a field the committed report never carried
+    # cannot itself have drifted" rule, one level down -- a report committed
+    # after issue #1205 added the `options` echo but before this option
+    # existed has an `options` block without this key, and the current
+    # build's richer echo is not drift.
+    committed_options = committed.get("options")
+    if not isinstance(committed_options, dict) or (
+        "power_connectivity" not in committed_options
+    ):
+        exclude.add(("options", "power_connectivity"))
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
@@ -4649,6 +4778,381 @@ def _prune_power_only_layout_circuits(
         '"topology.power_only_pruned")',
         "layout",
     )
+
+
+# --------------------------------------------------------------------------- #
+# Power/ground connectivity check (issue #1952)
+# --------------------------------------------------------------------------- #
+
+
+def _parse_power_connectivity(
+    options: Mapping[str, Any],
+) -> tuple[bool, dict[str, str] | None, Any]:
+    """Resolve ``options.power_connectivity`` into
+    ``(enabled, expected_nets, echo)`` (issue #1952).
+
+    Accepted shapes:
+
+    * **absent** (the default) -- ``(True, None, None)``. The
+      cross-instance consistency check runs; nothing is echoed back as an
+      explicit request value, matching ``netgen_setup``/
+      ``combine_devices_per_circuit``'s "``null`` when the option was
+      omitted" convention.
+    * ``false`` -- ``(False, None, False)``. The opt-out for a genuinely
+      multi-domain design, where one pin name legitimately reaches more
+      than one net and the consistency invariant does not hold.
+    * ``true`` -- ``(True, None, True)``. Identical behaviour to omitting
+      the key, stated explicitly so a committed request document records
+      that the check was wanted.
+    * ``{"expected_nets": {"<PIN>": "<NET>", ...}}`` -- ``(True, {...},
+      {...})``. Names the net each power/ground pin must reach, which turns
+      the *relative* consistency check into an *absolute* one (see
+      :data:`RULE_POWER_UNEXPECTED_PIN_NET`). Declaring a subset is fine:
+      every pin the mapping does not name still gets the consistency check.
+
+    Pin and net names are upper-cased here, once, for the same reason
+    :func:`_circuit_pin_names` upper-cases: SPICE is case-insensitive and
+    the layout netlist reaches this module through readers that disagree
+    about case (``NetlistSpiceReader`` normalises to upper case; a netlist
+    handed over from ``klt extract``'s own in-process extraction does not).
+    The *echo* keeps the caller's own spelling, so a committed report still
+    round-trips back into the request document it came from.
+
+    A wrong-shaped value is a clean request error, matching every other
+    option parser in this module (see :func:`_parse_compare_parameters`).
+    """
+    if "power_connectivity" not in options:
+        return True, None, None
+    value = options["power_connectivity"]
+    if isinstance(value, bool):
+        return value, None, value
+    if not isinstance(value, dict):
+        raise LvsError(
+            "options.power_connectivity must be a boolean or a JSON object, "
+            'e.g. {"expected_nets": {"VPWR": "VPWR", "VGND": "VGND"}}'
+        )
+    unknown = sorted(set(value) - {"expected_nets"})
+    if unknown:
+        raise LvsError(
+            "options.power_connectivity accepts only 'expected_nets' "
+            f"(got: {', '.join(unknown)})"
+        )
+    raw = value.get("expected_nets")
+    if raw is None:
+        return True, None, dict(value)
+    if not isinstance(raw, dict) or not raw:
+        raise LvsError(
+            "options.power_connectivity.expected_nets must be a non-empty "
+            "JSON object mapping a power/ground pin name to the net name it "
+            'must reach, e.g. {"VPWR": "VPWR", "VGND": "VGND"}'
+        )
+    expected: dict[str, str] = {}
+    for pin, net in raw.items():
+        if not isinstance(pin, str) or not pin.strip():
+            raise LvsError(
+                "options.power_connectivity.expected_nets keys must be "
+                "non-empty power/ground pin-name strings"
+            )
+        if not isinstance(net, str) or not net.strip():
+            raise LvsError(
+                "options.power_connectivity.expected_nets values must be "
+                f"non-empty net-name strings (pin {pin!r})"
+            )
+        expected[pin.strip().upper()] = net.strip().upper()
+    return True, expected, dict(value)
+
+
+def _power_pin_connections(
+    layout_netlist: Any, power_pin_names: frozenset[str]
+) -> list[dict[str, Any]]:
+    """Every ``(instance, power/ground pin) -> net`` edge in
+    ``layout_netlist`` (issue #1952).
+
+    Walks each circuit's subcircuit instances and, for every pin its master
+    declares whose (upper-cased) name is in ``power_pin_names`` -- the
+    library-derived power-pin universe :func:`_gate_level_power_pin_names`
+    computes, never a hardcoded per-PDK name table -- records which net that
+    instance actually connects it to. ``net`` is ``None`` when the pin
+    resolved to no net at all.
+
+    **Must run before :func:`_prune_power_only_layout_circuits`**, not
+    after. A filler/tap cell is *only* power pins, so pruning removes
+    exactly the instances whose power connectivity is the only thing about
+    them a compare could ever check -- and an unconditionally-inserted
+    filler shorting ``VPWR``/``VGND`` onto a signal net is the concrete
+    defect class issue #1442 fixed at the source. Checking after the prune
+    would silently exempt them.
+    """
+    rows: list[dict[str, Any]] = []
+    for circuit in layout_netlist.each_circuit():
+        for sub in circuit.each_subcircuit():
+            ref = sub.circuit_ref()
+            if ref is None:
+                continue
+            for pin in ref.each_pin():
+                name = pin.name()
+                if not name or name.upper() not in power_pin_names:
+                    continue
+                net = sub.net_for_pin(pin.id())
+                rows.append(
+                    {
+                        "circuit": circuit.name,
+                        "instance": sub.expanded_name(),
+                        "cell": ref.name,
+                        "pin": name.upper(),
+                        "net": net.expanded_name() if net is not None else None,
+                    }
+                )
+    return rows
+
+
+def _power_net_groups(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group one pin name's :func:`_power_pin_connections` rows by the net
+    each instance reaches, as ``power_connectivity.findings[].nets[]``
+    entries (issue #1952).
+
+    ``instance_count`` is always the exact, untruncated number of instances
+    in the group; ``instances`` lists at most
+    :data:`_POWER_INSTANCE_SAMPLE_LIMIT` of them, with
+    ``instances_truncated`` saying whether anything was left out -- a real
+    routed block puts hundreds of instances on one rail, and the few that
+    differ are the whole point of the finding.
+    """
+    by_net: dict[str | None, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_net.setdefault(row["net"], []).append(row)
+    groups: list[dict[str, Any]] = []
+    # `None` (an unconnected pin) sorts first, then net names alphabetically.
+    for net in sorted(by_net, key=lambda name: (name is not None, name or "")):
+        members = sorted(by_net[net], key=lambda row: (row["circuit"], row["instance"]))
+        sample = members[:_POWER_INSTANCE_SAMPLE_LIMIT]
+        groups.append(
+            {
+                "net": net,
+                "instance_count": len(members),
+                "instances": [
+                    {
+                        "circuit": row["circuit"],
+                        "instance": row["instance"],
+                        "cell": row["cell"],
+                    }
+                    for row in sample
+                ],
+                "instances_truncated": len(sample) < len(members),
+            }
+        )
+    return groups
+
+
+def _describe_power_net_groups(groups: list[dict[str, Any]]) -> str:
+    """A compact ``'<net>' (N instance(s), e.g. X1)`` rendering of
+    :func:`_power_net_groups`'s output for a finding's ``description``."""
+    parts = []
+    for group in groups:
+        net = "no net" if group["net"] is None else repr(group["net"])
+        example = group["instances"][0]["instance"] if group["instances"] else "?"
+        parts.append(f"{net} ({group['instance_count']} instance(s), e.g. {example})")
+    return "; ".join(parts)
+
+
+def _power_connectivity_findings(
+    rows: list[dict[str, Any]], expected_nets: dict[str, str] | None
+) -> list[dict[str, Any]]:
+    """The ``power_connectivity.findings[]`` list (issue #1952).
+
+    Per power/ground pin name, in this order:
+
+    1. :data:`RULE_POWER_UNCONNECTED_PIN` when any instance's pin reached no
+       net at all.
+    2. :data:`RULE_POWER_UNEXPECTED_PIN_NET` when ``expected_nets`` names
+       this pin and at least one instance reaches a different net. This
+       *replaces* rule 3 for that pin: it is the strictly stronger check
+       (it also catches a design where every instance is miswired the same
+       way, which cross-instance agreement cannot).
+    3. :data:`RULE_POWER_INCONSISTENT_PIN_NET` when no expectation was
+       declared for this pin and its instances reach more than one distinct
+       net.
+
+    One finding per offending *pin name*, never per instance: with two
+    instances disagreeing there is no majority to appeal to, so the check
+    reports the disagreement and names both sides rather than nominating a
+    winner it cannot justify. Every finding is ``severity: "error"`` -- a
+    power/ground pin on the wrong net is a real defect in every case this
+    fires, and unlike a ``mismatches[]`` warning there is no verdict for a
+    lesser severity to soften (``power_connectivity.status`` is derived from
+    the presence of findings, and the report's own ``status`` is untouched).
+    """
+    by_pin: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_pin.setdefault(row["pin"], []).append(row)
+
+    findings: list[dict[str, Any]] = []
+    for pin in sorted(by_pin):
+        entries = by_pin[pin]
+        expected = (expected_nets or {}).get(pin)
+
+        unconnected = [row for row in entries if row["net"] is None]
+        if unconnected:
+            groups = _power_net_groups(unconnected)
+            findings.append(
+                {
+                    "rule": RULE_POWER_UNCONNECTED_PIN,
+                    "severity": "error",
+                    "pin": pin,
+                    "expected_net": expected,
+                    "description": (
+                        f"standard-cell power/ground pin {pin!r} reaches no "
+                        f"net at all on {len(unconnected)} instance(s) -- "
+                        f"{_describe_power_net_groups(groups)}"
+                    ),
+                    "instance_count": len(entries),
+                    "nets": groups,
+                }
+            )
+
+        connected = [row for row in entries if row["net"] is not None]
+        if not connected:
+            continue
+
+        if expected is not None:
+            offending = [row for row in connected if row["net"].upper() != expected]
+            if offending:
+                groups = _power_net_groups(offending)
+                findings.append(
+                    {
+                        "rule": RULE_POWER_UNEXPECTED_PIN_NET,
+                        "severity": "error",
+                        "pin": pin,
+                        "expected_net": expected,
+                        "description": (
+                            f"standard-cell power/ground pin {pin!r} must "
+                            f"reach net {expected!r} "
+                            "(options.power_connectivity.expected_nets) but "
+                            f"{len(offending)} instance(s) reach a different "
+                            f"net -- {_describe_power_net_groups(groups)}"
+                        ),
+                        "instance_count": len(entries),
+                        "nets": groups,
+                    }
+                )
+            continue
+
+        distinct = {row["net"] for row in connected}
+        if len(distinct) > 1:
+            groups = _power_net_groups(connected)
+            findings.append(
+                {
+                    "rule": RULE_POWER_INCONSISTENT_PIN_NET,
+                    "severity": "error",
+                    "pin": pin,
+                    "expected_net": None,
+                    "description": (
+                        f"standard-cell power/ground pin {pin!r} reaches "
+                        f"{len(distinct)} distinct nets across "
+                        f"{len(connected)} instance(s) -- "
+                        f"{_describe_power_net_groups(groups)}. A single-"
+                        "power-domain block must wire every instance's "
+                        "same-named supply pin to the same net; declare "
+                        "options.power_connectivity.expected_nets to state "
+                        "which one is correct, or set "
+                        "options.power_connectivity: false if this design is "
+                        "genuinely multi-domain"
+                    ),
+                    "instance_count": len(entries),
+                    "nets": groups,
+                }
+            )
+    return findings
+
+
+def _power_connectivity_unchecked(reason: str) -> dict[str, Any]:
+    """A ``power_connectivity`` block for a run that did not perform the
+    check (issue #1952), stating *why* in ``reason``.
+
+    Always emitted -- including for a reference form this check does not
+    apply to -- so the question "was power/ground connectivity verified by
+    this run?" is answerable from any ``klt lvs`` report on its own, rather
+    than requiring a reader to know which ``reference.form`` the run used
+    and what that form's scope boundary is. Making that boundary visible in
+    the evidence is the original friction issue #1952 reported.
+    """
+    return {
+        "status": POWER_STATUS_UNCHECKED,
+        "reason": reason,
+        "power_pins": [],
+        "instance_count": 0,
+        "expected_nets": None,
+        "findings": [],
+        "finding_count": 0,
+    }
+
+
+def _power_connectivity_report(
+    layout_netlist: Any,
+    reference_netlist: Any,
+    library_pin_orders: Mapping[str, list[str]] | None,
+    *,
+    expected_nets: dict[str, str] | None,
+) -> dict[str, Any]:
+    """The ``power_connectivity`` block for a
+    ``reference.form: "gate-level-verilog"`` compare (issue #1952).
+
+    **What "PG connectivity" means here**: per-standard-cell-instance
+    *pin-to-net* verification. For every abstracted cell instance in the
+    layout netlist, every pin the PDK library declares as power/ground must
+    reach the net it is supposed to reach -- the net the caller declared
+    (``expected_nets``), or, absent a declaration, the same net every other
+    instance's same-named pin reaches. It is deliberately **not** a
+    geometric rail/grid continuity check: that is a different question,
+    answered today by ``klt ring-check`` (is this ring a closed annulus?)
+    and ``klt power`` (does the grid carry the current?), and answering it
+    here would need the routed geometry this compare never sees.
+
+    **Why this is checkable at all when the reference is signal-only.** The
+    reference Verilog carries no power connectivity, so there is nothing to
+    compare *against* -- which is exactly why ``docs/cli/lvs.md`` documents
+    this form as signal-only. But the check does not need the reference's
+    connectivity: it needs the reference *library*'s pin data (which pins
+    are power/ground -- :func:`_gate_level_power_pin_names` already derives
+    that, structurally, for issue #1622's pruning) plus the invariant that a
+    ``klt place-and-route`` block is single-power-domain by construction.
+    The layout side already carries the real per-instance power connectivity
+    (``klt extract --abstract-cells`` resolves and probes every declared pin,
+    power pins included). So the missing half of "full LVS" for this form is
+    recoverable from data ``run_lvs`` has already read, without a new verb,
+    a new input file, or a PDK-specific power-pin table.
+
+    Returns :func:`_power_connectivity_unchecked` when there is no derivable
+    power-pin universe (a reference with no library-cell circuits at all) or
+    when no instance in the layout carries a power/ground pin -- "no
+    evidence" is never reported as a clean verdict, mirroring
+    :func:`_is_power_only_circuit`'s own missing-evidence discipline.
+    """
+    power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
+    if not power_pin_names:
+        return _power_connectivity_unchecked(
+            "no power/ground pin universe could be derived from the "
+            "reference library's own pin-order data -- nothing establishes "
+            "which of this design's pins are power/ground pins"
+        )
+    rows = _power_pin_connections(layout_netlist, power_pin_names)
+    if not rows:
+        return _power_connectivity_unchecked(
+            "no layout-side subcircuit instance declares any of the "
+            "reference library's power/ground pins "
+            f"({', '.join(sorted(power_pin_names))}) -- the layout netlist "
+            "carries no power connectivity to check"
+        )
+    findings = _power_connectivity_findings(rows, expected_nets)
+    return {
+        "status": POWER_STATUS_MISMATCH if findings else POWER_STATUS_MATCH,
+        "reason": None,
+        "power_pins": sorted({row["pin"] for row in rows}),
+        "instance_count": len({(row["circuit"], row["instance"]) for row in rows}),
+        "expected_nets": dict(sorted(expected_nets.items())) if expected_nets else None,
+        "findings": findings,
+        "finding_count": len(findings),
+    }
 
 
 # --------------------------------------------------------------------------- #
