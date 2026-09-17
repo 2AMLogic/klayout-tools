@@ -22,6 +22,19 @@ proposed input/output contract per stage, which class of model should run
 each one, and an honest accounting of which stages `klt` already serves
 versus which still await tooling.
 
+**This document covers the analog path only.** The digital path (spec → RTL
+→ synthesis → place-and-route → DRC/LVS clean → timing-closed) is a peer,
+not a variant, and has its own stage graph, loops, model-class matrix, and
+gap map in [`digital-pipeline.md`](digital-pipeline.md) (issue #1956) —
+eleven stages D1–D11 and three loops (C: RTL ⇄ functional verification,
+D: synthesis/P&R ⇄ timing, E: P&R ⇄ DRC/LVS/ERC). The D-numbers are
+deliberately *not* in one-to-one correspondence with the S-numbers below;
+that document's "Crosswalk to the analog S1–S11" section is the mapping.
+Two stages here are load-bearing for it: S3's missing block-spec schema is
+a **shared** gap, not a per-path one (see §4's S3 row), and the analog
+S5–S7/S9 stages are what a *full-custom* digital block walks in place of
+its own D5–D8, per that document's §5.
+
 ## Scope: skills are procedure, not strategy
 
 This doc — and the skills it will feed — defines **navigation**: what

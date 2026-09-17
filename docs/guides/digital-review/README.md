@@ -16,6 +16,21 @@ side of the port; wiring these guides into each digital canary's own
 `CLAUDE.md` review-bar text is left to one follow-up issue per canary (see
 the parent issue body).
 
+**Where these guides sit in the digital pipeline.**
+[`docs/design/digital-pipeline.md`](../../design/digital-pipeline.md) (issue
+#1956) is the digital path's stage contract — eleven stages D1–D11 and three
+loops — and it places this directory precisely: these guides are **quality
+bars applied to a stage's output**, not stage contracts. Every guide below
+reviews an artifact produced at **D5 (RTL authoring)** or **D6 (functional
+verification)**; the pipeline doc says when those stages are *done* (Loop C's
+convergence criteria), and these guides say whether what they produced is any
+good. They compose rather than overlap — D5's exit criteria cite the
+mechanical evidence the "Evidence mapping" table below names, and D5's
+model-class rationale rests directly on this table's `*(none yet)*` rows
+(security/side-channel findings, spec-quoted behavioral claims, CDC structural
+issues), which are the concerns no `klt` verb checks and that therefore survive
+D6 through D10 untouched.
+
 ## When each guide applies
 
 | Guide | Applies to | Scope |
