@@ -376,8 +376,10 @@ into the circuit.)
   (A narrower, `blocks[].cell`-scoped exception to "not aware of internal
   geometry" was added later — see "An inter-block leg's own approach stub
   is no longer a silent short to its own block (#1527, fixed)" below.)
-  Case **(2)** now also has a remedy that keeps the ring: see "Routing
-  through a ring opening" below.
+  Case **(2)** now also has two remedies that keep the ring: cut a routing
+  opening in it (see "Routing through a ring opening" below), or route on a
+  plane the ring has no conductor on (see "Routing *over* a closed ring on a
+  higher plane" below, which needs no floorplan change at all).
 - **The obstacle-overlap check above is `routing.width_um`-aware, not just a
   zero-width centerline test (#999, fixed).** The bbox/margin heuristic
   described above used to test only the backbone's zero-width *centerline*
@@ -647,6 +649,68 @@ into the circuit.)
                "ring_gap_um": 1.0, "ring_gap_offset_um": -0.41}' > b.json
   # connectivity[] between a.M1_1_D and b.Q1_1_S now routes (exit 0) with
   # both guard rings intact, instead of exit 3 + unrouted_nets[].
+  klt gen-compose request.json --format json
+  ```
+- **Routing *over* a closed ring on a higher plane (#1960, fixed).** The ring
+  check above (and #199's closed-ring rejection it extends) used to be decided
+  purely from block/port identity — *this block reports a `TAP_*`/`COLL_*` port
+  and no `GAP_*` opening, therefore no route may touch its other ports* — with
+  no term for **which metal level the leg would actually be drawn on**. A
+  backbone flying two via levels above the ring was refused with the same
+  message, and the same three remedies, as one laid on the ring's own metal, so
+  the only way to give an enclosed net an externally reachable pad was to
+  *break* the ring (`ring_gap_side`, above) — a floorplan change that
+  interrupts the ring's substrate isolation — for what is a routing-layer
+  decision. `route_two_pin()` now resolves the ring's own conductor layers and
+  compares them against the layer(s) the leg draws on, admitting the leg only
+  when **every shape it draws** is provably clear of the ring:
+  - **The ring's conductor layers** are the union of every ring port's own
+    reported `layer` (a `guard_ring`/`diff_pair`/`mos_array` `TAP_*` reports
+    the family's local-metal role; a `bjt_array` `COLL_*` reports the
+    *diffusion* role; a `GAP_*` marker reports the layer a route would cross
+    the ring on) **plus the deck's `metals[0]`** — the local-metal level every
+    `klt gen` ring draws its metal loop on whether or not a tap port reports
+    it. Without that second term, an li1 backbone would look like it "cleared"
+    a collector ring whose `COLL_*` ports only name diffusion.
+  - **The backbone's own plane** must differ from every one of those layers
+    *and* be separated from each by at least one via in the resolved PDK
+    family's own `ExtractionDeck` `metals`/`vias` stack — resolved through the
+    same `_resolve_via_drop_layer` the via-drop check (#454/#1567) already
+    uses, never a second, private via table. When `routing.cross_block_layer_role`
+    (#1168) is configured, the layer it could be retried onto must clear too.
+  - **The via-drop landing pads** the leg itself draws must clear it as well: a
+    ladder carrying the backbone down to a pin lands an intermediate pad on
+    *every* metals level it passes through, and one of those can be the ring's
+    own layer. Such a pad is admitted only where it is provably clear of the
+    ring's trace — strictly inside the ring's enclosure for the ringed block's
+    own pin, and inside-or-clear-of the ring's trace band for the far pin —
+    with clearance of half the ring's trace width plus half the via-drop
+    landing pad's own fixed footprint (independent of the route's `width_um`)
+    plus the block's own `drc_hints.min_spacing_um`. Comparing only the two
+    endpoint layers would have wrongly admitted a pad landing on the ring.
+
+  Every "cannot be shown to clear" answer keeps today's rejection, verbatim:
+  a same-plane leg, a layer pair the deck cannot resolve (`_resolve_via_drop_layer`
+  returning an error, or a ring layer that is not a deck-known role at all), a
+  ring that does not report where its four sides run or how wide its trace is,
+  and any composition with no resolved `routing.layer_role`/extraction deck.
+  So, as with #434, the check is *refined*, never relaxed — on the ring's own
+  plane the behavior is exactly #199's. The same plane term also applies to the
+  gapped-ring geometry check above: a leg that flies over a ring is not
+  measured against that ring's opening at all, since it never crosses its
+  metal.
+
+  ```bash
+  # A two-unit bjt_array keeping its default *closed* collector ring:
+  klt gen bjt_array --pdk sky130A -o array.gds --format json \
+    --params '{"emitter_um": 3.4, "rows": 1, "cols": 2, "dummy": 0,
+               "topology": "common_centroid", "ratio": 1,
+               "add_collector_ring": true}' > array.json
+  # Its COLL_* taps report diffusion (65/20) and its ring metal is li1
+  # (67/20). With routing.layer_role "metal" (li1) a route out of Q0_B is
+  # still rejected -- that is the ring's own plane. With "metal3" (met2) the
+  # same composition routes (exit 0), the ring stays closed, and `klt
+  # extract` shows the routed net and the ring's tap net still distinct.
   klt gen-compose request.json --format json
   ```
 - **The composed output now carries net labels (#200, fixed).** Previously,

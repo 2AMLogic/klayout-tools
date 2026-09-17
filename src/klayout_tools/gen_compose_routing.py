@@ -1117,6 +1117,215 @@ def _ring_side_lines(block: dict[str, Any]) -> dict[str, float]:
     return lines
 
 
+def _ring_conductor_layers(
+    block: dict[str, Any], deck: ExtractionDeck
+) -> frozenset[tuple[int, int]]:
+    """Every layer ``block``'s guard/collector ring's own loop is conductive
+    on (issue #1960) -- the layer set a route must stay off to fly *over* the
+    ring rather than merge with it.
+
+    Two sources, unioned:
+
+    * every ring port's own reported ``layer``. A ``TAP_``/``COLL_`` tap port
+      reports the layer that makes it a tie (``guard_ring``/``diff_pair``/
+      ``mos_array`` report their tap on the family's ``"metal"`` role;
+      ``bjt_array``'s ``COLL_*`` collector tap reports the *diffusion* role,
+      which is what makes it a collector tie), and a ``GAP_*`` opening marker
+      reports "the layer a route would cross the ring on" (see ``gen.py``'s
+      :func:`~klayout_tools.gen._ring_ports`).
+    * ``deck.metals[0]`` -- the local-interconnect level every ``klt gen``
+      ring draws its *metal* loop on, whether or not a tap port happens to
+      report it. ``bjt_array``'s collector ring is the case that matters:
+      its ``COLL_*`` ports report only the diffusion role, but the ring is
+      drawn "on both the diffusion and the local-metal role" (``gen.py``'s
+      ``_bjt_array_describe``), so a check that trusted the tap port's layer
+      alone would conclude a ``"metal"``-role (li1) backbone flies over a
+      ring it in fact runs straight into. ``deck.metals[0]`` *is* the
+      ``"metal"`` role for every supported family (sky130 li1 ``67/20``,
+      gf180mcu Metal1 ``34/0`` -- see ``_PDK_ROLE_LAYERS``), read off the
+      deck rather than re-derived from a second, private table.
+
+    Empty only when ``block`` reports no ring port with a usable layer at
+    all, which callers treat as "cannot be shown to clear" and reject.
+    """
+    layers: set[tuple[int, int]] = set()
+    for name, port in block["ports"].items():
+        if _ring_port_side(name) is None or not isinstance(port, dict):
+            continue
+        layer = _port_own_layer(port)
+        if layer is not None:
+            layers.add(layer)
+    if layers and deck.metals:
+        layers.add(deck.metals[0])
+    return frozenset(layers)
+
+
+def _ring_trace_half_width_um(block: dict[str, Any]) -> float | None:
+    """Half the width of ``block``'s ring trace, read off its own tap ports'
+    reported ``width_um`` (``_ring_ports``' ``tap_width_um``), or ``None``
+    when no tap port reports a usable one.
+
+    Only ``TAP_``/``COLL_`` ports are read: a ``GAP_*`` port's ``width_um``
+    is the *opening's* length along its side, not the ring's trace width.
+    """
+    widths: list[float] = []
+    for name, port in block["ports"].items():
+        if not name.startswith(_RING_TAP_PORT_PREFIXES) or not isinstance(port, dict):
+            continue
+        if _ring_port_side(name) is None:
+            continue
+        value = port.get("width_um")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value > 0.0:
+            widths.append(float(value))
+    if not widths:
+        return None
+    return max(widths) / 2.0
+
+
+def _leg_plane_clears_ring(
+    block: dict[str, Any],
+    ring_pin: dict[str, Any],
+    offset_um: dict[str, float],
+    endpoints: tuple[tuple[dict[str, Any], dict[str, Any], tuple[float, float]], ...],
+    route_layers: tuple[tuple[int, int] | None, ...],
+    deck: ExtractionDeck | None,
+) -> bool:
+    """Whether this leg is drawn entirely on plane(s) that fly *over*
+    ``block``'s guard/collector ring instead of merging with it (issue
+    #1960).
+
+    The guard/collector-ring check (#199 case 2) was decided purely from
+    block/port identity: *this block reports a ``TAP_*``/``COLL_*`` port and
+    no ``GAP_*`` opening, therefore no route may touch its other ports*. That
+    is exactly right for a backbone drawn on the ring's own metal, and wrong
+    for one drawn two via levels above it -- a ``metal3``-role (met2)
+    backbone crossing a diffusion/li1 collector ring shares no conductor with
+    it, yet was rejected with the same message and pushed the caller into
+    breaking the ring (``params.ring_gap_side``) for what is a routing-layer
+    decision. This predicate is the plane term that branch was missing.
+
+    Returns ``True`` only when *every* shape the leg draws is provably clear
+    of the ring's own conductor:
+
+    1. **The backbone.** Each layer the leg may resolve onto (``route_layer``
+       plus ``cross_block_route_layer`` when configured -- the same-layer-
+       short retry, #1168, can switch the drawn layer *after* this check
+       runs, so both must clear) must differ from every layer in
+       :func:`_ring_conductor_layers` *and* be separated from it by at least
+       one via in the deck's own ``metals``/``vias`` stack, resolved through
+       the same :func:`_resolve_via_drop_layer` the router's via-drop check
+       already uses. A pair the deck cannot resolve at all -- ``(None,
+       reason)`` (no via declared for a needed hop, a bare-poly ring), or
+       ``(None, None)`` (the backbone is not on a metals-stack level, or the
+       ring's layer is not a deck-known role) -- is *not* evidence of
+       isolation, so it falls back to rejecting exactly as before.
+    2. **The via-drop landing pads.** A cleared backbone is not enough: the
+       ladder that carries each endpoint down to its own pad
+       (:func:`_resolve_via_drop_layer` again) lands an intermediate pad on
+       *every* metals level it passes through, and one of those can be the
+       ring's own layer. Such a pad is admitted only where it is provably
+       clear of the ring's trace -- strictly inside the ring's enclosure for
+       the ringed block's own endpoint (which is what the ring encloses),
+       and inside-or-clear-of the ring's trace band for the far endpoint.
+       Anything landing on the trace band itself, or outside the enclosure
+       for the pin the ring is supposed to enclose, is rejected: comparing
+       only the two endpoint layers would have wrongly admitted it.
+
+    Every "cannot show it clears" answer is ``False``, so this only ever
+    *adds* admissible routes to the identity-only behaviour -- a same-plane
+    leg still takes the identical rejection it always did.
+    """
+    if deck is None:
+        return False
+    resolved_route_layers = tuple(layer for layer in route_layers if layer is not None)
+    if len(resolved_route_layers) != len(route_layers) or not resolved_route_layers:
+        return False
+
+    ring_layers = _ring_conductor_layers(block, deck)
+    if not ring_layers:
+        return False
+
+    # 1. The backbone's own plane(s).
+    for route_layer in resolved_route_layers:
+        for ring_layer in ring_layers:
+            if route_layer == ring_layer:
+                return False  # same plane -- the genuine merge #199 rejects
+            ladder, error = _resolve_via_drop_layer(deck, route_layer, ring_layer)
+            if error is not None or not ladder:
+                # Not resolvable in this deck (or not a metals-stack pair at
+                # all): no proof the two planes are separated -- reject by
+                # default rather than assume clearance.
+                return False
+
+    # 2. The via-drop ladders' own landing pads.
+    lines = _ring_side_lines(block)
+    if any(side not in lines for side in _RING_SIDES):
+        return False  # the ring does not say where its four sides run
+    ring_half_um = _ring_trace_half_width_um(block)
+    if ring_half_um is None:
+        return False  # the ring does not say how wide its trace is
+    from .gen_compose import _VIA_LANDING_SIZE_UM
+
+    # A via-drop's landing pad is a fixed-size square (`_VIA_LANDING_SIZE_UM`,
+    # sized from the PDK's own contact-enclosure convention), independent of
+    # the route's own `width_um` -- the same convention `_drawn_leg_footprint_region`
+    # and `_drawn_leg_intermediate_pad_regions` already use. Sizing this
+    # clearance off `width_um` instead would underestimate the real pad
+    # footprint for any route narrower than `_VIA_LANDING_SIZE_UM`.
+    clearance_um = (
+        ring_half_um + _VIA_LANDING_SIZE_UM / 2.0 + block.get("min_spacing_um", 0.0)
+    )
+    x_lo = min(lines["W"], lines["E"]) + offset_um["x"]
+    x_hi = max(lines["W"], lines["E"]) + offset_um["x"]
+    y_lo = min(lines["S"], lines["N"]) + offset_um["y"]
+    y_hi = max(lines["S"], lines["N"]) + offset_um["y"]
+
+    for route_layer in resolved_route_layers:
+        for pin, port, pos in endpoints:
+            port_layer = _port_own_layer(port)
+            if port_layer is None:
+                continue  # no reported layer -- no ladder is drawn for it
+            ladder, error = _resolve_via_drop_layer(deck, route_layer, port_layer)
+            if error is not None:
+                # This endpoint is unreachable from this layer at all; the
+                # via-drop check reports it properly further down, but it is
+                # certainly not proof the ring is cleared.
+                return False
+            if not ladder:
+                continue
+            pads = {
+                layer
+                for _via, metal_a, metal_b in ladder
+                for layer in (metal_a, metal_b)
+            }
+            if not pads & ring_layers:
+                continue
+            x, y = pos
+            inside_ring = (
+                x_lo + clearance_um < x < x_hi - clearance_um
+                and y_lo + clearance_um < y < y_hi - clearance_um
+            )
+            if inside_ring:
+                continue
+            if pin["block"] == ring_pin["block"]:
+                # The ring is drawn *around* this block's own ports; a pad on
+                # the ring's own plane that is not inside the enclosure sits
+                # on (or beyond) the ring's trace, which is the merge the
+                # endpoint-layer comparison alone cannot see.
+                return False
+            clear_of_ring = (
+                x < x_lo - clearance_um
+                or x > x_hi + clearance_um
+                or y < y_lo - clearance_um
+                or y > y_hi + clearance_um
+            )
+            if not clear_of_ring:
+                return False
+    return True
+
+
 def _ring_gap_route_conflict(
     points: list[tuple[float, float]],
     block: dict[str, Any],
@@ -1957,7 +2166,17 @@ def route_two_pin(
        :func:`_block_has_ring_taps`) has that ring drawn *around* its other
        ports; a route touching one of those non-tap ports necessarily
        crosses the ring's own metal loop on its way in or out, merging the
-       net with the ring's own tap net.
+       net with the ring's own tap net. Since issue #1960 that is a
+       statement about the *plane* the leg is drawn on, not about block/port
+       identity alone: a backbone on a level the ring has no conductor on,
+       separated from every ring conductor by at least one via in the
+       resolved deck's own ``metals``/``vias`` stack, and whose via-drop
+       landing pads all stay clear of the ring's trace, physically flies
+       over the loop and is admitted (:func:`_leg_plane_clears_ring`).
+       Everything else -- a same-plane backbone, a pad landing on the ring's
+       own layer where it is not provably clear of the trace, or a layer
+       pair the deck cannot resolve at all -- takes the identical rejection
+       as before.
     3. **Self-net pad-crossing check** (#433): a same-block net's backbone is
        always inside its own block's bbox, so the obstacle-overlap check
        below exempts it entirely -- but nothing else was checking whether
@@ -2424,11 +2643,31 @@ def route_two_pin(
     # not rejected here: it is collected instead, and the drawn backbone is
     # checked against the ring's own geometry below, once `points` exists --
     # the route is allowed only if it actually passes through that opening.
+    #
+    # Both of those are *plane*-conditional since issue #1960: a leg drawn
+    # entirely on a level the ring has no conductor on -- and whose via-drop
+    # landing pads all stay clear of the ring's trace -- physically flies
+    # over the loop and merges with nothing, so it is neither rejected here
+    # nor measured against the ring's geometry below. See
+    # :func:`_leg_plane_clears_ring` for exactly what "clears" requires; an
+    # unresolvable or same-plane answer keeps the identical rejection this
+    # branch has always emitted.
     ring_pins: list[tuple[dict[str, Any], dict[str, Any]]] = []
     if pin_a["block"] != pin_b["block"]:
         for pin, block in ((pin_a, block_a), (pin_b, block_b)):
             if not _block_has_ring_taps(block) or pin["port"].startswith(
                 _RING_TAP_PORT_PREFIXES
+            ):
+                continue
+            if _leg_plane_clears_ring(
+                block,
+                pin,
+                offsets_um[pin["block"]],
+                ((pin_a, port_a, a), (pin_b, port_b, b)),
+                (route_layer, cross_block_route_layer)
+                if cross_block_route_layer is not None
+                else (route_layer,),
+                extraction_deck,
             ):
                 continue
             if _ring_gap_ports(block):
