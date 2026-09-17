@@ -1196,3 +1196,29 @@ def test_sg13cmos5l_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
     (device,) = report["devices"]
     assert {device["nets"]["a"], device["nets"]["b"]} == {"M3_NET", "M4_NET"}
     assert device["params"] == {"w_um": pytest.approx(5.0), "l_um": pytest.approx(5.0)}
+
+
+def test_sg13cmos5l_is_registered_for_parasitics_extraction(tmp_path: Path):
+    """Issue #1440: `_parasitics_registry()` omitted `sg13cmos5l`, so
+    `klt extract --deck sg13cmos5l --parasitics` failed with "unknown deck"
+    even though the deck declares its own (empty) `PARASITICS`. The run must
+    succeed and disclose the zero R/C via `metals_without_coefficient`, the
+    same shape any deck with an un-curated metal level already reports."""
+    from klayout_tools.decks import get_parasitics_deck, sg13cmos5l
+
+    assert get_parasitics_deck("sg13cmos5l") is sg13cmos5l.PARASITICS
+
+    path = _write_gds(_make_nfet_layout(), tmp_path / "nfet.gds")
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "nfet.spice"), parasitics=True
+    )
+
+    assert report["status"] == "extracted"
+    parasitics = report["parasitics"]
+    assert parasitics["r_count"] == 0
+    assert parasitics["c_count"] == 0
+    gaps = [gap["metal_index"] for gap in parasitics["metals_without_coefficient"]]
+    assert gaps == list(range(len(EXTRACTION_DECK.metals)))
+    assert any(
+        "PARASITICS.metals has no R/C coefficient" in w for w in report["warnings"]
+    )
