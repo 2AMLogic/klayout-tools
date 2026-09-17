@@ -794,7 +794,23 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     ``drc``.
 
     - ``drc`` passes on ``status == "clean"``.
-    - ``lvs`` passes on ``status == "match"``.
+    - ``lvs`` passes on ``status == "match"`` *and* (issue #1965, closing the
+      gap left by #1952/#1964's additive ``power_connectivity`` block) its
+      ``power_connectivity.status`` is not ``"mismatch"``. ``"unchecked"``
+      (every non-``gate-level-verilog`` reference form, or a
+      ``gate-level-verilog`` reference with the check explicitly disabled
+      via ``options.power_connectivity: false``) still passes -- it means
+      "does not apply here", not "unverified". An envelope with no
+      ``power_connectivity`` key at all (committed before #1964 landed)
+      also still passes -- ``.get("power_connectivity") or {}`` treats a
+      missing block the same as ``"unchecked"`` rather than raising or
+      retroactively failing old evidence. This is a deliberate hard-fail,
+      not an opt-in or disclosure-only gate: #1952's own motivation was
+      that "a T1 claim citing gate-level LVS ... is citing signal
+      connectivity, not full LVS" -- so a `klt signoff` check labeled
+      ``lvs`` should mean the compare *and* (when it applies) the
+      power/ground wiring were both clean, matching what
+      ``docs/cli/lvs.md`` already tells callers to gate on.
     - ``sim`` passes on ``status == "pass"``.
     - ``yield`` (issue #870) passes on ``status == "pass"`` (every
       measurement that declared a ``target_yield`` met it at the stated
@@ -837,7 +853,11 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     if kind == "drc":
         passed = envelope.get("status") == "clean"
     elif kind == "lvs":
-        passed = envelope.get("status") == "match"
+        power_connectivity = envelope.get("power_connectivity") or {}
+        passed = (
+            envelope.get("status") == "match"
+            and power_connectivity.get("status") != "mismatch"
+        )
     elif kind == "sim":
         passed = envelope.get("status") == "pass"
     elif kind == "yield":
@@ -886,6 +906,16 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "reference": envelope.get("reference"),
             "mismatch_count": envelope.get("mismatch_count"),
             "counts": envelope.get("counts"),
+            # Issue #1965: surfaced alongside the hard-fail gate in
+            # `_check_passed` so a `"fail"` verdict caused by a power
+            # miswire (rather than an ordinary signal mismatch) is visible
+            # without re-opening the source envelope. `None` on an
+            # envelope with no `power_connectivity` key at all (committed
+            # before #1964), distinct from the real `"unchecked"`/
+            # `"match"`/`"mismatch"` values.
+            "power_connectivity_status": (envelope.get("power_connectivity") or {}).get(
+                "status"
+            ),
         }
     elif kind == "sim":
         detail = {
