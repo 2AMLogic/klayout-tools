@@ -34,6 +34,7 @@ def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
     print(f"pdk: {report['pdk']}")
+    print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
     print(f"gates: {report['gate_count']}")
 

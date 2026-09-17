@@ -90,15 +90,18 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
+from ._provenance import build_provenance
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
-#: (#861), and Phase 3 (#908) all add fields additively -- no bump needed,
-#: per docs/cli/erc.md's "Phase scope" and docs/json-contract.md's
-#: additive-envelope design: `pdk`/`gates[].antenna_verdict`/
-#: `levels[].antenna_ratio`/`levels[].antenna_ratio_max`/
-#: `levels[].antenna_ratio_source`/`levels[].verdict` (Phase 1b),
-#: `erc_findings`/`erc_finding_count` (Phase 1c), and `levels[].remedy`
-#: (Phase 3).
+#: (#861), Phase 3 (#908), and issue #1968 all add fields additively -- no
+#: bump needed, per docs/cli/erc.md's "Phase scope" and
+#: docs/json-contract.md's additive-envelope design: `pdk`/
+#: `gates[].antenna_verdict`/`levels[].antenna_ratio`/
+#: `levels[].antenna_ratio_max`/`levels[].antenna_ratio_source`/
+#: `levels[].verdict` (Phase 1b), `erc_findings`/`erc_finding_count`
+#: (Phase 1c), `levels[].remedy` (Phase 3), and `status`/`provenance`
+#: (issue #1968 -- the two fields `klt signoff` grading needs, see that
+#: issue and docs/json-contract.md's "Shared `provenance` block").
 SCHEMA_VERSION = 1
 
 
@@ -752,10 +755,15 @@ def run_erc(
 
     Returns a dict matching the documented ``klt erc`` JSON schema (see
     ``docs/cli/erc.md``), including ``schema_version``, (issue #861)
-    ``erc_findings``/``erc_finding_count``, and (issue #908) each violating
-    ``levels[].remedy``. Raises :class:`ErcError` for a malformed spec, an
-    unknown ``pdk``, an unresolvable layout/top cell, or a layout in which
-    no net carries any geometry on the declared gate role at all.
+    ``erc_findings``/``erc_finding_count``, (issue #908) each violating
+    ``levels[].remedy``, and (issue #1968) a top-level ``status`` (
+    ``"clean"`` only when ``erc_finding_count == 0`` *and* no
+    ``gates[].levels[].verdict`` is ``"violate"``, else ``"violations"``)
+    plus the shared ``provenance`` block (:func:`._provenance.build_provenance`)
+    -- together the two things ``klt signoff`` needs to grade this output.
+    Raises :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
+    unresolvable layout/top cell, or a layout in which no net carries any
+    geometry on the declared gate role at all.
     """
     antenna_limits = _resolve_antenna_limits(pdk)
 
@@ -965,6 +973,43 @@ def run_erc(
         )
     )
 
+    erc_finding_count = len(erc_findings)
+
+    # Top-level `status` (issue #1968) -- so `klt erc`'s output is gradable
+    # (`klt signoff`'s `_check_passed`-style pass/fail read) without having
+    # to separately inspect two independent signals. Mirrors `klt drc`'s own
+    # `"clean"`/`"violations"` split, but -- unlike `erc_finding_count`
+    # alone -- also rolls up every gate's own per-level antenna verdict
+    # (`gates[].levels[].verdict`, see `klt power`'s own `em_verdict.status`
+    # roll-up from per-edge data for the analogous per-entry-rollup
+    # precedent): a run with zero `erc_findings` but at least one antenna
+    # `"violate"` level must not read as clean.
+    any_antenna_violation = any(
+        level["verdict"] == "violate" for gate in gates for level in gate["levels"]
+    )
+    status = (
+        "clean"
+        if erc_finding_count == 0 and not any_antenna_violation
+        else "violations"
+    )
+
+    # `provenance.pdk` (issue #1968): `--pdk` here selects a built-in
+    # antenna-ratio limit table baked into this module (see
+    # `_ANTENNA_LIMITS_BY_PDK`), not an installed PDK directory resolved via
+    # `klayout_tools.pdk.find_pdk` the way `klt drc`/`klt extract`/`klt lvs`
+    # populate `provenance.pdk` -- there is no `--pdk-root` for `klt erc` to
+    # resolve against. So this builds the same `{variant, resolved_via,
+    # version}` shape `build_provenance` expects by hand, with
+    # `resolved_via: "built-in"` naming that distinction honestly rather
+    # than fabricating a filesystem resolution that never happened.
+    # `None` when `--pdk` was omitted, matching every other verb's
+    # conditional `pdk`/`deck` population.
+    provenance_pdk = (
+        {"variant": pdk, "resolved_via": "built-in", "version": None}
+        if pdk is not None
+        else None
+    )
+
     return {
         "schema_version": SCHEMA_VERSION,
         "file": file,
@@ -974,5 +1019,7 @@ def run_erc(
         "gate_count": len(gates),
         "gates": gates,
         "erc_findings": erc_findings,
-        "erc_finding_count": len(erc_findings),
+        "erc_finding_count": erc_finding_count,
+        "status": status,
+        "provenance": build_provenance(pdk=provenance_pdk, input_path=file),
     }

@@ -59,16 +59,21 @@ net, missing substrate/well tie, supply short — computed from the same
 connectivity model, plus two new optional spec sections (`nets`, `ties`).
 See "ERC finding checks" and "Spec file" below.
 
-**Phase 3 (#908, this document's current state) additively delivers
-`levels[].remedy`**: for every `verdict: "violate"` level, a standard-fix
-recommendation — diode insertion or layer jumping — naming the specific net
-and layer, so the violation is directly actionable rather than just
-flagged. See "Antenna-violation fix guidance" below.
+**Phase 3 (#908) additively delivers `levels[].remedy`**: for every
+`verdict: "violate"` level, a standard-fix recommendation — diode insertion
+or layer jumping — naming the specific net and layer, so the violation is
+directly actionable rather than just flagged. See "Antenna-violation fix
+guidance" below.
+
+**Issue #1968 (this document's current state) additively delivers a
+top-level `status` and the shared `provenance` block** — split out of
+#1959's correction comment, since without either field this command's
+output could not be graded by `klt signoff`. See "JSON schema" below.
 
 Per [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
-design, none of 1b's, 1c's, or Phase 3's fields needed a **`schema_version`
-bump**: every field 1a's own version of this document promised is still
-exactly as documented, unchanged.
+design, none of 1b's, 1c's, Phase 3's, or #1968's fields needed a
+**`schema_version` bump**: every field 1a's own version of this document
+promised is still exactly as documented, unchanged.
 
 ## "Per gate" means "per gate net", not "per drawn poly finger"
 
@@ -414,7 +419,15 @@ the shared envelope (`schema_version`, error shape, exit codes).
       "bbox": { "left": 10000, "bottom": 0, "right": 10500, "top": 1000 }
     }
   ],
-  "erc_finding_count": 1
+  "erc_finding_count": 1,
+  "status": "violations",
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.29.8",
+    "pdk": { "name": "sky130", "source": "built-in", "version": null },
+    "deck": null,
+    "input": { "content_hash": "sha256:<hex>" }
+  }
 }
 ```
 
@@ -500,6 +513,8 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
 | `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
+| `status`         | string          | (issue #1968) `"clean"` only when `erc_finding_count == 0` **and** no `gates[].levels[].verdict` is `"violate"`; otherwise `"violations"` — a roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict. |
+| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). |
 
 ## Exit codes
 
@@ -542,7 +557,9 @@ ingestion harness exists is a natural follow-on.
 - [#861](https://github.com/2AMLogic/klayout-tools/issues/861) — Phase 1c,
   the core ERC finding list ("ERC finding checks" above).
 - [#908](https://github.com/2AMLogic/klayout-tools/issues/908) — Phase 3,
-  antenna-violation fix guidance ("Antenna-violation fix guidance" above),
+  antenna-violation fix guidance ("Antenna-violation fix guidance" above).
+- [#1968](https://github.com/2AMLogic/klayout-tools/issues/1968) — the
+  top-level `status` and shared `provenance` block ("JSON schema" above),
   shipped in this document's current form.
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet

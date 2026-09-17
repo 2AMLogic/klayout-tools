@@ -146,12 +146,23 @@ consumer of the `--check`/`--rerun` machinery below should apply, not just
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
-deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, and `precheck` — emit a
-shared top-level `provenance` block so a "clean"/"pass"/"match" result is
-auditable and reproducible later. Two runs made against different deck
-revisions or PDK releases are otherwise indistinguishable in the output, so a
-signoff claim can't be checked or reproduced. This block is **additive** (see
-above): adopting it required no `schema_version` bump on any verb.
+deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, and `erc`
+— emit a shared top-level `provenance` block so a "clean"/"pass"/"match"
+result is auditable and reproducible later. Two runs made against different
+deck revisions or PDK releases are otherwise indistinguishable in the output,
+so a signoff claim can't be checked or reproduced. This block is **additive**
+(see above): adopting it required no `schema_version` bump on any verb.
+
+`klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
+a built-in antenna-ratio limit table baked into `erc.py` itself (see
+[`docs/cli/erc.md`](cli/erc.md)'s "Sky130 antenna-ratio limits"), not an
+installed PDK directory resolved via `klayout_tools.pdk.find_pdk` the way
+every other verb below populates this field — there is no `--pdk-root` for
+`klt erc` to resolve against. Its `provenance.pdk.source` is therefore always
+`"built-in"` rather than a filesystem-resolution method name, and `version`
+is always `null` (no `SOURCES` stamp to read); `provenance.pdk` itself is
+still `null` when `--pdk` was omitted, matching every other verb's
+conditional population.
 
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
