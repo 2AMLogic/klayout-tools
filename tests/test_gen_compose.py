@@ -14459,3 +14459,28 @@ def test_leg_block_spacing_violation_um_exempts_the_shape_the_leg_lands_on():
         )
         is None
     )
+
+
+def test_compose_rejects_higher_plane_ring_escape_when_pad_lands_inside_ring_trace_band(
+    tmp_path, pdk_root
+):
+    # The via-drop landing pad is a fixed-size square (`_VIA_LANDING_SIZE_UM`,
+    # 0.42um -> half 0.21um), independent of the route's own `width_um`
+    # (0.17um here, half 0.085um). Sizing the pad-clearance term off
+    # `width_um` instead underestimates the real pad footprint: a pin at
+    # `y=0.35`, just inside the ring's S-side trace band (`y in [-0.21,
+    # 0.21]` plus the pad's own half-width), sits close enough that only the
+    # fixed landing-pad size -- not the narrower route width -- proves the
+    # drawn pad would actually overlap the ring's trace.
+    ringed = _hand_ringed_cell_block(
+        tmp_path,
+        pdk_root,
+        "ringpadband",
+        tap_layer={"layer": 65, "datatype": 20},
+        port_x_um=2.0,
+        port_y_um=0.35,
+    )
+    report = _hand_ringed_escape_report(tmp_path, pdk_root, "ringpadband_top", ringed)
+
+    assert report["unrouted_nets"] == ["N1"]
+    assert "closed guard/collector ring" in report["nets"][0]["legs"][0]["reason"]

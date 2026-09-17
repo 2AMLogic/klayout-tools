@@ -684,7 +684,8 @@ into the circuit.)
     own layer. Such a pad is admitted only where it is provably clear of the
     ring's trace — strictly inside the ring's enclosure for the ringed block's
     own pin, and inside-or-clear-of the ring's trace band for the far pin —
-    with clearance of half the ring's trace width plus half the route width
+    with clearance of half the ring's trace width plus half the via-drop
+    landing pad's own fixed footprint (independent of the route's `width_um`)
     plus the block's own `drc_hints.min_spacing_um`. Comparing only the two
     endpoint layers would have wrongly admitted a pad landing on the ring.
 

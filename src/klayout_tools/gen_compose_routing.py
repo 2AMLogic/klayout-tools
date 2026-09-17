@@ -1267,7 +1267,17 @@ def _leg_plane_clears_ring(
     ring_half_um = _ring_trace_half_width_um(block)
     if ring_half_um is None:
         return False  # the ring does not say how wide its trace is
-    clearance_um = ring_half_um + width_um / 2.0 + block.get("min_spacing_um", 0.0)
+    from .gen_compose import _VIA_LANDING_SIZE_UM
+
+    # A via-drop's landing pad is a fixed-size square (`_VIA_LANDING_SIZE_UM`,
+    # sized from the PDK's own contact-enclosure convention), independent of
+    # the route's own `width_um` -- the same convention `_drawn_leg_footprint_region`
+    # and `_drawn_leg_intermediate_pad_regions` already use. Sizing this
+    # clearance off `width_um` instead would underestimate the real pad
+    # footprint for any route narrower than `_VIA_LANDING_SIZE_UM`.
+    clearance_um = (
+        ring_half_um + _VIA_LANDING_SIZE_UM / 2.0 + block.get("min_spacing_um", 0.0)
+    )
     x_lo = min(lines["W"], lines["E"]) + offset_um["x"]
     x_hi = max(lines["W"], lines["E"]) + offset_um["x"]
     y_lo = min(lines["S"], lines["N"]) + offset_um["y"]
