@@ -43,6 +43,44 @@ not `klt --version`, if you need to detect this kind of drift. See
   gate would contradict `klt signoff`'s deliberate always-emit convention.
   Unrecognised netgen wording is still passed through, just without the
   escapes.
+- **Fixed**: yosys netlists no longer fail `klt place-and-route` two
+  deterministic, recurring ways (issue #1973). Both defects were invisible
+  until place-and-route and surfaced as a raw engine error pointing at a
+  generated file the caller never wrote.
+  - A `signed` port/wire qualifier (`output signed [15:0] sample;`) reached
+    OpenSTA's Verilog reader, which rejects the keyword outright: `[ERROR
+    STA-0171] <netlist> line N, syntax error`, at the **floorplan** stage.
+    Yosys's `write_verilog` preserves the qualifier and has no flag to
+    suppress it, and no Yosys pass clears a wire's `is_signed` attribute, so
+    `klt synthesize` now applies one post-`write_verilog` text rewrite that
+    drops `signed` from every `input`/`output`/`inout`/`wire`/`reg`/`logic`
+    declaration. Anchored to a preceding declaration keyword, so an
+    expression-level `$signed(...)` cast is never touched; the netlist file
+    is rewritten only when something actually changed.
+  - A bare `x`-valued constant (`assign \data_len$func$…o = 5'hxx;`, most
+    often a Verilog `function`'s dangling argument wire) became an empty
+    `GROUND`-typed net (`zero_`) that TritonRoute refuses with `DRT-0305` —
+    **after** floorplan, placement and CTS had all already succeeded, so it
+    cost a full route attempt to discover. Issue #854's existing `hilomap`
+    tie-cell pass only ever mapped concrete `1'b0`/`1'b1` literals; it does
+    not recognise an `x` bit as a constant at all. `klt synthesize`'s
+    generated script now emits `setundef -zero` immediately **before**
+    `hilomap`, so every `x` bit is resolved to a concrete `0` and then
+    tie-cell-mapped exactly like an ordinary literal. Scoped to the same
+    `_TIE_CELLS` condition as `hilomap` — a `cell_library` with no tie-cell
+    entry emits neither pass, exactly as before.
+  As a safety net for netlists that did **not** come from `klt synthesize`
+  (hand-written, third-party, post-edited), `klt place-and-route` now runs a
+  comment-aware pre-flight scan of `request.netlist` before invoking OpenROAD
+  at all, and rejects either construct with an `error.message` naming the
+  construct, its 1-based netlist line number, the offending line, and the
+  fix. `DRT-0305`'s existing diagnosis text is corrected accordingly (it
+  previously implied `hilomap` alone covered every constant case).
+  RTL-side, `docs/guides/digital-review/rtl-style-guide.md` gains a "Flow
+  compatibility" section covering the three constructs behind these failures:
+  no `signed` ports/wires, no synthesizable Verilog `function`s, and no
+  `integer` loop variables (which survive synthesis as wide tie-cell-driven
+  wires — wasted area rather than a hard failure).
 - **Fixed**: the curated `sky130` DRC deck now checks every routing metal's
   own **minimum area** — `met1.area.1`, `met2.area.1`, `met3.area.1`,
   `met4.area.1`, `met5.area.1` (issue #1955), the deck's first rules of the

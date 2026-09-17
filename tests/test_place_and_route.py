@@ -4562,6 +4562,216 @@ def test_stubbed_engine_version_unresolvable(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Netlist pre-flight: `signed` qualifiers + bare-`x` constants (issue #1973)
+#
+# Both constructs reach `klt place-and-route` routinely from netlists that
+# did NOT come from `klt synthesize` (hand-written, third-party, post-edited)
+# and fail deterministically several stages into a real OpenROAD run --
+# `signed` as OpenSTA's raw `STA-0171` syntax error at the floorplan stage,
+# a bare `x` constant as TritonRoute's `DRT-0305` a full route attempt later.
+# `_reject_unsupported_netlist_constructs` catches both up front, naming the
+# construct and its 1-based netlist line number.
+# --------------------------------------------------------------------------- #
+
+
+#: A minimal well-formed structural netlist, used as the base the tests below
+#: inject one defect into so the rejection is provably caused by that defect
+#: and not by the surrounding text.
+_CLEAN_NETLIST = """\
+module gcd(clk, req_val, resp_msg);
+  input clk;
+  input req_val;
+  output [15:0] resp_msg;
+  wire [15:0] resp_msg;
+  wire net1;
+  sky130_fd_sc_hd__inv_2 _0_ (.A(req_val), .Y(net1));
+endmodule
+"""
+
+
+def _reject_message(tmp_path, netlist_text: str) -> str:
+    """Run `run_place_and_route` against a request whose netlist is
+    `netlist_text`, and return the `PlaceAndRouteError` message it raised
+    before reaching any PDK resolution or OpenROAD subprocess."""
+    _write(tmp_path / "gcd_synth.v", netlist_text)
+    request_path = _write_request(tmp_path / "request.json", _base_request())
+    with pytest.raises(PlaceAndRouteError) as excinfo:
+        run_place_and_route(request_path)
+    return str(excinfo.value)
+
+
+def test_preflight_rejects_signed_output_port_naming_the_line(tmp_path):
+    """The original report's own Failure 1 (`output signed [15:0] sample;`):
+    rejected up front with the construct and its line number named, instead
+    of OpenSTA's bare `[ERROR STA-0171] <generated file> line N, syntax
+    error` at the floorplan stage."""
+    netlist = _CLEAN_NETLIST.replace(
+        "  output [15:0] resp_msg;", "  output signed [15:0] resp_msg;"
+    )
+
+    message = _reject_message(tmp_path, netlist)
+
+    assert "signed" in message
+    assert "line 4" in message
+    assert "output signed [15:0] resp_msg;" in message
+    assert "klt synthesize" in message
+
+
+def test_preflight_rejects_signed_wire_not_just_a_port(tmp_path):
+    """Test-plan edge case: a `signed` *wire* declaration, not just a port
+    -- the same failure, and caught by the same declaration-keyword anchor."""
+    netlist = _CLEAN_NETLIST.replace("  wire net1;", "  wire signed [7:0] net1;")
+
+    message = _reject_message(tmp_path, netlist)
+
+    assert "signed" in message
+    assert "line 6" in message
+
+
+def test_preflight_rejects_multibit_x_constant_naming_the_line(tmp_path):
+    """The original report's own Failure 2 shape -- a dangling Verilog
+    `function` argument left at `5'hxx` -- rejected up front, naming the
+    literal and its line, instead of costing a full route attempt to
+    discover as `DRT-0305`."""
+    netlist = _CLEAN_NETLIST.replace(
+        "  wire net1;",
+        "  wire net1;\n  wire [4:0] \\data_len$func$arg ;\n"
+        "  assign \\data_len$func$arg  = 5'hxx;",
+    )
+
+    message = _reject_message(tmp_path, netlist)
+
+    assert "5'hxx" in message
+    assert "line 8" in message
+    assert "DRT-0305" in message
+    assert "klt synthesize" in message
+
+
+def test_preflight_rejects_single_bit_x_constant(tmp_path):
+    """A one-bit `1'bx` is the same defect at the smallest possible width."""
+    netlist = _CLEAN_NETLIST.replace(
+        "  wire net1;", "  wire net1;\n  assign net1 = 1'bx;"
+    )
+
+    message = _reject_message(tmp_path, netlist)
+
+    assert "1'bx" in message
+
+
+def test_preflight_reports_the_first_defect_when_both_are_present(tmp_path):
+    """Test-plan edge case: a netlist carrying both defects at once. Both
+    are already fatal, so the first in file order is reported -- the one a
+    reader will go fix first."""
+    netlist = _CLEAN_NETLIST.replace(
+        "  output [15:0] resp_msg;", "  output signed [15:0] resp_msg;"
+    ).replace("  wire net1;", "  wire net1;\n  assign net1 = 1'bx;")
+
+    message = _reject_message(tmp_path, netlist)
+
+    assert "signed" in message
+    assert "line 4" in message
+
+
+def test_preflight_accepts_signed_cast_in_an_expression(tmp_path):
+    """`$signed(...)` is an expression-level cast every downstream reader
+    accepts -- and precisely the RTL-side replacement
+    `docs/guides/digital-review/rtl-style-guide.md` recommends for a
+    `signed` port. It must never be flagged, so the pattern is anchored to a
+    preceding declaration keyword rather than being a bare `\\bsigned\\b`."""
+    netlist = _CLEAN_NETLIST.replace(
+        "  wire net1;", "  wire net1;\n  assign net1 = $signed(req_val);"
+    )
+    _write(tmp_path / "gcd_synth.v", netlist)
+
+    place_and_route._reject_unsupported_netlist_constructs(
+        str(tmp_path / "gcd_synth.v")
+    )
+
+
+def test_preflight_accepts_resolved_constants_and_identifier_substrings(tmp_path):
+    """No false positive on an ordinary resolved constant whose hex digits
+    merely include letters (`8'hbe`, `16'd100`), nor on an identifier that
+    contains `signed` as a substring (`unsigned_sum`)."""
+    netlist = _CLEAN_NETLIST.replace(
+        "  wire net1;",
+        "  wire unsigned_sum;\n  wire net1;\n"
+        "  assign net1 = 8'hbe;\n  assign unsigned_sum = 16'd100;",
+    )
+    _write(tmp_path / "gcd_synth.v", netlist)
+
+    place_and_route._reject_unsupported_netlist_constructs(
+        str(tmp_path / "gcd_synth.v")
+    )
+
+
+def test_preflight_ignores_constructs_inside_comments(tmp_path):
+    """Comment-aware: a `signed` declaration or an x-constant quoted inside
+    a `//` line comment or a multi-line `/* ... */` block -- Yosys's own
+    generated netlist header banner is exactly such a block -- is prose, not
+    a construct."""
+    netlist = (
+        "/* Generated by yosys\n"
+        " * once emitted `output signed [15:0] sample;` here\n"
+        " * and `assign foo = 5'hxx;` too\n"
+        " */\n"
+        "// wire signed [3:0] legacy;\n"
+    ) + _CLEAN_NETLIST
+    _write(tmp_path / "gcd_synth.v", netlist)
+
+    place_and_route._reject_unsupported_netlist_constructs(
+        str(tmp_path / "gcd_synth.v")
+    )
+
+
+def test_preflight_still_flags_code_after_a_block_comment_ends(tmp_path):
+    """The comment blanking must resume scanning real code once `*/`
+    closes -- a defect on the same line as the block comment's terminator is
+    still a defect."""
+    netlist = "/* banner */ wire signed [3:0] legacy;\n" + _CLEAN_NETLIST
+
+    message = _reject_message(tmp_path, netlist)
+
+    assert "signed" in message
+    assert "line 1" in message
+
+
+def test_preflight_leaves_a_clean_netlist_alone(tmp_path):
+    """The control: the base netlist every test above injects into passes
+    the pre-flight untouched, so each rejection is provably caused by the
+    injected defect."""
+    _write(tmp_path / "gcd_synth.v", _CLEAN_NETLIST)
+
+    place_and_route._reject_unsupported_netlist_constructs(
+        str(tmp_path / "gcd_synth.v")
+    )
+
+
+def test_preflight_leaves_the_real_corpus_netlist_alone(tmp_path):
+    """No false positive on a real, full-size yosys-mapped sky130 netlist
+    (`tests/corpus/statime/gcd_netlist.v`) -- the single strongest guard
+    against this pre-flight rejecting netlists that route fine today."""
+    corpus = Path(__file__).parent / "corpus" / "statime" / "gcd_netlist.v"
+
+    place_and_route._reject_unsupported_netlist_constructs(str(corpus))
+
+
+def test_blank_verilog_comments_preserves_line_numbering(tmp_path):
+    """`_blank_verilog_comments` replaces comment characters with spaces
+    rather than deleting them, so a multi-line `/* ... */` does not collapse
+    the line structure the caller reports line numbers against (which is
+    exactly why `_strip_verilog_comments` cannot be reused here)."""
+    text = "wire a;\n/* two\n   lines */ wire b;\nwire c; // trailing\n"
+
+    lines = place_and_route._blank_verilog_comments(text)
+
+    assert len(lines) == 4
+    assert lines[0] == "wire a;"
+    assert lines[1].strip() == ""
+    assert lines[2].strip() == "wire b;"
+    assert lines[3].strip() == "wire c;"
+
+
+# --------------------------------------------------------------------------- #
 # Non-sky130 cell library + `--pdk`/`--pdk-root` (issue #629)
 # --------------------------------------------------------------------------- #
 

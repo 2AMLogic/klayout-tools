@@ -240,6 +240,45 @@ positive or false negative on text it cannot actually parse -- OpenROAD's
 own ``link_design`` remains the authority on whether the netlist and LEF
 actually agree structurally.
 
+Netlist pre-flight: ``signed`` qualifiers and bare-``x`` constants (issue #1973)
+---------------------------------------------------------------------------------
+
+Two structural-Verilog constructs reach this command routinely and fail it
+deterministically, each several stages into a real OpenROAD run and each
+with a diagnostic that points at a generated file the caller never wrote:
+
+- A ``signed`` port/wire qualifier (``output signed [15:0] sample;``).
+  Yosys's ``write_verilog`` preserves it and offers no flag to suppress it;
+  OpenSTA's Verilog reader -- the very first thing the ``"floorplan"`` stage
+  runs -- rejects the keyword outright with a bare ``[ERROR STA-0171]
+  <file> line N, syntax error``.
+- A bare ``x``-valued constant (``assign \\foo$func$..o = 5'hxx;``, most
+  often a Verilog ``function``'s own dangling argument wire). OpenSTA reads
+  it as a constant and materialises an empty ``GROUND``-typed net from it
+  (conventionally ``zero_``), which TritonRoute then refuses with
+  ``DRT-0305`` -- **after** floorplan, placement and CTS have all already
+  succeeded, so it costs a full route attempt to discover.
+
+:func:`_reject_unsupported_netlist_constructs` catches both **before** any
+OpenROAD subprocess runs, raising a :class:`PlaceAndRouteError` that names
+the construct, the 1-based netlist line number, and the offending source
+line -- and, for the ``x`` case, says what to do about it. The scan is
+comment-aware (a ``signed`` inside Yosys's own header banner, or an
+``x``-constant quoted in a comment, is not a construct) and deliberately
+narrow: the ``signed`` pattern is anchored to a preceding declaration
+keyword so an expression-level ``$signed(...)`` cast -- valid everywhere
+downstream, and the recommended RTL replacement for a ``signed`` port -- is
+never flagged.
+
+This is a **safety net for netlists that did not come from `klt
+synthesize`** (hand-written, third-party, or post-edited). ``klt
+synthesize`` itself now prevents both constructs at the source: it strips
+``signed`` declarations after ``write_verilog``, and runs ``setundef -zero``
+ahead of its existing ``hilomap`` pass so every ``x`` bit is resolved to a
+concrete ``0`` and then tie-cell-mapped exactly like an ordinary
+``1'b0``/``1'b1`` literal (issue #854's own fix, which alone covered only
+``0``/``1``).
+
 Timing-driven global routing + bounded antenna-repair iteration (issue #939)
 ------------------------------------------------------------------------------
 
@@ -1305,6 +1344,12 @@ def run_place_and_route(
         )
 
     netlist_path = _resolve_netlist(request["netlist"], request_dir)
+    # Issue #1973: fail here, naming the construct and its line, rather than
+    # letting a `signed` qualifier surface as OpenSTA's raw `STA-0171` syntax
+    # error at the floorplan stage or a bare `x` constant as TritonRoute's
+    # `DRT-0305` a full route attempt later. See this module's docstring
+    # "Netlist pre-flight" section.
+    _reject_unsupported_netlist_constructs(netlist_path)
 
     hdl_toplevel = request["hdl_toplevel"]
     if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
@@ -2345,6 +2390,121 @@ _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 def _strip_verilog_comments(text: str) -> str:
     return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", text))
+
+
+def _blank_verilog_comments(text: str) -> list[str]:
+    """``text``'s lines with every comment blanked out but **line numbering
+    preserved** -- one output entry per input line, comment characters
+    replaced by spaces rather than deleted.
+
+    :func:`_strip_verilog_comments` deletes comments outright, which
+    collapses the line structure a multi-line ``/* ... */`` spans and makes
+    the result useless for reporting a line number.
+    :func:`_reject_unsupported_netlist_constructs` needs to name the exact
+    1-based netlist line its diagnostic points at (issue #1973 -- the whole
+    point is to beat OpenSTA's own ``line N, syntax error`` to the punch),
+    so it needs this shape instead.
+    """
+    out: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        chars = list(line)
+        i = 0
+        while i < len(chars):
+            if in_block:
+                if line.startswith("*/", i):
+                    chars[i] = chars[i + 1] = " "
+                    i += 2
+                    in_block = False
+                    continue
+                chars[i] = " "
+                i += 1
+            elif line.startswith("/*", i):
+                chars[i] = chars[i + 1] = " "
+                i += 2
+                in_block = True
+            elif line.startswith("//", i):
+                for j in range(i, len(chars)):
+                    chars[j] = " "
+                break
+            else:
+                i += 1
+        out.append("".join(chars))
+    return out
+
+
+#: A ``signed`` qualifier on a port/wire declaration in a structural-Verilog
+#: netlist -- ``output signed [15:0] sample;``, ``wire signed [7:0] mid;``,
+#: ``input wire signed [3:0] a;`` (issue #1973). Anchored to a preceding
+#: declaration keyword on purpose: an expression-level ``$signed(...)`` cast
+#: is accepted by every downstream reader (and is the RTL-side replacement
+#: this repo's own ``docs/guides/digital-review/rtl-style-guide.md``
+#: recommends for a ``signed`` port), so it must never be flagged -- and
+#: ``$signed(`` is never immediately preceded by one of these keywords plus
+#: whitespace.
+_NETLIST_SIGNED_DECL_RE = re.compile(
+    r"\b(?:input|output|inout|wire|reg|logic)\s+signed\b"
+)
+
+#: A bare ``x``-valued Verilog constant literal -- ``5'hxx``, ``2'bxx``,
+#: ``1'bx``, ``8'shX0`` (issue #1973). Requires at least one ``x``/``X``
+#: digit, so an ordinary resolved constant (``1'b0``, ``16'd100``,
+#: ``8'hbe``) never matches -- only the unresolved bits OpenSTA turns into
+#: an unroutable ``GROUND``-typed net.
+_NETLIST_X_CONSTANT_RE = re.compile(
+    r"\d+'[sS]?[bBoOdDhH][0-9a-fA-F_]*[xX][0-9a-fA-FxX_]*"
+)
+
+
+def _reject_unsupported_netlist_constructs(netlist_path: str) -> None:
+    """Raise :class:`PlaceAndRouteError` naming the construct, the 1-based
+    line number, and the offending line when ``netlist_path`` carries a
+    ``signed`` port/wire qualifier or a bare ``x``-valued constant -- the
+    two constructs that deterministically fail a real OpenROAD run several
+    stages in, with a diagnostic pointing at a generated file the caller
+    never wrote (issue #1973; see this module's docstring "Netlist
+    pre-flight" section for the full rationale).
+
+    Reports the **first** offending line in file order, whichever construct
+    it is: both are already fatal, so there is nothing to gain from
+    enumerating every occurrence, and the first one is the one a reader will
+    go fix. A netlist this cannot read is not an error here --
+    :func:`_resolve_netlist` has already established the file exists and is
+    openable, and OpenROAD's own reader remains the authority on whether its
+    contents parse at all.
+    """
+    try:
+        with open(netlist_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return
+
+    for lineno, line in enumerate(_blank_verilog_comments(text), start=1):
+        signed_match = _NETLIST_SIGNED_DECL_RE.search(line)
+        if signed_match is not None:
+            raise PlaceAndRouteError(
+                f"netlist '{netlist_path}' line {lineno} declares a 'signed' "
+                f"port/wire ('{signed_match.group(0)}'): {line.strip()} -- "
+                "OpenSTA's Verilog reader (used by the 'floorplan' stage) "
+                "rejects the 'signed' keyword outright with a syntax error. "
+                "Re-synthesize with `klt synthesize`, which strips these "
+                "declarations, or remove the qualifier from the netlist and "
+                "use a `$signed(...)` cast in the RTL instead."
+            )
+
+        x_match = _NETLIST_X_CONSTANT_RE.search(line)
+        if x_match is not None:
+            raise PlaceAndRouteError(
+                f"netlist '{netlist_path}' line {lineno} drives a bare "
+                f"x-valued constant ('{x_match.group(0)}'): {line.strip()} -- "
+                "OpenSTA reads it as a constant and builds an empty "
+                "GROUND-typed net from it, which TritonRoute then refuses "
+                "with DRT-0305 (after floorplan, placement and CTS have all "
+                "already succeeded). Re-synthesize with `klt synthesize`, "
+                "which resolves x bits to concrete tie-cell-driven constants "
+                "(`setundef -zero` ahead of `hilomap`); a Verilog `function` "
+                "with a dangling argument is the usual source in RTL."
+            )
 
 
 def _macro_instance_port_connections(
@@ -3917,6 +4077,29 @@ def _constant_tie_diagnosis(
     is upstream, in synthesis: map constants onto real tie cells so no bare
     constant literal ever reaches place-and-route -- which ``klt synthesize``
     now does for every ``cell_library`` in its own tie-cell table (#854).
+
+    **Coverage correction (issue #1973).** Until #1973, the hint below said
+    ``hilomap`` alone covered this -- which was only true for concrete
+    ``1'b0``/``1'b1`` literals. ``hilomap`` does not recognise an ``x`` bit
+    as a constant to map at all, so an ``x``-valued literal (a Verilog
+    ``function``'s dangling argument wire is the usual source) survived
+    synthesis and produced this exact ``DRT-0305`` anyway. ``klt synthesize``
+    now runs ``setundef -zero`` **before** ``hilomap``, resolving every
+    ``x`` bit to a concrete ``0`` that ``hilomap`` then tie-cell-maps
+    identically to a literal constant -- so the hint's claim now holds for
+    ``x`` too, for any ``cell_library`` in the tie-cell table. A
+    ``cell_library`` *not* in that table still gets neither pass, which is
+    why the hint keeps its "for every standard-cell library in its tie-cell
+    table" qualifier and its hand-edit fallback.
+
+    Reaching this diagnosis at all now implies the netlist did **not** come
+    from a tie-cell-table ``klt synthesize`` run: a bare constant of either
+    kind in a caller-supplied netlist is rejected up front by
+    :func:`_reject_unsupported_netlist_constructs` (the ``x`` case) or was
+    already mapped (the ``0``/``1`` case). This stays as the last line of
+    defense for the cases neither covers -- an unmapped ``1'b0``/``1'b1``
+    literal, or a constant OpenROAD materialises from something other than a
+    literal in the Verilog text.
     """
     combined = f"{completed.stdout or ''}\n{completed.stderr or ''}"
     match = _DRT_CONSTANT_NET_RE.search(combined)
@@ -3929,9 +4112,11 @@ def _constant_tie_diagnosis(
         f"literal in the netlist becomes a net OpenROAD types {sig_type}, and "
         f"TritonRoute will not route one. Re-synthesize the netlist so its "
         f"constants are driven by real tie cells -- `klt synthesize` does this "
-        f"via yosys's `hilomap` pass for every standard-cell library in its "
-        f"tie-cell table -- or hand-edit the netlist to instantiate tie-high/"
-        f"tie-low cells before place-and-route.",
+        f"via yosys's `setundef -zero` + `hilomap` passes (which together "
+        f"cover x-valued bits as well as 1'b0/1'b1 literals) for every "
+        f"standard-cell library in its tie-cell table -- or hand-edit the "
+        f"netlist to instantiate tie-high/tie-low cells before "
+        f"place-and-route.",
     )
 
 

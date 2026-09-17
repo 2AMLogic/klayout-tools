@@ -499,6 +499,46 @@ _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     ),
 }
 
+#: Matches a Verilog ``signed`` qualifier immediately following a
+#: declaration keyword (``input``/``output``/``inout``/``wire``/``reg``/
+#: ``logic``) -- ``output signed [15:0] sample;``, ``wire signed [7:0]
+#: mid;``, ``input wire signed [3:0] a;`` -- issue #1973's Failure 1.
+#:
+#: Yosys's own ``write_verilog`` (:func:`_write_script`'s final line)
+#: preserves every port/wire's ``signed`` attribute verbatim and has no flag
+#: to suppress it, but OpenSTA's Verilog reader (used by ``klt
+#: place-and-route`` at the floorplan stage) rejects the keyword outright
+#: with a bare syntax error. :func:`_strip_signed_qualifiers` runs a
+#: post-write text rewrite -- the cleanest option Yosys's own pass set
+#: offers (there is no ``nosigned``-style ``write_verilog`` flag, and no
+#: separate pass clears a wire's ``is_signed`` attribute) -- so the emitted
+#: netlist never carries the keyword at all.
+#:
+#: Anchored to a declaration keyword (never a bare ``\bsigned\b``) so a
+#: ``$signed(...)`` cast used in an expression -- fully supported by every
+#: downstream reader, and RTL's own recommended replacement for a ``signed``
+#: port/wire (see ``docs/guides/digital-review/rtl-style-guide.md``) -- is
+#: never touched: `$signed(` is never immediately preceded by one of these
+#: keywords plus whitespace.
+_SIGNED_DECL_RE = re.compile(r"\b(input|output|inout|wire|reg|logic)(\s+)signed(\s+)")
+
+
+def _strip_signed_qualifiers(netlist_text: str) -> str:
+    """Rewrite every ``<decl-keyword> signed`` in ``netlist_text`` to just
+    ``<decl-keyword>``, dropping the ``signed`` qualifier and the single run
+    of whitespace that followed it while keeping the whitespace that
+    preceded it -- ``"output signed [15:0] sample;"`` becomes ``"output
+    [15:0] sample;"`` (issue #1973's Failure 1; see :data:`_SIGNED_DECL_RE`).
+
+    A pure text transform (no dependency on the writing Yosys version) so it
+    is safe to run over anything :func:`_run_yosys` produced -- and cheap
+    enough to always run, matching :func:`run_synthesize`'s existing
+    unconditional netlist-normalization posture (``-noattr`` itself is
+    unconditional).
+    """
+    return _SIGNED_DECL_RE.sub(r"\1\2", netlist_text)
+
+
 #: Matches every gate-level latch primitive/cell-type name Yosys or a
 #: liberty leaves behind (``$_DLATCH_P_``, ``$_DLATCHSR_PPP_``, ``$dlatch``,
 #: a liberty cell like ``sky130_fd_sc_hd__dlrtp_1``'s underlying
@@ -1021,6 +1061,19 @@ def run_synthesize(
         raise SynthesizeError(
             f"yosys exited successfully but did not produce '{netlist_path}'"
         )
+
+    # Issue #1973 Failure 1: strip any `signed` port/wire declaration Yosys's
+    # `write_verilog` left in place -- see `_strip_signed_qualifiers`'s own
+    # docstring for why this is a post-write text rewrite rather than a
+    # Yosys pass. Rewritten in place only when something actually changed,
+    # so a netlist with no `signed` declaration at all (the common case) is
+    # never touched -- not even its mtime.
+    with open(netlist_path, encoding="utf-8") as handle:
+        netlist_text = handle.read()
+    stripped_netlist_text = _strip_signed_qualifiers(netlist_text)
+    if stripped_netlist_text != netlist_text:
+        with open(netlist_path, "w", encoding="utf-8") as handle:
+            handle.write(stripped_netlist_text)
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
     engine_version = _yosys_version()
@@ -2248,8 +2301,8 @@ def _write_script(
 ) -> str:
     """Generate the ``.ys`` synthesis script (Yosys survey section 1's exact
     pass sequence: ``read_verilog`` -> ``hierarchy`` -> ``synth`` ->
-    ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``hilomap`` ->
-    ``stat``/``write_verilog``) into ``script_path``.
+    ``dfflibmap`` -> ``abc -liberty`` -> ``clean`` -> ``setundef`` ->
+    ``hilomap`` -> ``stat``/``write_verilog``) into ``script_path``.
 
     The ``abc`` line carries the issue #807 additions when the resolved
     ``cell_library`` has table entries for them:
@@ -2268,16 +2321,33 @@ def _write_script(
     file, per the #396 spike's explicit warning against regexing the
     interleaved Yosys log.
 
-    ``tie_cells`` (issue #854, a :data:`_TIE_CELLS` entry) adds one
-    ``hilomap -hicell <cell> <port> -locell <cell> <port>`` line, mapping
-    every remaining constant driver onto a real standard cell. Its position
-    is load-bearing: **after** ``clean`` (it can only rewrite the constants
-    ABC/``clean`` left behind) and **before** ``stat``/``write_verilog`` (the
-    tie cells it inserts are real instances, so they must be counted in
-    ``instance_count``/``area_um2`` and present in the emitted netlist).
+    ``tie_cells`` (issue #854, a :data:`_TIE_CELLS` entry) adds a
+    ``setundef -zero`` line (issue #1973) immediately followed by
+    ``hilomap -hicell <cell> <port> -locell <cell> <port>``, mapping every
+    remaining constant driver onto a real standard cell. Both lines'
+    position is load-bearing: **after** ``clean`` (they can only rewrite the
+    constants ABC/``clean`` left behind) and **before** ``stat``/
+    ``write_verilog`` (the tie cells they insert are real instances, so they
+    must be counted in ``instance_count``/``area_um2`` and present in the
+    emitted netlist). ``setundef -zero`` must additionally run **before**
+    ``hilomap``: without it, a bit left ``x`` by Yosys (a dangling Verilog
+    ``function`` argument is the common source -- issue #1973's Failure 2)
+    is not a constant `hilomap` recognises at all, so it survives as a bare
+    ``x`` literal that OpenSTA's Verilog reader turns into an unroutable
+    ``GROUND``-typed net exactly like an unmapped ``1'b0``/``1'b1`` would
+    (``DRT-0305``). Resolving every ``x`` bit to a concrete ``0`` first
+    means `hilomap`'s existing pass then maps it onto a tie cell identically
+    to a literal constant -- confirmed live (Yosys 0.69, a dangling-argument
+    ``function`` against a real sky130 liberty): the resulting netlist
+    carries zero bare constants of any kind, `x`-valued or not.
 
     With none of those (a ``cell_library`` in no table), the emitted script
-    is byte-identical to the pre-#807 one.
+    is byte-identical to the pre-#807 one -- `setundef` is scoped to the
+    same tie-cell-table condition as `hilomap` since, without a tie-cell
+    entry to map the resolved bit onto, converting a bare `x` into a bare
+    `0` swaps one already-known, separately-tracked bare-constant limitation
+    (:data:`_TIE_CELLS`'s own docstring, "gets **no** ``hilomap`` pass at
+    all") for another rather than fixing anything.
 
     ``adder_techmap_path`` (issue #1722, the request's ``arithmetic`` field)
     inserts the arithmetic-architecture substitution **between**
@@ -2404,6 +2474,12 @@ def _write_script(
     ]
     if tie_cells is not None:
         (hi_cell, hi_port), (lo_cell, lo_port) = tie_cells
+        # Issue #1973: resolve every `x` bit to a concrete `0` *before*
+        # `hilomap` runs, so a dangling-argument `x` constant gets mapped
+        # onto a tie cell exactly like a literal `1'b0`/`1'b1` already is --
+        # see this function's own docstring for why the ordering is
+        # load-bearing.
+        lines.append("setundef -zero")
         lines.append(f"hilomap -hicell {hi_cell} {hi_port} -locell {lo_cell} {lo_port}")
     lines += [
         f"tee -q -o {stats_text} "

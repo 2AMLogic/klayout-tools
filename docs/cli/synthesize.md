@@ -111,10 +111,15 @@ synth -top <hdl_toplevel>
 dfflibmap -liberty <liberty path>
 tee -q -o <abc log path> abc -liberty <liberty path> -constr <constr path> [-D <picoseconds>] [-dont_use <glob> ...]
 clean
+[setundef -zero]
 [hilomap -hicell <tie-hi cell> <port> -locell <tie-lo cell> <port>]
 tee -q -o <stats path> stat -liberty <liberty path> -json -top <hdl_toplevel>
 write_verilog -noattr <netlist path>
 ```
+
+`run_synthesize` then applies one post-`write_verilog` text rewrite to the
+emitted netlist, stripping any `signed` port/wire qualifier yosys left in
+place — see "`signed` stripping" below for why that is not a Yosys pass.
 
 `<liberty path>` is written as `$PDK_ROOT/<path under the resolved PDK install
 root>` in the committed `synth_<top>.ys` and as the real absolute path in the
@@ -307,6 +312,50 @@ A `cell_library` with no `_TIE_CELLS` entry emits no `hilomap` line at all,
 rather than a guessed cell name. A design that needs no constant tie (the
 repo's own `gcd.v`) is unaffected: its netlist and `stat` output are
 byte-identical with and without the pass.
+
+#### `x`-valued constants (`setundef`, issue #1973)
+
+`hilomap` maps concrete `1'b0`/`1'b1` literals only — it does not recognise
+an `x` bit as a constant to map at all. A Verilog `function` whose argument
+wire is left dangling is assigned `x` by yosys (`assign
+\data_len$func$…o = 5'hxx;`), and that bare literal survived the pass to
+produce the **identical** `DRT-0305` failure above — after floorplan,
+placement and CTS had all already succeeded.
+
+The generated script therefore emits `setundef -zero` immediately **before**
+`hilomap`, resolving every `x` bit to a concrete `0` that `hilomap` then
+maps onto a tie cell exactly like an ordinary literal. The ordering is
+load-bearing in both directions: after `clean` (it can only rewrite what ABC
+and `clean` left behind) and before `hilomap` (a bit resolved *after*
+`hilomap` would still reach the netlist as a bare `1'b0`). `setundef` is
+scoped to the same `_TIE_CELLS` condition as `hilomap` — with no tie cell to
+map the resolved bit onto, turning a bare `x` into a bare `0` would swap one
+bare-constant limitation for another rather than fixing anything.
+
+RTL-side, the construct that produces these is covered by
+[`docs/guides/digital-review/rtl-style-guide.md`](../guides/digital-review/rtl-style-guide.md)'s
+"Flow compatibility" rules — prefer `always @*` case blocks over
+synthesizable `function`s.
+
+### `signed` stripping (issue #1973)
+
+Yosys's `write_verilog` preserves every port/wire's `signed` qualifier
+verbatim (`output signed [15:0] sample;`) and offers no flag to suppress it
+— but OpenSTA's Verilog reader, the first thing `klt place-and-route` runs
+at the floorplan stage, rejects the keyword outright:
+
+```
+[ERROR STA-0171] .../.klt/synthesize/<top>_synth.v line 963, syntax error
+```
+
+Nothing in yosys's pass set clears a wire's `is_signed` attribute either, so
+`run_synthesize` applies a post-`write_verilog` text rewrite instead,
+dropping the qualifier from every `input`/`output`/`inout`/`wire`/`reg`/
+`logic` declaration. The rewrite is anchored to a preceding declaration
+keyword, so an expression-level `$signed(...)` cast — accepted by every
+downstream reader — is never touched. The netlist file is only rewritten
+when something actually changed, so the common case (no `signed` at all)
+leaves it untouched, mtime included.
 
 ## PDK / liberty resolution
 
