@@ -46,6 +46,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/gen-compose.md`](docs/cli/gen-compose.md)'s "Routing *over* a
   closed ring on a higher plane (#1960, fixed)".
 
+- **Added**: `klt signoff` now recognises the two **digital RTL-flow
+  evidence kinds** — `klt sta` and `klt functional-verification` — and
+  grades T1 item 7 ("Post-layout verification") **per block kind** rather
+  than globally (issue #1959). Before this, `_classify` recognised only
+  analog/full-custom artifacts, so a digital block's own evidence rendered
+  `unrecognized_envelope` on item 5, and item 7 was restricted to `pex`
+  alone — an artifact an RTL/synthesis block has no way to produce. **No
+  digital RTL-flow block could reach `tier: "T1"`.** Both new kinds are
+  detected structurally, like every other native kind: `sta` by a top-level
+  `geometry_source` string plus `timing_status` or a `corners` list,
+  `functional-verification` by a `tests` list plus `test_count`. `klt sta`
+  carries no pass/fail `status` of its own (`status` is always `"ok"`), so
+  its verdict is derived from the reported timing: **every** corner it
+  reported must be `timing_status: "constrained"` (OpenSTA's unconstrained
+  sentinel `1e+39` is positive, so a naive `worst_slack_ns >= 0` rule would
+  call an untimed design closed) with non-negative setup and hold slack —
+  scoped to the corner set the cited run itself declared, which is why `klt
+  place-and-route`'s unrestricted-sweep response stays deliberately
+  unrecognised. Item 7 now accepts `pex` for an analog partition, and `pex`
+  **or** an SDF-annotated `functional-verification` run for a digital one;
+  an unannotated (pre-layout, zero-delay) regression cited there renders a
+  new, additive `reason` value, **`"not_post_layout"`**, kept distinct from
+  `"wrong_kind"` so the report says whether to cite a different artifact or
+  re-run this one against the layout. **Analog and full-custom-digital
+  grading is unchanged**: an analog block's item 7 still requires `pex` and
+  nothing else, a `kind: "digital"` manifest still accepts `pex` there, and
+  item 5 stays unrestricted for every block kind. A `generic` citation still
+  renders `wrong_kind` on items 5 and 7 — widening `generic` onto them was
+  explicitly rejected as weakening the guarantee issue #1152 preserved.
 - **Added**: `klt lvs` now reports a **power/ground connectivity verdict**
   alongside the signal-connectivity one for `reference.form:
   "gate-level-verilog"` compares (issue #1952). That form is signal-only by

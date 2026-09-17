@@ -99,12 +99,13 @@ every block.
     (`analog`/`digital`/`mixed-signal`, `signoff.py`'s `_BLOCK_KINDS`) needs
     to change — a full-custom digital block still declares `kind: "digital"`
     and is graded the same way any other digital block is. Item 7 needs no
-    separate full-custom text: its grading is already restricted to a `klt
-    pex` citation regardless of column (see
+    separate full-custom text either: a digital block's item 7 accepts a
+    `klt pex` citation *or* the RTL-flow artifact the Digital column itself
+    names (issue #1959 — see
     [`docs/cli/signoff.md`](cli/signoff.md)'s "Item 7 is kind-restricted"
     section), so a full-custom partition's own post-layout re-simulation
     against its drawn layout satisfies it exactly like the Analog column's
-    item 7 does.
+    item 7 does, with no full-custom-specific wording needed here.
 - **Mixed-signal** blocks partition into analog and digital sub-blocks
   within the same repo and satisfy **both** columns, one per partition. The
   claim must state the partition boundary explicitly (which nets/pins/cells
@@ -155,6 +156,16 @@ every block.
      that same sweep — a SPICE-measured analog of STA setup/hold margin,
      e.g. a derived arrival-time-vs-required-time delta recorded per PVT
      point — as the full-custom substitute for the STA requirement above.
+     The machine-checkable evidence for the RTL-flow artifacts is a `klt
+     sta` JSON report run across the declared corner set (`pdk.corners`,
+     `docs/cli/sta.md`) and a `klt functional-verification` JSON report
+     (`docs/cli/functional-verification.md`); `klt signoff`'s tier-verdict
+     mode recognises both as first-class evidence kinds (#1959), so a
+     digital block no longer has to produce a `klt sim` corner sweep it has
+     no reason to run. An `sta` citation counts as passing only when every
+     corner it reports is `timing_status: "constrained"` with non-negative
+     setup and hold slack — the corner set graded is the one the cited run
+     itself declared.
    - Both require the spec table itself to be ratified — verdicts against
      a draft spec are provisional by construction.
 6. **Statistical claims carry Monte Carlo evidence** — any accuracy,
@@ -195,7 +206,17 @@ every block.
      topology produces.
    - *Digital* — the functional test suite re-run against the post-route
      gate-level netlist with back-annotated SDF timing, not only the
-     pre-layout RTL/gate simulation.
+     pre-layout RTL/gate simulation. The machine-checkable evidence is a
+     `klt functional-verification` JSON report from an SDF-annotated run
+     (`options.sdf`, `docs/cli/functional-verification.md`) — its
+     `environment.sdf` block is `null` on an ordinary zero-delay run and an
+     object with `annotated: true` on an annotated one, so the two are never
+     mistakable for each other from the JSON alone. `klt signoff` accepts
+     exactly that report, or a `klt pex` report (the full-custom sub-case's
+     own post-layout artifact), for a digital block's item 7 (#1959); an
+     unannotated regression renders `not_post_layout`, and a `klt sta` run —
+     even a SPEF-annotated one — is item 5's timing evidence, not this
+     item's functional re-simulation, so it renders `wrong_kind`.
 8. **Characterization report** — one aggregated, current artifact
    summarizing per-spec-row performance across conditions, with the
    evidence record each verdict rests on (#309 tracks the aggregation

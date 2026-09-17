@@ -546,6 +546,227 @@ GENERIC_PASS_ENVELOPE_WITH_PROVENANCE = {
     },
 }
 
+#: `klt sta` (docs/cli/sta.md) multi-corner response shape -- the digital
+#: item-5 artifact (issue #1959). `status` is always `"ok"` (this verb has
+#: no pass/fail concept of its own), so `klt signoff` derives a verdict from
+#: the per-corner timing instead: every corner `timing_status:
+#: "constrained"` with non-negative setup and hold slack.
+STA_MULTI_CORNER_CLEAN_ENVELOPE = {
+    "schema_version": 1,
+    "engine": "openroad",
+    "engine_version": "26Q3-771-g7cfb2105c9",
+    "hdl_toplevel": "gcd",
+    "status": "ok",
+    "def_path": "/abs/path/gcd.def",
+    "verilog_path": None,
+    "geometry_source": "routed",
+    "wire_load_model": None,
+    "wire_load_mode": None,
+    "spef_path": "/abs/path/gcd_route.spef",
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": {"name": "sky130A", "source": "volare", "version": "20240101"},
+        "deck": None,
+        "input": {"content_hash": "sha256:routeddef"},
+    },
+    "corners": [
+        {
+            "corner": "ss_100C_1v60",
+            "worst_slack_ns": 0.11842,
+            "total_negative_slack_ns": 0.0,
+            "worst_hold_slack_ns": 0.02011,
+            "total_negative_hold_slack_ns": 0.0,
+            "timing_status": "constrained",
+            "fmax_mhz": 401.552,
+            "setup_violation_count": 0,
+            "hold_violation_count": 0,
+            "clock_skew_ns": 0.0512,
+            "estimated_power_mw": 13.2,
+            "spef_annotation": None,
+            "deck": {
+                "name": "sky130_fd_sc_hd__ss_100C_1v60",
+                "content_hash": "sha256:libss",
+                "released": True,
+            },
+        },
+        {
+            "corner": "tt_025C_1v80",
+            "worst_slack_ns": 0.41233,
+            "total_negative_slack_ns": 0.0,
+            "worst_hold_slack_ns": 0.03812,
+            "total_negative_hold_slack_ns": 0.0,
+            "timing_status": "constrained",
+            "fmax_mhz": 512.345,
+            "setup_violation_count": 0,
+            "hold_violation_count": 0,
+            "clock_skew_ns": 0.0421,
+            "estimated_power_mw": 11.6,
+            "spef_annotation": None,
+            "deck": {
+                "name": "sky130_fd_sc_hd__tt_025C_1v80",
+                "content_hash": "sha256:libtt",
+                "released": True,
+            },
+        },
+    ],
+}
+
+#: One corner of the same characterization misses setup timing -- the
+#: multi-corner run as a whole did not close timing.
+STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE = {
+    **STA_MULTI_CORNER_CLEAN_ENVELOPE,
+    "corners": [
+        {
+            **STA_MULTI_CORNER_CLEAN_ENVELOPE["corners"][0],
+            "worst_slack_ns": -0.31842,
+            "total_negative_slack_ns": -2.41112,
+            "setup_violation_count": 5,
+        },
+        STA_MULTI_CORNER_CLEAN_ENVELOPE["corners"][1],
+    ],
+}
+
+#: Single-corner (`pdk.corner`) `klt sta` response -- the flat shape, with
+#: the same per-corner fields hoisted to the top level.
+STA_SINGLE_CORNER_CLEAN_ENVELOPE = {
+    "schema_version": 1,
+    "engine": "openroad",
+    "engine_version": "26Q3-771-g7cfb2105c9",
+    "hdl_toplevel": "gcd",
+    "status": "ok",
+    "def_path": "/abs/path/gcd.def",
+    "verilog_path": None,
+    "geometry_source": "routed",
+    "wire_load_model": None,
+    "wire_load_mode": None,
+    "spef_path": None,
+    "worst_slack_ns": 0.41233,
+    "total_negative_slack_ns": 0.0,
+    "worst_hold_slack_ns": 0.03812,
+    "total_negative_hold_slack_ns": 0.0,
+    "timing_status": "constrained",
+    "fmax_mhz": 512.345,
+    "setup_violation_count": 0,
+    "hold_violation_count": 0,
+    "clock_skew_ns": 0.0421,
+    "estimated_power_mw": 11.6,
+    "spef_annotation": None,
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": {"name": "sky130A", "source": "volare", "version": "20240101"},
+        "deck": {
+            "name": "sky130_fd_sc_hd__tt_025C_1v80",
+            "content_hash": "sha256:libtt",
+        },
+        "input": {"content_hash": "sha256:routeddef"},
+    },
+}
+
+#: OpenSTA's unconstrained-design sentinel (`1e+39`) restated -- a *positive*
+#: number, so a naive `worst_slack_ns >= 0` rule would report "timing closed"
+#: on a design that was never timed (docs/cli/sta.md's `timing_status`).
+STA_UNCONSTRAINED_ENVELOPE = {
+    **STA_SINGLE_CORNER_CLEAN_ENVELOPE,
+    "worst_slack_ns": 1e39,
+    "worst_hold_slack_ns": 0.0,
+    "timing_status": "unconstrained",
+}
+
+#: `klt functional-verification` (docs/cli/functional-verification.md)
+#: response shape -- an ordinary (zero-delay, pre-layout) regression:
+#: `environment.sdf` is `null`.
+FUNCTIONAL_VERIFICATION_PASS_ENVELOPE = {
+    "schema_version": 1,
+    "engine": "icarus",
+    "hdl_toplevel": "gcd",
+    "testbench": "test_gcd",
+    "status": "pass",
+    "test_count": 3,
+    "passed_count": 3,
+    "failed_count": 0,
+    "skipped_count": 0,
+    "tests": [
+        {
+            "name": "test_gcd_known_pairs",
+            "status": "passed",
+            "sim_time_ns": 520.0,
+            "real_time_s": 0.0051,
+        }
+    ],
+    "coverage": None,
+    "trace": None,
+    "environment": {
+        "engine": "icarus",
+        "engine_version": "13.0",
+        "cocotb_version": "2.0.1",
+        "results_xml": "/abs/path/results_icarus.xml",
+        "random_seed": 1785780800,
+        "sdf": None,
+    },
+}
+
+FUNCTIONAL_VERIFICATION_FAIL_ENVELOPE = {
+    **FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
+    "status": "fail",
+    "passed_count": 2,
+    "failed_count": 1,
+}
+
+#: The digital item-7 artifact (issue #1959): the same regression re-run
+#: against the post-route gate-level netlist with back-annotated SDF timing
+#: -- `environment.sdf` is an object, `annotated: true`.
+FUNCTIONAL_VERIFICATION_SDF_ENVELOPE = {
+    **FUNCTIONAL_VERIFICATION_PASS_ENVELOPE,
+    "environment": {
+        **FUNCTIONAL_VERIFICATION_PASS_ENVELOPE["environment"],
+        "sdf": {
+            "file": "gcd_route.sdf",
+            "corner": "typ",
+            "annotated": True,
+            "partial": True,
+            "dropped": {
+                "timingcheck": {
+                    "count": 708,
+                    "reason": (
+                        "Icarus implements SDF delay annotation but not TIMINGCHECK"
+                    ),
+                }
+            },
+        },
+    },
+}
+
+#: A `klt place-and-route` response (docs/cli/place-and-route.md) -- trimmed
+#: to the fields that overlap `klt sta`'s own shape. Not a recognised kind,
+#: and adding `sta`/`functional-verification` recognition must not
+#: accidentally start classifying it as one (issue #1959).
+PLACE_AND_ROUTE_ENVELOPE = {
+    "schema_version": 1,
+    "engine": "openroad",
+    "hdl_toplevel": "gcd",
+    "status": "ok",
+    "stage_reached": "route",
+    "worst_slack_ns": -2.18828,
+    "total_negative_slack_ns": -82.8171,
+    "timing_status": "constrained",
+    "worst_setup_slack_ns": -4.02163,
+    "worst_hold_slack_ns": 0.08421,
+    "corners": [
+        {
+            "name": "tt_025C_1v80",
+            "setup_slack_ns": -2.18828,
+            "hold_slack_ns": 0.42011,
+            "timing_status": "constrained",
+        }
+    ],
+    "stages": [{"name": "route"}],
+    "def_path": "/abs/path/gcd.def",
+    "gds_path": "/abs/path/gcd.gds",
+    "verilog_path": "/abs/path/gcd.v",
+}
+
 DRC_ERROR_ENVELOPE = {
     "schema_version": 1,
     "error": {"command": "drc", "message": "file not found: missing.gds"},
@@ -1460,7 +1681,11 @@ def test_digital_column_documents_the_full_custom_sub_case_for_items_1_2_5():
     sub-case of the existing column rather than a new column or manifest
     `kind` (grading is unaffected either way: these three items already
     accept any recognised evidence kind, regardless of what the column text
-    says)."""
+    says).
+
+    Issue #1959 extended the same inline-sub-case treatment to item 7, whose
+    grading stopped being column-independent once it became per-partition-kind
+    -- see the item-7 assertions at the end."""
     result = build_tier_report(_manifest(kind="digital"))
     by_id = {item["id"]: item for item in result["items"] if item["tier"] == "T1"}
 
@@ -1485,11 +1710,20 @@ def test_digital_column_documents_the_full_custom_sub_case_for_items_1_2_5():
     assert "timing-margin metric" in by_id[5]["text"]
     assert "PVT" in by_id[5]["text"]
 
-    # Item 7 (Post-layout verification) is deliberately untouched -- its
-    # grading is already pex-kind-restricted regardless of column text, so
-    # no full-custom-specific wording was added (see the doc's "Block kind"
-    # subsection).
-    assert "full-custom" not in by_id[7]["text"]
+    # Item 7 (Post-layout verification): until issue #1959 this item's
+    # grading was globally pex-restricted regardless of column text, so the
+    # Digital column needed no full-custom wording at all. Item 7 is now
+    # graded per-partition-kind (`pex` for analog; `pex` *or* an
+    # SDF-annotated `klt functional-verification` run for digital), so the
+    # Digital column now has to say which of the two artifacts a given
+    # digital partition cites -- the RTL-flow SDF re-simulation, or the
+    # full-custom sub-case's own `klt pex` report. This is still an inline
+    # sub-case of the Digital column, not a new column or manifest `kind`,
+    # exactly like items 1/2/5 above.
+    assert "SDF" in by_id[7]["text"]
+    assert "functional-verification" in by_id[7]["text"]
+    assert "full-custom sub-case" in by_id[7]["text"]
+    assert "pex" in by_id[7]["text"]
 
 
 def test_mixed_signal_manifest_doubles_up_kind_independent_items():
@@ -3509,3 +3743,399 @@ def test_committed_example_fleet_manifest_rolls_up_the_one_block(monkeypatch):
     assert block["block"] == "example-current-mirror"
     assert block["t1_met_count"] == 2
     assert block["tier"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Digital-flow evidence: `sta` + `functional-verification` (issue #1959)
+#
+# Before this phase, `_classify` recognised no digital RTL-flow artifact at
+# all, and item 7 was globally restricted to `pex` -- so no digital block
+# could reach T1 on items 5 and 7 whatever evidence it produced. These tests
+# cover the two new kinds, item 7's new per-block-kind restriction, and the
+# regression that analog / full-custom-digital grading is unchanged.
+# --------------------------------------------------------------------------- #
+
+
+def test_sta_multi_corner_clean_check_passes(tmp_path):
+    """`klt sta`'s `status` is always `"ok"` -- the verdict comes from the
+    per-corner timing instead."""
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_signoff([sta_path])
+
+    assert result["status"] == "pass"
+    check = result["checks"][0]
+    assert check["kind"] == "sta"
+    assert check["status"] == "ok"
+    assert check["passed"] is True
+    assert check["detail"]["corner_count"] == 2
+    assert check["detail"]["worst_slack_ns"] == 0.11842
+    assert check["detail"]["worst_hold_slack_ns"] == 0.02011
+    assert check["detail"]["timing_status"] == "constrained"
+
+
+def test_sta_single_corner_clean_check_passes(tmp_path):
+    sta_path = _write(tmp_path, "sta.json", STA_SINGLE_CORNER_CLEAN_ENVELOPE)
+
+    result = build_signoff([sta_path])
+
+    check = result["checks"][0]
+    assert check["kind"] == "sta"
+    assert check["passed"] is True
+    assert check["detail"]["corner_count"] is None
+
+
+def test_sta_setup_violation_at_one_corner_check_fails(tmp_path):
+    """Corner scoping is the cited run's own declared corner set: every
+    corner `klt sta` reported must close, not just the nominal one."""
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE)
+
+    result = build_signoff([sta_path])
+
+    assert result["status"] == "fail"
+    assert result["checks"][0]["passed"] is False
+
+
+def test_sta_unconstrained_timing_never_passes(tmp_path):
+    """OpenSTA's unconstrained sentinel (`1e+39`) is a *positive* number --
+    a naive `worst_slack_ns >= 0` rule would call an untimed design closed.
+    `timing_status` must be `"constrained"` first."""
+    sta_path = _write(tmp_path, "sta.json", STA_UNCONSTRAINED_ENVELOPE)
+
+    result = build_signoff([sta_path])
+
+    assert result["checks"][0]["kind"] == "sta"
+    assert result["checks"][0]["passed"] is False
+
+
+def test_sta_empty_corners_list_never_passes(tmp_path):
+    """A corners response that characterised zero corners proves nothing."""
+    sta_path = _write(
+        tmp_path,
+        "sta.json",
+        {**STA_MULTI_CORNER_CLEAN_ENVELOPE, "corners": []},
+    )
+
+    result = build_signoff([sta_path])
+
+    assert result["checks"][0]["passed"] is False
+
+
+def test_functional_verification_pass_check_passes(tmp_path):
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    result = build_signoff([fv_path])
+
+    check = result["checks"][0]
+    assert check["kind"] == "functional-verification"
+    assert check["passed"] is True
+    assert check["detail"]["test_count"] == 3
+    assert check["detail"]["failed_count"] == 0
+    assert check["detail"]["sdf_annotated"] is False
+
+
+def test_functional_verification_fail_check_fails(tmp_path):
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_FAIL_ENVELOPE)
+
+    result = build_signoff([fv_path])
+
+    assert result["checks"][0]["kind"] == "functional-verification"
+    assert result["checks"][0]["passed"] is False
+
+
+def test_sdf_annotated_functional_verification_is_marked_in_detail(tmp_path):
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_signoff([fv_path])
+
+    assert result["checks"][0]["detail"]["sdf_annotated"] is True
+    assert result["checks"][0]["detail"]["sdf_corner"] == "typ"
+
+
+def test_place_and_route_envelope_is_still_unrecognized(tmp_path):
+    """`klt place-and-route`'s response overlaps `klt sta`'s timing fields
+    (`worst_slack_ns`/`timing_status`/`corners`) but is a different verb with
+    a different corner-sweep contract -- recognising `sta` must not start
+    silently classifying it as one."""
+    pnr_path = _write(tmp_path, "pnr.json", PLACE_AND_ROUTE_ENVELOPE)
+
+    with pytest.raises(SignoffError, match="unrecognized shape"):
+        build_signoff([pnr_path])
+
+
+def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
+    """The headline gap: a digital block's corner-verification evidence is a
+    multi-corner `klt sta` run, not a `klt sim` corner sweep it has no reason
+    to produce."""
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": sta_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["reason"] is None
+    assert item_5["citation"]["kind"] == "sta"
+    assert item_5["citation"]["check_status"] == "ok"
+    assert item_5["citation"]["content_hash"] == "sha256:routeddef"
+
+
+def test_functional_verification_evidence_satisfies_item_5_for_digital(tmp_path):
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": fv_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["kind"] == "functional-verification"
+
+
+def test_failing_sta_evidence_for_item_5_renders_unmet_check_failed(tmp_path):
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_SETUP_VIOLATION_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": sta_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "check_failed"
+    assert item_5["citation"] is None
+
+
+def test_sdf_annotated_functional_verification_satisfies_item_7_for_digital(
+    tmp_path,
+):
+    """Item 7's Digital column asks for "the functional test suite re-run
+    against the post-route gate-level netlist with back-annotated SDF
+    timing" -- an SDF-annotated `klt functional-verification` run is exactly
+    that artifact."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"7": fv_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["reason"] is None
+    assert item_7["citation"]["kind"] == "functional-verification"
+
+
+def test_unannotated_functional_verification_for_item_7_is_not_post_layout(
+    tmp_path,
+):
+    """A zero-delay pre-layout regression is the right *kind* but the wrong
+    evidence: `environment.sdf` is `null`, so it proves nothing about
+    post-route behaviour. Distinguished from `wrong_kind` so the report says
+    exactly what to re-run."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"7": fv_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "not_post_layout"
+    assert item_7["citation"] is None
+
+
+def test_sta_citation_for_item_7_renders_unmet_wrong_kind(tmp_path):
+    """Settling the issue's open question: item 7's Digital column asks for
+    SDF gate-level re-simulation, not STA-with-parasitics. A `klt sta` run
+    (even a SPEF-annotated, timing-clean one) is item-5 evidence."""
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"7": sta_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "wrong_kind"
+    assert item_7["citation"] is None
+
+
+def test_pex_still_satisfies_item_7_for_a_full_custom_digital_block(tmp_path):
+    """Regression: a full-custom digital partition declares `kind:
+    "digital"` and cites `klt pex` exactly like an analog block -- widening
+    item 7 for the RTL flow must not take that path away."""
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"7": pex_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["citation"]["kind"] == "pex"
+
+
+def test_analog_item_7_still_requires_pex(tmp_path):
+    """Regression: the new digital artifact is scoped to the digital
+    partition -- an analog block's item 7 is unchanged, `pex` only."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"7": fv_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "wrong_kind"
+    assert item_7["citation"] is None
+
+
+def test_analog_item_5_accepts_any_recognised_kind_as_before(tmp_path):
+    """Regression: item 5 stays unrestricted for every block kind -- this
+    phase widens what is *recognised*, it does not tighten what item 5
+    accepts."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    analog = build_tier_report(_manifest(kind="analog", evidence={"5": drc_path}))
+    assert next(i for i in analog["items"] if i["id"] == 5)["status"] == "met"
+
+    full_custom_digital = build_tier_report(
+        _manifest(kind="digital", evidence={"5": sim_path})
+    )
+    item_5 = next(i for i in full_custom_digital["items"] if i["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["kind"] == "sim"
+
+
+def test_mixed_signal_partitions_apply_their_own_item_7_rule(tmp_path):
+    """A mixed-signal manifest's digital partition applies the same
+    per-block-kind item-7 rule a pure `digital` manifest does, while its
+    analog partition still requires `pex`."""
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            kind="mixed-signal",
+            evidence={"7.analog": pex_path, "7.digital": fv_path},
+        )
+    )
+
+    item_7 = {
+        item["partition"]: item
+        for item in result["items"]
+        if item["id"] == 7 and item["tier"] == "T1"
+    }
+    assert item_7["analog"]["status"] == "met"
+    assert item_7["analog"]["citation"]["kind"] == "pex"
+    assert item_7["digital"]["status"] == "met"
+    assert item_7["digital"]["citation"]["kind"] == "functional-verification"
+
+
+def test_mixed_signal_analog_partition_rejects_the_digital_item_7_artifact(
+    tmp_path,
+):
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="mixed-signal", evidence={"7": fv_path}))
+
+    item_7 = {
+        item["partition"]: item
+        for item in result["items"]
+        if item["id"] == 7 and item["tier"] == "T1"
+    }
+    assert item_7["analog"]["status"] == "unmet"
+    assert item_7["analog"]["reason"] == "wrong_kind"
+    assert item_7["digital"]["status"] == "met"
+
+
+def test_generic_citation_still_rejected_on_items_5_and_7_for_digital(tmp_path):
+    """Direction 3 of the issue -- widening `generic` onto items 5/7 -- is
+    explicitly NOT implemented: it would weaken exactly the guarantee #1152
+    was careful to preserve."""
+    generic_path = _write(tmp_path, "generic.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"5": generic_path, "7": generic_path})
+    )
+
+    for item_id in (5, 7):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "unmet", item_id
+        assert item["reason"] == "wrong_kind", item_id
+        assert item["citation"] is None
+
+
+def test_command_backed_sta_evidence_satisfies_item_5(monkeypatch):
+    """The new kinds work through the command-backed evidence path exactly
+    like the file-backed one -- no separate wiring."""
+
+    def fake_run(command, **kwargs):
+        return fake_completed(
+            returncode=0, stdout=json.dumps(STA_MULTI_CORNER_CLEAN_ENVELOPE)
+        )
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"5": {"command": ["klt", "sta", "request.json"]}},
+        )
+    )
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["kind"] == "sta"
+    assert item_5["citation"]["command"] == "klt sta request.json"
+
+
+def test_realistic_digital_envelope_set_reaches_eight_of_ten_items(tmp_path):
+    """The issue's "Manifest C" experiment, now with the digital artifacts
+    recognised: a digital RTL-flow block citing `sta`, `functional-
+    verification` (SDF-annotated for item 7), `drc`, `lvs` and `extract`
+    reaches `met` on items 1, 2, 3, 4, 5, 7 and 8 -- the two items it still
+    misses (6, 9) and item 10 are evidence it genuinely has not cited."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+    fv_sdf_path = _write(tmp_path, "fv-sdf.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "1": extract_path,
+                "2": drc_path,
+                "3": drc_path,
+                "4": lvs_path,
+                "5": sta_path,
+                "7": fv_sdf_path,
+                "8": generic_path,
+                "9": fv_path,
+            },
+        )
+    )
+
+    met = {item["id"] for item in result["items"] if item["status"] == "met"}
+    assert {1, 2, 3, 4, 5, 7, 8}.issubset(met)
+    assert result["t1_met_count"] >= 8
+
+    # And the two unmet items report "nobody cited this", never a check that
+    # ran and failed.
+    for item_id in (6, 10):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "unmet"
+        assert item["reason"] == "no_evidence"
+
+
+def test_fleet_rollup_blocking_item_reflects_the_new_digital_kinds(tmp_path):
+    """The roll-up is a pure reduction of `build_tier_report`, so a digital
+    block's blocking item moves off items 5/7 for free once its evidence is
+    recognised."""
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_sdf_path = _write(tmp_path, "fv-sdf.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_fleet_report(
+        {
+            "blocks": [
+                {
+                    "block": "digital-canary",
+                    "kind": "digital",
+                    "evidence": {"5": sta_path, "7": fv_sdf_path},
+                }
+            ]
+        }
+    )
+
+    block = result["blocks"][0]
+    assert block["blocking_item"]["id"] == 1
+    assert block["blocking_item"]["reason"] == "no_evidence"

@@ -254,6 +254,74 @@ prose structure" caveat). So a ``"power"``-kind citation is recognised by
 how :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` scopes ``"generic"`` to item
 8 alone, just with an empty accept-set instead of ``{8}`` today.
 
+## Digital-flow evidence: `sta` + `functional-verification` (issue #1959)
+
+Every kind above is an artifact an *analog* (or full-custom digital) block
+produces. A digital RTL-flow block's own evidence -- a multi-corner `klt
+sta` characterization and a `klt functional-verification` cocotb regression
+-- classified as nothing at all, so ``docs/design-evidence-tiers.md``'s
+Digital column for items 5 and 7 named artifacts this grader could not read:
+item 5 ("Full corner verification vs a ratified spec") rendered
+``unrecognized_envelope`` on the block's real evidence, and item 7
+("Post-layout verification") was globally restricted to ``"pex"``, an
+analog/full-custom artifact an RTL/synthesis block has no way to produce.
+**No digital RTL-flow block could reach T1.**
+
+This phase adds the two kinds the Digital column actually names, and makes
+item 7's restriction per-block-kind:
+
+- ``"sta"`` (``docs/cli/sta.md``) -- detected structurally by a top-level
+  ``geometry_source`` string (unique to this verb's response) plus either
+  the flat single-corner shape's ``timing_status`` or the multi-corner
+  shape's ``corners`` list. Unlike every other kind, a `klt sta` envelope's
+  own ``status`` is *always* ``"ok"`` (the verb has no pass/fail concept of
+  its own), so :func:`_check_passed` derives a verdict from the reported
+  timing instead -- see :func:`_sta_timing_passed`.
+- ``"functional-verification"`` (``docs/cli/functional-verification.md``) --
+  detected by a top-level ``tests`` list plus ``test_count``; passes on its
+  own ``status == "pass"`` (``failed_count == 0``). It carries no shared
+  ``provenance`` block at all (that verb's verdict depends on no PDK and no
+  deck), so a ``content_hash``-pinned citation of one always renders
+  ``"stale_evidence"``, the same documented caveat an unprovenanced
+  ``"generic"`` envelope already has.
+
+**Item 7's artifact, settled against the doc's own text.** The Digital
+column of item 7 asks for "the functional test suite re-run against the
+post-route gate-level netlist with back-annotated SDF timing" -- an SDF
+gate-level re-simulation, *not* STA-with-parasitics. So item 7's digital
+branch accepts a ``"functional-verification"`` citation **only** when that
+run was actually SDF-annotated (``environment.sdf`` is an object with
+``annotated: true`` -- ``docs/cli/functional-verification.md``'s "SDF
+back-annotation" section: "an annotated run is identifiable from the JSON
+alone"). An unannotated (zero-delay, pre-layout) regression is the right
+kind of artifact but not post-layout evidence, so it renders
+:data:`_REASON_NOT_POST_LAYOUT` -- deliberately distinct from
+:data:`_REASON_WRONG_KIND`, per issue #826's rule that the report must say
+precisely which thing is missing. A `klt sta` citation for item 7 is
+``"wrong_kind"``: a SPEF-annotated timing run strengthens item 5, it is not
+the functional re-simulation item 7 names.
+
+**Corner scoping (the issue's finding #2) is the cited run's own declared
+corner set.** A `klt sta` check passes only when *every* corner it reported
+has ``timing_status == "constrained"`` (OpenSTA's unconstrained sentinel,
+``1e+39``, is a positive number -- a naive ``worst_slack_ns >= 0`` rule
+would otherwise call an untimed design closed) and non-negative setup/hold
+slack. Which corners those are is decided by the request that produced the
+envelope (`klt sta`'s own ``pdk.corners``), so the pass rule is scoped to
+the corner set the claimant declared, never to an unrestricted sweep. This
+module deliberately does **not** recognise `klt place-and-route`'s
+``worst_setup_slack_ns``, whose corner set is the PDK's full shipped list
+rather than a declared one.
+
+**Item 5 stays unrestricted** (``allowed_kinds is None``), exactly as
+before: this phase widens what is *recognised*, it does not tighten what
+item 5 accepts -- an analog block's item 5, and a full-custom digital
+block's `klt sim` corner-matrix citation for it, grade exactly as they did
+before. **Direction 3 of issue #1959 -- letting a ``"generic"`` citation
+satisfy items 5/7 for digital blocks -- is deliberately not implemented**:
+it would weaken precisely the guarantee :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE`
+exists to preserve.
+
 ## Critical-metric consumption (issue #1850)
 
 Before this phase, every kind above derived ``passed`` purely from the
@@ -336,20 +404,49 @@ FLEET_REPORT_SCHEMA_VERSION = 1
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
 _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 
-#: Per-T1-item-id restriction on which :func:`_classify` kinds may satisfy
-#: that item (issue #871, Phase 2b of epic #706) -- passed as
-#: :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An item id absent
-#: from this map (every id but 7, today) is unrestricted (``None``),
-#: preserving the original Phase 0/1 behaviour where any recognised, passing
-#: envelope kind satisfies any item. Item 7 ("Post-layout verification")
-#: is the only item this phase restricts: it requires a ``"pex"``-kind
-#: citation (a `klt pex` schematic-vs-extracted-netlist delta report -- see
-#: this module's "Post-layout binding" docstring section) -- a `klt
-#: drc`/`klt lvs`/generic `klt sim`/`klt extract`/`klt yield` citation no
-#: longer satisfies it, even if that check itself passed.
-_ITEM_ALLOWED_KINDS: dict[int, set[str]] = {
-    7: {"pex"},
+#: Per-T1-item-id, **per-block-kind** restriction on which :func:`_classify`
+#: kinds may satisfy that item (issue #871, Phase 2b of epic #706; made
+#: per-block-kind by issue #1959) -- resolved by :func:`_allowed_kinds_for`
+#: and passed as :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An
+#: item id absent from this map (every id but 7, today) is unrestricted
+#: (``None``), preserving the original Phase 0/1 behaviour where any
+#: recognised, passing envelope kind satisfies any item.
+#:
+#: Item 7 ("Post-layout verification") is the only item restricted today.
+#: The inner map is keyed by the **partition kind** being graded
+#: (``"analog"``/``"digital"`` -- a ``"mixed-signal"`` manifest grades both,
+#: one per partition, so that value never appears here) and must name every
+#: partition kind, since :func:`_allowed_kinds_for` falls back to the
+#: strictest (analog) set rather than silently becoming unrestricted:
+#:
+#: - **analog** (and a mixed-signal block's analog partition): a
+#:   ``"pex"``-kind citation only -- the `klt pex`
+#:   schematic-vs-extracted-netlist delta report (see this module's
+#:   "Post-layout binding" docstring section). Unchanged by issue #1959.
+#: - **digital**: ``"pex"`` *or* ``"functional-verification"``. ``"pex"``
+#:   keeps the full-custom digital sub-case working unchanged (it declares
+#:   ``kind: "digital"`` and produces exactly an analog block's post-layout
+#:   artifact -- ``docs/design-evidence-tiers.md``'s "Full-custom digital
+#:   sub-case"); ``"functional-verification"`` is the RTL-flow artifact the
+#:   doc's own Digital column names, and is additionally required to be
+#:   SDF-annotated (see :data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE`).
+_ITEM_ALLOWED_KINDS: dict[int, dict[str, set[str]]] = {
+    7: {
+        "analog": {"pex"},
+        "digital": {"pex", "functional-verification"},
+    },
 }
+
+#: T1 item ids whose evidence must prove a **post-layout** run, not merely a
+#: passing check of an accepted kind (issue #1959). Checked in
+#: :func:`_grade_evidence` via :func:`_is_post_layout_evidence`: a ``"pex"``
+#: report is post-layout by construction (it re-simulates an extracted
+#: netlist), but a ``"functional-verification"`` regression is only
+#: post-layout evidence when it ran with back-annotated SDF timing --
+#: otherwise it is the pre-layout zero-delay run item 7's own checklist text
+#: explicitly excludes ("not only the pre-layout RTL/gate simulation"), and
+#: renders :data:`_REASON_NOT_POST_LAYOUT`.
+_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE: frozenset[int] = frozenset({7})
 
 #: T1 item ids whose own checklist text in ``docs/design-evidence-tiers.md``
 #: names no specific `klt` verb (issue #1152) -- the only items a
@@ -433,6 +530,21 @@ _REASON_COMMAND_FAILED = "command_failed"
 #: `"met"` by borrowing an unrelated check's pass.
 _REASON_WRONG_KIND = "wrong_kind"
 
+#: Issue #1959: the evidence resolved to a readable, recognised, *passing*
+#: envelope **of a kind this item accepts**, but that run is not the
+#: post-layout run the item requires -- today, a `klt
+#: functional-verification` regression cited for item 7 that ran without SDF
+#: back-annotation (``environment.sdf`` is ``null``), i.e. the pre-layout
+#: zero-delay simulation item 7's own checklist text excludes. Deliberately
+#: distinct from :data:`_REASON_WRONG_KIND` (which says "cite a different
+#: kind of artifact"): here the artifact *is* the right one, it just has to
+#: be re-run against the post-route netlist with SDF timing, and per issue
+#: #826's invariant the report must say which of the two is missing rather
+#: than collapse them into one ambiguous reason. Grouped with the "no
+#: runnable check proves this item" reasons for the same rationale as
+#: ``wrong_kind``: the cited check did not fail on its own terms.
+_REASON_NOT_POST_LAYOUT = "not_post_layout"
+
 #: Wall-clock cap on a command-backed evidence entry's subprocess (issue
 #: #825) -- a hung `klt drc`/`klt lvs`/`klt sim` gate must not hang `klt
 #: signoff` itself. Generous (corner-matrix sims are slow) but finite; a
@@ -479,7 +591,8 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                 {
                     "source": <str, the entry from `sources`>,
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
-                            | "power" | "generic" | "error",
+                            | "power" | "sta" | "functional-verification"
+                            | "generic" | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -613,7 +726,7 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     reason every native kind is checked *after* it: a hand-rolled, non-`klt`
     envelope could plausibly carry any field name by coincidence (e.g. a
     caller-chosen ``"violations"`` key that has nothing to do with `klt
-    drc`), so it is never inferred structurally like the seven kinds below --
+    drc`), so it is never inferred structurally like the nine kinds below --
     only an explicit, literal ``"kind": "generic"`` self-declaration
     classifies as ``"generic"``, checked first so no such coincidence can
     ever misroute it into a native kind instead.
@@ -684,13 +797,41 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     ):
         return "power"
 
+    # `klt sta` (issue #1959; docs/cli/sta.md): a top-level
+    # `geometry_source` string ("routed"/"placement_estimate"/
+    # "netlist_estimate") is unique to this verb's response -- no other klt
+    # verb emits that field at the top level -- and is always present, never
+    # null. It is paired with a shape discriminator so a future response
+    # carrying the field alone still fails loudly rather than being graded
+    # as timing evidence: `timing_status` (the flat, single-corner shape) or
+    # a `corners` list (the multi-corner `pdk.corners` shape). `klt
+    # place-and-route`'s response also carries `worst_slack_ns`/
+    # `timing_status`/`corners`, but no `geometry_source` -- it is a
+    # different verb with a different (unrestricted) corner-sweep contract
+    # and stays deliberately unrecognised, see this module's "Digital-flow
+    # evidence" docstring section.
+    if isinstance(envelope.get("geometry_source"), str) and (
+        "timing_status" in envelope or isinstance(envelope.get("corners"), list)
+    ):
+        return "sta"
+
+    # `klt functional-verification` (issue #1959;
+    # docs/cli/functional-verification.md): a top-level `tests` list (one
+    # entry per cocotb test case) plus `test_count` is unique to this shape
+    # -- it cannot collide with `drc` (`violations`), `lvs` (`mismatches`),
+    # `sim`/`yield` (`measurements`), `extract` (`device_count`+`nets`),
+    # `pex` (`delta`+`reference_netlist`), or `power`
+    # (`power_nets`+`networks`), all checked above.
+    if isinstance(envelope.get("tests"), list) and "test_count" in envelope:
+        return "functional-verification"
+
     raise SignoffError(
         f"envelope '{source}' has an unrecognized shape (schema_version="
         f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-        "yield/pex/power success or error envelope, and not a generic "
-        'evidence envelope ("kind": "generic") either -- klt signoff '
-        "aggregates those seven verbs' output plus opt-in generic evidence "
-        "today (see docs/cli/signoff.md)"
+        "yield/pex/power/sta/functional-verification success or error "
+        'envelope, and not a generic evidence envelope ("kind": "generic") '
+        "either -- klt signoff aggregates those nine verbs' output plus "
+        "opt-in generic evidence today (see docs/cli/signoff.md)"
     )
 
 
@@ -781,6 +922,129 @@ def _build_check(kind: str, envelope: dict[str, Any], source: str) -> dict[str, 
     }
 
 
+def _sta_corner_timing_passed(fields: dict[str, Any]) -> bool:
+    """Whether one `klt sta` corner's reported timing counts as closed
+    (issue #1959).
+
+    Two conditions, in order:
+
+    1. ``timing_status == "constrained"`` -- every slack value in this scope
+       is a real measurement, not OpenSTA's unconstrained-design sentinel
+       (``1e+39``, ``docs/cli/sta.md``: "Require ``timing_status ==
+       'constrained'`` before reading any slack number"). The sentinel is a
+       *positive* number, so skipping this check would report "timing
+       closed" for a design that was never timed at all.
+    2. ``worst_slack_ns`` is a real number ``>= 0`` (a corner with no
+       reported setup slack proves nothing), and ``worst_hold_slack_ns`` is
+       either ``None`` (no hold path to measure -- e.g. a purely
+       combinational design, per ``docs/cli/sta.md``) or a real number
+       ``>= 0``.
+    """
+    if fields.get("timing_status") != "constrained":
+        return False
+
+    setup = fields.get("worst_slack_ns")
+    if not isinstance(setup, (int, float)) or isinstance(setup, bool) or setup < 0:
+        return False
+
+    hold = fields.get("worst_hold_slack_ns")
+    if hold is None:
+        return True
+    if not isinstance(hold, (int, float)) or isinstance(hold, bool):
+        return False
+    return hold >= 0
+
+
+def _sta_timing_passed(envelope: dict[str, Any]) -> bool:
+    """Whether a `klt sta` envelope reports closed timing across every
+    corner it characterised (issue #1959).
+
+    Handles both documented response shapes (``docs/cli/sta.md``): the
+    multi-corner ``pdk.corners`` shape (a ``corners`` list, one entry per
+    requested corner, with the per-corner timing fields inside it) and the
+    flat single-corner shape (those same fields at the top level). An empty
+    ``corners`` list never passes -- a characterization of zero corners
+    proves nothing.
+
+    The graded corner set is exactly the set the cited run itself declared,
+    which is what keeps this rule scoped (see this module's "Digital-flow
+    evidence" docstring section on the issue's corner-scoping finding):
+    `klt signoff` never widens a claim to corners the claimant did not run,
+    and never narrows one to a nominal corner the claimant did run.
+    """
+    corners = envelope.get("corners")
+    if isinstance(corners, list):
+        if not corners:
+            return False
+        return all(
+            isinstance(corner, dict) and _sta_corner_timing_passed(corner)
+            for corner in corners
+        )
+    return _sta_corner_timing_passed(envelope)
+
+
+def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
+    """The `klt sta` corner whose reported timing decides the verdict --
+    the entry with the lowest ``worst_slack_ns`` on a multi-corner
+    (``pdk.corners``) response, or the envelope itself on the flat
+    single-corner response (whose per-corner fields live at the top level).
+    A corner with no reported setup slack sorts as the worst of all, since
+    an unmeasured corner is never evidence of closure. ``{}`` when a
+    ``corners`` list is present but carries no usable entry."""
+    corners = envelope.get("corners")
+    if not isinstance(corners, list):
+        return envelope
+
+    entries = [corner for corner in corners if isinstance(corner, dict)]
+    if not entries:
+        return {}
+
+    def sort_key(entry: dict[str, Any]) -> tuple[int, float]:
+        value = entry.get("worst_slack_ns")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return (0, float(value))
+        return (-1, 0.0)
+
+    return min(entries, key=sort_key)
+
+
+def _is_sdf_annotated(envelope: dict[str, Any]) -> bool:
+    """Whether a `klt functional-verification` envelope reports a run with
+    back-annotated SDF timing (issue #1959).
+
+    ``environment.sdf`` is ``null`` on an ordinary (zero-delay) run and an
+    object carrying ``annotated: true`` on an annotated one -- per
+    ``docs/cli/functional-verification.md``, "an annotated run is
+    identifiable from the JSON alone", which is exactly the property item 7
+    needs to tell a post-route gate-level re-simulation from the pre-layout
+    regression its own checklist text excludes."""
+    environment = envelope.get("environment")
+    if not isinstance(environment, dict):
+        return False
+    sdf = environment.get("sdf")
+    return isinstance(sdf, dict) and bool(sdf.get("annotated"))
+
+
+def _is_post_layout_evidence(kind: str, envelope: dict[str, Any]) -> bool:
+    """Whether a passing, accepted-kind citation actually proves a
+    **post-layout** run, for the items that require one
+    (:data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE`, issue #1959).
+
+    - ``"functional-verification"``: only when the regression ran with
+      back-annotated SDF timing (:func:`_is_sdf_annotated`) -- an
+      unannotated run is the pre-layout zero-delay simulation item 7
+      excludes.
+    - Every other kind: ``True``. ``"pex"`` re-simulates an extracted
+      netlist by construction, so a passing `klt pex` report is post-layout
+      evidence definitionally; kinds an item does not accept at all never
+      reach this check (see :func:`_grade_evidence`), so they are not this
+      function's problem to reject.
+    """
+    if kind == "functional-verification":
+        return _is_sdf_annotated(envelope)
+    return True
+
+
 def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     """Whether this one check counts as passing.
 
@@ -844,6 +1108,17 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       declares no droop *limit* to check it against (see this module's
       "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
       it is surfaced informationally in :func:`_detail` instead.
+    - ``sta`` (issue #1959) carries no pass/fail ``status`` of its own at
+      all (``docs/cli/sta.md``: ``status`` is always ``"ok"``), so this
+      derives a verdict from the reported timing -- see
+      :func:`_sta_timing_passed`: every reported corner must be
+      ``timing_status == "constrained"`` with non-negative setup and hold
+      slack.
+    - ``functional-verification`` (issue #1959) passes on ``status ==
+      "pass"`` (``failed_count == 0``, ``docs/cli/functional-verification.md``)
+      -- mirrors ``sim``. Whether the run was SDF-annotated is *not* a
+      pass/fail input here (an unannotated regression is a perfectly valid
+      pre-layout check); it only gates item 7, in :func:`_grade_evidence`.
     - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
       envelope's own, caller-asserted verdict; unlike every native kind
       above, nothing here re-derives that verdict from any other field,
@@ -869,6 +1144,10 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
     elif kind == "power":
         em_verdict = envelope.get("em_verdict")
         passed = isinstance(em_verdict, dict) and em_verdict.get("status") == "pass"
+    elif kind == "sta":
+        passed = _sta_timing_passed(envelope)
+    elif kind == "functional-verification":
+        passed = envelope.get("status") == "pass"
     elif kind == "generic":
         passed = envelope.get("status") == "pass"
     else:
@@ -959,6 +1238,45 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "em_verdict_status": em_verdict.get("status"),
             "em_verdict_fail_count": em_verdict.get("fail_count"),
             "em_verdict_checked_edge_count": em_verdict.get("checked_edge_count"),
+        }
+    elif kind == "sta":
+        # Both documented response shapes reduce to the same excerpt: the
+        # multi-corner shape reports the worst corner (the one that decides
+        # the verdict) plus how many corners were characterised; the flat
+        # single-corner shape reports its own fields with `corner_count`
+        # None, so a reader can tell "one corner, unreported" from "N
+        # corners" without re-parsing the envelope.
+        worst = _sta_worst_corner(envelope)
+        detail = {
+            "def_path": envelope.get("def_path"),
+            "verilog_path": envelope.get("verilog_path"),
+            "geometry_source": envelope.get("geometry_source"),
+            "spef_path": envelope.get("spef_path"),
+            "corner_count": (
+                len(envelope["corners"])
+                if isinstance(envelope.get("corners"), list)
+                else None
+            ),
+            "worst_corner": worst.get("corner"),
+            "worst_slack_ns": worst.get("worst_slack_ns"),
+            "worst_hold_slack_ns": worst.get("worst_hold_slack_ns"),
+            "timing_status": worst.get("timing_status"),
+        }
+    elif kind == "functional-verification":
+        environment = envelope.get("environment") or {}
+        sdf = environment.get("sdf")
+        detail = {
+            "hdl_toplevel": envelope.get("hdl_toplevel"),
+            "testbench": envelope.get("testbench"),
+            "test_count": envelope.get("test_count"),
+            "passed_count": envelope.get("passed_count"),
+            "failed_count": envelope.get("failed_count"),
+            "skipped_count": envelope.get("skipped_count"),
+            # Whether this regression ran against back-annotated SDF timing
+            # -- informational here, load-bearing for item 7 (see
+            # :func:`_is_post_layout_evidence`).
+            "sdf_annotated": _is_sdf_annotated(envelope),
+            "sdf_corner": sdf.get("corner") if isinstance(sdf, dict) else None,
         }
     elif kind == "generic":
         detail = {
@@ -1351,7 +1669,10 @@ def build_tier_report(
                 notes=list(t1_item["notes"]),
                 partition=partition if kind == "mixed-signal" else None,
                 evidence=evidence,
-                allowed_kinds=_ITEM_ALLOWED_KINDS.get(t1_item["id"]),
+                allowed_kinds=_allowed_kinds_for(t1_item["id"], partition),
+                require_post_layout=(
+                    t1_item["id"] in _ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE
+                ),
             )
             total += 1
             if entry["status"] == "met":
@@ -1387,6 +1708,28 @@ def build_tier_report(
         "source_doc": doc_source_label(tiers_doc),
         "items": items,
     }
+
+
+def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
+    """Resolve which :func:`_classify` kinds may satisfy T1 item ``item_id``
+    for the partition currently being graded (issue #1959).
+
+    ``partition_kind`` is ``"analog"`` or ``"digital"`` -- for a
+    ``"mixed-signal"`` manifest :func:`build_tier_report` grades one
+    partition at a time, so the same per-block-kind rule applies to a
+    mixed-signal block's digital partition as to a pure ``"digital"`` block,
+    with no separate wiring.
+
+    ``None`` means unrestricted (every item but 7 today). An item present in
+    :data:`_ITEM_ALLOWED_KINDS` but with no entry for this partition kind
+    falls back to the ``"analog"`` (strictest) set rather than becoming
+    silently unrestricted -- an unrecognised partition kind must never
+    *loosen* an item's evidence requirement.
+    """
+    by_partition_kind = _ITEM_ALLOWED_KINDS.get(item_id)
+    if by_partition_kind is None:
+        return None
+    return by_partition_kind.get(partition_kind, by_partition_kind["analog"])
 
 
 def _t1_item_text(t1_item: dict[str, Any], partition: str) -> str | None:
@@ -1507,6 +1850,9 @@ def _yield_samples_content_hash(
 
 def _grade_evidence(
     spec: dict[str, Any],
+    *,
+    require_post_layout: bool = False,
+    allowed_kinds: set[str] | None = None,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
     and return ``(status, reason, citation)``.
@@ -1563,6 +1909,19 @@ def _grade_evidence(
     ``"stale_evidence"``, per this function's own mismatch check below; a
     manifest that pins no ``content_hash`` at all is unaffected (no
     staleness claim was ever made).
+
+    **Post-layout requirement** (issue #1959): ``require_post_layout`` is
+    set for the items in :data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE` (item
+    7 today). A passing citation that is not post-layout evidence
+    (:func:`_is_post_layout_evidence` -- today, a `klt
+    functional-verification` run with no SDF back-annotation) renders
+    :data:`_REASON_NOT_POST_LAYOUT`. ``allowed_kinds`` is consulted **only**
+    to order that check correctly against :func:`_build_tier_item`'s own
+    kind gate: a citation of a kind this item does not accept at all must
+    report ``"wrong_kind"`` (cite a different artifact), not
+    ``"not_post_layout"`` (re-run this artifact against the layout), so the
+    post-layout gate is skipped for a kind that is about to be rejected as
+    the wrong kind anyway.
     """
     expected_hash = spec.get("content_hash")
 
@@ -1620,6 +1979,13 @@ def _grade_evidence(
     if not _check_passed(check_kind, envelope):
         return "unmet", _REASON_CHECK_FAILED, None
 
+    if (
+        require_post_layout
+        and (allowed_kinds is None or check_kind in allowed_kinds)
+        and not _is_post_layout_evidence(check_kind, envelope)
+    ):
+        return "unmet", _REASON_NOT_POST_LAYOUT, None
+
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
@@ -1653,19 +2019,28 @@ def _build_tier_item(
     partition: str | None,
     evidence: dict[str, Any],
     allowed_kinds: set[str] | None = None,
+    require_post_layout: bool = False,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
     :func:`build_tier_report`'s docstring for the full met/unmet rule and
     the ``reason`` enum.
 
-    ``allowed_kinds`` (issue #871, Phase 2b of epic #706): when given, a
-    ``"met"`` grading is only accepted if the resolved evidence's classified
-    kind (:func:`_classify`, via the citation's ``"kind"``) is a member of
-    this set -- otherwise the item is downgraded to ``"unmet"`` with
-    ``reason: "wrong_kind"`` and no citation. ``None`` (the default) means no
+    ``allowed_kinds`` (issue #871, Phase 2b of epic #706; resolved
+    per-block-kind since issue #1959): when given, a ``"met"`` grading is
+    only accepted if the resolved evidence's classified kind
+    (:func:`_classify`, via the citation's ``"kind"``) is a member of this
+    set -- otherwise the item is downgraded to ``"unmet"`` with ``reason:
+    "wrong_kind"`` and no citation. ``None`` (the default) means no
     restriction, preserving Phase 0/1's original behaviour where any
     recognised, passing envelope kind satisfies any item -- every T1 item
-    except item 7 still passes ``None`` (see :data:`_ITEM_ALLOWED_KINDS`).
+    except item 7 still passes ``None`` (see :data:`_ITEM_ALLOWED_KINDS`
+    and :func:`_allowed_kinds_for`).
+
+    ``require_post_layout`` (issue #1959) is forwarded to
+    :func:`_grade_evidence` for the items in
+    :data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE` (item 7 today): an
+    accepted-kind, passing citation that does not itself prove a
+    post-layout run renders ``reason: "not_post_layout"`` instead.
 
     A ``"generic"``-kind citation (issue #1152) is gated independently of
     ``allowed_kinds``: it only satisfies an item whose id is a member of
@@ -1691,7 +2066,11 @@ def _build_tier_item(
         if spec is None:
             reason = _REASON_INVALID_EVIDENCE
         else:
-            status, reason, citation = _grade_evidence(spec)
+            status, reason, citation = _grade_evidence(
+                spec,
+                require_post_layout=require_post_layout,
+                allowed_kinds=allowed_kinds,
+            )
             if (
                 status == "met"
                 and citation["kind"] == "generic"

@@ -67,11 +67,12 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
 `klt signoff` reads each `<file>` as a JSON object, classifies it by its own
 structural shape (mirroring `klt report`'s envelope-kind detection — see
 [`report.md`](report.md#envelope-kind-detection) — extended here to also
-recognise `klt extract`'s, `klt sim`'s, `klt yield`'s, `klt pex`'s, and `klt
-power`'s shapes, plus — issue #1152, checked *ahead* of every native shape,
-since it is not inferred structurally — an opt-in generic evidence
-envelope's explicit, literal `"kind": "generic"` self-declaration), and
-combines them into one verdict in two steps:
+recognise `klt extract`'s, `klt sim`'s, `klt yield`'s, `klt pex`'s, `klt
+power`'s, `klt sta`'s, and `klt functional-verification`'s shapes, plus —
+issue #1152, checked *ahead* of every native shape, since it is not inferred
+structurally — an opt-in generic evidence envelope's explicit, literal
+`"kind": "generic"` self-declaration), and combines them into one verdict in
+two steps:
 
 1. **Provenance consistency.** Every input's `provenance` block (issue
    #251, [`../json-contract.md`](../json-contract.md#shared-provenance-block))
@@ -96,11 +97,18 @@ combines them into one verdict in two steps:
    (no measurement declared a `target_yield`, so nothing could fail —
    [`yield.md`](yield.md#exit-codes)), `klt pex` on `status: "pass"` (every
    graded schematic-vs-extracted delta row met its tolerance — see "Item 7
-   is kind-restricted: `klt pex`" below and [`pex.md`](pex.md) for this
+   is kind-restricted, per block kind" below and [`pex.md`](pex.md) for this
    envelope shape's full, ratified contract), `klt power` on
    `em_verdict.status: "pass"` (see "`klt power` evidence (envelope
    aggregation only)" below — `klt power`'s envelope carries no top-level
-   `status` field at all, unlike every other kind), and a **generic**
+   `status` field at all, unlike every other kind), `klt
+   functional-verification` on `status: "pass"` (`failed_count == 0` —
+   [`functional-verification.md`](functional-verification.md)), `klt sta` on
+   its *reported timing* rather than a `status` field (that verb's `status`
+   is always `"ok"`: every corner it reports must be `timing_status:
+   "constrained"` with non-negative setup and hold slack — see "Digital-flow
+   evidence: `klt sta` and `klt functional-verification`" below), and a
+   **generic**
    evidence envelope on its own `status: "pass"` (see "Generic evidence
    (opt-in, non-`klt`-native)" below). `klt extract` has no independent pass/fail — a
    present extract envelope is definitionally a successful extraction (`klt
@@ -108,7 +116,7 @@ combines them into one verdict in two steps:
    `error`-kind check instead) — so it always counts as passed, but is
    still listed in `checks[]` so its `provenance` block participates in
    step 1 and its device/net counts are visible in the aggregated result.
-   An `error`-kind entry (any of the seven verbs' own `--format json`
+   An `error`-kind entry (any of the nine verbs' own `--format json`
    failure output, e.g. a captured `klt drc` run that hit a missing file)
    never passes.
 
@@ -288,7 +296,8 @@ against a caller-supplied **block manifest**:
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
-`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`power`/`generic`, whose own check
+`drc`/`lvs`/`extract`/`sim`/`yield`/`pex`/`power`/`sta`/`functional-verification`/`generic`,
+whose own check
 passed — and, if the evidence entry pinned an expected `content_hash`, whose
 own input content hash matches it (`provenance.input.content_hash` for
 drc/lvs/extract/sim/pex, and optionally for `generic` (see "Generic
@@ -302,8 +311,10 @@ malformed entry, an unreadable/unparsable evidence file, a command-backed
 entry whose subprocess couldn't be launched/timed out/exited
 nonzero/produced stdout that isn't valid JSON, an unrecognised envelope
 shape, a failing check, or a passing check of a kind that item does not
-accept (item 7 only accepts `pex`; every item other than item 8 rejects a
-`generic` citation; **every** item rejects a `power` citation — see "No T1
+accept (item 7 accepts `pex` for an analog block and `pex` or an
+SDF-annotated `functional-verification` run for a digital one; every item
+other than item 8 rejects a `generic` citation; **every** item rejects a
+`power` citation — see "No T1
 item accepts `power` evidence" below) — also renders `"unmet"`: **this phase
 never infers a `"met"` verdict for an item with no runnable check behind
 it.**
@@ -323,7 +334,8 @@ statistical-evidence item, binding a `klt yield`
 ([`yield.md`](yield.md), epic #710) campaign report the same way. **Phase 2b
 (issue #871)** binds item 7, the post-layout-verification item, to a `klt
 pex` report — and, unlike every other item, restricts which envelope
-*kinds* satisfy it (see "Item 7 is kind-restricted: `klt pex`" below).
+*kinds* satisfy it (see "Item 7 is kind-restricted, per block kind"
+below).
 **Phase 3 (issue #1152)** adds the opt-in `generic` evidence kind and binds
 it to item 8, the one T1 item naming no specific `klt` verb — and, like item
 7's restriction, gates which item a `generic` citation may satisfy, so it
@@ -400,7 +412,7 @@ understands, the command emits the usual error envelope (`schema_version`,
 `error.command: "signoff"`, `error.message`) and exits `1` — a tier report is
 never rendered from a partially-understood doc.
 
-### Item 7 is kind-restricted: `klt pex`
+### Item 7 is kind-restricted, per block kind
 
 Every T1 item except item 7 accepts *any* recognised, *native* envelope kind
 — a `klt drc` report can satisfy item 8 just as well as item 3, since Phase
@@ -408,15 +420,45 @@ Every T1 item except item 7 accepts *any* recognised, *native* envelope kind
 check was cited, not on whether that check was the *right kind* of check.
 (This is unchanged by issue #1152's `generic` kind below — that issue adds a
 *separate*, narrower restriction gating `generic` specifically, on top of,
-not instead of, this native-kind permissiveness.) Item 7 ("Post-layout verification" — the schematic-vs-extracted-netlist
-re-simulation delta) is the one exception, added in issue #871 (Phase 2b of
-epic #706): its evidence must classify as kind `"pex"` specifically. A
-`drc`/`lvs`/`sim`/`extract`/`yield` citation for item 7 — even one whose own
-check genuinely passed — renders `"unmet"` with `reason: "wrong_kind"`,
-never a borrowed pass. This closes a concrete gap Phase 0/1 left open: prior
-to issue #871, a manifest could render item 7 `"met"` by citing, say, a
-clean `klt drc` report, with nothing enforcing that the cited evidence
-actually proved a post-layout re-simulation happened.
+not instead of, this native-kind permissiveness.) Item 7 ("Post-layout
+verification") is the one exception, added in issue #871 (Phase 2b of epic
+#706). This closes a concrete gap Phase 0/1 left open: prior to issue #871,
+a manifest could render item 7 `"met"` by citing, say, a clean `klt drc`
+report, with nothing enforcing that the cited evidence actually proved a
+post-layout re-simulation happened.
+
+**The accepted kinds depend on the partition being graded** (issue #1959).
+Item 7 is one of the per-kind checklist items (`docs/design-evidence-tiers.md`'s
+"Block kind" subsection), and the Analog and Digital columns name genuinely
+different artifacts — so the restriction resolves per partition kind, not
+once globally:
+
+| Partition graded | Accepted kinds for item 7 | The artifact |
+|---|---|---|
+| `analog` (and a `mixed-signal` block's analog partition) | `pex` | The schematic-vs-extracted-netlist re-simulation delta — see [`pex.md`](pex.md) |
+| `digital` (and a `mixed-signal` block's digital partition) | `pex`, **or** an SDF-annotated `functional-verification` | `pex` for the full-custom digital sub-case (no RTL, no synthesis — that partition produces exactly an analog block's post-layout artifact); an SDF-annotated [`klt functional-verification`](functional-verification.md) run for the RTL flow |
+
+A citation of any kind not in that row — a `drc`/`lvs`/`sim`/`extract`/`yield`
+report, or (for an analog partition) a `functional-verification` report —
+renders `"unmet"` with `reason: "wrong_kind"`, even when the cited check
+genuinely passed. **An analog block's item 7 is byte-for-byte unchanged by
+issue #1959**: it still requires `pex` and nothing else. A `mixed-signal`
+manifest grades one partition at a time, so its analog partition applies the
+analog row and its digital partition the digital row, with no extra manifest
+syntax.
+
+**`not_post_layout` vs. `wrong_kind`.** A `functional-verification` citation
+for a digital partition's item 7 must additionally prove the regression ran
+against the post-route netlist with back-annotated SDF timing — item 7's own
+checklist text is explicit that the pre-layout RTL/gate simulation does not
+count. `klt functional-verification`'s `environment.sdf` is `null` on an
+ordinary zero-delay run and an object carrying `annotated: true` on an
+annotated one, so the two are distinguishable from the JSON alone. An
+unannotated (but passing) regression cited for item 7 renders `"unmet"` with
+`reason: "not_post_layout"` — deliberately a *different* reason from
+`"wrong_kind"`, per issue #826's rule that the report must say precisely
+what is missing: `"wrong_kind"` means "cite a different artifact",
+`"not_post_layout"` means "re-run *this* artifact against the layout".
 
 **`klt pex`'s envelope shape.** At the time issue #871 wired this
 restriction, `klt pex` (Epic #709) did not exist yet, so `klt signoff`
@@ -461,6 +503,91 @@ resolved discrepancy.
 tolerance), mirroring `klt sim`. Its `_detail()` excerpt (envelope
 aggregation mode) carries `netlist`, `reference_netlist`, `corner_count`,
 `passed`, `failed`, and `errored`.
+
+### Digital-flow evidence: `klt sta` and `klt functional-verification`
+
+Every kind above is an artifact an *analog* (or full-custom digital) block
+produces. Before issue #1959, a digital RTL-flow block's own evidence
+classified as nothing at all: `klt signoff` recognised no digital artifact,
+so `docs/design-evidence-tiers.md`'s Digital column named artifacts this
+grader could not read. Item 5's digital evidence rendered
+`unrecognized_envelope`, and item 7 was globally restricted to `pex` — an
+analog/full-custom artifact an RTL/synthesis block has no way to produce.
+**No digital RTL-flow block could reach `tier: "T1"`.** Issue #1959 adds the
+two kinds the Digital column actually names.
+
+**`klt sta`** ([`sta.md`](sta.md)) — the multi-corner static timing
+analysis half of item 5's Digital column. Recognised structurally by a
+top-level `geometry_source` string (unique to this verb's response among
+every `klt` envelope shape) paired with either the flat single-corner
+shape's `timing_status` or the multi-corner (`pdk.corners`) shape's
+`corners` list.
+
+Unlike every other kind, a `klt sta` envelope has **no pass/fail `status` of
+its own** — `status` is always `"ok"` (the verb reports timing, it does not
+judge it). So `klt signoff` derives a verdict from the reported timing
+instead. Every corner the run reported must satisfy both of:
+
+1. `timing_status == "constrained"`. OpenSTA's unconstrained-design sentinel
+   is `1e+39` — a *positive* number, so a naive `worst_slack_ns >= 0` rule
+   would report "timing closed with maximum confidence" for a design that
+   was never timed at all. [`sta.md`](sta.md) makes this check mandatory
+   before reading any slack number, and `klt signoff` enforces it.
+2. Non-negative setup slack (`worst_slack_ns >= 0`) and either no hold path
+   to measure (`worst_hold_slack_ns: null`, e.g. a purely combinational
+   design) or non-negative hold slack.
+
+An empty `corners` list never passes — a characterization of zero corners
+proves nothing.
+
+**Corner scoping is the cited run's own declared corner set.** Which corners
+must close is decided by the request that produced the envelope (`klt sta`'s
+`pdk.corners`), so `klt signoff` never widens a claim to corners the
+claimant did not run, and never narrows one to a nominal corner they did.
+This is deliberately why `klt place-and-route`'s response is **not**
+recognised here even though it carries overlapping timing fields
+(`worst_slack_ns`/`timing_status`/`corners`): its `worst_setup_slack_ns`
+comes from an unrestricted sweep over the PDK's full shipped corner list,
+not a declared one, so a "slack ≥ 0" rule against it would fail almost every
+real block for corners nobody claimed. A `place-and-route` envelope still
+raises "unrecognized shape", exactly as before.
+
+**`klt functional-verification`** ([`functional-verification.md`](functional-verification.md))
+— the bit-exact functional regression half of item 5's Digital column, and
+(SDF-annotated) the whole of item 7's. Recognised structurally by a
+top-level `tests` list plus `test_count`. It passes on its own
+`status: "pass"` (`failed_count == 0`), mirroring `klt sim`.
+
+Whether the run was SDF-annotated is **not** a pass/fail input — an
+unannotated regression is a perfectly valid pre-layout check, and satisfies
+item 5 on its own terms. It only gates item 7, via `not_post_layout` (see
+"Item 7 is kind-restricted, per block kind" above).
+
+This verb carries **no shared `provenance` block at all** (its verdict
+depends on no PDK and no rule deck — see
+[`../json-contract.md`](../json-contract.md)), so a citation of one has
+`content_hash: null`. A manifest that pins an expected `content_hash` on a
+`functional-verification` entry therefore always renders `stale_evidence` —
+the same documented caveat an unprovenanced `generic` envelope already
+carries, and the same "stale, not a false pass" rule every other kind gets.
+Pin no `content_hash` on such an entry unless and until that verb grows a
+`provenance` block.
+
+**Item 5 itself stays unrestricted.** This phase widens what `klt signoff`
+*recognises*; it does not tighten what item 5 *accepts*. An analog block's
+item 5, and a full-custom digital block's `klt sim` corner-matrix citation
+for it, grade exactly as they did before — see "Items 1, 2, 9, and 10: `klt
+signoff` cannot check topical relevance" above for the standing caveat that
+an unrestricted item is graded on whether *some* passing check was cited,
+not on topical relevance.
+
+**Direction 3 of issue #1959 — letting a `generic` citation satisfy items 5
+and 7 for digital blocks — is deliberately not implemented.** It would
+weaken exactly the guarantee the `generic` kind's item-8-only scoping exists
+to preserve (see "Generic evidence" immediately below): a hand-rolled "yep,
+it's fine" JSON record must not stand in for corner or post-layout evidence
+it never proved. A `generic` citation for items 5 or 7 still renders
+`wrong_kind`, for every block kind.
 
 ### Generic evidence (opt-in, non-`klt`-native)
 
@@ -743,7 +870,8 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
-| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 7 requires `"pex"` (see "Item 7 is kind-restricted: `klt pex`" above), and every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above). The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), and **every** item rejects a `"power"` citation. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"not_post_layout"`       | yes | The evidence resolved to a recognised, *passing* envelope **of a kind this item accepts**, but that run is not the post-layout run the item requires — today, a `klt functional-verification` regression cited for item 7 that ran without SDF back-annotation (`environment.sdf` is `null`), i.e. the pre-layout zero-delay simulation item 7's own checklist text excludes. Deliberately distinct from `"wrong_kind"`: the artifact *is* the right one, it just has to be re-run against the post-route netlist with SDF timing. |
 
 ## Fleet roll-up (`--fleet`)
 
@@ -1153,8 +1281,8 @@ like every other item this checklist grades.
 ## Worked example: binding the post-layout item to `klt pex`, and why a bare DRC citation no longer satisfies it
 
 Issue #871 (Phase 2b of epic #706): item 7 ("Post-layout verification")
-binds to a `klt pex` report (see "Item 7 is kind-restricted: `klt pex`"
-above, and [`pex.md`](pex.md) for its full, ratified contract — issue
+binds to a `klt pex` report (see "Item 7 is kind-restricted, per block
+kind" above, and [`pex.md`](pex.md) for its full, ratified contract — issue
 #801):
 
 ```
@@ -1273,7 +1401,9 @@ step, e.g. because no compatible open standard-cell library exists for the
 PDK/voltage combination — as a **sub-case of the Digital column**, not a new
 column or a new manifest `kind`. Grading needs no code change either: items
 1, 2, and 5 already accept *any* recognised evidence kind (only item 7 is
-kind-restricted, to `pex` — see "Item 7 is kind-restricted" above), so a
+kind-restricted — see "Item 7 is kind-restricted, per block kind" above;
+a `kind: "digital"` manifest accepts `pex` there, which is exactly what a
+full-custom partition produces), so a
 full-custom partition's `klt lvs`/`klt drc`/`klt sim`/`klt pex` evidence
 grades exactly like an RTL/synthesis-flow digital block's would, under the
 same `kind: "digital"` manifest:
@@ -1398,7 +1528,7 @@ source: docs/design-evidence-tiers.md
 ```
 
 Had item 7 been the gap instead, the roll-up would name it the same way —
-and, because item 7 is kind-restricted (see "Item 7 is kind-restricted:
-`klt pex`" above), citing a passing-but-wrong-kind envelope there renders
+and, because item 7 is kind-restricted (see "Item 7 is kind-restricted,
+per block kind" above), citing a passing-but-wrong-kind envelope there renders
 `blocking: #7 Post-layout verification (reason: wrong_kind)` rather than
 borrowing that pass.
