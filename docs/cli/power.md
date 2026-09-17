@@ -433,8 +433,18 @@ IR-drop solve already produced are checked against those limits, per net.
   `"pass"` if at least one edge was checked and none failed, or
   `"not_checked"` if the net had no edge with both a declared limit and a
   solved current** — e.g. a net whose whole stackup declared no EM limits
-  at all. The overall `em_verdict.status` rolls the same three values up
-  across every net.
+  at all.
+- **The overall `em_verdict.status` rolls up the same underlying data, but
+  adds a fourth value the per-net `status` does not need** (issue #1997):
+  `"fail"` if any edge anywhere failed; else `"pass_partial"` if at least
+  one edge was checked and none failed, but `unchecked_edge_count` is still
+  nonzero (some other edge in the design was never checked at all); else
+  `"pass"` only when every edge that exists was actually checked
+  (`unchecked_edge_count == 0`); else `"not_checked"` if nothing was ever
+  checked. `"pass_partial"` exists because "at least one edge checked and
+  clean" is a much weaker claim at the whole-design level than at a single
+  net's — a design can have every net partially covered and still roll up
+  to a misleadingly plain `"pass"` without it.
 - **`em_verdict` is `null` when there was no IR-drop solve at all** (the
   spec declared neither `pads` nor `current_model`) — there are no branch
   currents to compare, the same condition under which `ir_drop_map` itself
@@ -639,7 +649,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 | Field                | Type               | Description                                                                                       |
 | -------------------- | ------------------ | --------------------------------------------------------------------------------------------------|
-| `status`             | string             | `"pass"`, `"fail"`, or `"not_checked"` — the roll-up across every net (see "EM current-density verdict" above). |
+| `status`             | string             | `"pass"`, `"pass_partial"` (issue #1997), `"fail"`, or `"not_checked"` — the roll-up across every net (see "EM current-density verdict" above). |
 | `checked_edge_count`/`unchecked_edge_count` | integer | Edges with both a declared limit and a solved current, vs. edges missing either.               |
 | `fail_count`         | integer            | Checked edges whose \|current\| exceeded their own `current_limit_a`. `0` on a clean run.         |
 | `worst_case`         | object \| null     | The checked edge with the smallest `margin_a` anywhere (most over its limit, or closest to it) — same shape as a `nets[].failing_edges[]` entry below, `null` if nothing was checked. |

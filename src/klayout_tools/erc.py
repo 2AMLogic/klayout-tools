@@ -990,11 +990,28 @@ def run_erc(
                 else None
             )
 
-        level_verdicts = {level["verdict"] for level in levels}
-        if "violate" in level_verdicts:
+        # `antenna_verdict` rollup (issue #1997) -- only `levels[1:]` (the
+        # non-gate roles) count towards "graded" coverage: `levels[0]` (the
+        # gate role itself) is *always* `"unchecked"` by construction (see
+        # above), so its presence must never, on its own, downgrade an
+        # otherwise fully-graded gate to `"pass_partial"`. Among the graded
+        # levels: `"violate"` wins outright regardless of coverage; absent
+        # a violation, `"pass_partial"` reports that at least one graded
+        # level passed but at least one other graded level's own role
+        # wasn't in the selected PDK's limit table (e.g. sky130's table has
+        # no met3-5 entries -- see "Sky130 antenna-ratio limits" in
+        # docs/cli/erc.md) or `--pdk` was omitted entirely for some
+        # otherwise-checkable subset; plain `"pass"` only when every graded
+        # level was actually compared against a limit and none violated;
+        # `"unchecked"` when no graded level was ever compared at all (e.g.
+        # `--pdk` omitted, or a single-role stackup).
+        graded_verdicts = {level["verdict"] for level in levels[1:]}
+        if "violate" in graded_verdicts:
             antenna_verdict = "violate"
-        elif "pass" in level_verdicts:
-            antenna_verdict = "pass"
+        elif "pass" in graded_verdicts:
+            antenna_verdict = (
+                "pass_partial" if "unchecked" in graded_verdicts else "pass"
+            )
         else:
             antenna_verdict = "unchecked"
 

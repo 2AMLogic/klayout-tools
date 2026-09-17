@@ -337,9 +337,29 @@ the fix — see "Gate area: `poly ∩ diff` vs. raw poly area" above), while
 longer trivially `1.0`; it remains `"unchecked"` regardless, for the same
 poly-perimeter-vs-area reason above.
 
-Each `gates[]` entry also reports an aggregate `antenna_verdict`: `
-"violate"` if any of its `levels[]` violate, else `"pass"` if any level
-passed, else `"unchecked"`.
+Each `gates[]` entry also reports an aggregate `antenna_verdict`, rolled up
+from its *graded* levels (`levels[1:]` — everything except the gate role
+itself, which is always `"unchecked"` and never counts towards coverage
+here):
+
+- **`antenna_verdict: "violate"`** — at least one graded level violates.
+  Wins outright regardless of any other level's coverage.
+- **`antenna_verdict: "pass_partial"`** (issue #1997) — no graded level
+  violates, at least one graded level passed, but at least one other
+  graded level is `"unchecked"` — a genuine coverage gap, not a clean
+  bill of health. The canonical example: a full sky130 stack through met5,
+  since sky130's own antenna-ratio table (below) has no met3/met4/met5
+  entries at all — only li1/met1/met2 are ever actually graded, so a
+  stack that also declares met3-5 always reports `"pass_partial"`, never
+  a plain `"pass"`, unless every graded level's role happens to be one the
+  table covers.
+- **`antenna_verdict: "pass"`** — every graded level was actually compared
+  against a limit, and none violated. Reserved for a spec whose `stackup`
+  declares only roles the selected PDK's table covers (or when every
+  declared role's antenna ratio is otherwise fully graded).
+- **`antenna_verdict: "unchecked"`** — no graded level was ever compared
+  against a limit at all (e.g. `--pdk` was omitted, so every level
+  including the graded ones comes back `"unchecked"`).
 
 ### Sky130 antenna-ratio limits
 
@@ -561,7 +581,7 @@ forward regardless (a `diode_insertion` remedy):
 | `gates[].gate_id`| string          | `"gate<index>"`, ascending in internal net-id order (stable within one run, not guaranteed stable across `klt`/KLayout versions). |
 | `gates[].net`    | string \| null  | The net's own label text, if any `stackup` role's `label_layer` carries one; `null` if unlabelled. |
 | `gates[].gate_area_um2` | number   | This net's own merged area on the gate-role layer, in µm² — or, when `stackup[0].active_layer` is supplied, that area intersected with the active/diffusion layer (`poly ∩ diff`, issue #1979). Identical to `levels[0].cumulative_area_um2` only when `active_layer` is omitted. |
-| `gates[].antenna_verdict` | string | `"violate"` if any `levels[]` entry violates, else `"pass"` if any level passed, else `"unchecked"`. |
+| `gates[].antenna_verdict` | string | `"violate"` if any *graded* `levels[1:]` entry (excludes `levels[0]`, the gate role, which is always `"unchecked"`) violates; else `"pass_partial"` if at least one graded level passed but at least one other graded level is `"unchecked"` (issue #1997 — a genuine coverage gap, e.g. met3-5 on a full sky130 stack); else `"pass"` if every graded level passed; else `"unchecked"`. |
 | `gates[].levels` | array\<object\> | One entry per `stackup` role, in fabrication order — see below.                                  |
 | `levels[].layer` | string          | The contributing `stackup` role's own `name`.                                                     |
 | `levels[].step_area_um2` | number   | This net's own merged area on this role's layer, in µm².                                         |
