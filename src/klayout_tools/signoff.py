@@ -2351,46 +2351,9 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "sdf_corner": sdf.get("corner") if isinstance(sdf, dict) else None,
         }
     elif kind == "erc":
-        findings = envelope.get("erc_findings")
-        rule_counts: dict[str, int] = {}
-        if isinstance(findings, list):
-            for finding in findings:
-                if isinstance(finding, dict) and isinstance(finding.get("rule"), str):
-                    rule = finding["rule"]
-                    rule_counts[rule] = rule_counts.get(rule, 0) + 1
-        detail = {
-            "file": envelope.get("file"),
-            "spec": envelope.get("spec"),
-            "gate_role": envelope.get("gate_role"),
-            "gate_count": envelope.get("gate_count"),
-            "erc_finding_count": envelope.get("erc_finding_count"),
-            # Per-rule breakdown, so "which of the five ERC rules fired" is
-            # readable without re-opening the envelope -- the same reason
-            # `klt drc`'s own `rule_counts` exists. Item 11 grades only two
-            # of these rules (see :func:`_grade_power_delivery`), so a
-            # reader needs to see which ones actually fired.
-            "erc_rule_counts": dict(sorted(rule_counts.items())),
-        }
+        detail = _erc_detail(envelope)
     elif kind == "place-and-route":
-        power = envelope.get("power") or {}
-        straps = power.get("straps")
-        detail = {
-            "hdl_toplevel": envelope.get("hdl_toplevel"),
-            "stage_reached": envelope.get("stage_reached"),
-            "gds_path": envelope.get("gds_path"),
-            "verilog_path": envelope.get("verilog_path"),
-            # The `power` block is the only part of this response this
-            # module reasons about -- T1 item 11's digital branch (issue
-            # #2025). Surfaced verbatim so a "no PDN" verdict is readable
-            # beside the artifact that caused it.
-            "power_pdn": power.get("pdn"),
-            "power_global_connect": power.get("global_connect"),
-            "power_net": power.get("power_net"),
-            "ground_net": power.get("ground_net"),
-            "tapcell_master": power.get("tapcell_master"),
-            "strap_layers": _strap_layers(envelope),
-            "strap_count": len(straps) if isinstance(straps, list) else None,
-        }
+        detail = _place_and_route_detail(envelope)
     elif kind == "generic":
         detail = {
             "summary": envelope.get("summary"),
@@ -2411,6 +2374,54 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     # for the same condition; see "Vacuous-verdict refusal" above.
     detail.update(_nothing_checked_detail(envelope))
     return detail
+
+
+def _erc_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"erc"`` branch (issue #2025), split out so adding
+    a kind does not push :func:`_detail`'s own dispatch chain up by the size
+    of the branch as well as by the branch itself."""
+    rule_counts: dict[str, int] = {}
+    for finding in envelope.get("erc_findings") or []:
+        rule = finding.get("rule") if isinstance(finding, dict) else None
+        if isinstance(rule, str):
+            rule_counts[rule] = rule_counts.get(rule, 0) + 1
+    return {
+        "file": envelope.get("file"),
+        "spec": envelope.get("spec"),
+        "gate_role": envelope.get("gate_role"),
+        "gate_count": envelope.get("gate_count"),
+        "erc_finding_count": envelope.get("erc_finding_count"),
+        # Per-rule breakdown, so "which of the five ERC rules fired" is
+        # readable without re-opening the envelope -- the same reason `klt
+        # drc`'s own `rule_counts` exists. Item 11 grades only three of these
+        # rules (see :func:`_erc_supply_findings`), so a reader needs to see
+        # which ones actually fired.
+        "erc_rule_counts": dict(sorted(rule_counts.items())),
+    }
+
+
+def _place_and_route_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"place-and-route"`` branch (issue #2025), split
+    out for the same reason as :func:`_erc_detail`."""
+    power = envelope.get("power") or {}
+    straps = power.get("straps")
+    return {
+        "hdl_toplevel": envelope.get("hdl_toplevel"),
+        "stage_reached": envelope.get("stage_reached"),
+        "gds_path": envelope.get("gds_path"),
+        "verilog_path": envelope.get("verilog_path"),
+        # The `power` block is the only part of this response this module
+        # reasons about -- T1 item 11's digital branch (issue #2025).
+        # Surfaced verbatim so a "no PDN" verdict is readable beside the
+        # artifact that caused it.
+        "power_pdn": power.get("pdn"),
+        "power_global_connect": power.get("global_connect"),
+        "power_net": power.get("power_net"),
+        "ground_net": power.get("ground_net"),
+        "tapcell_master": power.get("tapcell_master"),
+        "strap_layers": _strap_layers(envelope),
+        "strap_count": len(straps) if isinstance(straps, list) else None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -3348,9 +3359,7 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     # artifact. Present only when the cited envelope reports it, and never
     # consulted by any grading rule: the verdict is still `status == "pass"`
     # alone.
-    body_bias = _pex_body_bias_disclosure(
-        resolution["kind"], resolution["envelope"]
-    )
+    body_bias = _pex_body_bias_disclosure(resolution["kind"], resolution["envelope"])
     if body_bias is not None:
         citation["body_bias"] = body_bias
     return citation
@@ -3429,27 +3438,23 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(document, dict):
         return None
 
-    supply_nets: list[str] = []
-    for entry in document.get("nets") or []:
-        if not isinstance(entry, dict) or entry.get("kind") != "supply":
-            continue
-        name = entry.get("name")
-        if isinstance(name, str) and name:
-            supply_nets.append(name)
-
-    stackup: set[str] = set()
-    for entry in document.get("stackup") or []:
-        if not isinstance(entry, dict):
-            continue
-        for field in ("name", "layer"):
-            value = entry.get(field)
-            if isinstance(value, str) and value:
-                stackup.add(value)
-
     ties = document.get("ties")
     return {
-        "supply_nets": supply_nets,
-        "stackup": stackup,
+        "supply_nets": [
+            entry["name"]
+            for entry in document.get("nets") or []
+            if isinstance(entry, dict)
+            and entry.get("kind") == "supply"
+            and isinstance(entry.get("name"), str)
+            and entry["name"]
+        ],
+        "stackup": {
+            entry[field]
+            for entry in document.get("stackup") or []
+            if isinstance(entry, dict)
+            for field in ("name", "layer")
+            if isinstance(entry.get(field), str) and entry[field]
+        },
         "tie_count": len(ties) if isinstance(ties, list) else 0,
     }
 
@@ -3547,6 +3552,83 @@ def _lvs_reference_carries_supplies(
     return all(name.upper() in paired for name in supply_nets)
 
 
+def _resolve_power_delivery_parts(
+    specs: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
+    """Resolve every part of T1 item 11's compound citation (issue #2025) and
+    index the resolutions by :func:`_classify` kind -- ``(by_kind, None)`` on
+    success, ``(None, <_REASON_* constant>)`` on the first part that cannot
+    be used.
+
+    Each part goes through :func:`_resolve_evidence`, the same
+    read/run/classify/hash path every single-artifact item's citation uses,
+    and is then subject to the three rules that apply to a part *as a part*:
+    an ``error`` envelope is ``check_errored``, a kind outside
+    :data:`_POWER_DELIVERY_KINDS` is ``wrong_kind`` (it proves nothing about
+    power delivery), and a part whose own pinned ``content_hash`` no longer
+    matches is ``stale_evidence``. The item-specific rules
+    (:func:`_grade_power_delivery`) apply only to a set that survives all of
+    these.
+
+    A later part of the same kind replaces an earlier one -- citing two ERC
+    runs for one item is a manifest authoring mistake, not a shape this
+    grading has a meaning for; the last one named wins, the same way a
+    duplicate JSON key would.
+    """
+    by_kind: dict[str, dict[str, Any]] = {}
+    for spec in specs:
+        resolution, reason = _resolve_evidence(spec)
+        if resolution is None:
+            return None, reason
+        kind = resolution["kind"]
+        if kind == "error":
+            return None, _REASON_CHECK_ERRORED
+        if kind not in _POWER_DELIVERY_KINDS:
+            return None, _REASON_WRONG_KIND
+        expected_hash = spec.get("content_hash")
+        if expected_hash is not None and resolution["content_hash"] != expected_hash:
+            return None, _REASON_STALE_EVIDENCE
+        by_kind[kind] = resolution
+    return by_kind, None
+
+
+def _pdn_branch_reason(
+    par: dict[str, Any],
+    lvs: dict[str, Any],
+    supply_spec: dict[str, Any],
+) -> str | None:
+    """T1 item 11's **PDN branch** (issue #2025) -- the extra conditions a
+    cited `klt place-and-route` response brings with it. ``None`` when they
+    all hold; otherwise the ``reason`` that does not.
+
+    Three conditions, in the order a reader would debug them: the response
+    itself must pass (a P&R run that errored proves nothing); it must report
+    ``power.pdn: true`` with a ``power.tapcell_master`` named, i.e. a grid
+    was actually built (:data:`_REASON_NO_PDN`); and every
+    ``power.straps[].layer`` it reports must be covered by the ERC spec's own
+    stackup (:data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- an ERC run that never
+    looked at the layers the supply is routed on says nothing about the grid
+    this response built). Finally the LVS half tightens: with a PDN in play
+    the same report's ``power_connectivity.status`` must be ``"match"``, and
+    ``"unchecked"`` does **not** satisfy item 11 even though it satisfies
+    item 4.
+    """
+    if not _check_passed("place-and-route", par["envelope"]):
+        return _REASON_CHECK_FAILED
+    power = par["envelope"].get("power") or {}
+    if power.get("pdn") is not True or not power.get("tapcell_master"):
+        return _REASON_NO_PDN
+    strap_layers = _strap_layers(par["envelope"])
+    if not strap_layers or any(
+        layer not in supply_spec["stackup"] for layer in strap_layers
+    ):
+        return _REASON_SUPPLY_SPEC_INCOMPLETE
+    power_connectivity = lvs["envelope"].get("power_connectivity") or {}
+    if power_connectivity.get("status") != "match":
+        return _REASON_LVS_SUPPLY_UNPROVEN
+    return None
+
+
 def _grade_power_delivery(
     specs: list[dict[str, Any]], *, partition_kind: str
 ) -> tuple[str, str | None, dict[str, Any] | None]:
@@ -3596,24 +3678,9 @@ def _grade_power_delivery(
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
     """
-    by_kind: dict[str, dict[str, Any]] = {}
-    for spec in specs:
-        resolution, reason = _resolve_evidence(spec)
-        if resolution is None:
-            return "unmet", reason, None
-        kind = resolution["kind"]
-        if kind == "error":
-            return "unmet", _REASON_CHECK_ERRORED, None
-        if kind not in _POWER_DELIVERY_KINDS:
-            return "unmet", _REASON_WRONG_KIND, None
-        expected_hash = spec.get("content_hash")
-        if expected_hash is not None and resolution["content_hash"] != expected_hash:
-            return "unmet", _REASON_STALE_EVIDENCE, None
-        # A later part of the same kind replaces an earlier one -- citing two
-        # ERC runs for one item is a manifest authoring mistake, not a shape
-        # this grading has a meaning for; the last one named wins, the same
-        # way a duplicate JSON key would.
-        by_kind[kind] = resolution
+    by_kind, reason = _resolve_power_delivery_parts(specs)
+    if by_kind is None:
+        return "unmet", reason, None
 
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
@@ -3637,26 +3704,13 @@ def _grade_power_delivery(
 
     par = by_kind.get("place-and-route")
     if par is not None:
-        if not _check_passed("place-and-route", par["envelope"]):
-            return "unmet", _REASON_CHECK_FAILED, None
-        power = par["envelope"].get("power") or {}
-        if power.get("pdn") is not True or not power.get("tapcell_master"):
-            return "unmet", _REASON_NO_PDN, None
-        strap_layers = _strap_layers(par["envelope"])
-        if not strap_layers or any(
-            layer not in supply_spec["stackup"] for layer in strap_layers
-        ):
-            # The ERC run did not look at the layers the supply is actually
-            # routed on, so its "one island" verdict says nothing about the
-            # grid this response built.
-            return "unmet", _REASON_SUPPLY_SPEC_INCOMPLETE, None
-        power_connectivity = lvs["envelope"].get("power_connectivity") or {}
-        if power_connectivity.get("status") != "match":
-            return "unmet", _REASON_LVS_SUPPLY_UNPROVEN, None
-    elif not _lvs_reference_carries_supplies(
-        lvs["envelope"], supply_spec["supply_nets"]
-    ):
-        return "unmet", _REASON_LVS_SUPPLY_UNPROVEN, None
+        reason = _pdn_branch_reason(par, lvs, supply_spec)
+    elif _lvs_reference_carries_supplies(lvs["envelope"], supply_spec["supply_nets"]):
+        reason = None
+    else:
+        reason = _REASON_LVS_SUPPLY_UNPROVEN
+    if reason is not None:
+        return "unmet", reason, None
 
     # The compound citation keeps the single-citation contract every existing
     # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
