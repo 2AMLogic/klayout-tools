@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
+  ladder's intermediate landing pads against each landing layer's own
+  minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
+  (0.42um, 0.1764um²) square (issue #2072). A route reaching a deep pin
+  (e.g. a `bond_pad`'s `top_metal`/met5 port) via sky130's full
+  li1→met1→met2→met3→met4→met5 stack previously drew an isolated,
+  sub-minimum-area landing pad on met3/met4 — a guaranteed
+  `met3.area.1`/`met4.area.1` violation under `klt drc --deck sky130`
+  once issue #1989 gave the curated deck a `met*.area.1` rule at all. The
+  digital `klt place-and-route` flow (OpenROAD-authored `VIA_`-prefixed
+  via cells, a separate code path) was investigated and did **not**
+  reproduce this on any of the three checked-in corpus fixtures — see the
+  issue for the full investigation.
 - **Added**: `klt erc --format json` now emits `provenance.spec` as
   `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
   the stackup/vias/nets/ties spec file the run was validated against.
