@@ -113,7 +113,7 @@ exit codes).
     "klayout_version": "0.30.10",
     "pdk": null,
     "deck": null,
-    "input": {"content_hash": "sha256:f2ff80..."}
+    "input": {"content_hash": "sha256:f2ff80...", "role": "layout"}
   }
 }
 ```

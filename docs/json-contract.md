@@ -311,7 +311,7 @@ geometry change from a klt/KLayout upgrade. See
   "klayout_version": "0.29.8",
   "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
   "deck": {"name": "sky130", "content_hash": "sha256:<hex>", "released": true},
-  "input": {"content_hash": "sha256:<hex>"}
+  "input": {"content_hash": "sha256:<hex>", "role": "layout"}
 }
 ```
 
@@ -394,22 +394,52 @@ geometry change from a klt/KLayout upgrade. See
     deck `content_hash` plus its structural device-class coverage
     (`ExtractionDeck.device_classes`) directly, with no input layout needed —
     see `docs/cli/deck.md`.
-- `input` — the input layout stream the run was made against, as
-  `{content_hash}` (same shape as `deck`). `content_hash` is a
-  `sha256:`-prefixed hex digest of the file, so a stale committed report is a
-  one-line diff against a freshly computed hash instead of being
-  byte-identical to a current run. Populated by `drc`, `extract`, and (since
-  issue #1969) `lvs`, which records the hash of the layout side it compared —
-  the same file and the same digest its own `environment.layout_sha256`
-  records, in the `sha256:`-prefixed form this block uses. `lvs` deliberately
-  populated `null` here until #1969, on the reasoning that
-  `environment.layout_sha256`/`reference_sha256` already covered it; that was
-  wrong for `klt signoff --manifest`, whose staleness gate reads
-  `provenance.input.content_hash` generically across every check kind and
-  cannot see an LVS-only field, so every `content_hash`-pinned "LVS clean"
-  citation graded `stale_evidence`. `environment.layout_sha256` is unchanged
-  (still a bare hex digest, no `sha256:` prefix). `input` is still `null` for
-  a verb with no single input stream to pin this way.
+- `input` — the single input artifact the run was made against, as
+  `{content_hash, role}` (mirroring `deck`'s `{name, content_hash,
+  released}`). `content_hash` is a `sha256:`-prefixed hex digest of the file,
+  so a stale committed report is a one-line diff against a freshly computed
+  hash instead of being byte-identical to a current run. Populated by `drc`,
+  `extract`, `pex`, and (since issue #1969) `lvs`, which records the hash of
+  the layout side it compared — the same file and the same digest its own
+  `environment.layout_sha256` records, in the `sha256:`-prefixed form this
+  block uses. `lvs` deliberately populated `null` here until #1969, on the
+  reasoning that `environment.layout_sha256`/`reference_sha256` already
+  covered it; that was wrong for `klt signoff --manifest`, whose staleness
+  gate reads `provenance.input.content_hash` generically across every check
+  kind and cannot see an LVS-only field, so every `content_hash`-pinned "LVS
+  clean" citation graded `stale_evidence`. `environment.layout_sha256` is
+  unchanged (still a bare hex digest, no `sha256:` prefix). `input` is still
+  `null` for a verb with no single input artifact to pin this way.
+  - `role` (issue #2027) — **which kind of artifact `content_hash` covers**.
+    One of:
+
+    | `role` | Meaning | Verbs |
+    |---|---|---|
+    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `lef-abstract`, `lvs` (`layout.file` shape), `sta` (`def` request) |
+    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request) |
+    | `"source"` | HDL source | `synthesize`, `equiv` |
+
+    The field exists because the hash alone is kind-blind, and one verb can
+    pin either kind: `klt lvs`'s `layout.file` shape hashes the original
+    GDS/OASIS stream (byte-identical to what `klt drc` hashes for the same
+    file), while its pre-extracted `layout.netlist` shape hashes a *SPICE
+    netlist*. **A consumer comparing `content_hash` across reports must
+    compare only within one `role`** — `klt signoff`'s
+    `provenance_consistency` gate does, the same way it compares
+    `deck.content_hash` only among checks naming the same deck. Before this
+    field, that gate compared a pre-extracted LVS run's netlist digest
+    against a DRC report's layout digest and rendered `refused` for a
+    consistent `drc` + `lvs` pair describing one design: a false alarm, not
+    caught staleness.
+    Adding `role` is additive — the key appears whenever `input` is
+    non-`null` and nothing else about the block changed. An envelope
+    committed before #2027 carries no `role`; read it as `"layout"`, the
+    field's only documented meaning at the time (`klt signoff` does exactly
+    that, so archived evidence keeps participating in the layout-side
+    comparison rather than being exempted from it). `klt wave`'s block is
+    built by the `klt-wave` binary rather than by this module and does not
+    carry `role`; the same "read it as `layout`" rule would misdescribe a
+    waveform trace, which is why no cross-report comparison consumes it.
 
 Fields that can't be resolved are `null` per the envelope convention — never
 silently fabricated. The block is built once in

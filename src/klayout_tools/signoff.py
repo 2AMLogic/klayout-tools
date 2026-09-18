@@ -553,7 +553,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any, TypedDict, Union, cast, get_args, get_origin, get_type_hints
 
-from ._provenance import sha256_file
+from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
 from .coverage import coverage_nothing_checked, coverage_nothing_checked_reasons
 from .design_evidence_tiers import (
     DesignEvidenceTiersError,
@@ -684,6 +684,14 @@ _PDK_NAME = "pdk.name"
 _PDK_VERSION = "pdk.version"
 _INPUT_HASH = "input.content_hash"
 
+#: How a ``provenance.input`` block with no ``role`` key is read by
+#: :func:`_check_input_hashes` (issue #2027). ``"layout"`` was the field's
+#: only documented meaning before the discriminator existed
+#: (``docs/json-contract.md``: "the input layout stream the run was made
+#: against"), so reading an older envelope this way keeps it in the
+#: layout-side comparison rather than exempting it.
+_DEFAULT_INPUT_ROLE = INPUT_ROLE_LAYOUT
+
 #: ``reason`` values a tier-report item can carry when its ``status`` is
 #: ``"unmet"`` -- see :func:`_grade_evidence` and :func:`_build_tier_item`.
 #: Issue #826 (Phase 1b of epic #706): the whole point of this enum is that
@@ -797,6 +805,11 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                         "field": "pdk.name" | "pdk.version" |
                                  "input.content_hash" |
                                  "deck[<deck name>].content_hash",
+                        # `input.content_hash` only (issue #2027): which
+                        # `provenance.input.role` this entry's checks
+                        # disagreed on -- hashes are compared only within a
+                        # role, never across them.
+                        "role": <str>,   # optional
                         "values": [{"source": <str>, "value": <str>}, ...],
                     },
                     ...
@@ -2165,13 +2178,24 @@ def _provenance_consistency(checks: list[dict[str, Any]]) -> dict[str, Any]:
       very layout DRC ran on (issue #1987's second finding -- before that,
       ``klt lvs`` populated nothing here, so a clean DRC of last week's
       layout combined with a matching LVS of today's was "consistent" by
-      omission). When more than one check populates it, they must agree:
+      omission). Compared **per ``input.role``** (issue #2027), the same way
+      ``deck[<name>].content_hash`` is compared per deck name: checks that
+      hashed a layout stream must agree with each other, and checks that
+      hashed a netlist must agree with each other, but a netlist digest is
+      never compared against a layout digest. Without that grouping, a
+      ``klt lvs`` run in the pre-extracted ``layout.netlist`` shape (whose
+      hash is of a *SPICE netlist*) could never agree with a ``klt drc``
+      report of the same design, and this gate refused a perfectly
+      consistent bundle. Within a role the rule is unchanged and unweakened:
       the whole point of "signoff" is that DRC, extraction and LVS ran
       against the *same* layout stream, not a stale pairing (the design
       doc's §1 "signoff rejection" failure mode). An envelope predating the
       verb's adoption of the field (``input`` absent or ``None``) is still
       excluded rather than forced into a mismatch -- ``None`` is "nothing
-      to say", never "disagrees with everyone".
+      to say", never "disagrees with everyone". An envelope predating
+      ``role`` itself is read as ``"layout"``, the field's only documented
+      meaning before #2027, so a mixed-vintage bundle of layout-hashing
+      reports stays exactly as strict as it was.
     - ``deck[<name>].content_hash`` -- compared only among checks that name
       the *same* deck (an LVS run and a DRC run legitimately use different
       decks; two checks both naming ``"sky130"`` must be byte-identical).
@@ -2189,9 +2213,7 @@ def _provenance_consistency(checks: list[dict[str, Any]]) -> dict[str, Any]:
 
     _check_scalar_field(checks, mismatches, field=_PDK_NAME, path=("pdk", "name"))
     _check_scalar_field(checks, mismatches, field=_PDK_VERSION, path=("pdk", "version"))
-    _check_scalar_field(
-        checks, mismatches, field=_INPUT_HASH, path=("input", "content_hash")
-    )
+    _check_input_hashes(checks, mismatches)
     _check_deck_hashes(checks, mismatches)
 
     return {"ok": not mismatches, "mismatches": mismatches}
@@ -2222,6 +2244,60 @@ def _check_scalar_field(
     distinct = {entry["value"] for entry in entries}
     if len(distinct) > 1:
         mismatches.append({"field": field, "values": entries})
+
+
+def _check_input_hashes(
+    checks: list[dict[str, Any]], mismatches: list[dict[str, Any]]
+) -> None:
+    """Append one ``mismatches[]`` entry per ``provenance.input.role`` whose
+    ``content_hash`` disagrees across the checks declaring that role (issue
+    #2027) -- the exact shape :func:`_check_deck_hashes` uses for deck names,
+    for the same reason: a hash is only comparable against a hash of the same
+    *kind* of artifact.
+
+    ``klt drc``/``klt extract``/``klt pex`` hash an input layout stream, but
+    ``klt lvs`` hashes whatever its ``request.layout`` named -- the original
+    GDS/OASIS for the ``layout.file`` shape, and a *SPICE netlist* for the
+    pre-extracted ``layout.netlist`` shape. Comparing those two digests
+    without regard to role can only ever produce a mismatch, even when both
+    describe the same design, which is a false alarm rather than caught
+    staleness (the repo's own ``examples/signoff/`` pair reproduced it).
+
+    A check whose ``input`` block predates the ``role`` field (or carries a
+    non-string there) is read as :data:`_DEFAULT_INPUT_ROLE` -- ``"layout"``
+    was the field's only documented meaning before #2027, so committed
+    evidence from an older ``klt`` keeps participating in the layout-side
+    comparison exactly as before instead of dropping into a bucket of its
+    own and quietly weakening the gate.
+
+    The emitted ``field`` stays ``"input.content_hash"`` for every role (the
+    value ``docs/cli/signoff.md`` documents and consumers match on); the
+    disagreeing role is carried in the additive ``role`` key beside it, so a
+    bundle that disagrees on two roles at once produces two distinguishable
+    entries.
+    """
+    by_role: dict[str, list[dict[str, Any]]] = {}
+    for check in checks:
+        provenance = check.get("provenance")
+        if not isinstance(provenance, dict):
+            continue
+        block = provenance.get("input")
+        if not isinstance(block, dict):
+            continue
+        content_hash = block.get("content_hash")
+        if content_hash is None:
+            continue
+        role = block.get("role")
+        if not isinstance(role, str):
+            role = _DEFAULT_INPUT_ROLE
+        by_role.setdefault(role, []).append(
+            {"source": check["source"], "value": content_hash}
+        )
+
+    for role, entries in sorted(by_role.items()):
+        distinct = {entry["value"] for entry in entries}
+        if len(distinct) > 1:
+            mismatches.append({"field": _INPUT_HASH, "role": role, "values": entries})
 
 
 def _check_deck_hashes(

@@ -573,7 +573,7 @@ from ._paths import (
     validate_request_shape,
 )
 from ._paths import _tcl_net_list as _tcl_net_list
-from ._provenance import build_provenance
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance
 from .lef_header import read_lef_header
 from .pdk import lef_files
 from .pdk_cells import list_lib_corners, resolve_liberty_for_cell_library
@@ -1864,6 +1864,11 @@ def run_place_and_route(
         deck_path=liberty_path,
         pdk=pdk_info,
         input_path=netlist_path,
+        # Issue #2027: `klt place-and-route`'s single pinned input is the
+        # gate-level *netlist* it placed, never a layout stream -- declaring
+        # the role keeps `klt signoff`'s `input.content_hash` cross-check
+        # from comparing this digest against a layout-hashing check's.
+        input_role=INPUT_ROLE_NETLIST,
     )
 
     return {

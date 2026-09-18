@@ -234,6 +234,7 @@ from typing import Any
 from ._paths import _load_request_json, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
+    INPUT_ROLE_SOURCE,
     _combined_content_hash,
     _yosys_version,
     build_provenance,
@@ -1181,10 +1182,18 @@ def _build_report(
 ) -> dict[str, Any]:
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
-        provenance = build_provenance(input_path=all_sources[0])
+        # Issue #2027: `klt equiv`'s inputs are HDL sources (the golden and
+        # gate-level designs), never a layout stream -- see
+        # `docs/json-contract.md`'s `provenance.input.role`.
+        provenance = build_provenance(
+            input_path=all_sources[0], input_role=INPUT_ROLE_SOURCE
+        )
     else:
         provenance = build_provenance()
-        provenance["input"] = {"content_hash": _combined_content_hash(all_sources)}
+        provenance["input"] = {
+            "content_hash": _combined_content_hash(all_sources),
+            "role": INPUT_ROLE_SOURCE,
+        }
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1896,10 +1905,18 @@ def _build_sequential_report(
     """
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
-        provenance = build_provenance(input_path=all_sources[0])
+        # Issue #2027: `klt equiv`'s inputs are HDL sources (the golden and
+        # gate-level designs), never a layout stream -- see
+        # `docs/json-contract.md`'s `provenance.input.role`.
+        provenance = build_provenance(
+            input_path=all_sources[0], input_role=INPUT_ROLE_SOURCE
+        )
     else:
         provenance = build_provenance()
-        provenance["input"] = {"content_hash": _combined_content_hash(all_sources)}
+        provenance["input"] = {
+            "content_hash": _combined_content_hash(all_sources),
+            "role": INPUT_ROLE_SOURCE,
+        }
 
     return {
         "schema_version": SCHEMA_VERSION,

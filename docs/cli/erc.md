@@ -518,7 +518,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
     "klayout_version": "0.29.8",
     "pdk": { "name": "sky130", "source": "built-in", "version": null },
     "deck": null,
-    "input": { "content_hash": "sha256:<hex>" },
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" },
     "spec": { "content_hash": "sha256:<hex>" }
   }
 }

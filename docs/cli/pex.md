@@ -578,7 +578,7 @@ full `repo`/`external`/`absent` scope meanings.
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "volare", "version": "<stamp>" },
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
 ```

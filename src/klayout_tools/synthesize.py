@@ -206,6 +206,7 @@ from typing import Any
 from . import env_provenance
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import (
+    INPUT_ROLE_SOURCE,
     _combined_content_hash,
     _yosys_version,
     build_provenance,
@@ -1114,9 +1115,16 @@ def run_synthesize(
         deck_path=liberty_path,
         pdk=pdk_info,
         input_path=resolved_sources[0] if len(resolved_sources) == 1 else None,
+        # Issue #2027: what `klt synthesize` pins is its HDL *source*, not a
+        # layout stream or a netlist -- see `docs/json-contract.md`'s
+        # `provenance.input.role`.
+        input_role=INPUT_ROLE_SOURCE,
     )
     if len(resolved_sources) > 1:
-        provenance["input"] = {"content_hash": _combined_content_hash(resolved_sources)}
+        provenance["input"] = {
+            "content_hash": _combined_content_hash(resolved_sources),
+            "role": INPUT_ROLE_SOURCE,
+        }
 
     equivalence = None
     if verify_equivalence:

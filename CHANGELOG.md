@@ -138,6 +138,32 @@ not `klt --version`, if you need to detect this kind of drift. See
   `klt lvs`'s precedent for a second input (`environment.reference_sha256`).
   Purely additive — no `schema_version` bump (`klt erc` stays at `1`), and
   `provenance.input`/`provenance.pdk`/`provenance.deck` are unchanged.
+- **Added**: `provenance.input.role` — a discriminator naming *which kind of
+  artifact* `provenance.input.content_hash` covers (issue #2027), one of
+  `"layout"` (a GDSII/OASIS stream or a DEF), `"netlist"` (a SPICE or
+  gate-level Verilog netlist), or `"source"` (HDL source). The hash alone was
+  kind-blind, and one verb can pin either kind: `klt lvs`'s `layout.file`
+  shape hashes the original layout stream, but its pre-extracted
+  `layout.netlist` shape hashes a *SPICE netlist*. **Bug fix**: `klt signoff`
+  compared `input.content_hash` across every check that populated it, so a
+  `klt drc` report and a pre-extracted-shape `klt lvs` report of the *same
+  design* could never agree and the run rendered `status: "refused"` — a
+  false alarm rather than caught staleness, reproducible with this repo's own
+  `examples/signoff/` pair (whose `lvs.request.json` uses that shape). The
+  gate now compares hashes only among checks declaring the same `role`,
+  exactly as it already compared `deck.content_hash` only among checks naming
+  the same deck; a genuine disagreement *within* a role is still refused, and
+  a bundle disagreeing on two roles reports one `mismatches[]` entry per role
+  (same `field`, distinguished by a new additive `mismatches[].role` key,
+  also shown in `--format text`). Evidence committed before this field
+  carries no `role` and is read as `"layout"` — the field's only documented
+  meaning at the time — so archived reports keep participating in the
+  layout-side comparison rather than being silently exempted from it.
+  Additive throughout: `role` appears whenever `input` is non-`null`, nothing
+  is renamed or removed, and no `schema_version` bumps. A knock-on effect is
+  that `klt sim` (and any other netlist-only verb) *can* now populate
+  `provenance.input` for the `--manifest` staleness pin without poisoning the
+  cross-check; wiring that up is separate work.
 - **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
   and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
   block kind (issue #1987). Both items previously accepted *any* recognised,

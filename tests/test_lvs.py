@@ -614,8 +614,14 @@ def test_clean_self_compare_reports_match(tmp_path):
     # duplication is deliberate -- `klt signoff --manifest`'s staleness gate
     # reads `provenance.input.content_hash` generically and cannot see an
     # LVS-only `environment.*` field.
+    # Issue #2027: and the block says *what* that hash is of. This request
+    # uses the pre-extracted `layout.netlist` shape, so the hashed file is a
+    # SPICE netlist -- `role: "netlist"` is what stops `klt signoff` from
+    # comparing it against a `klt drc` report's layout digest and refusing a
+    # perfectly consistent pair.
     assert prov["input"] == {
-        "content_hash": "sha256:" + report["environment"]["layout_sha256"]
+        "content_hash": "sha256:" + report["environment"]["layout_sha256"],
+        "role": "netlist",
     }
 
 
@@ -10563,7 +10569,10 @@ def test_netgen_engine_populates_provenance_input_content_hash(tmp_path, monkeyp
 
     assert report["engine"] == "netgen"
     assert report["provenance"]["input"] == {
-        "content_hash": "sha256:" + report["environment"]["layout_sha256"]
+        "content_hash": "sha256:" + report["environment"]["layout_sha256"],
+        # Issue #2027: `_netgen_request` uses the pre-extracted
+        # `layout.netlist` shape, so the pinned artifact is a SPICE netlist.
+        "role": "netlist",
     }
 
 
@@ -10599,12 +10608,72 @@ def test_provenance_input_hash_is_the_original_layout_stream(tmp_path):
     report = run_lvs(path)
 
     assert report["provenance"]["input"] == {
-        "content_hash": "sha256:" + sha256_file(str(SKY130_INV))
+        "content_hash": "sha256:" + sha256_file(str(SKY130_INV)),
+        # Issue #2027: an inline-extraction run hashes the original stream,
+        # so it declares the layout role and is directly comparable with a
+        # `klt drc` report of the same GDS.
+        "role": "layout",
     }
     # ... and it is emphatically not the extracted netlist's digest, the one
     # derived artifact an inline-extraction run has lying around.
     assert report["provenance"]["input"]["content_hash"] != "sha256:" + sha256_file(
         reference_path
+    )
+
+
+def test_provenance_input_role_follows_the_layout_request_shape(tmp_path):
+    """Issue #2027: `provenance.input.role` must track *which* `request.layout`
+    shape was used, because the two shapes hash different kinds of artifact.
+
+    `layout.file` (inline extraction) hashes the original GDS/OASIS stream --
+    byte-identical to what `klt drc` hashes for the same file. `layout.netlist`
+    (pre-extracted) hashes a SPICE netlist, which is not a layout stream at
+    all. Both are legitimate; the defect was that the shared field claimed to
+    be "the input layout stream" in both cases, so `klt signoff` compared a
+    netlist digest against a layout digest and refused to aggregate a `drc` +
+    `lvs` pair describing one design. This test runs both shapes over the same
+    inverter so the roles cannot silently converge.
+    """
+    from klayout_tools._provenance import sha256_file
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+    layout_netlist_path = str(tmp_path / "layout.spice")
+    run_extract(str(SKY130_INV), "sky130", output=layout_netlist_path)
+
+    inline_report = run_lvs(
+        _write_request(
+            tmp_path / "inline.json",
+            {
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {"netlist": reference_path, "top": extracted["top"]},
+            },
+        )
+    )
+    pre_extracted_report = run_lvs(
+        _write_request(
+            tmp_path / "pre-extracted.json",
+            {
+                "layout": {"netlist": layout_netlist_path, "top": extracted["top"]},
+                "reference": {"netlist": reference_path, "top": extracted["top"]},
+            },
+        )
+    )
+
+    assert inline_report["provenance"]["input"] == {
+        "content_hash": "sha256:" + sha256_file(str(SKY130_INV)),
+        "role": "layout",
+    }
+    assert pre_extracted_report["provenance"]["input"] == {
+        "content_hash": "sha256:" + sha256_file(layout_netlist_path),
+        "role": "netlist",
+    }
+    # The whole point: same design, two incomparable digests. Only the
+    # declared role tells a consumer not to compare them.
+    assert (
+        inline_report["provenance"]["input"]["content_hash"]
+        != pre_extracted_report["provenance"]["input"]["content_hash"]
     )
 
 
