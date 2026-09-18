@@ -28,6 +28,11 @@ and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
 #1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
 WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
 leaving ``equiv.py``'s independent error-formatting function without it).
+
+Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
+(issue #2065) -- a *layout-aware* digest for reports that pin the input streams
+they were built from (``klt gen-compose``'s ``blocks[].source_digest``), where
+a raw-byte hash would report drift on every re-write of identical geometry.
 """
 
 from __future__ import annotations
@@ -91,6 +96,163 @@ def sha256_file(path: str | None) -> str | None:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# Bumped whenever the canonical serialisation below changes shape, so a digest
+# computed by an older klt build can never be mistaken for a digest of the same
+# geometry computed by a newer one (the two would differ for reasons that have
+# nothing to do with the geometry drifting).
+_LAYOUT_GEOMETRY_DIGEST_VERSION = "klt-layout-geometry-digest/1"
+
+
+def _canonical_layer_key(info: Any) -> str:
+    """A layer's stable identity for :func:`layout_geometry_digest`.
+
+    ``layer/datatype`` for a numbered layer (what both GDS and OASIS actually
+    store), falling back to the layer *name* only for a name-only layer, which
+    has no number to key on. A layer that carries both keeps its number as the
+    identity -- GDS stores no layer names at all, so folding the name in would
+    make the same geometry hash differently depending on the container format.
+    """
+    if info.is_named():
+        return f"name:{info.name}"
+    return f"{info.layer}/{info.datatype}"
+
+
+def _canonical_properties(layout: Any, prop_id: int) -> str:
+    """User properties attached to a shape/instance, sorted, or ``""``."""
+    if not prop_id:
+        return ""
+    try:
+        props = layout.properties(prop_id)
+    except Exception:
+        return ""
+    rendered = sorted(f"{key!r}={value!r}" for key, value in props)
+    return " props=[" + ",".join(rendered) + "]"
+
+
+def _canonical_shape_token(shape: Any) -> str:
+    """One shape, rendered so that geometrically identical shapes render
+    identically.
+
+    Boxes are widened to polygons because the two are the same geometry
+    written two ways (GDS has no box record at all; OASIS does), and KLayout's
+    ``Polygon`` normalises its own point order/winding/collinear points on
+    construction -- so a rectangle written as a box and the same rectangle
+    written as a four-point boundary produce one token, not two.
+    """
+    import klayout.db as kdb
+
+    if shape.is_box():
+        return f"polygon {kdb.Polygon(shape.box).to_s()}"
+    if shape.is_polygon():
+        return f"polygon {shape.polygon.to_s()}"
+    if shape.is_path():
+        return f"path {shape.path.to_s()}"
+    if shape.is_text():
+        return f"text {shape.text.to_s()}"
+    if shape.is_edge():
+        return f"edge {shape.edge.to_s()}"
+    # Anything the accessors above do not cover (edge pairs, point-like
+    # shapes a future KLayout adds) still contributes its own rendering --
+    # unknown-but-present beats silently dropped.
+    return f"other {shape.to_s()}"
+
+
+def _canonical_instance_token(inst: Any) -> str:
+    """One child-cell instance, keyed by the *name* of the cell it places.
+
+    Deliberately not ``cell_index``: that is an index into this one layout's
+    own cell table, so it changes when a writer emits its cells in a different
+    order even though nothing about the placement moved.
+
+    A regular array's two axes are sorted rather than reported as written:
+    ``(a, na)`` and ``(b, nb)`` name the same lattice of placements in either
+    order, and writers really do disagree about which is which (KLayout writes
+    the same array with the axes swapped between GDS and OASIS).
+    """
+    token = f"inst {inst.cell.name} {inst.cplx_trans.to_s()}"
+    if inst.is_regular_array():
+        axes = sorted([(inst.a.to_s(), inst.na), (inst.b.to_s(), inst.nb)])
+        rendered = ",".join(f"{vector}x{count}" for vector, count in axes)
+        token += f" array=({rendered})"
+    return token
+
+
+def layout_geometry_digest(path: str | None) -> str | None:
+    """A ``sha256:``-prefixed digest of a GDS/OASIS stream's *decoded
+    geometry*, or ``None`` when it cannot be computed (issue #2065).
+
+    Deliberately **not** :func:`sha256_file`. A raw-byte hash answers "are
+    these two files identical", which is the wrong question for a layout
+    stream: re-writing geometrically identical output produces different bytes
+    every time (the BGNLIB/BGNSTR timestamp records carry the write time, and
+    shape/instance order within a cell follows whatever order the writer
+    happened to emit). A consumer comparing raw-byte hashes therefore sees
+    drift on every re-run and cannot tell a re-write from a real change --
+    exactly the failure mode issue #2065 was filed against. The byte-level
+    contract of :func:`sha256_file`/:func:`_content_hash` is unchanged and
+    still what ``drc``/``lvs``/``extract``/``sim`` record; this is a second,
+    layout-aware digest for callers that need equality to mean "same
+    geometry".
+
+    The digest covers, in a fixed order that no writer can perturb:
+
+    - the layout's database unit;
+    - every cell, sorted by name;
+    - within each cell, every shape (keyed by layer/datatype) and every
+      child-cell instance (keyed by the placed cell's *name*), each rendered
+      canonically and then sorted, so element order in the file is irrelevant;
+    - user properties attached to those shapes/instances.
+
+    Container metadata that says nothing about the geometry -- timestamps,
+    record order, cell-table indices, the format itself -- is never read.
+
+    Returns ``None`` (never a fabricated value, matching this module's
+    convention for everything it cannot resolve) for a falsy path, a path that
+    is not an existing file, a stream KLayout cannot read, or a missing
+    ``klayout`` engine.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import klayout.db as kdb
+
+        layout = kdb.Layout()
+        layout.read(path)
+
+        digest = hashlib.sha256()
+
+        def feed(line: str) -> None:
+            digest.update(line.encode("utf-8", errors="backslashreplace"))
+            digest.update(b"\n")
+
+        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION)
+        feed(f"dbu {layout.dbu:.12g}")
+
+        layer_keys = [
+            (index, _canonical_layer_key(layout.get_info(index)))
+            for index in layout.layer_indexes()
+        ]
+        for cell in sorted(layout.each_cell(), key=lambda c: c.name):
+            tokens: list[str] = []
+            for index, layer_key in layer_keys:
+                for shape in cell.shapes(index).each():
+                    tokens.append(
+                        f"shape {layer_key} {_canonical_shape_token(shape)}"
+                        f"{_canonical_properties(layout, shape.prop_id)}"
+                    )
+            for inst in cell.each_inst():
+                tokens.append(
+                    f"{_canonical_instance_token(inst)}"
+                    f"{_canonical_properties(layout, inst.prop_id)}"
+                )
+            feed(f"cell {cell.name}")
+            for token in sorted(tokens):
+                feed(f"  {token}")
+    except Exception:
+        return None
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _yosys_version() -> str | None:
