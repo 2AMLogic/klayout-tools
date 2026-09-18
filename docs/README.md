@@ -150,6 +150,7 @@ docs/
     wave-query-response.schema.json
   guides/                # how-to guides
     building-klayout-macos.md
+    ci-wall-clock-budget.md
     digital-review/      # RTL / testbench review guides (ported, Apache-2.0 — see its NOTICE)
       README.md
       NOTICE

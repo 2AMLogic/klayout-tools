@@ -995,3 +995,67 @@ jobs:
             echo "::error::step summary markdown did not mention violations"
             exit 1
           }
+
+  wall-clock-budget:
+    name: CI wall-clock budget
+    # Issue #1971 measured CI wall clock across the 2AM Logic repos and found
+    # that most of them are starved waiting on the `[self-hosted, heavy]` pool
+    # rather than actually computing -- sky130-pll did 24s of work in 6.5
+    # hours. THIS repo was the one exception: ~1000s of real summed job
+    # seconds against 408s median / 782s max of run wall clock, i.e. already
+    # parallelised. That makes klayout-tools the one repo where the work
+    # itself has to shrink, and so the one repo where a compute regression is
+    # worth gating on. Before this job nothing did: the per-job
+    # `timeout-minutes` above are hard ceilings (the `test` matrix allows 45
+    # minutes for a 3-minute job), so a leg could quietly triple and still be
+    # green. See docs/guides/ci-wall-clock-budget.md.
+    #
+    # `needs:` every measured job so this runs last and sees their completed
+    # timings; `if: always()` so a red run still gets its breakdown (a
+    # slowdown that also breaks a test is exactly when you want the numbers).
+    needs:
+      - lint
+      - native
+      - native-statime
+      - native-techmap
+      - native-wave
+      - site
+      - test
+      - action-smoke-test
+    if: always()
+    # Deliberately ubuntu-latest, never the heavy pool: a ~20s check that
+    # measures queue contention must not queue behind it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # The Actions API call below reads this run's own job timings.
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Fetch this run's job and run timings
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            > /tmp/ci-jobs.json
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            > /tmp/ci-run.json
+
+      - name: Check wall-clock budget
+        # --report-only for fork PRs: ci.yml's runner conditional routes those
+        # to ubuntu-latest, whose per-job timings the budgets -- measured on
+        # the self-hosted pool -- do not describe. A fixed threshold tuned
+        # against self-hosted numbers would otherwise redden every fork PR.
+        # Same-repo runs gate for real (exit 1 fails this job).
+        #
+        # No `uv sync`: the script is standard-library-only on purpose, so the
+        # budget check does not become part of the cost it measures.
+        run: |
+          python3 scripts/check_ci_wall_clock.py \
+            --jobs-json /tmp/ci-jobs.json \
+            --run-json /tmp/ci-run.json \
+            --budget .github/ci-wall-clock-budget.json \
+            --annotate \
+            ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && '--report-only' || '' }}
