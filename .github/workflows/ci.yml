@@ -47,6 +47,18 @@ jobs:
       - name: ruff check
         run: uv run --frozen --extra dev ruff check .
 
+      - name: Cyclomatic-complexity ratchet (C901)
+        # scripts/check_complexity_baseline.py (issue #2034, decomposed from
+        # #2011 item 3). C901 is deliberately excluded from the `ruff check`
+        # step above's select list -- see pyproject.toml's
+        # [tool.ruff.lint.mccabe] comment -- so this dedicated step is what
+        # actually gates complexity: fails on a function newly over
+        # max-complexity that is not in complexity-baseline.json, or on a
+        # baselined function whose complexity has increased since that file
+        # was recorded. A baselined function that improves (or disappears)
+        # never fails this step.
+        run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
+
   native:
     name: ${{ matrix.job_name }}
     # `native/mom/` (issue #718), `native/congestion/` (issue #785, Epic

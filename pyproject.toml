@@ -215,6 +215,24 @@ select = [
     "B",   # flake8-bugbear
 ]
 
+[tool.ruff.lint.mccabe]
+# Cyclomatic-complexity ratchet, not a ceiling (issue #2034, decomposed from
+# #2011 item 3). `C901` is deliberately NOT in `[tool.ruff.lint]`'s `select`
+# list above -- adding it there would make plain `ruff check .` fail
+# outright on every function already over this threshold (167, measured
+# 2026-09-18 -- a snapshot, re-measure rather than trust this number),
+# which is exactly the "ceiling that blocks landing on pre-existing debt"
+# the issue argues against. This `max-complexity` value is instead the
+# target `scripts/check_complexity_baseline.py` enforces as its own
+# dedicated CI step: any function not listed in the committed
+# `complexity-baseline.json` must stay at or under this value, and any
+# baselined function must not get *more* complex than its recorded value
+# (getting less complex, or disappearing, never fails). See that script's
+# module docstring for the full mechanism, and
+# `tests/test_check_complexity_baseline.py` for the drift guard that keeps
+# this value and the script's own `MAX_COMPLEXITY` constant in sync.
+max-complexity = 10
+
 [tool.ruff.lint.per-file-ignores]
 # Byte-exact ports of third-party source (docs/design/mutation-testing-spike.md,
 # "Attribution mechanics"; `src/klayout_tools/_vendor/__init__.py`'s own "port,
