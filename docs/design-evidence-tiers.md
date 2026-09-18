@@ -98,9 +98,9 @@ below, and why items 3 and 4 require their coverage gaps to be disclosed
 ### Block kind
 
 A T1 claim states the block's **kind**: `analog`, `digital`, or
-`mixed-signal`. The kind determines which column of items 1, 2, 5, 6, and 7
-applies — items 3, 4, 9, and 10 are kind-independent and apply as written to
-every block.
+`mixed-signal`. The kind determines which column of items 1, 2, 5, 7, and 11
+applies — items 3, 4, 6, 8, 9, and 10 are kind-independent and apply as
+written to every block.
 
 - **Analog** blocks satisfy the *Analog* column only.
 - **Digital** blocks satisfy the *Digital* column only. Nothing in the
@@ -329,6 +329,45 @@ every block.
 10. **Repo hygiene** — a README stating what the block is, its spec table,
     and how to reproduce every result; a license; CI that at minimum
     keeps the harness and evidence formats valid.
+11. **Power delivery (structural)**
+    - *Analog* — the `klt erc` supply evidence below, plus an LVS report
+      (item 4's own) whose reference actually carried the supply nets, so
+      the supplies were part of the compare rather than absent from it:
+      every declared supply net appears in that report's
+      `net_correspondence` paired to a reference-side net. A SPICE
+      reference satisfies this by construction; a signal-only
+      `gate-level-verilog` reference does not, which is why the Digital
+      column asks for `power_connectivity` instead.
+    - *Digital* — the `klt erc` supply evidence below, plus the routed
+      artifact having actually been produced with a power grid, plus item
+      4's power/ground verdict having actually run. Concretely: the `klt
+      place-and-route` response's `power.pdn` is `true` with a
+      `power.tapcell_master` named (`docs/cli/place-and-route.md` → "Power
+      delivery"), every `power.straps[].layer` is covered by the cited
+      `klt erc` spec's own stackup, and that same LVS report's
+      `power_connectivity.status` is `"match"` — `"unchecked"` does **not**
+      satisfy this item, unlike item 4 itself, where it means "the question
+      does not apply here". For a hand-captured full-custom digital
+      partition (no RTL, no synthesis, no P&R — see "Full-custom digital
+      sub-case" above), this item is satisfied instead by the Analog
+      column's artifacts, exactly as items 1, 2, and 5 are: there is no
+      `klt place-and-route` response to cite, and the hand-drawn block's
+      SPICE-reference LVS already carries its supplies.
+    - Both columns rest on the same `klt erc` **supply spec** run
+      (`docs/cli/erc.md`): a spec declaring every supply as a `nets[]`
+      entry with `"kind": "supply"`, a stackup covering the layers the
+      supply is routed on, and the `ties[]` declarations for the
+      well/substrate taps. Every declared supply must resolve to exactly
+      **one** electrical island — no `erc.unconnected_net` and no
+      `erc.supply_short` naming it — and the run must report zero
+      `erc.missing_tie`. Those are the rules this item grades, not the
+      report's overall `status`: an antenna verdict or a floating-gate
+      finding is a real defect, but it is not this item's subject and does
+      not block it (#1994). IR-drop and EM (`klt power`) stay deliberately
+      **outside** this item — see "Power/IR-drop + EM evidence" below. This
+      item is the *structural* question ("is the supply connected to what it
+      powers"), not the *analysis* question ("how far does it droop, and
+      does any segment exceed its EM limit").
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 
@@ -339,9 +378,10 @@ under load, and does any segment exceed its EM current-density limit — and a
 This section defers the analysis question only. An earlier revision of it
 called power-grid evidence "orthogonal to the DRC/LVS/corner/Monte-Carlo/
 post-layout checklist"; that was true of the analysis question and wrong
-about the structural one, which is item 4's own subject matter and is graded
-there today (`power_connectivity`, issues #1952/#1965). Read nothing in this
-section as deferring the structural question.
+about the structural one, which is item 11's own subject matter (and, for
+per-cell-instance pin-to-net correctness, item 4's — `power_connectivity`,
+issues #1952/#1965). Read nothing in this section as deferring the
+structural question.
 
 `klt power` (Epic #712, issues #844/#845/#846 —
 [`docs/cli/power.md`](cli/power.md)) reports a routed design's static
@@ -354,21 +394,25 @@ row: item 5 ("every spec row, per-row pass/fail") already makes such a row
 binding through machinery that exists — the same mechanism the
 "Area-efficiency spec convention" section below relies on.
 
-**What the structural question is, and is not, covered by today.** Item 4's
-`power_connectivity` covers per-cell-instance pin-to-net correctness, and
+**What the structural question is covered by, and how that changed.** Item
+4's `power_connectivity` covers per-cell-instance pin-to-net correctness, and
 only for a `gate-level-verilog` compare (see item 4 for its exact reach and
 for what `"unchecked"` does and does not mean). It does not cover geometric
-rail/grid continuity, and **no T1 item requires a power grid to exist as
-such**: a routed digital block with zero straps and zero PDN vias is caught
-above only to the extent item 4's `power_connectivity` verdict catches it —
-which is not at all when that verdict is `"unchecked"`, and never on the
-grounds of the missing grid itself. Whether the checklist should gain an item
-requiring a connected power delivery network is a live question this doc
-deliberately does not settle — adding one would change `t1_item_count` and
-therefore what every existing T1 claim means, which makes it an operator
-decision rather than a tooling one (#1982). Until it is settled, a T1 claim
-on a digital block says nothing about the block's power grid beyond what
-item 4's `power_connectivity` verdict states on its own terms.
+rail/grid continuity, and on its own it never required a power grid to exist
+at all: a routed digital block with zero straps and zero PDN vias was caught
+only to the extent that verdict caught it — which is not at all when it is
+`"unchecked"`, and never on the grounds of the missing grid itself. Whether
+the checklist should gain an item requiring a connected power delivery
+network was a live question this doc deliberately did not settle, because
+adding one changes `t1_item_count` and therefore what every existing T1
+claim means, which made it an operator decision rather than a tooling one
+(#1982). **That decision was taken — approved 2026-09-17 (#2025) — and is
+item 11 above.** The structural question is now graded directly, per block
+kind, from a `klt erc` supply-spec run (plus, for an RTL-flow digital block,
+the `klt place-and-route` response's own `power` block and item 4's
+`power_connectivity` verdict). Item 4 continues to mean exactly what it
+always meant; item 11 is what a claim now rests a "the supply reaches what
+it powers" statement on.
 
 `klt signoff` (issue #1321, Phase 2 of epic #712) recognises a `klt power`
 JSON envelope as a `"power"`-kind check **in envelope-aggregation mode
