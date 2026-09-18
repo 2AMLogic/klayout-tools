@@ -76,6 +76,18 @@ The `lvs` verb compares extracted and reference netlists and reports structured 
 - **lvs_mismatch** (`lvs_mismatch.py`): Mismatch classification, tolerance handling, and filtering subsystem (net/device mismatch categorization)
 - **lvs_netgen** (`lvs_netgen.py`): netgen engine subprocess invocation, output parsing, and report interpretation
 
+### pdk
+
+The `pdk` verb discovers and resolves an installed PDK, and answers queries against it (standard-cell libraries, shipped PyCell libraries, cross-section/stackup dumps).
+
+- **pdk_cmd** (`cli/pdk_cmd.py`): CLI interface for `klt pdk find` / `list` / `cells` / `pcell-check` / `stackup`
+- **pdk** (`pdk.py`): Core PDK discovery/resolution engine (`find_pdk()` / `list_pdks()`)
+- **pdk_cells** (`pdk_cells.py`): Standard-cell library device-flavor/voltage-domain queries and Liberty-corner resolution (`klt pdk cells`); split out of `pdk.py` per issue #1884
+- **pdk_pcell** (`pdk_pcell.py`): Reaches a resolved PDK's own shipped KLayout PyCell libraries (`klt pdk pcell-check`, issue #1535)
+- **pdk_stackup** (`pdk_stackup.py`): Normalized PDK cross-section/stackup dump (`klt pdk stackup`, issue #1609)
+
+`pdk_models.py` is **not** part of this split — it's a genuine cross-verb shared module (imported by `extract`, `lvs`, `sim`, `gen_layer_params`, and others), not `pdk`-exclusive code.
+
 ### place_and_route
 
 The `place_and_route` verb runs placement, global/detail routing, and post-PnR optimization steps.
@@ -130,9 +142,11 @@ Both fit the single-implementation-module pattern (see "Single-File Verbs" below
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pdk, pex, power, precheck, render, report, ring_check, size, socket_check, stats, synthesize, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, ring_check, size, socket_check, stats, synthesize, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
+
+**Naming trap**: `version` is an exception to the `<verb>.py` naming pattern above — there is no `src/klayout_tools/version.py`. `klt version`'s core module is `build_identity.py` (`cli/version_cmd.py` imports `version_report` from `..build_identity`).
 
 ## Finding Functionality
 
