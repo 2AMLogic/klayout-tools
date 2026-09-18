@@ -179,7 +179,7 @@ from typing import Any
 
 from ._layout import write_layout
 from ._paths import _resolve_relative
-from ._provenance import layout_geometry_digest
+from ._provenance import build_provenance, layout_geometry_digest
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -2106,6 +2106,23 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     absolute ``generator_report`` path, or one given as an inline JSON
     object, is unaffected by ``request_dir`` either way.
 
+    The response carries the shared ``provenance`` block (issue #2035) built
+    by :func:`~klayout_tools._provenance.build_provenance` -- see
+    ``docs/json-contract.md``'s "Shared ``provenance`` block". Its point here
+    is ``klt_version``/``klayout_version``: a project that commits a composed
+    layout *and this report* as evidence and recomposes later could otherwise
+    not tell a real geometry change from a klt/KLayout upgrade. A compose
+    request carries no rule/model deck and no single input layout stream (it
+    composes parameters plus the blocks' own generator sub-reports, not a
+    layout file), so ``provenance.deck``/``provenance.input`` are always
+    ``None`` -- matching ``klt lvs`` against a pre-extracted netlist.
+    ``provenance.pdk`` carries the same identity as the response's top-level
+    ``pdk`` field, in the shared block's own ``{name, source, version}``
+    spelling. Additive field, no ``schema_version`` bump -- and additive in
+    the ``blocks[].generator_report`` sense too: a compose response remains a
+    valid input block for a further ``compose()`` call (#1189), which ignores
+    keys it does not consume.
+
     Raises :class:`GenComposeError` for an unresolvable PDK, an unrecognised
     ``request.pdk`` key, a malformed request, an unsupported
     ``placement.strategy``, a ``connectivity[]`` reference to a nonexistent
@@ -3447,6 +3464,11 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "notes": notes,
         },
         "warnings": warnings,
+        # Issue #2035: the shared `provenance` block every other verb's
+        # report already carries -- see this function's docstring. A compose
+        # request involves no rule/model deck and no single input layout
+        # stream, so `deck`/`input` are both `None` here.
+        "provenance": build_provenance(pdk=pdk_info),
     }
 
 

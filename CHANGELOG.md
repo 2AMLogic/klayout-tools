@@ -81,6 +81,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   `coverage` block, one predating the convention, or one reporting
   `nothing_checked: false` grades exactly as it did before — the refusal fires
   only on an explicit `true`.
+- **Added**: `klt gen` and `klt gen-compose` `--format json` reports now carry
+  the shared top-level `provenance` block (issue #2035) — the same one
+  `klt drc`/`lvs`/`extract`/`sim` already emit, built by the same
+  `build_provenance()` helper. `klt_version` and `klayout_version` are the
+  point: a project that commits generated geometry plus its report as evidence
+  and re-runs the generator later could previously not tell a real geometry
+  change from a klt/KLayout upgrade — the `gen` family's report was the one
+  `klt` artefact whose producing build could not be read back off the artefact.
+  `provenance.pdk` mirrors the identity of each report's existing top-level
+  `pdk` field; `provenance.deck` and `provenance.input` are always `null` for
+  both verbs, since a generator/compose request is parameters (plus, for
+  compose, the blocks' own generator sub-reports), with no rule/model deck and
+  no single input layout stream to pin. Purely additive — no `schema_version`
+  bump on either command (both stay at `1`).
 - **Added**: `klt erc --format json` now emits `provenance.spec` as
   `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
   the stackup/vias/nets/ties spec file the run was validated against.

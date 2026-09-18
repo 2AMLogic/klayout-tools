@@ -146,12 +146,13 @@ consumer of the `--check`/`--rerun` machinery below should apply, not just
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
-deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, and `erc`
-— emit a shared top-level `provenance` block so a "clean"/"pass"/"match"
-result is auditable and reproducible later. Two runs made against different
-deck revisions or PDK releases are otherwise indistinguishable in the output,
-so a signoff claim can't be checked or reproduced. This block is **additive**
-(see above): adopting it required no `schema_version` bump on any verb.
+deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
+`gen`, and `gen-compose` — emit a shared top-level `provenance` block so a
+"clean"/"pass"/"match" result is auditable and reproducible later. Two runs
+made against different deck revisions or PDK releases are otherwise
+indistinguishable in the output, so a signoff claim can't be checked or
+reproduced. This block is **additive** (see above): adopting it required no
+`schema_version` bump on any verb.
 
 `klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
 a built-in antenna-ratio limit table baked into `erc.py` itself (see
@@ -186,6 +187,21 @@ still earn the block its keep, the same reproducibility role it plays for
 every other verb below. See
 [`docs/design/waveform-query-contract-spike.md`](design/waveform-query-contract-spike.md)
 section 2 and [`docs/cli/wave.md`](cli/wave.md).
+
+`klt gen`/`klt gen-compose` (issue #2035) are a partial exception for the
+same reason, one field narrower: a generator or compose request is
+*parameters* (plus, for compose, the blocks' own generator sub-reports) —
+there is no rule/model deck and no single input layout stream to pin — so
+`provenance.deck`/`provenance.input` are always `null` for both verbs.
+Unlike `klt wave`, both do resolve a PDK, and unconditionally (a generator
+cannot draw geometry without one), so `provenance.pdk` is always populated
+and mirrors the identity the report's own top-level `pdk` field carries.
+`klt_version` and `klayout_version` are what these two verbs gained the
+block for: a consumer that commits generated geometry plus its report as
+evidence and re-runs the generator later can otherwise not tell a real
+geometry change from a klt/KLayout upgrade. See
+[`docs/cli/gen.md`](cli/gen.md) and
+[`docs/cli/gen-compose.md`](cli/gen-compose.md).
 
 ```json
 "provenance": {

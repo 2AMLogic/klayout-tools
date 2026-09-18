@@ -1979,6 +1979,63 @@ def test_compose_row_places_two_real_blocks(tmp_path, pdk_root):
     assert offsets_seen == expected
 
 
+def test_compose_report_includes_provenance_block(tmp_path, pdk_root):
+    """Issue #2035: `klt gen-compose`'s report must carry the same shared
+    `provenance` block (klt version + KLayout engine version) every other
+    verb's report already carries, built via `build_provenance(pdk=...)`.
+    A compose request involves no rule/model deck and no single input
+    layout stream (it composes parameters plus block sub-reports, not a
+    layout file), so `deck`/`input` stay `None` -- matching `klt lvs`
+    against a pre-extracted netlist."""
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", num=2)
+
+    output = tmp_path / "composed_provenance.gds"
+    report = compose(
+        {
+            "schema": gen_compose.REQUEST_SCHEMA,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+            "options": {"cell_name": "composed_provenance_0", "output": str(output)},
+        }
+    )
+
+    provenance = report["provenance"]
+    assert set(provenance) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
+    assert provenance["klt_version"]
+    assert provenance["klayout_version"]
+    # No rule/model deck and no single input layout stream for this verb.
+    assert provenance["deck"] is None
+    assert provenance["input"] is None
+    # `provenance.pdk` must agree with the report's own top-level `pdk`.
+    assert set(provenance["pdk"]) == {"name", "source", "version"}
+    assert provenance["pdk"]["name"] == report["pdk"]["variant"]
+    assert provenance["pdk"]["version"] == report["pdk"]["version"]
+    assert provenance["pdk"]["source"]
+
+    # A compose report is itself reusable as a `blocks[].generator_report`
+    # input to a further compose call -- the new key must not break that.
+    nested = compose(
+        {
+            "schema": gen_compose.REQUEST_SCHEMA,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": report}],
+            "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+            "options": {
+                "cell_name": "composed_provenance_1",
+                "output": str(tmp_path / "composed_provenance_1.gds"),
+            },
+        }
+    )
+    assert nested["provenance"]["pdk"]["name"] == "sky130A"
+
+
 def test_compose_output_is_byte_reproducible(tmp_path, pdk_root):
     """Two `compose()` runs with identical blocks/placement/inputs must
     produce byte-identical GDS streams (#320), matching `klt gen`'s
