@@ -227,6 +227,41 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
     return max(_VIA_LANDING_SIZE_UM, needed_side_um)
 
 
+def _resolve_landing_pad_sizes(
+    routed_geometry: list[dict[str, Any]], variant: str
+) -> dict[tuple[int, int], float]:
+    """Per-``(layer, datatype)`` via-drop landing-pad side lengths (um) for
+    every distinct landing layer drawn across ``routed_geometry`` (issue
+    #2072).
+
+    One :func:`_landing_pad_side_um_for_layer` lookup per *distinct* landing
+    layer actually used by a drawn via-drop -- never per drop, and never a
+    private threshold -- mirroring the shape of
+    :func:`~klayout_tools.gen_compose.compose`'s own ``via_drop_size_um``
+    resolution (issue #1501) against :func:`_min_width_um_for_layer`. The
+    result is threaded into
+    :func:`~klayout_tools.gen_compose._write_composed_gds`, which falls back
+    to the fixed ``_VIA_LANDING_SIZE_UM`` for any layer missing from this
+    map.
+
+    Extracted out of ``compose()`` rather than inlined there (PR #2075
+    review): ``compose()`` is the single most complex function in the
+    repo's ``C901`` ratchet baseline, and inlining this triple-nested loop
+    pushed it past its recorded value. Behaviour is identical to the inlined
+    form -- a layer with no matching ``"area"`` rule (or an unresolvable PDK
+    family) still resolves to exactly ``_VIA_LANDING_SIZE_UM``.
+    """
+    landing_pad_size_um: dict[tuple[int, int], float] = {}
+    for route in routed_geometry:
+        for drop in route.get("via_drops", []):
+            for pad_layer in drop.get("landing_layers", ()):
+                if pad_layer not in landing_pad_size_um:
+                    landing_pad_size_um[pad_layer] = _landing_pad_side_um_for_layer(
+                        variant, pad_layer
+                    )
+    return landing_pad_size_um
+
+
 def _port_own_layer(port: dict[str, Any]) -> tuple[int, int] | None:
     """The ``(layer, datatype)`` a port's own reported ``layer{layer,
     datatype}`` geometry names, or ``None`` when it is missing/malformed.

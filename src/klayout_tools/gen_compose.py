@@ -208,13 +208,13 @@ from .gen_compose_routing import (
     _declare_only_bundle_result,
     _drawn_leg_footprint_region,
     _drawn_leg_intermediate_pad_regions,
-    _landing_pad_side_um_for_layer,
     _leg_block_spacing_violation_um,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
     _polyline_midpoint_um,
     _resolve_cross_block_route_layer,
     _resolve_label_layer,
+    _resolve_landing_pad_sizes,
     _resolve_route_layer,
     _ring_port_side,
     read_block_layer_geometry,
@@ -3353,15 +3353,15 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     # landing layer actually used across every drawn via-drop, mirroring
     # `via_drop_size_um` immediately above. A layer with no matching "area"
     # rule (or an unresolvable PDK family) keeps exactly
-    # `_VIA_LANDING_SIZE_UM`, unchanged.
-    landing_pad_size_um: dict[tuple[int, int], float] = {}
-    for route in routed_geometry:
-        for drop in route.get("via_drops", []):
-            for pad_layer in drop.get("landing_layers", ()):
-                if pad_layer not in landing_pad_size_um:
-                    landing_pad_size_um[pad_layer] = _landing_pad_side_um_for_layer(
-                        pdk_info["variant"], pad_layer
-                    )
+    # `_VIA_LANDING_SIZE_UM`, unchanged. The loop itself lives in
+    # `_resolve_landing_pad_sizes` (beside `_landing_pad_side_um_for_layer`,
+    # which was likewise extracted rather than inlined) instead of inline
+    # here, so this function -- already the worst entry in the repo's `C901`
+    # ratchet baseline -- does not grow by drawing DRC-clean landing pads
+    # (PR #2075 review).
+    landing_pad_size_um = _resolve_landing_pad_sizes(
+        routed_geometry, pdk_info["variant"]
+    )
     composed_dbu_um, dbu_rescale_warnings = _write_composed_gds(
         blocks,
         order,
