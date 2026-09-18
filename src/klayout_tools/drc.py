@@ -199,6 +199,30 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
+def _curated_nothing_checked_reasons(
+    deck: list[DrcRule], rules_checked: list[str]
+) -> list[str]:
+    """The curated engine's ``coverage.nothing_checked_reasons`` (issue #1996).
+
+    A deck that ran not one rule produces a ``"clean"`` verdict that is
+    vacuously true. ``rules_checked`` states what the verdict was actually
+    measured over, so its emptiness -- and only its emptiness -- is the
+    condition; the two reason codes then distinguish *why* there was nothing
+    to run. A degenerate deck declaring no rules at all reports
+    ``deck_has_no_rules``; a deck that declares rules but had every one
+    skipped for an absent input layer (the empty/wrong-PDK stream case
+    ``coverage.rules_skipped`` already enumerates) reports
+    ``all_rules_skipped``.
+
+    Returns ``[]`` for any run that checked at least one rule --
+    ``nothing_checked`` is never a synonym for *partial* coverage (see
+    :mod:`klayout_tools.coverage`).
+    """
+    if rules_checked:
+        return []
+    return [REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED]
+
+
 def run_drc(
     path: str,
     deck_name: str,
@@ -922,17 +946,6 @@ def run_drc(
                 {"marker": _fmt(marker), "description": description}
             )
 
-    # Issue #1996: a deck that ran not one rule produces a "clean" verdict
-    # that is vacuously true. `rules_checked` states what this verdict was
-    # measured over, and the shared `nothing_checked` roll-up lets a reader
-    # (`klt signoff`) refuse the citation without re-deriving that emptiness
-    # from `rules_skipped` vs. the deck's own rule count.
-    nothing_checked_reasons: list[str] = []
-    if not rules_checked:
-        nothing_checked_reasons.append(
-            REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED
-        )
-
     coverage = {
         "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
@@ -943,7 +956,10 @@ def run_drc(
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "deck_scope": deck_scope,
-        **build_nothing_checked(nothing_checked_reasons),
+        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
+        # refuse a "clean" verdict measured over nothing without re-deriving
+        # that emptiness from `rules_skipped` vs. the deck's own rule count.
+        **build_nothing_checked(_curated_nothing_checked_reasons(deck, rules_checked)),
     }
 
     return {

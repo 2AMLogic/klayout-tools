@@ -1433,6 +1433,70 @@ def _nothing_checked_reasons(envelope: dict[str, Any]) -> list[str] | None:
     return coverage_nothing_checked_reasons(envelope)
 
 
+def _nothing_checked_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``nothing_checked_reasons`` key (issue #1996), or an
+    empty dict when ``envelope`` makes no vacuous-run claim.
+
+    A merge-in fragment rather than a mutation of the caller's dict, matching
+    how every other optional detail key beside it is decided -- and keeping
+    the "is this key present at all?" branch in one named place rather than
+    adding a fifth conditional to :func:`_detail` itself.
+    """
+    reasons = _nothing_checked_reasons(envelope)
+    if reasons is None:
+        return {}
+    return {"nothing_checked_reasons": reasons}
+
+
+def _kind_is_accepted(check_kind: str, allowed_kinds: set[str] | None) -> bool:
+    """Whether the item :func:`_grade_evidence` is grading accepts a citation
+    of ``check_kind`` at all -- ``True`` for an unrestricted item
+    (``allowed_kinds is None``, see :func:`_allowed_kinds_for`).
+
+    Both of :func:`_grade_evidence`'s kind-gated refusals consult this before
+    firing, for the same reason: a citation of a kind the item does not accept
+    must say "cite a different artifact" (``wrong_kind``, applied downstream by
+    :func:`_build_tier_item`) rather than name a defect in the artifact that
+    *was* cited -- issue #826's invariant that the two stay distinguishable.
+    """
+    return allowed_kinds is None or check_kind in allowed_kinds
+
+
+def _kind_gated_refusal(
+    check_kind: str,
+    envelope: dict[str, Any],
+    *,
+    allowed_kinds: set[str] | None,
+    require_post_layout: bool,
+) -> str | None:
+    """The reason :func:`_grade_evidence` must refuse this *passing*,
+    right-kind envelope -- or ``None`` when it has no such reason.
+
+    Both refusals resolved here apply only to a kind the item accepts (see
+    :func:`_kind_is_accepted`), so they are decided in one place rather than
+    repeating that gate per condition:
+
+    - :data:`_REASON_NOTHING_CHECKED` (issue #1996) -- the envelope's own
+      ``coverage`` block reports ``nothing_checked: true``, so its passing
+      ``status`` was measured over nothing at all.
+    - :data:`_REASON_NOT_POST_LAYOUT` -- the run is not the post-layout run
+      the item requires.
+
+    ``nothing_checked`` is checked first: an empty report is not post-layout
+    evidence either, and "this measured nothing" names the more fundamental
+    of the two problems. Both are ordered *after* :func:`_check_passed` in
+    the caller, so a run that both failed and measured nothing is reported as
+    the failure it is.
+    """
+    if not _kind_is_accepted(check_kind, allowed_kinds):
+        return None
+    if _nothing_checked_reasons(envelope) is not None:
+        return _REASON_NOTHING_CHECKED
+    if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
+        return _REASON_NOT_POST_LAYOUT
+    return None
+
+
 def _pex_body_bias_disclosure(
     kind: str, envelope: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -1644,9 +1708,7 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
     # envelope predating the convention renders exactly as before. This is
     # the reader-facing half of the `passed: False` `_build_check` applies
     # for the same condition; see "Vacuous-verdict refusal" above.
-    nothing_checked = _nothing_checked_reasons(envelope)
-    if nothing_checked is not None:
-        detail["nothing_checked_reasons"] = nothing_checked
+    detail.update(_nothing_checked_detail(envelope))
     return detail
 
 
@@ -2404,28 +2466,17 @@ def _grade_evidence(
     if not _check_passed(check_kind, envelope):
         return "unmet", _REASON_CHECK_FAILED, None
 
-    # Issue #1996: a passing envelope that states it checked nothing backs no
-    # claim -- see this module's "Vacuous-verdict refusal" docstring section.
-    # Ordered after `_check_passed` (a run that both failed *and* measured
-    # nothing is reported as the failure it is) and before the post-layout
-    # gate (an empty report is not post-layout evidence either, and
-    # "nothing_checked" names the more fundamental problem of the two).
-    # `allowed_kinds` is consulted for exactly the reason the post-layout
-    # gate below consults it: a citation of a kind this item does not accept
-    # at all must say "cite a different artifact" (`"wrong_kind"`, applied by
-    # `_build_tier_item`), not "re-run this one against something"
-    # (`"nothing_checked"`) -- issue #826's invariant.
-    if (
-        allowed_kinds is None or check_kind in allowed_kinds
-    ) and _nothing_checked_reasons(envelope) is not None:
-        return "unmet", _REASON_NOTHING_CHECKED, None
-
-    if (
-        require_post_layout
-        and (allowed_kinds is None or check_kind in allowed_kinds)
-        and not _is_post_layout_evidence(check_kind, envelope)
-    ):
-        return "unmet", _REASON_NOT_POST_LAYOUT, None
+    # The two refusals that apply only to a kind this item actually accepts --
+    # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
+    # together, in that order. See `_kind_gated_refusal`.
+    kind_gated = _kind_gated_refusal(
+        check_kind,
+        envelope,
+        allowed_kinds=allowed_kinds,
+        require_post_layout=require_post_layout,
+    )
+    if kind_gated is not None:
+        return "unmet", kind_gated, None
 
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
