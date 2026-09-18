@@ -395,6 +395,77 @@ def test_annotate_emits_an_error_annotation_on_a_real_breach(tmp_path: Path) -> 
     assert "::error" in result.stdout
 
 
+def test_annotate_emits_a_warning_not_an_error_on_a_queue_only_breach(
+    tmp_path: Path,
+) -> None:
+    """A queue-only breach exits 0 -- the annotation must say `::warning::`,
+    not `::error::`. A red annotation on a green job trains people to ignore
+    annotations (follow-up from #1993, filed as #2056)."""
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Fast job",
+                started="2026-09-17T08:00:00Z",
+                completed="2026-09-17T08:00:24Z",
+            ),
+        ],
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        # Run created an hour before the job ever started: pure queue time.
+        "--run-json",
+        str(_run_meta(tmp_path, "2026-09-17T07:00:00Z")),
+        "--budget",
+        str(_budget(tmp_path)),
+        "--annotate",
+    )
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    assert "::warning" in result.stdout
+    assert "::error" not in result.stdout
+
+
+def test_annotate_on_mixed_breach_warns_for_queue_and_errors_for_compute(
+    tmp_path: Path,
+) -> None:
+    """A compute breach alongside a queue breach (exit 1 overall) must still
+    annotate the queue line as `::warning::` -- only the compute line, the one
+    that actually reddens the build, gets `::error::`."""
+    jobs = _jobs(
+        tmp_path,
+        [
+            # 700 s against a 120 s job budget: a compute breach. Total
+            # compute (700 s) stays under the 1500 s total budget, so the
+            # wall-clock queue breach is reported alongside it.
+            _job(
+                "Fast job",
+                started="2026-09-17T09:00:00Z",
+                completed="2026-09-17T09:11:40Z",
+            ),
+        ],
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        "--run-json",
+        str(_run_meta(tmp_path, "2026-09-17T07:00:00Z")),
+        "--budget",
+        str(_budget(tmp_path)),
+        "--annotate",
+        "--format",
+        "json",
+    )
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    stdout_lines = result.stdout.splitlines()
+    annotation_lines = [ln for ln in stdout_lines if ln.startswith("::")]
+    assert len(annotation_lines) == 2
+    warning_lines = [ln for ln in annotation_lines if ln.startswith("::warning")]
+    error_lines = [ln for ln in annotation_lines if ln.startswith("::error")]
+    assert len(warning_lines) == 1 and "(queue)" in warning_lines[0]
+    assert len(error_lines) == 1 and "(compute)" in error_lines[0]
+
+
 # --------------------------------------------------------------------------
 # Payload edge cases
 # --------------------------------------------------------------------------

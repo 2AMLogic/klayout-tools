@@ -160,6 +160,16 @@ done
 asserts the recorded baseline sits below the budgets, so a transcription slip
 cannot ship a budget that is already breached on a green run.
 
+**Re-measurement is also mandatory after any runner-pool change** — adding or
+removing self-hosted runners, resizing them, or otherwise changing what
+`[self-hosted, heavy]` resolves to — even when nothing in `ci.yml` itself
+changes. Every number on this page (the per-job budgets, the total-compute
+budget, and especially the wall-clock budget, which is queue time plus
+compute) is calibrated against *this* pool's contention and hardware. A pool
+change invalidates that calibration exactly like a job-cost change does, and a
+stale budget is either a spurious compute breach (pool got slower) or a gate
+that no longer catches a real regression (pool got faster).
+
 ## Running the check locally
 
 ```bash
