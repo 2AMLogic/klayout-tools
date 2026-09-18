@@ -28,8 +28,8 @@ BUDGET_FILE = REPO_ROOT / ".github" / "ci-wall-clock-budget.json"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 # Exit-code contract, mirroring scripts/check-release-lag.sh's tiering:
-#   0 = within budget (or a report-only run), 1 = budget breach,
-#   2 = the check itself could not run.
+#   0 = within budget, a queue-only breach, or a report-only run,
+#   1 = compute budget breach, 2 = the check itself could not run.
 EXIT_OK = 0
 EXIT_BREACH = 1
 EXIT_CANNOT_RUN = 2
@@ -245,10 +245,12 @@ def test_total_compute_breach_is_classified_as_compute(tmp_path: Path) -> None:
     assert kinds == {"compute"}
 
 
-def test_queue_breach_is_classified_as_queue_not_compute(tmp_path: Path) -> None:
+def test_queue_only_breach_is_reported_but_does_not_fail(tmp_path: Path) -> None:
     """Wall clock blown while compute is well within budget is a *scheduling*
     breach -- the distinction #1971's whole survey turned on. Misreporting it
-    as compute would send the next reader off optimising jobs that are fine."""
+    as compute would send the next reader off optimising jobs that are fine,
+    and *failing* on it would redden a build for runner-pool contention no PR
+    author can fix. So it is classified `queue`, reported, and exits 0."""
     jobs = _jobs(
         tmp_path,
         [
@@ -270,10 +272,70 @@ def test_queue_breach_is_classified_as_queue_not_compute(tmp_path: Path) -> None
         "--format",
         "json",
     )
-    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
     payload = json.loads(result.stdout)
     assert [b["kind"] for b in payload["breaches"]] == ["queue"]
+    assert payload["status"] == "breach"
     assert payload["total_job_seconds"] == 24
+
+
+def test_queue_only_breach_still_says_so_in_the_text_report(tmp_path: Path) -> None:
+    """Exiting 0 must not make the breach invisible: it still prints, and still
+    says which kind it is, so queue starvation stays attributable."""
+    jobs = _jobs(
+        tmp_path,
+        [
+            _job(
+                "Fast job",
+                started="2026-09-17T08:00:00Z",
+                completed="2026-09-17T08:00:24Z",
+            ),
+        ],
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        "--run-json",
+        str(_run_meta(tmp_path, "2026-09-17T07:00:00Z")),
+        "--budget",
+        str(_budget(tmp_path)),
+    )
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    assert "budget breach(es)" in result.stdout
+    assert "run wall clock" in result.stdout
+    assert "scheduling/queue breach" in result.stdout
+
+
+def test_compute_breach_alongside_a_queue_breach_still_fails(tmp_path: Path) -> None:
+    """A queue breach does not launder a compute breach sharing the same run:
+    one job blows its own budget (compute) while total compute stays inside
+    budget, so the wall-clock queue breach is reported too. Mixed => exit 1."""
+    jobs = _jobs(
+        tmp_path,
+        [
+            # 700 s against a 120 s job budget: a compute breach. Total compute
+            # (700 s) is still under the 1500 s total budget, so the wall-clock
+            # line is not suppressed and a queue breach is reported alongside.
+            _job(
+                "Fast job",
+                started="2026-09-17T09:00:00Z",
+                completed="2026-09-17T09:11:40Z",
+            ),
+        ],
+    )
+    result = _run(
+        "--jobs-json",
+        str(jobs),
+        "--run-json",
+        str(_run_meta(tmp_path, "2026-09-17T07:00:00Z")),
+        "--budget",
+        str(_budget(tmp_path)),
+        "--format",
+        "json",
+    )
+    assert result.returncode == EXIT_BREACH, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert {b["kind"] for b in payload["breaches"]} == {"compute", "queue"}
 
 
 # --------------------------------------------------------------------------

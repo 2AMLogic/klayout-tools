@@ -28,11 +28,17 @@ code under test.
 
 Exit codes (mirroring `scripts/check-release-lag.sh`'s tiering):
 
-  0  within budget, or a `--report-only` run
-  1  budget breach
+  0  within budget, a queue-only breach, or a `--report-only` run
+  1  compute budget breach
   2  the check itself could not run (unreadable/incoherent budget file, or a
      payload with nothing measurable in it) -- a check that silently stops
      checking is worse than no check at all, so this is never a green.
+
+Only a *compute* breach exits 1. A queue-only breach is printed, annotated and
+summarised but does not fail the build: the classification above says it is not
+the author's to fix, and reddening a build for runner-pool contention is how a
+check earns the reflex of being ignored. A hard queue gate, if ever wanted,
+belongs behind an opt-in flag.
 
 Usage:
 
@@ -297,7 +303,8 @@ def render_text(
                 "",
                 "Compute is WITHIN budget -- this is a scheduling/queue breach, not a",
                 "code regression. Optimising these jobs would achieve nothing (issue",
-                "#1971): look at runner-pool contention instead.",
+                "#1971): look at runner-pool contention instead. Reported, not gated:",
+                "a queue-only breach exits 0 and does not fail this build.",
             ]
         elif "compute" in kinds:
             lines += [
@@ -454,7 +461,11 @@ def main(argv: list[str] | None = None) -> int:
         except OSError as exc:  # pragma: no cover - summary is best-effort
             print(f"warning: could not write step summary: {exc}", file=sys.stderr)
 
-    if breaches and not args.report_only:
+    # Only a *compute* breach is the author's to act on, so only a compute
+    # breach reddens the build. A queue-only breach is runner-pool contention:
+    # it is reported (annotation + step summary) but exits 0, because failing a
+    # build for something no PR author can fix is how a red check gets ignored.
+    if any(b.kind == "compute" for b in breaches) and not args.report_only:
         return EXIT_BREACH
     return EXIT_OK
 

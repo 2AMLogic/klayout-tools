@@ -120,6 +120,12 @@ six hours of queue time gets misread as slow tests.
 - A wall-clock overrun *while compute is within budget* is a **queue** breach:
   runner-pool contention. Optimising the jobs would achieve nothing.
 
+**Only a compute breach fails the build.** A queue-only breach prints its
+report, annotates and lands in the step summary, then exits 0 — failing a build
+for contention no PR author can fix is how a red check earns the reflex of
+being ignored (a hard queue gate, if ever wanted, belongs behind an opt-in
+flag).
+
 A slowdown is never reported as both — when compute is over, the wall-clock
 line is suppressed so the actionable breach is not buried.
 
@@ -166,6 +172,6 @@ python3 scripts/check_ci_wall_clock.py \
   --jobs-json /tmp/ci-jobs.json --run-json /tmp/ci-run.json
 ```
 
-Exit codes: `0` within budget (or `--report-only`), `1` budget breach, `2` the
-check could not run — a malformed budget file or a payload with nothing
-measurable in it never reports a vacuous pass.
+Exit codes: `0` within budget, a queue-only breach, or `--report-only`; `1` a
+compute budget breach; `2` the check could not run — a malformed budget file or
+a payload with nothing measurable in it never reports a vacuous pass.
