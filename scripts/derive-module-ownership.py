@@ -16,8 +16,8 @@ role descriptions, formatted for inclusion in docs/module-ownership.md.
 import ast
 import re
 import sys
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
 
 def find_repo_root() -> Path:
@@ -110,11 +110,32 @@ def get_imports_from_file(file_path: Path) -> list[str]:
     return imports
 
 
+def _owning_verb(basename: str, all_verb_names: set[str]) -> str | None:
+    """Return the most specific registered verb `basename` belongs to, if any.
+
+    A plain ``basename.startswith(verb_name)`` test conflates sibling verbs
+    that share a prefix (``gen`` / ``gen_compose``, ``sta`` / ``stats``) since
+    "stats".startswith("sta") is true despite `stats` being its own verb.
+    Requiring an exact match or a ``verb_name + "_"`` boundary fixes the
+    ``sta``/``stats`` case; picking the *longest* such match additionally
+    resolves ``gen`` vs. ``gen_compose`` (both satisfy the boundary rule for
+    `basename="gen_compose_routing"`, but `gen_compose` is the more specific,
+    correct owner).
+    """
+    candidates = [
+        v for v in all_verb_names if basename == v or basename.startswith(v + "_")
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=len)
+
+
 def find_related_modules(
     verb_name: str,
     cmd_module: str,
     all_modules: dict[str, list[Path]],
     src_base: Path,
+    all_verb_names: set[str],
 ) -> list[tuple[str, str]]:
     """Find all modules related to a verb.
 
@@ -130,8 +151,12 @@ def find_related_modules(
         # Check if module belongs to this verb (by name)
         module_basename = module_name.split(".")[-1]
 
-        # Match: module starts with verb name or is a subsystem (extract_abstract, etc.)
-        if module_basename.startswith(verb_name) and module_basename != cmd_module:
+        # Match: module belongs to this verb specifically, not a sibling verb
+        # that happens to share a name prefix (see _owning_verb).
+        if (
+            module_basename != cmd_module
+            and _owning_verb(module_basename, all_verb_names) == verb_name
+        ):
             for file_path in all_modules[module_name]:
                 if file_path.exists():
                     doc = get_module_docstring(file_path)
@@ -160,7 +185,7 @@ def find_related_modules(
     if primary_module in all_modules:
         for file_path in all_modules[primary_module]:
             imports = get_imports_from_file(file_path)
-            for module_name, imported_name in imports:
+            for _module_name, imported_name in imports:
                 # Look for related modules (same verb prefix)
                 if imported_name.startswith(verb_name) and imported_name != cmd_module:
                     if imported_name not in related:
@@ -200,12 +225,15 @@ def main():
     # Extract verbs and find modules
     verbs = extract_verbs_from_parser(parser_file)
     all_modules = find_python_modules(src_base)
+    all_verb_names = set(verbs.keys())
 
     # Build the map
     multi_file_verbs = {}
 
     for verb_name, cmd_module in sorted(verbs.items()):
-        related = find_related_modules(verb_name, cmd_module, all_modules, src_base)
+        related = find_related_modules(
+            verb_name, cmd_module, all_modules, src_base, all_verb_names
+        )
         if related:
             multi_file_verbs[verb_name] = related
 

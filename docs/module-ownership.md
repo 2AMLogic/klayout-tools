@@ -6,19 +6,31 @@ This document maps each `klt` verb implementation to its constituent modules, id
 
 ## Derivation Method
 
-This map was derived **mechanically** using:
+This map is **mechanically assisted, hand-verified**:
 
 1. **CLI parser registration** in `src/klayout_tools/cli/parser.py`: each verb's entry point via `set_defaults(func=<verb>_cmd.run)`
 2. **Import graph analysis**: tracing the `from .. import` chains in each `<verb>_cmd.py` module to find all related modules
 3. **Module docstrings**: extracting the first paragraph from each module's `"""..."""` to document ownership boundaries
 
-The derivation is reproducible: modules related to a verb are those whose names start with the verb name (e.g., `extract`, `extract_abstract`, `extract_parasitics` for the `extract` verb) plus any modules explicitly imported in the verb's primary module or CLI command module.
+[`scripts/derive-module-ownership.py`](../scripts/derive-module-ownership.py) automates most of this — grouping modules whose names share a verb's name (with a `_` boundary, so a sibling verb that happens to share a prefix, e.g. `gen` vs. `gen_compose` or `sta` vs. `stats`, is never misattributed) — but its output is **not** byte-identical to this doc, for two reasons that make full mechanical reproduction impractical:
 
-See [`scripts/derive-module-ownership.py`](../scripts/derive-module-ownership.py) (or run the equivalent analysis via AST parsing and `cli/parser.py` inspection) to regenerate or validate this map.
+- **Verb/module name mismatches require judgment the script can't automate.** `klt yield`'s core logic lives in `yield_analysis.py` (not `yield.py`, which doesn't exist), and `klt sta`'s lives in `post_route_sta.py` (not `sta.py`, which is a *different*, unrelated module — see the `sta` entry below). These are exactly the cases this doc exists to flag, but the script has no way to know a verb's core module is named differently from the verb itself.
+- **The script's own "multi-file" filter (≥2 non-cmd modules) is a heuristic, not the deciding rule.** A verb whose CLI command file (`<verb>_cmd.py`) delegates to a *single*, oddly-named core module (`yield`, `sta`, `signoff`) is still worth mapping here even though the script's filter excludes it — the whole point is finding where a verb's logic actually lives, not just verbs that happen to span 2+ files by that count.
+
+Run the script to validate the *unambiguous* entries (verb name == core module name, e.g. `extract`, `lvs`, `sim`) and as a starting point for new ones; treat its output as an aid, not a generator, for the name-mismatch cases called out inline below.
 
 ## Multi-File Verbs
 
 The following verbs are implemented across more than one source file. Each entry lists the module name (as a Python `import` path) and a one-line description of its role.
+
+### deck
+
+The `deck` verb identifies a built-in DRC/LVS rule deck and resolves it back to the release that shipped it.
+
+- **deck_cmd** (`cli/deck_cmd.py`): CLI interface for `klt deck resolve` / `hash` / `info`
+- **decks.history** (`decks/history.py`): Deck resolution engine — content-hash and `(name, version)` lookups against the generated release-history table
+
+`deck_cmd.py` also imports `_provenance.py` for shared PDK-resolution provenance identity — that module is the explicit "except PDK resolution" carve-out to the self-containment principle noted at the top of this doc, and is shared by `drc`/`lvs`/`extract`/`sim`/`precheck` too. It is not code owned by `deck` itself, so it is not listed as one of `deck`'s constituent modules.
 
 ### extract
 
@@ -89,21 +101,36 @@ The `sim` verb runs SPICE simulations over generated netlists and produces struc
 - **sim_plot** (`sim_plot.py`): Result plotting and waveform display utilities (matplotlib/HTML output)
 - **sim_remote** (`sim_remote.py`): Remote simulation orchestration (AMI/cloud runner invocation and result retrieval)
 
+### sta
+
+The `sta` verb runs gate-level static timing analysis over a routed DEF, backed by the native Rust `klt_statime_native` extension.
+
+- **sta_cmd** (`cli/sta_cmd.py`): CLI interface, argument parsing, JSON envelope output
+- **post_route_sta** (`post_route_sta.py`): Core post-route STA engine — timing-graph construction, critical-path reporting, the actual module `klt sta` runs
+
+**Naming trap**: `src/klayout_tools/sta.py` also exists but is a *different*, unrelated module — a native-Rust critical-path library that backs `klt synthesize`'s integrated `sta` report (a different verb entirely). `klt sta` itself does not import `sta.py`.
+
 ### yield
 
-The `yield` verb computes yield predictions and sensitivity analysis across parameter sweeps.
+`klt yield` turns a Monte Carlo sample set plus spec limits into a yield estimate (confidence interval, Cpk/sigma-to-spec).
 
 - **yield_cmd** (`cli/yield_cmd.py`): CLI interface for yield analysis
-- **yield** (`yield.py`): Core yield analysis engine, failure rate computation, public API
-- **yield_analysis** (`yield_analysis.py`): Yield model analysis and Monte Carlo simulation subsystem
-- **yield_campaign** (`yield_campaign.py`): Multi-run yield campaign orchestration (sweep parameter management)
-- **yield_sensitivity** (`yield_sensitivity.py`): Parameter sensitivity analysis for yield (parameter sweep and ranking)
+- **yield_analysis** (`yield_analysis.py`): Core yield analysis engine — distribution fit, CI/Cpk, negative-control and analytic-cross-check discipline (delegates the numeric core to the `klt_yield_native` Rust extension)
+
+**Naming trap**: there is no `yield.py` — the verb's core module is `yield_analysis.py`.
+
+**Not part of this split**: `klt yield-campaign` and `klt yield-sensitivity` are separate, independently-registered CLI verbs (their own `set_defaults` entries in `cli/parser.py`), not additional files of `klt yield` itself, despite the shared `yield*` module-name prefix:
+
+- `yield-campaign` = `cli/yield_campaign_cmd.py` + `yield_campaign.py` (multi-run campaign orchestration; also borrows `yield_cmd.py`'s text-report printer for its own text output)
+- `yield-sensitivity` = `cli/yield_sensitivity_cmd.py` + `yield_sensitivity.py` (parameter sensitivity ranking for a completed campaign)
+
+Both fit the single-implementation-module pattern (see "Single-File Verbs" below) once their own cmd/core pair is counted separately from `yield`'s.
 
 ## Single-File Verbs
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pdk, pex, precheck, render, report, ring_check, size, socket_check, stats, synthesize, techmap, trajectory, version, wave
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pdk, pex, power, precheck, render, report, ring_check, size, socket_check, stats, synthesize, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
 
