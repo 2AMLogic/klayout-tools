@@ -386,6 +386,46 @@ def _device_body_net_name(device: Any) -> str | None:
     return None
 
 
+def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
+    """``{device-class name: unverified device count}`` for every MOS device
+    class in ``layout_circuit`` whose body terminals were compared against a
+    deck-synthesized net rather than a real schematic one (issue #281).
+
+    The single source of truth for that determination: :func:`_body_net_warnings`
+    renders these counts as its ``device.body_unverified`` ``mismatches[]``
+    prose, and :func:`~klayout_tools.lvs._body_verification_report` renders the
+    same counts as the machine-checkable ``body_verification`` block (issue
+    #1983) -- so the warning a reader sees and the field a grader reads can
+    never disagree. See :func:`_body_net_warnings` for the full rationale on
+    *which* devices count as unverified on which decks.
+
+    Empty when every MOS body terminal resolved to a real net (a layout that
+    drew its substrate/well ties on a deck that has a tap mechanism), which is
+    exactly the "verified" case.
+    """
+    counts: dict[str, int] = {}
+
+    nfet_count = sum(
+        1
+        for device in layout_circuit.each_device()
+        if device.device_class().name == deck.nfet_class
+        and _device_body_net_name(device) in (deck.substrate_net, None)
+    )
+    if nfet_count:
+        counts[deck.nfet_class] = nfet_count
+
+    if deck.tap is None and deck.tap_nplus is None and deck.tap_pplus is None:
+        pfet_count = sum(
+            1
+            for device in layout_circuit.each_device()
+            if device.device_class().name == deck.pfet_class
+        )
+        if pfet_count:
+            counts[deck.pfet_class] = pfet_count
+
+    return counts
+
+
 def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     """Issue #281 (narrowed to real-tap-drawn layouts by #490): flag, as
     non-blocking ``severity: "warning"`` entries, the MOS body terminals
@@ -434,12 +474,12 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
 
     entries: list[dict[str, Any]] = []
 
-    nfet_count = sum(
-        1
-        for device in layout_circuit.each_device()
-        if device.device_class().name == deck.nfet_class
-        and _device_body_net_name(device) in (deck.substrate_net, None)
-    )
+    # Issue #1983: both this prose warning and the machine-checkable
+    # `body_verification` block are rendered from one determination, so a
+    # reader and a grader can never see different answers.
+    counts = _body_unverified_counts(layout_circuit, deck)
+
+    nfet_count = counts.get(deck.nfet_class, 0)
     if nfet_count:
         entries.append(
             _mismatch(
@@ -456,30 +496,25 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
             )
         )
 
-    if deck.tap is None and deck.tap_nplus is None and deck.tap_pplus is None:
-        pfet_count = sum(
-            1
-            for device in layout_circuit.each_device()
-            if device.device_class().name == deck.pfet_class
-        )
-        if pfet_count:
-            entries.append(
-                _mismatch(
-                    CATEGORY_DEVICE_BODY_UNVERIFIED,
-                    "warning",
-                    f"{pfet_count} PMOS device body terminal(s) were "
-                    "compared against an anonymous, deck-synthesized well "
-                    "net, not a real schematic net -- this deck has no "
-                    "distinct well-tap layer (see docs/cli/extract.md, "
-                    '"Coverage")',
-                    "layout",
-                    device={
-                        "layout": None,
-                        "reference": None,
-                        "class": deck.pfet_class,
-                    },
-                )
+    pfet_count = counts.get(deck.pfet_class, 0)
+    if pfet_count:
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_BODY_UNVERIFIED,
+                "warning",
+                f"{pfet_count} PMOS device body terminal(s) were "
+                "compared against an anonymous, deck-synthesized well "
+                "net, not a real schematic net -- this deck has no "
+                "distinct well-tap layer (see docs/cli/extract.md, "
+                '"Coverage")',
+                "layout",
+                device={
+                    "layout": None,
+                    "reference": None,
+                    "class": deck.pfet_class,
+                },
             )
+        )
 
     return entries
 

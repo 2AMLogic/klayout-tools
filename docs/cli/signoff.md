@@ -301,6 +301,75 @@ mismatches, `power_connectivity: "unchecked"`) get no equivalent treatment
 for item 4 — that, and whether a non-empty gap should ever change item 3's
 verdict, are open questions #2002 deliberately left unanswered.
 
+### Device-body bias is reported, not graded
+
+[`extract.md`](extract.md#coverage) states that a device body left on an
+anonymous, deck-synthesized net has **no DC bias path at all**, which makes a
+resimulation of that extracted netlist "physically wrong, not merely
+imprecise" — the run converges and produces numbers, and those numbers are
+not comparable to a schematic-level netlist's. `klt pex` *is* such a
+resimulation, and it is the artifact
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 (post-layout
+verification — the item with the strictest citation rule in the checklist) is
+cited from. So an item-7 citation could be backed by numbers that look like
+measurements and are not, with nothing in the signoff artifact saying so.
+Symmetrically, `klt lvs` reported its own body-tie coverage gap only as a
+`device.body_unverified` warning this command never read.
+
+Issue #1983 makes `klt signoff` **report** both:
+
+| Mode | Where |
+| ---- | ----- |
+| Envelope aggregation | `checks[].detail.body_bias` on a `pex`-kind check; `checks[].detail.body_verification_status` on an `lvs`-kind check |
+| Tier-verdict report (`--manifest`) | `citation.body_bias` on a `"met"` `pex`-kind citation — item 7's own artifact |
+
+```
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 7) | {status, body_bias: .citation.body_bias}'
+{
+  "status": "met",
+  "body_bias": {
+    "status": "unbiased",
+    "unbiased_device_count": 3,
+    "unbiased_nets": ["\\$5", "\\$7"]
+  }
+}
+$ klt signoff --manifest manifest.json --format text
+...
+[MET  ] T1 #7 Post-layout verification
+        cite: pex.json (kind=pex, status=pass, content_hash=sha256:..., exit_status=0)
+        body bias: unbiased (3 device(s) with no DC bias path on \$5, \$7) -- these post-layout numbers are not comparable to the schematic leg; see docs/cli/extract.md
+```
+
+The per-device `unbiased_pmos_body_nets[]` list is deliberately **not**
+carried through — it can run to hundreds of entries on a real block, and a
+reader who needs it has the cited envelope. The count and the distinct net
+names are enough to tell a clean run from a compromised one and to find the
+devices in the source artifact.
+
+**No verdict changes.** A `pex` check still passes on `status: "pass"` alone
+and an `lvs` check on `status: "match"` (plus the existing
+`power_connectivity` gate) — a claim that was `met` before this change is
+still `met`. This is a different default from the `power_connectivity`
+hard-fail above, deliberately: a power-connectivity `"mismatch"` is a
+*defect* (a real miswire, always wrong), whereas an unverified/unbiased body
+is a *coverage* condition some PDK decks produce on **every** layout they
+extract regardless of what the designer drew — hard-failing it would
+retroactively fail whole PDKs' worth of otherwise-valid evidence on a
+question this command cannot itself adjudicate. The original friction was
+that the condition was *invisible*; making it visible is the fix, and what it
+should cost a claim is left to the reader of the evidence, with
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 now stating
+the condition a `pex` citation is only valid under.
+
+Absent entirely — no `body_bias` key in the detail/citation — for post-layout
+evidence committed before `klt pex` reported it, and for every non-`pex`
+kind. An absent body-bias statement means "this artifact made no body-bias
+statement", never "every device body was biased"; a run that checked and
+found them all biased says so positively (`status: "biased"`).
+`detail.body_verification_status` is `null` (rather than absent) for `lvs`
+evidence committed before `klt lvs` reported `body_verification`, which is
+likewise distinct from the real `"verified"` value.
+
 ## Tier-verdict report (`--manifest`)
 
 `klt signoff --manifest <file>` renders the **T1-T4 evidence-tier item
@@ -925,7 +994,7 @@ required.
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one. |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, and `body_bias` for a `pex` citation whose envelope reports one (issue #1983). |
 
 #### `citation` fields
 
@@ -937,6 +1006,7 @@ required.
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
+| `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
 | `coverage`      | object          | **`drc` citations only**, and only when the cited envelope carries a `coverage` block (issue #2002): `{"layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`, quoted verbatim from it — the three fields [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a DRC claim to disclose. **Absent** for any other kind, and for DRC evidence committed before `klt drc` reported coverage — an absent `coverage` means "this artifact reported no coverage", never "this deck has no gaps". See "DRC coverage is reported, not graded" above. |
 
 #### `reason` values

@@ -423,6 +423,65 @@ command's own contract changes:
   coupling-canary fixtures in `tests/test_pex.py` keep theirs for exactly
   that reason.
 
+## Unbiased device bodies invalidate the comparison (issue #1983)
+
+A PMOS device's body terminal extracts onto a **floating, anonymous net** (a
+KLayout-synthesized `$5`-style name) whenever no well tie — drawn or derived
+— reaches that device's `nwell` island. Per
+[`extract.md`](extract.md#coverage), that net has **no DC bias path at all**,
+which makes a full-circuit resimulation of the extracted netlist
+"physically wrong, not merely imprecise": ngspice converges and produces
+numbers, and those numbers are not comparable to a schematic-level
+netlist's.
+
+`klt pex`'s entire output *is* such a resimulation, compared row-by-row
+against a schematic leg — so this condition does not merely reduce a
+`delta[]` row's precision, it invalidates the comparison the row reports. And
+a `klt pex` report is the artifact
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 (post-layout
+verification — the item with the strictest citation rule in the checklist) is
+cited from, while never carrying the extraction's own JSON. A reader of a
+committed `klt pex` record therefore had no way to tell a post-layout number
+measured on a properly-biased netlist from one measured on a floating-body
+netlist.
+
+The `body_bias` block states it:
+
+```json
+"body_bias": {
+  "status": "unbiased",
+  "unbiased_device_count": 3,
+  "unbiased_nets": ["\\$5", "\\$7"],
+  "unbiased_pmos_body_nets": [
+    {"device": "$1", "net": "\\$5"},
+    {"device": "$2", "net": "\\$5"},
+    {"device": "$3", "net": "\\$7"}
+  ]
+}
+```
+
+It is reduced from the extraction this command drove itself (`klt extract`'s
+`unbiased_pmos_body_nets[]`, issue #555) — nothing here re-derives the
+condition, and the entries are carried through verbatim, same field name and
+same `{"device", "net"}` shape, so a reader who knows one artifact already
+knows the other.
+
+**Reported, not enforced.** `status` is untouched: a run whose deltas all met
+tolerance still reports `status: "pass"` with `body_bias.status: "unbiased"`,
+and the exit code is unchanged. Whether an unbiased body should invalidate a
+*claim* is a policy question for the consumer of the evidence — `klt signoff`
+surfaces it on item 7's citation (`citation.body_bias`, see
+[`signoff.md`](signoff.md)) without grading on it, and
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 states the
+condition a `pex` citation is only valid under. Grading on it here would
+retroactively fail every design on a PDK whose deck has no well-tap
+mechanism, which is a separate decision from making the condition visible.
+
+**A clean run says so positively.** `status: "biased"` with a zero count is
+emitted for a run that checked and found every body biased — distinct from a
+pre-#1983 record that never reported it at all, where the field is simply
+absent.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -527,6 +586,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
 | `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), and `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |

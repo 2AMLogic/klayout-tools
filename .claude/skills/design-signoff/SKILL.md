@@ -149,6 +149,17 @@ With the kind resolved:
    MC legs not combined with process corners, known false negatives
    documented in repo READMEs — each becomes a named caveat on that item,
    and an uncombined or undisclosed caveat downgrades PRESENT → PARTIAL.
+   **Item 7 has its own version of this (issue #1983).** A `klt pex`
+   citation carries `citation.body_bias` (`checks[].detail.body_bias` in
+   envelope-aggregation mode): `status: "unbiased"` means the extracted
+   netlist those post-layout numbers came from had device bodies with no DC
+   bias path, which per `docs/cli/extract.md` makes the resimulation
+   physically wrong, not merely imprecise. It is reported, not graded —
+   item 7 still grades `met` on `status: "pass"` alone — so an `"unbiased"`
+   citation is a mandatory named caveat on item 7, and quoting it is the
+   claim's job. `checks[].detail.body_verification_status` is the upstream
+   `klt lvs` counterpart for item 4; treat `"unchecked"` as unverified, not
+   as clean.
 4. **Spec ratification gates item 5.** If the spec table is draft, every
    sim verdict is provisional; say so at the top of the report.
 5. **Completeness before quality.** A spec row with no testbench anywhere
