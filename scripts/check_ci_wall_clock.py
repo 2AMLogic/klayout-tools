@@ -380,6 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CANNOT_RUN
 
     includes_queue = started_at is not None
+    # Fallback: omitting --run-json drops pre-run queue wait from wall clock.
     wall_start = started_at if includes_queue else first_start
     wall_clock_seconds = max(0, int((last_end - wall_start).total_seconds()))
     total_seconds = sum(t.seconds for t in timings)

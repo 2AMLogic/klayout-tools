@@ -156,6 +156,13 @@ for id in $(gh run list --workflow=ci.yml --status=success --limit=25 \
 done
 ```
 
+A **runner-pool** change is a distinct trigger from the CI-cost changes above,
+and re-measuring after one is required rather than optional: moving a job
+between `[self-hosted, heavy]` and `ubuntu-latest` changes the machine the
+numbers describe even when the work itself is unchanged, so a baseline carried
+over from the old pool silently describes hardware that no longer runs the
+jobs.
+
 `tests/test_ci_wall_clock.py::test_repo_budgets_leave_headroom_over_the_measured_baseline`
 asserts the recorded baseline sits below the budgets, so a transcription slip
 cannot ship a budget that is already breached on a green run.
