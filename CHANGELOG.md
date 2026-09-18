@@ -14,6 +14,18 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt erc --format json` now emits `provenance.spec` as
+  `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
+  the stackup/vias/nets/ties spec file the run was validated against.
+  `provenance.input.content_hash` (issue #1968) already pinned the layout, but
+  an ERC verdict is only meaningful relative to the declarations it was run
+  with: the top-level `spec` field echoed a bare path, so editing the spec
+  (dropping a `ties` entry, re-pointing a `layer`) left a committed report
+  silently asserting a verdict for declarations it never saw. This is a
+  verb-local field rather than a new `build_provenance()` parameter, following
+  `klt lvs`'s precedent for a second input (`environment.reference_sha256`).
+  Purely additive — no `schema_version` bump (`klt erc` stays at `1`), and
+  `provenance.input`/`provenance.pdk`/`provenance.deck` are unchanged.
 - **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
   and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
   block kind (issue #1987). Both items previously accepted *any* recognised,

@@ -193,6 +193,13 @@ def test_run_erc_reports_two_gates(tmp_path):
     assert "klt_version" in report["provenance"]
     assert "klayout_version" in report["provenance"]
 
+    # issue #2036: `klt erc` is validated against two inputs, so the block
+    # pins the spec's *contents* too -- not just the path echoed in the
+    # top-level `spec` field -- in the same `sha256:`-prefixed form.
+    assert report["provenance"]["spec"] == {
+        "content_hash": f"sha256:{_sha256_file(spec)}"
+    }
+
 
 def test_run_erc_accumulates_connected_area_layer_by_layer(tmp_path):
     gds = tmp_path / "basic.gds"
@@ -672,6 +679,55 @@ def test_provenance_pdk_populated_only_when_pdk_given(tmp_path):
         "source": "built-in",
         "version": None,
     }
+
+
+def test_provenance_spec_hash_tracks_spec_contents(tmp_path):
+    """Issue #2036: editing the spec file changes
+    `provenance.spec.content_hash` even though the layout (and therefore
+    `provenance.input.content_hash`) is byte-identical. This is the whole
+    point of the field: an ERC verdict is relative to the declarations it
+    was run with, so a committed report must be re-verifiable against the
+    spec as well as the layout."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    before = run_erc(str(gds), str(spec))
+    assert before["provenance"]["spec"]["content_hash"] == (
+        f"sha256:{_sha256_file(spec)}"
+    )
+
+    # A real declaration edit (the `met2` level is dropped from the
+    # stackup), not a cosmetic one -- the layout is untouched.
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+                {"name": "met1", "layer": "5/0"},
+            ],
+            "vias": [
+                {"name": "licon", "layer": "2/0", "between": ["poly", "li1"]},
+                {"name": "mcon", "layer": "4/0", "between": ["li1", "met1"]},
+            ],
+        },
+    )
+    after = run_erc(str(gds), str(spec))
+
+    assert after["provenance"]["spec"]["content_hash"] == (
+        f"sha256:{_sha256_file(spec)}"
+    )
+    assert (
+        after["provenance"]["spec"]["content_hash"]
+        != before["provenance"]["spec"]["content_hash"]
+    )
+    # The layout side is unchanged -- only the spec drifted.
+    assert (
+        after["provenance"]["input"]["content_hash"]
+        == before["provenance"]["input"]["content_hash"]
+    )
 
 
 # --- run_erc: antenna-violation fix guidance (issue #908, epic #713 Phase 3)
