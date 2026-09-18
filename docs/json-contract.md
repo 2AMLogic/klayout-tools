@@ -458,7 +458,7 @@ rendering, not the contract, so this shape is not versioned.
 | --------- | -------------------------------------------------------------------------------------------- |
 | `0`       | Success. The documented success payload was written to stdout.                               |
 | `1`       | Application-level error (e.g. missing/unreadable file). Documented error shape on stderr.     |
-| `2`       | Usage error (missing required argument, invalid `--format` choice, etc.) — raised by argparse before a command's handler runs. |
+| `2`       | Usage error (missing required argument, invalid `--format` choice, etc.) — usually raised by argparse before a command's handler runs; a command may also detect one itself (see the carve-out below). |
 
 Codes `0`/`1`/`2` mean the same thing for every verb. A command may define
 **additional** codes above `2` for outcomes that are neither success nor
@@ -473,6 +473,17 @@ deliberately out of scope for the shared `output.py` helper — argparse always
 writes plain text for usage errors, in both `--format text` and `--format
 json` modes, since format-specific handling would require parsing the
 arguments before the parser itself has rejected them.
+
+**The carve-out is about argparse, not about exit code `2`.** A usage error a
+command detects *itself*, inside its own `run()` — e.g. `klt gen` rejecting a
+generator name passed alongside `--pdk-pcell` — is past the parser, so
+`args.format` is known and the documented envelope is owed: emit it with
+`return output.emit_error(name, message, args.format,
+exit_code=output.EXIT_USAGE_ERROR)`. The envelope shape and the exit code are
+independent — `emit_error` writes the same envelope either way, and returns
+whatever code the caller asks for (default `ERROR_EXIT_CODE`, `1`). A
+plain-text `print()` + bare `return 2` in a command's `run()` is a contract
+violation (issue #2029).
 
 ## `--format text` vs `--format json`
 

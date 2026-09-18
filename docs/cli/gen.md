@@ -1932,6 +1932,13 @@ to stdout (and no GDS/OASIS file is written). No Python traceback is printed.
   { "schema_version": 1, "error": { "command": "gen", "message": "unknown generator 'bogus' -- available: resistor_strip (see `klt gen --list`)" } }
   ```
 
+This applies to **this command's own** usage checks too (no generator name
+with no mode flag; a generator name alongside `--pdk-pcell`): under
+`--format json` they emit the same envelope, and still exit `2` rather than
+`1` (issue #2029). Only argparse's usage errors — a bad `--format` value,
+two mode flags at once — stay plain text in both formats, per the carve-out
+in [`docs/json-contract.md`](../json-contract.md).
+
 ## Worked example
 
 ```bash

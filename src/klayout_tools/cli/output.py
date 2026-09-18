@@ -24,7 +24,11 @@ Design notes (additive envelope, not a wrapping one):
 - Exit code ``1`` is returned by :func:`emit_error` for application-level
   errors. Argparse-level usage errors (exit code ``2``) are raised by
   argparse itself before a command's ``run()`` executes, so they are out of
-  scope for this helper by construction.
+  scope for this helper by construction. A usage error a command detects
+  *itself*, inside ``run()``, is **not** out of scope -- it still owes the
+  caller the documented envelope, so :func:`emit_error` takes an optional
+  ``exit_code`` for that case (issue #2029). The envelope shape and the exit
+  code are independent: this module owns the former, the caller the latter.
 """
 
 from __future__ import annotations
@@ -35,6 +39,11 @@ from collections.abc import Callable
 
 #: Application-level error exit code (as opposed to argparse's usage-error 2).
 ERROR_EXIT_CODE = 1
+
+#: Usage-error exit code -- matches argparse's own (see docs/json-contract.md).
+#: Pass it to :func:`emit_error` as ``exit_code`` when a command detects a
+#: usage error itself, inside ``run()``, after argparse has accepted the argv.
+EXIT_USAGE_ERROR = 2
 
 
 def emit_success(
@@ -119,16 +128,26 @@ def render_rerun_drift(result: dict) -> None:
         print(f"      fresh:     {entry['fresh']!r}")
 
 
-def emit_error(command: str, message: str, format: str) -> int:
-    """Emit an application-level error and return the exit code to use.
+def emit_error(
+    command: str,
+    message: str,
+    format: str,
+    exit_code: int = ERROR_EXIT_CODE,
+) -> int:
+    """Emit an error envelope and return the exit code to use.
 
     ``format == "json"`` writes the documented error envelope to stderr:
     ``{"schema_version": 1, "error": {"command": ..., "message": ...}}``.
     ``format == "text"`` writes the pre-existing plain-text stderr line,
     ``klt <command>: <message>``.
 
-    Always returns :data:`ERROR_EXIT_CODE` (``1``) so a command's ``run()``
-    can simply ``return emit_error(...)``.
+    Returns ``exit_code``, which defaults to :data:`ERROR_EXIT_CODE` (``1``)
+    for an application-level error, so a command's ``run()`` can simply
+    ``return emit_error(...)``. A command that detects a **usage** error
+    itself -- after argparse has accepted the argv, so argparse will not
+    report it -- passes :data:`EXIT_USAGE_ERROR` (``2``) explicitly rather
+    than hand-rolling a plain-text ``print`` that would bypass the envelope
+    under ``--format json`` (issue #2029).
     """
     if format == "json":
         error_payload = {
@@ -139,4 +158,4 @@ def emit_error(command: str, message: str, format: str) -> int:
         print(file=sys.stderr)
     else:
         print(f"klt {command}: {message}", file=sys.stderr)
-    return ERROR_EXIT_CODE
+    return exit_code
