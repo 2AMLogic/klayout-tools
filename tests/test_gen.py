@@ -427,6 +427,68 @@ def test_cli_bad_format_is_usage_error(capsys):
 
 
 # --------------------------------------------------------------------------- #
+# Self-detected usage errors emit the documented envelope (issue #2029)
+#
+# These two paths are past argparse -- `args.format` is known -- so the
+# json-contract carve-out for argparse's own plain-text usage errors does not
+# cover them. They owe the caller the documented JSON error envelope while
+# still exiting 2 (a usage error), not 1 (an application error).
+# --------------------------------------------------------------------------- #
+
+#: (test id, argv after "gen", substring the message must contain)
+_SELF_DETECTED_USAGE_ERRORS = [
+    ("missing_generator", [], "generator name is required"),
+    (
+        "generator_with_pdk_pcell",
+        ["resistor_strip", "--pdk-pcell", "toy_lib/ToyCell"],
+        "cannot be given too",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "argv,message_fragment",
+    [(argv, fragment) for _id, argv, fragment in _SELF_DETECTED_USAGE_ERRORS],
+    ids=[case_id for case_id, _argv, _fragment in _SELF_DETECTED_USAGE_ERRORS],
+)
+def test_cli_usage_error_json_envelope(argv, message_fragment, capsys):
+    exit_code = main(["gen", *argv, "--format", "json"])
+
+    captured = capsys.readouterr()
+    # Exit 2 asserted explicitly: routing these paths through `emit_error`
+    # must not silently collapse EXIT_USAGE_ERROR into ERROR_EXIT_CODE (1).
+    assert exit_code == 2
+    assert captured.out == ""
+
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "gen"
+    assert isinstance(error["error"]["message"], str)
+    assert error["error"]["message"]
+    assert message_fragment in error["error"]["message"]
+    assert "Traceback" not in captured.err
+    # The envelope carries the message alone -- the text rendering's `klt gen:`
+    # prefix must not leak into the JSON payload.
+    assert not error["error"]["message"].startswith("klt gen:")
+
+
+@pytest.mark.parametrize(
+    "argv,message_fragment",
+    [(argv, fragment) for _id, argv, fragment in _SELF_DETECTED_USAGE_ERRORS],
+    ids=[case_id for case_id, _argv, _fragment in _SELF_DETECTED_USAGE_ERRORS],
+)
+def test_cli_usage_error_text_format_unchanged(argv, message_fragment, capsys):
+    """`--format text` keeps the pre-existing `klt gen: <message>` line."""
+    exit_code = main(["gen", *argv])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("klt gen: ")
+    assert message_fragment in captured.err
+
+
+# --------------------------------------------------------------------------- #
 # --params: path-or-inline
 # --------------------------------------------------------------------------- #
 

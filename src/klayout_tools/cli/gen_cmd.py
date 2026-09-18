@@ -18,17 +18,19 @@ Exit codes (see ``docs/cli/gen.md`` for the full table):
     2 - usage error (missing generator name with no mode flag, two mode
         flags at once, a generator name alongside --pdk-pcell, bad --format
         value) -- from argparse or this module's own usage check
+
+The two usage errors this module detects itself (rather than argparse) are
+reported through ``emit_error`` with ``exit_code=EXIT_USAGE_ERROR``, so they
+carry the documented JSON envelope under ``--format json`` while keeping
+exit 2 distinct from an application error's exit 1 (issue #2029). Argparse's
+own usage errors stay plain text, per ``docs/json-contract.md``'s carve-out.
 """
 
 import argparse
-import sys
 
 from ..gen import REQUEST_SCHEMA, GenError, generate, list_generators, load_params_arg
 from ..pdk_pcell import generate_pdk_pcell, list_pdk_pcells
-from .output import emit_error, emit_success
-
-#: Usage-error exit code -- matches argparse's own (see docs/json-contract.md).
-EXIT_USAGE_ERROR = 2
+from .output import EXIT_USAGE_ERROR, emit_error, emit_success
 
 
 def run(args: argparse.Namespace) -> int:
@@ -47,21 +49,23 @@ def run(args: argparse.Namespace) -> int:
 
     if args.pdk_pcell:
         if args.generator:
-            print(
-                "klt gen: --pdk-pcell instantiates the PDK's own PCell, so a "
+            return emit_error(
+                "gen",
+                "--pdk-pcell instantiates the PDK's own PCell, so a "
                 f"generator name ('{args.generator}') cannot be given too",
-                file=sys.stderr,
+                args.format,
+                exit_code=EXIT_USAGE_ERROR,
             )
-            return EXIT_USAGE_ERROR
         return _run_pdk_pcell(args)
 
     if not args.generator:
-        print(
-            "klt gen: a generator name is required (or pass --list, "
+        return emit_error(
+            "gen",
+            "a generator name is required (or pass --list, "
             "--list-pdk-pcells, or --pdk-pcell)",
-            file=sys.stderr,
+            args.format,
+            exit_code=EXIT_USAGE_ERROR,
         )
-        return EXIT_USAGE_ERROR
 
     try:
         params = load_params_arg(args.params)
