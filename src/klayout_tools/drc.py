@@ -51,6 +51,12 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import _content_hash, build_provenance
 from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
 from ._report_verify import load_committed_report as _load_committed_report
+from .coverage import (
+    REASON_ALL_RULES_SKIPPED,
+    REASON_DECK_HAS_NO_RULES,
+    REASON_DECK_REPORTED_NO_RULES,
+    build_nothing_checked,
+)
 from .decks import (
     DrcRule,
     UnknownDeckError,
@@ -228,11 +234,14 @@ def run_drc(
                 "deck_layers": ["<layer>/<datatype>", ...],
                 "layers_checked": ["<layer>/<datatype>", ...],
                 "layers_in_stream_without_rules": ["<layer>/<datatype>", ...],
+                "rules_checked": [<rule id>, ...],
                 "rules_skipped": [<rule id>, ...],
                 "voltage_domain_warnings": [
                     {"marker": "<layer>/<datatype>", "description": str}, ...
                 ],
                 "deck_scope": [<scope identifier>, ...],
+                "nothing_checked": bool,
+                "nothing_checked_reasons": [<reason code>, ...],
             },
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
@@ -295,10 +304,24 @@ def run_drc(
     deck's rules reference (a static property of the deck, independent of
     ``path``); ``coverage.layers_checked`` is the subset of those layers
     actually present in this stream; ``coverage.rules_skipped`` lists the
-    rule ids skipped because their layer(s) were absent. A ``"clean"``
-    ``status`` with a non-empty ``layers_in_stream_without_rules`` means
-    "clean, and here is exactly what was not looked at" rather than a
-    fully-verified pass.
+    rule ids skipped because their layer(s) were absent, and
+    ``coverage.rules_checked`` (issue #1996) its complement -- the rule ids
+    that actually ran against real geometry. A ``"clean"`` ``status`` with a
+    non-empty ``layers_in_stream_without_rules`` means "clean, and here is
+    exactly what was not looked at" rather than a fully-verified pass.
+
+    ``coverage.nothing_checked``/``nothing_checked_reasons`` (issue #1996)
+    are the shared convention declared in :mod:`klayout_tools.coverage`,
+    emitted by every verb that can reach a vacuous verdict. Here they are
+    ``True`` / ``["all_rules_skipped"]`` exactly when ``rules_checked`` is
+    empty while the deck declares rules (the degenerate empty-stream case:
+    every rule's layer is absent, so a ``"clean"`` verdict was measured over
+    nothing at all), or ``["deck_has_no_rules"]`` for a deck that declares
+    none. **This does not change the ``status`` field**, which stays
+    ``"clean"`` for that case exactly as before -- it only makes the
+    emptiness legible to a reader, which is what lets `klt signoff` refuse
+    to count such a report as evidence (see ``signoff.py``'s "Vacuous-
+    verdict refusal" docstring section).
 
     ``coverage.voltage_domain_warnings`` (issue #552) is a second, narrower
     trust gap ``layers_in_stream_without_rules`` alone does not surface:
@@ -445,6 +468,7 @@ def run_drc(
     violations: list[dict[str, Any]] = []
     rule_counts: dict[str, int] = {}
     rules_skipped: list[str] = []
+    rules_checked: list[str] = []
 
     for rule in deck:
         # For a `derived_layer` rule (#345), the region actually checked is
@@ -504,6 +528,13 @@ def run_drc(
             if other_index is None:
                 rules_skipped.append(rule.id)
                 continue
+
+        # Every `continue` above is a skip; reaching here means this rule's
+        # input layer(s) all resolved, so it is about to be evaluated against
+        # real geometry -- record it so `coverage.rules_checked` (and the
+        # `coverage.nothing_checked` roll-up derived from it) can state what
+        # this verdict was actually measured over (issue #1996).
+        rules_checked.append(rule.id)
 
         layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
 
@@ -891,15 +922,28 @@ def run_drc(
                 {"marker": _fmt(marker), "description": description}
             )
 
+    # Issue #1996: a deck that ran not one rule produces a "clean" verdict
+    # that is vacuously true. `rules_checked` states what this verdict was
+    # measured over, and the shared `nothing_checked` roll-up lets a reader
+    # (`klt signoff`) refuse the citation without re-deriving that emptiness
+    # from `rules_skipped` vs. the deck's own rule count.
+    nothing_checked_reasons: list[str] = []
+    if not rules_checked:
+        nothing_checked_reasons.append(
+            REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED
+        )
+
     coverage = {
         "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
         "layers_in_stream_without_rules": [
             _fmt(t) for t in sorted(layers_in_stream_without_rules)
         ],
+        "rules_checked": sorted(rules_checked),
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "deck_scope": deck_scope,
+        **build_nothing_checked(nothing_checked_reasons),
     }
 
     return {
@@ -1471,10 +1515,25 @@ def _rdb_value_points_um(value_text: str) -> list[tuple[float, float]]:
 
 def _parse_klayout_rdb_report(
     report_path: str, dbu: float
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], dict[str, int], list[str]]:
     """Classify a KLayout report-database (``.lyrdb``, RDB XML) file into
-    ``(violations, rule_counts)`` matching ``klt drc``'s existing
-    ``violations[]``/``rule_counts`` shape (see :func:`run_drc`'s docstring).
+    ``(violations, rule_counts, rule_categories)`` -- the first two matching
+    ``klt drc``'s existing ``violations[]``/``rule_counts`` shape (see
+    :func:`run_drc`'s docstring), the third (issue #1996) the sorted,
+    deduplicated list of ``<category>`` names the report *declares*.
+
+    ``rule_categories`` is the closest thing an externally-run deck offers to
+    "which rules did you actually run": KLayout's DRC DSL creates a category
+    the moment a rule calls ``output(...)``, whether or not that rule found
+    anything, so an ordinary clean run still declares one category per rule
+    and an empty ``<items/>`` list. A report declaring **no** categories at
+    all therefore means the deck never reached a single ``output(...)`` --
+    the all-rules-gated-behind-an-unset-``--deck-var`` case
+    :func:`run_drc_klayout_engine` reports as
+    ``coverage.nothing_checked``. (A deck that instead creates its categories
+    lazily, only when a violation exists, would report the same emptiness on
+    a genuinely clean run; that is an honest "this report cannot distinguish
+    the two", not a misclassification this module can silently resolve.)
 
     Unlike the curated engine (:func:`run_drc`), an arbitrary PDK-native
     ``.lydrc``/``.drc`` script is not built from this module's own
@@ -1534,12 +1593,14 @@ def _parse_klayout_rdb_report(
                 desc_el.text if desc_el is not None and desc_el.text else ""
             )
 
+    rule_categories = sorted(descriptions)
+
     violations: list[dict[str, Any]] = []
     rule_counts: dict[str, int] = {}
 
     items_el = root.find("items")
     if items_el is None:
-        return violations, rule_counts
+        return violations, rule_counts, rule_categories
 
     for item_el in items_el.findall("item"):
         category_el = item_el.find("category")
@@ -1600,7 +1661,16 @@ def _parse_klayout_rdb_report(
         )
         rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
 
-    return violations, rule_counts
+    # A rule id that produced items but was never declared under
+    # `<categories>` (a deck writing RDB XML by hand, say) still counts as a
+    # rule this run reported on -- union rather than trust `<categories>`
+    # alone, so `rule_categories` can never be empty for a report that
+    # plainly found violations.
+    return (
+        violations,
+        rule_counts,
+        sorted(set(rule_categories) | set(rule_counts)),
+    )
 
 
 #: KLayout's own error prefix for a deck-script failure, as emitted by
@@ -1741,11 +1811,28 @@ def run_drc_klayout_engine(
     curated engine's ``sky130``/``gf180mcu`` deck identifiers are -- an
     arbitrary PDK-native script is identified by its own path).
 
-    Unlike the curated engine, ``coverage`` cannot be meaningfully populated
-    for an externally-run script this module has no declarative rule table
-    for -- every ``coverage`` sub-field is an empty list (never fabricated),
-    a known, documented limitation (see ``docs/cli/drc.md``, "Engine" ->
-    "klayout").
+    Unlike the curated engine, most of ``coverage`` cannot be meaningfully
+    populated for an externally-run script this module has no declarative
+    rule table for -- the layer-level sub-fields
+    (``deck_layers``/``layers_checked``/``layers_in_stream_without_rules``/
+    ``rules_skipped``/``voltage_domain_warnings``/``deck_scope``) are all
+    empty lists (never fabricated), a known, documented limitation (see
+    ``docs/cli/drc.md``, "Engine" -> "klayout").
+
+    Two sub-fields *are* populated (issue #1996).
+    ``coverage.rules_checked`` is the sorted list of rule categories the
+    deck's own report declares -- the only "which rules ran" evidence an
+    RDB report carries (see :func:`_parse_klayout_rdb_report`). When it is
+    empty, ``coverage.nothing_checked`` is ``True`` and
+    ``nothing_checked_reasons`` is ``["deck_reported_no_rules"]``: the deck
+    script completed, wrote a well-formed report, and never reached a single
+    ``output(...)`` call. The common cause is a PDK-native deck that gates
+    its whole rule set behind a feature-toggle global set via ``-rd``
+    (``--deck-var``) which this invocation left unset -- previously
+    indistinguishable from a real ``status: "clean"``, which is exactly the
+    gap this field closes for `klt signoff` (see the shared convention in
+    :mod:`klayout_tools.coverage`). ``status`` itself is unchanged: an empty
+    report is still ``"clean"``, now with the emptiness stated alongside it.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
@@ -1860,7 +1947,9 @@ def run_drc_klayout_engine(
                 "accept a partial report anyway. klayout's own output:\n" + detail
             )
 
-        violations, rule_counts = _parse_klayout_rdb_report(report_path, dbu)
+        violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
+            report_path, dbu
+        )
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)
 
@@ -1902,10 +1991,18 @@ def run_drc_klayout_engine(
         "coverage": {
             "deck_layers": [],
             "layers_checked": [],
+            # Issue #1996: the one coverage sub-field this engine *can*
+            # populate honestly -- the rule categories the deck's own report
+            # declares. Empty means the deck never reached an `output(...)`
+            # call, which is what `nothing_checked` below reports on.
+            "rules_checked": rule_categories,
             "layers_in_stream_without_rules": [],
             "rules_skipped": [],
             "voltage_domain_warnings": [],
             "deck_scope": [],
+            **build_nothing_checked(
+                [] if rule_categories else [REASON_DECK_REPORTED_NO_RULES]
+            ),
         },
         "provenance": build_provenance(
             deck_name=os.path.basename(deck_file),

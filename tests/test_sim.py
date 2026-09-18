@@ -5119,10 +5119,23 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "errored",
         "metrics",
         "environment",
+        # Issue #1996: the shared vacuous-verdict convention
+        # (`klayout_tools.coverage`) -- always present, purely additive.
+        "coverage",
         "provenance",
         "measurements",
         "corners",
     }
+    assert set(data["coverage"].keys()) == {
+        "corners_simulated",
+        "measurements_declared",
+        "measurements_with_limits",
+        "unrecognized_limit_keys",
+        "nothing_checked",
+        "nothing_checked_reasons",
+    }
+    assert data["coverage"]["corners_simulated"] == data["corner_count"]
+    assert isinstance(data["coverage"]["nothing_checked"], bool)
     # Issue #1849: `metrics` re-keys the corner_count/passed/failed/errored
     # rollup under its declared METRICS2.1-style names, additive alongside
     # the existing fields.
