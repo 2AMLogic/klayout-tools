@@ -13009,6 +13009,17 @@ def test_parasitics_coupling_matches_magic_ext2spice(tmp_path):
     """
     import subprocess
 
+    from helpers.magic_oracle import find_magic_tech
+
+    tech_path = find_magic_tech("sky130")
+    if tech_path is None:
+        pytest.skip(
+            "no magic technology file for sky130 -- run scripts/fetch-magic-"
+            "tech.sh, install an open_pdks PDK, or set KLT_MAGIC_TECH_SKY130 "
+            "(see docs/design/magic-oracle.md); magic's undocumented default "
+            "tech is not guaranteed to support GDS input (issue #2045)"
+        )
+
     layout_path = _write_gds(_make_overlap_layout(), tmp_path / "overlap.gds")
     report = run_extract(
         layout_path, "sky130", output=str(tmp_path / "overlap.spice"), parasitics=True
@@ -13030,7 +13041,16 @@ def test_parasitics_coupling_matches_magic_ext2spice(tmp_path):
         "quit -noprompt\n"
     )
     completed = subprocess.run(
-        ["magic", "-dnull", "-noconsole", str(magic_script)],
+        [
+            "magic",
+            "-dnull",
+            "-noconsole",
+            "-rcfile",
+            os.devnull,
+            "-T",
+            tech_path,
+            str(magic_script),
+        ],
         capture_output=True,
         text=True,
         timeout=120,
