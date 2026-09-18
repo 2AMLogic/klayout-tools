@@ -198,10 +198,12 @@ independently of the existing :data:`_ITEM_ALLOWED_KINDS` mechanism (item
 ``{8}`` -- the one T1 item whose own checklist text names no `klt` verb.
 Items 3-7 (DRC, LVS, corner verification, Monte Carlo, post-layout) reject a
 ``"generic"`` citation unconditionally, the same ``"wrong_kind"`` outcome
-item 7 already renders for any non-``pex`` citation; this phase does not
+item 7 already renders for any non-``pex`` citation; this phase did not
 touch items 3-6's separate, pre-existing permissiveness toward *other*
-recognised native kinds (:data:`_ITEM_ALLOWED_KINDS` still names only item
-7) -- closing that wider gap is out of this issue's scope.
+recognised native kinds (when it shipped, :data:`_ITEM_ALLOWED_KINDS` named
+only item 7) -- closing that wider gap was out of *that* issue's scope, and
+was done for items 3 and 4 by issue #1987 (they now accept only ``"drc"``
+and ``"lvs"`` respectively -- see :data:`_ITEM_ALLOWED_KINDS`).
 
 ## `klt power` (IR-drop/EM) evidence ingestion (issue #1321, Phase 2 of epic #712)
 
@@ -452,16 +454,22 @@ _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 #: kinds may satisfy that item (issue #871, Phase 2b of epic #706; made
 #: per-block-kind by issue #1959) -- resolved by :func:`_allowed_kinds_for`
 #: and passed as :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An
-#: item id absent from this map (every id but 7, today) is unrestricted
-#: (``None``), preserving the original Phase 0/1 behaviour where any
-#: recognised, passing envelope kind satisfies any item.
+#: item id absent from this map (every id but 3, 4 and 7, today) is
+#: unrestricted (``None``), preserving the original Phase 0/1 behaviour where
+#: any recognised, passing envelope kind satisfies any item.
 #:
-#: Item 7 ("Post-layout verification") is the only item restricted today.
+#: Items 3 ("DRC clean"), 4 ("LVS clean") and 7 ("Post-layout verification")
+#: are the restricted ones today -- items 3 and 4 joined in issue #1987, so
+#: a `klt extract` report (which :func:`_check_passed` counts as passing
+#: unconditionally) can no longer stand in for a check it never ran.
 #: The inner map is keyed by the **partition kind** being graded
 #: (``"analog"``/``"digital"`` -- a ``"mixed-signal"`` manifest grades both,
 #: one per partition, so that value never appears here) and must name every
 #: partition kind, since :func:`_allowed_kinds_for` falls back to the
-#: strictest (analog) set rather than silently becoming unrestricted:
+#: strictest (analog) set rather than silently becoming unrestricted.
+#: Items 3 and 4 name the same single kind for both partition kinds (a DRC
+#: clean is a DRC clean whichever flow drew the block); item 7's two sets
+#: genuinely differ:
 #:
 #: - **analog** (and a mixed-signal block's analog partition): a
 #:   ``"pex"``-kind citation only -- the `klt pex`
@@ -1413,18 +1421,27 @@ def _provenance_consistency(checks: list[dict[str, Any]]) -> dict[str, Any]:
     Four fields are compared, each only across the checks that actually
     populate it (``docs/json-contract.md``'s ``provenance`` block leaves a
     field ``None`` when a verb has nothing to report there -- e.g. ``klt
-    lvs``'s ``provenance.input`` is always ``None``, so it never
-    participates):
+    sim`` simulates a netlist against a model library, has no input
+    *layout* stream to pin, and so leaves ``provenance.input`` ``None`` and
+    never participates in the ``input.content_hash`` comparison):
 
     - ``pdk.name`` / ``pdk.version`` -- every check that resolved a PDK
       must agree on which one and which release. A DRC report from a
       sky130 run combined with an LVS report from a gf180mcu run (or two
       sky130 runs against different PDK snapshots) is not one signoff.
-    - ``input.content_hash`` -- populated by ``drc``/``extract`` only
-      (``docs/json-contract.md``). When more than one check populates it,
-      they must agree: the whole point of "signoff" is that DRC and
-      extraction ran against the *same* layout stream, not a stale pairing
-      (the design doc's §1 "signoff rejection" failure mode).
+    - ``input.content_hash`` -- populated by ``drc``/``extract``/``lvs``/
+      ``pex`` (``docs/json-contract.md``); ``klt lvs`` joined them in issue
+      #1969, which is what lets this comparison bind an LVS check to the
+      very layout DRC ran on (issue #1987's second finding -- before that,
+      ``klt lvs`` populated nothing here, so a clean DRC of last week's
+      layout combined with a matching LVS of today's was "consistent" by
+      omission). When more than one check populates it, they must agree:
+      the whole point of "signoff" is that DRC, extraction and LVS ran
+      against the *same* layout stream, not a stale pairing (the design
+      doc's §1 "signoff rejection" failure mode). An envelope predating the
+      verb's adoption of the field (``input`` absent or ``None``) is still
+      excluded rather than forced into a mismatch -- ``None`` is "nothing
+      to say", never "disagrees with everyone".
     - ``deck[<name>].content_hash`` -- compared only among checks that name
       the *same* deck (an LVS run and a DRC run legitimately use different
       decks; two checks both naming ``"sky130"`` must be byte-identical).
@@ -1659,8 +1676,9 @@ def build_tier_report(
     ``"generic"``-kind citation (see "Generic evidence ingestion" above)
     satisfies only the T1 items whose own checklist text names no specific
     `klt` verb -- today, item 8 ("Characterization report") alone. Every
-    other item, including the six otherwise-unrestricted items 1-6/9-10 that
-    accept any *native* recognised kind, renders ``"unmet"`` with
+    other item, including the six otherwise-unrestricted items 1, 2, 5, 6, 9
+    and 10 that accept any *native* recognised kind (items 3, 4 and 7 carry
+    their own kind restriction, see above), renders ``"unmet"`` with
     ``reason: "wrong_kind"`` for a ``"generic"`` citation -- this does not
     loosen items 3-7's own evidence requirements, only adds a new kind item
     8 alone may satisfy.

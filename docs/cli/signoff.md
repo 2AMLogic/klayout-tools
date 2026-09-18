@@ -489,15 +489,21 @@ never rendered from a partially-understood doc.
 ### Item 7 is kind-restricted, per block kind
 
 Every T1 item except items 3, 4 and 7 accepts *any* recognised, *native*
-envelope kind — a `klt drc` report can satisfy item 8 just as well as item
-3, since Phase
+envelope kind — a `klt drc` report can satisfy item 1 just as well as a `klt
+lvs` one, since Phase
 0/1 (issues #722/#825) graded each item purely on whether *some* passing
 check was cited, not on whether that check was the *right kind* of check.
 (This is unchanged by issue #1152's `generic` kind below — that issue adds a
 *separate*, narrower restriction gating `generic` specifically, on top of,
-not instead of, this native-kind permissiveness.) Item 7 ("Post-layout
-verification") is the one exception, added in issue #871 (Phase 2b of epic
-#706). This closes a concrete gap Phase 0/1 left open: prior to issue #871,
+not instead of, this native-kind permissiveness.) Items 3 and 4 left that
+permissiveness in issue #1987 — each accepts only its own verb's envelope,
+`drc` and `lvs` respectively, so a `klt extract` report, which has no
+independent pass/fail and therefore always counts as passed, can no longer
+satisfy a "DRC clean" or "LVS clean" claim. Item 7 ("Post-layout
+verification") was the first such restriction, added in issue #871 (Phase 2b
+of epic #706), and is the only one whose accepted set depends on the
+partition being graded. This closes a concrete gap Phase 0/1 left open:
+prior to issue #871,
 a manifest could render item 7 `"met"` by citing, say, a clean `klt drc`
 report, with nothing enforcing that the cited evidence actually proved a
 post-layout re-simulation happened.
@@ -1499,9 +1505,10 @@ as a schematic and verified via SPICE + PVT sweep — no RTL, no synthesis
 step, e.g. because no compatible open standard-cell library exists for the
 PDK/voltage combination — as a **sub-case of the Digital column**, not a new
 column or a new manifest `kind`. Grading needs no code change either: items
-1, 2, and 5 already accept *any* recognised evidence kind (only item 7 is
-kind-restricted — see "Item 7 is kind-restricted, per block kind" above;
-a `kind: "digital"` manifest accepts `pex` there, which is exactly what a
+1, 2, and 5 already accept *any* recognised evidence kind (only items 3, 4
+and 7 are kind-restricted — items 3 and 4 to `drc`/`lvs` respectively, per
+issue #1987; item 7 per "Item 7 is kind-restricted, per block kind" above,
+where a `kind: "digital"` manifest accepts `pex`, which is exactly what a
 full-custom partition produces), so a
 full-custom partition's `klt lvs`/`klt drc`/`klt sim`/`klt pex` evidence
 grades exactly like an RTL/synthesis-flow digital block's would, under the
