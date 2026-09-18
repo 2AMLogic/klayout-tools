@@ -14,6 +14,110 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt erc --format json` now emits `provenance.spec` as
+  `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
+  the stackup/vias/nets/ties spec file the run was validated against.
+  `provenance.input.content_hash` (issue #1968) already pinned the layout, but
+  an ERC verdict is only meaningful relative to the declarations it was run
+  with: the top-level `spec` field echoed a bare path, so editing the spec
+  (dropping a `ties` entry, re-pointing a `layer`) left a committed report
+  silently asserting a verdict for declarations it never saw. This is a
+  verb-local field rather than a new `build_provenance()` parameter, following
+  `klt lvs`'s precedent for a second input (`environment.reference_sha256`).
+  Purely additive — no `schema_version` bump (`klt erc` stays at `1`), and
+  `provenance.input`/`provenance.pdk`/`provenance.deck` are unchanged.
+- **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
+  and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
+  block kind (issue #1987). Both items previously accepted *any* recognised,
+  passing envelope kind — including `klt extract`, which has no failure
+  verdict and so always counts as passed, meaning a manifest citing
+  `{"3": "extract.json", "4": "extract.json"}` graded both items `met` on a
+  report that ran neither check and could not have failed. **Grading change**:
+  a manifest citing a non-`drc` kind for item 3, or a non-`lvs` kind for item
+  4, moves from `met` to `unmet` with `reason: "wrong_kind"` — the same
+  outcome item 7 has rendered for a non-`pex` citation since issue #871. The
+  cited check did not fail on its own terms; it simply is not the check the
+  item names. `examples/signoff/manifest.json` already cites the right kinds
+  and is unaffected. Paired with issue #1969's `provenance.input.content_hash`
+  population below, an item-4 "LVS clean" claim is now both *the right check*
+  and *bound to the layout DRC ran on*: `provenance_consistency` refuses a
+  manifest whose `drc` and `lvs` envelopes pin different layout hashes. No
+  JSON shape change (no field added, renamed, removed or nested).
+- **Added**: a magic-backed **cross-validation oracle** for `klt drc` and
+  `klt extract` (issue #2014, pairing #1 of tracking issue #2007). Both verbs
+  were backed by KLayout alone — `tests/test_lvs.py`'s netgen tier
+  cross-validates LVS *comparison*, but both of its comparators are fed by
+  KLayout's own extraction, so extraction and DRC themselves had no
+  independent check at all. `tests/test_drc_magic_oracle.py` and
+  `tests/test_extract_magic_oracle.py` now run
+  [magic](http://opencircuitdesign.com/magic/) — a separate geometry engine
+  with its own open_pdks sky130/gf180mcu decks — over the *same* GDS bytes and
+  compare verdicts: zero violations on a clean sky130/gf180mcu corpus cell,
+  and agreement on three seeded defects (a 0.09 µm met1 spacing violation, an
+  input-to-output short, 11 deleted `licon1` cuts). Extraction agreement is
+  exact — device count, per-class counts, every `w`/`l`/`as`/`ad`/`ps`/`pd`
+  parameter, drain/gate/source connectivity, and net count all match on both
+  PDKs; DRC is compared as zero/non-zero plus rule identity and location,
+  because the two engines paint a spacing failure with different granularity.
+  Both modules are real-binary-gated and skip cleanly (with a specific reason)
+  when `magic` or a magic technology file is absent, so no existing CI leg
+  changes. New provisioning: `scripts/install-magic.sh` (pinned, checksummed
+  magic 8.3.683 built `--without-x`; the distro 8.3.105 is rejected by decks
+  that declare `requires magic-8.3.411`), `scripts/fetch-magic-tech.sh`
+  (generates `sky130A`/`gf180mcuC` decks from pinned open_pdks source rather
+  than requiring a multi-GB PDK install), and a `workflow_dispatch`
+  `magic-oracle.yml` job that provisions both and fails if the tests skip.
+  No `klt` runtime behaviour or JSON shape changes — magic stays an oracle,
+  never a runtime dependency. Methodology, measured results, the declared
+  shared surface and the unsupported cases: `docs/design/magic-oracle.md`.
+- **Added**: device-body tie/bias status is now a **gradeable field**, not
+  only a warning (issue #1983). `klt lvs` emitted `device.body_unverified` as
+  a `mismatches[]` entry that never changed `status`, and `klt pex` said
+  nothing at all about whether the netlist it re-simulated had a DC bias path
+  for its device bodies — even though `docs/cli/extract.md` states that an
+  untied body makes such a resimulation "physically wrong, not merely
+  imprecise". That silently weakened `docs/design-evidence-tiers.md` item 7
+  (post-layout verification, the item with the strictest citation rule in the
+  checklist): a `klt pex` citation could be backed by numbers that look like
+  measurements and are not, with nothing in the evidence saying so. Three
+  additive blocks close that:
+  - `klt lvs` gains a top-level **`body_verification`** block — `status`
+    (`"verified"`/`"unverified"`/`"unchecked"`), `reason`, `device_classes`,
+    `device_count`, `findings`, `finding_count` — rendered from the same
+    determination as the existing `device.body_unverified` warnings, so the
+    two can never disagree. `"unchecked"` (the pre-extracted
+    `layout.netlist` form, which verifies nothing either way) is now
+    distinguishable from `"verified"`; before, both simply carried no
+    warning.
+  - `klt pex` gains a top-level **`body_bias`** block — `status`
+    (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets`, and
+    `unbiased_pmos_body_nets` carried verbatim from the extraction this
+    command drives itself (`klt extract`'s own issue-#555 array).
+  - `klt signoff` surfaces both: `checks[].detail.body_verification_status`
+    on an `lvs` check, `checks[].detail.body_bias` on a `pex` check, and
+    `citation.body_bias` on a `"met"` item-7 citation (plus the `--format
+    text` rendering of the latter), so item 7's verdict and the one property
+    that can invalidate the numbers backing it sit in the same artifact.
+
+  **No verdict changes anywhere**: `klt lvs` still reports `status: "match"`
+  for a matching compare with unverified bodies (the warning's non-blocking
+  severity is unchanged), `klt pex` still reports `status: "pass"` and the
+  same exit code, and `klt signoff` grades an `lvs` check on `status ==
+  "match"` (plus the existing `power_connectivity` gate) and a `pex` check on
+  `status == "pass"` exactly as before. This is report-before-enforce, and a
+  deliberately different default from #1965's `power_connectivity` hard-fail:
+  a power-connectivity mismatch is a *defect*, whereas an unverified/unbiased
+  body is a *coverage* condition some PDK decks produce on every layout they
+  extract — hard-failing it would retroactively fail whole PDKs' worth of
+  otherwise-valid evidence. `docs/design-evidence-tiers.md` item 7 now states
+  the condition a `pex` citation is valid under, claimant-enforced exactly
+  like item 3's DRC-coverage disclosure. Purely additive and back-compatible:
+  the `body_bias` key is absent for every non-`pex` kind and for `pex`
+  evidence committed before this change (an absent statement reads as "this
+  artifact made no body-bias statement", never "every body was biased"),
+  `detail.body_verification_status` is `null` for pre-#1983 `lvs` evidence,
+  and `klt lvs --check --rerun` does not report either new block as drift on a
+  report committed before it existed. No `schema_version` bump.
 - **Added**: `klt signoff` now reports the cited DRC envelope's `coverage`
   block (issue #2002). `docs/design-evidence-tiers.md` item 3 requires a claim
   to enumerate its deck's coverage gaps and, since issue #1982, names the
@@ -116,6 +220,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   comes purely from an `assign` is ever joined; a genuinely unconnected or
   differently-wired reference port is untouched and still reports as a
   real mismatch.
+- **Fixed**: `klt erc`'s per-gate `antenna_verdict` and `klt power`'s overall
+  `em_verdict.status` now report a new `"pass_partial"` value (issue #1997)
+  instead of silently reading as a plain `"pass"` when their own coverage
+  data shows only part of the relevant surface was actually checked.
+  `klt erc`: `antenna_verdict` is `"pass_partial"` when at least one graded
+  metal level (`levels[1:]`, excluding the gate role, which is always
+  `"unchecked"`) is `"unchecked"` and no graded level violates — the
+  canonical case is a full sky130 stack through met5, since sky130's own
+  antenna-ratio table has no met3/met4/met5 entries at all. `klt power`:
+  the overall `em_verdict.status` is `"pass_partial"` when
+  `unchecked_edge_count > 0` and `fail_count == 0` — e.g. only one edge in
+  the whole design had both a declared current limit and a solved current.
+  Real violations/failures are unaffected: `antenna_verdict` still reports
+  `"violate"` and `em_verdict.status` still reports `"fail"` regardless of
+  coverage. `klt signoff`'s power-evidence check (`em_verdict.status ==
+  "pass"`, exact match) already treats `"pass_partial"` at least as
+  strictly as `"pass"` — it does not pass.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the

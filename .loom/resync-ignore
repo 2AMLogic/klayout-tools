@@ -183,3 +183,22 @@ commands/loom/builder-pr.md
 # flake-detection test, this pin can be dropped and the files resynced normally.
 scripts/verify-proposal-refs.sh
 scripts/tests/test-verify-proposal-refs.sh
+
+# #2020: pr-worktree.sh carries a local-only call to the repo-owned
+# .loom/hooks/post-worktree.sh (a `run_post_worktree_hook` helper, invoked
+# both from the "reuse an existing PR worktree" path and the "freshly
+# created PR worktree" path) so a PR review worktree gets its own uv-synced
+# venv + editable install, the same treatment worktree.sh already gave issue
+# worktrees. Without it, `pytest` run inside a `.loom/worktrees/pr-<N>/`
+# review worktree could silently import the MAIN CHECKOUT's src/ via a stale
+# editable install recorded elsewhere -- a false negative on a PR that fixes
+# a bug (old code still runs) or a false positive on a PR that introduces
+# one (discovered evaluating PR #2013, reproduced in
+# `.loom/worktrees/pr-2013`). This call was never upstreamed into
+# rjwalters/loom's own pr-worktree.sh template (klayout-tools is a uv-based
+# Python project; upstream's own template has no Python-specific setup
+# step), so an unpinned resync would silently drop it -- the same reversion
+# pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898. If the upstream
+# Loom project ever adopts an equivalent post-worktree-hook call from
+# pr-worktree.sh, this pin can be dropped and the file resynced normally.
+scripts/pr-worktree.sh

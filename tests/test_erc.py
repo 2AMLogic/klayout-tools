@@ -193,6 +193,13 @@ def test_run_erc_reports_two_gates(tmp_path):
     assert "klt_version" in report["provenance"]
     assert "klayout_version" in report["provenance"]
 
+    # issue #2036: `klt erc` is validated against two inputs, so the block
+    # pins the spec's *contents* too -- not just the path echoed in the
+    # top-level `spec` field -- in the same `sha256:`-prefixed form.
+    assert report["provenance"]["spec"] == {
+        "content_hash": f"sha256:{_sha256_file(spec)}"
+    }
+
 
 def test_run_erc_accumulates_connected_area_layer_by_layer(tmp_path):
     gds = tmp_path / "basic.gds"
@@ -505,6 +512,98 @@ def test_antenna_golden_violate_pass_pair_per_layer(
     assert pass_report["gates"][0]["antenna_verdict"] == "pass"
 
 
+def _full_stack_spec(path) -> None:
+    """Same gate/li1/met1/met2 stackup as `_basic_spec`, plus met3/met4/
+    met5 -- roles sky130's own antenna-ratio limit table
+    (`_SKY130_ANTENNA_RATIO_MAX_EGAR`) has no entries for at all (issue
+    #1997's "met3-5-only" partial-coverage scenario; see docs/cli/erc.md's
+    "Sky130 antenna-ratio limits" table). No vias connect met3-5 to the
+    rest of the stack -- their own `step_area_um2` stays `0.0` regardless,
+    which does not matter here: `verdict` is driven purely by whether the
+    PDK table recognises the role `name` at all, not by geometry.
+    """
+    path.write_text(
+        json.dumps(
+            {
+                "stackup": [
+                    {"name": "poly", "layer": "1/0", "role": "gate"},
+                    {"name": "li1", "layer": "3/0"},
+                    {"name": "met1", "layer": "5/0"},
+                    {"name": "met2", "layer": "7/0", "label_layer": "7/5"},
+                    {"name": "met3", "layer": "20/0"},
+                    {"name": "met4", "layer": "21/0"},
+                    {"name": "met5", "layer": "22/0"},
+                ],
+                "vias": [
+                    {"name": "licon", "layer": "2/0", "between": ["poly", "li1"]},
+                    {"name": "mcon", "layer": "4/0", "between": ["li1", "met1"]},
+                    {"name": "via1", "layer": "6/0", "between": ["met1", "met2"]},
+                ],
+            }
+        )
+    )
+
+
+def test_antenna_verdict_pass_partial_when_met3_5_ungraded(tmp_path):
+    """A full-stack spec declaring met3-5 (roles sky130's antenna-ratio
+    table has no limit entries for at all) still gets a `levels[]` entry
+    for each (`verdict: "unchecked"`) -- but the per-gate `antenna_verdict`
+    rollup must not silently read as a plain `"pass"` just because every
+    *graded* level (li1/met1/met2, the roles the table does cover) passed
+    clean. `"pass_partial"` reports that distinction (issue #1997)."""
+    gds = tmp_path / "full_stack_pass.gds"
+    spec = tmp_path / "full_stack.erc.json"
+    _full_stack_spec(spec)
+    _antenna_fixture(gds, li1_um2=1.0, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    gate = report["gates"][0]
+    verdict_by_layer = {lvl["layer"]: lvl["verdict"] for lvl in gate["levels"]}
+
+    assert verdict_by_layer["li1"] == "pass"
+    assert verdict_by_layer["met1"] == "pass"
+    assert verdict_by_layer["met2"] == "pass"
+    assert verdict_by_layer["met3"] == "unchecked"
+    assert verdict_by_layer["met4"] == "unchecked"
+    assert verdict_by_layer["met5"] == "unchecked"
+    assert gate["antenna_verdict"] == "pass_partial"
+
+
+def test_antenna_verdict_violate_wins_over_partial_met3_5_coverage(tmp_path):
+    """A real antenna-ratio violation on a graded level (li1) still reports
+    `"violate"` even though met3-5 are simultaneously `"unchecked"` --
+    coverage gaps never mask a genuine violation (issue #1997)."""
+    gds = tmp_path / "full_stack_violate.gds"
+    spec = tmp_path / "full_stack.erc.json"
+    _full_stack_spec(spec)
+    _antenna_fixture(gds, li1_um2=80.0, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    gate = report["gates"][0]
+    li1_level = next(lvl for lvl in gate["levels"] if lvl["layer"] == "li1")
+
+    assert li1_level["verdict"] == "violate"
+    assert gate["antenna_verdict"] == "violate"
+
+
+def test_antenna_verdict_plain_pass_when_stackup_omits_ungraded_roles(tmp_path):
+    """A genuinely fully-covered design -- a stackup that declares only
+    roles the selected PDK's table actually has limits for (no met3-5 at
+    all) -- must still report a plain `"pass"`, not `"pass_partial"`; the
+    gate role itself (`stackup[0]`, always `"unchecked"` by construction)
+    must never, on its own, trigger `"pass_partial"` (issue #1997)."""
+    gds = tmp_path / "basic_full_coverage.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    _antenna_fixture(gds, li1_um2=1.0, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    gate = report["gates"][0]
+
+    assert gate["levels"][0]["verdict"] == "unchecked"  # the gate role itself
+    assert gate["antenna_verdict"] == "pass"
+
+
 # --- run_erc: top-level `status` roll-up (issue #1968) -----------------------
 
 
@@ -580,6 +679,55 @@ def test_provenance_pdk_populated_only_when_pdk_given(tmp_path):
         "source": "built-in",
         "version": None,
     }
+
+
+def test_provenance_spec_hash_tracks_spec_contents(tmp_path):
+    """Issue #2036: editing the spec file changes
+    `provenance.spec.content_hash` even though the layout (and therefore
+    `provenance.input.content_hash`) is byte-identical. This is the whole
+    point of the field: an ERC verdict is relative to the declarations it
+    was run with, so a committed report must be re-verifiable against the
+    spec as well as the layout."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    before = run_erc(str(gds), str(spec))
+    assert before["provenance"]["spec"]["content_hash"] == (
+        f"sha256:{_sha256_file(spec)}"
+    )
+
+    # A real declaration edit (the `met2` level is dropped from the
+    # stackup), not a cosmetic one -- the layout is untouched.
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+                {"name": "met1", "layer": "5/0"},
+            ],
+            "vias": [
+                {"name": "licon", "layer": "2/0", "between": ["poly", "li1"]},
+                {"name": "mcon", "layer": "4/0", "between": ["li1", "met1"]},
+            ],
+        },
+    )
+    after = run_erc(str(gds), str(spec))
+
+    assert after["provenance"]["spec"]["content_hash"] == (
+        f"sha256:{_sha256_file(spec)}"
+    )
+    assert (
+        after["provenance"]["spec"]["content_hash"]
+        != before["provenance"]["spec"]["content_hash"]
+    )
+    # The layout side is unchanged -- only the spec drifted.
+    assert (
+        after["provenance"]["input"]["content_hash"]
+        == before["provenance"]["input"]["content_hash"]
+    )
 
 
 # --- run_erc: antenna-violation fix guidance (issue #908, epic #713 Phase 3)

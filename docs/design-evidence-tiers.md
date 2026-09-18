@@ -287,6 +287,26 @@ every block.
      unannotated regression renders `not_post_layout`, and a `klt sta` run —
      even a SPEF-annotated one — is item 5's timing evidence, not this
      item's functional re-simulation, so it renders `wrong_kind`.
+   - A `klt pex` citation is only as good as the **device-body bias** of the
+     netlist it ran on (#1983). A device body left on an anonymous,
+     deck-synthesized net has no DC bias path at all, which makes a
+     resimulation of that extracted netlist *physically wrong, not merely
+     imprecise* (`docs/cli/extract.md` → "Coverage") — the run converges and
+     reports numbers, and those numbers are not comparable to the schematic
+     leg they are being diffed against. A `klt pex` report states the
+     condition in its own `body_bias` block (`docs/cli/pex.md`), and `klt
+     signoff` surfaces it verbatim on this item's citation
+     (`citation.body_bias`). **It does not grade on it**: an item-7 citation
+     whose `body_bias.status` is `"unbiased"` still renders `met`, because
+     the condition is a deck-coverage property some PDKs produce on every
+     layout they extract, not a defect this command can adjudicate. So a
+     claim citing item 7 must read that field and state whether its
+     post-layout numbers were measured on a properly-biased netlist —
+     claimant-enforced, exactly like item 3's DRC-coverage disclosure. The
+     same discipline applies upstream at item 4: `klt lvs`'s
+     `body_verification` block says whether the compare verified the body
+     ties at all, and `"unchecked"` (a pre-extracted netlist) is not
+     `"verified"`.
 8. **Characterization report** — one aggregated, current artifact
    summarizing per-spec-row performance across conditions, with the
    evidence record each verdict rests on (#309 tracks the aggregation

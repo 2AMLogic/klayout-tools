@@ -480,6 +480,53 @@ PEX_PASS_ENVELOPE = {
 
 PEX_FAIL_ENVELOPE = {**PEX_PASS_ENVELOPE, "status": "fail", "passed": 2, "failed": 1}
 
+#: Issue #1983: a `klt pex` run whose extracted side had every device body
+#: on a real, named net -- the clean case, stated positively.
+PEX_PASS_BODY_BIASED_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "body_bias": {
+        "status": "biased",
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+        "unbiased_pmos_body_nets": [],
+    },
+}
+
+#: Issue #1983: the compromised case -- every graded delta row met its
+#: tolerance (`status: "pass"`), but the extracted netlist those numbers came
+#: from had PMOS bodies on anonymous, deck-synthesized nets with no DC bias
+#: path at all, which per docs/cli/extract.md makes the resimulation
+#: "physically wrong, not merely imprecise". Before #1983 this artifact was
+#: byte-indistinguishable from the one above.
+PEX_PASS_BODY_UNBIASED_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "body_bias": {
+        "status": "unbiased",
+        "unbiased_device_count": 3,
+        "unbiased_nets": ["\\$5", "\\$7"],
+        "unbiased_pmos_body_nets": [
+            {"device": "$1", "net": "\\$5"},
+            {"device": "$2", "net": "\\$5"},
+            {"device": "$3", "net": "\\$7"},
+        ],
+    },
+}
+
+#: Issue #1983: `klt lvs` evidence whose compare matched while its MOS body
+#: terminals went structurally unverified (the `device.body_unverified`
+#: condition, now also stated as a gradeable `body_verification` block).
+LVS_MATCH_BODY_UNVERIFIED_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "body_verification": {
+        "status": "unverified",
+        "reason": None,
+        "device_classes": ["nfet"],
+        "device_count": 2,
+        "findings": [{"class": "nfet", "device_count": 2}],
+        "finding_count": 1,
+    },
+}
+
 #: `klt power` (issues #844/#845/#846, Epic #712 Phase 1) JSON report shape
 #: -- hand-built here exactly like every other kind's fixture (see
 #: docs/cli/power.md's JSON schema). Unlike every kind above, it carries no
@@ -525,6 +572,18 @@ POWER_EM_FAIL_ENVELOPE = {
         **POWER_PASS_ENVELOPE["em_verdict"],
         "status": "fail",
         "fail_count": 1,
+    },
+}
+
+#: At least one edge was checked and none failed, but some other edge in
+#: the design was never checked at all (issue #1997) -- rolled-up
+#: `"pass_partial"`, distinct from a genuinely complete `"pass"`.
+POWER_EM_PASS_PARTIAL_ENVELOPE = {
+    **POWER_PASS_ENVELOPE,
+    "em_verdict": {
+        **POWER_PASS_ENVELOPE["em_verdict"],
+        "status": "pass_partial",
+        "unchecked_edge_count": 3,
     },
 }
 
@@ -1302,6 +1361,201 @@ def test_cli_manifest_text_omits_coverage_for_legacy_evidence(tmp_path, capsys):
     assert "coverage:" not in out
 
 
+# --------------------------------------------------------------------------- #
+# Device-body bias surfacing (issue #1983): `klt pex`'s `body_bias` and
+# `klt lvs`'s `body_verification` are reported by `klt signoff` -- in the
+# aggregation mode's `checks[].detail`, in item 7's own citation, and in the
+# text rendering -- while changing no verdict anywhere. An untied body makes
+# a post-layout resimulation "physically wrong" (docs/cli/extract.md), and
+# item 7 has the strictest citation rule in the checklist, so the one
+# property that can silently invalidate its numbers must be visible in the
+# artifact that cites them.
+# --------------------------------------------------------------------------- #
+
+
+def test_pex_detail_surfaces_an_unbiased_body(tmp_path):
+    path = _write(tmp_path, "pex.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["kind"] == "pex"
+    assert check["detail"]["body_bias"] == {
+        "status": "unbiased",
+        "unbiased_device_count": 3,
+        "unbiased_nets": ["\\$5", "\\$7"],
+    }
+    # The per-device list stays in the cited envelope -- it can run to
+    # hundreds of entries on a real block, and the counts plus the distinct
+    # net names are enough to tell a clean run from a compromised one.
+    assert "unbiased_pmos_body_nets" not in check["detail"]["body_bias"]
+
+
+def test_pex_detail_surfaces_a_clean_body_bias_positively(tmp_path):
+    """ "Checked, and every body had a DC bias path" must be distinguishable
+    from "never reported" -- so the clean verdict is stated, not omitted."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_BODY_BIASED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["body_bias"] == {
+        "status": "biased",
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+    }
+
+
+def test_unbiased_bodies_do_not_change_the_pex_verdict(tmp_path):
+    """Report, not enforce: a `pex` run whose extracted side had floating
+    device bodies grades exactly as one that did not. Unlike a
+    `power_connectivity` mismatch (#1965, a real miswire), an unbiased body
+    is a coverage condition some decks produce on every layout they extract
+    -- hard-failing it would retroactively fail whole PDKs' worth of
+    otherwise-valid evidence on a question this module cannot adjudicate."""
+    unbiased = _write(tmp_path, "unbiased.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+    biased = _write(tmp_path, "biased.json", PEX_PASS_BODY_BIASED_ENVELOPE)
+
+    unbiased_result = build_signoff([unbiased])
+    biased_result = build_signoff([biased])
+
+    assert unbiased_result["status"] == biased_result["status"] == "pass"
+    assert unbiased_result["checks"][0]["passed"] is True
+    assert biased_result["checks"][0]["passed"] is True
+
+
+def test_pex_detail_omits_body_bias_for_a_pre_1983_envelope(tmp_path):
+    """Back-compat: post-layout evidence committed before `klt pex` reported
+    body bias renders exactly as before -- no crash, and no fabricated
+    `"biased"` claim for a run that never measured it."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "body_bias" not in check["detail"]
+
+
+def test_non_pex_kinds_never_carry_a_body_bias_disclosure(tmp_path):
+    """`klt lvs`'s parallel `body_verification` answers a related but
+    distinct question and is surfaced separately -- nothing here fabricates
+    a `body_bias` key for a kind whose envelope does not report one."""
+    lvs = _write(tmp_path, "lvs.json", LVS_MATCH_BODY_UNVERIFIED_ENVELOPE)
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_signoff([lvs, drc])
+
+    assert all("body_bias" not in check["detail"] for check in result["checks"])
+
+
+def test_malformed_body_bias_block_is_normalised_not_crashed(tmp_path):
+    """A hand-edited or truncated `body_bias` block must degrade to a
+    readable disclosure, never raise -- the same shape-normalisation
+    discipline `_drc_coverage_disclosure` applies."""
+    path = _write(
+        tmp_path,
+        "pex.json",
+        {**PEX_PASS_ENVELOPE, "body_bias": {"status": "unbiased"}},
+    )
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["body_bias"] == {
+        "status": "unbiased",
+        "unbiased_device_count": None,
+        "unbiased_nets": [],
+    }
+
+
+def test_lvs_detail_surfaces_body_verification_status(tmp_path):
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_BODY_UNVERIFIED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["detail"]["body_verification_status"] == "unverified"
+    # Preserved behaviour: `klt lvs`'s own non-blocking semantics for this
+    # condition are unchanged -- the check still passes.
+    assert check["passed"] is True
+    assert result["status"] == "pass"
+
+
+def test_lvs_detail_body_verification_status_is_none_for_pre_1983_evidence(tmp_path):
+    """An envelope with no `body_verification` key at all (committed before
+    #1983) reads as `None` -- distinct from the real `"verified"` value, so
+    old evidence never masquerades as having been checked."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["body_verification_status"] is None
+
+
+def test_tier_report_item_7_citation_surfaces_an_unbiased_body(tmp_path):
+    """The load-bearing case: item 7's verdict and the property that can
+    invalidate the numbers backing it now sit in the same artifact. The item
+    is still `met` -- the disclosure qualifies the citation, it does not
+    revoke it."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["reason"] is None
+    assert item_7["citation"]["body_bias"] == {
+        "status": "unbiased",
+        "unbiased_device_count": 3,
+        "unbiased_nets": ["\\$5", "\\$7"],
+    }
+
+
+def test_tier_report_item_7_citation_omits_body_bias_for_legacy_evidence(tmp_path):
+    """Back-compat on the tier-report path: a pre-#1983 `pex` envelope still
+    renders item 7 `met`, with a citation shaped exactly as before."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert "body_bias" not in item_7["citation"]
+
+
+def test_cli_manifest_text_shows_body_bias_beside_the_item_7_citation(tmp_path, capsys):
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"7": pex_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    body_bias_line = next(line for line in out.splitlines() if "body bias:" in line)
+    assert "unbiased" in body_bias_line
+    assert "3 device(s) with no DC bias path" in body_bias_line
+    assert "\\$5, \\$7" in body_bias_line
+
+
+def test_cli_manifest_text_omits_body_bias_for_legacy_evidence(tmp_path, capsys):
+    """A pre-#1983 `pex` envelope prints no body-bias line at all -- an
+    absent statement must not read as "every body was biased"."""
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"7": pex_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "cite:" in out
+    assert "body bias:" not in out
+
+
 def test_cli_fleet_text_flags_blocks_whose_deck_left_gaps(tmp_path, capsys):
     """Fleet text names a gap-bearing block's coverage beside its tier, and
     stays quiet for a block that reported none."""
@@ -1522,6 +1776,23 @@ def test_power_em_fail_check_fails(tmp_path):
     assert check["detail"]["em_verdict_fail_count"] == 1
 
 
+def test_power_em_pass_partial_does_not_pass(tmp_path):
+    """`em_verdict.status == "pass_partial"` (issue #1997) -- every checked
+    edge stayed under its limit, but some other edge in the design was
+    never checked at all; this must not be treated as more passing than a
+    missing verdict, i.e. it must not silently pass."""
+    path = _write(tmp_path, "power.json", POWER_EM_PASS_PARTIAL_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["kind"] == "power"
+    assert check["passed"] is False
+    assert check["detail"]["em_verdict_status"] == "pass_partial"
+    assert check["detail"]["em_verdict_fail_count"] == 0
+
+
 def test_power_em_not_checked_does_not_pass(tmp_path):
     """`em_verdict.status == "not_checked"` -- nothing in the spec had both a
     declared current limit and a solved current, so nothing was actually
@@ -1726,6 +1997,91 @@ def test_lvs_joins_the_input_hash_cross_check(tmp_path):
     values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
     assert values[drc_path] == "sha256:layoutA"
     assert values[lvs_path] == "sha256:layoutB"
+
+
+def test_drc_and_lvs_against_the_same_layout_stay_consistent(tmp_path):
+    """Issue #1987, the paired passing case for
+    `test_lvs_joins_the_input_hash_cross_check` above: binding LVS into the
+    `input.content_hash` comparison must only refuse a *genuinely* stale
+    pairing. A DRC and an LVS envelope naming the same layout hash are the
+    normal T1 combination and must still render `ok: true` with no
+    mismatches -- otherwise the fix would trade a silent false pass for a
+    blanket false refusal, which is just as useless a grade.
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    # Precondition: both fixtures really do pin the same layout, so the
+    # assertion below is about the comparison and not about the fixtures
+    # accidentally having drifted apart.
+    assert (
+        DRC_CLEAN_ENVELOPE["provenance"]["input"]
+        == LVS_MATCH_ENVELOPE["provenance"]["input"]
+    )
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
+@pytest.mark.parametrize("shape", ["absent", "null"])
+def test_pre_1969_lvs_envelope_is_excluded_not_a_forced_mismatch(tmp_path, shape):
+    """Issue #1987 edge case: an `lvs` envelope committed *before* `klt lvs`
+    started populating `provenance.input` (issue #1969) carries no
+    `input.content_hash` at all -- either the key is absent entirely or it
+    is an explicit `null`.
+
+    Such an envelope must stay non-participating, exactly as it was before
+    the field existed: `_check_scalar_field` collects only non-`None`
+    values, so a single populating check (the DRC sibling) leaves one
+    distinct value and no mismatch. The failure mode this guards against is
+    treating "nothing to say" as "disagrees with everyone", which would
+    retroactively refuse every archived report the moment the field shipped.
+    """
+    provenance = {**LVS_MATCH_ENVELOPE["provenance"]}
+    if shape == "absent":
+        del provenance["input"]
+    else:
+        provenance["input"] = None
+    old_shape_lvs = {**LVS_MATCH_ENVELOPE, "provenance": provenance}
+
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", old_shape_lvs)
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+    lvs_check = next(check for check in result["checks"] if check["kind"] == "lvs")
+    assert lvs_check["provenance"].get("input") is None
+
+
+def test_sim_does_not_participate_in_the_input_hash_cross_check(tmp_path):
+    """Issue #1987's scope note, pinned as behaviour: `klt sim` deliberately
+    leaves `provenance.input` `None` (it simulates a netlist against a model
+    library -- there is no input *layout* stream to pin), so it never
+    contributes a value to the `input.content_hash` comparison.
+
+    This is the reason `klt sim` did *not* get `klt lvs`'s issue-#1969
+    treatment: a netlist digest is not comparable with the layout digests
+    `drc`/`extract`/`lvs`/`pex` contribute, so populating the shared field
+    with one would turn every legitimate layout-plus-simulation manifest
+    into a permanent `provenance_consistency` refusal.
+    """
+    assert SIM_PASS_ENVELOPE["provenance"]["input"] is None
+
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    result = build_signoff([drc_path, lvs_path, sim_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
 
 
 def test_mismatched_pdk_name_is_refused(tmp_path):

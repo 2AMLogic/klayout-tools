@@ -1,0 +1,123 @@
+name: magic cross-validation oracle (drc, extract)
+
+# Issue #2014 (pairing #1 of tracking issue #2007): a CI-runnable execution
+# path for the magic-backed cross-validation oracle --
+# `tests/test_drc_magic_oracle.py` and `tests/test_extract_magic_oracle.py`.
+# Both modules check `klt drc` / `klt extract` against magic, a genuinely
+# independent geometry engine, on a clean sky130/gf180mcu corpus cell and on
+# seeded defects (a met1 spacing violation, an input-to-output short, a set
+# of missing vias). See `docs/design/magic-oracle.md` for the methodology.
+#
+# Both modules are real-binary-gated (the pattern `tests/test_lvs.py`'s
+# netgen tier established): without `magic` and a magic technology file they
+# skip cleanly, so the ordinary `ci.yml` test job stays green and silent on
+# them. This job is what makes them actually run.
+#
+# Provisioning here is deliberately light, and deliberately NOT the
+# multi-GB volare/open_pdks install `place-and-route-smoke.yml` and
+# `equiv-canary.yml` need: magic's decks are *generated* by open_pdks from
+# one source `.tech` per process, so `scripts/fetch-magic-tech.sh`
+# reproduces exactly that step from ~350 KB of pinned, checksummed
+# open_pdks source. The only heavy step is building the pinned magic
+# (~2-3 minutes, cached between runs by tag).
+#
+# `workflow_dispatch` only, matching the other oracle/canary workflows:
+# nothing here gates a PR. Trigger from the Actions tab, or `gh workflow run
+# magic-oracle.yml`, whenever `klt drc`, `klt extract`, `decks/sky130.py`,
+# `decks/gf180mcu.py`, or the oracle itself changes -- and before a release.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: magic-oracle-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MAGIC_VERSION: "8.3.683"
+
+jobs:
+  magic-oracle:
+    name: klt drc / klt extract vs. magic (sky130A, gf180mcuC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Verify KLayout imports headlessly
+        run: |
+          uv run --frozen --extra dev python -c "
+          import klayout.db as kdb
+          print('klayout', kdb.Layout().dbu)
+          "
+
+      - name: Install magic build dependencies
+        # Tcl is magic's batch scripting interface (not optional, even
+        # headless); Tk and m4 are configure-time requirements of the
+        # Tcl-enabled build; csh runs magic's own install-time scripts.
+        # No X11/OpenGL/Cairo: scripts/install-magic.sh configures
+        # `--without-x`. Same mirror-resilient apt front end, and the same
+        # timeout/retry envelope, ci.yml's package steps use.
+        timeout-minutes: 5
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          CI_APT_DEADLINE: "270"
+          CI_APT_PER_CMD_TIMEOUT: "150"
+        run: scripts/ci-apt-install.sh tcl-dev tk-dev m4 csh
+
+      - name: Cache pinned magic build
+        id: magic-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/magic-${{ env.MAGIC_VERSION }}
+          key: magic-${{ env.MAGIC_VERSION }}-${{ runner.os }}-${{ hashFiles('scripts/install-magic.sh', 'scripts/_install_common.sh') }}
+
+      - name: Build + install pinned magic (cache miss only)
+        if: steps.magic-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: scripts/install-magic.sh
+
+      - name: Add pinned magic to PATH
+        run: echo "$HOME/.cache/magic-${{ env.MAGIC_VERSION }}/bin" >>"$GITHUB_PATH"
+
+      - name: Verify magic runs headlessly
+        # `-dnull -noconsole` is exactly how the oracle drives it: no GUI,
+        # no X11, per this repo's headless-always rule.
+        run: |
+          magic --version
+          printf 'quit -noprompt\n' >/tmp/magic-smoke.tcl
+          magic -dnull -noconsole -rcfile /dev/null /tmp/magic-smoke.tcl
+
+      - name: Generate the open_pdks magic decks (sky130A, gf180mcuC)
+        run: scripts/fetch-magic-tech.sh
+
+      - name: Run the magic cross-validation oracle
+        run: |
+          uv run --frozen --extra dev pytest \
+            tests/test_drc_magic_oracle.py tests/test_extract_magic_oracle.py \
+            -v -rs | tee pytest-magic-oracle.log
+
+      - name: Confirm the oracle ran to completion, not skipped
+        # pytest exits 0 on a skip, and *both* halves of this oracle's gate
+        # (a new-enough `magic`, a resolvable technology file) are supposed
+        # to be satisfied by the steps above -- so a skip here means
+        # provisioning silently regressed, which is exactly the "green job
+        # that tested nothing" failure #2007's criterion 2 is about. Same
+        # belt-and-suspenders check equiv-canary.yml applies.
+        run: |
+          if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-magic-oracle.log; then
+            echo "::error::magic oracle tests were SKIPPED, not run -- provisioning did not satisfy their gate." >&2
+            exit 1
+          fi
+          echo "magic oracle ran to completion (not skipped)."

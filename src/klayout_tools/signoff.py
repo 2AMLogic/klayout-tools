@@ -198,10 +198,12 @@ independently of the existing :data:`_ITEM_ALLOWED_KINDS` mechanism (item
 ``{8}`` -- the one T1 item whose own checklist text names no `klt` verb.
 Items 3-7 (DRC, LVS, corner verification, Monte Carlo, post-layout) reject a
 ``"generic"`` citation unconditionally, the same ``"wrong_kind"`` outcome
-item 7 already renders for any non-``pex`` citation; this phase does not
+item 7 already renders for any non-``pex`` citation; this phase did not
 touch items 3-6's separate, pre-existing permissiveness toward *other*
-recognised native kinds (:data:`_ITEM_ALLOWED_KINDS` still names only item
-7) -- closing that wider gap is out of this issue's scope.
+recognised native kinds (when it shipped, :data:`_ITEM_ALLOWED_KINDS` named
+only item 7) -- closing that wider gap was out of *that* issue's scope, and
+was done for items 3 and 4 by issue #1987 (they now accept only ``"drc"``
+and ``"lvs"`` respectively -- see :data:`_ITEM_ALLOWED_KINDS`).
 
 ## `klt power` (IR-drop/EM) evidence ingestion (issue #1321, Phase 2 of epic #712)
 
@@ -229,11 +231,13 @@ JSON schema) -- so :func:`_check_passed` derives a pass/fail verdict from
 ``em_verdict`` instead: ``"met"`` only when a static IR-drop solve actually
 ran (``em_verdict`` is not ``None`` -- a spec declaring neither ``pads`` nor
 a ``current_model`` produces no solve at all, per ``docs/cli/power.md``, and
-proves nothing) *and* that solve's own EM verdict rolled up to
+proves nothing) *and* that solve's own EM verdict rolled up to exactly
 ``em_verdict["status"] == "pass"``. A rolled-up ``"fail"`` (a checked edge
-exceeded its declared current-density limit) or ``"not_checked"`` (nothing
+exceeded its declared current-density limit), ``"not_checked"`` (nothing
 in the whole spec had both a declared current limit and a solved current,
-so nothing was actually verified) does not pass, exactly like a missing
+so nothing was actually verified), or ``"pass_partial"`` (issue #1997 --
+at least one edge checked clean, but some other edge in the design was
+never checked at all) does not pass, exactly like a missing
 ``em_verdict`` -- this module never infers a passing verdict from
 ``worst_case_droop_mv`` alone, since the envelope declares no droop
 *limit* to compare it against (that binding is left to a future phase, per
@@ -385,6 +389,53 @@ mismatches, ``power_connectivity: "unchecked"``) deserve the same treatment
 for item 4, are all open questions issue #2002 left open on purpose -- not
 answered here.
 
+## Device-body bias surfacing (issue #1983)
+
+``docs/cli/extract.md`` states that a device body left on an anonymous,
+deck-synthesized net has **no DC bias path at all**, which makes a
+resimulation of that extracted netlist "physically wrong, not merely
+imprecise" -- the run converges and produces numbers, and those numbers are
+not comparable to a schematic-level netlist's. `klt pex` *is* such a
+resimulation, and it is the artifact ``docs/design-evidence-tiers.md`` item
+7 (post-layout verification -- the item with the strictest citation rule in
+the checklist) is cited from. So an item-7 citation could be backed by
+numbers that look like measurements and are not, with nothing anywhere in
+the signoff artifact saying so. Symmetrically, `klt lvs` reported its own
+body-tie coverage gap only as a ``device.body_unverified``
+``mismatches[]`` warning -- an entry this module never read, and one that
+never changed that envelope's ``status``.
+
+Both sides now state it in a field, and this module quotes both:
+
+- ``checks[].detail.body_verification_status`` -- `klt lvs`'s
+  ``body_verification.status`` (``"verified"``/``"unverified"``/
+  ``"unchecked"``), beside the existing ``power_connectivity_status``.
+- ``checks[].detail.body_bias`` and a ``"met"`` item's
+  ``citation.body_bias`` -- `klt pex`'s ``body_bias`` block reduced to its
+  verdict and counts (see :func:`_pex_body_bias_disclosure`). The citation
+  form is the load-bearing one: item 7's verdict and the property that can
+  invalidate the numbers backing it now sit in the same artifact.
+
+**Report, not enforce**, exactly like the DRC coverage surfacing above.
+:func:`_check_passed` is untouched: a `pex` envelope still passes on
+``status == "pass"`` whatever its ``body_bias`` says, and an `lvs` envelope
+still passes on ``status == "match"`` (plus the #1965 power gate) whatever
+its ``body_verification`` says -- so no existing claim's verdict moves. Two
+reasons this is the right default here and hard-fail was the right default
+for ``power_connectivity`` (#1965): a power-connectivity ``"mismatch"`` is
+a *defect* (a real miswire, always wrong), whereas an unverified/unbiased
+body is a *coverage* condition that some PDK decks produce on every layout
+they extract regardless of what the designer drew -- hard-failing it would
+retroactively fail whole PDKs' worth of otherwise-valid evidence on a
+question this module cannot itself adjudicate. And the original friction was
+specifically that the condition was *invisible*: "an item whose evidence can
+be silently invalid is worse than an item with no evidence, because the
+second is visible" (issue #1983). Making it visible is the fix; deciding
+what it should cost a claim is a policy question left to the reader of the
+evidence, and ``docs/design-evidence-tiers.md`` item 7 now states that
+condition explicitly rather than implying a `pex` citation is
+self-validating.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -452,16 +503,22 @@ _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 #: kinds may satisfy that item (issue #871, Phase 2b of epic #706; made
 #: per-block-kind by issue #1959) -- resolved by :func:`_allowed_kinds_for`
 #: and passed as :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An
-#: item id absent from this map (every id but 7, today) is unrestricted
-#: (``None``), preserving the original Phase 0/1 behaviour where any
-#: recognised, passing envelope kind satisfies any item.
+#: item id absent from this map (every id but 3, 4 and 7, today) is
+#: unrestricted (``None``), preserving the original Phase 0/1 behaviour where
+#: any recognised, passing envelope kind satisfies any item.
 #:
-#: Item 7 ("Post-layout verification") is the only item restricted today.
+#: Items 3 ("DRC clean"), 4 ("LVS clean") and 7 ("Post-layout verification")
+#: are the restricted ones today -- items 3 and 4 joined in issue #1987, so
+#: a `klt extract` report (which :func:`_check_passed` counts as passing
+#: unconditionally) can no longer stand in for a check it never ran.
 #: The inner map is keyed by the **partition kind** being graded
 #: (``"analog"``/``"digital"`` -- a ``"mixed-signal"`` manifest grades both,
 #: one per partition, so that value never appears here) and must name every
 #: partition kind, since :func:`_allowed_kinds_for` falls back to the
-#: strictest (analog) set rather than silently becoming unrestricted:
+#: strictest (analog) set rather than silently becoming unrestricted.
+#: Items 3 and 4 name the same single kind for both partition kinds (a DRC
+#: clean is a DRC clean whichever flow drew the block); item 7's two sets
+#: genuinely differ:
 #:
 #: - **analog** (and a mixed-signal block's analog partition): a
 #:   ``"pex"``-kind citation only -- the `klt pex`
@@ -1130,7 +1187,14 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       connectivity, not full LVS" -- so a `klt signoff` check labeled
       ``lvs`` should mean the compare *and* (when it applies) the
       power/ground wiring were both clean, matching what
-      ``docs/cli/lvs.md`` already tells callers to gate on.
+      ``docs/cli/lvs.md`` already tells callers to gate on. Its
+      ``body_verification`` block (issue #1983) is **not** consulted: a
+      ``"match"`` from a layout whose MOS bodies were compared against a
+      deck-synthesized net passes exactly like one whose bodies resolved to
+      real drawn ties. That field is surfaced, not graded -- see this
+      module's "Device-body bias surfacing" docstring section for why
+      hard-fail is the right default for a power miswire and the wrong one
+      for a body-tie coverage gap.
     - ``sim`` passes on ``status == "pass"``.
     - ``yield`` (issue #870) passes on ``status == "pass"`` (every
       measurement that declared a ``target_yield`` met it at the stated
@@ -1147,19 +1211,26 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       and its device/net counts are visible in the aggregated verdict.
     - ``pex`` (issue #871; shape ratified by #801, `klt pex`) passes on
       ``status == "pass"`` -- mirrors ``sim``: every graded delta row met
-      its tolerance.
+      its tolerance. Its ``body_bias`` block (issue #1983) is **not**
+      consulted: a run whose extracted side had no DC bias path for its
+      device bodies passes exactly like one that did. That field is
+      surfaced (``detail.body_bias``, and ``citation.body_bias`` on a
+      ``"met"`` item), not graded -- see this module's "Device-body bias
+      surfacing" docstring section.
     - ``power`` (issue #1321) has no top-level ``status`` field at all
       (unlike every kind above -- ``docs/cli/power.md``'s JSON schema), so
       this derives a verdict from ``em_verdict`` instead: passes only when
       a static IR-drop solve actually ran (``em_verdict`` is not ``None`` --
       a spec declaring neither ``pads`` nor a ``current_model`` produces no
       solve at all, per ``docs/cli/power.md``, and proves nothing) *and*
-      that solve's own EM current-density verdict rolled up to
+      that solve's own EM current-density verdict rolled up to exactly
       ``em_verdict["status"] == "pass"``. A rolled-up ``"fail"`` (a checked
-      edge exceeded its declared current-density limit) or
-      ``"not_checked"`` (nothing in the whole spec had both a declared
-      current limit and a solved current, so nothing was actually
-      verified) does not pass, same as a missing ``em_verdict``.
+      edge exceeded its declared current-density limit), ``"not_checked"``
+      (nothing in the whole spec had both a declared current limit and a
+      solved current, so nothing was actually verified), or
+      ``"pass_partial"`` (issue #1997 -- some edge in the design was never
+      checked at all, even though every checked edge passed) does not
+      pass, same as a missing ``em_verdict``.
       ``worst_case_droop_mv`` is not itself compared here -- the envelope
       declares no droop *limit* to check it against (see this module's
       "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
@@ -1257,6 +1328,51 @@ def _drc_coverage_disclosure(
     }
 
 
+def _pex_body_bias_disclosure(
+    kind: str, envelope: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The cited `klt pex` envelope's own statement about whether the
+    extracted netlist it re-simulated had a DC bias path for every device
+    body (issue #1983) -- or ``None`` when there is nothing to quote.
+
+    Quoted verbatim off the envelope, never re-derived: `klt pex` builds it
+    from the extraction it drove itself (``docs/cli/pex.md`` ->
+    ``body_bias``), which is the only place the information exists.
+
+    ``None`` in exactly two cases, and they mean the same thing to a reader
+    ("this artifact makes no body-bias statement"), never "the bodies were
+    biased":
+
+    - ``kind != "pex"``. No other envelope kind carries a ``body_bias``
+      block. (`klt lvs`'s parallel ``body_verification`` block is surfaced
+      separately, as ``detail.body_verification_status`` -- it answers a
+      related but distinct question: whether the *compare* verified the body
+      ties, not whether the *simulated* netlist had a bias path.)
+    - The envelope has no ``body_bias`` key at all, or a non-object one:
+      post-layout evidence committed before `klt pex` reported it.
+      Back-compat is the whole reason this is ``None`` rather than a
+      fabricated ``"biased"`` -- an old record must not read as a netlist
+      that was checked and found clean.
+
+    ``unbiased_pmos_body_nets`` is deliberately **not** carried through: the
+    per-device list can run to hundreds of entries on a real block, and a
+    reader who needs it has the cited envelope. The count and the distinct
+    net names are enough to tell a clean run from a compromised one and to
+    find the devices in the source artifact.
+    """
+    if kind != "pex":
+        return None
+    body_bias = envelope.get("body_bias")
+    if not isinstance(body_bias, dict):
+        return None
+    nets = body_bias.get("unbiased_nets")
+    return {
+        "status": body_bias.get("status"),
+        "unbiased_device_count": body_bias.get("unbiased_device_count"),
+        "unbiased_nets": list(nets) if isinstance(nets, list) else [],
+    }
+
+
 def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
     """A small, kind-specific excerpt of the source envelope -- not a
     re-export of the full contract (a consumer that wants the raw
@@ -1302,6 +1418,17 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "power_connectivity_status": (envelope.get("power_connectivity") or {}).get(
                 "status"
             ),
+            # Issue #1983: whether the cited compare's MOS body terminals
+            # were resolved from real drawn geometry or from a
+            # deck-synthesized net (`klt lvs`'s `body_verification` block).
+            # Reported, never graded on -- see this module's "Device-body
+            # bias surfacing" docstring section. `None` on an envelope with
+            # no `body_verification` key at all (committed before #1983),
+            # distinct from the real `"verified"`/`"unverified"`/
+            # `"unchecked"` values.
+            "body_verification_status": (envelope.get("body_verification") or {}).get(
+                "status"
+            ),
         }
     elif kind == "sim":
         detail = {
@@ -1336,6 +1463,15 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "failed": envelope.get("failed"),
             "errored": envelope.get("errored"),
         }
+        # Issue #1983: whether the netlist these numbers were measured on
+        # actually had a DC bias path for every device body -- reported,
+        # never graded on (see this module's "Device-body bias surfacing"
+        # docstring section). Omitted entirely for a `pex` envelope
+        # committed before `body_bias` existed, so old evidence renders
+        # exactly as it did before.
+        body_bias = _pex_body_bias_disclosure(kind, envelope)
+        if body_bias is not None:
+            detail["body_bias"] = body_bias
     elif kind == "power":
         em_verdict = envelope.get("em_verdict") or {}
         detail = {
@@ -1413,18 +1549,27 @@ def _provenance_consistency(checks: list[dict[str, Any]]) -> dict[str, Any]:
     Four fields are compared, each only across the checks that actually
     populate it (``docs/json-contract.md``'s ``provenance`` block leaves a
     field ``None`` when a verb has nothing to report there -- e.g. ``klt
-    lvs``'s ``provenance.input`` is always ``None``, so it never
-    participates):
+    sim`` simulates a netlist against a model library, has no input
+    *layout* stream to pin, and so leaves ``provenance.input`` ``None`` and
+    never participates in the ``input.content_hash`` comparison):
 
     - ``pdk.name`` / ``pdk.version`` -- every check that resolved a PDK
       must agree on which one and which release. A DRC report from a
       sky130 run combined with an LVS report from a gf180mcu run (or two
       sky130 runs against different PDK snapshots) is not one signoff.
-    - ``input.content_hash`` -- populated by ``drc``/``extract`` only
-      (``docs/json-contract.md``). When more than one check populates it,
-      they must agree: the whole point of "signoff" is that DRC and
-      extraction ran against the *same* layout stream, not a stale pairing
-      (the design doc's §1 "signoff rejection" failure mode).
+    - ``input.content_hash`` -- populated by ``drc``/``extract``/``lvs``/
+      ``pex`` (``docs/json-contract.md``); ``klt lvs`` joined them in issue
+      #1969, which is what lets this comparison bind an LVS check to the
+      very layout DRC ran on (issue #1987's second finding -- before that,
+      ``klt lvs`` populated nothing here, so a clean DRC of last week's
+      layout combined with a matching LVS of today's was "consistent" by
+      omission). When more than one check populates it, they must agree:
+      the whole point of "signoff" is that DRC, extraction and LVS ran
+      against the *same* layout stream, not a stale pairing (the design
+      doc's §1 "signoff rejection" failure mode). An envelope predating the
+      verb's adoption of the field (``input`` absent or ``None``) is still
+      excluded rather than forced into a mismatch -- ``None`` is "nothing
+      to say", never "disagrees with everyone".
     - ``deck[<name>].content_hash`` -- compared only among checks that name
       the *same* deck (an LVS run and a DRC run legitimately use different
       decks; two checks both naming ``"sky130"`` must be byte-identical).
@@ -1600,6 +1745,13 @@ def build_tier_report(
                             "rules_skipped": ["met5.4"],
                             "deck_scope": ["5.x", "6.x"],
                         },
+                        # `pex` citations only, and only when the cited
+                        # envelope reports body bias (issue #1983)
+                        "body_bias": {
+                            "status": "unbiased",
+                            "unbiased_device_count": 148,
+                            "unbiased_nets": ["\\$5"],
+                        },
                     },
                 },
                 ...  # items 1-10 (doubled per partition for mixed-signal),
@@ -1659,8 +1811,9 @@ def build_tier_report(
     ``"generic"``-kind citation (see "Generic evidence ingestion" above)
     satisfies only the T1 items whose own checklist text names no specific
     `klt` verb -- today, item 8 ("Characterization report") alone. Every
-    other item, including the six otherwise-unrestricted items 1-6/9-10 that
-    accept any *native* recognised kind, renders ``"unmet"`` with
+    other item, including the six otherwise-unrestricted items 1, 2, 5, 6, 9
+    and 10 that accept any *native* recognised kind (items 3, 4 and 7 carry
+    their own kind restriction, see above), renders ``"unmet"`` with
     ``reason: "wrong_kind"`` for a ``"generic"`` citation -- this does not
     loosen items 3-7's own evidence requirements, only adds a new kind item
     8 alone may satisfy.
@@ -2154,6 +2307,14 @@ def _grade_evidence(
     coverage = _drc_coverage_disclosure(check_kind, envelope)
     if coverage is not None:
         citation["coverage"] = coverage
+    # Issue #1983: a `pex` citation also carries the cited envelope's own
+    # body-bias statement -- item 7's verdict and the one property that can
+    # silently invalidate the numbers backing it end up in the same
+    # artifact. Present only when the cited envelope reports it, and never
+    # consulted above: the verdict is still `status == "pass"` alone.
+    body_bias = _pex_body_bias_disclosure(check_kind, envelope)
+    if body_bias is not None:
+        citation["body_bias"] = body_bias
     return "met", None, citation
 
 

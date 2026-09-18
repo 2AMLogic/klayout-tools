@@ -157,6 +157,7 @@ from .extract import (
 from .lvs_mismatch import (
     _apply_tolerance_snaps,
     _body_net_warnings,
+    _body_unverified_counts,
     _build_mismatches,
     _build_net_correspondence,
     _collect_tolerance_snaps,
@@ -310,6 +311,27 @@ CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_j
 POWER_STATUS_MATCH = "match"
 POWER_STATUS_MISMATCH = "mismatch"
 POWER_STATUS_UNCHECKED = "unchecked"
+
+#: Issue #1983: ``body_verification.status`` values -- the machine-checkable
+#: counterpart of the ``device.body_unverified`` ``mismatches[]`` warning
+#: (issue #281). Deliberately a *separate* verdict from the report's top-level
+#: ``status``, exactly as :data:`POWER_STATUS_MATCH` and friends are: a
+#: ``"unverified"`` body is a coverage statement about how the layout's MOS
+#: bodies were resolved, not a compare failure, so it never changes ``status``
+#: (that non-blocking behaviour is unchanged from before this block existed).
+#: See :func:`_body_verification_report`.
+#:
+#: - ``"verified"``: inline extraction ran and every MOS body terminal in the
+#:   layout's top circuit resolved to a real, drawn/labelled net.
+#: - ``"unverified"``: at least one MOS body terminal was compared against a
+#:   deck-synthesized net instead (the ``device.body_unverified`` condition).
+#: - ``"unchecked"``: this run could not answer the question at all -- the
+#:   pre-extracted ``layout.netlist`` request form, which carries no deck and
+#:   therefore no way to tell a drawn tie from a synthesized one. Never means
+#:   "verified": the reason says which case it is.
+BODY_STATUS_VERIFIED = "verified"
+BODY_STATUS_UNVERIFIED = "unverified"
+BODY_STATUS_UNCHECKED = "unchecked"
 
 #: ``power_connectivity.findings[].rule``: one standard-cell power/ground pin
 #: name reaches more than one distinct net across the design's instances --
@@ -605,6 +627,19 @@ def run_lvs(request: str) -> dict[str, Any]:
     body terminals were compared against a deck-synthesized net rather than
     a real schematic one -- never emitted for the pre-extracted
     ``layout.netlist`` form, and never affecting ``status``.
+
+    ``body_verification`` (issue #1983) is that same disclosure in
+    machine-checkable form: a top-level block, always present, whose
+    ``status`` is ``"verified"``/``"unverified"``/``"unchecked"``
+    (:data:`BODY_STATUS_VERIFIED` and friends) -- see
+    :func:`_body_verification_report`. Both renderings come from one
+    determination, so they cannot disagree. ``status`` is unchanged by it:
+    a layout with unverified bodies still matches when the compare matches.
+    The block exists because a ``mismatches[]`` warning is not gradeable --
+    a downstream consumer (``klt signoff``, a committed evidence record)
+    had to string-match a category inside an array of ordinary compare
+    findings to ask the question, so in practice nothing asked, and a
+    record carrying the warning was indistinguishable from a clean one.
 
     ``request.reference.device_bulk`` (issue #506) is the reconciliation
     counterpart of that disclosure: it normalises a named reference device
@@ -1664,6 +1699,22 @@ def run_lvs(request: str) -> dict[str, Any]:
         list(layout_deck.device_classes) if layout_deck is not None else None
     )
 
+    # Issue #1983: the machine-checkable counterpart of the
+    # `device.body_unverified` warning below, replaced with a real verdict
+    # whenever inline extraction ran. Emitted as an explicit `"unchecked"`
+    # carrying a reason rather than omitted, so "were this layout's device
+    # bodies verifiably tied?" is answerable from any `klt lvs` report on its
+    # own -- on the pre-extracted `layout.netlist` form the warning's absence
+    # means "not checked", and on an inline extraction it means "checked and
+    # clean", and nothing in the report used to tell those apart.
+    body_verification: dict[str, Any] = _body_verification_unchecked(
+        "no request.layout.deck was given (the pre-extracted "
+        "request.layout.netlist form), so nothing establishes this layout's "
+        "substrate/well-tap convention and no synthesized body net can be "
+        "told apart from a real one -- this run verified nothing about the "
+        "device bodies either way"
+    )
+
     if layout_deck is not None:
         # Issue #281: MOS body terminals extracted onto deck-synthesized nets
         # (never a real schematic net -- see `_body_net_warnings`) are only a
@@ -1674,6 +1725,10 @@ def run_lvs(request: str) -> dict[str, Any]:
         # the `compare_result`/safety-net invariant above -- they are purely
         # additive, non-blocking notes.
         mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
+        # Issue #1983: same determination, rendered as the gradeable block
+        # -- see `_body_verification_report` for why one source of truth
+        # backs both renderings.
+        body_verification = _body_verification_report(layout_circuit, layout_deck)
 
     if combine_warnings:
         # Issue #466: same rationale as `_body_net_warnings` above -- these
@@ -1910,6 +1965,15 @@ def run_lvs(request: str) -> dict[str, Any]:
         # See `_power_connectivity_report` and
         # `docs/design/pg-connectivity-check-decision.md`.
         "power_connectivity": power_connectivity,
+        # Issue #1983: whether this layout's MOS body terminals were resolved
+        # from real drawn/labelled geometry or from a deck-synthesized net --
+        # the gradeable form of the `device.body_unverified` warning, which
+        # was previously only discoverable by string-matching a `category`
+        # inside `mismatches[]`. Reported beside `status`, never folded into
+        # it: `status` is, and stays, exactly the comparer's own result, so a
+        # layout with unverified bodies still reports `status: "match"` when
+        # the compare matched. See `_body_verification_report`.
+        "body_verification": body_verification,
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
@@ -2295,7 +2359,14 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
     exclude.update(
         (field,)
-        for field in ("reference_top", "options", "power_connectivity")
+        for field in (
+            "reference_top",
+            "options",
+            "power_connectivity",
+            # Issue #1983: same rule -- a report committed before the
+            # `body_verification` block existed cannot have drifted in it.
+            "body_verification",
+        )
         if field not in committed
     )
     # Issue #1952: the same "a field the committed report never carried
@@ -5323,6 +5394,85 @@ def _power_connectivity_findings(
                 }
             )
     return findings
+
+
+def _body_verification_unchecked(reason: str) -> dict[str, Any]:
+    """A ``body_verification`` block for a run that could not determine how
+    the layout's MOS body terminals were resolved (issue #1983), stating
+    *why* in ``reason``.
+
+    Always emitted -- including for the pre-extracted ``layout.netlist``
+    request form this determination does not apply to -- so the question
+    "did this run verify that the device bodies are tied?" is answerable
+    from any ``klt lvs`` report on its own, rather than requiring a reader
+    to know which ``layout`` request shape produced it and infer the answer
+    from the *absence* of a ``device.body_unverified`` warning. That
+    absence is exactly the ambiguity issue #1983 reported: on a
+    pre-extracted netlist it means "not checked", and on an inline
+    extraction it means "checked and clean", and nothing in the report
+    distinguished them. Same discipline as
+    :func:`_power_connectivity_unchecked`.
+    """
+    return {
+        "status": BODY_STATUS_UNCHECKED,
+        "reason": reason,
+        "device_classes": [],
+        "device_count": 0,
+        "findings": [],
+        "finding_count": 0,
+    }
+
+
+def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
+    """The ``body_verification`` block for an inline-extraction compare
+    (issue #1983) -- the machine-checkable form of the
+    ``device.body_unverified`` warning (issue #281).
+
+    Rendered from :func:`~klayout_tools.lvs_mismatch._body_unverified_counts`,
+    the *same* determination :func:`_body_net_warnings` renders its prose
+    ``mismatches[]`` entries from, so the warning a human reads and the field
+    a grader reads can never disagree about how many devices are affected or
+    which classes they belong to.
+
+    Why this needs to exist at all, given the warning already did: a
+    ``mismatches[]`` entry is not gradeable. Answering "were this layout's
+    device bodies verifiably tied?" from a committed ``klt lvs`` record meant
+    string-matching a ``category`` inside an array whose other entries are
+    ordinary compare findings -- so in practice nothing downstream asked, and
+    a record carrying the warning was indistinguishable from a clean one at
+    every consumer that only reads ``status`` (``klt signoff`` included). See
+    ``docs/cli/lvs.md`` -> ``body_verification``.
+
+    **This does not change ``status``.** A layout with unverified bodies
+    still reports ``status: "match"`` when the compare matched, and the
+    warning entries are still ``severity: "warning"`` with
+    ``mismatch_count`` counting them -- unchanged from before this block
+    existed. The block makes the condition *visible to a grader*; whether it
+    should also block a verdict is a separate policy question, deliberately
+    left to the consumer (see ``docs/design-evidence-tiers.md`` item 7).
+    """
+    counts = _body_unverified_counts(layout_circuit, deck)
+    if not counts:
+        return {
+            "status": BODY_STATUS_VERIFIED,
+            "reason": None,
+            "device_classes": [],
+            "device_count": 0,
+            "findings": [],
+            "finding_count": 0,
+        }
+    findings = [
+        {"class": device_class, "device_count": count}
+        for device_class, count in sorted(counts.items())
+    ]
+    return {
+        "status": BODY_STATUS_UNVERIFIED,
+        "reason": None,
+        "device_classes": sorted(counts),
+        "device_count": sum(counts.values()),
+        "findings": findings,
+        "finding_count": len(findings),
+    }
 
 
 def _power_connectivity_unchecked(reason: str) -> dict[str, Any]:
