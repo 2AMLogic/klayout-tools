@@ -4722,15 +4722,348 @@ def test_run_drc_sky130_met5_area_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# ---------------------------------------------------------------------------
+# sky130 met1-met5 holes-area rule coverage (#1976)
+#
+# Each metal layer's plain minimum-area rule above (`met{N}.area.1`, #1955)
+# has a holes-area *companion* scoped to `Region.holes()` -- the interior
+# voids of a slotted plate or fill pattern, not the metal polygon itself:
+# `met1.holes_area.1`/`met2.holes_area.1`/`met5.holes_area.1` at 140_000
+# dbu^2 (0.14 um^2), `met3.holes_area.1`/`met4.holes_area.1` at 200_000
+# dbu^2 (0.2 um^2). Each fixture is a single polygon with one explicit
+# rectangular hole (`kdb.Polygon.insert_hole`), written to and read back
+# from a real GDS file -- GDS has no native hole concept, so the writer
+# decomposes it into a "keyhole" (hull and hole joined by a zero-width
+# slit); `Region.holes()`'s merged semantics (see `DerivedLayer`'s
+# `"holes"` mode docstring) reconstructs the real hole on read, exactly as
+# it must for the multi-rectangle "slotted plate" idiom real layout uses.
+#
+# The surrounding metal ring (`margin` below) is always thicker than the
+# layer's own `width.1`/`space.1` threshold, so those rules stay clean --
+# with one deliberate exception: met5's holes-area threshold (0.14 um^2,
+# i.e. a square hole side of ~0.37 um) is numerically *smaller* than met5's
+# own minimum-spacing threshold (1.6 um), so *any* met5 hole small enough to
+# violate `met5.holes_area.1` is, by construction, also narrower than 1.6 um
+# in its shortest dimension and therefore also violates `met5.space.1`
+# ("space" bounds intra-polygon notches/holes too, unlike `"isolated"` --
+# see `DrcRule`'s own docstring). This is not a test-fixture defect: the
+# real sky130A deck has exactly this same overlap between `m5.2` and `m5.7`
+# for any real too-small met5 slot. met5's violating fixture asserts both.
+# ---------------------------------------------------------------------------
+
+
+def _write_slotted_metal_plate(path, layer, layer_name, hole_w, hole_h, margin):
+    """Write a single-cell GDS with one `layer` polygon: an outer rectangle
+    with one rectangular hole punched `margin` dbu in from every edge (#1976).
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    lidx = layout.layer(*layer)
+    layout.set_info(lidx, kdb.LayerInfo(*layer, layer_name))
+    plate_w = hole_w + 2 * margin
+    plate_h = hole_h + 2 * margin
+    poly = kdb.Polygon(kdb.Box(0, 0, plate_w, plate_h))
+    poly.insert_hole(kdb.Box(margin, margin, margin + hole_w, margin + hole_h))
+    top.shapes(lidx).insert(poly)
+    layout.write(str(path))
+
+
+def _write_unslotted_metal_plate(path, layer, layer_name, width, height):
+    """Write a single-cell GDS with one solid `layer` rectangle -- no holes
+    at all, the negative control an empty `Region.holes()` result must not
+    be treated as a violation or crash the check (#1976)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    lidx = layout.layer(*layer)
+    layout.set_info(lidx, kdb.LayerInfo(*layer, layer_name))
+    top.shapes(lidx).insert(kdb.Box(0, 0, width, height))
+    layout.write(str(path))
+
+
+def test_run_drc_sky130_met1_holes_area_violation(tmp_path):
+    """A met1 hole smaller than the 140_000 dbu^2 (0.14 um^2)
+    `met1.holes_area.1` threshold trips exactly one violation. The 240 dbu
+    ring margin keeps `met1.width.1`/`met1.space.1` (140 dbu each) clean."""
+    path = tmp_path / "met1_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (68, 20), "met1.drawing", 300, 400, 240
+    )  # hole 120_000 dbu^2 < 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met1.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met1.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met1.drawing"
+
+
+def test_run_drc_sky130_met1_holes_area_clean(tmp_path):
+    """A met1 hole at/above the 140_000 dbu^2 `met1.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met1_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (68, 20), "met1.drawing", 350, 400, 240
+    )  # hole 140_000 dbu^2 >= 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met1_no_holes_clean(tmp_path):
+    """A plain, unslotted met1 plate -- no holes at all -- reports clean,
+    not an error: an empty `Region.holes()` result must not be treated as a
+    violation (#1976's negative control)."""
+    path = tmp_path / "met1_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (68, 20), "met1.drawing", 1000, 1000)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met2_holes_area_violation(tmp_path):
+    """A met2 hole smaller than the 140_000 dbu^2 (0.14 um^2)
+    `met2.holes_area.1` threshold trips exactly one violation. The 240 dbu
+    ring margin keeps `met2.width.1`/`met2.space.1` (140 dbu each) clean."""
+    path = tmp_path / "met2_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (69, 20), "met2.drawing", 300, 400, 240
+    )  # hole 120_000 dbu^2 < 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met2.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met2.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met2.drawing"
+
+
+def test_run_drc_sky130_met2_holes_area_clean(tmp_path):
+    """A met2 hole at/above the 140_000 dbu^2 `met2.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met2_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (69, 20), "met2.drawing", 350, 400, 240
+    )  # hole 140_000 dbu^2 >= 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met2_no_holes_clean(tmp_path):
+    """A plain, unslotted met2 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met2_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (69, 20), "met2.drawing", 1000, 1000)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met3_holes_area_violation(tmp_path):
+    """A met3 hole smaller than the 200_000 dbu^2 (0.2 um^2)
+    `met3.holes_area.1` threshold trips exactly one violation. The 400 dbu
+    ring margin keeps `met3.width.1`/`met3.space.1` (300 dbu each) clean."""
+    path = tmp_path / "met3_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (70, 20), "met3.drawing", 350, 400, 400
+    )  # hole 140_000 dbu^2 < 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met3.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met3.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met3.drawing"
+
+
+def test_run_drc_sky130_met3_holes_area_clean(tmp_path):
+    """A met3 hole at/above the 200_000 dbu^2 `met3.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met3_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (70, 20), "met3.drawing", 400, 500, 400
+    )  # hole 200_000 dbu^2 >= 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met3_no_holes_clean(tmp_path):
+    """A plain, unslotted met3 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met3_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (70, 20), "met3.drawing", 1500, 1500)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met4_holes_area_violation(tmp_path):
+    """A met4 hole smaller than the 200_000 dbu^2 (0.2 um^2)
+    `met4.holes_area.1` threshold trips exactly one violation. The 400 dbu
+    ring margin keeps `met4.width.1`/`met4.space.1` (300 dbu each) clean."""
+    path = tmp_path / "met4_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (71, 20), "met4.drawing", 350, 400, 400
+    )  # hole 140_000 dbu^2 < 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met4.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met4.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met4.drawing"
+
+
+def test_run_drc_sky130_met4_holes_area_clean(tmp_path):
+    """A met4 hole at/above the 200_000 dbu^2 `met4.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met4_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (71, 20), "met4.drawing", 400, 500, 400
+    )  # hole 200_000 dbu^2 >= 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met4_no_holes_clean(tmp_path):
+    """A plain, unslotted met4 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met4_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (71, 20), "met4.drawing", 1500, 1500)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met5_holes_area_violation(tmp_path):
+    """A met5 hole smaller than the 140_000 dbu^2 (0.14 um^2)
+    `met5.holes_area.1` threshold trips a violation -- alongside
+    `met5.space.1`, since any hole this small is also narrower than met5's
+    own 1.6 um minimum spacing in its shortest dimension (see this
+    section's own docstring note above; not a fixture defect, the same
+    overlap the real sky130A deck's `m5.2`/`m5.7` pair has)."""
+    path = tmp_path / "met5_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (72, 20), "met5.drawing", 300, 400, 1800
+    )  # hole 120_000 dbu^2 < 140_000; also < 1600 dbu min spacing
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["met5.holes_area.1"] == 1
+    holes_violations = [
+        v for v in report["violations"] if v["rule"] == "met5.holes_area.1"
+    ]
+    (violation,) = holes_violations
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met5.drawing"
+
+
+def test_run_drc_sky130_met5_holes_area_clean(tmp_path):
+    """A met5 hole at/above the 140_000 dbu^2 `met5.holes_area.1` threshold,
+    and at/above its own 1.6 um minimum spacing in every dimension so
+    `met5.space.1` also stays clean, passes with no violations at all."""
+    path = tmp_path / "met5_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (72, 20), "met5.drawing", 1700, 1700, 1800
+    )  # hole 2_890_000 dbu^2 >= 140_000; >= 1600 dbu in both dimensions
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met5_no_holes_clean(tmp_path):
+    """A plain, unslotted met5 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met5_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (72, 20), "met5.drawing", 5000, 5000)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
+    """Every `met{1..5}.holes_area.1` rule carries a `provenance` citation
+    naming the official `sky130A_mr.drc` rule id it was transcribed from, at
+    the same pinned open_pdks commit the rest of the deck cites (#1976), and
+    a `DerivedLayer(mode="holes")` whose `base` matches the plain layer:
+
+      m1.7  m1.holes.with_area(0..0.14)  -> 140_000 dbu^2
+      m2.7  m2.holes.with_area(0..0.14)  -> 140_000 dbu^2
+      m3.7  m3.holes.with_area(0..0.2)   -> 200_000 dbu^2
+      m4.7  m4.holes.with_area(0..0.2)   -> 200_000 dbu^2
+      m5.7  m5.holes.with_area(0..0.14)  -> 140_000 dbu^2
+    """
+    expected = {
+        "met1.holes_area.1": ("m1.7", 140_000, (68, 20)),
+        "met2.holes_area.1": ("m2.7", 140_000, (69, 20)),
+        "met3.holes_area.1": ("m3.7", 200_000, (70, 20)),
+        "met4.holes_area.1": ("m4.7", 200_000, (71, 20)),
+        "met5.holes_area.1": ("m5.7", 140_000, (72, 20)),
+    }
+
+    holes_rules = {rule.id: rule for rule in get_deck("sky130") if rule.id in expected}
+    assert set(holes_rules) == set(expected)
+
+    for rule_id, (source_rule_id, area_min_dbu2, layer) in expected.items():
+        rule = holes_rules[rule_id]
+        assert rule.check == "area"
+        assert rule.layer == layer
+        assert rule.area_min_dbu2 == area_min_dbu2
+        assert rule.area_max_dbu2 is None
+        assert rule.derived_layer is not None
+        assert rule.derived_layer.mode == "holes"
+        assert rule.derived_layer.base == layer
+        assert rule.derived_layer.intersect_with is None
+        assert rule.provenance is not None, f"sky130/{rule_id}: no provenance"
+        assert rule.provenance.source_repo == "fossi-foundation/open-pdks"
+        assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
+        assert rule.provenance.rule_id == source_rule_id
+        assert rule.provenance.commit == "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+
+
 def test_sky130_deck_check_kind_breakdown():
     """Structural regression for the deck's own `docs/cli/drc.md` "Coverage"
-    kind-breakdown table (#1955): 52 rules total -- 15 `width`, 13 `space`,
-    1 `isolated`, 16 `enclosing`, 2 `separation`, 5 `area`. Fails loudly (at
-    the exact number that changed) if a future rule addition/removal drifts
-    from that table without updating it."""
+    kind-breakdown table (#1976, extending #1955's 52-rule baseline): 57
+    rules total -- 15 `width`, 13 `space`, 1 `isolated`, 16 `enclosing`,
+    2 `separation`, 10 `area`. Fails loudly (at the exact number that
+    changed) if a future rule addition/removal drifts from that table
+    without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 52
+    assert len(deck) == 57
     counts = Counter(rule.check for rule in deck)
     assert counts == {
         "width": 15,
@@ -4738,7 +5071,7 @@ def test_sky130_deck_check_kind_breakdown():
         "isolated": 1,
         "enclosing": 16,
         "separation": 2,
-        "area": 5,
+        "area": 10,
     }
 
 
@@ -4763,7 +5096,15 @@ def test_sky130_area_rules_cite_pinned_sky130a_mr_drc():
         "met5.area.1": ("m5.4", 4_000_000, (72, 20)),
     }
 
-    area_rules = {rule.id: rule for rule in get_deck("sky130") if rule.check == "area"}
+    # `rule.derived_layer is None` excludes the `met{1..5}.holes_area.1`
+    # siblings added by #1976 (also `check="area"`, but scoped via
+    # `DerivedLayer(mode="holes")` -- see
+    # `test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc` for those).
+    area_rules = {
+        rule.id: rule
+        for rule in get_deck("sky130")
+        if rule.check == "area" and rule.derived_layer is None
+    }
     assert set(area_rules) == set(expected)
 
     for rule_id, (source_rule_id, area_min_dbu2, layer) in expected.items():

@@ -587,7 +587,7 @@ no per-net isolation) than it actually has.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 52
+design rule manual (which spans hundreds of rules). It currently covers 57
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
@@ -612,11 +612,12 @@ Broken down by check kind:
 | `isolated`   |     1 |
 | `enclosing`  |    16 |
 | `separation` |     2 |
-| `area`       |     5 |
-| **total**    |**52** |
+| `area`       |    10 |
+| **total**    |**57** |
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
-five `met{1..5}.area.1` minimum-area rules, issue #1955 — see the next
+five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
+`met{1..5}.holes_area.1` holes-area rules, issue #1976 — see the next
 paragraph.)
 
 `nwell.width.1`/`nwell.space.1` (issue #1420) close this deck's original
@@ -730,21 +731,31 @@ false positives on correct geometry; the 0.08 um two-adjacent-edges half
 stays uncovered, like the end-of-line variants noted for gf180mcu below.
 
 `met1.area.1`/`met2.area.1`/`met3.area.1`/`met4.area.1`/`met5.area.1`
-(issue #1955) are the five `"area"`-kind rules the kind-breakdown table
-above counts: a minimum-area check for every metal layer this deck already
-covers with a width/space rule, transcribed from the same real sky130A
-install cited above — `sky130A_mr.drc`'s `m1.6`/`m2.6`/`m3.6`/`m4.4a`/
-`m5.4`. Before these, the deck had no `"area"`-kind rule at all (the check
-primitive existed since issue #812, but no rule used it), so a
+(issue #1955) are five of the ten `"area"`-kind rules the kind-breakdown
+table above counts: a minimum-area check for every metal layer this deck
+already covers with a width/space rule, transcribed from the same real
+sky130A install cited above — `sky130A_mr.drc`'s `m1.6`/`m2.6`/`m3.6`/
+`m4.4a`/`m5.4`. Before these, the deck had no `"area"`-kind rule at all (the
+check primitive existed since issue #812, but no rule used it), so a
 minimum-area violation — a routine defect class in automated P&R output —
 passed `klt drc` with a bare `status: "clean"` verdict and no rule having
-looked at it. Each layer's holes-area sibling (`m1.7`/`m2.7`/`m3.7`/
-`m4.7`/`m5.7`, scoped to `Region.holes`, a concept this engine's `DrcRule`
-vocabulary cannot express) remains out of scope, and `"density"`/
-`"antenna"` remain unused entirely — density in particular stays a
-separate follow-on, since a real density check scopes to a floorplan
-boundary this engine's windowed `"density"` implementation has no concept
-of (see "`"area"`/`"density"`/`"antenna"` check kinds" above).
+looked at it.
+
+`met1.holes_area.1`/`met2.holes_area.1`/`met3.holes_area.1`/
+`met4.holes_area.1`/`met5.holes_area.1` (issue #1976) are the other five
+`"area"`-kind rules: the holes-area *companion* of each rule above,
+transcribed from the same install's `m1.7`/`m2.7`/`m3.7`/`m4.7`/`m5.7`. Each
+scopes the area threshold to the checked layer's **holes** (the interior
+voids of a merged metal region — an enclosed slot in a wide plate or a
+fill pattern) rather than the metal polygon itself, via
+`DerivedLayer`'s new `"holes"` mode (`klayout.db.Region.holes()`, see
+`DerivedLayer`'s own docstring in `src/klayout_tools/decks/rules.py`). A
+plate with no holes at all derives an empty region under this mode, which
+stays clean, not an error. `"density"`/`"antenna"` remain unused entirely —
+density in particular stays a separate follow-on, since a real density
+check scopes to a floorplan boundary this engine's windowed `"density"`
+implementation has no concept of (see "`"area"`/`"density"`/`"antenna"`
+check kinds" above).
 
 Antenna coverage, unlike density, is **not** a gap in the toolset — it is
 simply a different verb. `klt erc` (issue #860) produces a per-gate
@@ -1512,7 +1523,9 @@ claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this
 field existed). sky130's five `met{1..5}.area.1` rules (issue #1955) each
 carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
-(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), so 34 of its 52 rules are covered.
+(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), and its five
+`met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
+`m3.7`/`m4.7`/`m5.7`, so 39 of its 57 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
