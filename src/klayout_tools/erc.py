@@ -90,7 +90,7 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
-from ._provenance import build_provenance
+from ._provenance import _content_hash, build_provenance
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
 #: (#861), Phase 3 (#908), issue #1968, and issue #1979 all add fields/
@@ -794,6 +794,11 @@ def run_erc(
     ``gates[].levels[].verdict`` is ``"violate"``, else ``"violations"``)
     plus the shared ``provenance`` block (:func:`._provenance.build_provenance`)
     -- together the two things ``klt signoff`` needs to grade this output.
+    That block additionally carries (issue #2036) a verb-local
+    ``provenance.spec.content_hash``, pinning ``spec_path``'s contents the
+    same ``sha256:``-prefixed way ``provenance.input.content_hash`` pins the
+    layout, so a committed report can be re-verified against *both* inputs
+    its verdict depends on.
     Raises :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
     unresolvable layout/top cell, or a layout in which no net carries any
     geometry on the declared gate role at all.
@@ -1089,6 +1094,22 @@ def run_erc(
         else None
     )
 
+    provenance = build_provenance(pdk=provenance_pdk, input_path=file)
+
+    # `provenance.spec` (issue #2036): `klt erc` is validated against *two*
+    # inputs, not one -- the layout (`provenance.input`) and the stackup/
+    # vias/nets/ties spec. An ERC verdict is only meaningful relative to the
+    # declarations it was run against, so a report that pins the layout but
+    # not the spec still can't be re-verified: the spec can be edited (a
+    # dropped `ties` entry, a re-pointed `layer`) and a committed report goes
+    # on asserting a verdict for declarations it never saw. Attached here
+    # rather than via a second `build_provenance` parameter, following `klt
+    # lvs`'s precedent (`environment.reference_sha256`, `lvs.py`) of keeping
+    # a verb-specific second-input hash out of the shared helper's signature.
+    # `_content_hash` (not the bare `sha256_file`) so this reads identically
+    # to the `sha256:`-prefixed `provenance.input.content_hash` beside it.
+    provenance["spec"] = {"content_hash": _content_hash(spec_path)}
+
     return {
         "schema_version": SCHEMA_VERSION,
         "file": file,
@@ -1100,5 +1121,5 @@ def run_erc(
         "erc_findings": erc_findings,
         "erc_finding_count": erc_finding_count,
         "status": status,
-        "provenance": build_provenance(pdk=provenance_pdk, input_path=file),
+        "provenance": provenance,
     }

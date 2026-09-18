@@ -164,6 +164,19 @@ is always `null` (no `SOURCES` stamp to read); `provenance.pdk` itself is
 still `null` when `--pdk` was omitted, matching every other verb's
 conditional population.
 
+`klt erc` also carries one **extra** key no other verb emits (issue #2036):
+`provenance.spec`, shaped `{content_hash}` exactly like `input` below and
+likewise `sha256:`-prefixed. An ERC run is validated against *two* inputs,
+not one — the layout (`provenance.input`) and the stackup/vias/nets/ties
+spec file — and its verdict is only meaningful relative to the declarations
+it was run with, so pinning the layout alone leaves a committed report
+re-verifiable only halfway: edit the spec (drop a `ties` entry, re-point a
+`layer`) and the report goes on asserting a verdict for declarations it
+never saw. The top-level `spec` field is the spec's *path*; this is its
+content. It is a verb-local field, not a `build_provenance()` parameter —
+the same choice `klt lvs` made for its own second input
+(`environment.reference_sha256`).
+
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
 waveform trace has neither), so `pdk`/`deck`/`klayout_version` are always

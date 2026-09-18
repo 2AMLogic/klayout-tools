@@ -518,7 +518,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
     "klayout_version": "0.29.8",
     "pdk": { "name": "sky130", "source": "built-in", "version": null },
     "deck": null,
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>" },
+    "spec": { "content_hash": "sha256:<hex>" }
   }
 }
 ```
@@ -606,7 +607,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `status`         | string          | (issue #1968) `"clean"` only when `erc_finding_count == 0` **and** no `gates[].levels[].verdict` is `"violate"`; otherwise `"violations"` — a roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict. |
-| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). |
+| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 
 ## Exit codes
 
