@@ -5,6 +5,8 @@
     "drc.coverage.deck_scope_count": 17,
     "drc.coverage.layers_checked_count": 4,
     "drc.coverage.layers_in_stream_without_rules_count": 2,
+    "drc.coverage.nothing_checked_reasons_count": 0,
+    "drc.coverage.rules_checked_count": 7,
     "drc.coverage.rules_skipped_count": 50,
     "drc.coverage.voltage_domain_warnings_count": 0,
     "drc.dbu_um": 0.001,
