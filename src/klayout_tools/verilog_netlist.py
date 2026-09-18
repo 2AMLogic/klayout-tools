@@ -61,6 +61,30 @@ power connectivity to contradict it. See `docs/cli/lvs.md`'s "No
 power/ground pins" note; power-grid correctness belongs to `klt power`/`klt
 drc`, not here.
 
+**A port-to-port (or port-to-internal-net) `assign` alias is tracked, not
+resolved, here** (issue #2021). `assign <net> = <net>;` is resolved
+transparently for every *instance* connection (an aliased net used as
+`.PORT(NET)` reads back as its ultimate target, above), but a module's own
+declared *port list* is emitted exactly as written -- an aliased port
+becomes its own `.SUBCKT` pin, with nothing inside the body ever
+referencing it (every instance that would have used it was rewritten to the
+alias's target instead). Left alone, that pin reads back from
+`NetlistSpiceReader` as an isolated, disconnected net and `klt lvs` reports
+it as an unmatched pin/net even when the layout is completely correct --
+gate-level Verilog routinely carries a port-to-port alias like `assign
+dbg_uart_byte[i] = rx_byte[i];`, where the layout has exactly one physical
+net for both names. This module only *records* which ports are
+alias-driven (:func:`collect_gate_level_port_aliases`,
+:func:`parse_gate_level_verilog`'s own `port_aliases` field) -- there is no
+SPICE-text way to
+express "two distinct pin names, one net" (repeating a net name across two
+`.SUBCKT` header positions would just drop one of the two declared names).
+`klayout_tools.lvs._apply_gate_level_port_aliases` applies the actual fix,
+joining the alias pin's net onto its canonical target's net in the real
+`kdb.Netlist` object built from this module's SPICE text, after it is read
+back -- see that function's docstring, and `docs/cli/lvs.md`'s
+`topology.reference_port_alias_joined` finding.
+
 **Deliberately narrow, deliberately loud** (mirrors
 `klayout_tools.netlist_normalize`'s own discipline for the sibling
 subckt-call conversion): only the structurally simple constructs a
@@ -446,6 +470,45 @@ def _parse_instance_statement(statement: str) -> _Instance:
     return _Instance(cell=cell, name=inst_name, connections=connections)
 
 
+def _port_aliases(ports: list[str], aliases: dict[str, str]) -> dict[str, str]:
+    """``{<port>: <canonical net>}`` for every ``port`` whose value comes
+    purely from a (possibly chained) ``assign`` -- issue #2021.
+
+    Mirrors :func:`_resolve_alias`'s own chain-following (so a multi-hop
+    ``assign c = b; assign b = a;`` collapses ``c``/``b`` onto ``a`` exactly
+    as instance connections already do), but is applied to the module's
+    *declared port list* instead: :func:`convert_gate_level_verilog` (see
+    its own docstring) never resolves a header port name the way it resolves
+    an instance's connection expression, so a port whose only Verilog-level
+    connection is an ``assign`` is emitted as a ``.SUBCKT`` pin with nothing
+    inside the body ever referencing it -- an isolated, disconnected net
+    once read back by ``NetlistSpiceReader``. That is invisible here (this
+    function only inspects the parsed Verilog); it is
+    ``klayout_tools.lvs._apply_gate_level_port_aliases`` that turns this
+    mapping into an actual fix, joining the alias port's net onto its
+    canonical target's net in the real ``kdb.Netlist`` object
+    ``NetlistSpiceReader`` builds, *after* this module's own text-only
+    conversion.
+
+    Only a ``port`` whose canonical target differs from itself is included
+    (the common case -- most ports have no ``assign`` at all -- returns an
+    empty mapping). The canonical target may itself be another declared
+    port (the issue's own headline case, e.g. ``assign dbg_uart_byte[i] =
+    rx_byte[i];``, two port names for one electrical node) or a purely
+    internal net an instance connects to (the identical mechanical bug, one
+    layer simpler: a port renamed via ``assign`` rather than two ports tied
+    together) -- both are handled identically, since the fix's job either
+    way is "make this port's net the same object as whatever it was really
+    wired to."
+    """
+    result: dict[str, str] = {}
+    for port in ports:
+        canonical = _resolve_alias(port, aliases)
+        if canonical != port:
+            result[port] = canonical
+    return result
+
+
 def _parse_module_chunk(chunk: str) -> _Module:
     statements = _split_top_level(chunk, seps=";")
     if not statements:
@@ -506,12 +569,16 @@ def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
     one per ``module``/``endmodule`` block, in file order.
 
     Each entry is ``{"name": str, "ports": list[str], "instances":
-    list[{"cell": str, "name": str, "connections": dict[str, str]}]}`` --
-    plain JSON-serialisable primitives, mirroring every other pure-library
-    function in this repo. ``ports`` is already bit-expanded (a ``[15:0]``
-    bus port becomes 16 individual entries); ``connections`` values are
-    already alias-resolved (a preceding ``assign`` is transparent to every
-    consumer of this data).
+    list[{"cell": str, "name": str, "connections": dict[str, str]}],
+    "port_aliases": dict[str, str]}`` -- plain JSON-serialisable primitives,
+    mirroring every other pure-library function in this repo. ``ports`` is
+    already bit-expanded (a ``[15:0]`` bus port becomes 16 individual
+    entries); ``connections`` values are already alias-resolved (a preceding
+    ``assign`` is transparent to every consumer of this data).
+    ``port_aliases`` (issue #2021, see :func:`_port_aliases`) is
+    ``{<port>: <canonical net>}`` for every declared port whose only
+    Verilog-level connection is an ``assign`` -- empty for every module that
+    has none, which is most of them.
 
     Raises :class:`VerilogNetlistError` for anything this narrow grammar
     does not model -- see the module docstring's "Deliberately narrow"
@@ -542,9 +609,49 @@ def parse_gate_level_verilog(text: str) -> list[dict[str, object]]:
             for inst in module.instances
         ]
         modules.append(
-            {"name": module.name, "ports": list(module.ports), "instances": instances}
+            {
+                "name": module.name,
+                "ports": list(module.ports),
+                "instances": instances,
+                "port_aliases": _port_aliases(module.ports, module.aliases),
+            }
         )
     return modules
+
+
+def collect_gate_level_port_aliases(text: str) -> dict[str, dict[str, str]]:
+    """``{<module name>: {<port>: <canonical net>}}`` for every module in
+    gate-level Verilog ``text`` that declares at least one port whose only
+    Verilog-level connection is an ``assign`` (issue #2021) -- a module with
+    none is omitted entirely, so the common case (no port aliasing at all)
+    returns ``{}``.
+
+    A thin wrapper around :func:`parse_gate_level_verilog`'s own
+    ``port_aliases`` field, re-parsing the same ``text``
+    :func:`convert_gate_level_verilog` already parsed once for the SPICE
+    conversion -- kept as a separate entry point (rather than folded into
+    that function's return value) so the SPICE-text conversion's own return
+    type/signature stays exactly what every existing caller/test already
+    depends on. The re-parse is cheap (a `klt place-and-route` reference is
+    a single flat module, never large enough for this to matter) and pure
+    (no side effects, safe to call any number of times against the same
+    text).
+
+    ``klayout_tools.lvs._read_reference_netlist`` calls this once, right
+    after its own (already-successful) :func:`convert_gate_level_verilog`
+    call, and hands the result to ``run_lvs`` as an *output* parameter
+    (mirroring ``placeholder_value_classes``'s own pattern), which
+    ``klayout_tools.lvs._apply_gate_level_port_aliases`` then applies to the
+    real ``kdb.Netlist`` object built from that SPICE text -- the module
+    docstring's "Deliberately narrow, deliberately loud" section explains why
+    the fix cannot live in the SPICE text itself.
+    """
+    modules = parse_gate_level_verilog(text)
+    return {
+        module["name"]: dict(module["port_aliases"])  # type: ignore[arg-type]
+        for module in modules
+        if module["port_aliases"]
+    }
 
 
 #: Matches a `.subckt`/`.SUBCKT` header line (SPICE directives are

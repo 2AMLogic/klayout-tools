@@ -11372,6 +11372,7 @@ def test_cli_lvs_no_request_no_check_is_a_usage_error():
 
 from klayout_tools.verilog_netlist import (  # noqa: E402
     VerilogNetlistError,
+    collect_gate_level_port_aliases,
     convert_gate_level_verilog,
     parse_gate_level_verilog,
     parse_subckt_pin_orders,
@@ -11594,6 +11595,95 @@ def test_parse_gate_level_verilog_resolves_assign_alias():
     """
     modules = parse_gate_level_verilog(text)
     assert modules[0]["instances"][0]["connections"]["A"] == "a"
+
+
+def test_parse_gate_level_verilog_port_to_port_assign_alias():
+    """Issue #2021: a port-to-port `assign` (e.g. `assign dbg_uart_byte[i] =
+    rx_byte[i];`) is recorded in `port_aliases` -- two declared port names for
+    one electrical node -- even though `instances`' own connections are
+    unaffected (neither port is used by any instance directly)."""
+    text = """
+    module top(rx_byte, dbg_uart_byte, clk, y);
+      input rx_byte;
+      output dbg_uart_byte;
+      input clk;
+      output y;
+      assign dbg_uart_byte = rx_byte;
+      cellx u0 (.A(rx_byte), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["port_aliases"] == {"dbg_uart_byte": "rx_byte"}
+    assert modules[0]["instances"][0]["connections"]["A"] == "rx_byte"
+
+
+def test_parse_gate_level_verilog_port_to_internal_net_assign_alias():
+    """The same mechanical bug, one layer simpler: a single port whose only
+    connection is an `assign` to a purely internal (non-port) net -- also
+    recorded in `port_aliases`, not just the port-to-port case."""
+    text = """
+    module top(a, y_alias);
+      input a;
+      output y_alias;
+      assign y_alias = y;
+      cellx u0 (.A(a), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["port_aliases"] == {"y_alias": "y"}
+
+
+def test_parse_gate_level_verilog_port_alias_multi_hop_chain():
+    """A multi-hop `assign` chain (`assign c = b; assign b = a;`) resolves
+    all the way to the ultimate target, matching `_resolve_alias`'s own
+    chain-following for instance connections."""
+    text = """
+    module top(a, b, c);
+      input a;
+      output b;
+      output c;
+      assign c = b;
+      assign b = a;
+      cellx u0 (.A(a), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["port_aliases"] == {"b": "a", "c": "a"}
+
+
+def test_parse_gate_level_verilog_no_port_aliases_is_empty():
+    """The common case -- no `assign` touching any declared port -- leaves
+    `port_aliases` empty, not merely absent."""
+    text = """
+    module top(a, y);
+      input a;
+      output y;
+      cellx u0 (.A(a), .Y(y));
+    endmodule
+    """
+    modules = parse_gate_level_verilog(text)
+    assert modules[0]["port_aliases"] == {}
+
+
+def test_collect_gate_level_port_aliases_omits_modules_with_none():
+    """`collect_gate_level_port_aliases` only names modules that actually
+    have at least one aliased port -- the common (no aliasing) module is
+    omitted entirely, not included with an empty dict."""
+    text = """
+    module aliased(a, b);
+      input a;
+      output b;
+      assign b = a;
+      cellx u0 (.A(a), .Y(b));
+    endmodule
+
+    module plain(a, y);
+      input a;
+      output y;
+      cellx u0 (.A(a), .Y(y));
+    endmodule
+    """
+    assert collect_gate_level_port_aliases(text) == {"aliased": {"b": "a"}}
 
 
 def test_parse_gate_level_verilog_resolves_bit_constants():
@@ -12530,6 +12620,130 @@ def test_run_lvs_gate_level_verilog_disjoint_pin_stray_cell_still_reported(tmp_p
     assert "MYLIB__DFXTP_1" not in pruned["description"]
 
 
+#: `_GATE_LEVEL_REFERENCE_VERILOG` extended with a port-to-port `assign`
+#: alias (issue #2021): `mid_alias` is a second declared top-level port for
+#: the same node as `mid` -- the headline scenario the issue describes
+#: (`assign dbg_uart_byte[i] = rx_byte[i];`), here unindexed for brevity.
+_GATE_LEVEL_REFERENCE_VERILOG_PORT_ALIAS = """
+module top(in, mid, out, mid_alias);
+  input in;
+  output mid;
+  output out;
+  output mid_alias;
+  assign mid_alias = mid;
+  mylib__inv_1 u1 (.A(in), .Y(mid));
+  mylib__buf_1 u2 (.A(mid), .Y(out));
+endmodule
+"""
+
+
+def test_run_lvs_gate_level_verilog_port_alias_reports_disclosure_and_matches(
+    tmp_path,
+):
+    """Issue #2021: a reference-side port-to-port `assign` alias
+    (`mid_alias` aliasing `mid`) no longer leaves `mid_alias` as its own
+    isolated, disconnected net -- it is joined onto `mid`'s net before
+    comparing, disclosed via a `topology.reference_port_alias_joined`
+    `severity: "warning"` entry (never an error, never flips `status`), and
+    `net_correspondence` shows both names resolving to the layout's one
+    physical `mid` net."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(
+        tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG_PORT_ALIAS
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    assert report["category_counts"].get("topology.reference_port_alias_joined") == 1
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == "topology.reference_port_alias_joined"
+    ]
+    assert entry["severity"] == "warning"
+    assert entry["details"] == {
+        "canonical_net": "mid",
+        "aliased_ports": ["mid_alias"],
+    }
+    assert entry["circuit"] == {"layout": None, "reference": "top"}
+    # The reference declares one more pin than the layout (the alias), but
+    # every pin still matches -- the aliased pin correctly folds onto the
+    # layout's one physical `mid` net, not left dangling.
+    assert report["counts"]["pins"] == {"layout": 3, "reference": 4, "matched": 8}
+
+
+def test_run_lvs_gate_level_verilog_port_alias_does_not_absorb_real_defect(tmp_path):
+    """Issue #2021's own acceptance criterion: a genuinely broken connection
+    wholly unrelated to the alias (`X2`'s pins swapped) must still be
+    reported as a real mismatch, alongside -- not instead of -- the harmless
+    alias disclosure. The fix must never silently absorb a real defect."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_BROKEN)
+    reference_path = _write(
+        tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG_PORT_ALIAS
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"].get("topology", 0) >= 1
+    # ...and the harmless alias is still disclosed, not conflated with the
+    # real defect or dropped because the overall status is "mismatch".
+    assert report["category_counts"].get("topology.reference_port_alias_joined") == 1
+
+
+def test_run_lvs_gate_level_verilog_no_port_alias_leaves_disclosure_empty(tmp_path):
+    """Regression guard: the existing, non-aliased
+    `_GATE_LEVEL_REFERENCE_VERILOG` fixture must never emit the new
+    disclosure category -- it has no `assign`-aliased port at all."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    assert "topology.reference_port_alias_joined" not in report["category_counts"]
+
+
 def test_prune_power_only_layout_circuits_never_prunes_keep_name(tmp_path):
     """`keep_name` (the caller's own `layout.top`) is never pruned, even
     when it does classify as power-only -- pruning it would turn a
@@ -12565,6 +12779,101 @@ XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1
     assert "MYLIB__TAPVPWRVGND_1" in warning["description"]
     remaining = {circuit.name for circuit in layout_netlist.each_circuit()}
     assert remaining == {"TOP"}
+
+
+def test_apply_gate_level_port_aliases_joins_pin_onto_canonical_net(tmp_path):
+    """Issue #2021, unit-level: given the parsed `port_aliases` mapping,
+    `_apply_gate_level_port_aliases` moves the alias pin's declared net onto
+    its canonical target's net -- both pins stay individually declared and
+    named (`Circuit.pin_count()` unchanged), now pointing at the *same*
+    net, and the alias's own original net is purged (it has zero terminals/
+    pins/subcircuit pins once its pin is moved off it)."""
+    import klayout.db as kdb
+
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.subckt top in rx_byte dbg_uart_byte
+X1 in rx_byte mylib__inv_1
+.ends
+.subckt mylib__inv_1 A Y
+.ends
+""",
+    )
+    reference_netlist = kdb.Netlist()
+    reference_netlist.read(reference_path, kdb.NetlistSpiceReader())
+    top = reference_netlist.circuit_by_name("TOP")
+    assert top.pin_count() == 3
+
+    entries = lvs._apply_gate_level_port_aliases(
+        {"top": {"dbg_uart_byte": "rx_byte"}}, reference_netlist
+    )
+
+    assert len(entries) == 1
+    assert entries[0]["category"] == lvs.CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED
+    assert entries[0]["severity"] == "warning"
+    assert entries[0]["details"] == {
+        "canonical_net": "rx_byte",
+        "aliased_ports": ["dbg_uart_byte"],
+    }
+
+    # Both declared pins survive, distinctly named, now on the same net --
+    # checked from the net's own side (`each_pin()`) rather than by comparing
+    # two `Circuit.net_for_pin()` return values with `==`/`is`, which is not
+    # a reliable identity check across separate SWIG-wrapped accessor calls.
+    assert top.pin_count() == 3
+    pin_names = {pin.name() for pin in top.each_pin()}
+    assert pin_names == {"IN", "RX_BYTE", "DBG_UART_BYTE"}
+    rx_net = top.net_by_name("RX_BYTE")
+    assert rx_net.pin_count() == 2
+    assert {pinref.pin().name() for pinref in rx_net.each_pin()} == {
+        "RX_BYTE",
+        "DBG_UART_BYTE",
+    }
+    # The alias's own original (now-empty) net was purged.
+    assert top.net_by_name("DBG_UART_BYTE") is None
+
+
+def test_apply_gate_level_port_aliases_multi_hop_chain_joins_every_alias(tmp_path):
+    """A 3-way alias group (`assign c = b; assign b = a;`, all declared
+    ports) joins every alias port onto the *same* surviving net in one pass,
+    reported as a single disclosure entry naming both aliases."""
+    import klayout.db as kdb
+
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        """
+.subckt top a b c
+X1 a d mylib__inv_1
+.ends
+.subckt mylib__inv_1 A Y
+.ends
+""",
+    )
+    reference_netlist = kdb.Netlist()
+    reference_netlist.read(reference_path, kdb.NetlistSpiceReader())
+    top = reference_netlist.circuit_by_name("TOP")
+
+    entries = lvs._apply_gate_level_port_aliases(
+        {"top": {"b": "a", "c": "a"}}, reference_netlist
+    )
+
+    assert len(entries) == 1
+    assert entries[0]["details"] == {
+        "canonical_net": "a",
+        "aliased_ports": ["b", "c"],
+    }
+    net_a = top.net_by_name("A")
+    assert net_a.pin_count() == 3
+    assert {pinref.pin().name() for pinref in net_a.each_pin()} == {"A", "B", "C"}
+    assert top.net_by_name("B") is None
+    assert top.net_by_name("C") is None
+
+
+def test_apply_gate_level_port_aliases_empty_mapping_is_a_no_op():
+    """The common case -- no module in `port_aliases` -- returns no
+    disclosure entries and never touches `reference_netlist`."""
+    assert lvs._apply_gate_level_port_aliases({}, object()) == []
 
 
 def test_run_lvs_power_only_pruning_is_scoped_to_gate_level_verilog(tmp_path):

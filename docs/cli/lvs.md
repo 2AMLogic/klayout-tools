@@ -609,6 +609,22 @@ comparing, disclosing what it removed as a `severity: "warning"`,
 `topology` mismatch. You do not need to exclude these cells from
 `--abstract-cells` yourself.
 
+**A reference port declared only via `assign` is joined onto its target's
+net automatically** (issue #2021) — gate-level Verilog routinely carries a
+port-to-port alias like `assign dbg_uart_byte[i] = rx_byte[i];` (e.g. a
+debug/monitor tap port for a "real" signal port), and the conversion above
+resolves an `assign` alias for every *instance* connection but never for a
+module's own declared port list, so the aliased port would otherwise read
+back as its own isolated, disconnected reference net even though the layout
+has exactly one physical net for both names. `klt lvs` joins the alias
+port's net onto its canonical target's net before comparing, disclosing
+what it joined as a `severity: "warning"`, `category:
+"topology.reference_port_alias_joined"` entry — see
+"`topology.reference_port_alias_joined`" below — rather than reporting a
+false `pin.unmatched`/`net.unmatched` mismatch. A genuinely unconnected or
+differently-wired reference port is untouched and still reports as a real
+mismatch.
+
 What that costs is real and must not be misread: **a power-net defect is
 invisible to `status`**. A standard cell whose `VGND` pin is wired to
 the power rail in the layout still reports `status: "match"`, because the
@@ -1243,8 +1259,8 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.placeholder_value`, `device.property`, `device.parameter_tolerated`, `device.parameter_excluded`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `topology.power_only_pruned`, `hints.rejected`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.placeholder_value` entry (see below) is always `"warning"` for the same reason — it discloses that a `reference.form: "subckt-call"` conversion's placeholder `0` resistance/capacitance was excluded from the compare, so it never changes `status` either. Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `device.parameter_excluded` entry (see below) is always `"warning"` for the same reason — it discloses that `options.compare_parameters` removed a parameter from a device class's compare entirely, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.placeholder_value`, `device.property`, `device.parameter_tolerated`, `device.parameter_excluded`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `topology.power_only_pruned`, `topology.reference_port_alias_joined`, `hints.rejected`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.placeholder_value` entry (see below) is always `"warning"` for the same reason — it discloses that a `reference.form: "subckt-call"` conversion's placeholder `0` resistance/capacitance was excluded from the compare, so it never changes `status` either. Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `device.parameter_excluded` entry (see below) is always `"warning"` for the same reason — it discloses that `options.compare_parameters` removed a parameter from a device class's compare entirely, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `topology.reference_port_alias_joined` entry (see below) is likewise always `"warning"` — it discloses that a reference port declared only via a plain `assign` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`) had its net joined onto its canonical target's net before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
@@ -2109,6 +2125,49 @@ lines, from the extracted SPICE netlist before calling `klt lvs`) —
 implemented natively here, and derived from the library rather than from a
 fixed pin-name set, instead of requiring a caller to pre-filter their
 netlist.
+
+#### `topology.reference_port_alias_joined`: a reference port declared only via `assign` was joined onto its target's net
+
+Only possible when `reference.form: "gate-level-verilog"` (issue #2021), and
+only emitted when the reference declares a port whose only Verilog-level
+connection is a plain `assign <port> = <net>;` alias — routine output of
+synthesis whenever a module port is driven directly by another net or port,
+e.g. `assign dbg_uart_byte[i] = rx_byte[i];` (a debug/monitor tap port
+carrying the same node as a "real" signal port).
+
+**The gap this closes.** The gate-level-Verilog-to-SPICE conversion resolves
+an `assign` alias transparently for every *instance* connection — a net
+used as `.PORT(<aliased net>)` reads back as its ultimate target — but never
+for a module's own declared port list. An aliased port is therefore emitted
+as its own `.SUBCKT` pin, with nothing inside the body ever referencing it
+(every instance that would have used it was rewritten to the alias's target
+instead), which reads back as an isolated, disconnected reference net even
+though the layout has exactly one physical net serving both names. Before
+this fix, that could surface as a false `pin.unmatched`/`net.unmatched`
+finding on a design that is electrically correct — the same "making the
+layout more correct makes the report worse" failure shape issue #1994
+describes, one layer up in the comparison rather than in extraction (that
+issue's own tie-cell/VPWR half of the same investigation).
+
+**The fix.** `klt lvs` joins the alias port's net onto its canonical
+target's net (following a multi-hop `assign` chain to its ultimate target,
+same as the instance-connection resolution above) before the compare runs —
+both port names stay individually declared, now pointing at the same net,
+matching a correctly-wired layout's own "one net, two named pins" shape.
+Only a port whose value comes purely from an `assign` is ever joined; a
+genuinely unconnected or differently-wired reference port is untouched and
+still reports as a real mismatch.
+
+`severity` is always `"warning"` — this is a request-side transform applied
+to the reference before the compare, not a `NetlistComparer` finding, so it
+never changes `status` on its own (a request whose only finding is this
+entry reports `status: "match"` with a nonzero `mismatch_count`). `side` is
+always `"reference"`. `circuit.reference` names the module the alias was
+declared in; `description` and `details.canonical_net`/
+`details.aliased_ports` name the target net and every alias port folded
+into it. Present for the same reason `topology.power_only_pruned` is: a
+`"match"` reached this way is never silently indistinguishable from one
+reached against the reference's original, unresolved port list.
 
 #### `combine_devices_per_circuit.unmatched`: an `options.combine_devices_per_circuit` glob matched no circuit
 

@@ -196,6 +196,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   sky130 deck is now 57 rules (was 52), and `provenance.deck.content_hash`
   changes accordingly. See `docs/cli/drc.md`'s "Coverage" section for the
   full per-kind breakdown.
+- **Fixed**: `klt lvs` no longer reports a `reference.form:
+  "gate-level-verilog"` reference's `assign`-aliased port as a false
+  mismatch (issue #2021, the other half of #1994's 77 false `klt lvs`
+  errors on the same design). Gate-level Verilog routinely carries a
+  port-to-port `assign` alias -- e.g. `assign dbg_uart_byte[i] =
+  rx_byte[i];`, two declared port names for one electrical node -- but the
+  conversion to SPICE resolves an `assign` alias transparently for every
+  *instance* connection, never for a module's own declared port list: the
+  aliased port was emitted as its own `.SUBCKT` pin with nothing inside the
+  body ever referencing it, reading back as an isolated, disconnected
+  reference net even though the layout has exactly one physical net for
+  both names. `klt lvs` now joins the alias port's net onto its canonical
+  target's net (following a multi-hop `assign` chain to its ultimate
+  target, same as the existing instance-connection resolution) before the
+  compare runs -- both port names stay individually declared, now on the
+  same net, matching a correctly-wired layout's own "one net, two named
+  pins" shape. Disclosed via a new, always-`"warning"`
+  `mismatches[].category: "topology.reference_port_alias_joined"` entry
+  (never flips `status`) naming the joined net and every alias port folded
+  into it -- see [`docs/cli/lvs.md`](docs/cli/lvs.md)'s
+  "`topology.reference_port_alias_joined`" section. Only a port whose value
+  comes purely from an `assign` is ever joined; a genuinely unconnected or
+  differently-wired reference port is untouched and still reports as a
+  real mismatch.
 - **Fixed**: `klt erc`'s per-gate `antenna_verdict` and `klt power`'s overall
   `em_verdict.status` now report a new `"pass_partial"` value (issue #1997)
   instead of silently reading as a plain `"pass"` when their own coverage
