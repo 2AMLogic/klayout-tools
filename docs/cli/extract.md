@@ -5373,6 +5373,22 @@ written to stdout. No Python traceback is printed.
   { "schema_version": 1, "error": { "command": "extract", "message": "unknown deck 'nope' (available: gf180mcu, sky130)" } }
   ```
 
+## Cross-validation against magic (independent oracle)
+
+`klt extract`'s device list, device parameters and connectivity are
+cross-checked against **magic**'s `extract` -> `ext2spice` flow — a separate
+extractor with its own open_pdks device recognition (issue #2014, pairing #1
+of tracking issue #2007). On the same GDS bytes the two agree exactly, on both
+sky130 and gf180mcu: device count, per-class counts, every
+`w`/`l`/`as`/`ad`/`ps`/`pd` value, drain/gate/source nets, and net count —
+and they react identically to seeded defects (an input-to-output short, a set
+of deleted `licon1` cuts). `tests/test_extract_magic_oracle.py` is
+real-binary-gated and skips without `magic`;
+`.github/workflows/magic-oracle.yml` runs it for real on demand. Parasitic
+extraction (`--parasitics`) is *not* covered by that pairing. See
+[`docs/design/magic-oracle.md`](../design/magic-oracle.md) for the
+methodology, the measured results, and the declared naming/scope differences.
+
 ## Out of scope
 
 First-order lumped RC parasitics are available behind `--parasitics` (see

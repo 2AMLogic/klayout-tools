@@ -31,6 +31,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   and *bound to the layout DRC ran on*: `provenance_consistency` refuses a
   manifest whose `drc` and `lvs` envelopes pin different layout hashes. No
   JSON shape change (no field added, renamed, removed or nested).
+- **Added**: a magic-backed **cross-validation oracle** for `klt drc` and
+  `klt extract` (issue #2014, pairing #1 of tracking issue #2007). Both verbs
+  were backed by KLayout alone — `tests/test_lvs.py`'s netgen tier
+  cross-validates LVS *comparison*, but both of its comparators are fed by
+  KLayout's own extraction, so extraction and DRC themselves had no
+  independent check at all. `tests/test_drc_magic_oracle.py` and
+  `tests/test_extract_magic_oracle.py` now run
+  [magic](http://opencircuitdesign.com/magic/) — a separate geometry engine
+  with its own open_pdks sky130/gf180mcu decks — over the *same* GDS bytes and
+  compare verdicts: zero violations on a clean sky130/gf180mcu corpus cell,
+  and agreement on three seeded defects (a 0.09 µm met1 spacing violation, an
+  input-to-output short, 11 deleted `licon1` cuts). Extraction agreement is
+  exact — device count, per-class counts, every `w`/`l`/`as`/`ad`/`ps`/`pd`
+  parameter, drain/gate/source connectivity, and net count all match on both
+  PDKs; DRC is compared as zero/non-zero plus rule identity and location,
+  because the two engines paint a spacing failure with different granularity.
+  Both modules are real-binary-gated and skip cleanly (with a specific reason)
+  when `magic` or a magic technology file is absent, so no existing CI leg
+  changes. New provisioning: `scripts/install-magic.sh` (pinned, checksummed
+  magic 8.3.683 built `--without-x`; the distro 8.3.105 is rejected by decks
+  that declare `requires magic-8.3.411`), `scripts/fetch-magic-tech.sh`
+  (generates `sky130A`/`gf180mcuC` decks from pinned open_pdks source rather
+  than requiring a multi-GB PDK install), and a `workflow_dispatch`
+  `magic-oracle.yml` job that provisions both and fails if the tests skip.
+  No `klt` runtime behaviour or JSON shape changes — magic stays an oracle,
+  never a runtime dependency. Methodology, measured results, the declared
+  shared surface and the unsupported cases: `docs/design/magic-oracle.md`.
 - **Added**: `klt signoff` now reports the cited DRC envelope's `coverage`
   block (issue #2002). `docs/design-evidence-tiers.md` item 3 requires a claim
   to enumerate its deck's coverage gaps and, since issue #1982, names the

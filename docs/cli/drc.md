@@ -1659,6 +1659,23 @@ Both modes reuse the same 0/3 split a normal run uses: `0` when `status` is
 unparseable `<report.json>` exits `1` with a clean error message, same as
 any other application-level failure.
 
+## Cross-validation against magic (independent oracle)
+
+This deck's verdicts are cross-checked against **magic**, a separate geometry
+engine with its own independently transcribed open_pdks sky130/gf180mcu rule
+decks — issue #2014, pairing #1 of tracking issue #2007. Both engines read the
+same GDS bytes; `tests/test_drc_magic_oracle.py` asserts they agree on a clean
+corpus cell and on a seeded 0.09 µm met1 spacing violation (same rule, same
+place). It is real-binary-gated and skips without `magic` installed;
+`.github/workflows/magic-oracle.yml` runs it for real on demand.
+
+What that does **not** prove is as important as what it does: `klt`'s deck is
+a curated subset (see "Coverage" above), so the claim is one-directional —
+everything `klt drc` flags, magic flags too. `coverage` stays the contract for
+what was never checked. See
+[`docs/design/magic-oracle.md`](../design/magic-oracle.md) for the full
+methodology, the measured results, and the declared shared surface.
+
 ## Exit codes
 
 | Code | Meaning                                                     |
