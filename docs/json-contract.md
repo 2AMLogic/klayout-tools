@@ -427,6 +427,73 @@ convention).
   registry — it cannot be declared ahead of time because `klt` does not own
   the name.
 
+## Output-artifact path fields: envelope vs. plain string (issue #2073)
+
+`klt` reports an output-artifact path (a file it just wrote — a netlist, a
+DEF, a GDS, a script) in one of two shapes today, and the two coexist
+deliberately rather than by oversight:
+
+- **`{path, scope}` envelope** — `{"path": "<repo-relative POSIX path>",
+  "scope": "repo"}` when the artifact lives inside the invoking repo,
+  `{"path": null, "scope": "external"}` when it does not, `{"path": null,
+  "scope": "absent"}` when the field has no artifact to report. Built by
+  `env_provenance.repo_relative_path()` (`src/klayout_tools/env_provenance.py`)
+  — see that module's docstring for the full rationale (a repo-relative path
+  is committable evidence; a machine-specific absolute path is not).
+  `scope` is not decoration: the resolution rule differs per value — a
+  `"repo"` path must be joined to *the invoking repo's* root (the cwd `klt`
+  was run from), `"external"`/`"absent"` carry no usable path at all.
+- **Plain string** — a bare absolute filesystem path (or `null` before the
+  artifact exists), with no `scope` alongside it. The historical shape every
+  path field used before the envelope existed.
+
+**Resolved disposition (issue #2073): document the split, do not force a
+migration.** A consumer chaining stages together needs to know *which* shape
+a given field uses; it does not need every field to use the *same* shape.
+Migrating the "plain string" column below to the envelope would touch 12
+modules' `SCHEMA_VERSION` at once for fields whose consumers (`klt sta`,
+`klt lvs`, downstream tooling) already parse them as plain strings — a much
+larger blast radius and test-churn cost than documenting the existing,
+stable split. The table below is the durable fix: it is the one place a
+consumer (or a future migration) checks to know a field's shape without
+probing the value's Python type at runtime.
+
+**`{path, scope}` envelope fields**, as of `712a0219` (2026-09-18):
+
+| Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
+|---|---|---|---|
+| `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,schematic_netlist}` | 2 | #1261 |
+| `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
+| `size` | `models_lib` | 2 | #1274 |
+
+**Plain-string fields** — intentionally unchanged by this issue:
+
+| Command | Field(s) | `SCHEMA_VERSION` |
+|---|---|---|
+| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` | 1 |
+| `sta` | `def_path`, `verilog_path`, `spef_path` | 1 |
+| `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
+| `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 3 |
+| `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
+| `gen` | `gds_path` | 1 |
+| `gen-compose` | `gds_path` (top-level and per-block) | 1 |
+| `draw` | `gds_path` | 1 |
+| `layout-plan-execute` | `gds_path` | 1 |
+| `lef-abstract` | `output` | 1 |
+| `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
+| `functional-verification` | `info_path`, `log_path`, `options.trace.path` | 1 |
+| `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
+
+A field moving from this table to the envelope table above is a breaking
+change to that field (a retype, `dict` in place of `str`) and earns a
+`SCHEMA_VERSION` bump on its own module, following the `synthesize.py:246` /
+`pex.py:160` / `sim.py:127` precedent — the same rule "Design: additive
+envelope, not a wrapping envelope" states for the top-level envelope applies
+per-field here too. There is no tool-wide signal for "which shape does field
+X use today" beyond this table; re-check it (and this table's own `git log`)
+before writing a consumer that assumes one shape tool-wide.
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written

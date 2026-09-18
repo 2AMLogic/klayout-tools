@@ -1741,6 +1741,14 @@ unsure).
 }
 ```
 
+**Path field shape (issue #2073).** `def_path`/`unrouted_def_path`/
+`gds_path`/`verilog_path` below (and the nested `spef_sta.{spef_path,sdf_path}`)
+are plain absolute-path strings, not the `{path, scope}` envelope
+`klt synthesize`/`klt pex`/`klt sim`/`klt size` report their own output
+paths as. This is a deliberate, documented split, not an oversight —
+see `docs/json-contract.md`'s "Output-artifact path fields: envelope vs.
+plain string" for the full enumeration and rationale.
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
