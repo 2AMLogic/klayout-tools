@@ -1177,6 +1177,23 @@ LVS_MATCH_SIGNAL_ONLY_CORRESPONDENCE_ENVELOPE = {
     ],
 }
 
+#: PR #2057 review follow-up: a `gate-level-verilog` reference that *does*
+#: declare explicit power ports, so its supplies pair in
+#: `net_correspondence` exactly like `LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE`
+#: -- but the caller explicitly disabled the power/ground check
+#: (`options.power_connectivity: false`). Pairing alone must not be enough
+#: to satisfy item 11's no-PAR branch: without the check having actually
+#: run, nothing verified the supplies landed on the right nets.
+LVS_MATCH_SUPPLY_CORRESPONDENCE_DISABLED_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_DISABLED_ENVELOPE,
+    "options": {"power_connectivity": False},
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": "VGND", "pin": True},
+        {"layout": "VPWR", "reference": "VPWR", "pin": True},
+    ],
+}
+
 DRC_ERROR_ENVELOPE = {
     "schema_version": 1,
     "error": {"command": "drc", "message": "file not found: missing.gds"},
@@ -5997,6 +6014,34 @@ def test_item_11_full_custom_digital_is_met_through_the_analog_artifacts(tmp_pat
     assert item["status"] == "met"
     assert item["citation"]["power_delivery"]["pdn"] is False
     assert item["citation"]["power_delivery"]["partition_kind"] == "digital"
+
+
+def test_item_11_rejects_supply_correspondence_when_power_connectivity_disabled(
+    tmp_path,
+):
+    """PR #2057 review follow-up: a `gate-level-verilog` reference can
+    declare explicit power ports, so its supplies pair in
+    `net_correspondence` even though the caller disabled the power/ground
+    check (`options.power_connectivity: false`). Net-correspondence pairing
+    alone must not satisfy the no-PAR branch -- the check never actually
+    ran, so nothing verified the supplies landed on the right nets."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    lvs_envelope=LVS_MATCH_SUPPLY_CORRESPONDENCE_DISABLED_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_supply_unproven"
 
 
 @pytest.mark.parametrize(

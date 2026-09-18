@@ -411,8 +411,8 @@ item 11 above.** The structural question is now graded directly, per block
 kind, from a `klt erc` supply-spec run (plus, for an RTL-flow digital block,
 the `klt place-and-route` response's own `power` block and item 4's
 `power_connectivity` verdict). Item 4 continues to mean exactly what it
-always meant; item 11 is what a claim now rests a "the supply reaches what
-it powers" statement on.
+always meant; item 11 is what a claim's "the supply reaches what it powers"
+statement now rests on.
 
 `klt signoff` (issue #1321, Phase 2 of epic #712) recognises a `klt power`
 JSON envelope as a `"power"`-kind check **in envelope-aggregation mode

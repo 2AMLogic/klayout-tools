@@ -3527,20 +3527,28 @@ def _lvs_reference_carries_supplies(
     supply nets**, i.e. that the supplies were part of the compare rather
     than absent from it (T1 item 11's analog/full-custom branch).
 
-    True only when every declared supply appears in the report's own
-    ``net_correspondence`` (``docs/cli/lvs.md``) paired to a non-``None``
-    reference-side net. A SPICE reference satisfies this by construction --
+    True only when ``options.power_connectivity`` was not explicitly
+    disabled (``False``) *and* every declared supply appears in the report's
+    own ``net_correspondence`` (``docs/cli/lvs.md``) paired to a non-``None``
+    reference-side net. A SPICE reference satisfies both by construction --
     it declares its own supply nets and pins, which is exactly why item 4's
-    ``power_connectivity`` reports ``"unchecked"`` for it. A signal-only
-    ``gate-level-verilog`` reference does not: its supplies exist on the
-    layout side alone, so they never pair, and such a block must instead
-    prove item 11 through the PDN branch (the `klt place-and-route` response
-    plus ``power_connectivity``).
+    ``power_connectivity`` reports ``"unchecked"`` for it, and it has no
+    reason to ever disable the option. A signal-only ``gate-level-verilog``
+    reference does not: its supplies normally exist on the layout side
+    alone, so they never pair, and such a block must instead prove item 11
+    through the PDN branch (the `klt place-and-route` response plus
+    ``power_connectivity``). Rejecting an explicit ``options.power_connectivity:
+    false`` closes the remaining gap -- a gate-level-verilog reference that
+    *does* declare explicit power ports could otherwise pair here even
+    though the caller turned the power/ground check off, letting a block
+    reach ``"met"`` with power delivery never actually verified.
 
     Name comparison is case-insensitive, matching how `klt lvs` itself
     matches power pin/net names (``NetlistSpiceReader`` upper-cases what it
     reads -- see ``docs/cli/lvs.md``'s ``options.power_connectivity``).
     """
+    if (envelope.get("options") or {}).get("power_connectivity") is False:
+        return False
     paired: set[str] = set()
     for row in envelope.get("net_correspondence") or []:
         if not isinstance(row, dict):
