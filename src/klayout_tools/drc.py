@@ -105,7 +105,12 @@ _ANTENNA_CHECKS = {"antenna"}
 # see that class's docstring for each one's derivation. Validated per rule
 # (rather than assumed) so a deck typo fails loudly with the rule id instead
 # of silently falling through to the default derivation.
-_DERIVED_LAYER_MODES = {"sized_intersection", "overlapping", "not_interacting"}
+_DERIVED_LAYER_MODES = {
+    "sized_intersection",
+    "overlapping",
+    "not_interacting",
+    "holes",
+}
 
 # `run_drc()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1847, adopting the #247 registry beyond its
@@ -418,11 +423,13 @@ def run_drc(
             deck_layer_tuples.add(rule.other_layer)
         if rule.derived_layer is not None:
             # `rule.layer` is only the derived rule's *reporting* identity
-            # (see DerivedLayer's docstring) -- the two layers actually read
+            # (see DerivedLayer's docstring) -- the layer(s) actually read
             # to compute the checked region are these, independent of
-            # whether either happens to equal `rule.layer`.
+            # whether either happens to equal `rule.layer`. `"holes"` mode
+            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
             deck_layer_tuples.add(rule.derived_layer.base)
-            deck_layer_tuples.add(rule.derived_layer.intersect_with)
+            if rule.derived_layer.intersect_with is not None:
+                deck_layer_tuples.add(rule.derived_layer.intersect_with)
 
     # Reuse layers.py's existing per-layer enumeration (used today by
     # `klt layers`) for stream-layer enumeration, rather than a second
@@ -453,14 +460,21 @@ def run_drc(
         if rule.derived_layer is not None:
             _validate_derived_layer(rule)
             base_index = layout.find_layer(*rule.derived_layer.base)
-            intersect_index = layout.find_layer(*rule.derived_layer.intersect_with)
+            intersect_index = (
+                layout.find_layer(*rule.derived_layer.intersect_with)
+                if rule.derived_layer.intersect_with is not None
+                else None
+            )
             if base_index is None:
                 # The derived region's own source shapes are absent from this
                 # stream -> no violations possible in any mode, skip like any
                 # other missing-layer rule.
                 rules_skipped.append(rule.id)
                 continue
-            if intersect_index is None and rule.derived_layer.mode != "not_interacting":
+            if intersect_index is None and rule.derived_layer.mode not in (
+                "not_interacting",
+                "holes",
+            ):
                 # The second input layer is absent -> both the
                 # "sized_intersection" and "overlapping" derivations yield an
                 # empty region, so there is nothing to check. "not_interacting"
@@ -469,6 +483,10 @@ def run_drc(
                 # that rule must still run against the full base region (see
                 # `DerivedLayer`'s docstring) -- the ordinary thin-oxide-only
                 # layout, which must stay checked against the unmarked column.
+                # "holes" is the other exception: it never reads a second
+                # layer at all (`intersect_with` is always `None` for it), so
+                # `intersect_index` being `None` here is expected, not a
+                # missing-layer condition.
                 rules_skipped.append(rule.id)
                 continue
         else:
@@ -506,7 +524,18 @@ def run_drc(
                     else kdb.Region()
                 )
                 size_dbu = round(rule.derived_layer.sized_by_um / layout.dbu)
-                if rule.derived_layer.mode in ("overlapping", "not_interacting"):
+                if rule.derived_layer.mode == "holes":
+                    # Interior voids of the merged `base` region (#1976) --
+                    # `intersect_with`/`sized_by_um` are unused for this mode.
+                    # Explicit `.merged()` before `.holes()` documents the
+                    # requirement even though `Region.holes()` already applies
+                    # merged semantics itself -- a hole formed by several
+                    # abutting drawn rectangles (the common GDS idiom for a
+                    # slotted plate) is only visible once merged. A `base`
+                    # region with no holes at all derives an empty region,
+                    # which is simply nothing to report -- not an error.
+                    region = base_region.merged().holes()
+                elif rule.derived_layer.mode in ("overlapping", "not_interacting"):
                     # Marker-scoped whole-polygon selection (#1110): here
                     # `sized_by_um` is a guard band around the *marker*
                     # (`intersect_with`), not around `base`.
@@ -1193,7 +1222,8 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
     layers = set()
     if rule.derived_layer is not None:
         layers.add(rule.derived_layer.base)
-        layers.add(rule.derived_layer.intersect_with)
+        if rule.derived_layer.intersect_with is not None:
+            layers.add(rule.derived_layer.intersect_with)
     else:
         layers.add(rule.layer)
     if rule.other_layer is not None:

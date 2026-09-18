@@ -117,11 +117,40 @@ class DerivedLayer:
     overwhelmingly common case -- a thin-oxide-only design draws no
     ``Dualgate`` at all). The other two modes derive an empty region from an
     absent input layer, so they skip as any other missing-layer rule does.
+
+    **``"holes"`` mode (issue #1976).** A third, unrelated need: a DRM rule
+    scoped not to a boolean/sized combination of two drawn layers, but to
+    the *interior voids* of one merged drawn layer -- sky130's ``m1.7``-
+    ``m5.7`` (each spelled ``m{N}.holes.with_area(0..threshold)`` in the
+    source DSL) require a minimum area on the holes enclosed by a slotted
+    metal plate or fill pattern, not on the metal polygons themselves.
+    ``"holes"`` derives ``base_region.merged().holes()`` --
+    ``klayout.db.Region.holes()``, which returns each enclosed void as its
+    own filled polygon (merged first, since a hole formed by several
+    abutting drawn rectangles -- the common GDS idiom for a slotted plate --
+    is only visible once those fragments are merged into one polygon with a
+    void; ``Region.holes()`` already applies this "merged semantics"
+    internally, but the explicit ``.merged()`` here documents the
+    requirement rather than relying on the default silently). ``base`` is
+    the only input this mode reads; ``intersect_with`` is unused (leave it
+    ``None``, the default) and ``sized_by_um`` is unused (conventionally
+    ``0.0``) -- there is no second layer or sizing margin in this
+    derivation, unlike every mode above. A ``base`` region with no holes at
+    all (an ordinary unslotted plate) derives an *empty* region, which is
+    not a violation for any check kind applied to it -- see
+    :attr:`DrcRule.area_min_dbu2`'s own note that an empty input region
+    simply has nothing to report, the same "nothing to check" behaviour
+    every check kind already has for a missing/empty layer.
+
+    Pair this mode with ``check="area"`` (:attr:`DrcRule.area_min_dbu2`) to
+    express a holes-area rule like ``m1.7``: the checked "region" becomes
+    each hole polygon, and the area threshold applies to each one
+    individually, exactly matching ``with_area``'s official semantics.
     """
 
     base: tuple[int, int]
     sized_by_um: float
-    intersect_with: tuple[int, int]
+    intersect_with: tuple[int, int] | None = None
     mode: str = "sized_intersection"
 
 

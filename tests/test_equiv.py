@@ -1938,6 +1938,189 @@ def test_sequential_engine_refinement_cannot_launder_broken_gate(tmp_path):
         assert "z" not in blacklisted
 
 
+# --------------------------------------------------------------------------- #
+# Issue #1999: Verilog *escaped* identifiers (a leading `\`, terminated by
+# whitespace rather than by the next non-identifier character) are how a real
+# P&R/synthesis flow spells a port whose name contains `.`, `[`, `]` or `/`
+# -- e.g. a flattened hierarchical output `\q.x` or a bit-blasted bus bit
+# `\q[0]`. `write_verilog -noattr` therefore emits their declarations with a
+# space before the semicolon (`  output \q.x ;`), which the stage-1 refinement
+# loop's port parser must tolerate: a top-level port it fails to recognise is
+# misclassified as an internal wire and *blacklisted* as a cut point, deleting
+# the one proof obligation that would have caught a real difference on it.
+# --------------------------------------------------------------------------- #
+
+
+def _seq_escaped_port_rtl(escaped: str, *, broken: bool) -> str:
+    """Issue #1999 fixture: the `_SEQ_*_RENAMED_INTERNAL_RTL` shape above
+    (a same-named internal wire `n1` at opposite polarity, so cut-point
+    refinement genuinely has to run) with a *second*, escaped-identifier
+    output port alongside the plain `y`.
+
+    `broken=False` is the gold side; `broken=True` is a gate whose only
+    functional difference is on the escaped port (`|` where gold has `&`),
+    so the escaped port carries the sole proof obligation that distinguishes
+    the two designs.
+    """
+    n1 = "~(a & b)" if broken else "a & b"
+    read_n1 = "(~n1)" if broken else "n1"
+    escaped_expr = f"{read_n1} | c" if broken else "n1 & c"
+    return (
+        "module top(input clk, input rst, input a, input b, input c,\n"
+        f"           output reg y, output reg \\{escaped} );\n"
+        "  (* keep *) wire n1;\n"
+        f"  assign n1 = {n1};\n"
+        "  always @(posedge clk) begin\n"
+        f"    if (rst) begin y <= 1'b0; \\{escaped}  <= 1'b0; end\n"
+        f"    else begin y <= {read_n1} | c; \\{escaped}  <= {escaped_expr}; end\n"
+        "  end\n"
+        "endmodule\n"
+    )
+
+
+def test_parse_module_ports_matches_escaped_identifier_ports(tmp_path):
+    """Issue #1999 root cause, isolated: `write_verilog -noattr` terminates
+    an escaped identifier with whitespace, so an escaped port declaration
+    reads `output \\q.x ;` -- a space before the `;`. `_parse_module_ports`
+    must still record it (under the same `\\`-stripped spelling
+    `_parse_unproven_equiv_signals` produces), or `_run_sequential` will
+    mistake a top-level port for an internal wire and blacklist it."""
+    netlist = tmp_path / "netlist.v"
+    netlist.write_text(
+        "\n".join(
+            [
+                "module gate(a, \\q.x );",
+                "  input a;",
+                "  output \\q.x ;",
+                "endmodule",
+                "module gold(clk, a, sum, \\q.x , \\q[0] , \\top/u1/z );",
+                "  input clk;",
+                "  wire clk;",
+                "  input [3:0] a;",
+                "  output [3:0] sum;",
+                "  output \\q.x ;",
+                "  reg \\q.x ;",
+                "  output \\q[0] ;",
+                "  wire \\q[0] ;",
+                "  inout \\top/u1/z ;",
+                "  wire n1;",
+                "endmodule",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    ports = equiv._parse_module_ports(str(netlist), "gold")
+
+    assert ports == {
+        "clk": "input",
+        "a": "input",
+        "sum": "output",
+        "q.x": "output",
+        "q[0]": "output",
+        "top/u1/z": "inout",
+    }
+    # Plain (non-escaped) declarations are unaffected, and a non-port `wire`
+    # declaration is still not a port.
+    assert "n1" not in ports
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.parametrize("escaped", ["q.x", "q[0]"])
+def test_sequential_refinement_never_blacklists_an_escaped_top_level_port(
+    tmp_path, escaped
+):
+    """Issue #1999: two gate-level netlists whose only functional difference
+    is on an *escaped* top-level output port must never be reported
+    `"equivalent"`.
+
+    Before the fix, `_PORT_DECL_RE` could not match `output \\q.x ;` (the
+    whitespace an escaped identifier is terminated by sits between the name
+    and the `;`), so the port never reached `_parse_module_ports`' result,
+    stage 1's refinement loop classified it as an internal wire, and
+    `equiv_make -blacklist` dropped the only obligation that distinguishes
+    the two designs -- leaving the untouched `y` obligation to be proven and
+    the run to report a false `"equivalent"` (verified live on Yosys 0.69)."""
+    _write(tmp_path / "gold.v", _seq_escaped_port_rtl(escaped, broken=False))
+    _write(tmp_path / "gate.v", _seq_escaped_port_rtl(escaped, broken=True))
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] != "equivalent", report["diagnostics"]
+
+    blacklist_path = report["artifacts"]["stage1_blacklist_path"]
+    if blacklist_path is not None:
+        blacklisted = Path(blacklist_path).read_text(encoding="utf-8").split()
+        # The escaped port is a top-level obligation, never a cut point --
+        # but the genuinely-internal `n1` still is, so refinement did run.
+        assert escaped not in blacklisted
+        assert "y" not in blacklisted
+        assert "n1" in blacklisted
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+@pytest.mark.parametrize("escaped", ["q.x", "q[0]"])
+def test_sequential_escaped_port_counterexample_is_simulation_confirmed(
+    tmp_path, escaped
+):
+    """Issue #1999, downstream half: once an escaped port survives port
+    parsing it also flows into stage 2's `-show <name>_gold/-show
+    <name>_gate` dump and into the iverilog/vvp confirmation testbench, so
+    the generated testbench has to spell it as a legal Verilog escaped
+    identifier. Otherwise the confirmation compile fails and a genuine
+    counterexample is silently downgraded to `"inconclusive"`."""
+    _write(tmp_path / "gold.v", _seq_escaped_port_rtl(escaped, broken=False))
+    _write(tmp_path / "gate.v", _seq_escaped_port_rtl(escaped, broken=True))
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["status"] == "counterexample", report["diagnostics"]
+    counterexample = report["counterexample"]
+    assert escaped in counterexample["diverging_outputs"]
+    assert counterexample["confirmed_by_simulation"] is True
+    assert set(report["counterexample"]["simulation"]["diverging_outputs"]) & {escaped}
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("y", "y"),
+        ("_560_", "_560_"),
+        ("sum$next", "sum$next"),
+        ("q.x", "\\q.x "),
+        ("q[0]", "\\q[0] "),
+        ("top/u1/z", "\\top/u1/z "),
+        ("2fast", "\\2fast "),
+    ],
+)
+def test_verilog_ident_escapes_only_when_required(name, expected):
+    """Issue #1999: names that are already legal simple identifiers are
+    emitted verbatim (so every existing generated testbench is byte-for-byte
+    unchanged); anything else becomes a whitespace-terminated Verilog
+    escaped identifier."""
+    assert equiv._verilog_ident(name) == expected
+
+
 @pytest.mark.parametrize("bad_depth", [0, -1, "4", 1.5, True])
 def test_sequential_engine_bad_induction_depth_is_error(tmp_path, bad_depth):
     _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)

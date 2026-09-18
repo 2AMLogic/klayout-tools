@@ -56,6 +56,42 @@ not `klt --version`, if you need to detect this kind of drift. See
   falls back to its own declared access point. A tie output the parent
   genuinely routes to the rail still binds to it (that connection is drawn
   outside the cell and survives abstraction). No JSON shape change.
+- **Fixed**: `klt equiv --engine yosys-sequential` no longer drops a
+  top-level port whose name is a Verilog **escaped identifier** (issue
+  #1999) — the leading-`\` spelling a synthesis/P&R flow uses for a name
+  containing `.`, `[`, `]` or `/`, e.g. a flattened hierarchical output
+  `\q.x` or a bit-blasted bus bit `\q[0]`. Such an identifier is terminated
+  by whitespace, so Yosys writes its declaration as `output \q.x ;` (a space
+  before the semicolon) and the stage-1 port-list parser did not match it at
+  all. The port was therefore misclassified as an internal wire and
+  blacklisted by the cut-point refinement loop (issue #1353), deleting the
+  one proof obligation that distinguishes the two designs: two netlists
+  differing **only** on an escaped top-level port were reported
+  `"equivalent"` (verified live on Yosys 0.69). Escaped ports are now
+  recognised, never blacklisted, and carried into stage 2's counterexample
+  dump and the `iverilog`/`vvp` confirmation testbench under their plain,
+  unescaped name (`counterexample.diverging_outputs`, and each cycle's
+  `inputs`/`gold_outputs`/`gate_outputs` keys). No JSON shape change — an
+  affected run's `status` simply stops being wrong.
+- **Fixed**: the curated `sky130` DRC deck now also checks each routing
+  metal's **holes-area** minimum — `met1.holes_area.1`, `met2.holes_area.1`,
+  `met3.holes_area.1`, `met4.holes_area.1`, `met5.holes_area.1` (issue
+  #1976), the holes-area companion of the plain `met{1..5}.area.1` rules
+  below. Each is scoped to the checked layer's **holes** — the
+  interior voids enclosed by a merged metal region, e.g. a slot in a wide
+  plate or a fill pattern — rather than the metal polygon itself, via a new
+  `DerivedLayer` `"holes"` mode (`klayout.db.Region.holes()`). Thresholds
+  are transcribed from the same pinned `volare` sky130A install cited
+  below: `m1.7`/`m2.7`/`m5.7` 0.14 um², `m3.7`/`m4.7` 0.2 um² — carried on
+  `DrcRule`'s `area_min_dbu2` field as 140 000 / 200 000 dbu². Before this,
+  a too-small slot cut into a wide metal plate or MiM-cap plate — a real
+  manufacturability defect — came back `clean` rather than reported. A
+  plate with no holes at all correctly stays `clean`, not an error (an
+  empty `Region.holes()` result is not a violation). Each rule also
+  carries a populated `provenance` citing its own upstream rule id. The
+  sky130 deck is now 57 rules (was 52), and `provenance.deck.content_hash`
+  changes accordingly. See `docs/cli/drc.md`'s "Coverage" section for the
+  full per-kind breakdown.
 - **Fixed**: `klt lvs` no longer reports a `reference.form:
   "gate-level-verilog"` reference's `assign`-aliased port as a false
   mismatch (issue #2021, the other half of #1994's 77 false `klt lvs`
@@ -163,11 +199,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   upstream rule id. The sky130 deck is now 52 rules (was 47), `coverage.
   rules_skipped` gains the five new ids on a stream with no geometry on the
   corresponding metal, and `provenance.deck.content_hash` changes accordingly.
-  Each layer's *holes*-area sibling (`m1.7`-`m5.7`) stays untranscribed
-  (issue #1976 — `DrcRule` has no way to name a polygon's holes), and the
-  `"density"` check kind stays unused (this engine's windowed implementation
-  has no floorplan-boundary concept). See `docs/cli/drc.md`'s "Coverage"
-  section for the full per-kind breakdown.
+  Each layer's *holes*-area sibling (`m1.7`-`m5.7`) is transcribed separately
+  by issue #1976 (see above), and the `"density"` check kind stays unused
+  (this engine's windowed implementation has no floorplan-boundary concept).
+  See `docs/cli/drc.md`'s "Coverage" section for the full per-kind breakdown.
 - **Changed**: `klt gen-compose`'s closed guard/collector-ring rejection is now
   **plane-aware** instead of identity-only (issue #1960). Previously the check
   fired from block/port identity alone — *this block reports a

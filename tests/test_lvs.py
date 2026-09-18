@@ -2239,6 +2239,59 @@ def test_equivalent_pins_hint_unknown_pin_raises(tmp_path):
         run_lvs(path)
 
 
+def test_equivalent_pins_hint_recorded_in_hints_applied(tmp_path):
+    """Issue #1998: a `hints.equivalent_pins` grouping actually passed to
+    `NetlistComparer.equivalent_pins()` is disclosed verbatim under the
+    report's `hints_applied` field, keyed by (reference-side) subcircuit
+    name -- even though it does not change the verdict here (the two
+    netlists already match structurally without the hint). Before this
+    field existed, an applied `equivalent_pins` hint left no trace at all in
+    the response."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "hints": {"equivalent_pins": {"INV": [["A", "Y"]]}},
+        },
+    )
+    response = run_lvs(path)
+    assert response["status"] == "match"
+    assert response["hints_applied"] == {"INV": [["A", "Y"]]}
+
+
+def test_hints_applied_absent_when_no_equivalent_pins_hint(tmp_path):
+    """Issue #1998: `hints_applied` is `null`, not a spurious empty `{}`,
+    when the request supplies no `hints.equivalent_pins` at all -- the same
+    always-present-but-nullable convention `options.compare_parameters`
+    already follows for an optional dict-shaped echo. Also confirms a
+    `hints.same_nets`-only request (which has its own, separate disclosure
+    path via `hints.rejected`) does not spuriously populate this field."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+            "hints": {"same_nets": [["VGND", "VGND"]]},
+        },
+    )
+    response = run_lvs(path)
+    assert response["hints_applied"] is None
+
+    no_hints_path = _write_request(
+        tmp_path / "request_no_hints.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    assert run_lvs(no_hints_path)["hints_applied"] is None
+
+
 # --------------------------------------------------------------------------- #
 # options.flatten_reference / options.flatten_layout (issue #1085): `klt
 # extract` always extracts a *flat* layout netlist, so a hierarchical
