@@ -40,6 +40,7 @@ The `extract` verb extracts SPICE-compatible netlists from layout. Its implement
 - **extract** (`extract.py`): Core netlist extraction engine; main public API (`run_extract()`) and data structures
 - **extract_abstract** (`extract_abstract.py`): Black-box cell abstraction subsystem (cell-level abstractions with pins, per `--abstract-cells`)
 - **extract_parasitics** (`extract_parasitics.py`): RC-parasitics measurement and critical-net analysis (geometry-based R/C computation)
+- **extract_report** (`extract_report.py`): Netlist-report-description subsystem — shapes an already-resolved `kdb.Circuit`/`kdb.LayoutToNetlist` into the response's `devices[]`/`nets[]` arrays, `device_counts`, and the layer/net warning lists (`merged_net_labels`, `unbiased_pmos_body_nets`, `single_terminal_nets`, `ignored_layers`, `device_recognition_only_layers`, the `parasitics` deck-gap reports)
 - **extract_spef** (`extract_spef.py`): SPEF (Standard Parasitic Exchange Format) export subsystem (identifiers, netgen integration, RC-star node generation)
 - **decks.extraction** (`decks/extraction.py`): PDK-specific extraction deck management (deck selection, validation)
 
