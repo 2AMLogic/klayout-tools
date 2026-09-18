@@ -87,6 +87,7 @@ docs/
     em-field-sim-spike.md
     em-site-export-format.md
     extract-fidelity-roadmap.md
+    fastcap-oracle.md
     flute-congestion-precheck-results.md
     fst-writer-upstream-bug-report.md
     gen-bjt-array-spike.md
