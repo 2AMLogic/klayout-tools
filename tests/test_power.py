@@ -1542,7 +1542,17 @@ def test_stackup_current_limit_is_scaled_by_rail_width_at_extraction(tmp_path):
 
 def test_em_verdict_golden_pass_under_the_limit(tmp_path):
     """1 mA through a 1-um-wide met1 rail against a 10 mA limit: comfortably
-    under -- the golden *pass* segment."""
+    under -- the golden *pass* segment.
+
+    Only 1 of the design's 5 total edges is actually checked (the rest have
+    no pad/solved current at all), so the *overall* rollup is
+    `"pass_partial"` (issue #1997), not a plain `"pass"` -- a genuinely
+    complete check is exercised separately by
+    `test_gcd_fixture_em_verdict_passes_on_real_rails`/
+    `test_modexp_canary_em_verdict_passes_on_real_rails` below. The
+    per-net `VPWR` status stays plain `"pass"`: it is unaffected by this
+    issue, which only changes the overall rollup's own `status`.
+    """
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "em.pass.power.json"
     _basic_fixture(gds)
@@ -1562,7 +1572,7 @@ def test_em_verdict_golden_pass_under_the_limit(tmp_path):
     report = run_power(str(gds), str(spec))
     em = report["em_verdict"]
     assert em is not None
-    assert em["status"] == "pass"
+    assert em["status"] == "pass_partial"
     assert em["fail_count"] == 0
     # Island A's one edge (the only solved one) is checked; island B's three
     # edges (unsolved -- no pad) and island C's one edge (VGND, unsolved) are

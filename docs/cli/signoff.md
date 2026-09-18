@@ -774,7 +774,9 @@ field instead of a `status` field:
 - **Does not pass** on a rolled-up `em_verdict.status: "fail"` (a checked
   edge exceeded its declared current-density limit), `"not_checked"`
   (nothing in the whole spec had both a declared current limit and a solved
-  current, so nothing was actually verified), or a `null` `em_verdict`.
+  current, so nothing was actually verified), `"pass_partial"` (issue
+  #1997 — every checked edge passed, but some other edge in the design was
+  never checked at all), or a `null` `em_verdict`.
 
 `worst_case_droop_mv` is not itself compared against anything — the
 envelope declares no droop *limit* field to check it against (that binding

@@ -528,6 +528,18 @@ POWER_EM_FAIL_ENVELOPE = {
     },
 }
 
+#: At least one edge was checked and none failed, but some other edge in
+#: the design was never checked at all (issue #1997) -- rolled-up
+#: `"pass_partial"`, distinct from a genuinely complete `"pass"`.
+POWER_EM_PASS_PARTIAL_ENVELOPE = {
+    **POWER_PASS_ENVELOPE,
+    "em_verdict": {
+        **POWER_PASS_ENVELOPE["em_verdict"],
+        "status": "pass_partial",
+        "unchecked_edge_count": 3,
+    },
+}
+
 #: No edge in the whole spec had both a declared current limit and a solved
 #: current, so nothing was actually EM-verified -- rolled-up `"not_checked"`.
 POWER_EM_NOT_CHECKED_ENVELOPE = {
@@ -1520,6 +1532,23 @@ def test_power_em_fail_check_fails(tmp_path):
     assert check["passed"] is False
     assert check["detail"]["em_verdict_status"] == "fail"
     assert check["detail"]["em_verdict_fail_count"] == 1
+
+
+def test_power_em_pass_partial_does_not_pass(tmp_path):
+    """`em_verdict.status == "pass_partial"` (issue #1997) -- every checked
+    edge stayed under its limit, but some other edge in the design was
+    never checked at all; this must not be treated as more passing than a
+    missing verdict, i.e. it must not silently pass."""
+    path = _write(tmp_path, "power.json", POWER_EM_PASS_PARTIAL_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["kind"] == "power"
+    assert check["passed"] is False
+    assert check["detail"]["em_verdict_status"] == "pass_partial"
+    assert check["detail"]["em_verdict_fail_count"] == 0
 
 
 def test_power_em_not_checked_does_not_pass(tmp_path):

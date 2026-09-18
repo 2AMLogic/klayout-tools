@@ -1050,6 +1050,17 @@ def _compute_em_verdict(
     declared limit and a solved current (e.g. every edge on that net's
     stackup/via roles declared no ``current_limit_a_per_um``/
     ``current_limit_a`` at all).
+
+    The *overall* rollup's own ``status`` (issue #1997) additionally
+    distinguishes a genuinely complete check from a partial one:
+    ``"pass_partial"`` when at least one edge anywhere in the design was
+    checked and none failed, but ``unchecked_edge_count`` is still nonzero
+    (some other edge had no declared limit, no solved current, or both) --
+    plain ``"pass"`` is reserved for a design where every edge that exists
+    was actually compared against a limit. Per-net ``status`` above is
+    unaffected -- it stays ``"pass"``/``"fail"``/``"not_checked"``, since a
+    net's own coverage is already fully expressed by its own
+    ``checked_edge_count``/``unchecked_edge_count`` pair.
     """
     if ir_drop_map is None:
         return None
@@ -1152,10 +1163,18 @@ def _compute_em_verdict(
         ):
             overall_worst = net_worst
 
+    # Overall rollup `status` (issue #1997) -- `"pass_partial"` reports that
+    # at least one edge was checked and none failed, but some other edge in
+    # the design was never checked at all (`overall_unchecked > 0`: no
+    # declared limit, no solved current, or both) -- so a plain `"pass"` is
+    # reserved for a design where every edge that exists was actually
+    # compared against a limit.
     if overall_checked == 0:
         status = "not_checked"
     elif overall_fail:
         status = "fail"
+    elif overall_unchecked:
+        status = "pass_partial"
     else:
         status = "pass"
 

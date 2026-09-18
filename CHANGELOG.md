@@ -109,6 +109,23 @@ not `klt --version`, if you need to detect this kind of drift. See
   sky130 deck is now 57 rules (was 52), and `provenance.deck.content_hash`
   changes accordingly. See `docs/cli/drc.md`'s "Coverage" section for the
   full per-kind breakdown.
+- **Fixed**: `klt erc`'s per-gate `antenna_verdict` and `klt power`'s overall
+  `em_verdict.status` now report a new `"pass_partial"` value (issue #1997)
+  instead of silently reading as a plain `"pass"` when their own coverage
+  data shows only part of the relevant surface was actually checked.
+  `klt erc`: `antenna_verdict` is `"pass_partial"` when at least one graded
+  metal level (`levels[1:]`, excluding the gate role, which is always
+  `"unchecked"`) is `"unchecked"` and no graded level violates — the
+  canonical case is a full sky130 stack through met5, since sky130's own
+  antenna-ratio table has no met3/met4/met5 entries at all. `klt power`:
+  the overall `em_verdict.status` is `"pass_partial"` when
+  `unchecked_edge_count > 0` and `fail_count == 0` — e.g. only one edge in
+  the whole design had both a declared current limit and a solved current.
+  Real violations/failures are unaffected: `antenna_verdict` still reports
+  `"violate"` and `em_verdict.status` still reports `"fail"` regardless of
+  coverage. `klt signoff`'s power-evidence check (`em_verdict.status ==
+  "pass"`, exact match) already treats `"pass_partial"` at least as
+  strictly as `"pass"` — it does not pass.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the

@@ -231,11 +231,13 @@ JSON schema) -- so :func:`_check_passed` derives a pass/fail verdict from
 ``em_verdict`` instead: ``"met"`` only when a static IR-drop solve actually
 ran (``em_verdict`` is not ``None`` -- a spec declaring neither ``pads`` nor
 a ``current_model`` produces no solve at all, per ``docs/cli/power.md``, and
-proves nothing) *and* that solve's own EM verdict rolled up to
+proves nothing) *and* that solve's own EM verdict rolled up to exactly
 ``em_verdict["status"] == "pass"``. A rolled-up ``"fail"`` (a checked edge
-exceeded its declared current-density limit) or ``"not_checked"`` (nothing
+exceeded its declared current-density limit), ``"not_checked"`` (nothing
 in the whole spec had both a declared current limit and a solved current,
-so nothing was actually verified) does not pass, exactly like a missing
+so nothing was actually verified), or ``"pass_partial"`` (issue #1997 --
+at least one edge checked clean, but some other edge in the design was
+never checked at all) does not pass, exactly like a missing
 ``em_verdict`` -- this module never infers a passing verdict from
 ``worst_case_droop_mv`` alone, since the envelope declares no droop
 *limit* to compare it against (that binding is left to a future phase, per
@@ -1162,12 +1164,14 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       a static IR-drop solve actually ran (``em_verdict`` is not ``None`` --
       a spec declaring neither ``pads`` nor a ``current_model`` produces no
       solve at all, per ``docs/cli/power.md``, and proves nothing) *and*
-      that solve's own EM current-density verdict rolled up to
+      that solve's own EM current-density verdict rolled up to exactly
       ``em_verdict["status"] == "pass"``. A rolled-up ``"fail"`` (a checked
-      edge exceeded its declared current-density limit) or
-      ``"not_checked"`` (nothing in the whole spec had both a declared
-      current limit and a solved current, so nothing was actually
-      verified) does not pass, same as a missing ``em_verdict``.
+      edge exceeded its declared current-density limit), ``"not_checked"``
+      (nothing in the whole spec had both a declared current limit and a
+      solved current, so nothing was actually verified), or
+      ``"pass_partial"`` (issue #1997 -- some edge in the design was never
+      checked at all, even though every checked edge passed) does not
+      pass, same as a missing ``em_verdict``.
       ``worst_case_droop_mv`` is not itself compared here -- the envelope
       declares no droop *limit* to check it against (see this module's
       "`klt power` (IR-drop/EM) evidence ingestion" docstring section) --
