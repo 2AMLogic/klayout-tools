@@ -56,6 +56,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   falls back to its own declared access point. A tie output the parent
   genuinely routes to the rail still binds to it (that connection is drawn
   outside the cell and survives abstraction). No JSON shape change.
+- **Fixed**: `klt lvs` no longer reports a `reference.form:
+  "gate-level-verilog"` reference's `assign`-aliased port as a false
+  mismatch (issue #2021, the other half of #1994's 77 false `klt lvs`
+  errors on the same design). Gate-level Verilog routinely carries a
+  port-to-port `assign` alias -- e.g. `assign dbg_uart_byte[i] =
+  rx_byte[i];`, two declared port names for one electrical node -- but the
+  conversion to SPICE resolves an `assign` alias transparently for every
+  *instance* connection, never for a module's own declared port list: the
+  aliased port was emitted as its own `.SUBCKT` pin with nothing inside the
+  body ever referencing it, reading back as an isolated, disconnected
+  reference net even though the layout has exactly one physical net for
+  both names. `klt lvs` now joins the alias port's net onto its canonical
+  target's net (following a multi-hop `assign` chain to its ultimate
+  target, same as the existing instance-connection resolution) before the
+  compare runs -- both port names stay individually declared, now on the
+  same net, matching a correctly-wired layout's own "one net, two named
+  pins" shape. Disclosed via a new, always-`"warning"`
+  `mismatches[].category: "topology.reference_port_alias_joined"` entry
+  (never flips `status`) naming the joined net and every alias port folded
+  into it -- see [`docs/cli/lvs.md`](docs/cli/lvs.md)'s
+  "`topology.reference_port_alias_joined`" section. Only a port whose value
+  comes purely from an `assign` is ever joined; a genuinely unconnected or
+  differently-wired reference port is untouched and still reports as a
+  real mismatch.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the

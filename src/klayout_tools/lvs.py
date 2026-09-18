@@ -182,6 +182,7 @@ from .netlist_capacitor_recovery import (
 from .pdk import PdkNotFoundError, find_pdk
 from .verilog_netlist import (
     VerilogNetlistError,
+    collect_gate_level_port_aliases,
     convert_gate_level_verilog,
     parse_subckt_pin_orders,
 )
@@ -288,6 +289,16 @@ CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.un
 #: before comparing against a `reference.form: "gate-level-verilog"`
 #: reference -- see `_prune_power_only_layout_circuits`.
 CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
+#: Issue #2021: a `reference.form: "gate-level-verilog"` reference declared a
+#: port whose only Verilog-level connection was a plain `assign <port> =
+#: ...;` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`, two port names
+#: for one electrical node) -- `convert_gate_level_verilog` never resolves a
+#: module's own declared port list the way it resolves an instance
+#: connection, so that pin reads back as its own isolated, disconnected net.
+#: The alias pin's net was joined onto its canonical target's net (`Circuit
+#: .connect_pin`) before comparing, so it is not reported as
+#: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
+CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
 
 #: Issue #1952: ``power_connectivity.status`` values. Deliberately a
 #: *separate* verdict from the report's top-level ``status``, which stays
@@ -854,6 +865,11 @@ def run_lvs(request: str) -> dict[str, Any]:
     # in once `reference_netlist` is available below (only ever nonempty for
     # `reference.form: "gate-level-verilog"`).
     power_only_pruning_warnings: list[dict[str, Any]] = []
+    # Issue #2021: disclosure for `_apply_gate_level_port_aliases`, filled in
+    # once `reference_netlist` is available below (only ever nonempty for
+    # `reference.form: "gate-level-verilog"`, and then only when the
+    # reference declares an `assign`-aliased port).
+    gate_level_port_alias_warnings: list[dict[str, Any]] = []
     # Issue #1552: `options.combine_devices_per_circuit`'s per-macro combine
     # choices must run *before* either side's optional structural flatten
     # (`options.flatten_layout`/`options.flatten_reference`, issue #1085)
@@ -996,6 +1012,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     # value onto -- consumed by `_apply_reference_placeholder_values` below,
     # empty for every other reference form.
     reference_placeholder_classes: dict[str, str] = {}
+    # Issue #2021: populated by `_read_reference_netlist` only for
+    # `form="gate-level-verilog"` -- `{<module name>: {<port>: <canonical
+    # net>}}` for every declared port whose only Verilog-level connection is
+    # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
+    # right below, before anything else reads `reference_netlist`.
+    reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
     reference_netlist = _read_reference_netlist(
         reference_netlist_path,
         form=reference_form,
@@ -1006,9 +1028,20 @@ def run_lvs(request: str) -> dict[str, Any]:
         pdk_root=reference_spec.get("pdk_root"),
         pin_orders=reference_pin_orders,
         placeholder_value_classes=reference_placeholder_classes,
+        gate_level_port_aliases=reference_gate_level_port_aliases,
     )
 
     if reference_form == "gate-level-verilog":
+        # Issue #2021: joins every `assign`-aliased reference port's net onto
+        # its canonical target's net -- run first, before anything else below
+        # reads `reference_netlist`'s topology (the power connectivity report,
+        # the power-only prune, and the comparer itself all need the
+        # corrected shape).
+        gate_level_port_alias_warnings.extend(
+            _apply_gate_level_port_aliases(
+                reference_gate_level_port_aliases, reference_netlist
+            )
+        )
         # Issue #1952: the power/ground half of the compare, run *before*
         # the power-only prune below -- see `_power_pin_connections`'s
         # docstring for why that order is load-bearing (the prune removes
@@ -1717,6 +1750,14 @@ def run_lvs(request: str) -> dict[str, Any]:
         # appended here rather than folded into `_build_mismatches`.
         mismatches.extend(power_only_pruning_warnings)
 
+    if gate_level_port_alias_warnings:
+        # Issue #2021: same rationale as the disclosures above -- joining an
+        # `assign`-aliased reference port's net onto its canonical target is
+        # a request-side transform applied before the compare (before even
+        # the power-only prune above), not a `NetlistComparer` event, so it
+        # is appended here rather than folded into `_build_mismatches`.
+        mismatches.extend(gate_level_port_alias_warnings)
+
     if (
         layout_deck is not None
         or combine_warnings
@@ -1727,6 +1768,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         or compare_parameter_warnings
         or flatten_warnings
         or power_only_pruning_warnings
+        or gate_level_port_alias_warnings
     ):
         mismatches.sort(key=_sort_key)
 
@@ -2562,6 +2604,7 @@ def _read_reference_netlist(
     pdk_root: str | None = None,
     pin_orders: dict[str, list[str]] | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
+    gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280, extended by issue #1336).
@@ -2590,6 +2633,18 @@ def _read_reference_netlist(
     :func:`_apply_reference_placeholder_values`; every other caller can
     ignore it (``None``, the default, records nothing and leaves behaviour
     byte-identical).
+
+    ``gate_level_port_aliases`` (issue #2021) is the same kind of optional
+    *output* collector, populated only for ``form="gate-level-verilog"``:
+    :func:`~klayout_tools.verilog_netlist.collect_gate_level_port_aliases`'s
+    own ``{<module name>: {<port>: <canonical net>}}`` mapping, naming every
+    declared port whose only Verilog-level connection is a plain ``assign``
+    (e.g. a port-to-port alias, two reference port names for one electrical
+    node). ``run_lvs`` hands it to :func:`_apply_gate_level_port_aliases`,
+    which joins each alias port's net onto its canonical target's net in the
+    ``kdb.Netlist`` this function returns, *before* the comparer runs --
+    empty (the default, and the common case: most gate-level references
+    have no port aliasing at all) leaves behaviour byte-identical.
 
     ``form="gate-level-verilog"`` (issue #1336) treats ``path`` as a `klt
     place-and-route` `verilog_path` gate-level Verilog netlist instead of
@@ -2682,6 +2737,13 @@ def _read_reference_netlist(
                 f"could not convert gate-level-verilog reference netlist "
                 f"'{path}' to plain-element form: {exc}"
             ) from exc
+        if gate_level_port_aliases is not None:
+            # Issue #2021: re-parses the same `text` `convert_gate_level_
+            # verilog` just parsed successfully -- cheap (a single flat
+            # module) and pure, kept as a separate entry point so the SPICE
+            # conversion's own return type stays untouched (see
+            # `collect_gate_level_port_aliases`'s docstring).
+            gate_level_port_aliases.update(collect_gate_level_port_aliases(text))
         import tempfile
 
         with tempfile.NamedTemporaryFile(
@@ -4644,6 +4706,140 @@ def _is_power_only_circuit(
     if not pin_names:
         return False
     return all(name in power_pin_names for name in pin_names)
+
+
+def _apply_gate_level_port_aliases(
+    port_aliases: Mapping[str, Mapping[str, str]],
+    reference_netlist: Any,
+) -> list[dict[str, Any]]:
+    """Join a reference-side port's net onto its ``assign``-alias target's
+    net, for every module a ``reference.form: "gate-level-verilog"``
+    conversion carried a port-to-port (or port-to-internal-net) alias for
+    (issue #2021, the other half of issue #1994's 77 false LVS errors).
+
+    **The gap this closes.** ``convert_gate_level_verilog`` resolves an
+    ``assign <alias> = <target>;`` statement transparently for every
+    *instance* connection (see ``verilog_netlist.py``'s own docstring), but
+    never for a module's own declared port list -- a ``.SUBCKT`` boundary
+    pin whose only Verilog-level connection was an ``assign`` is emitted as
+    its own pin, with nothing inside the body ever referencing its name
+    (every instance that would have used it was rewritten to the alias's
+    *target* instead). Reading that SPICE back with ``NetlistSpiceReader``
+    creates exactly the isolated, zero-device/zero-terminal net that
+    implies, which ``NetlistComparer`` then reports as an unmatched pin/net
+    even when the layout is completely correct -- gate-level Verilog
+    routinely carries a port-to-port alias like ``assign dbg_uart_byte[i] =
+    rx_byte[i];``, where the layout has exactly one physical net serving
+    both names.
+
+    **Fix, applied here rather than in the SPICE text.** SPICE has no
+    pin-alias primitive, and repeating one net name across two ``.SUBCKT``
+    header positions would just drop the other, distinct declared name --
+    so this runs *after* ``NetlistSpiceReader`` has built the real
+    ``kdb.Circuit``/``kdb.Net``/``kdb.Pin`` objects, using
+    ``Circuit.connect_pin()`` to move the alias port's declared pin onto its
+    canonical target's net. Deliberately not ``Circuit.join_nets()``: that
+    method merges the two nets' *pins* into one (renamed to a
+    comma-joined string), which loses the alias port's own name entirely --
+    verified directly against a real ``kdb.Netlist`` in this issue's own
+    investigation. ``connect_pin`` instead leaves both declared pins in
+    place, each still individually named, now both pointing at the same
+    net -- the exact "one net, two named pins" shape a correctly-wired
+    layout already has, so the two sides compare cleanly on both the
+    pin-name match and the net match. The alias port's now-disconnected
+    original net (zero terminals, zero pins, zero subcircuit pins once its
+    pin is moved off it) is left for :func:`_purge_emptied_nets` to remove,
+    exactly like every other emptied net this module already cleans up.
+
+    ``port_aliases`` is
+    :func:`klayout_tools.verilog_netlist.collect_gate_level_port_aliases`'s
+    own return shape, ``{<module name>: {<alias port>: <canonical net>}}``
+    -- every module ``_read_reference_netlist`` parsed with at least one
+    port-to-port/port-to-net alias, empty (the common case) for every
+    reference this fix does not apply to.
+
+    A multi-hop alias chain (``assign c = b; assign b = a;``) collapses
+    every alias port for one canonical target into a single
+    :func:`_mismatch` entry and is applied correctly regardless of
+    dict-iteration order: every alias in a group is looked up and moved
+    onto the *same*, already-resolved ``canonical_net`` object, never
+    re-resolved by name after an earlier move in the same group could have
+    changed what that name refers to.
+
+    Never raises: a module name that does not resolve to a circuit in
+    ``reference_netlist``, or an alias/canonical port name that does not
+    resolve to a net inside that circuit (should not happen in practice --
+    the mapping was derived from the exact same parse
+    ``convert_gate_level_verilog`` used to build the SPICE this netlist was
+    read from -- but this is an internal consistency hook, not a
+    caller-facing contract like ``hints.same_nets``), is silently skipped
+    rather than treated as a request error.
+
+    Returns one ``severity: "warning"``
+    :data:`CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED` entry per joined
+    canonical net (naming every alias port folded into it), so a
+    ``"match"`` reached this way stays auditable -- the same disclosure
+    discipline :func:`_apply_reference_device_bulk`/
+    :func:`_apply_reference_placeholder_values` follow for their own
+    reference-side fixups. Empty when ``port_aliases`` is empty (the common
+    case).
+    """
+    entries: list[dict[str, Any]] = []
+    any_joined = False
+    for module_name in sorted(port_aliases):
+        aliases = port_aliases[module_name]
+        if not aliases:
+            continue
+        circuit = reference_netlist.circuit_by_name(module_name)
+        if circuit is None:
+            continue
+        # Group by canonical target so a multi-hop chain joins every alias
+        # for one target in a single pass -- see the docstring above.
+        groups: dict[str, list[str]] = {}
+        for alias_name, canonical_name in sorted(aliases.items()):
+            if alias_name == canonical_name:
+                continue
+            groups.setdefault(canonical_name, []).append(alias_name)
+        for canonical_name in sorted(groups):
+            alias_names = groups[canonical_name]
+            canonical_net = circuit.net_by_name(canonical_name)
+            if canonical_net is None:
+                continue
+            joined: list[str] = []
+            for alias_name in alias_names:
+                alias_pin = circuit.pin_by_name(alias_name)
+                alias_net = circuit.net_by_name(alias_name)
+                if alias_pin is None or alias_net is None or alias_net is canonical_net:
+                    continue
+                circuit.connect_pin(alias_pin, canonical_net)
+                joined.append(alias_name)
+            if not joined:
+                continue
+            any_joined = True
+            entries.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED,
+                    "warning",
+                    f"reference circuit '{module_name}' declared port(s) "
+                    f"{', '.join(sorted(joined))} via a plain 'assign "
+                    f"<port> = ...;' alias (request.reference.form: "
+                    f'"gate-level-verilog") -- joined onto the same net as '
+                    f"'{canonical_name}' before comparing, matching a "
+                    f"layout with a single physical net for these names, "
+                    f"instead of reporting them as unmatched (see "
+                    f"docs/cli/lvs.md, "
+                    '"topology.reference_port_alias_joined")',
+                    "reference",
+                    circuit={"layout": None, "reference": module_name},
+                    details={
+                        "canonical_net": canonical_name,
+                        "aliased_ports": sorted(joined),
+                    },
+                )
+            )
+    if any_joined:
+        _purge_emptied_nets(reference_netlist)
+    return entries
 
 
 def _prune_power_only_layout_circuits(
