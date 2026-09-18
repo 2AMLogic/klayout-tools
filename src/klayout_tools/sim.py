@@ -81,7 +81,7 @@ from ._provenance import build_provenance, sha256_file
 from ._text import line_containing as _line_containing
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
-from .pdk_models import _pdk_variant_family
+from .pdk_families import pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
 from .sim_plot import render_waveform_svg
@@ -357,7 +357,7 @@ def _mismatch_family_report(
     except OSError:
         netlist_text = ""
 
-    pdk_family = _pdk_variant_family(pdk_variant) if pdk_variant else None
+    pdk_family = pdk_variant_family(pdk_variant) if pdk_variant else None
 
     report: list[dict[str, Any]] = []
     for family in _detect_device_families(netlist_text):

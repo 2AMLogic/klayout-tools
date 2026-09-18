@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from klayout_tools import remote_launcher as rl
+from klayout_tools.pdk_families import KNOWN_PDK_FAMILIES
 
 # --------------------------------------------------------------------------- #
 # Instance sizing (decision 2's recipe)
@@ -182,6 +183,25 @@ def test_ami_pdk_key_rejects_family_without_published_ami():
     sky130A image, which is a different model deck."""
     with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
         rl.ami_pdk_key("sky130B")
+
+
+@pytest.mark.parametrize("requested", ["ihp-sg13g2", "ihp-sg13cmos5l"])
+def test_ami_pdk_key_rejects_a_family_the_remote_backend_does_not_cover(requested):
+    """Issue #2026: classification is delegated to
+    `pdk_families.pdk_variant_family`, so `ihp-sg13g2` now *classifies*
+    (to `sg13g2`) where the old local prefix scan simply failed to match --
+    but `_AMI_PDK_FAMILIES` is a declared narrowing that does not include it,
+    so the answer is still a named refusal, never a guessed AMI."""
+    with pytest.raises(rl.RemoteLaunchError, match="unsupported PDK"):
+        rl.ami_pdk_key(requested)
+
+
+def test_ami_pdk_families_is_a_declared_subset_of_the_authoritative_set():
+    """The narrowing is intentional (the AMI pipeline maintains fewer families
+    than the toolkit supports locally) and must stay expressible as a subset --
+    see `tests/test_pdk_families.py` for the package-wide version of this
+    invariant."""
+    assert rl._AMI_PDK_FAMILIES <= frozenset(KNOWN_PDK_FAMILIES)
 
 
 def test_resolve_ami_accepts_gf180mcu_variant(tmp_path):

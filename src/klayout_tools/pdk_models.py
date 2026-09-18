@@ -289,6 +289,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .pdk_families import pdk_variant_family
+
 if TYPE_CHECKING:
     import klayout.db as kdb
 
@@ -462,30 +464,6 @@ _MOS_MODEL_FLAVOURS: dict[tuple[str, str], dict[str, dict[str, str]]] = {
     },
 }
 
-#: PDK families this table knows how to classify a resolved `--pdk` variant
-#: name into (e.g. "sky130A"/"sky130B" -> "sky130", "gf180mcuA".."D" ->
-#: "gf180mcu") -- the same family prefixes `klayout_tools.decks`' registry
-#: uses as deck names. Order matters only in that no family here is a prefix
-#: of another (`"sg13g2"` and `"sg13cmos5l"` share the `"sg13"` stem but
-#: neither is a prefix of the other, so both are safe to list).
-_KNOWN_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu", "sg13g2", "sg13cmos5l")
-
-#: Resolved `--pdk` variant names whose family is *not* a prefix of the
-#: variant name, and so cannot be recovered by the prefix scan below (issue
-#: #1231). IHP-Open-PDK's SG13G2 install directory -- the variant name
-#: `klt pdk find` reports -- is `ihp-sg13g2`, while this repo's deck/family
-#: name for it is `sg13g2` (`klayout_tools.decks.sg13g2`); an explicit alias
-#: keeps families named after decks, the invariant `_KNOWN_PDK_FAMILIES`'
-#: own comment states, rather than introducing a family spelled differently
-#: from every table key around it. `ihp-sg13cmos5l` (issue #1400) is the
-#: same shape: the standalone `ihp-sg13cmos5l` clone's own directory name is
-#: the resolved variant, while this repo's deck/family name is
-#: `sg13cmos5l` (`klayout_tools.decks.sg13cmos5l`).
-_PDK_VARIANT_FAMILY_ALIASES: dict[str, str] = {
-    "ihp-sg13g2": "sg13g2",
-    "ihp-sg13cmos5l": "sg13cmos5l",
-}
-
 #: Geometry-literal style: write an explicit SPICE unit suffix (``L=0.5U``,
 #: ``AS=0.84P``), i.e. an absolute SI value that does not depend on the
 #: caller's ``.option scale``.
@@ -571,25 +549,6 @@ class ModelBindingError(Exception):
     """
 
 
-def _pdk_variant_family(variant: str) -> str:
-    """The PDK-family portion of a resolved ``--pdk`` variant name (e.g.
-    ``"sky130A"`` -> ``"sky130"``, ``"gf180mcuC"`` -> ``"gf180mcu"``,
-    ``"ihp-sg13g2"`` -> ``"sg13g2"``).
-
-    Returns ``variant`` unchanged when it does not match any known family
-    prefix -- :func:`resolve_mos_model_table` turns that into a named
-    :class:`ModelBindingError` rather than this helper raising, so the
-    error message can report the full attempted ``(deck, variant)`` pair.
-    """
-    aliased = _PDK_VARIANT_FAMILY_ALIASES.get(variant)
-    if aliased is not None:
-        return aliased
-    for family in _KNOWN_PDK_FAMILIES:
-        if variant.startswith(family):
-            return family
-    return variant
-
-
 def resolve_mos_model_table(deck_name: str, pdk_variant: str) -> dict[str, str]:
     """Resolve the curated ``{"nfet": ..., "pfet": ...}`` subcircuit-name
     table for ``deck_name`` against ``pdk_variant``'s PDK family.
@@ -599,7 +558,7 @@ def resolve_mos_model_table(deck_name: str, pdk_variant: str) -> dict[str, str]:
     family is unrecognised, or is recognised but has no curated entry for
     ``deck_name`` -- never returns a partial/guessed table.
     """
-    family = _pdk_variant_family(pdk_variant)
+    family = pdk_variant_family(pdk_variant)
     table = _MOS_MODEL_TABLE.get((deck_name, family))
     if table is None:
         available = ", ".join(
@@ -1266,7 +1225,7 @@ def resolve_device_bindings(
     base subcircuit, same as an unbound device class elsewhere in this
     function.
     """
-    family = _pdk_variant_family(pdk_variant)
+    family = pdk_variant_family(pdk_variant)
     # The target family's geometry-literal convention (issue #1396). Stamped
     # onto every binding below -- it is a property of the deck the cards are
     # written against, not of the device kind.

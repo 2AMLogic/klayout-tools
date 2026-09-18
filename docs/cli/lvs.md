@@ -235,8 +235,9 @@ When a device name is not one of the curated devices, supply it explicitly:
   declares is resolvable, so a deck recognises the same devices on this
   reference side that it recognises for extraction (issue #1464 — see
   "Per-deck coverage" below). Adding a new PDK family's device map
-  (`_MOS_MODEL_TABLE`, `_KNOWN_PDK_FAMILIES`, `_PDK_VARIANT_FAMILY_ALIASES`
-  in `klayout_tools.pdk_models`) is covered in
+  (`_MOS_MODEL_TABLE` in `klayout_tools.pdk_models`, plus the family
+  declaration itself — `KNOWN_PDK_FAMILIES`/`PDK_VARIANT_FAMILY_ALIASES` in
+  `klayout_tools.pdk_families`) is covered in
   [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
 - `reference.device_map` — an explicit `{ "<subckt-name>": <override> }`
   override, merged on top of the deck's map, for a device subcircuit name
