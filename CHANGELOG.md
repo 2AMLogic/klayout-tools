@@ -58,6 +58,54 @@ not `klt --version`, if you need to detect this kind of drift. See
   No `klt` runtime behaviour or JSON shape changes — magic stays an oracle,
   never a runtime dependency. Methodology, measured results, the declared
   shared surface and the unsupported cases: `docs/design/magic-oracle.md`.
+- **Added**: device-body tie/bias status is now a **gradeable field**, not
+  only a warning (issue #1983). `klt lvs` emitted `device.body_unverified` as
+  a `mismatches[]` entry that never changed `status`, and `klt pex` said
+  nothing at all about whether the netlist it re-simulated had a DC bias path
+  for its device bodies — even though `docs/cli/extract.md` states that an
+  untied body makes such a resimulation "physically wrong, not merely
+  imprecise". That silently weakened `docs/design-evidence-tiers.md` item 7
+  (post-layout verification, the item with the strictest citation rule in the
+  checklist): a `klt pex` citation could be backed by numbers that look like
+  measurements and are not, with nothing in the evidence saying so. Three
+  additive blocks close that:
+  - `klt lvs` gains a top-level **`body_verification`** block — `status`
+    (`"verified"`/`"unverified"`/`"unchecked"`), `reason`, `device_classes`,
+    `device_count`, `findings`, `finding_count` — rendered from the same
+    determination as the existing `device.body_unverified` warnings, so the
+    two can never disagree. `"unchecked"` (the pre-extracted
+    `layout.netlist` form, which verifies nothing either way) is now
+    distinguishable from `"verified"`; before, both simply carried no
+    warning.
+  - `klt pex` gains a top-level **`body_bias`** block — `status`
+    (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets`, and
+    `unbiased_pmos_body_nets` carried verbatim from the extraction this
+    command drives itself (`klt extract`'s own issue-#555 array).
+  - `klt signoff` surfaces both: `checks[].detail.body_verification_status`
+    on an `lvs` check, `checks[].detail.body_bias` on a `pex` check, and
+    `citation.body_bias` on a `"met"` item-7 citation (plus the `--format
+    text` rendering of the latter), so item 7's verdict and the one property
+    that can invalidate the numbers backing it sit in the same artifact.
+
+  **No verdict changes anywhere**: `klt lvs` still reports `status: "match"`
+  for a matching compare with unverified bodies (the warning's non-blocking
+  severity is unchanged), `klt pex` still reports `status: "pass"` and the
+  same exit code, and `klt signoff` grades an `lvs` check on `status ==
+  "match"` (plus the existing `power_connectivity` gate) and a `pex` check on
+  `status == "pass"` exactly as before. This is report-before-enforce, and a
+  deliberately different default from #1965's `power_connectivity` hard-fail:
+  a power-connectivity mismatch is a *defect*, whereas an unverified/unbiased
+  body is a *coverage* condition some PDK decks produce on every layout they
+  extract — hard-failing it would retroactively fail whole PDKs' worth of
+  otherwise-valid evidence. `docs/design-evidence-tiers.md` item 7 now states
+  the condition a `pex` citation is valid under, claimant-enforced exactly
+  like item 3's DRC-coverage disclosure. Purely additive and back-compatible:
+  the `body_bias` key is absent for every non-`pex` kind and for `pex`
+  evidence committed before this change (an absent statement reads as "this
+  artifact made no body-bias statement", never "every body was biased"),
+  `detail.body_verification_status` is `null` for pre-#1983 `lvs` evidence,
+  and `klt lvs --check --rerun` does not report either new block as drift on a
+  report committed before it existed. No `schema_version` bump.
 - **Added**: `klt signoff` now reports the cited DRC envelope's `coverage`
   block (issue #2002). `docs/design-evidence-tiers.md` item 3 requires a claim
   to enumerate its deck's coverage gaps and, since issue #1982, names the

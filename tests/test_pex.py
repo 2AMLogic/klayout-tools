@@ -31,7 +31,10 @@ import pytest
 from klayout_tools import sim
 from klayout_tools.cli import main
 from klayout_tools.pex import (
+    BODY_BIAS_BIASED,
+    BODY_BIAS_UNBIASED,
     PexError,
+    _body_bias_report,
     _build_delta_rows,
     _check_dut_declares_a_circuit,
     _delta_pct,
@@ -214,6 +217,54 @@ def test_check_dut_declares_a_circuit_raises_for_unreadable_file(tmp_path):
     missing = tmp_path / "does-not-exist.spice"
     with pytest.raises(PexError, match="could not be read"):
         _check_dut_declares_a_circuit("testbench.spice", str(missing))
+
+
+# --------------------------------------------------------------------------- #
+# `body_bias` (issue #1983): whether the extracted netlist this run
+# re-simulated actually had a DC bias path for every device body.
+# --------------------------------------------------------------------------- #
+
+
+def test_body_bias_report_biased_when_extraction_found_no_floating_bodies():
+    """The clean case: `klt extract` reported no unbiased PMOS body, so the
+    post-layout numbers are comparable to the schematic leg -- and the block
+    says so positively rather than merely staying empty."""
+    assert _body_bias_report({"unbiased_pmos_body_nets": []}) == {
+        "status": BODY_BIAS_BIASED,
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+        "unbiased_pmos_body_nets": [],
+    }
+
+
+def test_body_bias_report_biased_for_extraction_without_the_field():
+    """An extraction report that carries no `unbiased_pmos_body_nets` key at
+    all (nothing in this repo produces one, but the reduction must not
+    explode on a hand-built report) reads as the clean case."""
+    assert _body_bias_report({})["status"] == BODY_BIAS_BIASED
+
+
+def test_body_bias_report_unbiased_names_devices_and_nets():
+    """Issue #1983: a PMOS body on an anonymous, deck-synthesized net has no
+    DC bias path at all, which per `docs/cli/extract.md` makes a
+    resimulation of this netlist physically wrong -- `klt pex` now says so in
+    its own envelope, instead of that fact living only in an extraction
+    report a committed `klt pex` evidence record never carried.
+
+    The entries are carried through verbatim (same `{"device", "net"}` shape
+    `klt extract` uses), and `unbiased_nets` de-duplicates them so two PMOS
+    devices sharing one floating well read as one net, not two."""
+    entries = [
+        {"device": "$1", "net": "\\$5"},
+        {"device": "$2", "net": "\\$5"},
+        {"device": "$3", "net": "\\$7"},
+    ]
+    report = _body_bias_report({"unbiased_pmos_body_nets": entries})
+
+    assert report["status"] == BODY_BIAS_UNBIASED
+    assert report["unbiased_device_count"] == 3
+    assert report["unbiased_nets"] == ["\\$5", "\\$7"]
+    assert report["unbiased_pmos_body_nets"] == entries
 
 
 # --------------------------------------------------------------------------- #
@@ -1253,6 +1304,16 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
     assert report["extraction"]["device_count"] == 1
     assert report["extraction"]["net_count"] == 2
     assert report["extraction"]["model"] is not None
+    # Issue #1983: a drawn poly resistor has no MOS body to leave floating,
+    # so the run states the clean verdict positively -- an item-7 reader can
+    # now tell "checked, every body biased" from "never reported", which
+    # before this field was indistinguishable.
+    assert report["body_bias"] == {
+        "status": "biased",
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+        "unbiased_pmos_body_nets": [],
+    }
     assert report["corner_count"] == 1
     assert report["passed"] == 1
     assert report["failed"] == 0

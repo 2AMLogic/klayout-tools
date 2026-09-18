@@ -389,6 +389,53 @@ mismatches, ``power_connectivity: "unchecked"``) deserve the same treatment
 for item 4, are all open questions issue #2002 left open on purpose -- not
 answered here.
 
+## Device-body bias surfacing (issue #1983)
+
+``docs/cli/extract.md`` states that a device body left on an anonymous,
+deck-synthesized net has **no DC bias path at all**, which makes a
+resimulation of that extracted netlist "physically wrong, not merely
+imprecise" -- the run converges and produces numbers, and those numbers are
+not comparable to a schematic-level netlist's. `klt pex` *is* such a
+resimulation, and it is the artifact ``docs/design-evidence-tiers.md`` item
+7 (post-layout verification -- the item with the strictest citation rule in
+the checklist) is cited from. So an item-7 citation could be backed by
+numbers that look like measurements and are not, with nothing anywhere in
+the signoff artifact saying so. Symmetrically, `klt lvs` reported its own
+body-tie coverage gap only as a ``device.body_unverified``
+``mismatches[]`` warning -- an entry this module never read, and one that
+never changed that envelope's ``status``.
+
+Both sides now state it in a field, and this module quotes both:
+
+- ``checks[].detail.body_verification_status`` -- `klt lvs`'s
+  ``body_verification.status`` (``"verified"``/``"unverified"``/
+  ``"unchecked"``), beside the existing ``power_connectivity_status``.
+- ``checks[].detail.body_bias`` and a ``"met"`` item's
+  ``citation.body_bias`` -- `klt pex`'s ``body_bias`` block reduced to its
+  verdict and counts (see :func:`_pex_body_bias_disclosure`). The citation
+  form is the load-bearing one: item 7's verdict and the property that can
+  invalidate the numbers backing it now sit in the same artifact.
+
+**Report, not enforce**, exactly like the DRC coverage surfacing above.
+:func:`_check_passed` is untouched: a `pex` envelope still passes on
+``status == "pass"`` whatever its ``body_bias`` says, and an `lvs` envelope
+still passes on ``status == "match"`` (plus the #1965 power gate) whatever
+its ``body_verification`` says -- so no existing claim's verdict moves. Two
+reasons this is the right default here and hard-fail was the right default
+for ``power_connectivity`` (#1965): a power-connectivity ``"mismatch"`` is
+a *defect* (a real miswire, always wrong), whereas an unverified/unbiased
+body is a *coverage* condition that some PDK decks produce on every layout
+they extract regardless of what the designer drew -- hard-failing it would
+retroactively fail whole PDKs' worth of otherwise-valid evidence on a
+question this module cannot itself adjudicate. And the original friction was
+specifically that the condition was *invisible*: "an item whose evidence can
+be silently invalid is worse than an item with no evidence, because the
+second is visible" (issue #1983). Making it visible is the fix; deciding
+what it should cost a claim is a policy question left to the reader of the
+evidence, and ``docs/design-evidence-tiers.md`` item 7 now states that
+condition explicitly rather than implying a `pex` citation is
+self-validating.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -1140,7 +1187,14 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       connectivity, not full LVS" -- so a `klt signoff` check labeled
       ``lvs`` should mean the compare *and* (when it applies) the
       power/ground wiring were both clean, matching what
-      ``docs/cli/lvs.md`` already tells callers to gate on.
+      ``docs/cli/lvs.md`` already tells callers to gate on. Its
+      ``body_verification`` block (issue #1983) is **not** consulted: a
+      ``"match"`` from a layout whose MOS bodies were compared against a
+      deck-synthesized net passes exactly like one whose bodies resolved to
+      real drawn ties. That field is surfaced, not graded -- see this
+      module's "Device-body bias surfacing" docstring section for why
+      hard-fail is the right default for a power miswire and the wrong one
+      for a body-tie coverage gap.
     - ``sim`` passes on ``status == "pass"``.
     - ``yield`` (issue #870) passes on ``status == "pass"`` (every
       measurement that declared a ``target_yield`` met it at the stated
@@ -1157,7 +1211,12 @@ def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
       and its device/net counts are visible in the aggregated verdict.
     - ``pex`` (issue #871; shape ratified by #801, `klt pex`) passes on
       ``status == "pass"`` -- mirrors ``sim``: every graded delta row met
-      its tolerance.
+      its tolerance. Its ``body_bias`` block (issue #1983) is **not**
+      consulted: a run whose extracted side had no DC bias path for its
+      device bodies passes exactly like one that did. That field is
+      surfaced (``detail.body_bias``, and ``citation.body_bias`` on a
+      ``"met"`` item), not graded -- see this module's "Device-body bias
+      surfacing" docstring section.
     - ``power`` (issue #1321) has no top-level ``status`` field at all
       (unlike every kind above -- ``docs/cli/power.md``'s JSON schema), so
       this derives a verdict from ``em_verdict`` instead: passes only when
@@ -1269,6 +1328,51 @@ def _drc_coverage_disclosure(
     }
 
 
+def _pex_body_bias_disclosure(
+    kind: str, envelope: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The cited `klt pex` envelope's own statement about whether the
+    extracted netlist it re-simulated had a DC bias path for every device
+    body (issue #1983) -- or ``None`` when there is nothing to quote.
+
+    Quoted verbatim off the envelope, never re-derived: `klt pex` builds it
+    from the extraction it drove itself (``docs/cli/pex.md`` ->
+    ``body_bias``), which is the only place the information exists.
+
+    ``None`` in exactly two cases, and they mean the same thing to a reader
+    ("this artifact makes no body-bias statement"), never "the bodies were
+    biased":
+
+    - ``kind != "pex"``. No other envelope kind carries a ``body_bias``
+      block. (`klt lvs`'s parallel ``body_verification`` block is surfaced
+      separately, as ``detail.body_verification_status`` -- it answers a
+      related but distinct question: whether the *compare* verified the body
+      ties, not whether the *simulated* netlist had a bias path.)
+    - The envelope has no ``body_bias`` key at all, or a non-object one:
+      post-layout evidence committed before `klt pex` reported it.
+      Back-compat is the whole reason this is ``None`` rather than a
+      fabricated ``"biased"`` -- an old record must not read as a netlist
+      that was checked and found clean.
+
+    ``unbiased_pmos_body_nets`` is deliberately **not** carried through: the
+    per-device list can run to hundreds of entries on a real block, and a
+    reader who needs it has the cited envelope. The count and the distinct
+    net names are enough to tell a clean run from a compromised one and to
+    find the devices in the source artifact.
+    """
+    if kind != "pex":
+        return None
+    body_bias = envelope.get("body_bias")
+    if not isinstance(body_bias, dict):
+        return None
+    nets = body_bias.get("unbiased_nets")
+    return {
+        "status": body_bias.get("status"),
+        "unbiased_device_count": body_bias.get("unbiased_device_count"),
+        "unbiased_nets": list(nets) if isinstance(nets, list) else [],
+    }
+
+
 def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
     """A small, kind-specific excerpt of the source envelope -- not a
     re-export of the full contract (a consumer that wants the raw
@@ -1314,6 +1418,17 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "power_connectivity_status": (envelope.get("power_connectivity") or {}).get(
                 "status"
             ),
+            # Issue #1983: whether the cited compare's MOS body terminals
+            # were resolved from real drawn geometry or from a
+            # deck-synthesized net (`klt lvs`'s `body_verification` block).
+            # Reported, never graded on -- see this module's "Device-body
+            # bias surfacing" docstring section. `None` on an envelope with
+            # no `body_verification` key at all (committed before #1983),
+            # distinct from the real `"verified"`/`"unverified"`/
+            # `"unchecked"` values.
+            "body_verification_status": (envelope.get("body_verification") or {}).get(
+                "status"
+            ),
         }
     elif kind == "sim":
         detail = {
@@ -1348,6 +1463,15 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
             "failed": envelope.get("failed"),
             "errored": envelope.get("errored"),
         }
+        # Issue #1983: whether the netlist these numbers were measured on
+        # actually had a DC bias path for every device body -- reported,
+        # never graded on (see this module's "Device-body bias surfacing"
+        # docstring section). Omitted entirely for a `pex` envelope
+        # committed before `body_bias` existed, so old evidence renders
+        # exactly as it did before.
+        body_bias = _pex_body_bias_disclosure(kind, envelope)
+        if body_bias is not None:
+            detail["body_bias"] = body_bias
     elif kind == "power":
         em_verdict = envelope.get("em_verdict") or {}
         detail = {
@@ -1620,6 +1744,13 @@ def build_tier_report(
                             "layers_in_stream_without_rules": ["met4/0"],
                             "rules_skipped": ["met5.4"],
                             "deck_scope": ["5.x", "6.x"],
+                        },
+                        # `pex` citations only, and only when the cited
+                        # envelope reports body bias (issue #1983)
+                        "body_bias": {
+                            "status": "unbiased",
+                            "unbiased_device_count": 148,
+                            "unbiased_nets": ["\\$5"],
                         },
                     },
                 },
@@ -2176,6 +2307,14 @@ def _grade_evidence(
     coverage = _drc_coverage_disclosure(check_kind, envelope)
     if coverage is not None:
         citation["coverage"] = coverage
+    # Issue #1983: a `pex` citation also carries the cited envelope's own
+    # body-bias statement -- item 7's verdict and the one property that can
+    # silently invalidate the numbers backing it end up in the same
+    # artifact. Present only when the cited envelope reports it, and never
+    # consulted above: the verdict is still `status == "pass"` alone.
+    body_bias = _pex_body_bias_disclosure(check_kind, envelope)
+    if body_bias is not None:
+        citation["body_bias"] = body_bias
     return "met", None, citation
 
 

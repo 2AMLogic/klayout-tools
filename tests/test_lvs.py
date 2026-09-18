@@ -2838,6 +2838,77 @@ def test_body_unverified_warns_nmos_only_on_sky130(tmp_path):
     assert entry["side"] == "layout"
     assert entry["device"]["class"] == "nfet"
 
+    # Issue #1983: the same condition, machine-checkable beside `status`
+    # rather than only discoverable by string-matching `mismatches[]`.
+    body_verification = report["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert body_verification["reason"] is None
+    assert body_verification["device_classes"] == ["nfet"]
+    assert body_verification["device_count"] == 1
+    assert body_verification["findings"] == [{"class": "nfet", "device_count": 1}]
+    assert body_verification["finding_count"] == 1
+    # Existing behaviour preserved: the warning still never changes `status`.
+    assert report["status"] == "match"
+
+
+def test_body_verification_verified_when_every_body_resolves(tmp_path):
+    """Issue #1983: a gf180mcu layout that draws real Nplus/Pplus-over-Comp
+    ties resolves both body terminals to real, named nets -- no
+    `device.body_unverified` entry fires, and `body_verification` says
+    `"verified"` rather than merely staying silent."""
+    gds = _write_gf180mcu_clkinv_with_ties(tmp_path / "clkinv.gds")
+    reference_path = _write(tmp_path / "ref.spice", _GF180MCU_CLKINV_SPICE_NAMED_RAILS)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": gds, "deck": "gf180mcu"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "gf180mcu_fd_sc_mcu9t5v0__clkinv_1",
+            },
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
+        for m in report["mismatches"]
+    )
+    assert report["body_verification"] == {
+        "status": lvs.BODY_STATUS_VERIFIED,
+        "reason": None,
+        "device_classes": [],
+        "device_count": 0,
+        "findings": [],
+        "finding_count": 0,
+    }
+
+
+def test_body_verification_unchecked_for_pre_extracted_layout_netlist(tmp_path):
+    """Issue #1983: the pre-extracted `layout.netlist` form verifies nothing
+    about the device bodies, and now says so -- `"unchecked"` with a reason,
+    never `"verified"`. Before this block existed, this run and a genuinely
+    clean one were indistinguishable (both simply carried no
+    `device.body_unverified` entry)."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    body_verification = report["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNCHECKED
+    assert "no request.layout.deck was given" in body_verification["reason"]
+    assert body_verification["device_count"] == 0
+    assert body_verification["findings"] == []
+
 
 def _write_hier_inverter_gds(path: Path) -> str:
     """A minimal sky130 inverter whose gate ``A`` label lives inside an

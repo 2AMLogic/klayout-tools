@@ -267,6 +267,34 @@ def _format_coverage(coverage: dict) -> str:
     return ", ".join(parts)
 
 
+def _format_body_bias(body_bias: dict) -> str:
+    """One line summarising a `pex` citation's `body_bias` statement (issue
+    #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
+    and which synthesized nets are involved.
+
+    The verdict is always shown, including `"biased"`, for the same reason
+    `_format_coverage` always shows a `0`: "every device body had a DC bias
+    path" is the statement item 7's evidence is being asked to make, and it
+    must not be indistinguishable from an artifact that never made it (an
+    envelope with no `body_bias` block prints no line at all; see the call
+    site).
+    """
+    status = body_bias.get("status") or "unknown"
+    if status == "biased":
+        return f"{status} (every device body has a DC bias path)"
+    count = body_bias.get("unbiased_device_count") or 0
+    nets = body_bias.get("unbiased_nets") or []
+    shown = ", ".join(str(net) for net in nets[:_COVERAGE_PREVIEW])
+    if len(nets) > _COVERAGE_PREVIEW:
+        shown += f", +{len(nets) - _COVERAGE_PREVIEW} more"
+    suffix = f" on {shown}" if nets else ""
+    return (
+        f"{status} ({count} device(s) with no DC bias path{suffix}) -- "
+        "these post-layout numbers are not comparable to the schematic leg; "
+        "see docs/cli/extract.md"
+    )
+
+
 def _print_tier_report_text(result: dict) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
@@ -308,6 +336,16 @@ def _print_tier_report_text(result: dict) -> None:
             coverage = citation.get("coverage")
             if coverage:
                 print(f"        coverage: {_format_coverage(coverage)}")
+            # Issue #1983: a `pex` citation's own body-bias statement, shown
+            # beside the post-layout numbers it qualifies -- an extracted
+            # netlist with no DC bias path for its device bodies makes those
+            # numbers physically wrong (docs/cli/extract.md), and `klt
+            # signoff` does not grade on it, so a reviewer of item 7 needs it
+            # in the artifact they read. Absent for evidence committed before
+            # `klt pex` reported body bias.
+            body_bias = citation.get("body_bias")
+            if body_bias:
+                print(f"        body bias: {_format_body_bias(body_bias)}")
         elif item["reason"]:
             # Loud, not silent: an unmet item always names *why* -- "no
             # runnable check exists" (e.g. no_evidence) reads distinctly

@@ -1222,6 +1222,7 @@ section this engine buckets rather than fully structures:
 | `hints_applied` | object\<string, array\<array\<string\>\>\> \| `null` | Issue #1998. Every `hints.equivalent_pins` grouping actually passed to `NetlistComparer.equivalent_pins()` for this run, keyed by the (reference-side) subcircuit name it was declared against, with each group echoed verbatim as the caller wrote it — e.g. `{"ota_5t": [["inp", "inn"]]}`. `null` when the request supplied no `hints.equivalent_pins` (including a request with only a `hints.same_nets` hint, or no `hints` at all) — the same always-present-but-nullable convention `options.compare_parameters` follows for an optional dict-shaped echo, never a spuriously present empty `{}`. This is the only visibility a report gives into an applied `equivalent_pins` hint: unlike `hints.same_nets` (a hard assertion the comparer can refuse, surfaced as a `hints.rejected` mismatch entry — see below), a swappable-pin group has no "rejected" outcome, so without this field a reader could not tell whether — or how broadly — an `equivalent_pins` hint reshaped the verdict. Does not itself change `status`, `mismatch_count`, or any other verdict field; it only discloses that the hint was applied. A request naming an unknown subcircuit or pin fails the run outright (`LvsError`, exit 1, per `hints.equivalent_pins`'s own field description above) before any report is produced, so this field is never populated with a partial or invalid entry from a failed application. |
 | `status` | `"match"` \| `"mismatch"` \| `"inconclusive"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. `"inconclusive"` (issue #1370) is the third outcome: the compare the request asked for could **not** be performed, so this run reached no verdict about the design. It has exactly one cause today — `options.combine_devices` was requested and `combine_devices()` exhausted its retry budget on at least one side, so both sides were rolled back to their uncombined state (the symmetric degrade described under `options.combine_devices`) and the resulting engine `"mismatch"` was downgraded. A `"match"` is never downgraded. This mirrors `klt equiv`'s own `"inconclusive"` vocabulary and gets its own exit code (`4`, the same value `klt equiv` uses) so an automation gate can tell "the design differs" from "the comparison could not be performed". Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). This is always the engine's own verdict, including when `options.parameter_tolerance` is in force — that option is implemented by re-running a real `compare()` on values snapped into agreement, never by re-deriving the verdict from this command's own findings (see "`device.parameter_tolerated`" below). |
 | `power_connectivity` | object | Issue #1952. The **power/ground half** of the verdict, reported beside `status` rather than folded into it — see "Power/ground connectivity" above for the full field table, what the check verifies, and the invariant it rests on. Always present, for every `reference.form`: `status` is `"match"`/`"mismatch"` when the check ran, and `"unchecked"` (with a human-readable `reason`) when it did not, so "was power connectivity verified by this run?" is answerable from any `klt lvs` report on its own. **A caller wanting full LVS on a digital block gates on both `status == "match"` and `power_connectivity.status == "match"`** — this field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`, all of which stay exactly the signal-connectivity compare's own results. |
+| `body_verification` | object | Issue #1983. Whether this layout's MOS **body terminals** were resolved from real drawn/derived tap geometry or from a deck-synthesized net — the machine-checkable form of the `device.body_unverified` warning, reported beside `status` rather than folded into it. See "The same condition, machine-checkable" below for the full field table. Always present: `status` is `"verified"`/`"unverified"` when a `layout.deck` was given, and `"unchecked"` (with a human-readable `reason`) for the pre-extracted `layout.netlist` form, so "were the device bodies verified by this run?" is answerable from any `klt lvs` report on its own rather than being inferred from the *absence* of a warning. This field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`. |
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
 | `error_count` | integer | Issue #1132: the number of `mismatches[]` entries with `severity: "error"` — `sum(category_error_counts.values())`. `mismatch_count` alone cannot tell a caller this without re-reading every entry, since a nonzero `mismatch_count` can be entirely `severity: "warning"` (e.g. a report whose only finding is a `device.bulk_reconciled` disclosure). `0` on a `status: "match"` report exactly (a `"match"` verdict never carries an `error` entry). |
 | `category_counts` | object\<string, int\> | Per-category mismatch counts (`error` and `warning` entries combined), keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
@@ -1738,6 +1739,56 @@ always `severity: "warning"`, and never change `status` or break
 `mismatch_count`'s error semantics — they only make it visible, in-band,
 that this dimension of the compare was not fully verified against the
 schematic.
+
+##### The same condition, machine-checkable: `body_verification` (issue #1983)
+
+A `mismatches[]` warning is not *gradeable*. Answering "were this layout's
+device bodies verifiably tied?" from a committed report meant string-matching
+a `category` inside an array whose other entries are ordinary compare
+findings — so in practice nothing downstream asked, and a record carrying
+the warning was indistinguishable, at every consumer that reads only
+`status`, from one that did not.
+
+The top-level **`body_verification`** block (always present) states it as a
+field:
+
+```json
+"body_verification": {
+  "status": "unverified",
+  "reason": null,
+  "device_classes": ["nfet"],
+  "device_count": 2,
+  "findings": [{"class": "nfet", "device_count": 2}],
+  "finding_count": 1
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | `"verified"` — a deck was given and every MOS body terminal in the layout's top circuit resolved to a real drawn/derived net. `"unverified"` — at least one did not (the `device.body_unverified` condition above). `"unchecked"` — no `request.layout.deck` was given (the pre-extracted `request.layout.netlist` form), so nothing establishes this layout's tap convention and this run verified nothing about the bodies either way. |
+| `reason` | string \| `null` | Why the question could not be answered, for `status: "unchecked"`; `null` otherwise. |
+| `device_classes` | array\<string\> | The deck device-class names with unverified bodies (e.g. `["nfet"]`), sorted. Empty for `"verified"`/`"unchecked"`. |
+| `device_count` | integer | Total unverified device count across those classes. `0` for `"verified"`/`"unchecked"`. |
+| `findings` | array\<object\> | One `{"class", "device_count"}` entry per affected device class, class-sorted. |
+| `finding_count` | integer | `len(findings)`. |
+
+It is rendered from the *same* determination as the `device.body_unverified`
+warnings above, so the two can never disagree.
+
+**`"unchecked"` never means "verified".** Before this block existed, the
+*absence* of a `device.body_unverified` warning meant "checked and clean" on
+an inline extraction and "not checked at all" on a pre-extracted netlist,
+and nothing in the report told those apart.
+
+**This changes no verdict.** `status`, `mismatch_count`, `error_count` and
+the category counts are exactly what they were — a layout with unverified
+bodies still reports `status: "match"` when the compare matched, and the
+warnings are still `severity: "warning"`. `klt signoff` surfaces
+`body_verification.status` on an `lvs` check (`detail.body_verification_
+status`) but does not grade on it; see [`signoff.md`](signoff.md) and
+[`../design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 for why
+disclosure rather than hard-fail, and for the downstream consequence an
+untied body has for a post-layout `klt pex` citation.
 
 #### `device.combine_incomplete`: `options.combine_devices` could not fully combine a partial-match device group
 
