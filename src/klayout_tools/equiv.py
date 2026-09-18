@@ -170,6 +170,16 @@ bounded SAT search runs as before (verified live against a deliberately
 mutated real post-route netlist -- see ``docs/cli/equiv.md``'s
 "Re-running the real pre/post-route canary").
 
+That soundness argument rests entirely on step 2's "**except any name that
+is a top-level port**" filter, which in turn rests on
+:func:`_parse_module_ports` seeing *every* port. Verilog **escaped
+identifiers** (``\\q.x``, ``\\q[0]`` -- how a synthesis/P&R flow spells a
+name containing ``.``/``[``/``]``/``/``) are terminated by whitespace, so
+Yosys writes them as ``output \\q.x ;``; a parser that does not allow for
+that space silently loses the port, the loop blacklists it as if it were an
+internal wire, and a genuinely-different design is reported ``"equivalent"``
+(issue #1999). :data:`_PORT_DECL_RE` therefore matches both spellings.
+
 ``artifacts.stage1_blacklist_path`` records exactly which wires were
 dropped, so a reader can audit the weakened obligation set rather than
 having to trust it; an ``equiv_cutpoint_refinement`` info diagnostic reports
@@ -306,10 +316,25 @@ _SEQ_TIME_HEADER_RE = re.compile(r"Time Signal Name.*Bin\s*$")
 _SEQ_SIM_DISPLAY_RE = re.compile(r"^EQUIV_SIM_CYCLE (\d+) (gold|gate) (\S+) ([01xz]+)$")
 
 #: Parses one `write_verilog -noattr`-emitted port declaration line, e.g.
-#: `  input clk;` or `  output [3:0] sum;` -- see `_parse_module_ports`.
-_PORT_DECL_RE = re.compile(r"^\s*(input|output|inout)\s+(?:\[[^\]]+\]\s+)?(\S+?);\s*$")
+#: `  input clk;`, `  output [3:0] sum;` or -- for a Verilog *escaped*
+#: identifier -- `  output \q.x ;` (issue #1999). An escaped identifier is
+#: terminated by whitespace, not by the next non-identifier character, so
+#: Yosys emits a space between the name and the `;`; the `\s*` before the
+#: `;` is what lets such a port be recognised at all. Without it the port
+#: is silently invisible to `_parse_module_ports`, and `_run_sequential`'s
+#: cut-point refinement then mistakes a top-level port for an internal wire
+#: and blacklists away the very obligation that defines equivalence.
+_PORT_DECL_RE = re.compile(
+    r"^\s*(input|output|inout)\s+(?:\[[^\]]+\]\s+)?(\S+?)\s*;\s*$"
+)
 _MODULE_START_RE = re.compile(r"^\s*module\s+(\S+)\s*\(")
 _MODULE_END_RE = re.compile(r"^\s*endmodule\s*$")
+
+#: A Verilog-2005 *simple* identifier: no escape needed when emitting it
+#: into generated source. Anything else (a flattened hierarchical name
+#: `q.x`, a bit-blasted `q[0]`, a path-shaped `top/u1/z`) must be written as
+#: a whitespace-terminated escaped identifier -- see `_verilog_ident`.
+_SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
 
 #: One `equiv_status` "unproven cell" report line, e.g.
 #: `  Unproven $equiv $auto$equiv_make.cc:295:find_same_wires$10212:
@@ -1370,6 +1395,14 @@ def _parse_module_ports(netlist_path: str, module_name: str) -> dict[str, str]:
     complete, correct port list for both sides. ``inout`` ports are recorded
     but treated the same as ``output`` everywhere else in this module (rare
     at the gate-level netlists this engine targets; not specially modelled).
+
+    Port names are returned with Yosys's leading ``\\`` escape stripped --
+    the same spelling :func:`_parse_unproven_equiv_signals` produces, which
+    is what makes ``_run_sequential``'s "is this unproven signal a top-level
+    port?" test comparable at all (issue #1999), and the same spelling
+    ``sat -show``'s own signal table is parsed back into by
+    :func:`_parse_multicycle_signal_table`. Use :func:`_verilog_ident` when
+    emitting one of these names back into generated Verilog.
     """
     try:
         with open(netlist_path, encoding="utf-8") as handle:
@@ -1392,8 +1425,26 @@ def _parse_module_ports(netlist_path: str, module_name: str) -> dict[str, str]:
         match = _PORT_DECL_RE.match(line)
         if match:
             direction, name = match.groups()
-            ports.setdefault(name, direction)
+            ports.setdefault(name.lstrip("\\"), direction)
     return ports
+
+
+def _verilog_ident(name: str) -> str:
+    """Render ``name`` -- a port name as
+    :func:`_parse_module_ports`/:func:`_parse_multicycle_signal_table`
+    return it, i.e. already stripped of Yosys's leading ``\\`` -- as a
+    legal Verilog identifier for emission into generated source.
+
+    Simple identifiers pass through verbatim, so every testbench this
+    module already generated is byte-for-byte unchanged. A name that is not
+    a simple identifier (a flattened hierarchical output ``q.x``, a
+    bit-blasted ``q[0]``) becomes a Verilog *escaped* identifier: a leading
+    ``\\`` and a **trailing space**, which is the escape's terminator and
+    therefore part of the token, not decoration (issue #1999).
+    """
+    if _SIMPLE_IDENT_RE.match(name):
+        return name
+    return f"\\{name} "
 
 
 def _parse_unproven_equiv_signals(stdout: str) -> set[str]:
@@ -1579,6 +1630,12 @@ def _build_sequential_testbench(
     :func:`_confirm_sequential_counterexample` checks for the reported
     divergence reproducing *somewhere* in the trace rather than at the
     identical cycle index -- see that function's own docstring.
+
+    Port names that are not simple Verilog identifiers (a flattened
+    hierarchical ``q.x``, a bit-blasted ``q[0]``) are emitted through
+    :func:`_verilog_ident` so the generated testbench still compiles; the
+    ``$display`` *text* keeps the plain, unescaped spelling, since that is
+    what :data:`_SEQ_SIM_DISPLAY_RE` parses back out (issue #1999).
     """
     input_names = sorted(
         name for name, direction in ports.items() if direction == "input"
@@ -1587,15 +1644,23 @@ def _build_sequential_testbench(
         name for name, direction in ports.items() if direction != "input"
     )
 
+    def _tb_net(prefix: str, name: str) -> str:
+        """The testbench-local net carrying ``prefix``'s copy of ``name``."""
+        return _verilog_ident(f"{prefix}_{name}")
+
     lines = ["module equiv_tb;"]
     for name in input_names:
-        lines.append(f"  reg {name};")
+        lines.append(f"  reg {_verilog_ident(name)};")
     for name in output_names:
-        lines.append(f"  wire gold_{name}, gate_{name};")
+        lines.append(f"  wire {_tb_net('gold', name)}, {_tb_net('gate', name)};")
 
     def _conns(prefix: str) -> str:
-        conns = [f".{name}({name})" for name in input_names]
-        conns += [f".{name}({prefix}_{name})" for name in output_names]
+        conns = [
+            f".{_verilog_ident(name)}({_verilog_ident(name)})" for name in input_names
+        ]
+        conns += [
+            f".{_verilog_ident(name)}({_tb_net(prefix, name)})" for name in output_names
+        ]
         return ", ".join(conns)
 
     lines.append(f"  gold u_gold ({_conns('gold')});")
@@ -1608,19 +1673,19 @@ def _build_sequential_testbench(
                 continue
             width = entry["width"]
             if width == 1:
-                lines.append(f"    {name} = 1'b{entry['bin']};")
+                lines.append(f"    {_verilog_ident(name)} = 1'b{entry['bin']};")
             else:
-                lines.append(f"    {name} = {width}'b{entry['bin']};")
+                lines.append(f"    {_verilog_ident(name)} = {width}'b{entry['bin']};")
         lines.append("    #1;")
         time_value = cycle["time"]
         for name in output_names:
             lines.append(
                 f'    $display("EQUIV_SIM_CYCLE {time_value} gold {name} %b", '
-                f"gold_{name});"
+                f"{_tb_net('gold', name)});"
             )
             lines.append(
                 f'    $display("EQUIV_SIM_CYCLE {time_value} gate {name} %b", '
-                f"gate_{name});"
+                f"{_tb_net('gate', name)});"
             )
     lines.append("    $finish;")
     lines.append("  end")
