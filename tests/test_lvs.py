@@ -10322,6 +10322,47 @@ def test_netgen_engine_populates_provenance_input_content_hash(tmp_path, monkeyp
     }
 
 
+def test_provenance_input_hash_is_the_original_layout_stream(tmp_path):
+    """Issue #1987: `provenance.input.content_hash` must be the digest of the
+    *input layout stream the request named*, computed independently here
+    rather than cross-checked against `environment.layout_sha256` (which is
+    derived from the same call and so cannot catch the two drifting together).
+
+    This is the property `klt signoff`'s `provenance_consistency` relies on
+    to bind an LVS check to the layout `klt drc` ran on: both verbs must hash
+    the same bytes -- the GDS the caller handed them, never a derived
+    intermediate such as the extracted SPICE this inline-extraction path
+    produces on its way to the compare. `klt lvs` exposes no layout-
+    transforming option (it never passes `klt extract --abstract-cells`; see
+    `_resolve_layout`'s note that `abstracted_cells` is always empty here),
+    so there is no request shape in which the hashed file is anything but the
+    `layout.file` given.
+    """
+    from klayout_tools._provenance import sha256_file
+    from klayout_tools.extract import run_extract
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["provenance"]["input"] == {
+        "content_hash": "sha256:" + sha256_file(str(SKY130_INV))
+    }
+    # ... and it is emphatically not the extracted netlist's digest, the one
+    # derived artifact an inline-extraction run has lying around.
+    assert report["provenance"]["input"]["content_hash"] != "sha256:" + sha256_file(
+        reference_path
+    )
+
+
 #: A `netgen` `comp.out` whose property-error qualifier carries raw ANSI SGR
 #: escapes, used by the Finding-2 re-verification test below. `klt lvs` never
 #: emits colour itself, so the only way an ESC byte could reach a non-TTY

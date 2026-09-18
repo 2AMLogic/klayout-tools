@@ -1728,6 +1728,91 @@ def test_lvs_joins_the_input_hash_cross_check(tmp_path):
     assert values[lvs_path] == "sha256:layoutB"
 
 
+def test_drc_and_lvs_against_the_same_layout_stay_consistent(tmp_path):
+    """Issue #1987, the paired passing case for
+    `test_lvs_joins_the_input_hash_cross_check` above: binding LVS into the
+    `input.content_hash` comparison must only refuse a *genuinely* stale
+    pairing. A DRC and an LVS envelope naming the same layout hash are the
+    normal T1 combination and must still render `ok: true` with no
+    mismatches -- otherwise the fix would trade a silent false pass for a
+    blanket false refusal, which is just as useless a grade.
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    # Precondition: both fixtures really do pin the same layout, so the
+    # assertion below is about the comparison and not about the fixtures
+    # accidentally having drifted apart.
+    assert (
+        DRC_CLEAN_ENVELOPE["provenance"]["input"]
+        == LVS_MATCH_ENVELOPE["provenance"]["input"]
+    )
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
+@pytest.mark.parametrize("shape", ["absent", "null"])
+def test_pre_1969_lvs_envelope_is_excluded_not_a_forced_mismatch(tmp_path, shape):
+    """Issue #1987 edge case: an `lvs` envelope committed *before* `klt lvs`
+    started populating `provenance.input` (issue #1969) carries no
+    `input.content_hash` at all -- either the key is absent entirely or it
+    is an explicit `null`.
+
+    Such an envelope must stay non-participating, exactly as it was before
+    the field existed: `_check_scalar_field` collects only non-`None`
+    values, so a single populating check (the DRC sibling) leaves one
+    distinct value and no mismatch. The failure mode this guards against is
+    treating "nothing to say" as "disagrees with everyone", which would
+    retroactively refuse every archived report the moment the field shipped.
+    """
+    provenance = {**LVS_MATCH_ENVELOPE["provenance"]}
+    if shape == "absent":
+        del provenance["input"]
+    else:
+        provenance["input"] = None
+    old_shape_lvs = {**LVS_MATCH_ENVELOPE, "provenance": provenance}
+
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", old_shape_lvs)
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+    lvs_check = next(check for check in result["checks"] if check["kind"] == "lvs")
+    assert lvs_check["provenance"].get("input") is None
+
+
+def test_sim_does_not_participate_in_the_input_hash_cross_check(tmp_path):
+    """Issue #1987's scope note, pinned as behaviour: `klt sim` deliberately
+    leaves `provenance.input` `None` (it simulates a netlist against a model
+    library -- there is no input *layout* stream to pin), so it never
+    contributes a value to the `input.content_hash` comparison.
+
+    This is the reason `klt sim` did *not* get `klt lvs`'s issue-#1969
+    treatment: a netlist digest is not comparable with the layout digests
+    `drc`/`extract`/`lvs`/`pex` contribute, so populating the shared field
+    with one would turn every legitimate layout-plus-simulation manifest
+    into a permanent `provenance_consistency` refusal.
+    """
+    assert SIM_PASS_ENVELOPE["provenance"]["input"] is None
+
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    result = build_signoff([drc_path, lvs_path, sim_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
 def test_mismatched_pdk_name_is_refused(tmp_path):
     other_pdk_sim = {
         **SIM_PASS_ENVELOPE,

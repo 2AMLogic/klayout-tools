@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
+  and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
+  block kind (issue #1987). Both items previously accepted *any* recognised,
+  passing envelope kind — including `klt extract`, which has no failure
+  verdict and so always counts as passed, meaning a manifest citing
+  `{"3": "extract.json", "4": "extract.json"}` graded both items `met` on a
+  report that ran neither check and could not have failed. **Grading change**:
+  a manifest citing a non-`drc` kind for item 3, or a non-`lvs` kind for item
+  4, moves from `met` to `unmet` with `reason: "wrong_kind"` — the same
+  outcome item 7 has rendered for a non-`pex` citation since issue #871. The
+  cited check did not fail on its own terms; it simply is not the check the
+  item names. `examples/signoff/manifest.json` already cites the right kinds
+  and is unaffected. Paired with issue #1969's `provenance.input.content_hash`
+  population below, an item-4 "LVS clean" claim is now both *the right check*
+  and *bound to the layout DRC ran on*: `provenance_consistency` refuses a
+  manifest whose `drc` and `lvs` envelopes pin different layout hashes. No
+  JSON shape change (no field added, renamed, removed or nested).
 - **Added**: `klt signoff` now reports the cited DRC envelope's `coverage`
   block (issue #2002). `docs/design-evidence-tiers.md` item 3 requires a claim
   to enumerate its deck's coverage gaps and, since issue #1982, names the
