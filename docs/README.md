@@ -99,6 +99,7 @@ docs/
     lambdalib-survey.md
     layout-generator-spike.md
     lvs-extraction-spike.md
+    magic-oracle.md
     matching-and-floorplanning.md
     metric-namespace.md
     mom-cross-validation.md
