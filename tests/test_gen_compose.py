@@ -14484,3 +14484,139 @@ def test_compose_rejects_higher_plane_ring_escape_when_pad_lands_inside_ring_tra
 
     assert report["unrouted_nets"] == ["N1"]
     assert "closed guard/collector ring" in report["nets"][0]["legs"][0]["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2072: a via-drop ladder's intermediate landing pads must clear each
+# landing layer's own minimum-area DRC rule, not just the fixed
+# `_VIA_LANDING_SIZE_UM` (0.42um, 0.1764um^2) square -- reproduced against a
+# real `klt gen-compose` output (a `res_array` li1 pin routed to a `bond_pad`
+# `top_metal` (met5) pin, forcing the ladder through met3/met4 as isolated
+# intermediate hops) per the issue's own repro recipe.
+# --------------------------------------------------------------------------- #
+
+
+def test_landing_pad_side_um_for_layer_floors_to_the_deck_area_rule(pdk_root):
+    # met1/met2's own area rules (0.083/0.0676um^2) are already below
+    # `_VIA_LANDING_SIZE_UM`'s own 0.1764um^2 -- the pre-#2072 fixed pad
+    # stays unchanged there. met3/met4 (0.240um^2 each) and met5 (4.0um^2)
+    # all exceed it, so the resolved side must grow to clear them.
+    from klayout_tools.gen_compose_routing import _landing_pad_side_um_for_layer
+
+    variant = "sky130A"
+    assert _landing_pad_side_um_for_layer(variant, (68, 20)) == pytest.approx(0.42)
+    assert _landing_pad_side_um_for_layer(variant, (69, 20)) == pytest.approx(0.42)
+    # met3.area.1 / met4.area.1: 0.240um^2 -> side sqrt(0.240) ~= 0.4899um.
+    import math
+
+    met3_side = _landing_pad_side_um_for_layer(variant, (70, 20))
+    assert met3_side == pytest.approx(math.sqrt(0.240))
+    assert met3_side > 0.42
+    met4_side = _landing_pad_side_um_for_layer(variant, (71, 20))
+    assert met4_side == pytest.approx(math.sqrt(0.240))
+    # met5.area.1: 4.0um^2 -> side 2.0um.
+    met5_side = _landing_pad_side_um_for_layer(variant, (72, 20))
+    assert met5_side == pytest.approx(2.0)
+
+
+def test_landing_pad_side_um_for_layer_ignores_holes_area_rule(pdk_root):
+    # met1.holes_area.1 (0.14um^2, `derived_layer` set, checks an interior
+    # void of the merged region -- never satisfiable by drawing a bigger
+    # *solid* square) must not be picked up as if it were met1.area.1
+    # (0.083um^2) -- the plain, non-derived area rule is the only one that
+    # legitimately floors a solid pad's own side.
+    from klayout_tools.gen_compose_routing import _min_area_um2_for_layer
+
+    result = _min_area_um2_for_layer("sky130A", (68, 20))
+    assert result is not None
+    threshold_um2, rule_id = result
+    assert rule_id == "met1.area.1"
+    assert threshold_um2 == pytest.approx(0.083)
+
+
+def test_compose_bond_pad_via_ladder_landing_pads_clear_deck_area_floors(
+    tmp_path, pdk_root
+):
+    # Issue #2072's own repro: a `res_array` li1 pin routed on `"metal"`
+    # (li1) to a `bond_pad`'s `top_metal` (met5) pin forces the via-drop
+    # ladder through li1->met1->met2->met3->met4->met5 (sky130's curated
+    # deck's own metals[]/vias[] stack, `_resolve_via_drop_layer`). Nothing
+    # else the composition draws lands on met3/met4 at that point -- the
+    # ladder's own intermediate landing pads there are genuinely isolated,
+    # so a fixed 0.42um pad reproduces `met3.area.1`/`met4.area.1`
+    # (0.1764um^2 < 0.240um^2 each) on real `klt gen-compose` +
+    # `klt drc --deck sky130` output before the fix.
+    res0 = _gen_block(tmp_path, pdk_root, "res_array", "res0")
+    bond0 = _gen_block(tmp_path, pdk_root, "bond_pad", "bond0")
+
+    output = tmp_path / "bond_via_ladder.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "res0", "generator_report": res0},
+                {"id": "bond0", "generator_report": bond0},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["res0", "bond0"],
+                "origins_um": {
+                    "res0": {"x": 0.0, "y": 0.0},
+                    "bond0": {"x": 60.0, "y": 0.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "PADNET",
+                    "pins": [
+                        {"block": "res0", "port": "R3_B"},
+                        {"block": "bond0", "port": "PAD"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "bond_via_ladder", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bond_via_ladder")
+    dbu = layout.dbu
+
+    # met3 (70/20) and met4 (71/20) each carry exactly the ladder's own
+    # isolated intermediate landing pad at this net's via-drop point --
+    # confirm its drawn area alone already clears each layer's own
+    # met3.area.1/met4.area.1 threshold (0.240um^2), not merely a merged
+    # union with something else.
+    for layer_num, min_area_um2 in ((70, 0.240), (71, 0.240)):
+        region = kdb.Region(top.shapes(layout.layer(layer_num, 20)))
+        region.merge()
+        polygons = list(region.each())
+        assert polygons, f"expected drawn geometry on {layer_num}/20"
+        for polygon in polygons:
+            assert polygon.area() * (dbu**2) >= min_area_um2 - 1e-9
+
+    # `klt drc --deck sky130` no longer reports any of the met1-met5
+    # minimum-area rules the issue's own repro table names (met4.area.1 is
+    # the deck's own additional level beyond the issue's original table,
+    # found by this same repro). `met4.enclosing.via4.1` is a *distinct*,
+    # not-yet-fixed root cause (the landing pad's own enclosure of an
+    # upsized via4 cut, a different rule *kind* than area -- issue #2072's
+    # PR files it as a separate follow-up) and is deliberately not asserted
+    # clean here.
+    drc_report = run_drc(str(output), "sky130")
+    area_rule_ids = {
+        "met1.area.1",
+        "met2.area.1",
+        "met3.area.1",
+        "met4.area.1",
+        "met5.area.1",
+    }
+    violated_area_rules = area_rule_ids & set(drc_report["rule_counts"])
+    assert not violated_area_rules, drc_report["violations"]

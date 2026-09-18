@@ -133,6 +133,100 @@ def _min_width_um_for_layer(
     return best
 
 
+def _min_area_um2_for_layer(
+    variant: str, layer: tuple[int, int] | None
+) -> tuple[float, str] | None:
+    """Resolve the tightest applicable minimum-*area* DRC rule for ``layer``
+    from the resolved PDK family's own curated deck -- the *same*
+    ``ExtractionDeck``/``DrcRule`` set ``klt drc`` judges composed geometry
+    with, never a private, hard-coded threshold (issue #2072).
+
+    Mirrors :func:`_min_width_um_for_layer` above, generalised to ``"area"``
+    rules -- used by :func:`_landing_pad_side_um_for_layer` below to floor a
+    via-drop's landing-pad square against whichever metal level it actually
+    lands on. Returns ``(threshold_um2, rule_id)`` for the *largest*
+    matching plain ``"area"`` rule on ``layer`` (``other_layer`` and
+    ``derived_layer`` both unset -- this deliberately excludes a layer's
+    ``*.holes_area.*`` sibling rule, which checks the area of an *interior
+    void* of the merged region, not the polygon itself, and would never be
+    satisfied merely by drawing a bigger solid square), or ``None`` when
+    ``layer`` is ``None``, the layer has no such rule in the resolved deck,
+    or the PDK family/deck cannot be resolved at all -- an unresolvable
+    family degrades this check to a no-op, exactly like
+    :func:`_min_width_um_for_layer` does.
+    """
+    if layer is None:
+        return None
+    try:
+        family = _pdk_family(variant)
+        deck_rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except (GenError, UnknownDeckError):
+        return None
+    best: tuple[float, str] | None = None
+    for rule in deck_rules:
+        if (
+            rule.check == "area"
+            and rule.layer == layer
+            and rule.other_layer is None
+            and rule.derived_layer is None
+            and rule.area_min_dbu2 is not None
+        ):
+            threshold_um2 = rule.area_min_dbu2 * (nominal_dbu_um**2)
+            if best is None or threshold_um2 > best[0]:
+                best = (threshold_um2, rule.id)
+    return best
+
+
+def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> float:
+    """A via-drop landing pad's own drawn side length (um) on ``layer``,
+    floored against that layer's own minimum-*area* DRC rule (issue #2072).
+
+    A via-drop's landing pad (``_VIA_LANDING_SIZE_UM``, sized from the PDK's
+    contact-enclosure convention) is drawn on *every* hop of a multi-level
+    via ladder (:func:`_resolve_via_drop_layer`) -- including an
+    intermediate metal level the ladder merely passes through on its way to
+    a pin several levels up (e.g. a route reaching a `bond_pad`'s
+    ``top_metal`` port through sky130's li1->met1->met2->met3->met4->met5
+    stack). ``_VIA_LANDING_SIZE_UM`` (0.42um square, 0.1764um^2) clears
+    sky130's own met1/met2 minimum-area rules (0.083/0.0676um^2) but falls
+    short of met3/met4's (0.240um^2 each) and met5's (4.0um^2) -- so an
+    intermediate hop landing pad that never merges with a larger shape on
+    that layer (nothing else the composition draws is anchored there) is a
+    real, isolated sub-minimum-area polygon: exactly the `met3.area.1`/
+    `met4.area.1` violations issue #2072 reproduced against a real `klt
+    gen-compose` + `bond_pad` output.
+
+    Returns ``max(_VIA_LANDING_SIZE_UM, sqrt(area_floor))`` when ``layer``
+    carries a plain minimum-area rule in the resolved deck (a landing pad
+    already merged into a larger drawn shape on that layer stays clean
+    regardless of the extra size), or ``_VIA_LANDING_SIZE_UM`` unchanged
+    when the layer has no such rule (or the family/deck cannot be
+    resolved) -- an unresolvable family degrades to the pre-#2072 fixed
+    size, never blocks routing.
+
+    Same known, already-accepted scoping trade-off as ``via_drop_size_um``
+    (issue #1501): this resolved size is threaded into *drawing*
+    (:func:`~klayout_tools.gen_compose._write_composed_gds`) only, not into
+    the router's own pre-route spacing/collision pre-checks (still sized
+    off the fixed ``_VIA_LANDING_SIZE_UM`` baseline) -- so an oversized pad
+    on a rule-heavy layer (met5's 2.0um side, up from 0.42um) is, in the
+    rare case a route was accepted right at that pre-check's own margin,
+    theoretically capable of surfacing a *new*, previously-unseen spacing
+    violation against a neighbour `klt drc` would still catch. This is
+    strictly better than the pre-#2072 guaranteed area violation it
+    replaces, and mirrors the exact precedent #1501 already shipped and
+    left unchanged for `via_drop_size_um`'s own via-square growth.
+    """
+    from .gen_compose import _VIA_LANDING_SIZE_UM
+
+    area_floor = _min_area_um2_for_layer(variant, layer)
+    if area_floor is None:
+        return _VIA_LANDING_SIZE_UM
+    needed_side_um = math.sqrt(area_floor[0])
+    return max(_VIA_LANDING_SIZE_UM, needed_side_um)
+
+
 def _port_own_layer(port: dict[str, Any]) -> tuple[int, int] | None:
     """The ``(layer, datatype)`` a port's own reported ``layer{layer,
     datatype}`` geometry names, or ``None`` when it is missing/malformed.

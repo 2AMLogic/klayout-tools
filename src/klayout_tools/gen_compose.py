@@ -208,6 +208,7 @@ from .gen_compose_routing import (
     _declare_only_bundle_result,
     _drawn_leg_footprint_region,
     _drawn_leg_intermediate_pad_regions,
+    _landing_pad_side_um_for_layer,
     _leg_block_spacing_violation_um,
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
@@ -3341,6 +3342,26 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 via_drop_size_um[via_pair] = max(
                     _VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0
                 )
+    # Issue #2072: `_VIA_LANDING_SIZE_UM` is a guaranteed `met3.area.1`/
+    # `met4.area.1`/`met5.area.1`-class violation whenever a via-drop
+    # ladder's landing pad lands *isolated* on a metal level whose own
+    # minimum-area rule exceeds the fixed 0.42um square's 0.1764um^2 (e.g.
+    # an intermediate hop several levels below a `bond_pad`'s `top_metal`
+    # pin, which never merges with anything else the composition draws on
+    # that level). Derive a per-landing-layer floor from the same resolved
+    # deck `klt drc` judges the drawn pad with -- one lookup per *distinct*
+    # landing layer actually used across every drawn via-drop, mirroring
+    # `via_drop_size_um` immediately above. A layer with no matching "area"
+    # rule (or an unresolvable PDK family) keeps exactly
+    # `_VIA_LANDING_SIZE_UM`, unchanged.
+    landing_pad_size_um: dict[tuple[int, int], float] = {}
+    for route in routed_geometry:
+        for drop in route.get("via_drops", []):
+            for pad_layer in drop.get("landing_layers", ()):
+                if pad_layer not in landing_pad_size_um:
+                    landing_pad_size_um[pad_layer] = _landing_pad_side_um_for_layer(
+                        pdk_info["variant"], pad_layer
+                    )
     composed_dbu_um, dbu_rescale_warnings = _write_composed_gds(
         blocks,
         order,
@@ -3353,6 +3374,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         pin_placements,
         array_placement=array_placement_gds,
         via_drop_size_um=via_drop_size_um,
+        landing_pad_size_um=landing_pad_size_um,
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -3500,6 +3522,7 @@ def _write_composed_gds(
     pin_placements: list[dict[str, Any]] | None = None,
     array_placement: dict[str, Any] | None = None,
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
+    landing_pad_size_um: dict[tuple[int, int], float] | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -3568,15 +3591,26 @@ def _write_composed_gds(
     ``_VIA_DROP_SIZE_UM`` constant still draws a DRC-clean via; a caller that
     omits ``via_drop_size_um`` -- e.g. a pre-#1501 unit test constructing
     ``routed_geometry`` directly -- keeps exactly ``_VIA_DROP_SIZE_UM`` for
-    every drop, unchanged), plus a landing-pad square (``_VIA_LANDING_SIZE_UM``, sized
-    independently of the route's own trace width so the via's enclosure
-    requirement holds regardless) on *both* of that hop's ``landing_layers``,
-    all centered on the pin's exact composed-frame position -- the same
-    position the backbone's own drawn ``kdb.Path`` already terminates at, so
-    the first hop's landing pad always overlaps (and merges with) both the
-    backbone and the block's own existing pad on that layer, and every
-    subsequent hop's landing pad merges with the one before it at the same
-    point, chaining the full stack down to the pin's own layer.
+    every drop, unchanged), plus a landing-pad square on *both* of that
+    hop's ``landing_layers``, each sized independently to
+    ``landing_pad_size_um.get(landing_pair, _VIA_LANDING_SIZE_UM)`` (issue
+    #2072, mirroring ``via_drop_size_um`` immediately above: the caller --
+    :func:`compose` -- resolves this per distinct landing layer against
+    that layer's own minimum-*area* DRC rule, so an intermediate hop that
+    never merges with anything else the composition draws on that layer
+    -- e.g. a ladder passing through met3 on its way to a ``bond_pad``'s
+    ``top_metal`` pin -- still clears `met3.area.1`/`met4.area.1`/
+    `met5.area.1` instead of drawing an isolated sub-minimum-area polygon;
+    a caller that omits ``landing_pad_size_um`` keeps exactly
+    ``_VIA_LANDING_SIZE_UM`` for every pad, unchanged), independent of the
+    route's own trace width so the via's enclosure requirement holds
+    regardless, all centered on the pin's exact composed-frame position --
+    the same position the backbone's own drawn ``kdb.Path`` already
+    terminates at, so the first hop's landing pad always overlaps (and
+    merges with) both the backbone and the block's own existing pad on
+    that layer, and every subsequent hop's landing pad merges with the one
+    before it at the same point, chaining the full stack down to the pin's
+    own layer.
 
     Each entry's ``stub_widen`` (:func:`route_two_pin`'s own
     :func:`_endpoint_stub_widen_um`, issue #496) is a list of ``{x_um, y_um,
@@ -3798,7 +3832,18 @@ def _write_composed_gds(
             # constant for any layer the caller didn't resolve a floor for
             # (an unresolvable PDK family, or a pre-#1501 caller that never
             # populates `via_drop_size_um` at all).
-            landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
+            #
+            # Each landing pad's own side (#2072) is looked up the same way,
+            # per its own `landing_pair` layer, in `landing_pad_size_um` --
+            # resolved by `compose()` against that layer's own minimum-*area*
+            # DRC rule (:func:`_landing_pad_side_um_for_layer`), falling back
+            # to the fixed `_VIA_LANDING_SIZE_UM` constant unchanged for any
+            # layer the caller didn't resolve a floor for. A hop's two
+            # `landing_layers` can therefore draw two *differently*-sized
+            # squares at the identical (x, y) -- e.g. a met2 pad at the
+            # pre-#2072 0.42um fixed size alongside a met3 pad floored up to
+            # clear `met3.area.1` -- since each layer's own area minimum is
+            # independent of its neighbour's.
             for drop in route.get("via_drops", []):
                 via_pair = drop["via_layer"]
                 via_layer_index = layout.layer(via_pair[0], via_pair[1])
@@ -3814,13 +3859,17 @@ def _write_composed_gds(
                         cy + via_half_dbu,
                     )
                 )
-                landing_box = kdb.Box(
-                    cx - landing_half_dbu,
-                    cy - landing_half_dbu,
-                    cx + landing_half_dbu,
-                    cy + landing_half_dbu,
-                )
                 for landing_pair in drop.get("landing_layers", ()):
+                    landing_size_um = (landing_pad_size_um or {}).get(
+                        landing_pair, _VIA_LANDING_SIZE_UM
+                    )
+                    landing_half_dbu = int(round((landing_size_um / 2.0) / dbu))
+                    landing_box = kdb.Box(
+                        cx - landing_half_dbu,
+                        cy - landing_half_dbu,
+                        cx + landing_half_dbu,
+                        cy + landing_half_dbu,
+                    )
                     top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
                         landing_box
                     )
