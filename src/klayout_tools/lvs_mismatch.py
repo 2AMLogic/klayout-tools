@@ -386,6 +386,39 @@ def _device_body_net_name(device: Any) -> str | None:
     return None
 
 
+#: KLayout's own placeholder spelling for a net that carries no drawn label:
+#: ``Net.expanded_name()`` returns ``"$<n>"`` (``"$0"``, ``"$5"``, ...).
+#:
+#: **Raw, not backslash-escaped -- the two spellings are not interchangeable
+#: (issue #2048).** ``extract.py``'s ``_ANONYMOUS_NET_PREFIX`` is ``"\\$"``
+#: because every net name *that* module reports has already passed through
+#: :func:`~klayout_tools.extract.spice_safe_net_name`, which escapes the
+#: leading ``$`` to match the written netlist's own node spelling (issue
+#: #1162). Nothing on *this* module's path does that escaping:
+#: :func:`_device_body_net_name` reads ``Net.expanded_name()`` straight off
+#: the in-memory netlist, so the prefix to match here is the bare ``"$"``.
+#: Reusing ``extract.py``'s escaped constant here would silently never match
+#: any real body net.
+_RAW_ANONYMOUS_NET_PREFIX = "$"
+
+
+def _is_unresolved_body_net(name: str | None) -> bool:
+    """Whether a body terminal's net name (as returned by
+    :func:`_device_body_net_name`) fails to identify a real, drawn- or
+    derived-tap net: either KLayout synthesized an anonymous placeholder for
+    it (``"$<n>"`` -- no label reached the net, so nothing biases the body),
+    or the terminal reached no net at all (``None``).
+
+    The in-memory counterpart of ``extract.py``'s
+    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, which
+    makes the same per-device determination against the already-escaped
+    ``"\\$<n>"`` spelling it reports in ``klt extract``/``klt pex`` JSON --
+    see :data:`_RAW_ANONYMOUS_NET_PREFIX` for why the prefix differs between
+    the two paths even though the condition is identical.
+    """
+    return name is None or name.startswith(_RAW_ANONYMOUS_NET_PREFIX)
+
+
 def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
     """``{device-class name: unverified device count}`` for every MOS device
     class in ``layout_circuit`` whose body terminals were compared against a
@@ -414,14 +447,18 @@ def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
     if nfet_count:
         counts[deck.nfet_class] = nfet_count
 
-    if deck.tap is None and deck.tap_nplus is None and deck.tap_pplus is None:
-        pfet_count = sum(
-            1
-            for device in layout_circuit.each_device()
-            if device.device_class().name == deck.pfet_class
-        )
-        if pfet_count:
-            counts[deck.pfet_class] = pfet_count
+    # Issue #2048: per-device, not deck-structural. A deck that merely
+    # *declares* a tap mechanism does not guarantee any individual PMOS body
+    # reached a real net -- so ask each device, exactly as `klt extract`'s
+    # `_detect_unbiased_pmos_body_nets` already does.
+    pfet_count = sum(
+        1
+        for device in layout_circuit.each_device()
+        if device.device_class().name == deck.pfet_class
+        and _is_unresolved_body_net(_device_body_net_name(device))
+    )
+    if pfet_count:
+        counts[deck.pfet_class] = pfet_count
 
     return counts
 
@@ -445,19 +482,28 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     e.g. gf180mcu before issue #1084) is structurally unverified. The NMOS
     warning therefore counts only devices whose body net name equals
     ``deck.substrate_net`` (or resolves to no net at all), not every NMOS
-    device. The PMOS warning only fires when the deck also has no tap
-    mechanism at all -- neither a distinct drawn ``tap`` layer nor a
-    derived one (``deck.tap``/``tap_nplus``/``tap_pplus`` all ``None``,
-    issue #1084) -- a deck that has *either* ties PMOS bodies to a genuine,
-    named net unconditionally (no ring required, since every PMOS sits
-    inside an ``nwell`` by construction), so no warning is warranted there.
-    A gf180mcu layout whose declared ``tap_nplus``/``tap_pplus`` implant
-    layers happen to draw no real tie shape in a *specific* layout still
-    resolves each such PMOS body to an anonymous net -- exactly as it did
-    before this deck declared those fields -- but is no longer flagged by
-    this deck-structural warning, mirroring sky130's own long-standing
-    (optimistic) treatment of a deck that merely *has* a tap mechanism as
-    sufficient, not a guarantee that every individual instance used it.
+    device.
+
+    **The PMOS arm is per-device too, since issue #2048.** It used to be
+    deck-structural: it fired only when the deck had no tap mechanism at all
+    (``deck.tap``/``tap_nplus``/``tap_pplus`` all ``None``, gf180mcu before
+    issue #1084), treating a deck that merely *declares* one as sufficient
+    for every PMOS in every layout it extracts. It is not: a gf180mcu layout
+    whose declared ``tap_nplus``/``tap_pplus`` implant layers draw no real
+    well-tie shape still resolves each such PMOS body to an anonymous,
+    KLayout-synthesized ``"$<n>"`` net with no DC bias path -- and that went
+    unflagged here while ``klt pex``'s ``body_bias`` block, built from
+    ``extract.py``'s per-device
+    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, reported
+    the very same layout as ``"unbiased"``. The PMOS warning now counts
+    exactly the devices whose body terminal reached such a placeholder net
+    (or no net at all); see :func:`_is_unresolved_body_net`, and
+    :data:`_RAW_ANONYMOUS_NET_PREFIX` for why this in-memory path matches a
+    raw ``$`` where ``extract.py`` matches an escaped ``\\$``. A deck with a
+    real well-tap mechanism (sky130's drawn ``tap``/``well_label``) still
+    emits no PMOS warning on a well-labelled layout -- but now because each
+    PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because
+    the deck declared a mechanism.
 
     Neither warning fires at all for the pre-extracted ``layout.netlist``
     request form -- callers only reach this helper when ``layout.file`` +
@@ -503,10 +549,10 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
                 CATEGORY_DEVICE_BODY_UNVERIFIED,
                 "warning",
                 f"{pfet_count} PMOS device body terminal(s) were "
-                "compared against an anonymous, deck-synthesized well "
-                "net, not a real schematic net -- this deck has no "
-                "distinct well-tap layer (see docs/cli/extract.md, "
-                '"Coverage")',
+                "compared against an anonymous, KLayout-synthesized well "
+                "net, not a real schematic net -- no drawn or derived "
+                "well-tap geometry resolved these device(s)' body terminal "
+                'to a real net (see docs/cli/extract.md, "Coverage")',
                 "layout",
                 device={
                     "layout": None,

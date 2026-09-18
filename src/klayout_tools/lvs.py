@@ -1716,10 +1716,12 @@ def run_lvs(request: str) -> dict[str, Any]:
     )
 
     if layout_deck is not None:
-        # Issue #281: MOS body terminals extracted onto deck-synthesized nets
-        # (never a real schematic net -- see `_body_net_warnings`) are only a
-        # structural property of the *deck* used for inline extraction, not
-        # of this particular compare run. Appended (and the list re-sorted)
+        # Issue #281: MOS body terminals extracted onto deck-synthesized or
+        # anonymous nets (never a real schematic net -- see
+        # `_body_net_warnings`) are a property of the inline extraction --
+        # which deck ran and what tie geometry this layout drew (per-device
+        # on both arms since issue #2048) -- not of this particular compare
+        # run's pairings. Appended (and the list re-sorted)
         # rather than folded into `_build_mismatches`, since these entries
         # never come from a `NetlistComparer` event and do not participate in
         # the `compare_result`/safety-net invariant above -- they are purely
@@ -1734,8 +1736,8 @@ def run_lvs(request: str) -> dict[str, Any]:
         # Issue #466: same rationale as `_body_net_warnings` above -- these
         # never come from a `NetlistComparer` event either, so they are
         # appended (and the list re-sorted) rather than folded into
-        # `_build_mismatches`. Unlike the deck-structural body-net warnings,
-        # this fires for any request (pre-extracted `layout.netlist` and
+        # `_build_mismatches`. Unlike the inline-extraction-only body-net
+        # warnings, this fires for any request (pre-extracted `layout.netlist` and
         # `"netgen"` engine included), since `combine_devices()` runs before
         # the engine branch above.
         mismatches.extend(combine_warnings)

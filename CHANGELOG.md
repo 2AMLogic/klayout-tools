@@ -142,6 +142,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   claimant would state a disclosure for `klt signoff` to compare against, and
   whether `klt lvs`'s own coverage-shaped disclosures deserve the same
   treatment for item 4 are open questions #2002 deliberately left unanswered.
+- **Fixed**: `klt lvs` no longer reports `body_verification.status` as
+  `"verified"` for a layout whose PMOS bodies actually float (issue #2048).
+  The PMOS half of the determination (`_body_unverified_counts`) was
+  *deck-structural*: it only counted devices when the deck declared no well-tap
+  mechanism at all (`tap`/`tap_nplus`/`tap_pplus` all absent), so a deck that
+  merely **declares** one — gf180mcu's derived `tap_nplus`/`tap_pplus`, issue
+  #1084 — was treated as proof that every PMOS in every layout it extracts
+  reached a real net. It is not: a gf180mcu layout that draws no well tie
+  leaves each PMOS body on an anonymous, KLayout-synthesized `$<n>` net with no
+  DC bias path, and that layout still reported `"verified"` — while `klt pex`'s
+  `body_bias` block, built from `klt extract`'s per-device
+  `unbiased_pmos_body_nets[]` (issue #555), reported the very same layout as
+  `"unbiased"`. The arm is now per-device on both sides, so the two commands
+  agree and `"verified"` means what [`docs/cli/lvs.md`](docs/cli/lvs.md) says it
+  means ("**every** MOS body terminal ... resolved to a real drawn/derived
+  net"). Affects the `device.body_unverified` warning and the
+  `body_verification` block identically — they are rendered from the one
+  determination and still cannot disagree. sky130 is unchanged (its
+  `well_label`, 64/5, demonstrably names every PMOS body), now verified
+  per-device rather than excused by the deck's shape. **Strictly more
+  reporting, no verdict change**: the warning's non-blocking severity is
+  unchanged, so a matching compare with newly-counted PMOS bodies still reports
+  `status: "match"` and the same exit code; a gf180mcu report that previously
+  said `"verified"` now says `"unverified"`. No JSON shape change and no
+  `schema_version` bump.
 - **Fixed**: `klt extract --abstract-cells` no longer binds an abstracted
   cell's **unused tie output** to the design's named supply net (issue #1994).
   The extra pin access points discovered by walking a cell's own pre-erasure

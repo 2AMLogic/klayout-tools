@@ -2811,12 +2811,28 @@ def test_keep_extracted_is_a_noop_for_pre_extracted_layout(tmp_path):
 def test_body_unverified_warns_nmos_only_on_sky130(tmp_path):
     """sky130 draws no distinct NMOS substrate/tap layer, so every NMOS body
     lands on the deck's synthetic substrate net -- but sky130's own PMOS
-    `tap` layer (65/44) gives PMOS bodies a real, named net, so no PMOS
-    warning fires here."""
+    `tap`/`well_label` layers (65/44, 64/5) give PMOS bodies a real, named
+    net, so no PMOS warning fires here.
+
+    Issue #2048 regression: the PMOS arm is now per-device (it used to pass
+    sky130 purely because the deck *declares* a tap layer), so this asserts
+    the per-device premise directly -- each PMOS body really does resolve to
+    a named net here, rather than merely being excused by the deck's shape.
+    """
     from klayout_tools.extract import run_extract
 
     reference_path = str(tmp_path / "ref.spice")
     extracted = run_extract(str(SKY130_INV), "sky130", output=reference_path)
+
+    # The per-device premise, asserted rather than assumed: every PMOS body
+    # terminal names a real net (`VPB`), none an anonymous `\\$<n>` one.
+    pfet_bodies = [
+        device["nets"]["b"]
+        for device in extracted["devices"]
+        if device["class"] == "pfet"
+    ]
+    assert pfet_bodies and all(body == "VPB" for body in pfet_bodies)
+
     path = _write_request(
         tmp_path / "request.json",
         {
@@ -2908,6 +2924,98 @@ def test_body_verification_unchecked_for_pre_extracted_layout_netlist(tmp_path):
     assert "no request.layout.deck was given" in body_verification["reason"]
     assert body_verification["device_count"] == 0
     assert body_verification["findings"] == []
+
+
+def _one_device_circuit(*, body_net_name: str | None):
+    """A minimal in-memory KLayout netlist with a single `pfet`
+    `DeviceClassMOS4Transistor` whose body terminal reaches `body_net_name`
+    (an unnamed net, i.e. KLayout's anonymous placeholder, when `None`).
+
+    Returns `(netlist, circuit)` -- the owning `Netlist` must stay referenced
+    by the caller, or KLayout destroys it and every child object with it."""
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    pfet_class = kdb.DeviceClassMOS4Transistor()
+    pfet_class.name = "pfet"
+    netlist.add(pfet_class)
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    device = circuit.create_device(pfet_class, "M1")
+    net = (
+        circuit.create_net()
+        if body_net_name is None
+        else circuit.create_net(body_net_name)
+    )
+    device.connect_terminal("B", net)
+    return netlist, circuit
+
+
+def _gf180mcu_like_deck():
+    """A deck stub shaped like gf180mcu: no drawn `tap` layer, but a
+    *derivable* one declared via `tap_nplus`/`tap_pplus` (issue #1084) --
+    i.e. the exact deck shape whose mere declaration used to suppress the
+    PMOS body check entirely."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        nfet_class="nfet",
+        pfet_class="pfet",
+        substrate_net="vsubs",
+        tap=None,
+        tap_nplus=(32, 0),
+        tap_pplus=(31, 0),
+    )
+
+
+def test_body_unverified_counts_matches_raw_klayout_anonymous_prefix():
+    """Issue #2048's prefix trap, pinned.
+
+    `lvs_mismatch` reads `Net.expanded_name()` straight off the in-memory
+    netlist, whose anonymous-net placeholder is a **raw** `"$<n>"`.
+    `extract.py`'s `_ANONYMOUS_NET_PREFIX` is `"\\$"` only because every name
+    *that* module reports has already been backslash-escaped by
+    `spice_safe_net_name` (issue #1162). Reusing the escaped constant on this
+    path would match nothing at all -- silently restoring the bug while every
+    other assertion still passed -- so both spellings, and the fact that the
+    escaped one does not match a raw name, are asserted here directly.
+    """
+    from klayout_tools import extract as extract_mod
+    from klayout_tools import lvs_mismatch
+
+    assert lvs_mismatch._RAW_ANONYMOUS_NET_PREFIX == "$"
+    assert extract_mod._ANONYMOUS_NET_PREFIX == "\\$"
+    assert not "$0".startswith(extract_mod._ANONYMOUS_NET_PREFIX)
+
+    deck = _gf180mcu_like_deck()
+
+    _netlist, anonymous = _one_device_circuit(body_net_name=None)
+    device = next(iter(anonymous.each_device()))
+    # KLayout's own raw spelling -- no backslash anywhere in it.
+    assert lvs_mismatch._device_body_net_name(device).startswith("$")
+    assert "\\" not in lvs_mismatch._device_body_net_name(device)
+    assert lvs_mismatch._body_unverified_counts(anonymous, deck) == {"pfet": 1}
+
+    # A real, named well-tie net is never counted, on the same deck.
+    _named_netlist, named = _one_device_circuit(body_net_name="VPB")
+    assert lvs_mismatch._body_unverified_counts(named, deck) == {}
+
+
+def test_body_unverified_counts_flags_pmos_body_reaching_no_net_at_all():
+    """A body terminal that reaches no net at all is unverified for the same
+    reason an anonymous one is -- nothing biases it. Mirrors the NMOS arm's
+    long-standing `None` handling (issue #281)."""
+    from klayout_tools import lvs_mismatch
+
+    _netlist, circuit = _one_device_circuit(body_net_name="VPB")
+    device = next(iter(circuit.each_device()))
+    device.disconnect_terminal("B")
+
+    assert lvs_mismatch._device_body_net_name(device) is None
+    assert lvs_mismatch._body_unverified_counts(circuit, _gf180mcu_like_deck()) == {
+        "pfet": 1
+    }
 
 
 def _write_hier_inverter_gds(path: Path) -> str:
@@ -4050,16 +4158,22 @@ def test_deck_options_selects_gf180mcu_metal_top_flavour_for_inline_extraction(
     assert report["provenance"]["deck"]["options"] == {"metal_top": "30K"}
 
 
-def test_body_unverified_warns_nmos_only_on_gf180mcu(tmp_path):
+def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu_undrawn_tie(tmp_path):
     """gf180mcu draws no distinct NMOS substrate/tap layer -- `Comp` is
     shared with ordinary active, `ExtractionDeck.tap is None` -- so the NMOS
-    body always warns. The PMOS side no longer warns unconditionally (issue
-    #1084): this deck now declares `tap_nplus`/`tap_pplus`, a *derivable*
-    well-tap mechanism, mirroring sky130's own deck-structural (not
-    per-device) treatment of a deck that has *some* tap mechanism -- even
-    though `GF180_CLKINV` itself draws no well tie, so its one PMOS body
-    still resolves to an anonymous net (see
-    `test_gf180mcu_clkinv_1_spot_check` in `tests/test_extract.py`)."""
+    body always warns.
+
+    The PMOS body warns here too (issue #2048): `GF180_CLKINV` draws no well
+    tie at all, so its one PMOS body resolves to an anonymous,
+    KLayout-synthesized net (see `test_gf180mcu_clkinv_1_spot_check` in
+    `tests/test_extract.py`). The check used to be deck-structural -- this
+    deck *declares* `tap_nplus`/`tap_pplus` (issue #1084), a derivable
+    well-tap mechanism, and that declaration alone suppressed the warning for
+    every PMOS in every layout it extracts. Declaring a mechanism is not the
+    same as a given layout using it, so the arm is now per-device, exactly
+    like `klt extract`'s `_detect_unbiased_pmos_body_nets` (which has always
+    flagged this same cell).
+    """
     from klayout_tools.extract import run_extract
 
     reference_path = str(tmp_path / "ref.spice")
@@ -4079,9 +4193,66 @@ def test_body_unverified_warns_nmos_only_on_gf180mcu(tmp_path):
         for m in report["mismatches"]
         if m["category"] == lvs.CATEGORY_DEVICE_BODY_UNVERIFIED
     }
-    assert set(body_entries) == {"nfet"}
+    assert set(body_entries) == {"nfet", "pfet"}
     assert all(entry["severity"] == "warning" for entry in body_entries.values())
     assert all(entry["side"] == "layout" for entry in body_entries.values())
+
+    # Issue #2048: the machine-checkable block renders the same corrected
+    # determination -- it used to assert `"verified"` on this very layout.
+    assert report["body_verification"]["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert report["body_verification"]["device_classes"] == ["nfet", "pfet"]
+    assert report["body_verification"]["findings"] == [
+        {"class": "nfet", "device_count": 1},
+        {"class": "pfet", "device_count": 1},
+    ]
+    # Existing behaviour preserved: a warning still never changes `status`.
+    assert report["status"] == "match"
+
+
+def test_body_verification_and_pex_body_bias_agree_on_gf180mcu_undrawn_tie(tmp_path):
+    """Issue #2048's own cross-check: `klt lvs` and `klt pex` report the same
+    floating gf180mcu PMOS body.
+
+    Before the fix these two disagreed on this exact layout -- `klt lvs` said
+    `body_verification.status: "verified"` (its PMOS arm was deck-structural
+    and gf180mcu declares `tap_nplus`/`tap_pplus`) while `klt pex` said
+    `body_bias.status: "unbiased"` (its source, `klt extract`'s
+    `unbiased_pmos_body_nets[]`, has always been per-device). This drives
+    `klt pex`'s `body_bias` block through `_body_bias_report`, the exact
+    function `run_pex` renders it with, so no simulator is needed to compare
+    the two verdicts.
+    """
+    from klayout_tools.extract import run_extract
+    from klayout_tools.pex import BODY_BIAS_UNBIASED, _body_bias_report
+
+    reference_path = str(tmp_path / "ref.spice")
+    extracted = run_extract(str(GF180_CLKINV), "gf180mcu", output=reference_path)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"file": str(GF180_CLKINV), "deck": "gf180mcu"},
+            "reference": {"netlist": reference_path, "top": extracted["top"]},
+        },
+    )
+    report = run_lvs(path)
+
+    body_bias = _body_bias_report(extracted)
+    assert body_bias["status"] == BODY_BIAS_UNBIASED
+    assert body_bias["unbiased_device_count"] == 1
+    # `klt extract`'s side reports the *escaped* spelling of the same
+    # anonymous net (`spice_safe_net_name`, issue #1162); the LVS side reads
+    # `Net.expanded_name()` raw. Same condition, two spellings -- the trap
+    # issue #2048 calls out.
+    assert body_bias["unbiased_nets"][0].startswith("\\$")
+
+    body_verification = report["body_verification"]
+    assert body_verification["status"] == lvs.BODY_STATUS_UNVERIFIED
+    assert "pfet" in body_verification["device_classes"]
+    assert (
+        dict(body_verification["findings"][-1])["class"] == "pfet"
+        and dict(body_verification["findings"][-1])["device_count"]
+        == body_bias["unbiased_device_count"]
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -7244,20 +7415,23 @@ def test_corpus_known_good_cell_matches_cleanly(
 
     # Issue #281: every NMOS body terminal is tied to the deck's synthetic
     # substrate net (neither curated deck draws a distinct NMOS tap layer),
-    # so the `device.body_unverified` warning always fires for `nfet`; the
-    # `pfet` counterpart additionally fires only when the deck has **no** tap
-    # mechanism at all -- neither a distinct drawn `tap` layer nor a
-    # derivable one (issue #1084: gf180mcu now declares `tap_nplus`/
-    # `tap_pplus`, so it no longer qualifies, exactly like sky130's drawn
-    # `tap` -- even though neither corpus cell here draws an actual tie).
+    # so the `device.body_unverified` warning always fires for `nfet`. The
+    # `pfet` counterpart is per-device since issue #2048: it fires for each
+    # PMOS whose body actually landed on an anonymous, KLayout-synthesized
+    # net, not merely when the deck declares no tap mechanism. Neither corpus
+    # cell draws a real tie, so the two decks differ by *outcome*, not by
+    # deck shape: sky130's `well_label` (64/5) still names every PMOS body
+    # (`VPB`), while gf180mcu's undrawn `tap_nplus`/`tap_pplus` leave it
+    # anonymous -- derived below from the extraction itself rather than from
+    # the deck's declared fields.
     from klayout_tools.decks import get_extraction_deck
 
     deck_config = get_extraction_deck(deck)
     expected_body_classes = {deck_config.nfet_class}
-    if (
-        deck_config.tap is None
-        and deck_config.tap_nplus is None
-        and deck_config.tap_pplus is None
+    if any(
+        device["class"] == deck_config.pfet_class
+        and device["nets"]["b"].startswith("\\$")
+        for device in extracted["devices"]
     ):
         expected_body_classes.add(deck_config.pfet_class)
     body_unverified_classes = {
