@@ -35,6 +35,7 @@ from klayout_tools.pex import (
     BODY_BIAS_UNBIASED,
     PexError,
     _body_bias_report,
+    _build_coverage,
     _build_delta_rows,
     _check_dut_declares_a_circuit,
     _delta_pct,
@@ -47,6 +48,7 @@ from klayout_tools.pex import (
     _rewrite_dut_include,
     _row_status,
     _subckt_interfaces,
+    _unextracted_delta_rows,
     run_pex,
 )
 
@@ -400,6 +402,80 @@ def test_build_delta_rows_iterates_extracted_corner_order():
         spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
     )
     assert [row["corner_id"] for row in rows] == ["tt/1.800V/27C", "ss/1.620V/-40C"]
+
+
+# --------------------------------------------------------------------------- #
+# `coverage` / `nothing_checked` (issue #1996)
+# --------------------------------------------------------------------------- #
+
+
+def test_build_coverage_empty_delta_reports_nothing_checked():
+    """An empty `delta[]` means no schematic-vs-extracted comparison was
+    performed at all -- a `status: "pass"` that says nothing about the
+    layout. The envelope now states that in a field instead of leaving a
+    reader to infer it from a zero row count."""
+    coverage = _build_coverage(testbenches_summary=[], delta=[], corner_count=0)
+
+    assert coverage == {
+        "testbenches": 0,
+        "delta_rows": 0,
+        "corners_compared": 0,
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["no_delta_rows"],
+    }
+
+
+def test_build_coverage_real_comparison_with_zero_differences_is_not_nothing_checked():
+    """Issue #1996's edge case: a comparison that actually *ran* and found
+    every row within tolerance is not "nothing checked". `_build_delta_rows`
+    emits one row per compared `(corner, measurement)` pair unconditionally
+    -- there is no "within tolerance, so omit the row" path -- so the two
+    cases are structurally distinguishable, and this pins that."""
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    rows = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    # Identical values on both sides: a zero delta, and still a row.
+    assert [row["delta_pct"] for row in rows] == [0.0]
+
+    coverage = _build_coverage(
+        testbenches_summary=[{"request": "tb.json"}], delta=rows, corner_count=1
+    )
+
+    assert coverage == {
+        "testbenches": 1,
+        "delta_rows": 1,
+        "corners_compared": 1,
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
+
+
+def test_build_coverage_errored_rows_still_count_as_checked():
+    """A run whose extracted side was unrunnable emits one `error` row per
+    schematic-side pair (`_unextracted_delta_rows`). That is a *failed*
+    comparison, not an absent one -- `status` is already `"error"`, which
+    says so -- so it must not additionally read as `nothing_checked`, which
+    is reserved for a passing verdict measured over nothing."""
+    rows = _unextracted_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=_sim_report(
+            [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+        ),
+    )
+
+    coverage = _build_coverage(
+        testbenches_summary=[{"request": "tb.json"}], delta=rows, corner_count=1
+    )
+
+    assert coverage["delta_rows"] == 1
+    assert coverage["nothing_checked"] is False
+    assert coverage["nothing_checked_reasons"] == []
 
 
 # --------------------------------------------------------------------------- #
@@ -1318,6 +1394,17 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
     assert report["passed"] == 1
     assert report["failed"] == 0
     assert report["errored"] == 0
+    # Issue #1996: a real comparison ran, so this `"pass"` is earned -- the
+    # edge case the coverage block exists to distinguish from an empty
+    # `delta[]`, checked here end to end against real ngspice rather than
+    # only against a hand-built row list.
+    assert report["coverage"] == {
+        "testbenches": 1,
+        "delta_rows": 1,
+        "corners_compared": 1,
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
     assert len(report["testbenches"]) == 1
     assert report["testbenches"][0]["measurement_names"] == ["vout"]
     # Issue #1261: same normalization applies to each `testbenches[]`

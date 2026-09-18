@@ -1517,6 +1517,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. |
+| `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
@@ -1567,6 +1568,55 @@ corner-sweep rollup fields above are declared.
 | `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` only occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`); every other code is always `"error"`. Empty for a clean run.       |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
+
+### `coverage`
+
+Additive field (issue #1996, no `schema_version` bump), implementing the
+shared vacuous-verdict convention defined once in
+[`../json-contract.md`](../json-contract.md) — `klt drc` and `klt pex` emit
+the same two roll-up keys for their own equivalents.
+
+```json
+{
+  "coverage": {
+    "corners_simulated": 8,
+    "measurements_declared": 3,
+    "measurements_with_limits": 2,
+    "unrecognized_limit_keys": [],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
+  }
+}
+```
+
+| Field                      | Type            | Description |
+| -------------------------- | --------------- | ----------- |
+| `corners_simulated`        | integer         | `== corner_count`, restated here so the whole coverage story is in one block. |
+| `measurements_declared`    | integer         | How many `measurements[]` entries the request declared. |
+| `measurements_with_limits` | integer         | How many of those ended up with a bound `klt sim` actually applies (a `min` and/or `max` that is not `null`). |
+| `unrecognized_limit_keys`  | array\<object\> | `{"measurement": <name>, "keys": [<key>, ...]}` — every declared `limits` object containing a key `klt sim` does not read. Reported whenever present, even for a run that also has usable bounds: one typo'd measurement alongside several well-formed ones is still a real gap. |
+| `nothing_checked`          | boolean         | Whether this run graded *nothing*, so its `status` says nothing about the design. |
+| `nothing_checked_reasons`  | array\<string\> | Why. Empty exactly when `nothing_checked` is `false`. |
+
+Two ways a `status: "pass"` can be vacuous, one reason code each:
+
+| Reason code                | Meaning |
+| -------------------------- | ------- |
+| `empty_corner_matrix`      | The PVT corner matrix expanded to zero corners, so `passed`/`failed`/`errored` are all `0` and the aggregate falls through to `"pass"`. Nothing simulated. |
+| `unrecognized_limit_keys`  | Every declared `measurements[].limits` object used only keys `klt sim` does not apply. **Only `min` and `max` are read**, so a typo'd bound (`{"maximum": 1.8}`) is scored as if no bound had been declared, and every measurement passes unconditionally. |
+
+**`status` is unchanged** in both cases, exactly as before this block
+existed — the field makes the emptiness legible, it does not restate the
+verdict.
+
+A request that declares **no** `limits` at all is deliberately *not*
+flagged: a characterise-and-report sweep grades nothing on purpose, which is
+a stated intent rather than a silent miss. `measurements_with_limits` lets a
+reader draw that distinction themselves.
+
+[`klt signoff`](signoff.md) consumes this: a `sim` envelope reporting
+`nothing_checked: true` never counts as a passing check, and never backs a
+`"met"` tier-report item (reason `nothing_checked`).
 
 ### Semantics and guarantees
 

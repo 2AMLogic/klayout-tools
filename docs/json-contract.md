@@ -494,6 +494,63 @@ per-field here too. There is no tool-wide signal for "which shape does field
 X use today" beyond this table; re-check it (and this table's own `git log`)
 before writing a consumer that assumes one shape tool-wide.
 
+## Vacuous-verdict convention (`coverage.nothing_checked`, issue #1996)
+
+Several verbs can report a passing top-level verdict on a run that checked
+**nothing**, and until this convention existed there was no field a reader
+could consult to tell that apart from an earned pass:
+
+- `klt drc` (KLayout engine) — a PDK-native deck whose whole rule set is
+  gated behind a feature-toggle global set via `--deck-var` that the caller
+  never set. The deck runs to completion and writes a well-formed, **empty**
+  report: `status: "clean"`, `violation_count: 0`.
+- `klt sim` — a PVT corner matrix that expanded to zero corners, or a request
+  whose every `measurements[].limits` object used keys `klt sim` does not
+  apply (only `min`/`max` are read, so a typo'd bound passes everything).
+- `klt pex` — a run that produced no `delta[]` row at all, so no
+  schematic-vs-extracted comparison was ever performed.
+
+Those verbs now say so in their own `coverage` block, using two keys declared
+once in `src/klayout_tools/coverage.py` and spelled identically by every verb
+that adopts them:
+
+```json
+{
+  "schema_version": 1,
+  "coverage": {
+    "...": "the verb's own coverage fields, unchanged",
+    "nothing_checked": true,
+    "nothing_checked_reasons": ["deck_reported_no_rules"]
+  }
+}
+```
+
+- `nothing_checked` (boolean) — `true` **only** when the run performed zero
+  actual checks, so its own `status` says nothing about the design. It is
+  never a synonym for *partial* coverage: a run that checked one rule out of
+  eighty reports `false` (that gap is what the verb's own coverage fields —
+  `klt drc`'s `rules_skipped` / `layers_in_stream_without_rules` — are for).
+- `nothing_checked_reasons` (array of string) — why, using the stable reason
+  codes declared in `klayout_tools.coverage` (`deck_has_no_rules`,
+  `all_rules_skipped`, `deck_reported_no_rules`, `empty_corner_matrix`,
+  `unrecognized_limit_keys`, `no_delta_rows`). Always a list; empty exactly
+  when `nothing_checked` is `false`. More than one code can apply to one run,
+  and the set of codes can grow additively (see the pre-1.0 caveat above).
+- **Additive, no `schema_version` bump.** Adding these keys to a verb's
+  existing `coverage` block — or adding a `coverage` block to a verb that had
+  none — adds fields without renaming, removing, or retyping any existing
+  one.
+- **Absence is not evidence.** An envelope with no `coverage` key, or one
+  predating this convention, makes *no coverage statement*: a consumer must
+  read it as neither a gap nor a guarantee of full coverage.
+- **The producing verb's own `status` is unchanged** in every case. The
+  convention makes the emptiness legible; it does not restate the verdict.
+
+`klt signoff` is the first consumer that acts on it (see
+[`docs/cli/signoff.md`](cli/signoff.md)): an envelope reporting
+`nothing_checked: true` never counts as a passing check, and never backs a
+`"met"` tier-report item.
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written
