@@ -285,7 +285,8 @@ item 7's restriction per-block-kind:
   timing instead -- see :func:`_sta_timing_passed`.
 - ``"functional-verification"`` (``docs/cli/functional-verification.md``) --
   detected by a top-level ``tests`` list plus ``test_count``; passes on its
-  own ``status == "pass"`` (``failed_count == 0``). It carries no shared
+  own ``status == "pass"`` with consistent per-test counts, at least one
+  passing test and no failures (skips are allowed). It carries no shared
   ``provenance`` block at all (that verb's verdict depends on no PDK and no
   deck), so a ``content_hash``-pinned citation of one always renders
   ``"stale_evidence"``, the same documented caveat an unprovenanced
@@ -1888,6 +1889,40 @@ def _is_post_layout_evidence(kind: str, envelope: dict[str, Any]) -> bool:
     return True
 
 
+def _functional_verification_passed(envelope: _FunctionalVerificationEnvelope) -> bool:
+    """Require executed, consistent evidence even from old/external producers.
+
+    The three outcome counts must exactly match the individual test records
+    and sum to ``test_count``. Code-coverage collection is unrelated and
+    optional; skipped tests are allowed alongside a passing executed test.
+    """
+    fields = ("test_count", "passed_count", "failed_count", "skipped_count")
+    counts = {field: envelope.get(field) for field in fields}
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in counts.values()
+    ):
+        return False
+    if (
+        envelope.get("status") != "pass"
+        or counts["passed_count"] == 0
+        or counts["failed_count"] != 0
+    ):
+        return False
+    tests = envelope.get("tests")
+    if not isinstance(tests, list) or len(tests) != counts["test_count"]:
+        return False
+    observed = {"passed": 0, "failed": 0, "skipped": 0}
+    for test in tests:
+        if not isinstance(test, dict):
+            return False
+        status = test.get("status")
+        if not isinstance(status, str) or status not in observed:
+            return False
+        observed[status] += 1
+    return all(counts[f"{status}_count"] == count for status, count in observed.items())
+
+
 def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
 
@@ -1982,9 +2017,10 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       :func:`_sta_timing_passed`: every reported corner must be
       ``timing_status == "constrained"`` with non-negative setup and hold
       slack.
-    - ``functional-verification`` (issue #1959) passes on ``status ==
-      "pass"`` (``failed_count == 0``, ``docs/cli/functional-verification.md``)
-      -- mirrors ``sim``. Whether the run was SDF-annotated is *not* a
+    - ``functional-verification`` passes on ``status == "pass"`` with
+      consistent per-test counts, at least one passing test and no failures
+      (skips are allowed) -- see :func:`_functional_verification_passed`.
+      Whether the run was SDF-annotated is *not* a
       pass/fail input here (an unannotated regression is a perfectly valid
       pre-layout check); it only gates item 7, in :func:`_grade_evidence`.
     - ``erc`` (issue #2025) passes on ``status == "clean"`` -- the roll-up
@@ -2033,7 +2069,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     elif kind == "sta":
         passed = _sta_timing_passed(envelope)
     elif kind == "functional-verification":
-        passed = envelope.get("status") == "pass"
+        passed = _functional_verification_passed(envelope)
     elif kind == "erc":
         passed = envelope.get("status") == "clean"
     elif kind == "place-and-route":

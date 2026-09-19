@@ -139,7 +139,7 @@ cocotb's `get_results()` helper is deliberately *not* used as the source of
 truth: its `num_tests` counts skipped tests too, so it cannot produce the
 passed/failed/skipped split this contract reports.
 
-Two related consequences:
+Related consequences:
 
 - **A run that produced no `results.xml` is exit 1, not a pass.** Verified
   live: a testbench module that fails to import leaves cocotb exiting `0`
@@ -147,6 +147,17 @@ Two related consequences:
 - **A regression that registered zero `@cocotb.test()` functions is exit 1,
   not a vacuous pass.** It verified nothing, and `status: "pass"` there
   would hand `klt eval` a `valid: true` for a design nothing ever checked.
+- **A regression that skipped every test is also exit 1.** The error
+  explicitly reports all tests skipped and zero executed tests. Registering
+  tests alone does not verify a design.
+
+A mixed passing/skipped regression still passes when at least one test
+executed and none failed. Test filters may intentionally leave skipped
+entries in the report; this command does not infer which named tests a
+design must run. Detecting zero executed tests uses the testcase outcomes,
+not optional Verilator code-coverage collection. Signoff also validates
+these counts against the individual outcomes when reading saved evidence,
+including envelopes from older producers.
 
 ## Artifacts
 
@@ -820,8 +831,8 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `schema_version` | integer | Per-command version, per [`docs/json-contract.md`](../json-contract.md). |
 | `engine` | string | Echo of the request's engine. |
 | `hdl_toplevel` / `testbench` | string | Echo of the request's DUT / testbench-module identifiers. |
-| `status` | string | `"pass"` (`failed_count == 0`) or `"fail"` (`failed_count > 0`). Never `"error"` in-band — a run that failed to *run* emits no envelope at all (see "Exit codes"). |
-| `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure. `test_count` includes skipped tests, so `passed + failed + skipped == test_count`. |
+| `status` | string | `"pass"` (`passed_count > 0` and `failed_count == 0`) or `"fail"` (`failed_count > 0`). Skips alongside executed tests are allowed. Never `"error"` in-band — a run that failed to *run*, including zero executed tests, emits no envelope at all (see "Exit codes"). |
+| `test_count` / `passed_count` / `failed_count` / `skipped_count` | integer | Nonnegative counts derived from `results.xml`'s own `<testcase>`/`<failure>`/`<skipped>` structure, matching the individual `tests` records. `test_count` includes skipped tests, so `passed + failed + skipped == test_count == len(tests)`. |
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
@@ -835,8 +846,8 @@ block"), and `environment` is the contract's own reproducibility surface.
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Every test passed (`status: "pass"`). |
-| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests. |
+| `0` | At least one test executed and every executed test passed (`status: "pass"`); skipped tests are allowed. |
+| `1` | Failed to run — bad request, unresolvable RTL source or testbench module, coverage requested on an engine that has none, `options.sdf` on an engine (or an Icarus older than 13.0) that has no usable `$sdf_annotate` path, `options.sdf` alongside a `FUNCTIONAL` define, an unresolvable/unreadable SDF file, an SDF annotation that did not fully apply (`SDF WARNING`/`SDF ERROR` in the transcript), `options.trace` requested but the run produced no waveform file, missing cocotb/simulator install, build or elaboration error, simulator crash, no `results.xml` produced, or a regression that registered zero tests or skipped every test. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
 | `3` | Ran successfully; at least one test failed (`status: "fail"`). |
 
