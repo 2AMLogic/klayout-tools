@@ -276,14 +276,15 @@ def _abstract_cell_body_identity_cover(
     (and with either of the other two cells abstracted), but collapse to
     ``VDDTAP|VSSG`` as soon as the well-drawing cell is abstracted.
 
-    So the cover is captured here, pre-erasure, and unioned back into the
-    *classification* side only (see ``_extract_netlist``'s
-    ``nwell_body_cover``/``isolation_region``). The erased, post-abstraction
-    ``nwell`` region stays the **conductor**: an abstracted cell is still a
-    black box (its well is not a wire the parent can route through, and
-    ``_probe_abstract_pin_net`` still cannot bind a pin onto it), and the
-    PMOS ``"W"`` terminal still reads the conductor region, so no device can
-    be recognised with a body terminal that has no geometry.
+    The cover is captured here, pre-erasure, and unioned back into the
+    classification regions (``nwell_body_cover``/``isolation_region``).
+    The nwell cover also restores the actual well conductor for body-pin
+    probing and connectivity (#2082). Abutted standard cells share this
+    physical conductor: erasing it split one real well into false per-cell
+    body-pin islands. Exact polygons and placement transforms preserve real
+    well gaps; no pin names or bounding boxes are used to invent continuity.
+    Active/poly and other device-recognition layers remain erased, so this
+    does not reintroduce devices or internal signal ties into black boxes.
     """
     import klayout.db as kdb
 

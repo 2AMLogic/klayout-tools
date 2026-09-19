@@ -740,15 +740,24 @@ unrelated cells collapsed into one bogus composite name
 (`net_a|net_b|net_c|...`, reported in `merged_net_labels[]` — see "Merged
 net labels" below), purely because a *different* macro was black-boxed.
 
-So the matched instances' own pre-erasure `nwell`/`substrate_isolation`
-cover is unioned back into the **classification** side only. The erased
-region remains the **conductor**: a black box's well is still not a wire the
-parent can route through, `--abstract-cell-lef` pin probing still cannot
-bind a pin onto it, and the PMOS body terminal still reads the conductor
-region so no device can be recognised with a body terminal whose geometry
-was erased. The practical contract: **extracting with `--abstract-cells` on
-one cell type must report the same net names for every net that does not
-touch that cell as a flat (no-`--abstract-cells`) extraction does.**
+The matched instances' pre-erasure `nwell`/`substrate_isolation` cover is
+unioned back into the body-identity classifications. Nwell geometry is also
+retained as an electrical conductor (issue #2082): wells in abutted cells
+physically join across cell boundaries, so well/body pins must see that
+continuity even when the devices are black boxes. This uses the original
+polygons with each instance's placement transform. Separate wells remain
+separate, and wrongly tied wells and broken metal supplies still produce
+power-connectivity findings. Metals retain precedence for LEF pin probing.
+Device-recognition geometry, including active/poly and internal signal
+ties, remains erased; retaining a well does not restore devices inside a
+black box.
+
+A newly extracted SPICE netlist therefore carries the resolved well
+connectivity directly. Standalone SPICE files produced by older versions
+carry no abstraction metadata and must be re-extracted to recover it; LVS
+cannot safely dismiss their body-pin findings merely from a pin name.
+The practical contract remains: **abstracting one cell type must preserve
+the net identities of physically unrelated geometry elsewhere in the design.**
 
 **Output.** Every distinct matched cell type becomes its own
 `.SUBCKT <cell type> <pins...> ... .ENDS` block in the written SPICE (empty
