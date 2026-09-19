@@ -178,12 +178,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
 from typing import Any
 
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
+    _OpenRoadResult,
     _run_openroad,
     _timing_status,
 )
@@ -870,7 +871,7 @@ def _run_multi_corner(
 
 
 def _spef_annotation_block(
-    completed: subprocess.CompletedProcess,
+    completed: _OpenRoadResult,
     spef_net_names: list[str] | None,
 ) -> dict[str, Any]:
     """Assemble the ``spef_annotation`` response block from one completed
@@ -1601,7 +1602,7 @@ def _spef_net_names(spef_path: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _engine_error_message(completed: subprocess.CompletedProcess) -> str:
+def _engine_error_message(completed: _OpenRoadResult) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
     Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
