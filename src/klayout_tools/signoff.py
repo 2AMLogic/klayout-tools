@@ -1044,9 +1044,11 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     on from #247's metric-namespace registry and #1847/#1848/#1849's
     per-verb adoption of it).
 
-    Returns a list of blocker entries -- ``{"metric": <name>, "value":
-    <number>, "higher_is_better": <bool | None>}`` -- one per critical
-    metric whose value fails its own declared ``higher_is_better`` polarity.
+    Returns one entry per critical metric whose value violates its domain
+    or quality polarity. Entries retain ``metric``, ``value``, and
+    ``higher_is_better``; invalid values add ``domain`` and ``reason``.
+    Nonfinite floats are represented as strings in diagnostics, though JSON
+    input readers reject them before grading.
     An empty list means no critical metric blocked this envelope (including
     the common case of no ``metrics`` block at all, or a ``metrics`` block
     with no critical entries).
