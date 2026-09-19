@@ -143,6 +143,108 @@ names this explicitly for `extract`'s own schema — a **content**/
 consumer of the `--check`/`--rerun` machinery below should apply, not just
 `extract`'s.
 
+## Requested-but-unperformed analysis
+
+When a request asks for an analysis or capability, its response must make
+clear whether that work was performed. An absent or `null` result must not
+silently accompany an unqualified `"status": "ok"`. The command must
+either refuse with its documented error response or emit a warning that
+names the skipped capability and the reason it was skipped. A warning may
+qualify a successful partial result, but it does not establish that the
+requested analysis passed. A consumer requiring that analysis must treat
+it as unverified.
+
+This rule applies when a request implies a result, including a capability
+normally required by the requested flow; it does not turn every optional
+`null` field into a warning. Each verb documents which request fields
+require which results, when it refuses, and when it can return useful
+partial output with a warning. For example, a requested clock target with
+no timing result needs an explanation; merely echoing the target does not
+show that it was checked.
+
+### Shared warning entry
+
+Use this entry shape for warnings about skipped requested capabilities:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `category` | string | Stable, machine-readable category documented by the verb, such as `unsupported_cell_library`. Consumers branch on this value, not message wording. |
+| `count` | positive integer | Number of occurrences represented by this entry; `1` for a single capability warning. This is not the number of analyses completed or skipped. |
+| `text` | string | Explanation naming the affected capability or capabilities, why they were skipped, and the affected result fields. Include the relevant request value when it identifies the limitation. |
+
+The shared contract is the **entry**. Adoption preserves both a verb's
+existing warning container and its element types. A `warnings` array whose
+documented entries already have this object shape can use it directly.
+An existing `warnings: array<string>` must retain string elements: adding
+objects, including a mixture of strings and objects, breaks that contract.
+Such a verb exposes structured capability entries in a separate, additive,
+documented field, or introduces an explicitly versioned breaking migration
+with a `schema_version` bump.
+
+`klt synthesize` retains its existing object
+`warnings: {total, by_category, representatives}` and places them in
+`warnings.representatives[]`. Its `by_category` map exposes the category
+and count for consumers; its `representatives` entries explain them.
+Existing fields, counts, and engine diagnostic categories keep their
+documented meaning. Additive adoption must not rename, remove, or
+restructure an already-shipped field, change its element types, or change
+`warnings` from an object into an array.
+
+Each verb documents its capability categories and the results they
+qualify. A consumer can mechanically detect a known missing capability by
+category, without parsing `text`; an unfamiliar category must not be taken
+as proof that requested work completed. New categories remain additive
+under the value-set rule above. When warnings are aggregated or capped,
+the disclosure of skipped requested capabilities must remain visible.
+The shared output helpers do not infer missing analyses: the verb knows
+which work actually ran and is responsible for emitting the warning.
+
+### Worked example: synthesis without a verified library mapping
+
+The synthesis pilot implements this contract for missing library
+capabilities (issues #2088/#2099). Consider a resolved library named
+`acme_sc_hd` whose Liberty file is available but which has no verified
+constraint or tie-cell mapping. The relevant request fields are:
+
+```json
+{
+  "pdk": {"cell_library": "acme_sc_hd", "corner": "tt_025C_5v00"},
+  "constraints": {"clock_period_ns": 81.38}
+}
+```
+
+Synthesis can still produce a mapped netlist. With no engine warnings,
+the corresponding response excerpt is:
+
+```json
+{
+  "status": "ok",
+  "timing": null,
+  "warnings": {
+    "total": 1,
+    "by_category": {"unsupported_cell_library": 1},
+    "representatives": [
+      {
+        "category": "unsupported_cell_library",
+        "count": 1,
+        "text": "cell_library 'acme_sc_hd' has no verified mapping for: ABC -constr (driving cell/output load), load-driven sizing/buffering and ABC timing (timing is null); setundef -zero/hilomap (bare 0/1/x constants may remain unroutable in place-and-route). These capabilities were skipped."
+      }
+    ]
+  }
+}
+```
+
+The warning identifies both the skipped work and its cause. The netlist
+exists, but this response does not verify the requested 81.38 ns target or
+the constant mapping required for routing. A partially supported library
+names only its missing capabilities. See the
+[synthesis warning contract](cli/synthesize.md#warnings-engine-diagnostics-and-missing-library-capabilities)
+for aggregation and the existing engine categories.
+
+This first contract increment confirms that synthesis pilot; it does not
+claim every existing verb has been audited or add warnings to every
+response. Further verb adoption preserves each verb's existing envelope.
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
