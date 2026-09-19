@@ -145,7 +145,7 @@ port step:
 | Category | Absence means | Port action | Examples |
 | --- | --- | --- | --- |
 | **Required registration** | the family silently misbehaves or is unknown | **Must add an entry** | `pdk_families.KNOWN_PDK_FAMILIES`, §3's six deck registries, `pdk_models._MOS_MODEL_TABLE` |
-| **Conditionally required** | a specific, advertised capability is missing | Add **iff** you advertise that capability | `pdk_families.PDK_VARIANT_FAMILY_ALIASES` (iff the variant name isn't prefix-matchable), `_parasitics_registry()` (iff parasitics are calibrated), `decks`' HV/resistor/cap device entries |
+| **Conditionally required** | a specific, advertised capability is missing | Add **iff** you advertise that capability | `pdk_families.PDK_VARIANT_FAMILY_ALIASES` (iff the variant name isn't prefix-matchable), calibrated parasitic coefficients inside the already-registered deck, `decks`' HV/resistor/cap device entries |
 | **Optional narrowing with a documented default** | a documented default applies — *not* an omission | Add only to override the default | `gen_layer_params._PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` (defaults to `0.0`), `_PDK_CAP_GEOMETRY_MIN_UM` (generic geometry, not "capacitors unsupported"), `pdk_models._GEOMETRY_STYLE_BY_FAMILY` (defaults to unit-suffixed literals) |
 | **Declared support subset / exclusion list** | this subsystem does not cover the family, on purpose | Add only after actually verifying support | `pdk._CORNER_PDK_FAMILIES`, `remote_launcher._AMI_PDK_FAMILIES`, `gen_layer_params._MOS_ARRAY_WELL_TAP_FAMILIES`, `_GENERATOR_FAMILY_DEFERRED` |
 
