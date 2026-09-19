@@ -11278,6 +11278,7 @@ def test_run_lvs_echoes_reference_top_and_options(tmp_path):
         "compare_parameters": None,
         # Issue #1952: `null` when the option was omitted.
         "power_connectivity": None,
+        "supply_nets": ["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"],
     }
     # The pre-#1205 fields are untouched -- this is an additive change, so no
     # `schema_version` bump (docs/json-contract.md, "additive envelope").

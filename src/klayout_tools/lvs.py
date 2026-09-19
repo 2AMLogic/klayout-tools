@@ -175,6 +175,7 @@ from .lvs_netgen import (
     _resolve_netgen_setup,
     _run_netgen_lvs,
 )
+from .lvs_supply import parse_supply_nets, supply_fragmentation_findings
 from .netlist_capacitor_recovery import (
     custom_device_classes_for_deck,
     make_capacitor_class_recovery_reader,
@@ -867,6 +868,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         power_connectivity_expected_nets,
         power_connectivity_echo,
     ) = _parse_power_connectivity(options)
+    supply_nets = parse_supply_nets(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
     # extract` is always flat, so a hierarchical reference/pre-extracted
@@ -887,12 +889,20 @@ def run_lvs(request: str) -> dict[str, Any]:
         layout_echo,
         layout_hash_source,
         extracted_netlist_path,
+        layout_net_label_positions,
     ) = _resolve_layout(
         layout_spec,
         request_dir,
         keep_extracted,
         combine_devices_enabled,
         deck_options,
+    )
+    # Inspect original scoped nets before any transform can discard a power
+    # island or flatten independent child definitions into a shared scope.
+    supply_findings = supply_fragmentation_findings(
+        _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
+        supply_nets,
+        layout_net_label_positions,
     )
 
     flatten_warnings: list[dict[str, Any]] = []
@@ -1819,19 +1829,8 @@ def run_lvs(request: str) -> dict[str, Any]:
         # is appended here rather than folded into `_build_mismatches`.
         mismatches.extend(gate_level_port_alias_warnings)
 
-    if (
-        layout_deck is not None
-        or combine_warnings
-        or combine_per_circuit_warnings
-        or bulk_warnings
-        or placeholder_warnings
-        or tolerance_warnings
-        or compare_parameter_warnings
-        or flatten_warnings
-        or power_only_pruning_warnings
-        or gate_level_port_alias_warnings
-    ):
-        mismatches.sort(key=_sort_key)
+    mismatches.extend(supply_findings)
+    mismatches.sort(key=_sort_key)
 
     if combine_incomplete and status == "mismatch":
         # Issue #1370: `options.combine_devices` was requested, at least one
@@ -1942,6 +1941,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             # unresolved so a committed report round-trips back into the
             # request document it came from.
             "power_connectivity": power_connectivity_echo,
+            "supply_nets": supply_nets,
         },
         # Issue #1998: every `hints.equivalent_pins` grouping actually passed
         # to `NetlistComparer.equivalent_pins()` for this run, keyed by
@@ -2282,9 +2282,16 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         options["power_connectivity"] = power_connectivity
     elif isinstance(power_connectivity, dict):
         options["power_connectivity"] = dict(power_connectivity)
+    # Includes []: explicitly disabling the finding must survive a replay.
+    options.update(_supply_nets_replay_options(echoed))
     if options:
         request["options"] = options
     return request
+
+
+def _supply_nets_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
+    names = echoed.get("supply_nets")
+    return {"supply_nets": list(names)} if isinstance(names, list) else {}
 
 
 #: `rerun_lvs_report`'s own exclusion set (issue #1223), layered on top of
@@ -2377,10 +2384,9 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     # existed has an `options` block without this key, and the current
     # build's richer echo is not drift.
     committed_options = committed.get("options")
-    if not isinstance(committed_options, dict) or (
-        "power_connectivity" not in committed_options
-    ):
-        exclude.add(("options", "power_connectivity"))
+    for option in ("power_connectivity", "supply_nets"):
+        if not isinstance(committed_options, dict) or option not in committed_options:
+            exclude.add(("options", option))
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
@@ -2410,9 +2416,11 @@ def _resolve_layout(
     keep_extracted: bool,
     combine_devices: bool = False,
     deck_options: Mapping[str, str] | None = None,
-) -> tuple[kdb.Netlist, str, str, str | None]:
+) -> tuple[kdb.Netlist, str, str, str | None, dict[int, list[dict[str, Any]]]]:
     """Resolve ``request.layout`` to ``(netlist, echo, hash_source_path,
-    extracted_netlist_path_or_none)``.
+    extracted_netlist_path_or_none, net_label_positions)``. Original drawn
+    labels are keyed by layout cluster for the supply-fragmentation check;
+    pre-extracted SPICE has no such label map and returns an empty mapping.
 
     Two supported shapes (spike section 2b): ``{"file", "deck", "top"}`` runs
     inline extraction (composing ``extract.py``'s core function); ``{"netlist",
@@ -2557,11 +2565,9 @@ def _resolve_layout(
             # 12th return (mom_crosscheck, #798) is `klt extract
             # --mom-net`'s own report; `klt lvs` never passes that flag (LVS
             # is topological, parasitics-free), so it is always `None` here.
-            # The 13th return (net_label_positions, #1540) feeds `klt
-            # extract`'s own `nets[].label_positions_um`; `klt lvs`'s
-            # `net_correspondence[]` disambiguates a collided-name net
-            # against the *reference* schematic's net name instead, so this
-            # per-label-position map has no use here. The 14th return
+            # The 13th return preserves original labels for supply-
+            # fragmentation findings, including a supply label joined
+            # with another alias on the same physical net. The 14th return
             # (device_instance_paths, #1666) likewise feeds `klt extract`'s
             # own `devices[].instance_path`; `klt lvs` compares by device
             # class/parameter equivalence, not by originating GDS-level
@@ -2631,7 +2637,13 @@ def _resolve_layout(
                     f"'{extracted_netlist_path}': {exc}"
                 ) from exc
 
-        return netlist, layout_spec["file"], layout_file, extracted_netlist_path
+        return (
+            netlist,
+            layout_spec["file"],
+            layout_file,
+            extracted_netlist_path,
+            _net_label_positions,
+        )
 
     layout_netlist_path = _require_path(layout_spec, "netlist", "layout", request_dir)
     # Issue #1876: recover a capacitor's real device-class name across the
@@ -2680,7 +2692,7 @@ def _resolve_layout(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
 
-    return netlist, layout_spec["netlist"], layout_netlist_path, None
+    return netlist, layout_spec["netlist"], layout_netlist_path, None, {}
 
 
 def _read_reference_netlist(
