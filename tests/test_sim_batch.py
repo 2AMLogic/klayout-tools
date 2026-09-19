@@ -581,6 +581,83 @@ def test_no_credential_key_path_or_bucket_name_is_baked_into_source():
     ]
 
 
+#: Every *published* surface this backend adds: the docs page a reader
+#: follows, the worked example they copy, and the job-spec schema. The module
+#: itself is covered by
+#: `test_no_credential_key_path_or_bucket_name_is_baked_into_source` above --
+#: but that test only reads `sim_batch.py`, and these are the files that
+#: actually *show* values to a reader. `klayout-tools` is public.
+_PUBLISHED_BATCH_SURFACES = (
+    REPO_ROOT / "docs" / "cli" / "sim.md",
+    REPO_ROOT / "docs" / "schemas" / "batch-job-spec.schema.json",
+    *sorted(p for p in (REPO_ROOT / "examples" / "sim-batch").rglob("*")),
+)
+
+#: A deployed job bucket's name embeds the AWS account id that owns it, so a
+#: digit run hanging off `batch-jobs-` is the leak shape to catch. Account ids
+#: also surface bare inside ARNs, and long-lived keys start `AKIA`.
+_LEAK_PATTERNS = {
+    "account id in a bucket name": re.compile(
+        r"\d{12}[\w-]*batch-jobs|batch-jobs[\w-]*\d{12}"
+    ),
+    "digits in a bucket name": re.compile(r"batch-jobs-\d+"),
+    "account id in an ARN": re.compile(r"arn:aws:[a-z0-9-]*:[a-z0-9-]*:\d{12}"),
+    "AWS access key id": re.compile(r"AKIA"),
+}
+
+#: Any string ending `.pem`, so a key *path* can be distinguished from a
+#: documented stand-in nobody's machine actually has.
+_PEM_TOKEN = re.compile(r"[\w~./<>-]*\.pem")
+_PLACEHOLDER_PEM = re.compile(r"^(?:<[^>]+>|(?:my|your|example)[\w.-]*)\.pem$")
+
+
+def _published_surface_lines():
+    """`(relative-path, line-number, line)` for every published surface."""
+    for path in _PUBLISHED_BATCH_SURFACES:
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text()
+        except UnicodeDecodeError:  # pragma: no cover - no binaries today
+            continue
+        relative = path.relative_to(REPO_ROOT)
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            yield relative, lineno, line
+
+
+def test_no_account_id_bucket_name_or_key_material_in_published_docs_and_examples():
+    """The docs/examples companion to the source scan above.
+
+    `test_no_credential_key_path_or_bucket_name_is_baked_into_source` asserts
+    the module bakes nothing in, but the reader-facing files were unguarded --
+    and a real bucket name (account id and all) in a *public* repo's docs
+    leaks just as much as one in its source. Matching is by **pattern**: the
+    real value appears nowhere in this test either, and a hit is reported as
+    `path:line` only, never echoed into a CI log.
+    """
+    hits = {
+        label: [
+            f"{relative}:{lineno}"
+            for relative, lineno, line in _published_surface_lines()
+            if pattern.search(line)
+        ]
+        for label, pattern in _LEAK_PATTERNS.items()
+    }
+    assert hits == {label: [] for label in _LEAK_PATTERNS}
+
+
+def test_published_docs_and_examples_only_show_placeholder_key_paths():
+    """A `.pem` in prose must be an obvious stand-in (`<...>.pem`, or a
+    `my-`/`your-`/`example-` name), never a path off someone's machine."""
+    offenders = [
+        f"{relative}:{lineno}"
+        for relative, lineno, line in _published_surface_lines()
+        for token in _PEM_TOKEN.findall(line)
+        if not _PLACEHOLDER_PEM.match(token.rsplit("/", 1)[-1])
+    ]
+    assert offenders == []
+
+
 # --------------------------------------------------------------------------- #
 # End to end through `run_sim`
 # --------------------------------------------------------------------------- #

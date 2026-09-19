@@ -53,7 +53,7 @@
   },
   "backend": "batch",
   "batch": {
-    "bucket": "2am-batch-jobs-221082181346",
+    "bucket": "<your-batch-jobs-bucket>",
     "region": "us-east-1",
     "profile": "batch-runner-submit",
     "provision_script_path": "<path-to-your-2am-checkout>/infra/aws/batch-fleet-provision.sh",

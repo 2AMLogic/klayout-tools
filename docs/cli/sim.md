@@ -292,7 +292,7 @@ What differs from `remote` is *who acquires the machine*:
   "backend": "batch",
   "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
   "batch": {
-    "bucket": "2am-batch-jobs-221082181346",
+    "bucket": "<your-batch-jobs-bucket>",
     "region": "us-east-1",
     "profile": "batch-runner-submit",
     "provision_script_path": "~/GitHub/2am/infra/aws/batch-fleet-provision.sh",
@@ -305,7 +305,7 @@ What differs from `remote` is *who acquires the machine*:
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `batch.provision_script_path` | string, required (or `$KLT_BATCH_PROVISION_SCRIPT`) | Path to 2am's `infra/aws/batch-fleet-provision.sh` on *this* host. Resolution order: this field, then `$KLT_BATCH_PROVISION_SCRIPT`, then an error naming both — never a guessed path into a sibling checkout. An unresolvable script is an error raised **before any S3 write**, mirroring `remote.ssh_key_path`'s own early check. |
-| `batch.bucket` | string, required (or `$KLT_BATCH_JOB_BUCKET`, or the fleet config) | The job bucket. Resolution order: this field, then `$KLT_BATCH_JOB_BUCKET`, then `BATCH_JOB_BUCKET` in the `batch-fleet.env` sitting beside the resolved provision script (2am's own fleet config, which is the value its IAM policy is bound to — today `2am-batch-jobs-221082181346`). No literal default is compiled into `klt`: an unresolvable bucket is an error naming all three sources. |
+| `batch.bucket` | string, required (or `$KLT_BATCH_JOB_BUCKET`, or the fleet config) | The job bucket. Resolution order: this field, then `$KLT_BATCH_JOB_BUCKET`, then `BATCH_JOB_BUCKET` in the `batch-fleet.env` sitting beside the resolved provision script (2am's own fleet config, which is the value its IAM policy is bound to). The deployed bucket name is read from that fleet config at runtime and is deliberately not reproduced in this repo — it encodes deployment-specific account detail, so every example here shows the `<your-batch-jobs-bucket>` placeholder instead. No literal default is compiled into `klt`: an unresolvable bucket is an error naming all three sources. |
 | `batch.jobs_prefix` | string | S3 key prefix jobs live under. Defaults to the fleet config's `BATCH_JOBS_PREFIX`, else `"jobs"`. |
 | `batch.region` | string | AWS region passed to both the `aws` CLI and `launch`. Defaults to `$KLT_BATCH_REGION`, else the fleet config's `BATCH_REGION`, else the `aws` CLI's own resolution. |
 | `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
@@ -362,7 +362,7 @@ A `batch` run's response fills the same additive `environment.remote` slot
 "remote": {
   "provider": "aws-batch-fleet",
   "job_id": "klt-sim-4f2b19c0ae31",
-  "bucket": "2am-batch-jobs-221082181346",
+  "bucket": "<your-batch-jobs-bucket>",
   "region": "us-east-1",
   "instance_id": "i-0abc123",
   "instance_type": "c7i.4xlarge",

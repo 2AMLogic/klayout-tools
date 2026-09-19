@@ -40,12 +40,13 @@ uv run klt sim examples/sim-remote/matrix-local.request.json --format json
 uv run klt sim examples/sim-batch/matrix-batch.request.json --format json
 ```
 
-`matrix-batch.request.json` ships with a documented placeholder for the one
-host-specific field, never a working path from someone's machine:
+`matrix-batch.request.json` ships documented placeholders for both
+deployment-specific fields — never a working path from someone's machine,
+and never a real job-bucket name:
 
 ```json
 "batch": {
-  "bucket": "2am-batch-jobs-221082181346",
+  "bucket": "<your-batch-jobs-bucket>",
   "region": "us-east-1",
   "profile": "batch-runner-submit",
   "provision_script_path": "<path-to-your-2am-checkout>/infra/aws/batch-fleet-provision.sh",
@@ -55,8 +56,9 @@ host-specific field, never a working path from someone's machine:
 ```
 
 Point `provision_script_path` at your own `2am` checkout (or set
-`$KLT_BATCH_PROVISION_SCRIPT` and delete the field). `bucket`/`region`/
-`profile` can all be deleted too — with the script path resolved, `klt`
+`$KLT_BATCH_PROVISION_SCRIPT` and delete the field), and replace
+`<your-batch-jobs-bucket>` with your own job bucket (or set
+`$KLT_BATCH_JOB_BUCKET`). `bucket`/`region`/`profile` can all be deleted too — with the script path resolved, `klt`
 reads them from the `batch-fleet.env` sitting beside it, which is 2am's own
 source of truth for those values. Nothing here is a credential: `profile` is
 an `aws` CLI profile *name*, and the key it resolves to lives in your own
