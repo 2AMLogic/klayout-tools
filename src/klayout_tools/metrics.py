@@ -65,10 +65,19 @@ carry.
 `True` marks a metric whose failure should gate signoff mechanically (e.g.
 `drc__error__count`, where any nonzero value is a signoff blocker). Defaults
 to `False`.
+
+## `domain`
+
+`"finite_number"` (the default) accepts signed finite integers and floats.
+`"nonnegative_integer"` accepts only integers at least zero, excluding
+booleans and floats, and is declared for each critical error count. Domain
+validity is independent of quality polarity: a negative timing slack is a
+valid measurement even when its polarity makes it a signoff failure.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -76,6 +85,7 @@ from typing import Literal
 
 __all__ = [
     "Aggregator",
+    "MetricDomain",
     "MetricDef",
     "MetricNamespaceError",
     "REGISTRY",
@@ -91,6 +101,10 @@ __all__ = [
 #: JSON-serializable and exposable through docs/json-contract.md rather than
 #: being importable-code-only.
 Aggregator = Literal["sum", "min", "max", "mean"]
+
+#: Numeric domains are independent of quality polarity: a negative slack
+#: is a valid measurement, while a negative error count is invalid evidence.
+MetricDomain = Literal["finite_number", "nonnegative_integer"]
 
 #: A segment is lowercase-with-underscores (e.g. `passed_count`); the full
 #: name is two or more segments joined by `__`, which stays reserved as the
@@ -123,6 +137,8 @@ class MetricDef:
         critical: Whether this metric should mechanically gate signoff.
             Defaults to `False`.
         description: A short, human-readable description of the metric.
+        domain: Valid numeric values, independently of quality polarity.
+            Defaults to signed finite numbers; counts opt into integers.
     """
 
     name: str
@@ -130,6 +146,19 @@ class MetricDef:
     higher_is_better: bool | None
     critical: bool = False
     description: str = ""
+    domain: MetricDomain = "finite_number"
+
+    def invalid_value_reason(self, value: object) -> str | None:
+        """Return a stable diagnostic code for values outside this domain."""
+        if isinstance(value, float) and not math.isfinite(value):
+            return "non_finite"
+        if self.domain == "nonnegative_integer":
+            if not isinstance(value, int) or isinstance(value, bool):
+                return "expected_integer"
+            return "below_minimum" if value < 0 else None
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return "expected_number"
+        return None
 
 
 #: The module-level registry. Populated only by :func:`register` (never
@@ -147,14 +176,15 @@ def register(
     higher_is_better: bool | None,
     critical: bool = False,
     description: str = "",
+    domain: MetricDomain = "finite_number",
 ) -> MetricDef:
     """Declare a metric in the module-level :data:`REGISTRY`.
 
     Raises:
         MetricNamespaceError: `name` does not match the `a__b__c`-style
             naming grammar, `aggregator` is not one of the declared
-            aggregator kinds, or `name` is already registered (a
-            registration collision is a bug in the caller, never silently
+            aggregator kinds, `domain` is unknown, or `name` is already
+            registered (a collision is a bug in the caller, never silently
             overwritten).
     """
     if not _NAME_RE.match(name):
@@ -167,6 +197,8 @@ def register(
             f"metric {name!r}: unknown aggregator {aggregator!r} "
             f"(expected one of {_VALID_AGGREGATORS})"
         )
+    if domain not in ("finite_number", "nonnegative_integer"):
+        raise MetricNamespaceError(f"metric {name!r}: unknown domain {domain!r}")
     if name in REGISTRY:
         raise MetricNamespaceError(f"metric {name!r} is already registered")
 
@@ -176,6 +208,7 @@ def register(
         higher_is_better=higher_is_better,
         critical=critical,
         description=description,
+        domain=domain,
     )
     REGISTRY[name] = metric_def
     return metric_def
@@ -281,6 +314,7 @@ register(
     aggregator="sum",
     higher_is_better=False,
     critical=True,
+    domain="nonnegative_integer",
     description=(
         "Total DRC violation count for a block (`klt drc`'s "
         "violation_count, as surfaced through `klt layout-metrics`' "
@@ -325,6 +359,7 @@ register(
     aggregator="sum",
     higher_is_better=False,
     critical=True,
+    domain="nonnegative_integer",
     description=(
         "Number of corners that failed (a measurement outside its limits) "
         "in a `klt sim` sweep (`run_sim()`'s failed). Critical: any nonzero "
@@ -336,6 +371,7 @@ register(
     aggregator="sum",
     higher_is_better=False,
     critical=True,
+    domain="nonnegative_integer",
     description=(
         "Number of corners that errored (the simulator itself failed to "
         "produce a usable result) in a `klt sim` sweep (`run_sim()`'s "

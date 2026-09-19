@@ -50,13 +50,16 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
 from __future__ import annotations
 
 import argparse
-import json
-import os
-import sys
 from typing import Any
 
 from ..design_evidence_tiers import DesignEvidenceTiersError
-from ..signoff import SignoffError, build_fleet_report, build_signoff, build_tier_report
+from ..signoff import (
+    SignoffError,
+    _read_json_source,
+    build_fleet_report,
+    build_signoff,
+    build_tier_report,
+)
 from .output import emit_error, emit_success
 
 EXIT_PASS = 0
@@ -169,34 +172,8 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
 
 
 def _read_manifest(source: str, *, description: str = "manifest") -> Any:
-    """Read and JSON-decode a manifest: ``source == "-"`` reads stdin,
-    otherwise ``source`` is a file path. Raises :class:`SignoffError` on any
-    read/parse failure -- mirrors ``signoff.py``'s ``_read_json_source``
-    (same contract, kept separate since it lives on the CLI side and this
-    module's callers pass their own ``description``, e.g. ``"manifest"`` vs.
-    ``"fleet manifest"``, for error messages that name the right input)."""
-    if source == "-":
-        try:
-            return json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
-            raise SignoffError(f"stdin {description} is not valid JSON: {exc}") from exc
-
-    if not os.path.exists(source):
-        raise SignoffError(f"file not found: {source}")
-    if os.path.isdir(source):
-        raise SignoffError(f"not a file: {source}")
-
-    try:
-        with open(source, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, UnicodeDecodeError) as exc:
-        raise SignoffError(
-            f"could not read {description} file '{source}': {exc}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise SignoffError(
-            f"{description} file '{source}' is not valid JSON: {exc}"
-        ) from exc
+    """Use the same strict JSON reader for manifest, fleet, and evidence."""
+    return _read_json_source(source, description)
 
 
 def _print_text(result: dict) -> None:
