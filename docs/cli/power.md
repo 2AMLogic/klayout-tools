@@ -697,6 +697,22 @@ its own disconnected island (one island per row per net; before issue
 row's own rail too, fragmenting it into 88 `VPWR` / 105 `VGND` islands —
 see `tests/test_power.py`'s docstring for the full before/after story).
 
+**The paired fixture that shows what a PDN changes (issue #2079).** "17
+islands" is a property of *this routing*, not of `klt power`, and the corpus
+now carries the control that proves it: `tests/corpus/place_and_route/
+gcd-pdn.gds.gz` is the same `gcd` design through the same pipeline **with**
+a real `request.power` PDN (ORFS's own `platforms/sky130hd/pdn.tcl` met1
+followpins rail plus met4/met5 straps). Run against the full `met1`–`met5` +
+`via1`–`via4` stackup that PDN actually occupies, it resolves to exactly
+**1 `VPWR` island and 1 `VGND` island** (500 nodes, 1594 edges, zero
+warnings) — one connected mesh. Run against the same two-metal spec above,
+it reports 17 + 17 again, because the straps that connect the rows live on
+met4/met5 and this command only ever sees the layers a spec declares. Both
+halves are pinned by `tests/test_power.py`'s
+`test_gcd_pdn_fixture_resolves_each_supply_to_one_island`; see
+`tests/corpus/README.md`'s "`gcd-pdn`" section for that fixture's
+provenance.
+
 Adding `pads` (one per island, at each rail's left-hand end) and a
 `current_model` (0.2 mA hung on each `VPWR` rail's far end) to that same
 spec — with both metal roles at `0.125` ohm/sq, a sky130-order sheet

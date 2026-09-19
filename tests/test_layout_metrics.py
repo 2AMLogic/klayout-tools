@@ -26,6 +26,13 @@ from klayout_tools.layout_metrics import (
 # `klt layout-metrics` against machine-generated, macro-scale layout rather
 # than the hand-drawn analog fixtures above. See tests/corpus/README.md's
 # "Machine-generated macro-scale fixture" section for full provenance.
+#
+# Deliberately the fixture routed **without** `request.power` (issue #2079).
+# `klt layout-metrics` reports per-layer geometry totals, so its numbers are
+# a direct function of which fixture is read; the power-complete sibling
+# `gcd-pdn.gds.gz` has strictly more metal (37 layers vs. 31, 4856 top-level
+# instances vs. 4303) and would re-pin every count here against a different
+# artifact for no gain -- nothing this file asserts is about power delivery.
 CORPUS_DIR = Path(__file__).parent / "corpus"
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 

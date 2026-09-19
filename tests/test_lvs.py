@@ -7926,6 +7926,19 @@ def test_corpus_deliberately_broken_reference_reports_mismatches(
 # "Machine-generated macro-scale fixture" section) for full provenance and
 # docs/cli/lvs.md's "Machine-generated macro-scale fixture" section for the
 # methodology this mirrors from #456.
+#
+# Deliberately the fixture routed **without** `request.power` (issue #2079).
+# Every compare below is a *self-consistency* round-trip -- the layout is
+# compared against a netlist inline-extracted from that same layout -- so
+# its device/net/pin counts describe whichever fixture is read, and power
+# delivery never enters the verdict. The power-complete sibling
+# `gcd-pdn.gds.gz` exists for the check that *does* depend on it: gate-level
+# LVS's `power_connectivity` block, which resolves each supply to exactly one
+# net on that fixture and to per-row fragments on this one. That check needs
+# the run's own as-built Verilog (`verilog_path`), which is not committed
+# alongside either fixture, so it is gated in
+# `tests/corpus/place_and_route/regenerate.sh` at regeneration time rather
+# than here -- see `tests/corpus/README.md`.
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 
 _skip_no_pnr_fixture = pytest.mark.skipif(

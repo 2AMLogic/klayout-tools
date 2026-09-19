@@ -189,6 +189,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   a caller wanting a hard gate composes it on a non-empty `warnings` or
   `power.placed.status != "complete"`. Additive throughout; no
   `schema_version` bump.
+- **Added**: `tests/corpus/place_and_route/gcd-pdn.gds.gz` (issue #2079) — the
+  `gcd` worked-example design routed **with** a real `request.power` PDN
+  (ORFS's own `platforms/sky130hd/pdn.tcl` met1-followpins rail plus
+  met4/met5 straps, `power_net`/`ground_net` = `VPWR`/`VGND`), committed
+  beside the existing, deliberately grid-less `gcd.gds.gz` rather than
+  replacing it. Each supply resolves to exactly **one** net/island on the new
+  fixture (`klt lvs`'s `power_connectivity`: `"match"` across 1349
+  instances; `klt power` on the full met1–met5 stackup: 1 `VPWR` + 1 `VGND`
+  island) versus 17 per supply on the grid-less one, which stays byte-
+  identical — so every count previously measured against it, in tests and
+  docs alike, is unchanged. `tests/corpus/place_and_route/regenerate.sh` now
+  builds both, takes optional design-name arguments so one fixture can be
+  rebuilt without rewriting the others, and gates a power-bearing fixture on
+  a real gate-level `klt lvs` `power_connectivity` check before committing
+  it. No `klt` command behavior changed.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`

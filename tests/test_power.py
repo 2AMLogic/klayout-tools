@@ -24,7 +24,18 @@ from klayout_tools.cli import main
 from klayout_tools.power import PowerError, run_power
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
+#: The `gcd` macro routed **without** `request.power` -- deliberately kept
+#: (issue #2079) as this file's *negative* control: with no PDN, each
+#: standard-cell row's rail is its own disconnected island (17 per net), the
+#: exact topology `docs/cli/power.md`'s worked example documents and
+#: `test_gcd_fixture_extracts_a_real_power_grid` below pins.
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
+#: The same `gcd` design routed **with** a real `request.power` PDN (issue
+#: #2079) -- this file's *positive* control, and the paired fixture that
+#: makes the island counts above readable as a property of the request
+#: rather than of `klt power`. See `tests/corpus/README.md`'s "`gcd-pdn`"
+#: section for full provenance.
+PLACE_AND_ROUTE_PDN_GDS = CORPUS_DIR / "place_and_route" / "gcd-pdn.gds.gz"
 #: A real, fleet-canary routed digital block -- `sky130-modexp`'s own
 #: `layout/modexp.gds` (issue #1322, Phase 2 of epic #712's acceptance
 #: criterion 3: "validated ... on a real routed canary", not only the `gcd`
@@ -709,6 +720,142 @@ def test_gcd_fixture_extracts_a_real_power_grid(tmp_path):
             for edge in island["edges"]:
                 assert edge["resistance_ohm"] > 0
                 assert edge["kind"] in {"metal", "via"}
+
+
+def _sky130_pdn_stackup_spec(path: Path) -> None:
+    """The full `met1`-`met5` sky130 power stackup `gcd-pdn.gds.gz`'s own PDN
+    actually occupies -- layer/datatype numbers from `decks/sky130.py`'s own
+    `metals`/`metal_labels`/`vias` tuples (verified against a real sky130A
+    install), sheet resistances of the same order as the two-metal spec
+    above."""
+    path.write_text(
+        json.dumps(
+            {
+                "power_nets": ["VPWR", "VGND"],
+                "stackup": [
+                    {
+                        "name": name,
+                        "layer": f"{num}/20",
+                        "label_layer": f"{num}/5",
+                        "sheet_resistance_ohm_per_sq": rsq,
+                    }
+                    for name, num, rsq in (
+                        ("met1", 68, 0.125),
+                        ("met2", 69, 0.125),
+                        ("met3", 70, 0.047),
+                        ("met4", 71, 0.047),
+                        ("met5", 72, 0.029),
+                    )
+                ],
+                "vias": [
+                    {
+                        "name": name,
+                        "layer": f"{num}/44",
+                        "between": list(between),
+                        "resistance_ohm": rohm,
+                    }
+                    for name, num, between, rohm in (
+                        ("via1", 68, ("met1", "met2"), 2.0),
+                        ("via2", 69, ("met2", "met3"), 2.0),
+                        ("via3", 70, ("met3", "met4"), 2.0),
+                        ("via4", 71, ("met4", "met5"), 0.4),
+                    )
+                ],
+            }
+        )
+    )
+
+
+@pytest.mark.skipif(
+    not PLACE_AND_ROUTE_PDN_GDS.is_file(),
+    reason="no OpenROAD-produced place-and-route PDN corpus fixture checked in",
+)
+def test_gcd_pdn_fixture_resolves_each_supply_to_one_island(tmp_path):
+    """The positive control the fixture above is the negative control for
+    (issue #2079): the *same* `gcd` design, routed with a real
+    `request.power` PDN (ORFS `platforms/sky130hd/pdn.tcl`'s own met1
+    followpins rail + met4/met5 straps), resolves each supply to **exactly
+    one** island -- one connected mesh, not 17 disconnected per-row rails.
+
+    This is the property the fixture exists for, so it is pinned here rather
+    than left to the regeneration script alone: a `request.power` run whose
+    grid silently failed to tie the rows together still produces a routable,
+    DRC-clean GDS, and the island count is the cheapest place that shows up.
+    (`regenerate.sh` additionally gates the fixture on `klt lvs`'s
+    `power_connectivity` block -- every standard-cell supply *pin* reaching
+    one net -- which needs the run's own as-built Verilog and so cannot be
+    re-checked from the committed GDS alone.)
+
+    The second half is the discriminator that makes the first half mean
+    something: re-run against only the two-metal `met1`/`met2` stackup the
+    gridless fixture's test uses, and this same fixture reports 17 islands
+    per net again -- the met4/met5 straps are what connect the rows, and
+    `klt power` only sees the layers a spec declares. So "1 island" is a
+    statement about this layout's real PDN geometry, not about `klt power`
+    having grown more permissive.
+    """
+    spec = tmp_path / "gcd_pdn.power.json"
+    _sky130_pdn_stackup_spec(spec)
+
+    report = run_power(str(PLACE_AND_ROUTE_PDN_GDS), str(spec))
+
+    assert report["warnings"] == []
+    by_net = {entry["net"]: entry for entry in report["networks"]}
+    assert by_net["VPWR"]["island_count"] == 1
+    assert by_net["VGND"]["island_count"] == 1
+    assert report["island_count"] == 2
+    assert report["node_count"] == 500
+    assert report["edge_count"] == 1594
+
+    # Every edge is a real, positive resistor -- and both kinds are present:
+    # a mesh tied together purely by metal (no vias) would not be a PDN.
+    kinds = set()
+    for entry in report["networks"]:
+        for island in entry["islands"]:
+            for edge in island["edges"]:
+                assert edge["resistance_ohm"] > 0
+                kinds.add(edge["kind"])
+    assert kinds == {"metal", "via"}
+
+    # Discriminator: the same fixture, read through the two-metal stackup
+    # `test_gcd_fixture_extracts_a_real_power_grid` uses, is fragmented
+    # exactly like the gridless fixture -- the straps that connect the rows
+    # live on met4/met5, which that spec never declares.
+    two_metal = tmp_path / "gcd_pdn_two_metal.power.json"
+    two_metal.write_text(
+        json.dumps(
+            {
+                "power_nets": ["VPWR", "VGND"],
+                "stackup": [
+                    {
+                        "name": "met1",
+                        "layer": "68/20",
+                        "label_layer": "68/5",
+                        "sheet_resistance_ohm_per_sq": 0.1,
+                    },
+                    {
+                        "name": "met2",
+                        "layer": "69/20",
+                        "label_layer": "69/5",
+                        "sheet_resistance_ohm_per_sq": 0.05,
+                    },
+                ],
+                "vias": [
+                    {
+                        "name": "via1",
+                        "layer": "68/44",
+                        "between": ["met1", "met2"],
+                        "resistance_ohm": 2.0,
+                    }
+                ],
+            }
+        )
+    )
+
+    partial = run_power(str(PLACE_AND_ROUTE_PDN_GDS), str(two_metal))
+    partial_by_net = {entry["net"]: entry for entry in partial["networks"]}
+    assert partial_by_net["VPWR"]["island_count"] == 17
+    assert partial_by_net["VGND"]["island_count"] == 17
 
 
 # --- Static IR-drop solve (issue #845, Phase 1b) ----------------------------

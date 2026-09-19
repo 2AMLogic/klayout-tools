@@ -68,6 +68,18 @@ CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_CORPUS_FILES = sorted((CORPUS_DIR / "sky130").glob("*.gds"))
 GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
 
+# Every macro-scale acceptance test below reads
+# `corpus/place_and_route/gcd.gds.gz` -- the fixture routed **without**
+# `request.power` -- and that is deliberate, not a stale reference (issue
+# #2079). Issue #2079 added a power-complete sibling,
+# `corpus/place_and_route/gcd-pdn.gds.gz`, rather than regenerating this one,
+# precisely so the measured counts pinned here (parasitics totals, the 492
+# recovered DEF net names, the declared-pin SPEF port set) keep describing
+# the artifact they were measured against. Nothing this file asserts is about
+# power delivery, so there is nothing here the gridded fixture would test
+# better; use `gcd-pdn.gds.gz` when what is under test *is* the power grid
+# (see `tests/corpus/README.md`).
+
 #: Real `ngspice` invocations (sky130 vendor-deck simulations) are slow and
 #: host-load-sensitive -- the same wall-clock cost is fine in CI's dedicated,
 #: uncontended runner (~3.5min for the full suite, see issue #1651) but can
