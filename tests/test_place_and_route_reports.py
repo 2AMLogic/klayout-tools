@@ -20,6 +20,8 @@ from test_place_and_route import (
     _stub_openroad_success,
 )
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 _REPORTED_RECORD = (
     "violation type: Metal Spacing\n"
     "\tsrcs: net:_04497_ net:VSS\n"

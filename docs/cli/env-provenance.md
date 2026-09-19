@@ -72,9 +72,9 @@ on.
   attempt needs. Deliberately **not** `platform.platform()`, the string the
   audited harnesses concatenated the hostname onto.
 - `python_version`, `klt_version`, `klayout_version` — the tool versions.
-  `klt_version` is the plain package version (the same value
-  `provenance.klt_version` carries); use [`klt version`](version.md) when you
-  need to tell a release from a post-tag source build.
+  `klt_version` is the build identity (the same value
+  `provenance.klt_version` and [`klt version`](version.md) carry), including
+  a commit/dirty suffix or `+unknown` when it is not a confirmed release.
 - `paths` — one entry per `--path LABEL=PATH`, each `{path, scope}`:
 
   | `scope` | `path` | Meaning |

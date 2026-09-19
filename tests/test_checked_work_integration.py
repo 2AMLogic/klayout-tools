@@ -26,6 +26,8 @@ from klayout_tools.decks import DrcRule
 from klayout_tools.signoff import SignoffError, build_signoff, build_tier_report
 from test_signoff import DRC_CLEAN_ENVELOPE
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 _SCHEMA = json.loads(
     (Path(__file__).parents[1] / "docs/schemas/coverage.schema.json").read_text()
 )

@@ -81,6 +81,8 @@ from klayout_tools.place_and_route import (
     run_place_and_route,
 )
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 _GCD_RTL = """\
 module gcd #(
     parameter WIDTH = 16

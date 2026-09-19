@@ -36,6 +36,8 @@ from klayout_tools import post_route_sta
 from klayout_tools.cli import main
 from klayout_tools.post_route_sta import PostRouteStaError, load_request, run_sta
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 
 def _write(path: Path, text: str) -> str:
     path.write_text(text, encoding="utf-8")
