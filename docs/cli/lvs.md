@@ -1298,8 +1298,8 @@ isomorphism reimplemented downstream.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `layout` | string | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. |
-| `reference` | string | The paired reference net's name, same convention. |
+| `layout` | string \| `null` | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. `null` in the symmetric case to `reference` below (the comparer's `match_nets`/`match_ambiguous_nets` event carried no layout-side net object) — not observed in practice as of this writing, but not structurally ruled out either, so it is typed nullable here too. |
+| `reference` | string \| `null` | The paired reference net's name, same convention. **`null`** when the comparer's `match_nets`/`match_ambiguous_nets` event fired with no reference-side net object at all — observed today for a `reference.form: "gate-level-verilog"` run's layout-only supply pins (`VGND`/`VPWR`; see "No power/ground pins" above): the reference has nothing to pair them with, yet the comparer still logs a successful pairing for the layout side rather than a `net_mismatch`. This is a real entry with a `null` counterpart, not a missing one — see the paragraph below. |
 | `pin` | boolean | Whether this net is one of the compared circuit's declared pins (`Net.pin_count() > 0`), read from the layout side. `same_circuits` pins the layout/reference top circuits together before the compare runs, so a matched pair's declared-pin status agrees on both sides by construction. |
 | `heuristic` | boolean *(present only for a `reference.form: "gate-level-verilog"` run — see "Supply correspondences are not validated supply connectivity" below)* | `true` when this pairing puts a layout **supply** net opposite a reference net that is not itself a supply pin — a fallback the comparer had to guess at, not a correspondence it verified. `false` for every other pairing in such a run. The key is **omitted entirely** when no supply universe could be derived (every other `reference.form`, and any `gate-level-verilog` run whose `reference.library` pin orders did not resolve), so "checked, and this pairing is genuine" (`false`) stays distinguishable from "never checked" (absent). Read it with `entry.get("heuristic")`, not `entry["heuristic"]`. |
 
@@ -1311,20 +1311,38 @@ pairing" below; a pairing can appear in both places at once, since one
 documents *that* an ambiguity was resolved and the other documents *what*
 it resolved to). Emitted whenever the comparer produced at least one net
 pairing, regardless of `status` — on a partial/failed compare, the pairs
-that *did* match are still useful for localising the ones that did not (a
-net with no counterpart at all, e.g. one side dropped a device entirely,
-simply has no entry). `device_correspondence` (the same idea for devices)
-is not yet implemented — track it separately if needed.
+that *did* match are still useful for localising the ones that did not.
+
+**A net the comparer never matched at all has no entry here** — e.g. one
+side dropped a device entirely, so the comparer reports a `net_mismatch`
+event instead of a pairing; look for it in `mismatches[]` instead. That is
+a genuinely different case from a *successful* pairing whose counterpart
+is `null` (see the `layout`/`reference` rows above): such a pairing **does**
+get an entry — the comparer logged a real `match_nets`/`match_ambiguous_nets`
+event for it — it just names no net on one side. In practice this shows up
+as `reference: null` for a `reference.form: "gate-level-verilog"` run's
+layout-only supply pins; do not read a `null` counterpart as "no entry" or
+skip it when consuming this field. `device_correspondence` (the same idea
+for devices) is not yet implemented — track it separately if needed.
 
 Sorted by `(reference, layout)`, so repeated runs against the same inputs
 produce identical, diff-clean output — the same ordering guarantee
-`mismatches[]` makes. Deduplication is scoped **per circuit** (by the
-comparer's circuit scope, not by net name alone): a hierarchical netlist
-routinely reuses a local net name — `MID`, `OUT`, `A` — across unrelated
-subcircuits, and each such net is a distinct correspondence with its own
-`pin` flag. Two entries can therefore share the same `layout`/`reference`
-name (one per circuit) — that is expected, and is what keeps
-`len(net_correspondence) == counts.nets.matched` exact across a hierarchy.
+`mismatches[]` makes; a `null` `reference` (or `layout`) sorts as the empty
+string in this ordering, so every `reference: null` entry sorts *before*
+every entry naming a reference net, not after. Deduplication is scoped
+**per circuit** (by the comparer's circuit scope, not by net name alone): a
+hierarchical netlist routinely reuses a local net name — `MID`, `OUT`, `A`
+— across unrelated subcircuits, and each such net is a distinct
+correspondence with its own `pin` flag. Two entries can therefore share the
+same `layout`/`reference` name (one per circuit) — that is expected, and is
+what keeps `len(net_correspondence) == counts.nets.matched` exact across a
+hierarchy. That invariant holds **including** every null-counterpart entry:
+the comparer's `match_nets`/`match_ambiguous_nets` callback increments
+`counts.nets.matched` on every invocation with no exemption for a missing
+net object on either side, so a `reference: null` (or `layout: null`) entry
+is counted in `counts.nets.matched` exactly like an ordinary two-sided
+pairing — no separate accounting, and no adjustment needed to keep the
+invariant exact.
 
 #### Supply correspondences are not validated supply connectivity
 
