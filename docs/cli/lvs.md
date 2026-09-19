@@ -771,18 +771,26 @@ were perfectly connected.
 
 **Where the evidence stops, and what the report says about it.** Condition 2
 is a *cross-master* corroboration, so it corroborates nothing when the
-reference instantiates a single standard-cell master: a pin that master
-declares but never connects is then indistinguishable from its supplies. The
+instantiated masters are all the same declared-pin **shape** — either a
+single standard-cell master, or several drive-strength variants of one
+logical cell (`mylib__inv_1`/`mylib__inv_2`, both `A VGND VNB VPB VPWR Y`):
+a pin any of them declares but never connects is then indistinguishable from
+their supplies, and `len(masters) > 1` is not by itself evidence otherwise —
+two identically-shaped masters corroborate exactly as little as one. The
 check still runs (the common single-master case connects every signal pin,
 and the universe is exactly right), and `power_pins_derivation.corroborated`
-is `false` with a `reason` naming the limitation, rather than a guessed
+is `false` with a `reason` naming the limitation (which masters, and whether
+it's a single master or several sharing one shape), rather than a guessed
 universe presented as a corroborated one.
 
 Narrowing further — requiring a supply to be declared by every cell in the
 *whole* library, not just the instantiated ones — was measured against both
 supported PDKs and rejected: 9 of sky130's 437 `sky130_fd_sc_hd` cells and 2
-of gf180mcu's 229 `gf180mcu_fd_sc_mcu7t5v0` cells omit a well-tie pin (the
-tap and endcap cells), so that rule admits only `VGND`/`VPWR` (resp.
+of gf180mcu's 229 `gf180mcu_fd_sc_mcu7t5v0` cells omit a well-tie pin. (Six of
+sky130's nine are actually `sky130_fd_sc_hd__lpflow_lsbuf_*_isowell_tap_*`
+level-shifter buffers, not physical tap/endcap cells — but `klt synthesize`
+denylists the whole `lpflow_*` family, so none of them can reach a reference
+netlist through this flow anyway.) That rule admits only `VGND`/`VPWR` (resp.
 `VDD`/`VSS`) and drops the well ties out of both the checked universe and the
 tap-cell classification — real supply-defect coverage traded away to fix a
 case the rule above already fixes.
@@ -867,7 +875,7 @@ would silently exempt them.
 | `status` | `"match"` \| `"mismatch"` \| `"unchecked"` | The power/ground verdict, **independent of the report's top-level `status`** (which stays exactly `NetlistComparer.compare()`'s own signal-connectivity result). `"match"` when the check ran and found nothing; `"mismatch"` when it produced findings; `"unchecked"` when it did not run — never a clean verdict on absent evidence. |
 | `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
 | `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
-| `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` today; a future rule would be a new value, never a silent change of meaning for this one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` when more than one master corroborated the universe), and `reason` (`null` when corroborated; otherwise what the evidence could not establish). `null` when the run never derived a universe at all — a non-gate-level `reference.form`, the `power_connectivity: false` opt-out, or a reference instantiating no cell of the resolved library. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
+| `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` today; a future rule would be a new value, never a silent change of meaning for this one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` only when the instantiated masters include at least two genuinely distinct declared-pin shapes — not merely more than one master *name*; two drive-strength variants of one logical cell declare the same shape and corroborate nothing), and `reason` (`null` when corroborated; otherwise what the evidence could not establish, including a same-shape-only multi-master case). Populated — never `null` — whenever `reference.form` is `"gate-level-verilog"` and `power_connectivity` was not disabled, even when the reference instantiates no cell of the resolved library at all (`masters: []`, `reason` naming that). `null` only when the check never attempted a derivation: a non-gate-level `reference.form`, or the `power_connectivity: false` opt-out. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
 | `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
 | `unchecked_expected_pins` | array\<string\> | Issue #1978. `expected_nets` keys that named a power/ground pin no layout-side instance was actually observed to carry — a typo, or a PDK standard cell whose tie pin has no in-cell label/LEF port at all. Such a pin matches zero rows in `_power_pin_connections` and so produces zero findings, which reads identically to "checked and found correct" unless this field is consulted; a non-empty list means at least one declared expectation was never exercised by this run. `[]` on a clean check, and always `[]` when `status` is `"unchecked"`. |

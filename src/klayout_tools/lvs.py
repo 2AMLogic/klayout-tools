@@ -4767,10 +4767,11 @@ def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
 def _gate_level_power_pin_evidence(
     reference_netlist: Any | None,
     library_pin_orders: Mapping[str, list[str]] | None,
-) -> tuple[frozenset[str] | None, list[str]]:
-    """``(power_pin_names, masters)`` -- the derived power/ground pin
-    universe (issue #1622) together with the evidence it rests on: the
-    sorted names of the library cells (masters) the reference instantiates
+) -> tuple[frozenset[str] | None, list[str], bool]:
+    """``(power_pin_names, masters, corroborated)`` -- the derived
+    power/ground pin universe (issue #1622) together with the evidence it
+    rests on: the sorted names of the library cells (masters) the reference
+    instantiates, and whether that evidence is genuinely cross-corroborated
     (issue #2076).
 
     ``power_pin_names`` is the set of pin names (upper-cased) that are
@@ -4832,17 +4833,27 @@ def _gate_level_power_pin_evidence(
 
     **Where the evidence genuinely runs out, and why it is reported rather
     than guessed at.** Condition 2 is a cross-master corroboration, so it
-    can only corroborate when there is more than one master: a reference
-    instantiating a *single* library cell that leaves one of its pins
+    can only corroborate when there is more than one *genuinely distinct*
+    master: a reference instantiating a single library cell -- or several
+    drive-strength variants of the same one -- that leaves one of its pins
     dangling offers nothing that separates that pin from the cell's
-    supplies -- both are declared by every (i.e. the one) instantiated
-    master and carried by none. ``masters`` is returned alongside the
-    universe precisely so that case is visible in the report
-    (``power_connectivity.power_pins_derivation``, see
+    supplies -- both are declared identically by every instantiated master
+    and carried by none. Counting *names* (``len(masters) > 1``) is not
+    enough: ``mylib__inv_1``/``mylib__inv_2`` are two masters by name but
+    declare the identical pin order, so their intersection is no more
+    informative than either alone -- a dangling ``Y`` on both survives
+    exactly as it would with only one of them instantiated. ``corroborated``
+    is therefore true only when the instantiated masters' full declared pin
+    sets are not all identical, i.e. there are at least two distinct
+    *shapes* among them (the flip-flop's ``CLK``/``D``/``Q`` vs. the
+    inverter's ``A``/``Y``, not merely two differently-named inverters).
+    ``masters`` is returned alongside the universe -- and alongside
+    ``corroborated`` -- precisely so a same-shape-only case is visible in
+    the report (``power_connectivity.power_pins_derivation``, see
     :func:`_power_pins_derivation`) instead of being silently indistinguishable
-    from a corroborated one. Narrowing further -- e.g. demanding that a
-    supply be declared by every cell in the *whole* library -- was measured
-    against both supported PDKs and rejected: it admits only
+    from a genuinely corroborated one. Narrowing further -- e.g. demanding
+    that a supply be declared by every cell in the *whole* library -- was
+    measured against both supported PDKs and rejected: it admits only
     ``VGND``/``VPWR`` for sky130 (9 of 437 cells omit a well tie) and only
     ``VDD``/``VSS`` for gf180mcu, dropping the well-tie pins out of the
     checked universe and out of :func:`_is_power_only_circuit`'s tap-cell
@@ -4856,10 +4867,10 @@ def _gate_level_power_pin_evidence(
     of this library at all.
     """
     if not library_pin_orders:
-        return None, []
+        return None, [], False
     signal_pin_names = _reference_signal_pin_names(reference_netlist)
     if signal_pin_names is None:
-        return None, []
+        return None, [], False
     # Case-folded once: library cell names are verbatim from the `.subckt`
     # header (lower case, in both supported libraries), while the reference
     # circuit names come back from `NetlistSpiceReader` upper-cased.
@@ -4876,9 +4887,17 @@ def _gate_level_power_pin_evidence(
         masters.add(name)
         declared_per_master.append({pin.upper() for pin in pins if pin})
     if not declared_per_master:
-        return frozenset(), []
-    corroborated = set.intersection(*declared_per_master)
-    return frozenset(corroborated - signal_pin_names), sorted(masters)
+        return frozenset(), [], False
+    corroborated_pins = set.intersection(*declared_per_master)
+    # Genuine corroboration requires at least two distinct declared-pin
+    # *shapes* -- not just two master names -- see the docstring above.
+    distinct_shapes = {frozenset(pins) for pins in declared_per_master}
+    corroborated = len(distinct_shapes) > 1
+    return (
+        frozenset(corroborated_pins - signal_pin_names),
+        sorted(masters),
+        corroborated,
+    )
 
 
 def _gate_level_power_pin_names(
@@ -5723,7 +5742,7 @@ def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
     }
 
 
-def _power_pins_derivation(masters: list[str]) -> dict[str, Any]:
+def _power_pins_derivation(masters: list[str], corroborated: bool) -> dict[str, Any]:
     """The ``power_connectivity.power_pins_derivation`` block (issue #2076):
     how this run decided which pin names are power/ground, and how strong
     the evidence behind that decision is.
@@ -5734,18 +5753,20 @@ def _power_pins_derivation(masters: list[str]) -> dict[str, Any]:
     library (``VPWR``/``VGND``/``VPB``/``VNB``) from three supplies plus a
     misclassified signal pin without reverse-engineering the netlist.
 
-    ``corroborated`` is the honest-evidence flag.
-    :func:`_gate_level_power_pin_evidence`'s second condition ("every
-    instantiated master declares the pin") is a *cross-master* corroboration,
-    so it says nothing when there is only one master: a single-master
-    reference that leaves one of that cell's pins dangling offers no
-    evidence separating that pin from the cell's supplies. Rather than
-    claim a guessed universe or refuse to check designs whose single master
-    connects everything (the overwhelmingly common single-master case, where
-    the universe is exactly right), the check runs and says so here --
-    ``corroborated: false`` plus a ``reason`` naming the limitation.
+    ``corroborated`` is the honest-evidence flag, computed by
+    :func:`_gate_level_power_pin_evidence` (not re-derived here from
+    ``len(masters)``): its second condition ("every instantiated master
+    declares the pin") is a *cross-master* corroboration, so it says
+    nothing when the instantiated masters are all the same declared-pin
+    shape -- one master, or several drive-strength variants of one master,
+    are equally uninformative. A single-master reference that leaves one of
+    that cell's pins dangling offers no evidence separating that pin from
+    the cell's supplies. Rather than claim a guessed universe or refuse to
+    check designs whose single master connects everything (the
+    overwhelmingly common single-master case, where the universe is exactly
+    right), the check runs and says so here -- ``corroborated: false`` plus
+    a ``reason`` naming the limitation.
     """
-    corroborated = len(masters) > 1
     reason: str | None = None
     if not masters:
         reason = (
@@ -5753,14 +5774,26 @@ def _power_pins_derivation(masters: list[str]) -> dict[str, Any]:
             "library, so nothing establishes which pin names are power/ground"
         )
     elif not corroborated:
-        reason = (
-            "the reference instantiates a single standard-cell master "
-            f"({masters[0]}), so no second master can corroborate which of "
-            "its declared-but-unconnected pins are supplies -- a signal pin "
-            "left dangling on that master is indistinguishable here from a "
-            "power/ground pin (see docs/cli/lvs.md, "
-            '"power_pins_derivation")'
-        )
+        if len(masters) == 1:
+            reason = (
+                "the reference instantiates a single standard-cell master "
+                f"({masters[0]}), so no second master can corroborate which of "
+                "its declared-but-unconnected pins are supplies -- a signal pin "
+                "left dangling on that master is indistinguishable here from a "
+                "power/ground pin (see docs/cli/lvs.md, "
+                '"power_pins_derivation")'
+            )
+        else:
+            reason = (
+                f"the reference instantiates {len(masters)} standard-cell "
+                f"masters ({', '.join(masters)}) that all declare an "
+                "identical pin set -- e.g. drive-strength variants of one "
+                "logical cell -- so no genuinely distinct second shape "
+                "corroborates which of their declared-but-unconnected pins "
+                "are supplies -- a signal pin left dangling on all of them "
+                "is indistinguishable here from a power/ground pin (see "
+                'docs/cli/lvs.md, "power_pins_derivation")'
+            )
     return {
         "rule": POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
         "masters": list(masters),
@@ -5864,16 +5897,17 @@ def _power_connectivity_report(
     whether that evidence was corroborated by more than one master -- see
     :func:`_power_pins_derivation`.
     """
-    power_pin_names, masters = _gate_level_power_pin_evidence(
+    power_pin_names, masters, corroborated = _gate_level_power_pin_evidence(
         reference_netlist, library_pin_orders
     )
+    derivation = _power_pins_derivation(masters, corroborated)
     if not power_pin_names:
         return _power_connectivity_unchecked(
             "no power/ground pin universe could be derived from the "
             "reference library's own pin-order data -- nothing establishes "
-            "which of this design's pins are power/ground pins"
+            "which of this design's pins are power/ground pins",
+            derivation,
         )
-    derivation = _power_pins_derivation(masters)
     rows = _power_pin_connections(layout_netlist, power_pin_names)
     if not rows:
         return _power_connectivity_unchecked(

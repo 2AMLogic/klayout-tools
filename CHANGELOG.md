@@ -143,11 +143,17 @@ not `klt --version`, if you need to detect this kind of drift. See
 - **Added**: `klt lvs`'s `power_connectivity` block now carries
   `power_pins_derivation` (issue #2076) — the rule that produced
   `power_pins`, the library masters the reference instantiates (the evidence
-  it was applied to), and whether more than one master corroborated the
-  result. Purely additive, so no `schema_version` bump: a consumer that
-  quotes `power_pins` as a coverage claim can now see when that claim rests
-  on a single master's uncorroborated evidence (`corroborated: false`, with a
-  `reason`) instead of having to reverse-engineer it from the netlist.
+  it was applied to), and whether the instantiated masters' declared pin
+  shapes genuinely corroborate each other. `corroborated` is `true` only when
+  at least two instantiated masters declare *distinct* pin sets — not merely
+  when more than one master name is instantiated: two drive-strength variants
+  of one logical cell (e.g. `mylib__inv_1`/`mylib__inv_2`, both
+  `A VGND VNB VPB VPWR Y`) declare the identical shape and corroborate
+  nothing, the same evidentiary gap a single master has. Purely additive, so
+  no `schema_version` bump: a consumer that quotes `power_pins` as a coverage
+  claim can now see when that claim rests on uncorroborated evidence
+  (`corroborated: false`, with a `reason` naming the master(s) involved)
+  instead of having to reverse-engineer it from the netlist.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
