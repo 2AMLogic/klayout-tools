@@ -554,7 +554,13 @@ from pathlib import Path
 from typing import Any, TypedDict, Union, cast, get_args, get_origin, get_type_hints
 
 from ._provenance import sha256_file
-from .coverage import coverage_nothing_checked, coverage_nothing_checked_reasons
+from .coverage import (
+    coverage_nothing_checked,
+    coverage_nothing_checked_reasons,
+    coverage_refusal_reason,
+    coverage_state,
+    coverage_validation_error,
+)
 from .design_evidence_tiers import (
     DesignEvidenceTiersError,
     doc_source_label,
@@ -1517,12 +1523,12 @@ def _build_check(kind: str, envelope: _EvidenceEnvelope, source: str) -> dict[st
     # inside `_check_passed` (which still answers only "what does this
     # envelope's own verdict say") so the tier-report path can render the
     # more specific `_REASON_NOTHING_CHECKED` instead of `check_failed`.
-    vacuous = _nothing_checked_reasons(envelope) is not None
+    coverage_refusal = coverage_refusal_reason(envelope)
     return {
         "source": source,
         "kind": kind,
         "status": status,
-        "passed": _check_passed(kind, envelope) and not vacuous,
+        "passed": _check_passed(kind, envelope) and coverage_refusal is None,
         "detail": _detail(kind, envelope),
         "provenance": envelope.get("provenance"),
     }
@@ -1870,9 +1876,13 @@ def _nothing_checked_detail(envelope: dict[str, Any]) -> dict[str, Any]:
     adding a fifth conditional to :func:`_detail` itself.
     """
     reasons = _nothing_checked_reasons(envelope)
-    if reasons is None:
-        return {}
-    return {"nothing_checked_reasons": reasons}
+    detail = {} if reasons is None else {"nothing_checked_reasons": reasons}
+    state = coverage_state(envelope)
+    if state != "legacy":
+        detail["coverage_state"] = state
+    if state == "malformed":
+        detail["coverage_error"] = coverage_validation_error(envelope.get("coverage"))
+    return detail
 
 
 def _kind_is_accepted(check_kind: str, allowed_kinds: set[str] | None) -> bool:
@@ -1917,8 +1927,9 @@ def _kind_gated_refusal(
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
         return None
-    if _nothing_checked_reasons(envelope) is not None:
-        return _REASON_NOTHING_CHECKED
+    refusal = coverage_refusal_reason(envelope)
+    if refusal is not None:
+        return refusal
     if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
         return _REASON_NOT_POST_LAYOUT
     return None

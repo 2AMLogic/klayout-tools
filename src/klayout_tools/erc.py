@@ -91,6 +91,7 @@ from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
 from ._provenance import _content_hash, build_provenance
+from .coverage import build_check_coverage, work_id
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
 #: (#861), Phase 3 (#908), issue #1968, and issue #1979 all add fields/
@@ -106,6 +107,35 @@ from ._provenance import _content_hash, build_provenance
 #: `poly ∩ diff` gate-area computation, opt-in, legacy raw-poly-area
 #: behaviour preserved when omitted).
 SCHEMA_VERSION = 1
+
+
+def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str, Any]:
+    """Grade coverage against actual non-gate antenna levels, not gate count."""
+    checked = []
+    skipped = []
+    inapplicable = []
+    for gate in gates:
+        for index, level in enumerate(gate["levels"]):
+            identity = work_id("antenna", gate["gate_id"], level["layer"])
+            if index == 0:
+                inapplicable.append({"id": identity, "reason": "gate_reference_level"})
+            elif level["verdict"] in {"pass", "violate"}:
+                checked.append(identity)
+            else:
+                skipped.append(
+                    {
+                        "id": identity,
+                        "reason": "missing_antenna_pdk"
+                        if pdk is None
+                        else "missing_antenna_limit",
+                    }
+                )
+    return {
+        "scope": "antenna",
+        **build_check_coverage(
+            checked=checked, skipped=skipped, inapplicable=inapplicable
+        ),
+    }
 
 
 class ErcError(Exception):
@@ -1071,10 +1101,13 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
+    coverage = _antenna_coverage(gates, pdk)
     status = (
-        "clean"
-        if erc_finding_count == 0 and not any_antenna_violation
-        else "violations"
+        "violations"
+        if erc_finding_count or any_antenna_violation
+        else "not_checked"
+        if coverage["nothing_checked"]
+        else "clean"
     )
 
     # `provenance.pdk` (issue #1968): `--pdk` here selects a built-in
@@ -1121,5 +1154,6 @@ def run_erc(
         "erc_findings": erc_findings,
         "erc_finding_count": erc_finding_count,
         "status": status,
+        "coverage": coverage,
         "provenance": provenance,
     }

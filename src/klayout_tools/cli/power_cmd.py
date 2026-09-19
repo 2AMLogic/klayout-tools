@@ -5,12 +5,13 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/power.md`` for the full table):
-    0 - extraction succeeded, at least one power net resolved to at least
-        one island
+    0 - EM verdict pass or pass_partial
     1 - failed to run (bad file/spec, malformed stackup/via/power-net
         declaration, ambiguous top cell, or every declared power net
         matched no geometry at all) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
+    3 - an actual finding/limit failure
+    4 - no relevant checks (not_checked)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand.)
 """
@@ -28,12 +29,13 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("power", str(exc), args.format)
 
     emit_success(report, args.format, _print_text)
-    return 0
+    return {"pass": 0, "pass_partial": 0, "fail": 3, "not_checked": 4}[report["status"]]
 
 
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
+    print(f"status: {report['status']}")
     print(f"power_nets: {', '.join(report['power_nets'])}")
     print(
         f"islands: {report['island_count']}  nodes: {report['node_count']}  "

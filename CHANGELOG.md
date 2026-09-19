@@ -47,6 +47,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   uses the existing error path (exit 1, no success envelope). Readable empty
   logs, known-benign partial-coverage reporting, and non-SDF runs retain
   their existing behavior; no JSON shape change.
+- **Fixed** (#2108): DRC, ERC antenna, power EM, simulation and PEX report
+  versioned checked-work coverage and refuse known zero checks (`not_checked`,
+  exit 4). External KLayout category declarations no longer prove execution:
+  absent findings it reports `coverage_unknown`/4. DRC envelope v2 retains
+  declarations in `coverage.rule_categories` and corrects `rules_checked`.
+  Real failures retain precedence (including ERC/power exit 3). Plain,
+  numbered and compound signoff refuse zero, unknown and malformed coverage.
+  Existing coverage fields and verb-specific partial behavior remain;
+  [the compatibility mapping](docs/coverage-contract.md) lists migration
+  details and the remaining Phase 2 adapters.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`

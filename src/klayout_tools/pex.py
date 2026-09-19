@@ -141,7 +141,7 @@ from typing import Any
 
 from . import env_provenance
 from ._paths import _fold_spice_continuations, _resolve_relative
-from .coverage import REASON_NO_DELTA_ROWS, build_nothing_checked
+from .coverage import REASON_NO_DELTA_ROWS, build_check_coverage, work_id
 from .extract import ExtractError, run_extract
 from .sim import SimError, load_request, run_sim
 
@@ -867,40 +867,29 @@ def _build_coverage(
     delta: list[dict[str, Any]],
     corner_count: int,
 ) -> dict[str, Any]:
-    """The shared ``coverage`` block (issue #1996; see
-    :mod:`klayout_tools.coverage`) for one `klt pex` response.
-
-    `klt pex`'s ``status`` is ``"pass"`` when no ``delta[]`` row failed or
-    errored -- and an **empty** ``delta[]`` satisfies that vacuously. The two
-    cases a reader has to tell apart are:
-
-    - **A comparison ran and found nothing wrong.** Every compared
-      ``(corner, measurement)`` pair emits its own ``delta[]`` row, carrying
-      both values and ``status: "pass"``, whether or not the two sides differ
-      (:func:`_build_delta_rows` appends unconditionally -- there is no
-      "within tolerance, so omit the row" path). So a real comparison of a
-      real testbench always leaves ``delta`` non-empty, and
-      ``nothing_checked`` is ``False``.
-    - **No comparison happened at all.** ``delta`` is ``[]`` -- no testbench
-      produced a single ``(corner, measurement)`` pair to diff (e.g. every
-      testbench's ``measurements[]`` is empty, or its corner matrix expanded
-      to zero corners, so `klt sim` returned a response with nothing in it).
-      ``status`` is still ``"pass"``, and it says nothing whatever about the
-      layout. Reason ``"no_delta_rows"``.
-
-    The two are therefore **not** conflated in this verb's report today, and
-    this block states the distinction in a field rather than leaving it to a
-    reader who happens to know that rule. ``testbenches``/``delta_rows``/
-    ``corners_compared`` are reported unconditionally so a *partial* gap (one
-    of three testbenches contributing no rows) is visible too, even though it
-    does not trip ``nothing_checked`` -- which, per the shared convention, is
-    reserved for "this verdict was measured over nothing at all".
-    """
+    """Comparison coverage counts only rows with two comparable measurements."""
+    checked = []
+    skipped = []
+    for row in delta:
+        identity = work_id("comparison", row["corner_id"], row["spec_row"])
+        if row["status"] in {"pass", "fail"}:
+            checked.append(identity)
+        else:
+            skipped.append({"id": identity, "reason": "unavailable_comparison"})
+    for index, testbench in enumerate(testbenches_summary):
+        if not testbench["corner_count"] or not testbench["measurement_names"]:
+            skipped.append(
+                {"id": work_id("testbench", index), "reason": "no_comparison_pairs"}
+            )
     return {
         "testbenches": len(testbenches_summary),
         "delta_rows": len(delta),
         "corners_compared": corner_count,
-        **build_nothing_checked([] if delta else [REASON_NO_DELTA_ROWS]),
+        **build_check_coverage(
+            checked=checked,
+            skipped=skipped,
+            nothing_checked_reasons=[REASON_NO_DELTA_ROWS] if not delta else None,
+        ),
     }
 
 
@@ -1114,34 +1103,11 @@ def run_pex(
     and the named `flat_dut_mismatch` block (issue #1255, Gap 2; see
     :func:`_flat_dut_mismatch`).
 
-    ``coverage`` (issue #1996, the shared convention declared in
-    :mod:`klayout_tools.coverage`) is an always-present, purely additive
-    object (no ``schema_version`` bump) stating what this ``status`` was
-    compared over::
+    ``coverage`` preserves the legacy counters alongside common checked-work
+    v1 identities, skips, applicability and unknown execution. Known zero
+    actual checks produces ``not_checked`` unless a real failure/error wins.
+    See :func:`_build_coverage` and ``docs/coverage-contract.md``.
 
-        "coverage": {
-            "testbenches": <int>,
-            "delta_rows": <int>,
-            "corners_compared": <int>,
-            "nothing_checked": <bool>,
-            "nothing_checked_reasons": [<reason code>, ...]
-        }
-
-    ``nothing_checked`` is ``True`` (reason ``"no_delta_rows"``) exactly when
-    ``delta`` is empty -- a ``status: "pass"`` produced without a single
-    schematic-vs-extracted comparison. That is distinct from a comparison
-    that ran and found every row within tolerance, which emits one
-    ``delta[]`` row per compared ``(corner, measurement)`` pair; ``status``
-    itself is unchanged in both cases. See :func:`_build_coverage`.
-
-    Returns a dict matching the documented JSON schema (see
-    ``docs/cli/pex.md``) -- notably a `delta[]` array plus a
-    `reference_netlist` field, the shape issue #871 (Phase 2b of epic #706)
-    already taught `klt signoff`'s `_classify()` to recognise as kind
-    `"pex"` (see this module's docstring). Raises :class:`PexError` for
-    anything that prevents the run from completing at all (bad testbench, a
-    missing or ambiguous DUT reference, disagreeing schematic references, an
-    extraction or simulation failure).
     """
     if not testbench_paths:
         raise PexError("at least one testbench request is required")
@@ -1442,6 +1408,10 @@ def run_pex(
             }
         )
 
+    corner_count = len({row["corner_id"] for row in delta})
+    coverage = _build_coverage(
+        testbenches_summary=testbenches_summary, delta=delta, corner_count=corner_count
+    )
     passed = sum(1 for row in delta if row["status"] == "pass")
     failed = sum(1 for row in delta if row["status"] == "fail")
     errored = sum(1 for row in delta if row["status"] == "error")
@@ -1450,9 +1420,7 @@ def run_pex(
     elif failed:
         status = "fail"
     else:
-        status = "pass"
-
-    corner_count = len({row["corner_id"] for row in delta})
+        status = "not_checked" if coverage["nothing_checked"] else "pass"
 
     parasitics = extract_report.get("parasitics") or {}
     result: dict[str, Any] = {
@@ -1492,16 +1460,8 @@ def run_pex(
         "testbenches": testbenches_summary,
         "corner_count": corner_count,
         "delta": delta,
-        # Additive field (issue #1996): what this `status` was actually
-        # compared over. An empty `delta[]` passes vacuously, and until this
-        # block existed there was no field distinguishing "nothing to
-        # compare" from "compared everything, found nothing wrong" -- see
-        # `_build_coverage` and `klayout_tools.coverage`.
-        "coverage": _build_coverage(
-            testbenches_summary=testbenches_summary,
-            delta=delta,
-            corner_count=corner_count,
-        ),
+        # Actual comparable rows, separately from attempted/error row counts.
+        "coverage": coverage,
         "passed": passed,
         "failed": failed,
         "errored": errored,

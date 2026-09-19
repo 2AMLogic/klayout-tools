@@ -888,13 +888,32 @@ criterion 4):**
   contributes edges `em_verdict` cannot check (`unchecked_edge_count`, not
   a failure) — see "EM current-density verdict" above.
 
+## Checked-work coverage
+
+The [common v1 coverage contract](../coverage-contract.md) is additive to
+this command's existing envelope.
+
+`coverage.scope` is `electromigration`. Checked IDs name net/island/edge
+currents compared to declared limits. Missing limits or unavailable branch
+currents are skipped. Without a requested current solve, EM work is
+inapplicable and the result is `not_checked`, exit 4; network extraction
+remains available in the report. The additive top-level `status` mirrors
+`em_verdict.status` when present: `fail` exits 3, `not_checked` exits 4,
+and existing `pass`/`pass_partial` exit 0. The existing signoff refusal for
+`pass_partial` is unchanged.
+
+Completed refusal/failure reports remain on stdout; actual invocation errors
+retain exit 1 and the stderr error envelope.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
-| `0`       | Success — every requested power net was reported (with `island_count: 0` and a `warnings` entry for any net that matched no labelled geometry). **A `"fail"` `em_verdict.status` does not change the exit code** — like `worst_case_droop_mv`, the EM verdict is a reported result of a successful run, not a run failure; a caller gating CI on it should check `em_verdict.status`/`fail_count` in the JSON output, the same way a caller gates on `klt drc`'s violation count today. |
+| `0` | EM verdict is `pass` or the existing `pass_partial`. |
 | `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `power_nets`/`stackup`/`vias`/`pads`/`current_model` declaration, an ambiguous top cell (pass `--top`), or **every** requested power net matched no geometry at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
+| `3` | An EM limit was exceeded. |
+| `4` | No actual electromigration checks; `status: "not_checked"`. |
 
 ## See also
 

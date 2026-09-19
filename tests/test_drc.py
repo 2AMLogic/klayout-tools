@@ -78,7 +78,7 @@ def test_run_drc_reports_seeded_violation(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(path)
     assert report["deck"] == "sky130"
     assert report["dbu_um"] == 0.001
@@ -370,7 +370,7 @@ def test_run_drc_coverage_reports_uncovered_stream_layers(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["status"] == "clean"
+    assert report["status"] == "not_checked"
     assert report["coverage"]["layers_in_stream_without_rules"] == ["99/0"]
     assert report["coverage"]["layers_checked"] == []
     assert report["coverage"]["rules_skipped"] == sorted(
@@ -408,7 +408,7 @@ def test_run_drc_coverage_empty_stream(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["status"] == "clean"
+    assert report["status"] == "not_checked"
     assert report["coverage"]["layers_checked"] == []
     assert report["coverage"]["layers_in_stream_without_rules"] == []
     assert set(report["coverage"]["deck_layers"]) == {
@@ -420,14 +420,7 @@ def test_run_drc_coverage_empty_stream(tmp_path):
 
 
 def test_run_drc_coverage_empty_stream_reports_nothing_checked(tmp_path):
-    """Issue #1996: the same degenerate empty stream
-    `test_run_drc_coverage_empty_stream` above pins as `"clean"` now *also*
-    says, in the envelope itself, that the verdict was measured over
-    nothing -- `rules_checked` is empty and `nothing_checked` is `True`.
-
-    The `"clean"` verdict is deliberately unchanged (that behaviour is
-    pinned by the test above); this only makes the emptiness legible, which
-    is what lets `klt signoff` refuse the citation."""
+    """Known zero work is explicit and non-successful even without violations."""
     layout = kdb.Layout()
     layout.create_cell("TOP")
     path = tmp_path / "empty.gds"
@@ -435,7 +428,7 @@ def test_run_drc_coverage_empty_stream_reports_nothing_checked(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["status"] == "clean"
+    assert report["status"] == "not_checked"
     assert report["coverage"]["rules_checked"] == []
     assert report["coverage"]["nothing_checked"] is True
     assert report["coverage"]["nothing_checked_reasons"] == ["all_rules_skipped"]
@@ -600,7 +593,7 @@ def test_json_contract(tmp_path, capsys):
         "coverage",
         "provenance",
     }
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
 
     prov = data["provenance"]
     assert set(prov.keys()) == {
@@ -673,6 +666,12 @@ def test_json_contract(tmp_path, capsys):
 
     coverage = data["coverage"]
     assert set(coverage.keys()) == {
+        "schema_version",
+        "known",
+        "checked",
+        "skipped",
+        "inapplicable",
+        "unknown",
         "deck_layers",
         "layers_checked",
         "layers_in_stream_without_rules",
@@ -688,7 +687,15 @@ def test_json_contract(tmp_path, capsys):
     }
     assert isinstance(coverage["nothing_checked"], bool)
     for key, field in coverage.items():
-        if key == "nothing_checked":
+        if key in {
+            "nothing_checked",
+            "schema_version",
+            "known",
+            "checked",
+            "skipped",
+            "inapplicable",
+            "unknown",
+        }:
             continue
         assert isinstance(field, list)
         if key == "voltage_domain_warnings":
@@ -864,10 +871,10 @@ def test_text_format_reports_unchecked_layers_summary(tmp_path, capsys):
     path = tmp_path / "uncovered.gds"
     layout.write(str(path))
 
-    assert main(["drc", str(path), "--deck", "sky130"]) == 0
+    assert main(["drc", str(path), "--deck", "sky130"]) == 4
     out = capsys.readouterr().out
 
-    assert "status: clean" in out
+    assert "status: not_checked" in out
     assert "unchecked layers in stream: 1" in out
 
 
@@ -959,7 +966,7 @@ def test_run_drc_gf180mcu_reports_seeded_violation(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["deck"] == "gf180mcu"
     assert report["dbu_um"] == 0.001
     assert report["status"] == "violations"
@@ -1001,7 +1008,7 @@ def test_run_drc_gf180mcu_missing_layer_does_not_crash(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["deck"] == "gf180mcu"
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -1014,7 +1021,7 @@ def test_run_drc_gf180mcu_json_contract(tmp_path, capsys):
     assert main(["drc", str(path), "--deck", "gf180mcu", "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
 
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["deck"] == "gf180mcu"
     assert data["status"] == "violations"
     assert sum(data["rule_counts"].values()) == data["violation_count"]
@@ -1322,7 +1329,7 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
     synthetic seeded fixtures."""
     report = run_drc(str(layout_path), "gf180mcu")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(layout_path)
     assert report["deck"] == "gf180mcu"
     assert report["dbu_um"] == 0.001
@@ -1369,7 +1376,7 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     and routing-layer usage the hand-drawn analog corpus never exercises."""
     report = run_drc(str(PLACE_AND_ROUTE_GDS), "sky130")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(PLACE_AND_ROUTE_GDS)
     assert report["deck"] == "sky130"
     assert report["status"] in {"clean", "violations"}
