@@ -135,7 +135,8 @@ tier reports) into one query.
 **Statistical/post-layout items flow through automatically (issue #872, Phase
 2c of epic #706).** Because :func:`build_fleet_report` reduces whatever
 ``items[]`` :func:`build_tier_report` renders, and :func:`build_tier_report`
-has always rendered all 10 T1 items (item 6, item 7 included, since Phase 0),
+has always rendered *every* T1 item the doc lists (item 6 and item 7
+included, since Phase 0 -- and item 11, since issue #2025, for free),
 this needed no roll-up-side code change once #870/#871 taught
 :func:`_classify`/:func:`_check_passed` to recognise ``klt yield``/``klt
 pex`` evidence: a block's blocking item now resolves against those two
@@ -245,13 +246,14 @@ issue #1321's own "Dependencies" note on the still-open activity-weighted-
 current-model work). ``worst_case_droop_mv`` is still surfaced, verbatim,
 in :func:`_detail` -- informational, not itself a pass/fail input.
 
-**Not (yet) a T1 checklist item.** ``docs/design-evidence-tiers.md``'s T1
-checklist (items 1-10) has no item for power-grid IR-drop/EM evidence --
-unlike ``"generic"`` (which item 8 alone accepts), no T1 item names `klt
-power` at all, and mechanically extending the parsed item list is a
-separate, larger decision this phase does not make (see
-:mod:`.design_evidence_tiers`'s own "tightly coupled to the doc's current
-prose structure" caveat). So a ``"power"``-kind citation is recognised by
+**Still not a T1 checklist item.** ``docs/design-evidence-tiers.md``'s T1
+checklist has no item for power-grid IR-drop/EM evidence -- unlike
+``"generic"`` (which item 8 alone accepts), no T1 item names `klt power` at
+all. Item 11 ("Power delivery (structural)", issue #2025 -- see below) did
+*not* change this: the operator ruling that added it deliberately kept the
+*analysis* question (how far does the supply droop, does any segment exceed
+its EM limit) out of T1 and graded only the *structural* one. So a
+``"power"``-kind citation is recognised by
 :func:`build_signoff` (envelope-aggregation mode) but never satisfies any
 :func:`build_tier_report`/:func:`build_fleet_report` item --
 :data:`_ITEMS_ACCEPTING_POWER_EVIDENCE` is deliberately empty, mirroring
@@ -325,6 +327,56 @@ before. **Direction 3 of issue #1959 -- letting a ``"generic"`` citation
 satisfy items 5/7 for digital blocks -- is deliberately not implemented**:
 it would weaken precisely the guarantee :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE`
 exists to preserve.
+
+## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
+
+Every item above is proved by **one** artifact. T1 item 11 ("Power delivery
+(structural)"), added to ``docs/design-evidence-tiers.md`` by the operator
+ruling on issue #2025, is the first that is not: it asks whether the supply
+is actually connected to what it powers, and no single `klt` verb answers
+that. So this phase adds three things:
+
+- **Two new recognised kinds.** ``"erc"`` (``docs/cli/erc.md`` -- detected
+  by a top-level ``gates`` list plus ``gate_role``; gradeable at all only
+  since issue #1968 gave that verb a ``status`` and a ``provenance`` block)
+  and ``"place-and-route"`` (``docs/cli/place-and-route.md`` -- detected by
+  a ``stage_reached`` string plus the always-present ``power`` object).
+  Both are **opt-in per item**, scoped to item 11 alone via
+  :data:`_OPT_IN_KIND_ITEMS`, for exactly the reason ``"generic"`` is scoped
+  to item 8: a `klt place-and-route` response passes
+  :func:`_check_passed` on ``status == "ok"`` alone, so an unrestricted
+  citation of one would reopen the "cannot fail, therefore always passes"
+  hole issue #1987 closed for `klt extract`.
+- **A compound evidence entry.** Item 11's manifest entry may be a *list* of
+  ordinary evidence entries (each file- or command-backed, each resolved
+  through the same :func:`_resolve_evidence` path every other item uses).
+  See :func:`_normalize_evidence_parts`.
+- **A dedicated grading path**, :func:`_grade_power_delivery`: the cited set
+  must contain a `klt erc` supply-spec run and the LVS report item 4 grades,
+  plus -- for an RTL-flow digital block -- the `klt place-and-route` response
+  that says a PDN was built at all. Its four item-specific reasons
+  (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
+  :data:`_REASON_SUPPLY_NOT_CONTINUOUS`, :data:`_REASON_LVS_SUPPLY_UNPROVEN`)
+  keep "no grid was ever built" distinguishable from "the grid is built but
+  a rail is split in two", per issue #826's invariant.
+
+Two deliberate scoping decisions, both from the ruling itself:
+
+- **IR-drop and EM stay out.** `klt power`'s analysis verdict remains
+  accepted by no T1 item (:data:`_ITEMS_ACCEPTING_POWER_EVIDENCE` is still
+  empty). Item 11 is the *structural* question only.
+- **Item 11 does not grade the ERC envelope's own ``status``.** A `klt erc`
+  report is ``"clean"`` only when it has zero findings of *any* rule and no
+  antenna violation anywhere; item 11 grades exactly the supply-continuity
+  rules its checklist text names (see :func:`_erc_supply_findings`), so an
+  antenna verdict on an unrelated signal net -- or the tie-cell false
+  positives issue #1994 tracks -- cannot block a power-delivery claim.
+  Envelope-aggregation mode still grades an ``erc`` check on ``status``.
+
+One consequence worth stating plainly: ``t1_item_count`` is now 11 (22 for a
+``mixed-signal`` block), so every existing T1 claim means something slightly
+different than it did -- which is precisely why the doc required an operator
+ruling before this item could be added (#1982).
 
 ## Critical-metric consumption (issue #1850)
 
@@ -682,6 +734,54 @@ _ITEMS_ACCEPTING_GENERIC_EVIDENCE: frozenset[int] = frozenset({8})
 #: :func:`_build_tier_item`.
 _ITEMS_ACCEPTING_POWER_EVIDENCE: frozenset[int] = frozenset()
 
+#: T1 item ids an ``"erc"``-kind citation (issue #2025) may satisfy: item 11
+#: ("Power delivery (structural)") alone -- the only item whose checklist
+#: text names `klt erc` at all. Scoped exactly like ``"generic"`` above, so
+#: an ERC report can never borrow a pass for one of the six otherwise-
+#: unrestricted items (1, 2, 5, 6, 9, 10): it proves supply continuity and
+#: antenna ratios, not design sources, corner coverage, or repo hygiene.
+_ITEMS_ACCEPTING_ERC_EVIDENCE: frozenset[int] = frozenset({11})
+
+#: T1 item ids a ``"place-and-route"``-kind citation (issue #2025) may
+#: satisfy: item 11 alone, for the same reason. This one matters more than
+#: most -- :func:`_check_passed` counts a `klt place-and-route` response as
+#: passing on ``status == "ok"`` alone (a run that completed, negative slack
+#: and all), so an unrestricted citation of one would reopen exactly the
+#: "cannot fail, therefore always passes" hole issue #1987 closed for `klt
+#: extract` on items 3 and 4.
+_ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE: frozenset[int] = frozenset({11})
+
+#: Every **opt-in** kind, mapped to the T1 item ids that accept it -- the
+#: single table :func:`_build_tier_item` consults, so a new opt-in kind is
+#: one entry here rather than a fourth near-identical branch there. A kind
+#: absent from this table is *native and unrestricted*: it is governed only
+#: by :data:`_ITEM_ALLOWED_KINDS` (which restricts specific items to
+#: specific kinds), exactly as before this table existed. A kind present
+#: here is rejected -- a ``"met"`` grading downgraded to
+#: ``"unmet"``/:data:`_REASON_WRONG_KIND` -- for every item id outside its
+#: own set, *regardless* of whether that item's ``allowed_kinds`` is
+#: ``None``.
+_OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
+    "generic": _ITEMS_ACCEPTING_GENERIC_EVIDENCE,
+    "power": _ITEMS_ACCEPTING_POWER_EVIDENCE,
+    "erc": _ITEMS_ACCEPTING_ERC_EVIDENCE,
+    "place-and-route": _ITEMS_ACCEPTING_PLACE_AND_ROUTE_EVIDENCE,
+}
+
+#: T1 item ids graded by the dedicated **compound** evidence path
+#: (:func:`_grade_power_delivery`) instead of the one-envelope-one-item
+#: :func:`_build_tier_item` path every other item uses -- item 11 ("Power
+#: delivery (structural)", issue #2025) alone.
+#:
+#: Item 11 is the first T1 item no single artifact can prove. Its checklist
+#: text names a `klt erc` supply run **plus** an LVS report, plus -- for an
+#: RTL-flow digital partition -- the `klt place-and-route` response that
+#: says a PDN was built at all. So its manifest entry may be a **list** of
+#: ordinary evidence entries (each file- or command-backed, each resolved by
+#: the same machinery every other item uses), and the item is ``"met"`` only
+#: when the cited set jointly proves every condition the item names.
+_ITEMS_GRADED_AS_POWER_DELIVERY: frozenset[int] = frozenset({11})
+
 #: Provenance sub-fields compared for consistency across every input
 #: envelope that carries them -- see _provenance_consistency()'s docstring
 #: for what each check means and why a mismatch is refused rather than
@@ -766,6 +866,47 @@ _REASON_NOT_POST_LAYOUT = "not_post_layout"
 #: fix is to re-run it with something to check, not to fix a defect it found.
 _REASON_NOTHING_CHECKED = "nothing_checked"
 
+#: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Four
+#: reasons, not one, for the same reason :data:`_REASON_NOT_POST_LAYOUT` is
+#: distinct from :data:`_REASON_WRONG_KIND`: item 11 is a *compound* claim,
+#: and a report that collapsed "no grid was ever built" into the same
+#: ``check_failed`` shade as "the grid is built but one rail is split in
+#: two" would tell a reader nothing about which artifact to go fix. Each
+#: names a distinct, independently-actionable condition of the item's own
+#: checklist text:
+#:
+#: - :data:`_REASON_NO_PDN` -- the cited `klt place-and-route` response says
+#:   no power grid was built (``power.pdn`` is not ``true``, or no
+#:   ``power.tapcell_master`` was placed). Fix: re-run P&R with a
+#:   ``request.power`` block.
+#: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
+#:   spec document does not ask the question item 11 grades: it could not be
+#:   read, declares no ``"kind": "supply"`` net, declares no ``ties[]``
+#:   (so ``erc.missing_tie`` was never computed -- an uncomputed check is
+#:   not a clean one), or its stackup does not cover every strap layer the
+#:   P&R response reports. Fix: widen the spec and re-run `klt erc`.
+#: - :data:`_REASON_SUPPLY_NOT_CONTINUOUS` -- the ERC run *did* ask, and the
+#:   answer is no: a declared supply resolved to zero or several islands
+#:   (``erc.unconnected_net``), two declared supplies resolved to the same
+#:   island (``erc.supply_short``), or a well/tub has no connected tap
+#:   (``erc.missing_tie``). Fix: the layout.
+#: - :data:`_REASON_LVS_SUPPLY_UNPROVEN` -- the LVS half of the item is not
+#:   proven: for a digital partition with a PDN citation, the same report's
+#:   ``power_connectivity.status`` is not ``"match"`` (``"unchecked"`` does
+#:   not satisfy item 11, unlike item 4); otherwise, its
+#:   ``net_correspondence`` does not pair every declared supply net to a
+#:   reference-side net, so the supplies were not part of the compare.
+_REASON_NO_PDN = "no_pdn"
+_REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
+_REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
+_REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
+
+#: The three :func:`_classify` kinds T1 item 11's compound evidence list may
+#: cite (issue #2025). A cited part of any other recognised kind renders
+#: :data:`_REASON_WRONG_KIND` -- it proves nothing about power delivery, and
+#: item 11 must never reach ``"met"`` by borrowing an unrelated check's pass.
+_POWER_DELIVERY_KINDS: frozenset[str] = frozenset({"erc", "lvs", "place-and-route"})
+
 #: Wall-clock cap on a command-backed evidence entry's subprocess (issue
 #: #825) -- a hung `klt drc`/`klt lvs`/`klt sim` gate must not hang `klt
 #: signoff` itself. Generous (corner-matrix sims are slow) but finite; a
@@ -813,7 +954,7 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                     "source": <str, the entry from `sources`>,
                     "kind": "drc" | "lvs" | "extract" | "sim" | "yield" | "pex"
                             | "power" | "sta" | "functional-verification"
-                            | "generic" | "error",
+                            | "erc" | "place-and-route" | "generic" | "error",
                     "status": <str> | None,
                     "passed": <bool>,
                     "detail": {...},  # kind-specific summary, see _detail()
@@ -1137,6 +1278,46 @@ class _FunctionalVerificationEnvelope(_FunctionalVerificationRequired, total=Fal
     provenance: dict[str, Any] | None
 
 
+class _ErcRequired(_EnvelopeCommon):
+    # `status` is what `_check_passed` grades ("clean"/"violations",
+    # docs/cli/erc.md); `gates`/`gate_role` are the two fields `_classify`
+    # recognises this shape by (issue #2025). Item 11's own grading
+    # (`_erc_supply_spec`/`_erc_supply_findings`) reads `spec`/`erc_findings`
+    # defensively via `.get(...) or []`, so neither is required here.
+    status: str
+    gates: list[Any]
+    gate_role: Any
+
+
+class _ErcEnvelope(_ErcRequired, total=False):
+    spec: Any
+    stackup: Any
+    erc_findings: list[Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _PlaceAndRouteRequired(_EnvelopeCommon):
+    # `status` is what `_check_passed` grades ("ok" = the run completed,
+    # docs/cli/place-and-route.md); `stage_reached`/`power` are the two
+    # fields `_classify` recognises this shape by (issue #2025). `power` is
+    # always present in a real response (possibly `{}`), so it is required
+    # here even though `_strap_layers` still reads it via `.get(...) or {}`
+    # for the same "defend the reader anyway" reason every other kind does.
+    status: str
+    stage_reached: str
+    power: dict[str, Any]
+
+
+class _PlaceAndRouteEnvelope(_PlaceAndRouteRequired, total=False):
+    worst_setup_slack_ns: Any
+    worst_hold_slack_ns: Any
+    timing_status: Any
+    corners: list[Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
 class _GenericRequired(_EnvelopeCommon):
     # `kind` and `status` are the two fields docs/cli/signoff.md's "Generic
     # evidence" section declares required; `summary`/`source` are explicitly
@@ -1175,6 +1356,8 @@ _EvidenceEnvelope = (
     | _PowerEnvelope
     | _StaEnvelope
     | _FunctionalVerificationEnvelope
+    | _ErcEnvelope
+    | _PlaceAndRouteEnvelope
     | _GenericEnvelope
     | _ErrorEnvelope
 )
@@ -1195,6 +1378,8 @@ _ENVELOPE_SHAPES: dict[str, Any] = {
     "power": _PowerEnvelope,
     "sta": _StaEnvelope,
     "functional-verification": _FunctionalVerificationEnvelope,
+    "erc": _ErcEnvelope,
+    "place-and-route": _PlaceAndRouteEnvelope,
     "generic": _GenericEnvelope,
     "error": _ErrorEnvelope,
 }
@@ -1311,7 +1496,7 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     reason every native kind is checked *after* it: a hand-rolled, non-`klt`
     envelope could plausibly carry any field name by coincidence (e.g. a
     caller-chosen ``"violations"`` key that has nothing to do with `klt
-    drc`), so it is never inferred structurally like the nine kinds below --
+    drc`), so it is never inferred structurally like the eleven kinds below --
     only an explicit, literal ``"kind": "generic"`` self-declaration
     classifies as ``"generic"``, checked first so no such coincidence can
     ever misroute it into a native kind instead.
@@ -1420,14 +1605,40 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     elif isinstance(envelope.get("tests"), list) and "test_count" in envelope:
         kind = "functional-verification"
 
+    # `klt erc` (issue #2025; docs/cli/erc.md): a top-level `gates` list plus
+    # `gate_role` (the `stackup[0].name` echo) is unique to this shape -- no
+    # other verb emits either field. Recognised since `klt erc` grew a
+    # top-level `status` (`"clean"`/`"violations"`) and the shared
+    # `provenance` block in issue #1968, which is what made its output
+    # gradeable at all. See this module's "Power delivery (structural)"
+    # docstring section.
+    elif isinstance(envelope.get("gates"), list) and "gate_role" in envelope:
+        kind = "erc"
+
+    # `klt place-and-route` (issue #2025; docs/cli/place-and-route.md): a
+    # top-level `stage_reached` string plus the always-present `power`
+    # object is unique to this response -- no other verb emits either. The
+    # `power` block is the whole reason this kind is recognised (T1 item
+    # 11's digital branch asks whether the routed artifact was produced with
+    # a PDN at all); this module still deliberately ignores the response's
+    # own `worst_setup_slack_ns`/`corners` timing, whose corner set is the
+    # PDK's full shipped list rather than a declared one -- see "Digital-flow
+    # evidence" above on why `klt sta`, not this, is item 5's timing
+    # evidence.
+    elif isinstance(envelope.get("stage_reached"), str) and isinstance(
+        envelope.get("power"), dict
+    ):
+        kind = "place-and-route"
+
     else:
         raise SignoffError(
             f"envelope '{source}' has an unrecognized shape (schema_version="
             f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-            "yield/pex/power/sta/functional-verification success or error "
-            'envelope, and not a generic evidence envelope ("kind": "generic") '
-            "either -- klt signoff aggregates those nine verbs' output plus "
-            "opt-in generic evidence today (see docs/cli/signoff.md)"
+            "yield/pex/power/sta/functional-verification/erc/place-and-route "
+            "success or error envelope, and not a generic evidence envelope "
+            '("kind": "generic") either -- klt signoff aggregates those eleven '
+            "verbs' output plus opt-in generic evidence today (see "
+            "docs/cli/signoff.md)"
         )
 
     # Issue #2033: recognised is not the same as well-formed -- see
@@ -1756,6 +1967,24 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       -- mirrors ``sim``. Whether the run was SDF-annotated is *not* a
       pass/fail input here (an unannotated regression is a perfectly valid
       pre-layout check); it only gates item 7, in :func:`_grade_evidence`.
+    - ``erc`` (issue #2025) passes on ``status == "clean"`` -- the roll-up
+      of both violation signals a `klt erc` envelope carries (zero
+      ``erc_findings`` **and** no ``levels[].verdict == "violate"``, per
+      ``docs/cli/erc.md``: "This is what `klt signoff` reads as this
+      command's pass/fail verdict"). Note that T1 item 11 deliberately does
+      **not** grade an ERC citation on this verdict -- it grades the
+      specific supply-continuity rules the item names, so an antenna
+      violation on some unrelated signal net does not block a power-delivery
+      claim (see :func:`_grade_power_delivery`). This rule is what
+      envelope-aggregation mode (:func:`build_signoff`) uses.
+    - ``place-and-route`` (issue #2025) passes on ``status == "ok"`` -- a
+      run that completed. Like ``extract``, this is a "the command ran"
+      verdict, not a quality one: the response's own negative slack is
+      expected, not an error (``docs/cli/place-and-route.md``), and nothing
+      here turns a timing number into a pass/fail (that is `klt sta`'s job,
+      see "Digital-flow evidence" above). Because it cannot fail on
+      quality, this kind is opt-in per item exactly like ``generic`` --
+      only T1 item 11 accepts it, and only for its ``power`` block.
     - ``generic`` (issue #1152) passes on ``status == "pass"`` -- the
       envelope's own, caller-asserted verdict; unlike every native kind
       above, nothing here re-derives that verdict from any other field,
@@ -1785,6 +2014,10 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
         passed = _sta_timing_passed(envelope)
     elif kind == "functional-verification":
         passed = envelope.get("status") == "pass"
+    elif kind == "erc":
+        passed = envelope.get("status") == "clean"
+    elif kind == "place-and-route":
+        passed = envelope.get("status") == "ok"
     elif kind == "generic":
         passed = envelope.get("status") == "pass"
     else:
@@ -2128,6 +2361,10 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "sdf_annotated": _is_sdf_annotated(envelope),
             "sdf_corner": sdf.get("corner") if isinstance(sdf, dict) else None,
         }
+    elif kind == "erc":
+        detail = _erc_detail(envelope)
+    elif kind == "place-and-route":
+        detail = _place_and_route_detail(envelope)
     elif kind == "generic":
         detail = {
             "summary": envelope.get("summary"),
@@ -2148,6 +2385,54 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     # for the same condition; see "Vacuous-verdict refusal" above.
     detail.update(_nothing_checked_detail(envelope))
     return detail
+
+
+def _erc_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"erc"`` branch (issue #2025), split out so adding
+    a kind does not push :func:`_detail`'s own dispatch chain up by the size
+    of the branch as well as by the branch itself."""
+    rule_counts: dict[str, int] = {}
+    for finding in envelope.get("erc_findings") or []:
+        rule = finding.get("rule") if isinstance(finding, dict) else None
+        if isinstance(rule, str):
+            rule_counts[rule] = rule_counts.get(rule, 0) + 1
+    return {
+        "file": envelope.get("file"),
+        "spec": envelope.get("spec"),
+        "gate_role": envelope.get("gate_role"),
+        "gate_count": envelope.get("gate_count"),
+        "erc_finding_count": envelope.get("erc_finding_count"),
+        # Per-rule breakdown, so "which of the five ERC rules fired" is
+        # readable without re-opening the envelope -- the same reason `klt
+        # drc`'s own `rule_counts` exists. Item 11 grades only three of these
+        # rules (see :func:`_erc_supply_findings`), so a reader needs to see
+        # which ones actually fired.
+        "erc_rule_counts": dict(sorted(rule_counts.items())),
+    }
+
+
+def _place_and_route_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``"place-and-route"`` branch (issue #2025), split
+    out for the same reason as :func:`_erc_detail`."""
+    power = envelope.get("power") or {}
+    straps = power.get("straps")
+    return {
+        "hdl_toplevel": envelope.get("hdl_toplevel"),
+        "stage_reached": envelope.get("stage_reached"),
+        "gds_path": envelope.get("gds_path"),
+        "verilog_path": envelope.get("verilog_path"),
+        # The `power` block is the only part of this response this module
+        # reasons about -- T1 item 11's digital branch (issue #2025).
+        # Surfaced verbatim so a "no PDN" verdict is readable beside the
+        # artifact that caused it.
+        "power_pdn": power.get("pdn"),
+        "power_global_connect": power.get("global_connect"),
+        "power_net": power.get("power_net"),
+        "ground_net": power.get("ground_net"),
+        "tapcell_master": power.get("tapcell_master"),
+        "strap_layers": _strap_layers(envelope),
+        "strap_count": len(straps) if isinstance(straps, list) else None,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2331,7 +2616,7 @@ def build_tier_report(
             "block": "my-block" | None,
             "kind": "analog",
             "tier": "T1" | None,
-            "t1_item_count": 10,
+            "t1_item_count": 11,
             "t1_met_count": 3,
             "source_doc": "docs/design-evidence-tiers.md",
             "items": [
@@ -2367,7 +2652,7 @@ def build_tier_report(
                         },
                     },
                 },
-                ...  # items 1-10 (doubled per partition for mixed-signal),
+                ...  # items 1-11 (doubled per partition for mixed-signal),
                      # then one entry per T2/T3/T4 ladder row
             ],
         }
@@ -2430,6 +2715,24 @@ def build_tier_report(
     ``reason: "wrong_kind"`` for a ``"generic"`` citation -- this does not
     loosen items 3-7's own evidence requirements, only adds a new kind item
     8 alone may satisfy.
+
+    **Item 11 is compound, and per block kind** (issue #2025): "Power
+    delivery (structural)" is the one T1 item no single artifact proves, so
+    its ``evidence`` entry may be a **list** of ordinary evidence entries
+    (each file- or command-backed) rather than one. The cited set must
+    contain a `klt erc` supply-spec run and the same `klt lvs` report item 4
+    grades; for an RTL-flow digital block it must additionally contain the
+    `klt place-and-route` response proving a PDN was built
+    (``power.pdn: true`` with a ``power.tapcell_master``), and that LVS
+    report's ``power_connectivity.status`` must be ``"match"`` --
+    ``"unchecked"`` satisfies item 4 but **not** item 11. Without a P&R
+    citation (an analog block, or the doc's full-custom digital sub-case),
+    the LVS half is instead that the reference netlist carried the supply
+    nets. Item 11's four own ``reason`` values are listed below; see
+    :func:`_grade_power_delivery` for the full rule. ``"erc"`` and
+    ``"place-and-route"`` citations are accepted by item 11 alone
+    (:data:`_OPT_IN_KIND_ITEMS`) -- for any other item they render
+    ``"wrong_kind"``, exactly like a ``"generic"`` citation outside item 8.
 
     **No T1 item accepts ``"power"`` evidence** (issue #1321): `klt power`'s
     IR-drop/EM verdict (see this module's "`klt power` (IR-drop/EM) evidence
@@ -2502,6 +2805,23 @@ def build_tier_report(
       ``"wrong_kind"`` per issue #826's invariant: ``"wrong_kind"`` means
       "cite a different artifact"; ``"not_post_layout"`` means "re-run
       *this* artifact against the layout".
+    - ``"no_pdn"`` (issue #2025, item 11 only) -- the cited `klt
+      place-and-route` response says no power grid was built at all
+      (``power.pdn`` is not ``true``, or no ``power.tapcell_master`` was
+      placed). Re-run P&R with a ``request.power`` block.
+    - ``"supply_spec_incomplete"`` (issue #2025, item 11 only) -- the cited
+      `klt erc` run's own spec document does not ask the question item 11
+      grades: unreadable, no ``"kind": "supply"`` net declared, no ``ties[]``
+      declared (so ``erc.missing_tie`` was never computed), or a stackup that
+      does not cover every strap layer the P&R response reports.
+    - ``"supply_not_continuous"`` (issue #2025, item 11 only) -- the ERC run
+      did ask, and the answer is no: a declared supply resolved to zero or
+      several islands, two declared supplies resolved to one island, or a
+      well/tub has no connected tap.
+    - ``"lvs_supply_unproven"`` (issue #2025, item 11 only) -- the LVS half
+      of the item is unproven: ``power_connectivity.status`` is not
+      ``"match"`` (with a PDN citation), or the reference netlist did not
+      carry the supply nets (without one).
     - ``"tier_not_supported"`` -- a T2-T4 ladder row (see below): this
       repository has no mechanism to run a T2+ check at all.
 
@@ -2576,19 +2896,35 @@ def build_tier_report(
     total = 0
     for t1_item in doc["t1_items"]:
         for partition in partitions:
-            entry = _build_tier_item(
-                tier="T1",
-                item_id=t1_item["id"],
-                title=t1_item["title"],
-                text=_t1_item_text(t1_item, partition),
-                notes=list(t1_item["notes"]),
-                partition=partition if kind == "mixed-signal" else None,
-                evidence=evidence,
-                allowed_kinds=_allowed_kinds_for(t1_item["id"], partition),
-                require_post_layout=(
-                    t1_item["id"] in _ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE
-                ),
-            )
+            if t1_item["id"] in _ITEMS_GRADED_AS_POWER_DELIVERY:
+                # Item 11 (issue #2025) is the one T1 item no single
+                # artifact proves -- graded against the *set* of evidence
+                # entries cited for it, not one envelope. See
+                # :func:`_grade_power_delivery`.
+                entry = _build_power_delivery_item(
+                    tier="T1",
+                    item_id=t1_item["id"],
+                    title=t1_item["title"],
+                    text=_t1_item_text(t1_item, partition),
+                    notes=list(t1_item["notes"]),
+                    partition=partition if kind == "mixed-signal" else None,
+                    partition_kind=partition,
+                    evidence=evidence,
+                )
+            else:
+                entry = _build_tier_item(
+                    tier="T1",
+                    item_id=t1_item["id"],
+                    title=t1_item["title"],
+                    text=_t1_item_text(t1_item, partition),
+                    notes=list(t1_item["notes"]),
+                    partition=partition if kind == "mixed-signal" else None,
+                    evidence=evidence,
+                    allowed_kinds=_allowed_kinds_for(t1_item["id"], partition),
+                    require_post_layout=(
+                        t1_item["id"] in _ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE
+                    ),
+                )
             total += 1
             if entry["status"] == "met":
                 met_count += 1
@@ -2722,6 +3058,35 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     return {"kind": "file", "file": file, "content_hash": expected_hash}
 
 
+def _normalize_evidence_parts(raw: Any) -> list[dict[str, Any]] | None:
+    """Normalize a **compound** item's manifest entry (issue #2025, T1 item
+    11 only) into a list of :func:`_normalize_evidence_entry` specs, or
+    ``None`` if any part matches neither evidence shape.
+
+    A JSON array is the compound shape: every element is an ordinary
+    file-backed or command-backed evidence entry, and *all* of them must
+    normalize -- one malformed part renders the whole item
+    :data:`_REASON_INVALID_EVIDENCE` rather than being dropped from the set,
+    since a silently-shortened cited set is exactly how a compound item would
+    reach ``"met"`` without the artifact that was mistyped. An empty array is
+    likewise invalid: it cites nothing, but says it cites something.
+
+    A non-array entry is accepted too, as a one-element list -- so the
+    ordinary ``"11": "erc.json"`` shape is a well-formed (if, on its own,
+    insufficient) citation rather than a schema error.
+    """
+    if isinstance(raw, list):
+        if not raw:
+            return None
+        specs = [_normalize_evidence_entry(part) for part in raw]
+        if any(spec is None for spec in specs):
+            return None
+        return [spec for spec in specs if spec is not None]
+
+    spec = _normalize_evidence_entry(raw)
+    return None if spec is None else [spec]
+
+
 def _yield_samples_content_hash(
     envelope: dict[str, Any], spec: dict[str, Any]
 ) -> str | None:
@@ -2758,9 +3123,7 @@ def _yield_samples_content_hash(
     samples = envelope.get("samples")
     if not isinstance(samples, str):
         return None
-    cwd = spec.get("cwd") if spec.get("kind") == "command" else None
-    path = os.path.join(cwd, samples) if cwd and not os.path.isabs(samples) else samples
-    digest = sha256_file(path)
+    digest = sha256_file(_resolve_relative_to_spec(samples, spec))
     return f"sha256:{digest}" if digest is not None else None
 
 
@@ -2848,60 +3211,12 @@ def _grade_evidence(
     statement (including every envelope predating the convention). See this
     module's "Vacuous-verdict refusal" docstring section.
     """
-    expected_hash = spec.get("content_hash")
+    resolution, reason = _resolve_evidence(spec)
+    if resolution is None:
+        return "unmet", reason, None
 
-    if spec["kind"] == "command":
-        command = spec["command"]
-        command_label = shlex.join(command)
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=spec.get("cwd"),
-                capture_output=True,
-                text=True,
-                timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return "unmet", _REASON_COMMAND_FAILED, None
-
-        exit_status = completed.returncode
-
-        try:
-            envelope = json.loads(completed.stdout)
-        except json.JSONDecodeError:
-            if exit_status == 0:
-                return "unmet", _REASON_UNREADABLE_EVIDENCE, None
-            return "unmet", _REASON_COMMAND_FAILED, None
-
-        if not isinstance(envelope, dict):
-            return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
-
-        file_label: str | None = None
-        source_label = command_label
-    else:
-        file = spec["file"]
-        try:
-            envelope = _read_envelope(file)
-        except SignoffError:
-            return "unmet", _REASON_UNREADABLE_EVIDENCE, None
-
-        if not isinstance(envelope, dict):
-            return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
-
-        file_label = file
-        command_label = None
-        exit_status = 0
-        source_label = file
-
-    try:
-        # Issue #2033: also rejects an envelope that matches a kind's shape
-        # but is malformed for it (missing/wrong-typed required field) --
-        # rendered here as the same explicit "unrecognized envelope"
-        # outcome an unrecognisable shape has always produced, never a
-        # silent "met".
-        check_kind = _classify(envelope, source_label)
-    except SignoffError:
-        return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
+    check_kind = resolution["kind"]
+    envelope = resolution["envelope"]
 
     checked = cast(_EvidenceEnvelope, envelope)
 
@@ -2923,6 +3238,87 @@ def _grade_evidence(
     if kind_gated is not None:
         return "unmet", kind_gated, None
 
+    expected_hash = spec.get("content_hash")
+    if expected_hash is not None and resolution["content_hash"] != expected_hash:
+        return "unmet", _REASON_STALE_EVIDENCE, None
+
+    return "met", None, _citation(resolution)
+
+
+def _resolve_evidence(
+    spec: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Resolve one normalized evidence ``spec`` to the envelope it names,
+    without grading it -- returns ``(resolution, None)`` on success, or
+    ``(None, <_REASON_* constant>)`` when the evidence could not be resolved
+    to a recognised ``klt`` envelope at all.
+
+    Split out of :func:`_grade_evidence` (issue #2025) so the compound
+    item-11 path (:func:`_grade_power_delivery`) resolves its several cited
+    parts through *exactly* the same read/run/classify/hash logic every other
+    item's single citation goes through -- rather than a parallel
+    reimplementation that could drift from it -- while still applying its
+    own, item-specific pass rules to the resolved envelopes.
+
+    The ``resolution`` dict carries everything a caller needs to both grade
+    and cite the evidence: ``envelope`` (the parsed JSON object), ``kind``
+    (:func:`_classify`'s verdict -- possibly ``"error"``, which this function
+    deliberately does *not* itself reject, leaving that to the caller's own
+    grading rules), ``file``/``command`` (exactly one of which is non-``None``,
+    per the citation contract), ``exit_status`` (observed for a
+    command-backed entry, inferred ``0`` for a file-backed one), and
+    ``content_hash`` (the resolved *actual* input hash, including `klt
+    yield`'s samples-document fallback -- never compared against the spec's
+    pin here; that stays the caller's decision).
+    """
+    if spec["kind"] == "command":
+        command = spec["command"]
+        command_label = shlex.join(command)
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=spec.get("cwd"),
+                capture_output=True,
+                text=True,
+                timeout=_COMMAND_EVIDENCE_TIMEOUT_S,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None, _REASON_COMMAND_FAILED
+
+        exit_status = completed.returncode
+
+        try:
+            envelope = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            if exit_status == 0:
+                return None, _REASON_UNREADABLE_EVIDENCE
+            return None, _REASON_COMMAND_FAILED
+
+        if not isinstance(envelope, dict):
+            return None, _REASON_UNRECOGNIZED_ENVELOPE
+
+        file_label: str | None = None
+        source_label = command_label
+    else:
+        file = spec["file"]
+        try:
+            envelope = _read_envelope(file)
+        except SignoffError:
+            return None, _REASON_UNREADABLE_EVIDENCE
+
+        if not isinstance(envelope, dict):
+            return None, _REASON_UNRECOGNIZED_ENVELOPE
+
+        file_label = file
+        command_label = None
+        exit_status = 0
+        source_label = file
+
+    try:
+        check_kind = _classify(envelope, source_label)
+    except SignoffError:
+        return None, _REASON_UNRECOGNIZED_ENVELOPE
+
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
@@ -2932,34 +3328,485 @@ def _grade_evidence(
         # evidence binding" docstring section and
         # :func:`_yield_samples_content_hash`.
         actual_hash = _yield_samples_content_hash(envelope, spec)
-    if expected_hash is not None and actual_hash != expected_hash:
-        return "unmet", _REASON_STALE_EVIDENCE, None
 
+    return (
+        {
+            "spec": spec,
+            "envelope": envelope,
+            "kind": check_kind,
+            "file": file_label,
+            "command": command_label,
+            "exit_status": exit_status,
+            "content_hash": actual_hash,
+        },
+        None,
+    )
+
+
+def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
+    """Build a ``"met"`` item's ``citation`` block from a
+    :func:`_resolve_evidence` resolution -- see :func:`build_tier_report`'s
+    docstring for what each field means."""
     citation: dict[str, Any] = {
-        "file": file_label,
-        "command": command_label,
-        "kind": check_kind,
-        "check_status": envelope.get("status"),
-        "content_hash": actual_hash,
-        "exit_status": exit_status,
+        "file": resolution["file"],
+        "command": resolution["command"],
+        "kind": resolution["kind"],
+        "check_status": resolution["envelope"].get("status"),
+        "content_hash": resolution["content_hash"],
+        "exit_status": resolution["exit_status"],
     }
     # Issue #2002: a `drc` citation also carries the three `coverage` fields
     # item 3's doc text requires the claim to disclose -- so the disclosure a
     # claim owes and the numbers it owes it about are in the same artifact.
     # Present only when the cited envelope actually reports coverage, and
-    # never consulted above: the verdict is still `status == "clean"` alone.
-    coverage = _drc_coverage_disclosure(check_kind, envelope)
+    # never consulted by any grading rule: item 3's verdict is still
+    # `status == "clean"` alone.
+    coverage = _drc_coverage_disclosure(resolution["kind"], resolution["envelope"])
     if coverage is not None:
         citation["coverage"] = coverage
     # Issue #1983: a `pex` citation also carries the cited envelope's own
     # body-bias statement -- item 7's verdict and the one property that can
     # silently invalidate the numbers backing it end up in the same
     # artifact. Present only when the cited envelope reports it, and never
-    # consulted above: the verdict is still `status == "pass"` alone.
-    body_bias = _pex_body_bias_disclosure(check_kind, envelope)
+    # consulted by any grading rule: the verdict is still `status == "pass"`
+    # alone.
+    body_bias = _pex_body_bias_disclosure(resolution["kind"], resolution["envelope"])
     if body_bias is not None:
         citation["body_bias"] = body_bias
+    return citation
+
+
+# --------------------------------------------------------------------------- #
+# T1 item 11: power delivery (structural) -- issue #2025
+# --------------------------------------------------------------------------- #
+
+
+def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
+    """Resolve a path an envelope *names* (not one the manifest names)
+    against the directory the producing run itself used: ``spec["cwd"]`` for
+    a command-backed entry, this process's own cwd otherwise.
+
+    Shared by :func:`_yield_samples_content_hash` (the `klt yield` samples
+    document) and :func:`_erc_supply_spec` (the `klt erc` spec document) --
+    both are "the envelope points at a second document this module has to
+    read, because the envelope itself does not carry what we need".
+    """
+    cwd = spec.get("cwd") if spec.get("kind") == "command" else None
+    if cwd and not os.path.isabs(path):
+        return os.path.join(cwd, path)
+    return path
+
+
+def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
+    """Read the **spec document** a resolved `klt erc` citation names
+    (``envelope["spec"]``), and reduce it to the three facts T1 item 11
+    grades against -- or ``None`` when it cannot be read or parsed.
+
+    Returns ``{"supply_nets": [<name>, ...], "stackup": {<name/layer>, ...},
+    "tie_count": <int>}``:
+
+    - ``supply_nets`` -- every ``nets[]`` entry declared ``"kind":
+      "supply"``, by name. Item 11 requires at least one: `klt erc` computes
+      ``erc.unconnected_net``/``erc.supply_short`` *only* for declared nets
+      (``docs/cli/erc.md``), so a run whose spec declared no supply reports
+      zero supply findings for the same reason a DRC deck with no rules
+      reports zero violations -- it never asked. That must never read as a
+      clean supply.
+    - ``stackup`` -- every ``stackup[]`` entry's ``name`` *and* ``layer``,
+      in one set, so a strap layer named either way (a role name like
+      ``"met4"``, or a raw ``"71/20"``) matches.
+    - ``tie_count`` -- ``len(ties)``. Item 11 requires at least one for the
+      same "an uncomputed check is not a clean one" reason: ``ties`` omitted
+      means ``erc.missing_tie`` was never computed at all.
+
+    **Why this reads a second document at all.** `klt erc`'s envelope
+    (``docs/cli/erc.md``'s JSON schema) echoes the spec's *path* but not its
+    content -- not the declared nets, not their ``kind``, not the stackup,
+    not the ties. So the envelope alone cannot distinguish "every declared
+    supply resolved to one island" from "no supply was ever declared". This
+    is the same gap, and the same remedy, as `klt yield`'s missing
+    ``provenance`` block (see :func:`_yield_samples_content_hash`): read the
+    document the envelope names, via the same cwd resolution, rather than
+    fabricate a verdict from its absence. ``klt signoff`` stays a pure
+    *consumer* either way -- it changes no verb's own output.
+
+    Follow-up reconciliation, exactly as for `klt yield`: if `klt erc` later
+    echoes its resolved ``nets``/``ties``/``stackup`` declarations in its own
+    envelope, this function should prefer that echo and the disk read
+    becomes the fallback -- no change needed at any call site.
+    """
+    envelope = resolution["envelope"]
+    spec_path = envelope.get("spec")
+    if not isinstance(spec_path, str):
+        return None
+
+    try:
+        document = _read_json_source(
+            _resolve_relative_to_spec(spec_path, resolution["spec"]), "erc spec"
+        )
+    except SignoffError:
+        return None
+    if not isinstance(document, dict):
+        return None
+
+    ties = document.get("ties")
+    return {
+        "supply_nets": [
+            entry["name"]
+            for entry in document.get("nets") or []
+            if isinstance(entry, dict)
+            and entry.get("kind") == "supply"
+            and isinstance(entry.get("name"), str)
+            and entry["name"]
+        ],
+        "stackup": {
+            entry[field]
+            for entry in document.get("stackup") or []
+            if isinstance(entry, dict)
+            for field in ("name", "layer")
+            if isinstance(entry.get(field), str) and entry[field]
+        },
+        "tie_count": len(ties) if isinstance(ties, list) else 0,
+    }
+
+
+def _erc_supply_findings(
+    envelope: dict[str, Any], supply_nets: list[str]
+) -> list[dict[str, Any]]:
+    """Every ``erc_findings[]`` entry that contradicts T1 item 11's own
+    supply-continuity rule -- ``[]`` when the run reports none.
+
+    Exactly three of `klt erc`'s five rules are graded here
+    (``docs/cli/erc.md`` → "ERC finding checks"), and only for the *declared
+    supply* nets:
+
+    - ``erc.unconnected_net`` naming a declared supply -- that supply matched
+      zero islands (nothing carries its label) or more than one (the rail is
+      split into pieces that never touch). Either way it is not the "exactly
+      one island per declared supply" the item requires.
+    - ``erc.supply_short`` -- two declared supplies resolved to the *same*
+      island, which is likewise not one island per supply.
+    - ``erc.missing_tie`` -- a well/tub with no tap drawn inside it, or a tap
+      wired to the wrong net.
+
+    The other two rules (``erc.floating_gate`` and the signal-side
+    ``erc.multiply_driven_net``) and every antenna verdict are deliberately
+    **not** graded: they are real defects, but they are not power delivery,
+    and item 11 must not be blocked by an unrelated signal-net finding (nor
+    by the tie-cell antenna false positives issue #1994 tracks). This is why
+    item 11 does not simply require the ERC envelope's own
+    ``status == "clean"``.
+    """
+    declared = {name.upper() for name in supply_nets}
+    offending: list[dict[str, Any]] = []
+    for finding in envelope.get("erc_findings") or []:
+        if not isinstance(finding, dict):
+            continue
+        rule = finding.get("rule")
+        if rule == "erc.missing_tie" or rule == "erc.supply_short":
+            offending.append(finding)
+            continue
+        if rule != "erc.unconnected_net":
+            continue
+        for field in ("net", "other_net"):
+            value = finding.get(field)
+            if isinstance(value, str) and value.upper() in declared:
+                offending.append(finding)
+                break
+    return offending
+
+
+def _strap_layers(envelope: dict[str, Any]) -> list[str]:
+    """Every ``power.straps[].layer`` a `klt place-and-route` response
+    reports, in the response's own bottom-to-top order -- ``[]`` when the
+    request carried no ``power`` block (``docs/cli/place-and-route.md``)."""
+    power = envelope.get("power") or {}
+    straps = power.get("straps")
+    if not isinstance(straps, list):
+        return []
+    return [
+        strap["layer"]
+        for strap in straps
+        if isinstance(strap, dict) and isinstance(strap.get("layer"), str)
+    ]
+
+
+def _lvs_reference_carries_supplies(
+    envelope: dict[str, Any], supply_nets: list[str]
+) -> bool:
+    """Whether an LVS report proves its **reference netlist carried the
+    supply nets**, i.e. that the supplies were part of the compare rather
+    than absent from it (T1 item 11's analog/full-custom branch).
+
+    True only when ``options.power_connectivity`` was not explicitly
+    disabled (``False``) *and* every declared supply appears in the report's
+    own ``net_correspondence`` (``docs/cli/lvs.md``) paired to a non-``None``
+    reference-side net. A SPICE reference satisfies both by construction --
+    it declares its own supply nets and pins, which is exactly why item 4's
+    ``power_connectivity`` reports ``"unchecked"`` for it, and it has no
+    reason to ever disable the option. A signal-only ``gate-level-verilog``
+    reference does not: its supplies normally exist on the layout side
+    alone, so they never pair, and such a block must instead prove item 11
+    through the PDN branch (the `klt place-and-route` response plus
+    ``power_connectivity``). Rejecting an explicit ``options.power_connectivity:
+    false`` closes the remaining gap -- a gate-level-verilog reference that
+    *does* declare explicit power ports could otherwise pair here even
+    though the caller turned the power/ground check off, letting a block
+    reach ``"met"`` with power delivery never actually verified.
+
+    Name comparison is case-insensitive, matching how `klt lvs` itself
+    matches power pin/net names (``NetlistSpiceReader`` upper-cases what it
+    reads -- see ``docs/cli/lvs.md``'s ``options.power_connectivity``).
+    """
+    if (envelope.get("options") or {}).get("power_connectivity") is False:
+        return False
+    paired: set[str] = set()
+    for row in envelope.get("net_correspondence") or []:
+        if not isinstance(row, dict):
+            continue
+        layout = row.get("layout")
+        reference = row.get("reference")
+        if isinstance(layout, str) and isinstance(reference, str) and reference:
+            paired.add(layout.upper())
+    return all(name.upper() in paired for name in supply_nets)
+
+
+def _resolve_power_delivery_parts(
+    specs: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]] | None, str | None]:
+    """Resolve every part of T1 item 11's compound citation (issue #2025) and
+    index the resolutions by :func:`_classify` kind -- ``(by_kind, None)`` on
+    success, ``(None, <_REASON_* constant>)`` on the first part that cannot
+    be used.
+
+    Each part goes through :func:`_resolve_evidence`, the same
+    read/run/classify/hash path every single-artifact item's citation uses,
+    and is then subject to the three rules that apply to a part *as a part*:
+    an ``error`` envelope is ``check_errored``, a kind outside
+    :data:`_POWER_DELIVERY_KINDS` is ``wrong_kind`` (it proves nothing about
+    power delivery), and a part whose own pinned ``content_hash`` no longer
+    matches is ``stale_evidence``. The item-specific rules
+    (:func:`_grade_power_delivery`) apply only to a set that survives all of
+    these.
+
+    A later part of the same kind replaces an earlier one -- citing two ERC
+    runs for one item is a manifest authoring mistake, not a shape this
+    grading has a meaning for; the last one named wins, the same way a
+    duplicate JSON key would.
+    """
+    by_kind: dict[str, dict[str, Any]] = {}
+    for spec in specs:
+        resolution, reason = _resolve_evidence(spec)
+        if resolution is None:
+            return None, reason
+        kind = resolution["kind"]
+        if kind == "error":
+            return None, _REASON_CHECK_ERRORED
+        if kind not in _POWER_DELIVERY_KINDS:
+            return None, _REASON_WRONG_KIND
+        expected_hash = spec.get("content_hash")
+        if expected_hash is not None and resolution["content_hash"] != expected_hash:
+            return None, _REASON_STALE_EVIDENCE
+        by_kind[kind] = resolution
+    return by_kind, None
+
+
+def _pdn_branch_reason(
+    par: dict[str, Any],
+    lvs: dict[str, Any],
+    supply_spec: dict[str, Any],
+) -> str | None:
+    """T1 item 11's **PDN branch** (issue #2025) -- the extra conditions a
+    cited `klt place-and-route` response brings with it. ``None`` when they
+    all hold; otherwise the ``reason`` that does not.
+
+    Three conditions, in the order a reader would debug them: the response
+    itself must pass (a P&R run that errored proves nothing); it must report
+    ``power.pdn: true`` with a ``power.tapcell_master`` named, i.e. a grid
+    was actually built (:data:`_REASON_NO_PDN`); and every
+    ``power.straps[].layer`` it reports must be covered by the ERC spec's own
+    stackup (:data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- an ERC run that never
+    looked at the layers the supply is routed on says nothing about the grid
+    this response built). Finally the LVS half tightens: with a PDN in play
+    the same report's ``power_connectivity.status`` must be ``"match"``, and
+    ``"unchecked"`` does **not** satisfy item 11 even though it satisfies
+    item 4.
+    """
+    if not _check_passed("place-and-route", par["envelope"]):
+        return _REASON_CHECK_FAILED
+    power = par["envelope"].get("power") or {}
+    if power.get("pdn") is not True or not power.get("tapcell_master"):
+        return _REASON_NO_PDN
+    strap_layers = _strap_layers(par["envelope"])
+    if not strap_layers or any(
+        layer not in supply_spec["stackup"] for layer in strap_layers
+    ):
+        return _REASON_SUPPLY_SPEC_INCOMPLETE
+    power_connectivity = lvs["envelope"].get("power_connectivity") or {}
+    if power_connectivity.get("status") != "match":
+        return _REASON_LVS_SUPPLY_UNPROVEN
+    return None
+
+
+def _grade_power_delivery(
+    specs: list[dict[str, Any]], *, partition_kind: str
+) -> tuple[str, str | None, dict[str, Any] | None]:
+    """Grade T1 item 11 ("Power delivery (structural)", issue #2025) against
+    the **set** of evidence entries cited for it, and return ``(status,
+    reason, citation)`` in the same shape :func:`_grade_evidence` returns.
+
+    Unlike every other T1 item, no single artifact proves this one. The
+    cited set must contain:
+
+    - an ``"erc"`` citation -- a `klt erc` run against a **supply spec**
+      (:func:`_erc_supply_spec`): at least one ``"kind": "supply"`` net
+      declared, at least one ``ties[]`` entry declared, and no supply-side
+      finding (:func:`_erc_supply_findings`);
+    - an ``"lvs"`` citation -- the same report item 4 grades, which must
+      itself pass (:func:`_check_passed`);
+    - and, for an RTL-flow digital block, a ``"place-and-route"`` citation
+      whose ``power.pdn`` is ``true`` with a ``power.tapcell_master`` named,
+      and every ``power.straps[].layer`` covered by the ERC spec's own
+      stackup.
+
+    **Which branch applies is decided by whether a ``"place-and-route"``
+    citation is present**, not by ``partition_kind`` alone -- because
+    ``docs/design-evidence-tiers.md``'s "Full-custom digital sub-case"
+    declares ``kind: "digital"`` for a hand-captured block that has no P&R
+    run to cite at all, exactly as it does for items 1, 2, and 5. With a PDN
+    citation, the LVS half is ``power_connectivity.status == "match"``
+    (``"unchecked"`` does **not** satisfy item 11, unlike item 4, where it
+    means "the question does not apply here"). Without one, the LVS half is
+    that the reference carried the supply nets
+    (:func:`_lvs_reference_carries_supplies`) -- which a signal-only
+    ``gate-level-verilog`` reference cannot satisfy, so an RTL-flow digital
+    block cannot reach ``"met"`` by simply omitting its P&R citation.
+
+    ``partition_kind`` is accepted (and carried into the citation) so the
+    report says which column's rule was applied, and so a future per-kind
+    divergence has a place to land.
+
+    Every part is resolved through :func:`_resolve_evidence` -- the same
+    read/run/classify/hash path every other item uses -- so a part that is
+    unreadable, unrecognised, an ``error`` envelope, or stale against its own
+    pinned ``content_hash`` renders that part's own ordinary reason
+    (``unreadable_evidence``/``unrecognized_envelope``/``check_errored``/
+    ``stale_evidence``), never a power-delivery-specific one. Item-specific
+    reasons (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
+    :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
+    :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
+    resolved cleanly and still does not prove power delivery.
+    """
+    by_kind, reason = _resolve_power_delivery_parts(specs)
+    if by_kind is None:
+        return "unmet", reason, None
+
+    erc = by_kind.get("erc")
+    lvs = by_kind.get("lvs")
+    if erc is None or lvs is None:
+        # The cited set does not contain the artifacts this item names at
+        # all -- "cite a different artifact", which is exactly what
+        # `wrong_kind` means everywhere else in this module.
+        return "unmet", _REASON_WRONG_KIND, None
+
+    if not _check_passed("lvs", lvs["envelope"]):
+        return "unmet", _REASON_CHECK_FAILED, None
+
+    supply_spec = _erc_supply_spec(erc)
+    if supply_spec is None or not supply_spec["supply_nets"]:
+        return "unmet", _REASON_SUPPLY_SPEC_INCOMPLETE, None
+    if supply_spec["tie_count"] == 0:
+        return "unmet", _REASON_SUPPLY_SPEC_INCOMPLETE, None
+
+    if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
+        return "unmet", _REASON_SUPPLY_NOT_CONTINUOUS, None
+
+    par = by_kind.get("place-and-route")
+    if par is not None:
+        reason = _pdn_branch_reason(par, lvs, supply_spec)
+    elif _lvs_reference_carries_supplies(lvs["envelope"], supply_spec["supply_nets"]):
+        reason = None
+    else:
+        reason = _REASON_LVS_SUPPLY_UNPROVEN
+    if reason is not None:
+        return "unmet", reason, None
+
+    # The compound citation keeps the single-citation contract every existing
+    # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
+    # `exit_status` -- signoff_cmd.py's text rendering, the fleet roll-up's
+    # `drc_coverage` reduction) by leading with the ERC part, the one
+    # artifact both columns of item 11 always cite; `parts` carries every
+    # cited artifact in full, so nothing a reader needs is only reachable
+    # through the leading part.
+    citation = _citation(erc)
+    citation["parts"] = [
+        _citation(by_kind[kind])
+        for kind in ("erc", "lvs", "place-and-route")
+        if kind in by_kind
+    ]
+    citation["power_delivery"] = {
+        "partition_kind": partition_kind,
+        "supply_nets": list(supply_spec["supply_nets"]),
+        "pdn": par is not None,
+        "strap_layers": _strap_layers(par["envelope"]) if par is not None else [],
+        "tapcell_master": (
+            (par["envelope"].get("power") or {}).get("tapcell_master")
+            if par is not None
+            else None
+        ),
+        "power_connectivity_status": (
+            lvs["envelope"].get("power_connectivity") or {}
+        ).get("status"),
+    }
     return "met", None, citation
+
+
+def _build_power_delivery_item(
+    *,
+    tier: str,
+    item_id: int,
+    title: str,
+    text: str | None,
+    notes: list[str],
+    partition: str | None,
+    partition_kind: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any]:
+    """Render T1 item 11's report entry (issue #2025) -- the compound
+    counterpart of :func:`_build_tier_item`, which grades every other item.
+
+    Identical in shape and in its "no evidence is never a pass" discipline;
+    the only differences are that a *list* of evidence entries is accepted
+    (and required to normalize entry-by-entry, so one malformed part renders
+    the whole item :data:`_REASON_INVALID_EVIDENCE` rather than being
+    silently dropped from the cited set), and that grading is delegated to
+    :func:`_grade_power_delivery`.
+    """
+    citation = None
+    status = "unmet"
+    reason: str | None = _REASON_NO_EVIDENCE
+
+    raw_entry = _lookup_evidence(evidence, item_id, partition)
+    if raw_entry is not None:
+        specs = _normalize_evidence_parts(raw_entry)
+        if specs is None:
+            reason = _REASON_INVALID_EVIDENCE
+        else:
+            status, reason, citation = _grade_power_delivery(
+                specs, partition_kind=partition_kind
+            )
+
+    return {
+        "tier": tier,
+        "id": item_id,
+        "title": title,
+        "partition": partition,
+        "text": text,
+        "notes": notes,
+        "status": status,
+        "reason": reason,
+        "citation": citation,
+    }
 
 
 def _build_tier_item(
@@ -3024,19 +3871,10 @@ def _build_tier_item(
                 require_post_layout=require_post_layout,
                 allowed_kinds=allowed_kinds,
             )
-            if (
-                status == "met"
-                and citation["kind"] == "generic"
-                and item_id not in _ITEMS_ACCEPTING_GENERIC_EVIDENCE
-            ):
-                status = "unmet"
-                reason = _REASON_WRONG_KIND
-                citation = None
-            elif (
-                status == "met"
-                and citation["kind"] == "power"
-                and item_id not in _ITEMS_ACCEPTING_POWER_EVIDENCE
-            ):
+            opt_in_items = (
+                _OPT_IN_KIND_ITEMS.get(citation["kind"]) if status == "met" else None
+            )
+            if opt_in_items is not None and item_id not in opt_in_items:
                 status = "unmet"
                 reason = _REASON_WRONG_KIND
                 citation = None
@@ -3112,8 +3950,8 @@ def build_fleet_report(
                     "source": "manifests/sky130-bandgap.json",
                     "kind": "analog",
                     "tier": "T1",
-                    "t1_item_count": 10,
-                    "t1_met_count": 10,
+                    "t1_item_count": 11,
+                    "t1_met_count": 11,
                     "blocking_item": None,
                     "drc_coverage": [
                         {
@@ -3130,7 +3968,7 @@ def build_fleet_report(
                     "source": None,
                     "kind": "analog",
                     "tier": None,
-                    "t1_item_count": 10,
+                    "t1_item_count": 11,
                     "t1_met_count": 3,
                     "blocking_item": {
                         "id": 4,

@@ -228,6 +228,58 @@ not `klt --version`, if you need to detect this kind of drift. See
   `klt lvs`'s precedent for a second input (`environment.reference_sha256`).
   Purely additive — no `schema_version` bump (`klt erc` stays at `1`), and
   `provenance.input`/`provenance.pdk`/`provenance.deck` are unchanged.
+- **Added / Changed**: the T1 (bronze) evidence checklist in
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) gains
+  **item 11, "Power delivery (structural)"** (issue #2025, operator ruling
+  2026-09-17), and `klt signoff --manifest`/`--fleet` grades it. A fleet
+  survey found 2 of 7 committed digital layouts had no power delivery
+  network at all while still citing an LVS `match` toward item 4 — nothing
+  in T1 required a power grid to *exist*. Item 11 asks the structural
+  question directly, per block kind:
+  - **digital** (RTL flow) — the cited `klt place-and-route` response
+    reports `power.pdn: true` with a `power.tapcell_master` named, every
+    `power.straps[].layer` is covered by the cited `klt erc` spec's own
+    stackup, and the cited `klt lvs` report's `power_connectivity.status`
+    is `"match"` (`"unchecked"` satisfies item 4 but **not** item 11).
+  - **analog / custom** (and the doc's full-custom digital sub-case, which
+    has no P&R run to cite) — the cited `klt lvs` report's
+    `net_correspondence` pairs every declared supply net to a
+    reference-side net, i.e. the reference netlist carried the supplies. A
+    SPICE reference satisfies this by construction.
+  - **both** — a `klt erc` **supply-spec** run declaring at least one
+    `"kind": "supply"` net and at least one `ties[]` entry, reporting no
+    `erc.unconnected_net`/`erc.supply_short` on a declared supply and no
+    `erc.missing_tie`. Item 11 grades those rules specifically, *not* the
+    ERC envelope's own `status`, so an antenna verdict on an unrelated
+    signal net (or the tie-cell false positives issue #1994 tracks) cannot
+    block a power-delivery claim.
+
+  IR-drop and EM (`klt power`) deliberately stay **out** of T1 (silver-tier
+  material): `_ITEMS_ACCEPTING_POWER_EVIDENCE` is still empty, and item 11
+  is the *structural* question ("is the supply connected to what it
+  powers"), never the *analysis* one. **Grading change**: `t1_item_count`
+  is now `11` (`22` for `mixed-signal`), so every block that was at T1
+  before reports one more item and drops to `tier: null` until it cites
+  item 11 — which is precisely why the doc required an operator ruling
+  before this item could be added (#1982). The count was already the parsed
+  checklist's own length, never a literal in code.
+
+  Supporting additive changes, all documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md): `klt erc` and `klt
+  place-and-route` responses are now recognised envelope kinds (`"erc"`,
+  `"place-and-route"`) in both modes, each **opt-in to item 11 alone** the
+  way `"generic"` is scoped to item 8 — an `erc` or `place-and-route`
+  citation for any other item renders `wrong_kind`, which matters most for
+  the latter, since a P&R response passes on `status: "ok"` alone and an
+  unrestricted citation would reopen the "cannot fail, therefore always
+  passes" hole issue #1987 closed for `klt extract`. Item 11's manifest
+  entry may be a **JSON array** of ordinary evidence entries (the first
+  compound item; every other item still takes exactly one), each resolved
+  through the same read/run/classify/hash path as any single citation. Its
+  `citation` gains two item-11-only members, `parts[]` and
+  `power_delivery`, alongside the unchanged single-citation fields. Four
+  new `reason` values distinguish which artifact to go fix: `no_pdn`,
+  `supply_spec_incomplete`, `supply_not_continuous`, `lvs_supply_unproven`.
 - **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
   and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
   block kind (issue #1987). Both items previously accepted *any* recognised,

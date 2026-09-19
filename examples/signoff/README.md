@@ -34,7 +34,7 @@ the manifest into your own block repo.
 ```
 block: example-current-mirror  kind: analog
 tier: none
-T1: 2/10 items met
+T1: 2/11 items met
 
 [UNMET] T1 #1 Design sources
         reason: no_evidence
@@ -49,14 +49,14 @@ T1: 2/10 items met
 ...
 ```
 
-Two `MET` rows, eight `UNMET`/`no_evidence` rows, and the whole
+Two `MET` rows, nine `UNMET`/`no_evidence` rows, and the whole
 `T2`-`T4` ladder `unmet`/`tier_not_supported`. The command exits `3`, and
 **that is the point**: `tier` is `null` because the block does not yet clear
 T1, and `klt signoff` says so rather than rounding two genuine passes up
 into a tier claim. It would exit `0` only once every T1 item resolved to a
 passing, fresh check.
 
-The eight uncited items are the example's most important half. Each one
+The nine uncited items are the example's most important half. Each one
 names *why* it is unmet (`no_evidence` — the manifest never cited a check
 for it), so a skipped check is visibly distinguishable from a check that ran
 and failed (`check_failed`). Nothing is ever silently assumed met.

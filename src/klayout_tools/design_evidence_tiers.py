@@ -17,13 +17,17 @@ on top of this parse.
   their own (a Curator correction on this issue: only T1 has an itemized
   checklist).
 - **The T1 checklist** (the doc's "## T1 checklist" numbered list, items
-  1-10): each item's title, and either one kind-independent body of text
+  1-11): each item's title, and either one kind-independent body of text
   (items 3, 4, 6, 8, 9, 10 -- these apply as written to every block kind)
   or a per-kind ``{"analog": ..., "digital": ...}`` pair of bodies (items 1,
-  2, 5, 7 -- the doc's "Block kind" subsection explains which items split
-  this way). Item 5 additionally carries a kind-independent note (spec
-  ratification) alongside its two per-kind bodies -- captured in
-  ``notes[]``, not folded into either column.
+  2, 5, 7, 11 -- the doc's "Block kind" subsection explains which items
+  split this way). Items 5 and 11 additionally carry a kind-independent
+  note (spec ratification; the shared `klt erc` supply-spec clause both of
+  item 11's columns rest on) alongside their two per-kind bodies --
+  captured in ``notes[]``, not folded into either column. Nothing here
+  hardcodes *which* item ids split or how many there are: the count is the
+  parsed list's own length, which is why issue #2025 could add item 11 to
+  the doc without touching this parser.
 
 ## Why regex over a Markdown library
 
@@ -198,16 +202,17 @@ def parse_tier_doc(path: str | Path | None = None) -> dict[str, Any]:
                     "columns": {},
                     "notes": [],
                 },
-                ...  # items 1-10, in doc order
+                ...  # items 1-11, in doc order
             ],
         }
 
     Exactly one of ``text`` / ``columns`` is populated per item: ``columns``
-    (with ``"analog"``/``"digital"`` keys) for the four items the doc's
-    "Block kind" subsection calls out as kind-specific (1, 2, 5, 7); ``text``
-    for the six kind-independent items (3, 4, 6, 8, 9, 10). ``notes`` holds
-    any additional bullet under an item that names neither kind (only item 5
-    has one today: the spec-ratification caveat).
+    (with ``"analog"``/``"digital"`` keys) for the five items the doc's
+    "Block kind" subsection calls out as kind-specific (1, 2, 5, 7, 11);
+    ``text`` for the six kind-independent items (3, 4, 6, 8, 9, 10).
+    ``notes`` holds any additional bullet under an item that names neither
+    kind (item 5's spec-ratification caveat, and item 11's shared `klt erc`
+    supply-spec clause).
 
     Raises :class:`DesignEvidenceTiersError` if the file cannot be read, or
     if either the ladder table or the T1 item list is empty/malformed --

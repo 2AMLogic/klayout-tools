@@ -354,6 +354,30 @@ def _print_tier_report_text(result: dict) -> None:
             body_bias = citation.get("body_bias")
             if body_bias:
                 print(f"        body bias: {_format_body_bias(body_bias)}")
+            # Issue #2025: T1 item 11's citation is compound -- the `cite:`
+            # line above names its leading (`erc`) part, so every other
+            # cited artifact gets its own line rather than being reachable
+            # only through the JSON. Absent for every single-artifact item,
+            # which renders exactly as before.
+            for part in citation.get("parts") or []:
+                if part is citation or part.get("kind") == citation["kind"]:
+                    continue
+                part_source = (
+                    part["file"] if part["file"] is not None else part["command"]
+                )
+                print(
+                    f"        also: {part_source} "
+                    f"(kind={part['kind']}, status={part['check_status']})"
+                )
+            power_delivery = citation.get("power_delivery")
+            if power_delivery:
+                print(
+                    "        power delivery: supplies="
+                    f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
+                    f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
+                    "power_connectivity="
+                    f"{power_delivery['power_connectivity_status']}"
+                )
         elif item["reason"]:
             # Loud, not silent: an unmet item always names *why* -- "no
             # runnable check exists" (e.g. no_evidence) reads distinctly
