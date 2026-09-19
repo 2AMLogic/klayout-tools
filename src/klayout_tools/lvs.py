@@ -121,7 +121,7 @@ import fnmatch
 import json
 import os
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _load_request_json, _resolve_relative
@@ -4848,6 +4848,66 @@ def _is_power_only_circuit(
     return all(name in power_pin_names for name in pin_names)
 
 
+def _boundary_supply_nets(
+    circuit: Any, power_pin_names: frozenset[str]
+) -> Iterator[Any]:
+    """The **boundary-side** half of :func:`_layout_supply_net_names`'s two
+    traversals: for every pin ``circuit`` itself declares whose name is a
+    known power pin, the net that pin resolves to (issue #2136).
+
+    This is the cell-interior view -- an extracted ``..._inv_1``'s own
+    ``VPWR``/``VGND`` nets -- which :func:`_instance_supply_nets` alone
+    never reaches, because the instance-side walk only ever sees nets in a
+    *parent* circuit.
+    """
+    for pin in circuit.each_pin():
+        pin_name = pin.name()
+        if pin_name and pin_name.upper() in power_pin_names:
+            yield circuit.net_for_pin(pin.id())
+
+
+def _instance_supply_nets(
+    circuit: Any, power_pin_names: frozenset[str]
+) -> Iterator[Any]:
+    """The **instance-side** half of :func:`_layout_supply_net_names`'s two
+    traversals: for every subcircuit instance in ``circuit``, and every pin
+    its master declares whose name is a known power pin, the net ``circuit``
+    wires that pin to (issue #2136).
+
+    This is the top-level power grid (the same edge set
+    :func:`_power_pin_connections` walks for the ``power_connectivity``
+    report), and it is the only evidence available in a circuit that does
+    not itself declare a supply pin -- the case
+    :func:`_boundary_supply_nets` cannot cover.
+    """
+    for sub in circuit.each_subcircuit():
+        ref = sub.circuit_ref()
+        if ref is None:
+            continue
+        for pin in ref.each_pin():
+            pin_name = pin.name()
+            if pin_name and pin_name.upper() in power_pin_names:
+                yield sub.net_for_pin(pin.id())
+
+
+def _supply_net_spellings(net: Any) -> set[str]:
+    """Every upper-cased spelling under which ``net`` should be recognised
+    as a supply net, or an empty set for an unnamed/``None`` net.
+
+    Net names go through :func:`_name_or_none`, so a label-merged net is
+    spelled exactly as ``net_correspondence[]``/``mismatches[].net`` spell
+    it (``VPWR|VDD``); both the joined spelling and each ``|``-separated
+    alias are returned, so a correspondence entry matches whichever of the
+    two the compare-time net object reports.
+    """
+    name = _name_or_none(net)
+    if not name:
+        return set()
+    spellings = {name.upper()}
+    spellings.update(alias.upper() for alias in name.split("|") if alias)
+    return spellings
+
+
 def _layout_supply_net_names(
     layout_netlist: Any | None, power_pin_names: frozenset[str] | None
 ) -> frozenset[str] | None:
@@ -4861,24 +4921,20 @@ def _layout_supply_net_names(
     gf180mcu's ``VDD``/``VSS``/``VNW``/``VPW``): a net qualifies only
     because something the *library* declares to be a power pin
     (``power_pin_names``, derived by :func:`_gate_level_power_pin_names`)
-    actually lands on it. Two traversals, both needed:
+    actually lands on it. Two traversals, one helper each, both needed --
+    neither subsumes the other, which is why this is a union and not a
+    choice:
 
-    * **Instance side** -- for every subcircuit instance, every pin its
-      master declares whose name is a power pin: the net the parent circuit
-      wires that pin to. This is the top-level power grid (the same edge set
-      :func:`_power_pin_connections` walks for the ``power_connectivity``
-      report), and it is the only evidence available in a circuit that does
-      not itself declare a supply pin.
-    * **Boundary side** -- for every circuit, every pin *it* declares whose
-      name is a power pin: the net that pin resolves to. This is the
-      cell-interior view (an extracted ``..._inv_1``'s own ``VPWR``/``VGND``
-      nets), which the instance-side walk alone never reaches.
+    * **Boundary side** -- :func:`_boundary_supply_nets`, the cell-interior
+      view an instance-side walk never reaches.
+    * **Instance side** -- :func:`_instance_supply_nets`, the top-level
+      power grid, the only evidence in a circuit that declares no supply
+      pin of its own.
 
-    Net names go through :func:`_name_or_none`, so a label-merged net is
-    spelled exactly as ``net_correspondence[]``/``mismatches[].net`` spell
-    it (``VPWR|VDD``); both the joined spelling and each ``|``-separated
-    alias are recorded, so a correspondence entry matches whichever of the
-    two the compare-time net object reports.
+    Each yielded net is recorded under every spelling
+    :func:`_supply_net_spellings` gives it (the ``|``-joined label-merged
+    form *and* each alias), so a correspondence entry matches whichever of
+    the two the compare-time net object reports.
 
     Returns ``None`` for a falsy/``None`` ``power_pin_names`` (no derivable
     universe) or an unusable netlist, and an empty set when nothing
@@ -4891,28 +4947,11 @@ def _layout_supply_net_names(
     if not callable(each_circuit):
         return None
     names: set[str] = set()
-
-    def record(net: Any) -> None:
-        name = _name_or_none(net)
-        if not name:
-            return
-        names.add(name.upper())
-        names.update(alias.upper() for alias in name.split("|") if alias)
-
     for circuit in each_circuit():
-        for pin in circuit.each_pin():
-            pin_name = pin.name()
-            if pin_name and pin_name.upper() in power_pin_names:
-                record(circuit.net_for_pin(pin.id()))
-        for sub in circuit.each_subcircuit():
-            ref = sub.circuit_ref()
-            if ref is None:
-                continue
-            for pin in ref.each_pin():
-                pin_name = pin.name()
-                if not pin_name or pin_name.upper() not in power_pin_names:
-                    continue
-                record(sub.net_for_pin(pin.id()))
+        for net in _boundary_supply_nets(circuit, power_pin_names):
+            names.update(_supply_net_spellings(net))
+        for net in _instance_supply_nets(circuit, power_pin_names):
+            names.update(_supply_net_spellings(net))
     return frozenset(names)
 
 

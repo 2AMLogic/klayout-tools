@@ -470,15 +470,15 @@ def _device_body_net_name(device: Any) -> str | None:
 #: ``Net.expanded_name()`` returns ``"$<n>"`` (``"$0"``, ``"$5"``, ...).
 #:
 #: **Raw, not backslash-escaped -- the two spellings are not interchangeable
-#: (issue #2048).** ``extract.py``'s ``_ANONYMOUS_NET_PREFIX`` is ``"\\$"``
-#: because every net name *that* module reports has already passed through
-#: :func:`~klayout_tools.extract.spice_safe_net_name`, which escapes the
-#: leading ``$`` to match the written netlist's own node spelling (issue
-#: #1162). Nothing on *this* module's path does that escaping:
-#: :func:`_device_body_net_name` reads ``Net.expanded_name()`` straight off
-#: the in-memory netlist, so the prefix to match here is the bare ``"$"``.
-#: Reusing ``extract.py``'s escaped constant here would silently never match
-#: any real body net.
+#: (issue #2048).** ``extract_report.py``'s ``_ANONYMOUS_NET_PREFIX`` is
+#: ``"\\$"`` because every net name *that* module reports has already
+#: passed through :func:`~klayout_tools.extract.spice_safe_net_name`, which
+#: escapes the leading ``$`` to match the written netlist's own node
+#: spelling (issue #1162). Nothing on *this* module's path does that
+#: escaping: :func:`_device_body_net_name` reads ``Net.expanded_name()``
+#: straight off the in-memory netlist, so the prefix to match here is the
+#: bare ``"$"``. Reusing ``extract_report.py``'s escaped constant here would
+#: silently never match any real body net.
 _RAW_ANONYMOUS_NET_PREFIX = "$"
 
 
