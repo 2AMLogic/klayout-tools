@@ -21,6 +21,8 @@ from test_synthesize import (
     _stub_yosys_success,
 )
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 
 @pytest.fixture
 def prepared(tmp_path, monkeypatch):
