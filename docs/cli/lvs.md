@@ -727,6 +727,15 @@ compare *against*. The check does not need one. It needs:
 > In a single-power-domain block (what `klt place-and-route` produces),
 > every instance's same-named supply pin must reach the same net.
 
+When the layout SPICE comes from `klt extract --abstract-cells`, extraction
+preserves the original instance-transformed well polygons as conductors.
+Abutted cells' well/body pins therefore retain their real continuity; actual
+well gaps, wrong well ties, and metal-supply disconnects remain detectable.
+This is resolved in the extracted connectivity, with no pin-name exception
+in LVS. Re-extract older standalone SPICE artifacts that lost well geometry:
+without their layout, LVS cannot distinguish that loss from a real defect.
+See [cell abstraction](extract.md#cell-level-black-box--pins-abstraction---abstract-cells-issue-620).
+
 ### The three finding rules
 
 | `findings[].rule` | Fires when |
