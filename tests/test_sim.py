@@ -5018,9 +5018,18 @@ def test_run_sim_remote_fleet_shard_resolves_models_lib_for_process_corner(
     fleet use case)."""
     _write_body(tmp_path)
     lib_path = _write_corner_lib(tmp_path)
+    # This is a mocked transport/engine test: resolve its declared PDK from
+    # a minimal local fixture, never from an installation on the test host.
+    install_root = tmp_path / "pdk"
+    (install_root / "sky130A" / "libs.tech" / "ngspice").mkdir(parents=True)
+    (install_root / "sky130A" / "libs.tech" / "klayout").mkdir()
     base = _remote_fleet_base_request(
         corners={"process": ["tt", "ss"]},
-        models={"pdk": "sky130A", "lib": str(lib_path)},
+        models={
+            "pdk": "sky130A",
+            "pdk_root": str(install_root),
+            "lib": str(lib_path),
+        },
         options={"keep_artifacts": True},
     )
 
