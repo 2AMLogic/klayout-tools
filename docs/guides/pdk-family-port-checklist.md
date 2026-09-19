@@ -172,6 +172,57 @@ precisely the ambiguity issue #2026 was filed about — a reader could not
 tell "short because only two families are supported" from "short because
 someone forgot".
 
+### Explicit capability decisions and the CI completeness check
+
+Membership validation alone cannot distinguish an intentional support withdrawal
+from an accidentally deleted entry. For each family in `KNOWN_PDK_FAMILIES`,
+declare every capability in
+[`pdk_capabilities.DECISIONS`](../../src/klayout_tools/pdk_capabilities.py),
+independently of the implementation registries (issue #2132):
+
+| Catalog capability | Precisely scoped promise |
+| --- | --- |
+| `curated_drc` | Starter rules and all four DRC metadata registrations in §3; empty metadata maps are allowed. |
+| `extraction` | A registered `ExtractionDeck`, without claiming every device class. |
+| `parasitics` | A registered `ParasiticsDeck`, distinguishing coefficient presence from registration. |
+| `default_mos_model_binding` | Default `(family, family)` `nfet` and `pfet` bindings, independently of voltage flavors and non-MOS models. |
+| `generator_layer_roles` | Family role resolution, subject to individual generator/option exclusions. |
+| `corner_resolution` | An implemented family corner resolver; installation availability is checked at runtime. |
+| `remote_ami_transport` | Maintained family AMI transport, still subject to `SUPPORTED_PDKS` and `ami_pdk_key()` variant restrictions. |
+| `mos_array_well_taps` | Verified automatic MOS-array well taps, independently of guard-ring support. |
+
+Use `supported` when the named owner declarations provide that capability.
+Use `unsupported` with a nonempty, capability-specific reason for a deliberate
+limit, and keep it consistent with the owner's support gate. A missing row or
+decision is an error; do not generate an unsupported default from missing data.
+New capabilities require explicit decisions for every known family too.
+
+Only `parasitics` allows `supported_without_coefficients`, with a reason and a
+real registered deck containing no RC/coupling coefficient values. `None` means
+missing; numeric zero is a declared coefficient, and geometric lookback distances
+are not coefficients. Once any coefficients are curated, change the decision to
+`supported`. That promises some declared values, not complete calibration or
+silicon accuracy; existing partial-gap warnings still apply. Test missing-data
+behavior with a synthetic empty deck so later coefficient additions can proceed.
+
+Run `uv run --extra dev pytest tests/test_pdk_capabilities.py`. Normal pytest/CI
+also runs this live-owner invariant without installed PDKs, external engines, or
+network access. Its adapter preserves unknown family keys and reads actual
+registries and support sets; failures identify family, capability, owner, and
+problem. Removing a required registration must fail this check even when the
+family remains registered elsewhere.
+
+Keep the sparse policies above: absent gate clearance means `0.0`, absent
+capacitor floors use generic geometry, and absent model geometry style uses
+unit-suffixed literals. A well/tap role alone does not establish verified tap
+insertion. In particular, sg13cmos5l's `mos_array` exclusion applies to
+`add_guard_ring`, while ordinary arrays remain supported. Family AMI membership
+does not enable every variant. None of these defaults require dummy table rows.
+
+This finite catalog covers eight named contracts, not every family-keyed table
+or automatically discovered capability. Parent #2011 remains open for its
+explicit completion review; completing #2132 does not by itself close that epic.
+
 ### 5. Golden-pair tests, not just unit tests
 
 Mirror `tests/test_sg13g2_deck.py`'s golden layout→netlist pairs (e.g.
