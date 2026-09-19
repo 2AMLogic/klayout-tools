@@ -637,7 +637,12 @@ every occurrence of that type):
    `well_label`, `poly_label`) — not promoted from a nested sub-cell, only
    text drawn in the cell itself — each distinct label names a pin, and its
    own footprint's centre is the pin's access point, probed on the specific
-   conductor layer the label was drawn on.
+   conductor layer **that label** was drawn on. A pin labelled on more than
+   one conductor (a hard macro routinely draws both an `li1.pin` text on the
+   pad its interior drives and a `met2.pin` text on the stub the parent
+   routes to) contributes one candidate per label, each carrying its own
+   layer — the probe layer is a property of the access point, not of the pin
+   (issue #2142).
 2. **LEF fallback** (`--abstract-cell-lef`). When a matched cell type draws
    no such label, each `--abstract-cell-lef` path (a LEF file, or a
    directory of `*.lef`/`*.tlef` files) is searched for a `MACRO` block of
@@ -646,8 +651,20 @@ every occurrence of that type):
    local micrometre frame — the standard convention every real PDK
    standard-cell LEF follows, `ORIGIN 0 0` matching the cell's own drawn GDS
    origin). The LEF's own layer name is not translated to a GDS layer, so a
-   LEF-resolved pin is probed against the deck's conductor stack bottom-up
-   instead of one specific layer.
+   LEF-resolved pin is probed against the deck's **signal** conductor stack
+   bottom-up (`metals[]`, then `poly`) instead of one specific layer.
+
+**`nwell`/`tap` are never a fallback answer** (issue #2142). Whichever
+source resolved the pin, the probe only ever lands on the deck's
+body-identity field layers when one of them is the access point's *own*
+declared layer (a `well_label` pin). A well strap or a guard/substrate ring
+is one electrically continuous shape spanning most of a block, so its probed
+net is the same design-wide net at every coordinate it covers: used as a
+"nothing else is drawn here" fallback it binds *every* pin that misses its
+own conductor onto that one foreign net at once. A candidate point with
+nothing but well/tap under it now resolves to nothing at all, which surfaces
+as the ordinary per-instance "no conductor found at its resolved access
+point" `warnings[]` entry below rather than as a silent short into a rail.
 3. **Neither resolves.** A matched cell type with no in-cell label and no
    matching LEF macro is an application error naming the cell type — never a
    silently dropped pin or an unconnected instance.
@@ -851,7 +868,12 @@ declare separate body-tie pins that the layout ties to the rails, e.g.
 sky130's `VPB`/`VPWR` and `VNB`/`VGND` pairs. That is the design's own
 intent, not a fault; the entry is aggregated into a single `warnings[]`
 string (with a count for the remainder) precisely so a whole-block flow that
-trips it everywhere stays readable.
+trips it everywhere stays readable. That legitimacy is also why it stays a
+warning rather than becoming a hard failure (issue #2142 asked): on a real
+sky130 block every abstracted standard cell trips it by design, so failing
+on it by default would reject correct netlists wholesale. The fault it was
+reported against is instead fixed at its source — see the probe-layer rules
+above.
 
 **Mirrored/rotated instances** resolve their pins correctly: each
 occurrence's own instance transform (rotation, mirroring, array

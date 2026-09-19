@@ -14,6 +14,36 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract --abstract-cells` no longer binds several of one
+  abstracted macro's own separately declared pins onto a single synthesized
+  net, nor absorbs a top-level net that is not one of that macro's pins
+  (issue #2142 — a different mechanism from #1911/#1934's cross-instance
+  well reclassification, as that report's own ablation matrix showed). Two
+  probe-layer defects caused it. (1) The conductor a pin was probed on was
+  tracked **per pin**, not per access point: a macro that labels one port on
+  two conductors (an `li1.pin` text on the pad its interior drives plus a
+  `met2.pin` text on the stub the parent routes to — ordinary hard-macro
+  drawing) had every one of that pin's points probed against the
+  first-seen label layer, so the off-layer points missed and fell through
+  the bottom-up cross-layer fallback onto the first conductor with *any*
+  geometry at that coordinate — in a real block, the parent's power strap
+  running underneath. Because a named net correctly outranks the unnamed
+  island a black-boxed macro's own pad becomes, that strap then won for
+  *every* such pin at once. The probe layer is now a property of the access
+  point, so each candidate probes the conductor its own label names. (2)
+  The `nwell`/`tap` field layers are no longer a cross-layer fallback
+  answer unless one of them is the access point's own declared layer: a
+  well strap or guard/substrate ring is one continuous shape whose probed
+  net is the same design-wide net everywhere it covers, so using it as a
+  "nothing else is drawn here" answer merged every pin that missed its own
+  conductor onto that one foreign net (PR #622's review had only *demoted*
+  well/tap below the metals, not stopped them answering). Such a point now
+  resolves to nothing and surfaces through the existing per-instance "no
+  conductor found at its resolved access point" warning. The `#1366`
+  two-pins-one-net self-check stays a warning rather than becoming a hard
+  failure — on a real sky130 block every abstracted standard cell trips it
+  legitimately via its `VPB`/`VPWR` and `VNB`/`VGND` body-tie pairs. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Pin resolution".
 - **Fixed**: `klt place-and-route`'s routed GDS no longer carries metal
   below the PDK's own minimum-**area** rules, and the response says so
   either way (issue #2139, the `place-and-route` half of #2072 that PR

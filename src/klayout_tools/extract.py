@@ -3290,7 +3290,9 @@ def extract_netlist_from_layout(
     # `_wire_abstract_cells`.
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] = []
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] = {}
-    abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] = {}
+    abstract_cell_local_candidates: dict[
+        int, dict[str, list[tuple[kdb.Point, str]]]
+    ] = {}
     abstract_cell_global_net_ports: dict[int, int] = {}
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     if abstract_cell_patterns:
@@ -5346,7 +5348,9 @@ def _extract_netlist(
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] | None = None,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] | None = None,
-    abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] | None = None,
+    abstract_cell_local_candidates: (
+        dict[int, dict[str, list[tuple[kdb.Point, str]]]] | None
+    ) = None,
     abstract_cell_global_net_ports: dict[int, int] | None = None,
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     mom_net: str | None = None,
