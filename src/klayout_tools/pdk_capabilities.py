@@ -181,9 +181,10 @@ DECISIONS: Mapping[str, Mapping[str, Decision]] = MappingProxyType(
                     "supported", "Registered extraction device deck."
                 ),
                 "parasitics": Decision(
-                    "supported_without_coefficients",
-                    "Registered deck has no curated RC/coupling coefficients yet; "
-                    "gaps are disclosed.",
+                    "supported",
+                    "Registered deck carries sourced nominal RC/coupling "
+                    "coefficients (issue #2126); gaps against a calibrated "
+                    "model remain explicit.",
                 ),
                 "default_mos_model_binding": Decision(
                     "supported", "Default nfet/pfet subcircuit bindings."
