@@ -38,6 +38,38 @@ not `klt --version`, if you need to detect this kind of drift. See
   violation or corner error still outranks any coverage gap. `klt signoff`
   already read `"pass_partial"` as non-qualifying partial evidence for
   `sim`-kind checks (issue #2109), so no consumer-side change was needed.
+
+- **Added**: `klt place-and-route`'s `request.power` accepts a `preset` key
+  naming a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`,
+  `"gf180mcu_9t_6M"`, `"sky130hd"` — in place of hand-written
+  `power.straps[]`/`power.connects[]` (issue #2123, follow-up to #2086).
+  Building a real power grid previously required transcribing a platform's
+  `pdn_grid_strategy_*.cfg` / `pdn.tcl` field for field into the request;
+  #2086's measured audit catches a half-transcribed block after the fact,
+  but not needing the transcription at all is strictly better. Each preset
+  is this repo's own transcription of the cited ORFS config, recorded with
+  its source file and the exact commit it was read at
+  (`OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d`), in
+  the same "verified live, not guessed" per-library table style the existing
+  tapcell/filler/routing-layer tables use. A preset is expanded into
+  `straps`/`connects` *before* validation, so it runs through identical
+  checks, emits identical Tcl, and is echoed back in the identical
+  `power.straps[]`/`power.connects[]` response fields — plus a new additive
+  `power.preset` field naming which recipe produced them (`null` for a
+  hand-written block), so a preset run stays auditable rather than opaque.
+  `preset` and explicit `straps`/`connects` are **mutually exclusive**, not
+  merged per-field: a partial override would recreate the
+  "cites a platform config but silently carries one hand-edited value"
+  failure mode presets exist to remove. A preset may only be used with the
+  standard-cell library it was transcribed for, and an unknown name lists
+  the supported set. Additive throughout — no `schema_version` bump, and a
+  request that omits `preset` behaves byte-for-byte as before. Verified live
+  against real `openroad` (`26Q3-2056-g41a28926b9`) + real PDK installs:
+  all three presets reach `power.placed.status: "complete"` with
+  `warnings: []` on the GCD worked example. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s "Platform
+  PDN presets" section.
+
 - **Fixed**: `klt extract` no longer writes a net name containing `.` into a
   node-reference position of its SPICE output (issue #2145). A net can arrive
   carrying an instance path joined with a dot — `XBIAS.vb1` — either from

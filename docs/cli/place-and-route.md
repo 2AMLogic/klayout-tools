@@ -1683,9 +1683,10 @@ live re-measurement above.
 | `macros` | array\<object\> \| omitted | Hard-macro instances to fix at a caller-given location — see "Hard-macro placement" above. `[]`/omitted when the design has none. |
 | `power` | object \| omitted | Power delivery (tapcell/PDN/fillers) — see "Power delivery" below. Omitted (the default) preserves prior behavior exactly for this full PDN: no tapcells/fillers. `sky130_fd_sc_hd` runs still emit a small, separate row-rail obstruction regardless (issue #1442) — see "Row-rail fallback" below. |
 | `power.power_net` / `.ground_net` | string \| omitted | Power/ground net names. Default `"VDD"`/`"VSS"`. Must differ from each other. |
-| `power.straps` | array\<object\> | Required when `power` is given, non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
+| `power.preset` | string \| omitted | Additive field (issue #2123). Names a shipped, per-platform PDN recipe — `"gf180mcu_7t_6M"`, `"gf180mcu_9t_6M"`, `"sky130hd"` — supplying `power.straps`/`power.connects` in place of hand-transcribed ones. **Mutually exclusive with explicit `power.straps`/`power.connects`** (supplying both is a validation error, not a per-field override). The preset's own standard-cell library must match `pdk.cell_library`. An unknown name is a validation error listing the supported set. Resolved before any other validation runs, so the recipe is checked and emitted exactly as an equivalent hand-written block would be — and echoed back in `power.straps[]`/`power.connects[]`, plus `power.preset`. See "Platform PDN presets" below for each recipe's ORFS provenance and exact geometry. |
+| `power.straps` | array\<object\> | Required when `power` is given **unless** `power.preset` supplies it (issue #2123), non-empty. Each entry: `layer` (string, required), `width_um`/`pitch_um` (positive numbers, required), `offset_um` (number, default `0`), `spacing_um` (positive number, omitted by default — issue #1133), `followpins` (boolean, default `false`). Listed bottom-to-top; each consecutive pair is connected by an `add_pdn_connect` call. |
 | `power.straps[].spacing_um` | number \| omitted | Additive field (issue #1133) → `add_pdn_stripe -spacing`. The paired power/ground stripe spacing on this strap's own layer (used when a grid draws power and ground as an adjacent pair on one layer rather than on a single pitch). Omitted (the default) emits no `-spacing` flag, byte-identical to before this field existed. Not tied to having a second strap — describes this stripe alone. |
-| `power.connects` | array\<object\> \| omitted | Additive field (issue #1133). Per-pair `add_pdn_connect` via-stack tuning. Omitted (the default, `[]`) preserves this command's prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call for every consecutive `power.straps` pair. A pair with no matching entry here still gets that plain call — only pairs named in `power.connects` get the extra flags below. |
+| `power.connects` | array\<object\> \| omitted | Additive field (issue #1133); mutually exclusive with `power.preset` (issue #2123). Per-pair `add_pdn_connect` via-stack tuning. Omitted (the default, `[]`) preserves this command's prior plain `add_pdn_connect -grid {grid} -layers {lower upper}` call for every consecutive `power.straps` pair. A pair with no matching entry here still gets that plain call — only pairs named in `power.connects` get the extra flags below. |
 | `power.connects[].layers` | array\<string\> | Required, exactly 2 entries: `[lower_layer, upper_layer]`. Must name one of `power.straps`'s own consecutive pairs, in that pair's own order — an unmatched or duplicated pair is a validation error. |
 | `power.connects[].max_columns` | integer \| omitted | → `add_pdn_connect -max_columns`. Positive integer when given. |
 | `power.connects[].ongrid` | array\<string\> \| omitted | → `add_pdn_connect -ongrid`. Non-empty list of layer names when given. |
@@ -1812,6 +1813,7 @@ unsure).
     "annotation_warning": null
   },
   "power": {
+    "preset": null,
     "pdn": true,
     "global_connect": true,
     "power_net": "VDD",
@@ -1927,7 +1929,7 @@ plain string" for the full enumeration and rationale.
 | `min_area_repair` | object \| null | Additive field (issue #2139). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own post-route minimum-**area** repair pass — see "Minimum-area repair" below. `status` — `"clean"` (no sub-minimum-area polygon remains on any checked layer), `"violations"` (at least one could not be repaired safely), or `"skipped"` (the pass could not run at all). `reason` — `null` unless `"skipped"`; a `"skipped"` pass is deliberately **not** reported as clean, so "never measured" stays distinguishable from "measured and clean". `patches` — repair patches drawn. `repaired`/`remaining` — violating polygons cleared / still violating, both re-measured against the layer's own post-repair geometry rather than inferred. `rules[]` — per-rule detail (`rule`, `layer`, `threshold_um2`, `violations_before`, `violations_after`, `patches`) for every checked layer that had at least one violation, sorted by rule id; `[]` when nothing violated. `unrepaired[]` — up to 20 still-violating polygons (`rule`, `layer`, `area_um2`, `threshold_um2`, `bbox_um`), so a caller can act on real residual geometry rather than on a bare count. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `timing_status` (issue #1865) — the same constrained/unconstrained verdict the top-level field carries, computed from this block's own `worst_slack_ns`. `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
-| `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. `placed` — additive (issue #2086): what the run's own DEF says was actually *placed*, as opposed to every field above, which reports what it was *configured* with. `evidence` is `"def"` (the DEF was read and parsed — every count below is a measurement, and a `0` means zero) or `"unavailable"` (no DEF at this stage, unreadable, or no `COMPONENTS` section — every count is `null` and `unavailable_reason` says why; never a fabricated `0`). `def_path` names the DEF graded (the routed `def_path` at `"route"`, `unrouted_def_path` at `"place"`/`"cts"`, `null` at `"floorplan"`). `components`/`tapcells`/`endcaps`/`fillers` are instance counts by master. `special_nets` is one entry per DEF `SPECIALNETS` net — `{name, use, followpin_segments, stripe_segments, other_segments, stripe_layers, vias}` — i.e. the PDN's rails, straps and vias. `status` is `"complete"`/`"partial"`/`"absent"`/`"unknown"`, and `missing` names every failed check (`tapcells`, `endcaps`, `fillers`, `power_special_net`, `ground_special_net`, `special_nets`, `followpin_segments`, `stripe_segments`, `pdn_vias`) — a check that cannot apply (no endcap master in this library, a pre-`"route"` DEF that cannot yet carry fillers) is omitted, not failed. See "Measured power delivery" below. |
+| `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `preset` — additive (issue #2123): the `request.power.preset` name this run's `straps`/`connects` were resolved from, or `null` for a hand-written block (and for a `request.power`-less run). Because a preset resolves into the *same* validated values an explicit request produces, `straps`/`connects` alone cannot say which of the two a response describes; this field can. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. `placed` — additive (issue #2086): what the run's own DEF says was actually *placed*, as opposed to every field above, which reports what it was *configured* with. `evidence` is `"def"` (the DEF was read and parsed — every count below is a measurement, and a `0` means zero) or `"unavailable"` (no DEF at this stage, unreadable, or no `COMPONENTS` section — every count is `null` and `unavailable_reason` says why; never a fabricated `0`). `def_path` names the DEF graded (the routed `def_path` at `"route"`, `unrouted_def_path` at `"place"`/`"cts"`, `null` at `"floorplan"`). `components`/`tapcells`/`endcaps`/`fillers` are instance counts by master. `special_nets` is one entry per DEF `SPECIALNETS` net — `{name, use, followpin_segments, stripe_segments, other_segments, stripe_layers, vias}` — i.e. the PDN's rails, straps and vias. `status` is `"complete"`/`"partial"`/`"absent"`/`"unknown"`, and `missing` names every failed check (`tapcells`, `endcaps`, `fillers`, `power_special_net`, `ground_special_net`, `special_nets`, `followpin_segments`, `stripe_segments`, `pdn_vias`) — a check that cannot apply (no endcap master in this library, a pre-`"route"` DEF that cannot yet carry fillers) is omitted, not failed. See "Measured power delivery" below. |
 | `warnings` | array\<string\> | Additive field (issue #2086). Non-fatal conditions a caller must see before trusting this run's numbers; `[]` when there are none, never `null`. Today's only producer is the power-delivery audit: a run with no `request.power` (0 tapcells, 0 PDN, 0 fillers) and a run whose *supplied* `request.power` produced an incomplete grid both warn here, quoting the measured counts. This is a warning, not a refusal — `status` stays `"ok"` and the exit code stays `0`; the same strings are also written to **stderr** by the CLI in both `--format json` and `--format text`, so stdout stays a single parseable document. See "Measured power delivery" below. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`, with `input.role: "netlist"` (issue #2027 — this verb pins the gate-level netlist it placed, never a layout stream). |
 
@@ -2182,11 +2184,88 @@ floorplan-exploration run has no reason to build a PDN — so `status` stays
 it: fail on a non-empty `warnings`, or on
 `power.placed.status != "complete"`.
 
-**Shipping a platform-default PDN recipe is deliberately not part of this.**
-Issue #2086's second suggestion (carry ORFS's own
-`pdn_grid_strategy_7t_6M.cfg` so a caller need not transcribe it) is tracked
-separately — inventing strap layers/pitches/widths on a caller's behalf is a
-PDK-correctness decision, not a reporting one.
+**Shipping a platform-default PDN recipe was deliberately not part of
+#2086; it is now its own field.** See "Platform PDN presets" immediately
+below (issue #2123).
+
+### Platform PDN presets: `power.preset` (issue #2123)
+
+The audit above *catches* a half-transcribed `power` block. Not having to
+transcribe one is strictly better. Before `power.preset`, the only way to
+build a real PDN was to copy a platform's `pdn_grid_strategy_*.cfg` /
+`pdn.tcl` into `power.straps`/`power.connects` field for field — exactly the
+kind of thing that half-works silently.
+
+`power.preset` names a shipped recipe instead:
+
+```json
+"power": { "preset": "gf180mcu_7t_6M", "power_net": "VDD", "ground_net": "VSS" }
+```
+
+That request is **equivalent to**, not merely similar to, the hand-written
+block: the preset is expanded into `straps`/`connects` *before* validation,
+so it runs through the same checks, emits the same `add_pdn_stripe` /
+`add_pdn_connect` Tcl, and is echoed back in the same
+`power.straps[]`/`power.connects[]` response fields. The additive
+`power.preset` response field names which recipe produced them (and is
+`null` for a hand-written block), so a preset run is auditable rather than
+opaque. The generated Tcl is kept under `.klt/place-and-route/` as usual, so
+the fully-expanded grid is inspectable too.
+
+**Supported presets**, each transcribed from
+`The-OpenROAD-Project/OpenROAD-flow-scripts` @
+`95ebc50a258390f4c7896e5f04db743f62279c2d` (2026-09-19):
+
+| `preset` | `pdk.cell_library` | ORFS source | Straps (bottom→top) | Via-stack tuning |
+| --- | --- | --- | --- | --- |
+| `"gf180mcu_7t_6M"` | `gf180mcu_fd_sc_mcu7t5v0` | `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg` | `Metal1` w 0.600 / p 3.92 / off 0, followpins · `Metal4` w 4.480 / sp 0.56 / p 44.8 / off 22.4 · `Metal5` w 4.480 / p 89.6 / off 44.8 | `Metal1↔Metal4`: `max_columns 5`, `ongrid {Metal2 Metal3 Metal4}`, `split_cuts {Metal3 0.128}`. `Metal4↔Metal5`: none. |
+| `"gf180mcu_9t_6M"` | `gf180mcu_fd_sc_mcu9t5v0` | `flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg` | `Metal1` w 0.900 / p 5.040 / off 0, followpins · `Metal4`/`Metal5` identical to the 7t row above | identical to the 7t row above |
+| `"sky130hd"` | `sky130_fd_sc_hd` | `flow/platforms/sky130hd/pdn.tcl` | `met1` w 0.48 / p 5.44 / off 0, followpins · `met4` w 1.600 / p 27.140 / off 13.570 · `met5` w 1.600 / p 27.200 / off 13.600 | none — that config's two `add_pdn_connect` lines carry no flags |
+
+(The two gf180mcu configs differ in exactly one place: the taller 9-track
+row's own `Metal1` rail width/pitch. `platforms/gf180/config.mk`'s
+`PDN_TCL ?= …/pdn_grid_strategy_$(TRACK_OPTION)_6M.cfg` is what selects
+between them per `TRACK_OPTION`.)
+
+**`preset` and explicit `straps`/`connects` are mutually exclusive.**
+Supplying both is a validation error — deliberately, rather than a
+per-field override. A partial override would recreate the very failure mode
+presets exist to remove: a request that *looks* like it cites a platform
+config while silently carrying one hand-edited value. To run a tweaked
+variant, copy the geometry out of the table above and supply it explicitly;
+the response's `power.preset: null` then records that the run is not the
+platform recipe.
+
+**A preset may only be used with the library it was transcribed for.** A
+`gf180mcu_*` recipe against `sky130_fd_sc_hd` is rejected at validation
+rather than handed to `pdngen`, where `Metal4` straps on a sky130 stack
+would surface as an obscure engine error — or, worse, draw nothing and land
+as a `"partial"` grade from the audit above. An unknown preset name is
+likewise a validation error listing the supported set, matching the existing
+`_TAPCELL_CELLS`/`_FILLER_CELLS` "supported: …" error shape.
+
+**Not carried over from those configs**, because this command emits no
+equivalent Tcl for *any* request, preset or explicit: their `global
+connections` / `voltage domains` sections (built instead from the
+per-library pin-pattern table plus the caller's own
+`power_net`/`ground_net` — which default to the same `VDD`/`VSS` all three
+configs use), `define_pdn_grid`'s `-pins {Metal5}`/`-pins {met5}` (see the
+row-rail fallback below for why PG nets are deliberately never promoted
+into the top-level DEF `PINS` / Verilog port list here), and `pdn.tcl`'s
+`macro grids` section (this command's already-documented v1 macro-PDN
+exclusion).
+
+**Live verification.** All three presets were run end to end against a real
+`openroad` (`26Q3-2056-g41a28926b9`, `openroad/orfs:latest`) and real
+volare/ciel PDK installs on 2026-09-19 — the GCD worked example,
+`klt synthesize` → `klt place-and-route` through a full detailed route, with
+`"power": {"preset": …}` and no hand-written strap geometry at all. Each
+reached `power.placed.status: "complete"`, `power.placed.missing: []` and
+`warnings: []` under the measured audit above. Automated as
+`test_integration_real_openroad_preset_pdn_{sky130hd,gf180mcu_9t,gf180mcu_7t}`
+in `tests/test_place_and_route.py`, gated (skipped, never failed) on a
+machine without both halves of the toolchain, exactly like the existing
+worked-example integration tests.
 
 **Macro-specific PDN grids are out of scope for this v1.** `pdngen` here
 builds only the flat standard-cell grid (`define_pdn_grid` with no

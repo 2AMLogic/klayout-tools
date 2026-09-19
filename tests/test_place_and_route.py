@@ -58,6 +58,7 @@ Four tiers, mirroring `tests/test_synthesize.py`'s own structure:
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -1432,6 +1433,275 @@ def test_power_connects_entry_omitting_all_tuning_normalizes_to_none_fields():
 
 
 # --------------------------------------------------------------------------- #
+# `request.power.preset` -- platform-default PDN recipes (issue #2123).
+#
+# Each preset is this repo's own transcription of a real ORFS PDN config, so
+# the expectations below are spelled out literally from those files rather
+# than read back out of `_PDN_PRESETS` (which would only assert the table
+# equals itself). Sources, all `The-OpenROAD-Project/OpenROAD-flow-scripts`
+# @ `95ebc50a258390f4c7896e5f04db743f62279c2d`:
+#
+#   gf180mcu_7t_6M -> flow/platforms/gf180/openROAD/pdn/
+#                     pdn_grid_strategy_7t_6M.cfg
+#   gf180mcu_9t_6M -> flow/platforms/gf180/openROAD/pdn/
+#                     pdn_grid_strategy_9t_6M.cfg
+#   sky130hd       -> flow/platforms/sky130hd/pdn.tcl
+# --------------------------------------------------------------------------- #
+
+
+#: The `standard cell grid` straps each named preset must resolve to, keyed
+#: by preset name -- transcribed here a second time, straight from the cited
+#: config, so a typo in `_PDN_PRESETS` fails rather than round-trips.
+_EXPECTED_PRESET_STRAPS: dict[str, list[dict[str, object]]] = {
+    "gf180mcu_7t_6M": [
+        # add_pdn_stripe -grid {block} -layer {Metal1} -width {0.600}
+        #     -pitch {3.92} -offset {0} -followpins
+        {
+            "layer": "Metal1",
+            "width_um": 0.6,
+            "pitch_um": 3.92,
+            "offset_um": 0.0,
+            "spacing_um": None,
+            "followpins": True,
+        },
+        # add_pdn_stripe -grid {block} -layer {Metal4} -width {4.480}
+        #     -spacing {0.56} -pitch {44.8} -offset {22.4}
+        {
+            "layer": "Metal4",
+            "width_um": 4.48,
+            "pitch_um": 44.8,
+            "offset_um": 22.4,
+            "spacing_um": 0.56,
+            "followpins": False,
+        },
+        # add_pdn_stripe -grid {block} -layer {Metal5} -width {4.480}
+        #     -pitch {89.6} -offset {44.8}
+        {
+            "layer": "Metal5",
+            "width_um": 4.48,
+            "pitch_um": 89.6,
+            "offset_um": 44.8,
+            "spacing_um": None,
+            "followpins": False,
+        },
+    ],
+    "gf180mcu_9t_6M": [
+        # The 9t config differs from the 7t one above in exactly one place:
+        # the taller row's own Metal1 rail width/pitch.
+        {
+            "layer": "Metal1",
+            "width_um": 0.9,
+            "pitch_um": 5.04,
+            "offset_um": 0.0,
+            "spacing_um": None,
+            "followpins": True,
+        },
+        {
+            "layer": "Metal4",
+            "width_um": 4.48,
+            "pitch_um": 44.8,
+            "offset_um": 22.4,
+            "spacing_um": 0.56,
+            "followpins": False,
+        },
+        {
+            "layer": "Metal5",
+            "width_um": 4.48,
+            "pitch_um": 89.6,
+            "offset_um": 44.8,
+            "spacing_um": None,
+            "followpins": False,
+        },
+    ],
+    "sky130hd": [
+        # add_pdn_stripe -grid {grid} -layer {met1} -width {0.48}
+        #     -pitch {5.44} -offset {0} -followpins
+        {
+            "layer": "met1",
+            "width_um": 0.48,
+            "pitch_um": 5.44,
+            "offset_um": 0.0,
+            "spacing_um": None,
+            "followpins": True,
+        },
+        # add_pdn_stripe -grid {grid} -layer {met4} -width {1.600}
+        #     -pitch {27.140} -offset {13.570}
+        {
+            "layer": "met4",
+            "width_um": 1.6,
+            "pitch_um": 27.14,
+            "offset_um": 13.57,
+            "spacing_um": None,
+            "followpins": False,
+        },
+        # add_pdn_stripe -grid {grid} -layer {met5} -width {1.600}
+        #     -pitch {27.200} -offset {13.600}
+        {
+            "layer": "met5",
+            "width_um": 1.6,
+            "pitch_um": 27.2,
+            "offset_um": 13.6,
+            "spacing_um": None,
+            "followpins": False,
+        },
+    ],
+}
+
+#: The via-stack tuning each preset must resolve to. Both gf180mcu configs
+#: carry `add_pdn_connect -grid {block} -layers {Metal1 Metal4}
+#: -max_columns {5} -ongrid {Metal2 Metal3 Metal4} -split_cuts {Metal3
+#: 0.128}` plus a bare `{Metal4 Metal5}` pair; sky130hd's `pdn.tcl` carries
+#: two bare pairs and therefore no tuning at all.
+_GF180MCU_PRESET_CONNECTS = [
+    {
+        "layers": ["Metal1", "Metal4"],
+        "max_columns": 5,
+        "ongrid": ["Metal2", "Metal3", "Metal4"],
+        "split_cuts": {"layer": "Metal3", "width_um": 0.128},
+    }
+]
+_EXPECTED_PRESET_CONNECTS: dict[str, list[dict[str, object]]] = {
+    "gf180mcu_7t_6M": _GF180MCU_PRESET_CONNECTS,
+    "gf180mcu_9t_6M": _GF180MCU_PRESET_CONNECTS,
+    "sky130hd": [],
+}
+
+#: Every preset's own target standard-cell library.
+_PRESET_CELL_LIBRARIES = {
+    "gf180mcu_7t_6M": "gf180mcu_fd_sc_mcu7t5v0",
+    "gf180mcu_9t_6M": "gf180mcu_fd_sc_mcu9t5v0",
+    "sky130hd": "sky130_fd_sc_hd",
+}
+
+
+def test_pdn_presets_cover_exactly_the_documented_set():
+    """The shipped preset names are part of the JSON contract (documented in
+    `docs/cli/place-and-route.md`'s "Power delivery" section), so adding or
+    renaming one must be a deliberate, test-visible change."""
+    assert set(place_and_route._PDN_PRESETS) == set(_PRESET_CELL_LIBRARIES)
+
+
+@pytest.mark.parametrize("preset_name", sorted(_PRESET_CELL_LIBRARIES))
+def test_pdn_preset_entry_cites_its_orfs_source_file_and_commit(preset_name):
+    """Each entry must carry the "verified live" provenance the existing
+    per-library tables do: the ORFS file it was transcribed from *and* the
+    exact commit it was read at."""
+    source = place_and_route._PDN_PRESETS[preset_name]["source"]
+    assert source.startswith(
+        "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
+    )
+    assert source.endswith((".cfg", ".tcl"))
+
+
+@pytest.mark.parametrize("preset_name", sorted(_PRESET_CELL_LIBRARIES))
+def test_power_preset_resolves_to_its_platform_straps_and_connects(preset_name):
+    """The core of issue #2123: a `preset` alone (no `straps`/`connects`)
+    resolves to the cited platform config's own strap geometry and via-stack
+    tuning, normalized exactly as a hand-written request would be."""
+    validated = place_and_route._validate_power(
+        {"preset": preset_name},
+        _PRESET_CELL_LIBRARIES[preset_name],
+    )
+    assert validated["preset"] == preset_name
+    assert validated["straps"] == _EXPECTED_PRESET_STRAPS[preset_name]
+    assert validated["connects"] == _EXPECTED_PRESET_CONNECTS[preset_name]
+    # The preset supplies geometry only -- net names stay the caller's own
+    # (or their `"VDD"`/`"VSS"` defaults, which are also what all three
+    # cited configs use).
+    assert validated["power_net"] == "VDD"
+    assert validated["ground_net"] == "VSS"
+
+
+def test_power_preset_leaves_caller_supplied_net_names_alone():
+    validated = place_and_route._validate_power(
+        {"preset": "sky130hd", "power_net": "vccd1", "ground_net": "vssd1"},
+        "sky130_fd_sc_hd",
+    )
+    assert (validated["power_net"], validated["ground_net"]) == ("vccd1", "vssd1")
+
+
+def test_power_without_preset_echoes_none():
+    """A hand-written block is not a preset run and must never be reported as
+    one."""
+    validated = place_and_route._validate_power({"straps": _BASE_STRAPS})
+    assert validated["preset"] is None
+
+
+def test_power_preset_unknown_name_lists_the_supported_set():
+    """Mirrors the existing `_TAPCELL_CELLS`/`_FILLER_CELLS` "supported: ..."
+    error shape rather than a bare KeyError."""
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=(
+            r"unknown request\.power\.preset 'gf180mcu_5t_6M' \(supported: "
+            r"gf180mcu_7t_6M, gf180mcu_9t_6M, sky130hd\)"
+        ),
+    ):
+        place_and_route._validate_power({"preset": "gf180mcu_5t_6M"})
+
+
+@pytest.mark.parametrize("value", ["", 7, True, []])
+def test_power_preset_must_be_a_non_empty_string_when_given(value):
+    with pytest.raises(
+        PlaceAndRouteError, match="request.power.preset must be a non-empty string"
+    ):
+        place_and_route._validate_power({"preset": value, "straps": _BASE_STRAPS})
+
+
+@pytest.mark.parametrize(
+    ("extra", "named"),
+    [
+        ({"straps": _BASE_STRAPS}, "straps"),
+        ({"connects": []}, "connects"),
+        ({"straps": _BASE_STRAPS, "connects": []}, "connects/straps"),
+    ],
+)
+def test_power_preset_and_explicit_straps_or_connects_are_mutually_exclusive(
+    extra, named
+):
+    """Issue #2123's own open decision, resolved: mutually exclusive, not a
+    per-field override. A partial override would recreate exactly the
+    silently-half-transcribed block presets exist to eliminate."""
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=(
+            rf"request\.power\.preset 'sky130hd' and explicit "
+            rf"request\.power\.{re.escape(named)} are mutually exclusive"
+        ),
+    ):
+        place_and_route._validate_power(
+            {"preset": "sky130hd", **extra}, "sky130_fd_sc_hd"
+        )
+
+
+def test_power_preset_rejects_a_mismatched_cell_library():
+    """A gf180mcu recipe's `Metal4`/`Metal5` straps on a sky130 stack would
+    otherwise reach `pdngen` as an obscure engine error, or draw nothing at
+    all and grade `"partial"` under issue #2086's audit."""
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=(
+            r"request\.power\.preset 'gf180mcu_7t_6M' is a "
+            r"'gf180mcu_fd_sc_mcu7t5v0' recipe .* but request\.pdk\."
+            r"cell_library is 'sky130_fd_sc_hd'"
+        ),
+    ):
+        place_and_route._validate_power({"preset": "gf180mcu_7t_6M"}, "sky130_fd_sc_hd")
+
+
+def test_power_preset_resolution_does_not_mutate_the_shipped_table():
+    """`_PDN_PRESETS` is module-level state shared by every run in a process;
+    validation normalizes its own copy, never the table."""
+    before = copy.deepcopy(place_and_route._PDN_PRESETS)
+    validated = place_and_route._validate_power(
+        {"preset": "gf180mcu_9t_6M"}, "gf180mcu_fd_sc_mcu9t5v0"
+    )
+    validated["straps"][0]["width_um"] = 99.0
+    validated["connects"][0]["ongrid"].append("Metal9")
+    assert place_and_route._PDN_PRESETS == before
+
+
+# --------------------------------------------------------------------------- #
 # Macro-pin routability cross-check (issue #464): a LEF pin with no `PORT`
 # geometry at all (e.g. a device gate pin on bare poly `klt lef-abstract`
 # emitted with `geometry_source: "none"`) that is actually wired into the
@@ -2146,6 +2416,7 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # `power` member exactly, so a future field addition has to be
     # deliberate.
     assert _power_without_placed(report) == {
+        "preset": None,
         "pdn": False,
         "global_connect": False,
         "power_net": None,
@@ -2366,6 +2637,9 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     # Issue #2086's additive `power.placed` block is asserted separately
     # below (tmp-path `def_path`); every other member is still pinned here.
     assert _power_without_placed(report) == {
+        # issue #2123: an explicit `straps[]`/`connects[]` request is not a
+        # preset run -- echoed as `None`, never a fabricated recipe name.
+        "preset": None,
         "pdn": True,
         "global_connect": True,
         "power_net": "VDD",
@@ -2599,6 +2873,169 @@ def test_stubbed_floorplan_with_spacing_and_connect_tuning_reproduces_platform_p
     # No tuning given for met4/met5 -- falls back to the plain call, matching
     # this module's prior (and the platform config's own) untuned pair.
     assert "add_pdn_connect -grid {grid} -layers {met4 met5}" in floorplan_lines
+
+
+def test_stubbed_floorplan_preset_emits_the_platform_pdn_without_transcription(
+    tmp_path, monkeypatch
+):
+    """Issue #2123: `"power": {"preset": "sky130hd"}` -- with **no**
+    `straps`/`connects` in the request at all -- must emit exactly the
+    `standard cell grid` section of ORFS's own
+    `flow/platforms/sky130hd/pdn.tcl`, and echo the resolved geometry back
+    in the same `power.straps[]`/`power.connects[]` fields an explicit
+    request produces, so the preset is auditable rather than opaque.
+    """
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "sky130hd", "power_net": "VDD", "ground_net": "VSS"},
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    # The preset name itself is echoed, so a reader can tell a recipe run
+    # from a hand-written one.
+    assert report["power"]["preset"] == "sky130hd"
+    # ...and the resolved geometry is echoed in exactly the shape an
+    # explicit request yields (issue #1133's own fields).
+    assert report["power"]["straps"] == [
+        {"layer": "met1", "spacing_um": None},
+        {"layer": "met4", "spacing_um": None},
+        {"layer": "met5", "spacing_um": None},
+    ]
+    assert report["power"]["connects"] == [
+        {
+            "layers": ["met1", "met4"],
+            "max_columns": None,
+            "ongrid": None,
+            "split_cuts": None,
+        },
+        {
+            "layers": ["met4", "met5"],
+            "max_columns": None,
+            "ongrid": None,
+            "split_cuts": None,
+        },
+    ]
+
+    floorplan_lines = _script_lines(
+        os.path.join(
+            os.path.dirname(request_path),
+            ".klt",
+            "place-and-route",
+            "pnr_gcd_floorplan.tcl",
+        )
+    )
+    # Verbatim from that config's own `standard cell grid` section (modulo
+    # this module's own fixed `-grid {grid}` name and its deliberate
+    # omission of `define_pdn_grid -pins`).
+    for expected in (
+        "add_pdn_stripe -grid {grid} -layer {met1} -width {0.48} "
+        "-pitch {5.44} -offset {0.0} -followpins",
+        "add_pdn_stripe -grid {grid} -layer {met4} -width {1.6} "
+        "-pitch {27.14} -offset {13.57}",
+        "add_pdn_stripe -grid {grid} -layer {met5} -width {1.6} "
+        "-pitch {27.2} -offset {13.6}",
+        "add_pdn_connect -grid {grid} -layers {met1 met4}",
+        "add_pdn_connect -grid {grid} -layers {met4 met5}",
+    ):
+        assert expected in floorplan_lines
+
+
+def test_stubbed_floorplan_preset_matches_the_equivalent_explicit_request(
+    tmp_path, monkeypatch
+):
+    """A preset is a shorthand, never a separate code path: the generated
+    floorplan Tcl for `{"preset": "sky130hd"}` must be byte-identical to
+    that of a request spelling the same recipe out by hand (issue #2123)."""
+
+    def _floorplan_tcl(sub_dir: str, power: dict) -> list[str]:
+        work = tmp_path / sub_dir
+        work.mkdir()
+        request_path = _setup_success_env(
+            work, monkeypatch, target_stage="floorplan", power=power
+        )
+        _stub_openroad_success(monkeypatch, stages=("floorplan",))
+        run_place_and_route(request_path)
+        lines = _script_lines(
+            os.path.join(
+                os.path.dirname(request_path),
+                ".klt",
+                "place-and-route",
+                "pnr_gcd_floorplan.tcl",
+            )
+        )
+        # Every other line carries this run's own tmp-path, so compare the
+        # power-delivery block alone -- which is the whole of what `preset`
+        # resolution can affect.
+        return [
+            line
+            for line in lines
+            if line.split(" ", 1)[0]
+            in {
+                "tapcell",
+                "add_global_connection",
+                "global_connect",
+                "set_voltage_domain",
+                "define_pdn_grid",
+                "add_pdn_stripe",
+                "add_pdn_connect",
+                "pdngen",
+            }
+        ]
+
+    preset_lines = _floorplan_tcl("via_preset", {"preset": "sky130hd"})
+    explicit_lines = _floorplan_tcl(
+        "via_explicit",
+        {
+            "straps": [
+                {
+                    "layer": "met1",
+                    "width_um": 0.48,
+                    "pitch_um": 5.44,
+                    "offset_um": 0.0,
+                    "followpins": True,
+                },
+                {
+                    "layer": "met4",
+                    "width_um": 1.6,
+                    "pitch_um": 27.14,
+                    "offset_um": 13.57,
+                },
+                {
+                    "layer": "met5",
+                    "width_um": 1.6,
+                    "pitch_um": 27.2,
+                    "offset_um": 13.6,
+                },
+            ]
+        },
+    )
+    assert preset_lines == explicit_lines
+    # Guard against the comparison degenerating to two empty lists.
+    assert any(line.startswith("add_pdn_stripe ") for line in preset_lines)
+
+
+def test_stubbed_floorplan_preset_for_another_library_is_rejected_before_openroad(
+    tmp_path, monkeypatch
+):
+    """The cross-check runs during request validation, so a gf180mcu recipe
+    aimed at a sky130 run never reaches `pdngen` (where its `Metal4` straps
+    would either error obscurely or silently draw nothing)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        power={"preset": "gf180mcu_9t_6M"},
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=r"request\.power\.preset 'gf180mcu_9t_6M' is a",
+    ):
+        run_place_and_route(request_path)
 
 
 def test_stubbed_full_route_reports_nonzero_antenna_violation_count(
@@ -8319,6 +8756,12 @@ _REAL_GF180MCU_PNR_VARIANT = _find_real_pnr_variant(
     _GF180MCU_CELL_LIBRARY,
     required_layers=("Metal2", "Metal3", "Metal4", "Metal5"),
 )
+#: The 7-track sibling (issue #2123's third preset). Same 5LM requirement --
+#: `pdn_grid_strategy_7t_6M.cfg`'s own straps reach `Metal5`.
+_REAL_GF180MCU_7T_PNR_VARIANT = _find_real_pnr_variant(
+    _GF180MCU_7T_CELL_LIBRARY,
+    required_layers=("Metal2", "Metal3", "Metal4", "Metal5"),
+)
 
 
 def _find_real_ihp_pnr_variant(cell_library: str) -> tuple[str, str] | None:
@@ -8582,6 +9025,183 @@ def test_integration_real_openroad_gcd_worked_example_sg13g2(tmp_path, monkeypat
     assert os.path.isfile(report["gds_path"])
     assert report["die_area_um2"] is not None
     assert report["core_area_um2"] is not None
+
+
+def _run_preset_pdn_integration(
+    tmp_path,
+    monkeypatch,
+    *,
+    variant_gate: tuple[str, str],
+    cell_library: str,
+    preset: str,
+    floorplan: dict,
+    io: dict,
+    clock_period_ns: float,
+) -> dict:
+    """Shared body of the three `request.power.preset` integration runs
+    (issue #2123): synthesize the GCD worked example, then place-and-route
+    it through a full detailed route with **no** hand-written PDN geometry
+    at all -- only `{"preset": ...}` -- and return the report.
+
+    This is the automated form of this issue's "a preset-driven run reaches
+    `power.placed.status == "complete"` and `warnings == []` under
+    #2086/#2122's audit on a real toolchain run (not a stub), for each
+    supported library" acceptance criterion. The two assertions that
+    criterion names are made by each caller below, so a failure names the
+    library it happened on.
+    """
+    root, variant = variant_gate
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    from klayout_tools.synthesize import run_synthesize
+
+    rtl_path = tmp_path / "gcd.v"
+    rtl_path.write_text(_GCD_RTL, encoding="utf-8")
+    synth_request = _write_request(
+        tmp_path / "synth_request.json",
+        {
+            "engine": "yosys",
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": cell_library},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(
+            netlist=_synth_netlist_path(synth_request, "gcd", synth_report["run_id"]),
+            pdk={"cell_library": cell_library},
+            floorplan=floorplan,
+            io=io,
+            constraints={"clock_port": "clk", "clock_period_ns": clock_period_ns},
+            # The entire point: no `straps`/`connects` transcribed by hand.
+            power={"preset": preset},
+        ),
+    )
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["power"]["preset"] == preset
+    assert report["power"]["pdn"] is True
+    # The resolved recipe is echoed, not hidden behind the preset name.
+    assert [strap["layer"] for strap in report["power"]["straps"]] == [
+        strap["layer"] for strap in _EXPECTED_PRESET_STRAPS[preset]
+    ]
+    assert len(report["power"]["connects"]) == len(_EXPECTED_PRESET_STRAPS[preset]) - 1
+    return report
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SKY130_PNR_VARIANT is None,
+    reason="no real sky130_fd_sc_hd LEF/liberty/GDS set resolves via list_pdks()",
+)
+def test_integration_real_openroad_preset_pdn_sky130hd(tmp_path, monkeypatch):
+    """`"power": {"preset": "sky130hd"}` end to end against a real
+    `openroad` + a real sky130 install (issue #2123)."""
+    report = _run_preset_pdn_integration(
+        tmp_path,
+        monkeypatch,
+        variant_gate=_REAL_SKY130_PNR_VARIANT,
+        cell_library="sky130_fd_sc_hd",
+        preset="sky130hd",
+        floorplan={
+            "method": "utilization",
+            "utilization_pct": 38,
+            "aspect_ratio": 1.0,
+            "core_margin_um": 2.0,
+            "site": "unithd",
+        },
+        io={"layer_h": "met3", "layer_v": "met2"},
+        clock_period_ns=1.1,
+    )
+    assert report["power"]["placed"]["status"] == "complete"
+    assert report["power"]["placed"]["missing"] == []
+    assert report["warnings"] == []
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_GF180MCU_PNR_VARIANT is None,
+    reason=(
+        "no real gf180mcu_fd_sc_mcu9t5v0 LEF/liberty/GDS set on a 5LM "
+        "variant (tech LEF declaring Metal2-Metal5) resolves via list_pdks()"
+    ),
+)
+def test_integration_real_openroad_preset_pdn_gf180mcu_9t(tmp_path, monkeypatch):
+    """`"power": {"preset": "gf180mcu_9t_6M"}` end to end against a real
+    `openroad` + a real 5LM gf180mcu install (issue #2123). Floorplan/IO
+    values mirror the gf180mcu worked example above."""
+    report = _run_preset_pdn_integration(
+        tmp_path,
+        monkeypatch,
+        variant_gate=_REAL_GF180MCU_PNR_VARIANT,
+        cell_library=_GF180MCU_CELL_LIBRARY,
+        preset="gf180mcu_9t_6M",
+        floorplan={
+            "method": "utilization",
+            "utilization_pct": 38,
+            "aspect_ratio": 1.0,
+            "core_margin_um": 2.0,
+            "site": "GF018hv5v_green_sc9",
+        },
+        io={"layer_h": "Metal3", "layer_v": "Metal4"},
+        clock_period_ns=10.0,
+    )
+    assert report["power"]["placed"]["status"] == "complete"
+    assert report["power"]["placed"]["missing"] == []
+    assert report["warnings"] == []
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_GF180MCU_7T_PNR_VARIANT is None,
+    reason=(
+        "no real gf180mcu_fd_sc_mcu7t5v0 LEF/liberty/GDS set on a 5LM "
+        "variant (tech LEF declaring Metal2-Metal5) resolves via list_pdks()"
+    ),
+)
+def test_integration_real_openroad_preset_pdn_gf180mcu_7t(tmp_path, monkeypatch):
+    """`"power": {"preset": "gf180mcu_7t_6M"}` end to end against a real
+    `openroad` + a real 5LM gf180mcu install (issue #2123).
+
+    The site name is this library's own, taken from the installed
+    `libs.ref/gf180mcu_fd_sc_mcu7t5v0/lef/gf180mcu_fd_sc_mcu7t5v0.lef`
+    (`SITE GF018hv5v_mcu_sc7`) rather than derived by analogy from the
+    9-track sibling's `GF018hv5v_green_sc9` -- the two libraries do not
+    share a naming stem, and guessing `GF018hv5v_green_sc7` fails live with
+    `[ERROR IFP-0018] Unable to find site` (observed while writing this
+    test)."""
+    report = _run_preset_pdn_integration(
+        tmp_path,
+        monkeypatch,
+        variant_gate=_REAL_GF180MCU_7T_PNR_VARIANT,
+        cell_library=_GF180MCU_7T_CELL_LIBRARY,
+        preset="gf180mcu_7t_6M",
+        floorplan={
+            "method": "utilization",
+            "utilization_pct": 38,
+            "aspect_ratio": 1.0,
+            "core_margin_um": 2.0,
+            "site": "GF018hv5v_mcu_sc7",
+        },
+        io={"layer_h": "Metal3", "layer_v": "Metal4"},
+        clock_period_ns=10.0,
+    )
+    assert report["power"]["placed"]["status"] == "complete"
+    assert report["power"]["placed"]["missing"] == []
+    assert report["warnings"] == []
 
 
 @pytest.mark.skipif(
