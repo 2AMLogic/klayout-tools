@@ -564,6 +564,13 @@ full `repo`/`external`/`absent` scope meanings.
   "passed": 3,
   "failed": 0,
   "errored": 0,
+  "coverage": {
+    "testbenches": 1,
+    "delta_rows": 3,
+    "corners_compared": 3,
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
+  },
   "pin_count_mismatch": null,
   "flat_dut_mismatch": null,
   "provenance": {
@@ -591,6 +598,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
 | `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |
+| `coverage`           | object            | Issue #1996 (additive field). What this `status` was actually compared over: `testbenches`, `delta_rows`, `corners_compared`, plus the shared `nothing_checked`/`nothing_checked_reasons` roll-up. See "`coverage`: an empty `delta[]` is not a pass" below. |
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
@@ -605,6 +613,46 @@ full `repo`/`external`/`absent` scope meanings.
 | `extracted_value` | number \| null  | The measurement's value on the extracted-side run, or `null` if it was unextractable (a `klt sim` `"error"`-status measurement). |
 | `delta_pct`       | number \| null  | `100 * (extracted_value - schematic_value) / abs(schematic_value)`, rounded to 3 decimals; `null` when either value is missing or `schematic_value` is exactly `0`. |
 | `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
+
+### `coverage`: an empty `delta[]` is not a pass
+
+Additive field (issue #1996, no `schema_version` bump), implementing the
+shared vacuous-verdict convention defined once in
+[`../json-contract.md`](../json-contract.md) — `klt drc` and `klt sim` emit
+the same two roll-up keys for their own equivalents.
+
+`status` is `"pass"` when no `delta[]` row failed or errored — and an
+**empty** `delta[]` satisfies that vacuously. The two cases a reader has to
+tell apart are *not* conflated in this report:
+
+- **A comparison ran and found nothing wrong.** Every compared
+  `(corner, measurement)` pair emits its own `delta[]` row carrying both
+  values and `status: "pass"`, whether or not the two sides differ — there
+  is no "within tolerance, so omit the row" path. So a real comparison always
+  leaves `delta` non-empty, and `nothing_checked` is `false`.
+- **No comparison happened at all.** `delta` is `[]` — no testbench produced
+  a single `(corner, measurement)` pair to diff (e.g. every testbench's
+  `measurements[]` is empty, or its corner matrix expanded to zero corners).
+  `status` is still `"pass"`, and it says nothing whatever about the layout.
+  `nothing_checked` is `true`, reason `no_delta_rows`.
+
+| Field                     | Type            | Description |
+| ------------------------- | --------------- | ----------- |
+| `testbenches`             | integer         | `== len(testbenches)`, restated here so the whole coverage story is in one block. |
+| `delta_rows`              | integer         | `== len(delta)` — the load-bearing count. |
+| `corners_compared`        | integer         | `== corner_count`. |
+| `nothing_checked`         | boolean         | Whether this run compared nothing, so its `status` says nothing about the layout. |
+| `nothing_checked_reasons` | array\<string\> | Why. Empty exactly when `nothing_checked` is `false`. |
+
+A run whose extracted side was unrunnable (`pin_count_mismatch` /
+`flat_dut_mismatch`) still emits one `error` row per schematic-side pair, so
+it reports `nothing_checked: false` — that is a *failed* comparison, not an
+absent one, and `status: "error"` already says so. `nothing_checked` is
+reserved for a **passing** verdict measured over nothing.
+
+[`klt signoff`](signoff.md) consumes this: a `pex` envelope reporting
+`nothing_checked: true` never counts as a passing check, and never backs a
+`"met"` item 7 citation (reason `nothing_checked`).
 
 ## Exit codes
 

@@ -79,6 +79,11 @@ from . import remote_transport as remote_transport
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from ._text import line_containing as _line_containing
+from .coverage import (
+    REASON_EMPTY_CORNER_MATRIX,
+    REASON_UNRECOGNIZED_LIMIT_KEYS,
+    build_nothing_checked,
+)
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
@@ -704,6 +709,30 @@ def run_sim(
     ``measurements[].name`` stays out of scope for this registry -- those
     names are caller-supplied via the request spec, not ``klt``-declared.
 
+    ``coverage`` (issue #1996, the shared convention declared in
+    :mod:`klayout_tools.coverage`) is a second always-present, purely
+    additive object (no ``schema_version`` bump) stating what this
+    ``status`` was graded over::
+
+        "coverage": {
+            "corners_simulated": <int>,
+            "measurements_declared": <int>,
+            "measurements_with_limits": <int>,
+            "unrecognized_limit_keys": [
+                {"measurement": <str>, "keys": [<str>, ...]}, ...
+            ],
+            "nothing_checked": <bool>,
+            "nothing_checked_reasons": [<reason code>, ...]
+        }
+
+    ``nothing_checked`` is ``True`` for the two ways this response can reach
+    ``status: "pass"`` having graded nothing -- an empty corner matrix
+    (``"empty_corner_matrix"``), and a request whose every declared
+    ``measurements[].limits`` object used keys `klt sim` does not apply
+    (``"unrecognized_limit_keys"``; only ``min``/``max`` are read, so a
+    typo'd bound silently passes everything). ``status`` itself is
+    unchanged in both cases. See :func:`_build_coverage`.
+
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
     the sweep from starting at all (bad request, unresolvable netlist/model
@@ -1285,6 +1314,12 @@ def run_sim(
             _CORNER_ERRORED_COUNT_METRIC_NAME: errored,
         },
         "environment": environment,
+        # Issue #1996: what this verdict was actually graded over -- always
+        # present, purely additive. `nothing_checked` is the load-bearing
+        # field: an empty corner matrix, or a `limits` object whose keys
+        # `klt sim` never applied, both produce `status: "pass"` from a run
+        # that checked nothing. See `_build_coverage`.
+        "coverage": _build_coverage(measurements_spec, corners),
         "provenance": build_provenance(
             deck_name=(os.path.basename(models_lib) if models_lib else None),
             deck_path=models_lib,
@@ -3229,6 +3264,70 @@ def _parse_measurements(log_text: str) -> dict[str, float]:
     for name in failed:
         values.pop(name, None)
     return values
+
+
+#: The only ``measurements[].limits`` keys :func:`_evaluate_limits` applies.
+#: Anything else in a ``limits`` object is silently inert -- which is exactly
+#: why :func:`_build_coverage` reports it (issue #1996).
+_RECOGNISED_LIMIT_KEYS = ("min", "max")
+
+
+def _build_coverage(
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The shared ``coverage`` block (issue #1996; see
+    :mod:`klayout_tools.coverage`) for one `klt sim` response.
+
+    `klt sim` can report ``status: "pass"`` from a run that graded nothing,
+    in two ways this block makes legible:
+
+    - **An empty corner matrix.** ``corners`` is ``[]``, so
+      ``passed``/``failed``/``errored`` are all ``0`` and the aggregate
+      status falls through to ``"pass"``. Reason
+      ``"empty_corner_matrix"``.
+    - **Limits nobody applied.** ``_evaluate_limits`` reads only ``min`` and
+      ``max``; a measurement declaring ``{"maximum": 1.8}`` (or any other
+      typo) is scored as if it had declared no bound at all, and passes
+      unconditionally. Every offending object is listed in
+      ``unrecognized_limit_keys`` regardless -- a *partial* disclosure, since
+      one typo'd measurement alongside several well-formed ones is still a
+      real gap -- but the run only counts as ``nothing_checked`` when a
+      ``limits`` object was declared somewhere and **no** measurement ended
+      up with a usable bound. Reason ``"unrecognized_limit_keys"``.
+
+    A request that simply declares no ``limits`` at all is *not* flagged: a
+    characterise-and-report sweep deliberately grades nothing, which is a
+    stated intent rather than a silent miss. ``measurements_with_limits``
+    lets a reader draw that distinction themselves.
+    """
+    unrecognized: list[dict[str, Any]] = []
+    limits_declared = 0
+    measurements_with_limits = 0
+    for spec in measurements_spec:
+        limits = spec.get("limits")
+        if not isinstance(limits, dict) or not limits:
+            continue
+        limits_declared += 1
+        unknown = sorted(k for k in limits if k not in _RECOGNISED_LIMIT_KEYS)
+        if unknown:
+            unrecognized.append({"measurement": spec.get("name"), "keys": unknown})
+        if any(limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS):
+            measurements_with_limits += 1
+
+    reasons: list[str] = []
+    if not corners:
+        reasons.append(REASON_EMPTY_CORNER_MATRIX)
+    if limits_declared and not measurements_with_limits and unrecognized:
+        reasons.append(REASON_UNRECOGNIZED_LIMIT_KEYS)
+
+    return {
+        "corners_simulated": len(corners),
+        "measurements_declared": len(measurements_spec),
+        "measurements_with_limits": measurements_with_limits,
+        "unrecognized_limit_keys": unrecognized,
+        **build_nothing_checked(reasons),
+    }
 
 
 def _evaluate_limits(
