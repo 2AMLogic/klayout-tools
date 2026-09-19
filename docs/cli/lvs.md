@@ -1301,6 +1301,7 @@ isomorphism reimplemented downstream.
 | `layout` | string | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. |
 | `reference` | string | The paired reference net's name, same convention. |
 | `pin` | boolean | Whether this net is one of the compared circuit's declared pins (`Net.pin_count() > 0`), read from the layout side. `same_circuits` pins the layout/reference top circuits together before the compare runs, so a matched pair's declared-pin status agrees on both sides by construction. |
+| `heuristic` | boolean *(present only for a `reference.form: "gate-level-verilog"` run — see "Supply correspondences are not validated supply connectivity" below)* | `true` when this pairing puts a layout **supply** net opposite a reference net that is not itself a supply pin — a fallback the comparer had to guess at, not a correspondence it verified. `false` for every other pairing in such a run. The key is **omitted entirely** when no supply universe could be derived (every other `reference.form`, and any `gate-level-verilog` run whose `reference.library` pin orders did not resolve), so "checked, and this pairing is genuine" (`false`) stays distinguishable from "never checked" (absent). Read it with `entry.get("heuristic")`, not `entry["heuristic"]`. |
 
 Populated for every successful pairing the comparer made — both an
 unambiguous `match_nets` event and an ambiguously-resolved
@@ -1324,6 +1325,55 @@ subcircuits, and each such net is a distinct correspondence with its own
 `pin` flag. Two entries can therefore share the same `layout`/`reference`
 name (one per circuit) — that is expected, and is what keeps
 `len(net_correspondence) == counts.nets.matched` exact across a hierarchy.
+
+#### Supply correspondences are not validated supply connectivity
+
+**A `net_correspondence` entry naming a supply net is not, on its own,
+evidence that the layout's power grid is correct** (issue #2136). A
+`reference.form: "gate-level-verilog"` reference carries no power/ground
+pins at all (see "No power/ground pins" above), so the comparer never has a
+same-named candidate for the layout's `VGND`/`VPWR` and pairs it with
+whatever its graph heuristics reach first — routinely an unrelated signal
+net (a spare `oen`-style port is a common one), or with nothing at all.
+Before this was disclosed, the two readings below produced identical
+output:
+
+- "this design's power grid is fine and the two happened to line up", and
+- "this design has no power grid the reference could describe, and the
+  comparer had nothing better to guess with".
+
+The `heuristic` field separates them. For a `gate-level-verilog` run whose
+`reference.library` pin orders resolve, every entry carries it:
+
+- `heuristic: true` — the layout side is demonstrably a supply net (some
+  pin the *library* declares to be a power/ground pin lands on it) and the
+  reference side is not a supply pin. The pairing is a fallback; do not
+  read it as verified.
+- `heuristic: false` — an ordinary pairing the compare stands behind.
+
+Like every other power/ground-aware behaviour here, "is this a supply net?"
+is derived structurally from `reference.library`'s own `.subckt` pin orders
+— never a hardcoded PDK power-pin table (sky130's
+`VPWR`/`VGND`/`VPB`/`VNB` vs. gf180mcu's `VDD`/`VSS`/`VNW`/`VPW`) and never
+a `V*` name glob. A rail named after nothing in particular (`VSS_RAIL`) is
+recognised because a cell's `VGND` pin lands on it; a signal net named
+`VGND_MONITOR` is not, because none does.
+
+The key is **absent** for every other `reference.form`. Those references
+carry their own power nets and pins, which take part in the ordinary
+compare, so there is no fallback to disclose — and nothing there licenses
+calling any pin name a power pin (the same restriction that scopes the
+power-only prune and the `power_connectivity` check). It is also absent for
+a `gate-level-verilog` run whose library pin orders did not resolve: that
+run checked nothing, and says so by omission rather than by a misleading
+`false`.
+
+**`heuristic` never changes `status`.** It is a disclosure about what the
+signal compare did and did not verify, exactly like
+`power_connectivity`'s separate verdict — and `power_connectivity` (see
+below) remains the check that actually validates the layout's supply
+connectivity, keyed on the library's own declared supply pins rather than
+on the reference.
 
 #### Supply fragmentation: `net.supply_fragmented`
 

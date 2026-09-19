@@ -2974,19 +2974,20 @@ def test_body_unverified_counts_matches_raw_klayout_anonymous_prefix():
 
     `lvs_mismatch` reads `Net.expanded_name()` straight off the in-memory
     netlist, whose anonymous-net placeholder is a **raw** `"$<n>"`.
-    `extract.py`'s `_ANONYMOUS_NET_PREFIX` is `"\\$"` only because every name
-    *that* module reports has already been backslash-escaped by
+    `extract_report.py`'s `_ANONYMOUS_NET_PREFIX` (relocated there out of
+    `extract.py` by PR #2071's netlist-report split) is `"\\$"` only because
+    every name *that* module reports has already been backslash-escaped by
     `spice_safe_net_name` (issue #1162). Reusing the escaped constant on this
     path would match nothing at all -- silently restoring the bug while every
     other assertion still passed -- so both spellings, and the fact that the
     escaped one does not match a raw name, are asserted here directly.
     """
-    from klayout_tools import extract as extract_mod
+    from klayout_tools import extract_report as extract_report_mod
     from klayout_tools import lvs_mismatch
 
     assert lvs_mismatch._RAW_ANONYMOUS_NET_PREFIX == "$"
-    assert extract_mod._ANONYMOUS_NET_PREFIX == "\\$"
-    assert not "$0".startswith(extract_mod._ANONYMOUS_NET_PREFIX)
+    assert extract_report_mod._ANONYMOUS_NET_PREFIX == "\\$"
+    assert not "$0".startswith(extract_report_mod._ANONYMOUS_NET_PREFIX)
 
     deck = _gf180mcu_like_deck()
 
@@ -7093,6 +7094,218 @@ def test_is_power_only_circuit_spares_disjoint_pin_stray_cell():
     assert not {"CLK", "D", "Q"} & signal_pins
     # ...yet the cell is still spared, because they are not power pins.
     assert lvs._is_power_only_circuit(stray, power_pins) is False
+
+
+class _FakeSupplyPin:
+    """A `klayout.db.Pin` stand-in carrying both the accessors
+    `_layout_supply_net_names` reads: `.name()` and `.id()` (issue #2136)."""
+
+    def __init__(self, name: str, pin_id: int) -> None:
+        self._name = name
+        self._id = pin_id
+
+    def name(self) -> str:
+        return self._name
+
+    def id(self) -> int:
+        return self._id
+
+
+class _FakeSupplyInstance:
+    """A `klayout.db.SubCircuit` stand-in: `.circuit_ref()` (the master it
+    instantiates) plus `.net_for_pin(pin_id)` (the parent-circuit net that
+    master's pin is wired to) -- the two accessors the instance-side half of
+    `_layout_supply_net_names` walks (issue #2136)."""
+
+    def __init__(self, ref: object, nets: dict[int, str | None]) -> None:
+        self._ref = ref
+        self._nets = {
+            pin_id: (None if name is None else _FakeNamed(name))
+            for pin_id, name in nets.items()
+        }
+
+    def circuit_ref(self) -> object:
+        return self._ref
+
+    def net_for_pin(self, pin_id: int) -> object:
+        return self._nets.get(pin_id)
+
+
+class _FakeSupplyCircuit:
+    """A `klayout.db.Circuit` stand-in for `_layout_supply_net_names`
+    (issue #2136): a declared pin list with ids, the net each of those pins
+    resolves to (`.net_for_pin`), and the subcircuit instances it contains
+    (`.each_subcircuit`)."""
+
+    def __init__(
+        self,
+        name: str,
+        pins: list[str],
+        pin_nets: dict[str, str | None] | None = None,
+        subcircuits: list[_FakeSupplyInstance] | None = None,
+    ) -> None:
+        self.name = name
+        self._pins = [_FakeSupplyPin(p, i) for i, p in enumerate(pins)]
+        pin_nets = pin_nets or {}
+        self._pin_nets = {
+            pin.id(): (
+                None
+                if pin_nets.get(pin.name()) is None
+                else _FakeNamed(pin_nets[pin.name()])
+            )
+            for pin in self._pins
+        }
+        self._subcircuits = subcircuits or []
+
+    def expanded_name(self) -> str:
+        return self.name
+
+    def each_pin(self) -> list[_FakeSupplyPin]:
+        return self._pins
+
+    def net_for_pin(self, pin_id: int) -> object:
+        return self._pin_nets.get(pin_id)
+
+    def each_subcircuit(self) -> list[_FakeSupplyInstance]:
+        return self._subcircuits
+
+
+def _fake_supply_layout() -> _FakeNetlist:
+    """A layout netlist shaped like the `gate-level-verilog` fixtures below:
+    a `TOP` that wires each cell instance's `VPWR`/`VGND` pins to its own
+    rails, plus the extracted cell circuit whose own boundary declares those
+    same supply pins (issue #2136)."""
+    cell = _FakeSupplyCircuit(
+        "MYLIB__INV_1",
+        ["A", "Y", "VGND", "VPWR"],
+        pin_nets={"A": "A", "Y": "Y", "VGND": "VGND", "VPWR": "VPWR"},
+    )
+    top = _FakeSupplyCircuit(
+        "TOP",
+        ["IN", "OUT"],
+        pin_nets={"IN": "IN", "OUT": "OUT"},
+        subcircuits=[
+            _FakeSupplyInstance(cell, {0: "IN", 1: "OUT", 2: "VSS_RAIL", 3: "VDD_RAIL"})
+        ],
+    )
+    return _FakeNetlist([top, cell])
+
+
+def test_layout_supply_net_names_walks_instance_and_boundary_pins():
+    """Issue #2136: the layout-side supply-net universe is structural -- a
+    net qualifies only because a pin the *library* declares to be a power
+    pin lands on it, never because of how it is spelled.
+
+    Both traversals are load-bearing and neither subsumes the other: the
+    instance-side walk finds the top-level rails (`VSS_RAIL`/`VDD_RAIL`,
+    which are not named after any pin at all), and the boundary-side walk
+    finds the extracted cell's own interior `VGND`/`VPWR` nets, which no
+    instance in this netlist wires."""
+    power_pins = frozenset({"VGND", "VNB", "VPB", "VPWR"})
+    names = lvs._layout_supply_net_names(_fake_supply_layout(), power_pins)
+    assert names == frozenset({"VSS_RAIL", "VDD_RAIL", "VGND", "VPWR"})
+    # Signal nets never qualify, however central they are to the design.
+    assert not {"IN", "OUT", "A", "Y"} & names
+
+
+def test_layout_supply_net_names_records_merged_net_aliases():
+    """A label-merged layout rail is reported as `VPWR|VDD` by
+    `_name_or_none`; both the joined spelling and each alias are recorded,
+    so a correspondence entry matches whichever of the two the compare-time
+    net object reports (issue #2136)."""
+    cell = _FakeSupplyCircuit("MYLIB__INV_1", ["VPWR"], pin_nets={"VPWR": "VPWR|VDD"})
+    names = lvs._layout_supply_net_names(
+        _FakeNetlist([cell]), frozenset({"VGND", "VPWR"})
+    )
+    assert names == frozenset({"VPWR|VDD", "VPWR", "VDD"})
+
+
+def test_layout_supply_net_names_missing_evidence_is_none():
+    """Every missing input degrades to `None` -- the same "no evidence,
+    flag nothing" discipline `_is_power_only_circuit` follows (issue
+    #2136)."""
+    layout = _fake_supply_layout()
+    assert lvs._layout_supply_net_names(layout, None) is None
+    assert lvs._layout_supply_net_names(layout, frozenset()) is None
+    assert lvs._layout_supply_net_names(None, frozenset({"VGND"})) is None
+    assert lvs._layout_supply_net_names(object(), frozenset({"VGND"})) is None
+    # A derivable universe that nothing in the layout touches is an empty
+    # set, never "everything".
+    assert (
+        lvs._layout_supply_net_names(layout, frozenset({"VNW", "VPW"})) == frozenset()
+    )
+
+
+def test_supply_pin_universe_is_none_without_both_halves():
+    """Issue #2136: the bundle is built only when *both* derivations
+    succeed -- no library pin orders (every non-`gate-level-verilog` form
+    passes `None`) and no layout net carrying a power pin each leave
+    `net_correspondence[]` byte-identical to what it was before."""
+    reference = _fake_gate_level_reference()
+    layout = _fake_supply_layout()
+    assert lvs._supply_pin_universe(layout, reference, None) is None
+    assert lvs._supply_pin_universe(layout, None, _FAKE_LIBRARY_PIN_ORDERS) is None
+    assert lvs._supply_pin_universe(None, reference, _FAKE_LIBRARY_PIN_ORDERS) is None
+    universe = lvs._supply_pin_universe(layout, reference, _FAKE_LIBRARY_PIN_ORDERS)
+    assert universe is not None
+    assert universe.power_pin_names == frozenset({"VGND", "VNB", "VPB", "VPWR"})
+    assert "VSS_RAIL" in universe.layout_supply_nets
+
+
+def test_is_unverified_supply_correspondence_discriminates():
+    """Issue #2136's discrimination, pinned directly: only a layout supply
+    net paired with a reference net that is not itself a supply pin is
+    flagged."""
+    from klayout_tools.lvs_mismatch import (
+        _is_unverified_supply_correspondence as flagged,
+    )
+
+    universe = lvs._SupplyPinUniverse(
+        power_pin_names=frozenset({"VGND", "VPWR"}),
+        layout_supply_nets=frozenset({"VGND", "VPWR", "VSS_RAIL"}),
+    )
+    # The reported defect: a real supply net opposite an unrelated signal.
+    assert flagged("VGND", "OEN", universe) is True
+    assert flagged("VSS_RAIL", "OEN", universe) is True
+    # ...and the degenerate version of it, opposite nothing at all.
+    assert flagged("VGND", None, universe) is True
+    # A genuine supply-to-supply pairing (a reference that *does* declare
+    # the supply pin) is never flagged.
+    assert flagged("VGND", "VGND", universe) is False
+    # Ordinary signal-to-signal pairings are never flagged, including one
+    # whose reference side happens to be a supply name.
+    assert flagged("IN", "IN", universe) is False
+    assert flagged("IN", "VGND", universe) is False
+    # A label-merged supply net is recognised through its aliases.
+    assert flagged("VPWR|VDD", "OEN", universe) is True
+    # No universe (every non-`gate-level-verilog` form) flags nothing.
+    assert flagged("VGND", "OEN", None) is False
+
+
+def test_build_net_correspondence_omits_heuristic_without_a_universe():
+    """Issue #2136: with no supply universe the key is absent entirely --
+    not `false` -- so "checked and genuine" stays distinguishable from
+    "never checked", and every other reference form's output is
+    byte-identical to before."""
+
+    class _MatchedNet(_FakeNamed):
+        """`_FakeNamed` plus the `pin_count()` accessor
+        `_build_net_correspondence` reads for its `pin` flag."""
+
+        def pin_count(self) -> int:
+            return 1
+
+    logger = _FakeLogger()
+    logger.net_matches = [(1, _MatchedNet("VGND"), _MatchedNet("OEN"))]
+    (entry,) = lvs._build_net_correspondence(logger)
+    assert entry == {"layout": "VGND", "reference": "OEN", "pin": True}
+
+    universe = lvs._SupplyPinUniverse(
+        power_pin_names=frozenset({"VGND"}),
+        layout_supply_nets=frozenset({"VGND"}),
+    )
+    (flagged_entry,) = lvs._build_net_correspondence(logger, universe)
+    assert flagged_entry["heuristic"] is True
 
 
 def test_build_mismatches_ambiguous_net_is_warning_topology():
@@ -12292,6 +12505,116 @@ def test_run_lvs_gate_level_verilog_tolerates_layout_side_power_pins(tmp_path):
     assert report["status"] == "match"
     assert report["mismatch_count"] == 0
     assert "pin.unmatched" not in report["category_counts"]
+
+
+#: `_GATE_LEVEL_REFERENCE_VERILOG` with one extra declared top-level port,
+#: `oen`, that nothing inside the module drives (issue #2136). This is the
+#: ordinary shape of a synthesized block's unused output-enable port, and it
+#: is what gives the comparer a spare reference-side net to pair the
+#: layout's `VGND` rail with: the reference, being `gate-level-verilog`,
+#: carries no supply pin for `VGND` to match by name.
+_GATE_LEVEL_REFERENCE_VERILOG_WITH_SPARE_PORT = """
+module top(in, mid, out, oen);
+  input in;
+  output mid;
+  output out;
+  output oen;
+  mylib__inv_1 u1 (.A(in), .Y(mid));
+  mylib__buf_1 u2 (.A(mid), .Y(out));
+endmodule
+"""
+
+
+def test_run_lvs_gate_level_verilog_flags_supply_matched_to_signal_net(tmp_path):
+    """Issue #2136's reported defect, reproduced and then flagged.
+
+    The comparer pairs the layout's real `VGND` rail with the reference's
+    unrelated `OEN` signal net -- it has no same-named candidate to prefer,
+    because a `gate-level-verilog` reference structurally carries no
+    power/ground pins -- and the run still reports `status: "match"` with
+    zero mismatches. That verdict is correct for *signal* connectivity and
+    is deliberately unchanged here; what was missing is any way to tell
+    that pairing apart from one the compare actually verified.
+
+    The entry now carries `heuristic: true`, while every genuinely
+    name-matched signal pairing in the same report carries
+    `heuristic: false` -- so a caller can see both that the check ran and
+    exactly which correspondences it could not stand behind.
+    """
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER)
+    reference_path = _write(
+        tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG_WITH_SPARE_PORT
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+
+    # The signal verdict is untouched -- this issue adds a disclosure
+    # beside `status`, it never changes it.
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+    correspondence = report["net_correspondence"]
+    supply_to_signal = [
+        e for e in correspondence if e["layout"] == "VGND" and e["reference"] == "OEN"
+    ]
+    assert len(supply_to_signal) == 1, correspondence
+    assert supply_to_signal[0]["heuristic"] is True
+    assert supply_to_signal[0]["pin"] is True
+
+    # Every name-matched signal pairing is reported as verified, so the
+    # flag localises the problem instead of tainting the whole report.
+    by_pair = {(e["layout"], e["reference"]): e for e in correspondence}
+    for pair in (("IN", "IN"), ("MID", "MID"), ("OUT", "OUT")):
+        assert by_pair[pair]["heuristic"] is False
+
+    # A layout supply net the comparer paired with nothing at all is the
+    # degenerate version of the same fallback, and is flagged too.
+    assert all(
+        e["heuristic"] is True
+        for e in correspondence
+        if e["layout"] in {"VGND", "VPWR"}
+    )
+
+
+def test_net_correspondence_omits_heuristic_for_a_spice_reference(tmp_path):
+    """Issue #2136's scope boundary: every reference form other than
+    `gate-level-verilog` carries its own power/ground pins and nets, which
+    take part in the ordinary compare -- there is no fallback to disclose,
+    nothing licenses calling any pin name a power pin, and the
+    `net_correspondence[]` entries stay byte-identical to what they were
+    before this issue (no `heuristic` key at all).
+
+    `_INVERTER_SPICE` self-compared is the genuine supply-to-supply case:
+    `VPWR`/`VGND` are matched by name on both sides.
+    """
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+    report = run_lvs(path)
+
+    assert report["status"] == "match"
+    correspondence = report["net_correspondence"]
+    assert {e["reference"] for e in correspondence} == {"A", "Y", "VPWR", "VGND"}
+    assert all(set(e) == {"layout", "reference", "pin"} for e in correspondence)
 
 
 def _gate_level_power_request(tmp_path, layout_spice, **options):

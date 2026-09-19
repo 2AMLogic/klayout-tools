@@ -121,7 +121,7 @@ import fnmatch
 import json
 import os
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _load_request_json, _resolve_relative
@@ -165,6 +165,7 @@ from .lvs_mismatch import (
     _mismatch,
     _parse_parameter_tolerance,
     _sort_key,
+    _SupplyPinUniverse,
     _terminal_names,
     _tolerance_disclosure,
 )
@@ -1063,6 +1064,14 @@ def run_lvs(request: str) -> dict[str, Any]:
     # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
     # right below, before anything else reads `reference_netlist`.
     reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
+    # Issue #2136: the library-derived power-pin universe plus the layout
+    # nets those pins land on, used below to mark a `net_correspondence[]`
+    # entry that pairs a layout supply net with a reference net that is not
+    # itself a supply pin. Derived only in the `gate-level-verilog` branch
+    # (the one reference form whose netlist carries no power/ground pins at
+    # all), and left `None` everywhere else -- which keeps every other
+    # form's `net_correspondence[]` byte-identical to before.
+    supply_universe: _SupplyPinUniverse | None = None
     reference_netlist = _read_reference_netlist(
         reference_netlist_path,
         form=reference_form,
@@ -1086,6 +1095,16 @@ def run_lvs(request: str) -> dict[str, Any]:
             _apply_gate_level_port_aliases(
                 reference_gate_level_port_aliases, reference_netlist
             )
+        )
+        # Issue #2136: derived here, before the power-only prune below, for
+        # the same reason `_power_pin_connections` must run before it -- the
+        # prune removes exactly the filler/tap instances whose power pins are
+        # part of the evidence that the layout's rails are supply nets. Not
+        # gated on `options.power_connectivity`: this is a disclosure about
+        # what the *compare* did or did not verify, which a caller who turned
+        # the separate power-connectivity check off needs at least as much.
+        supply_universe = _supply_pin_universe(
+            layout_netlist, reference_netlist, reference_pin_orders
         )
         # Issue #1952: the power/ground half of the compare, run *before*
         # the power-only prune below -- see `_power_pin_connections`'s
@@ -1575,7 +1594,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             ]
         status = "match" if compare_result else "mismatch"
         engine_version = _engine_version()
-        net_correspondence = _build_net_correspondence(logger)
+        net_correspondence = _build_net_correspondence(logger, supply_universe)
         counts = {
             "nets": {
                 "layout": sum(1 for _ in layout_circuit.each_net()),
@@ -4827,6 +4846,140 @@ def _is_power_only_circuit(
     if not pin_names:
         return False
     return all(name in power_pin_names for name in pin_names)
+
+
+def _boundary_supply_nets(
+    circuit: Any, power_pin_names: frozenset[str]
+) -> Iterator[Any]:
+    """The **boundary-side** half of :func:`_layout_supply_net_names`'s two
+    traversals: for every pin ``circuit`` itself declares whose name is a
+    known power pin, the net that pin resolves to (issue #2136).
+
+    This is the cell-interior view -- an extracted ``..._inv_1``'s own
+    ``VPWR``/``VGND`` nets -- which :func:`_instance_supply_nets` alone
+    never reaches, because the instance-side walk only ever sees nets in a
+    *parent* circuit.
+    """
+    for pin in circuit.each_pin():
+        pin_name = pin.name()
+        if pin_name and pin_name.upper() in power_pin_names:
+            yield circuit.net_for_pin(pin.id())
+
+
+def _instance_supply_nets(
+    circuit: Any, power_pin_names: frozenset[str]
+) -> Iterator[Any]:
+    """The **instance-side** half of :func:`_layout_supply_net_names`'s two
+    traversals: for every subcircuit instance in ``circuit``, and every pin
+    its master declares whose name is a known power pin, the net ``circuit``
+    wires that pin to (issue #2136).
+
+    This is the top-level power grid (the same edge set
+    :func:`_power_pin_connections` walks for the ``power_connectivity``
+    report), and it is the only evidence available in a circuit that does
+    not itself declare a supply pin -- the case
+    :func:`_boundary_supply_nets` cannot cover.
+    """
+    for sub in circuit.each_subcircuit():
+        ref = sub.circuit_ref()
+        if ref is None:
+            continue
+        for pin in ref.each_pin():
+            pin_name = pin.name()
+            if pin_name and pin_name.upper() in power_pin_names:
+                yield sub.net_for_pin(pin.id())
+
+
+def _supply_net_spellings(net: Any) -> set[str]:
+    """Every upper-cased spelling under which ``net`` should be recognised
+    as a supply net, or an empty set for an unnamed/``None`` net.
+
+    Net names go through :func:`_name_or_none`, so a label-merged net is
+    spelled exactly as ``net_correspondence[]``/``mismatches[].net`` spell
+    it (``VPWR|VDD``); both the joined spelling and each ``|``-separated
+    alias are returned, so a correspondence entry matches whichever of the
+    two the compare-time net object reports.
+    """
+    name = _name_or_none(net)
+    if not name:
+        return set()
+    spellings = {name.upper()}
+    spellings.update(alias.upper() for alias in name.split("|") if alias)
+    return spellings
+
+
+def _layout_supply_net_names(
+    layout_netlist: Any | None, power_pin_names: frozenset[str] | None
+) -> frozenset[str] | None:
+    """Every layout net name (upper-cased) that is demonstrably carrying a
+    standard-cell **power/ground** pin, or ``None`` when there is not enough
+    evidence to derive one (issue #2136).
+
+    Structural, not name-pattern -- the same discipline
+    :func:`_is_power_only_circuit` applies, and for the same
+    PDK-independence reason (sky130's ``VPWR``/``VGND``/``VPB``/``VNB`` vs.
+    gf180mcu's ``VDD``/``VSS``/``VNW``/``VPW``): a net qualifies only
+    because something the *library* declares to be a power pin
+    (``power_pin_names``, derived by :func:`_gate_level_power_pin_names`)
+    actually lands on it. Two traversals, one helper each, both needed --
+    neither subsumes the other, which is why this is a union and not a
+    choice:
+
+    * **Boundary side** -- :func:`_boundary_supply_nets`, the cell-interior
+      view an instance-side walk never reaches.
+    * **Instance side** -- :func:`_instance_supply_nets`, the top-level
+      power grid, the only evidence in a circuit that declares no supply
+      pin of its own.
+
+    Each yielded net is recorded under every spelling
+    :func:`_supply_net_spellings` gives it (the ``|``-joined label-merged
+    form *and* each alias), so a correspondence entry matches whichever of
+    the two the compare-time net object reports.
+
+    Returns ``None`` for a falsy/``None`` ``power_pin_names`` (no derivable
+    universe) or an unusable netlist, and an empty set when nothing
+    qualifies -- callers treat both as "no evidence" and flag nothing, the
+    same missing-evidence discipline :func:`_is_power_only_circuit` follows.
+    """
+    if layout_netlist is None or not power_pin_names:
+        return None
+    each_circuit = getattr(layout_netlist, "each_circuit", None)
+    if not callable(each_circuit):
+        return None
+    names: set[str] = set()
+    for circuit in each_circuit():
+        for net in _boundary_supply_nets(circuit, power_pin_names):
+            names.update(_supply_net_spellings(net))
+        for net in _instance_supply_nets(circuit, power_pin_names):
+            names.update(_supply_net_spellings(net))
+    return frozenset(names)
+
+
+def _supply_pin_universe(
+    layout_netlist: Any | None,
+    reference_netlist: Any | None,
+    library_pin_orders: Mapping[str, list[str]] | None,
+) -> _SupplyPinUniverse | None:
+    """Bundle the two name sets :func:`_build_net_correspondence` needs to
+    tell a verified net correspondence apart from a supply-net fallback
+    (issue #2136), or ``None`` when either side yields no evidence.
+
+    ``None`` is the answer for every ``reference.form`` other than
+    ``"gate-level-verilog"`` (nothing licenses calling any pin name a power
+    pin there -- the same restriction that scopes
+    :func:`_prune_power_only_layout_circuits` and the
+    ``power_connectivity`` report), and for a ``gate-level-verilog`` run
+    whose library pin orders could not be resolved. A ``None`` universe
+    leaves ``net_correspondence[]`` byte-identical to what it was before
+    this issue.
+    """
+    power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
+    if not power_pin_names:
+        return None
+    layout_supply_nets = _layout_supply_net_names(layout_netlist, power_pin_names)
+    if not layout_supply_nets:
+        return None
+    return _SupplyPinUniverse(power_pin_names, layout_supply_nets)
 
 
 def _apply_gate_level_port_aliases(
