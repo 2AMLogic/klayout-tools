@@ -17,7 +17,12 @@
 #      (a "recognized top-level dir/file"). Existence is checked with
 #      `git ls-tree -r origin/main --name-only`; line ranges are checked
 #      against `git show origin/main:<path> | wc -l`.
-#   2. "<N> tracked `<pattern>` files" claims (N as a digit or one..ten
+#   2. `name.ext:L` / `name.ext:L1-L2` references — backticked or bare —
+#      resolved by unique basename in origin/main's tree. Missing names and
+#      ambiguous names (with candidate paths) are reported explicitly.
+#      Basenames require a line suffix; ordinary filenames in prose and
+#      version numbers are not citations. Qualified paths are checked once.
+#   3. "<N> tracked `<pattern>` files" claims (N as a digit or one..ten
 #      spelled out) — checked against `git ls-files -- <pattern>`.
 #
 # Every miss is listed; the script exits non-zero if there is at least one.
@@ -116,10 +121,12 @@ is_recognized_top() {
 }
 
 # --- Extract path / path:L / path:L1-L2 references (backticked or bare).
-# Requires at least one '/' so bare prose (version numbers, "e.g.", "and/or")
-# never matches; a directory component is exactly what "under a recognized
-# top-level dir" means.
+# Slash-qualified paths retain the recognized-top-level filter. Bare
+# basenames require an extension starting with a letter and a line suffix,
+# so prose filenames and version numbers do not become citations. The
+# leading boundary excludes suffixes of paths and URL host:port strings.
 PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
+BASENAME_RE='(^|[^A-Za-z0-9_./:-])[A-Za-z0-9_.-]+\.[A-Za-z][A-Za-z0-9_-]*:[0-9]+(-[0-9]+)?'
 
 # Populated once via a plain command substitution (NOT inside a pipe) so the
 # assignment survives for the whole script (#1863). A prior version cached
@@ -142,7 +149,12 @@ PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
 # be interrupted by the reader's early exit.
 FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
 
-mapfile -t CANDIDATES < <(grep -oE "$PATH_RE" "$BODY_FILE" | sort -u)
+# One alternation consumes a qualified path as a whole, never again as its
+# basename suffix. Strip a basename's leading delimiter before deduplication.
+mapfile -t CANDIDATES < <(
+    grep -oE "$PATH_RE|$BASENAME_RE" "$BODY_FILE" |
+        sed -E 's/^[^A-Za-z0-9_.-]//' | sort -u
+)
 
 for raw_candidate in "${CANDIDATES[@]}"; do
     # Strip trailing sentence punctuation the character class can't exclude
@@ -160,8 +172,25 @@ for raw_candidate in "${CANDIDATES[@]}"; do
         lines="${BASH_REMATCH[2]}${BASH_REMATCH[4]:+-${BASH_REMATCH[4]}}"
     fi
 
-    is_recognized_top "$path" || continue
+    if [[ "$path" == */* ]]; then
+        is_recognized_top "$path" || continue
+    fi
     CHECKED_PATHS=$((CHECKED_PATHS + 1))
+
+    if [[ "$path" != */* ]]; then
+        matches=()
+        while IFS= read -r tree_path; do
+            [[ "${tree_path##*/}" == "$path" ]] && matches+=("$tree_path")
+        done <<< "$FULL_TREE_CACHE"
+        if (( ${#matches[@]} == 0 )); then
+            MISSES+=("MISSING FILE: \`$path\` has no matching basename on origin/main")
+            continue
+        elif (( ${#matches[@]} > 1 )); then
+            MISSES+=("AMBIGUOUS FILE: \`$path\` matches multiple paths on origin/main: ${matches[*]}")
+            continue
+        fi
+        path="${matches[0]}"
+    fi
 
     if ! grep -qFx "$path" <<< "$FULL_TREE_CACHE"; then
         MISSES+=("MISSING FILE: \`$path\` does not exist on origin/main")
