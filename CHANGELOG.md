@@ -27,6 +27,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   via cells, a separate code path) was investigated and did **not**
   reproduce this on any of the three checked-in corpus fixtures — see the
   issue for the full investigation.
+- **Added**: `klt gen-compose --format json` now emits `blocks[].source_path`
+  and `blocks[].source_digest` (issue #2065), recording which stream each
+  composed block's geometry was read from and a digest of that stream's
+  contents. A composition is a snapshot of inputs that keep moving under it,
+  and the report previously described only its own output — so "does this
+  composition still match what its inputs publish today?" could not be
+  answered from the report at all. `source_digest` is a **layout-aware**
+  digest (new `_provenance.layout_geometry_digest`), not a raw-byte file hash:
+  it covers the decoded geometry (dbu, cells sorted by name, each cell's
+  shapes keyed by layer/datatype and instances keyed by the placed cell's
+  name, canonicalised and sorted), so a re-written but geometrically identical
+  input hashes identically despite new `BGNLIB`/`BGNSTR` timestamps and
+  reordered elements, while real geometry drift shows up as a different
+  digest. `null` when it cannot be computed (stream moved/unreadable) — never
+  fabricated. Purely additive — no `schema_version` bump (`klt gen-compose`
+  stays at `1`), and the composed GDS itself is untouched. The raw-byte
+  `sha256_file`/`provenance.input.content_hash` contract `klt
+  drc`/`lvs`/`extract`/`sim` rely on is unchanged.
 - **Added**: `klt erc --format json` now emits `provenance.spec` as
   `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
   the stackup/vias/nets/ties spec file the run was validated against.

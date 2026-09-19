@@ -179,6 +179,7 @@ from typing import Any
 
 from ._layout import write_layout
 from ._paths import _resolve_relative
+from ._provenance import layout_geometry_digest
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -3399,6 +3400,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # row_pitch_um/col_pitch_um, not one).
         min_spacing_um = spacing_um
 
+    source_digests = _block_source_digests(blocks, order)
     response_blocks = [
         {
             "id": block_id,
@@ -3408,6 +3410,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "source": blocks[block_id]["source"],
             "generator": blocks[block_id]["generator"],
             "cell_name": blocks[block_id]["cell_name"],
+            "source_path": blocks[block_id]["gds_path"],
+            "source_digest": source_digests[blocks[block_id]["gds_path"]],
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
             "orientation": blocks[block_id].get("orientation", "none"),
@@ -3444,6 +3448,34 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         },
         "warnings": warnings,
     }
+
+
+def _block_source_digests(
+    blocks: dict[str, dict[str, Any]], order: list[str]
+) -> dict[str, str | None]:
+    """``{gds_path: source_digest}`` for every block's own input stream (#2065).
+
+    A composition is a *snapshot* of inputs that keep moving under it, so the
+    report has to say what it was built from: the stream each block's geometry
+    was read from, plus a digest of that stream, so "is this composition still
+    current?" becomes a comparison rather than a layer-by-layer XOR.
+
+    The digest is deliberately **not** a raw-byte hash
+    (:func:`klayout_tools._provenance.layout_geometry_digest` explains why):
+    an input re-run that emits geometrically identical output still writes
+    different bytes every time, so a byte hash reports drift on every re-run
+    and cannot distinguish a re-write from a real change. ``None`` for a
+    stream that cannot be decoded -- never fabricated.
+
+    Keyed by path (not by block ``id``) so two blocks placed out of the same
+    stream decode it once.
+    """
+    digests: dict[str, str | None] = {}
+    for block_id in order:
+        source_path = blocks[block_id]["gds_path"]
+        if source_path not in digests:
+            digests[source_path] = layout_geometry_digest(source_path)
+    return digests
 
 
 def _collect_matched_groups(

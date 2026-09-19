@@ -14620,3 +14620,147 @@ def test_compose_bond_pad_via_ladder_landing_pads_clear_deck_area_floors(
     }
     violated_area_rules = area_rule_ids & set(drc_report["rule_counts"])
     assert not violated_area_rules, drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
+# blocks[].source_path / blocks[].source_digest -- input provenance (#2065)
+# --------------------------------------------------------------------------- #
+
+
+def _write_boxed_gds(path, cell_name, boxes_um, order=None):
+    """Write `cell_name` holding one li1 (67/20) rectangle per entry of
+    `boxes_um` (each `(x0, y0, x1, y1)` in um), inserted in `order`.
+
+    `order` exists to produce two on-disk streams that hold *the same*
+    geometry written in a different element order -- the byte-different,
+    geometrically-identical case `source_digest` (#2065) has to see through,
+    and which a raw-byte hash cannot.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li1 = layout.layer(67, 20)
+    cell = layout.create_cell(cell_name)
+    for index in order if order is not None else range(len(boxes_um)):
+        x0, y0, x1, y1 = boxes_um[index]
+        cell.shapes(li1).insert(
+            kdb.Box(
+                int(round(x0 / layout.dbu)),
+                int(round(y0 / layout.dbu)),
+                int(round(x1 / layout.dbu)),
+                int(round(y1 / layout.dbu)),
+            )
+        )
+    layout.write(str(path))
+    return str(path)
+
+
+def _compose_one_cell_block(tmp_path, pdk_root, gds, cell_name, tag):
+    """Compose the single library cell `cell_name` out of `gds`, and return
+    the response's one `blocks[]` entry."""
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "u1", "cell": {"gds_path": gds, "cell_name": cell_name}}],
+            "placement": {"strategy": "row", "order": ["u1"], "spacing_um": 1.0},
+            "options": {
+                "cell_name": f"{tag}_0",
+                "output": str(tmp_path / f"{tag}.gds"),
+            },
+        }
+    )
+    return report["blocks"][0]
+
+
+def test_compose_blocks_report_source_path_and_digest_for_both_block_kinds(
+    tmp_path, pdk_root
+):
+    # #2065: a compose.json has to say what it was built *from*. Both block
+    # kinds -- a `generator_report` block (a klt verb's own output) and a
+    # `cell` block (a pre-existing library cell) -- resolve a stream path, so
+    # both report it plus a digest of that stream's geometry.
+    generated = _gen_block(tmp_path, pdk_root, "mos_array", "tail_0", rows=1, cols=2)
+    lib = _write_boxed_gds(tmp_path / "lib.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "gen", "generator_report": generated},
+                {"id": "lib", "cell": {"gds_path": lib, "cell_name": "lib_inv"}},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["gen", "lib"],
+                "spacing_um": 1.0,
+            },
+            "options": {
+                "cell_name": "prov_top_0",
+                "output": str(tmp_path / "prov_top.gds"),
+            },
+        }
+    )
+
+    by_id = {block["id"]: block for block in report["blocks"]}
+    assert by_id["gen"]["source_path"] == generated["gds_path"]
+    assert by_id["lib"]["source_path"] == lib
+    for block in report["blocks"]:
+        assert block["source_digest"].startswith("sha256:")
+        assert len(block["source_digest"]) == len("sha256:") + 64
+    # Two genuinely different inputs, so two different digests.
+    assert by_id["gen"]["source_digest"] != by_id["lib"]["source_digest"]
+
+
+def test_compose_source_digest_is_stable_across_a_byte_different_rewrite(
+    tmp_path, pdk_root
+):
+    # The whole point of #2065: an input re-run that emits geometrically
+    # identical output still writes different *bytes* (BGNLIB/BGNSTR
+    # timestamps, plus whatever order the writer happened to emit elements
+    # in). A raw-byte hash calls that drift; `source_digest` must not.
+    boxes = [(0.0, 0.0, 2.0, 1.2), (3.0, 0.0, 5.0, 1.2)]
+    first = _write_boxed_gds(tmp_path / "a.gds", "lib_inv", boxes, order=[0, 1])
+    second = _write_boxed_gds(tmp_path / "b.gds", "lib_inv", boxes, order=[1, 0])
+
+    from klayout_tools._provenance import sha256_file
+
+    assert sha256_file(first) != sha256_file(second), (
+        "fixture is not exercising the case: the two streams are byte-identical"
+    )
+
+    first_block = _compose_one_cell_block(tmp_path, pdk_root, first, "lib_inv", "one")
+    second_block = _compose_one_cell_block(tmp_path, pdk_root, second, "lib_inv", "two")
+
+    assert first_block["source_path"] != second_block["source_path"]
+    assert first_block["source_digest"] == second_block["source_digest"]
+
+
+def test_compose_source_digest_differs_when_the_input_geometry_differs(
+    tmp_path, pdk_root
+):
+    # The other half of the contract: equality has to actually mean something.
+    # One rectangle 0.1um wider is real drift and must show up as a different
+    # digest.
+    first = _write_boxed_gds(tmp_path / "a.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+    second = _write_boxed_gds(tmp_path / "b.gds", "lib_inv", [(0.0, 0.0, 2.1, 1.2)])
+
+    first_block = _compose_one_cell_block(tmp_path, pdk_root, first, "lib_inv", "one")
+    second_block = _compose_one_cell_block(tmp_path, pdk_root, second, "lib_inv", "two")
+
+    assert first_block["source_digest"] != second_block["source_digest"]
+
+
+def test_compose_source_digest_is_null_when_it_cannot_be_computed(
+    tmp_path, pdk_root, monkeypatch
+):
+    # Never fabricated (the `_provenance` convention): a stream that cannot be
+    # digested reports `null` rather than some placeholder a consumer would
+    # compare against.
+    lib = _write_boxed_gds(tmp_path / "lib.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+    monkeypatch.setattr(gen_compose, "layout_geometry_digest", lambda path: None)
+
+    block = _compose_one_cell_block(tmp_path, pdk_root, lib, "lib_inv", "nodigest")
+
+    assert block["source_path"] == lib
+    assert block["source_digest"] is None
