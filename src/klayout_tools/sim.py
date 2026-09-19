@@ -82,7 +82,8 @@ from ._text import line_containing as _line_containing
 from .coverage import (
     REASON_EMPTY_CORNER_MATRIX,
     REASON_UNRECOGNIZED_LIMIT_KEYS,
-    build_nothing_checked,
+    build_check_coverage,
+    work_id,
 )
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
@@ -735,29 +736,10 @@ def run_sim(
     ``measurements[].name`` stays out of scope for this registry -- those
     names are caller-supplied via the request spec, not ``klt``-declared.
 
-    ``coverage`` (issue #1996, the shared convention declared in
-    :mod:`klayout_tools.coverage`) is a second always-present, purely
-    additive object (no ``schema_version`` bump) stating what this
-    ``status`` was graded over::
-
-        "coverage": {
-            "corners_simulated": <int>,
-            "measurements_declared": <int>,
-            "measurements_with_limits": <int>,
-            "unrecognized_limit_keys": [
-                {"measurement": <str>, "keys": [<str>, ...]}, ...
-            ],
-            "nothing_checked": <bool>,
-            "nothing_checked_reasons": [<reason code>, ...]
-        }
-
-    ``nothing_checked`` is ``True`` for the two ways this response can reach
-    ``status: "pass"`` having graded nothing -- an empty corner matrix
-    (``"empty_corner_matrix"``), and a request whose every declared
-    ``measurements[].limits`` object used keys `klt sim` does not apply
-    (``"unrecognized_limit_keys"``; only ``min``/``max`` are read, so a
-    typo'd bound silently passes everything). ``status`` itself is
-    unchanged in both cases. See :func:`_build_coverage`.
+    ``coverage`` preserves the legacy counters alongside common checked-work
+    v1 identities, skips, applicability and unknown execution. Known zero
+    actual checks produces ``not_checked`` unless a real failure/error wins.
+    See :func:`_build_coverage` and ``docs/coverage-contract.md``.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
@@ -1238,6 +1220,7 @@ def run_sim(
                 entry, specs_by_name.get(entry["name"]), plots_by_corner
             )
 
+    coverage = _build_coverage(measurements_spec, corners)
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
     errored = sum(1 for c in corners if c["status"] == "error")
@@ -1253,7 +1236,7 @@ def run_sim(
         # run `fail` (exit 3) rather than being reported and ignored.
         status = "fail"
     else:
-        status = "pass"
+        status = "not_checked" if coverage["nothing_checked"] else "pass"
 
     environment: dict[str, Any] = {
         "engine": engine,
@@ -1349,7 +1332,7 @@ def run_sim(
         # field: an empty corner matrix, or a `limits` object whose keys
         # `klt sim` never applied, both produce `status: "pass"` from a run
         # that checked nothing. See `_build_coverage`.
-        "coverage": _build_coverage(measurements_spec, corners),
+        "coverage": coverage,
         "provenance": build_provenance(
             deck_name=(os.path.basename(models_lib) if models_lib else None),
             deck_path=models_lib,
@@ -3303,35 +3286,60 @@ def _parse_measurements(log_text: str) -> dict[str, float]:
 _RECOGNISED_LIMIT_KEYS = ("min", "max")
 
 
+def _measurement_coverage(
+    spec: dict[str, Any], corner: dict[str, Any], corner_index: int
+) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
+    """Count actual observations or applied bounds, never corner declarations.
+
+    ``corner_index`` (this corner's position in the report's own ``corners``
+    list) scopes every identity built here -- ``corner_id`` alone is a
+    *display* label (e.g. supply voltage rounded to 3 decimals) and distinct
+    corners can legitimately round to the same one, which would otherwise
+    collide as the same "unique" work identity and make
+    :func:`~klayout_tools.coverage.build_check_coverage` reject two genuinely
+    separate checks as a duplicate.
+    """
+    name = spec["name"]
+    identity = work_id("measurement", corner_index, corner["corner_id"], name)
+    limits = spec.get("limits") or {}
+    measurement = next(
+        (m for m in corner.get("measurements", []) if m["name"] == name), {}
+    )
+    measured = measurement.get("value") is not None and measurement.get("status") in {
+        "pass",
+        "fail",
+    }
+    checked = []
+    skipped = []
+    inapplicable = []
+    if not limits:
+        inapplicable.append(
+            {"id": identity + "/limits", "reason": "characterization_without_limits"}
+        )
+        if measured:
+            checked.append(identity + "/observation")
+        else:
+            skipped.append(
+                {"id": identity + "/observation", "reason": "unavailable_measurement"}
+            )
+    for key, value in limits.items():
+        bound_id = work_id("limit", corner_index, corner["corner_id"], name, key)
+        if key not in _RECOGNISED_LIMIT_KEYS:
+            skipped.append({"id": bound_id, "reason": "unrecognized_limit_key"})
+        elif value is None:
+            skipped.append({"id": bound_id, "reason": "missing_limit_value"})
+        elif not measured:
+            skipped.append({"id": bound_id, "reason": "unavailable_measurement"})
+        else:
+            checked.append(bound_id)
+    return checked, skipped, inapplicable
+
+
 def _build_coverage(
     measurements_spec: list[dict[str, Any]],
     corners: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """The shared ``coverage`` block (issue #1996; see
-    :mod:`klayout_tools.coverage`) for one `klt sim` response.
-
-    `klt sim` can report ``status: "pass"`` from a run that graded nothing,
-    in two ways this block makes legible:
-
-    - **An empty corner matrix.** ``corners`` is ``[]``, so
-      ``passed``/``failed``/``errored`` are all ``0`` and the aggregate
-      status falls through to ``"pass"``. Reason
-      ``"empty_corner_matrix"``.
-    - **Limits nobody applied.** ``_evaluate_limits`` reads only ``min`` and
-      ``max``; a measurement declaring ``{"maximum": 1.8}`` (or any other
-      typo) is scored as if it had declared no bound at all, and passes
-      unconditionally. Every offending object is listed in
-      ``unrecognized_limit_keys`` regardless -- a *partial* disclosure, since
-      one typo'd measurement alongside several well-formed ones is still a
-      real gap -- but the run only counts as ``nothing_checked`` when a
-      ``limits`` object was declared somewhere and **no** measurement ended
-      up with a usable bound. Reason ``"unrecognized_limit_keys"``.
-
-    A request that simply declares no ``limits`` at all is *not* flagged: a
-    characterise-and-report sweep deliberately grades nothing, which is a
-    stated intent rather than a silent miss. ``measurements_with_limits``
-    lets a reader draw that distinction themselves.
-    """
+    """Common checked-work v1 plus the existing simulation coverage counters."""
     unrecognized: list[dict[str, Any]] = []
     limits_declared = 0
     measurements_with_limits = 0
@@ -3346,9 +3354,30 @@ def _build_coverage(
         if any(limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS):
             measurements_with_limits += 1
 
-    reasons: list[str] = []
+    checked = []
+    skipped = []
+    inapplicable = []
+    for corner_index, corner in enumerate(corners):
+        if not measurements_spec:
+            skipped.append(
+                {
+                    "id": work_id("corner", corner_index, corner["corner_id"]),
+                    "reason": "no_requested_measurements",
+                }
+            )
+        for spec in measurements_spec:
+            actual, missing, irrelevant = _measurement_coverage(
+                spec, corner, corner_index
+            )
+            checked.extend(actual)
+            skipped.extend(missing)
+            inapplicable.extend(irrelevant)
+    reasons = []
     if not corners:
         reasons.append(REASON_EMPTY_CORNER_MATRIX)
+        skipped.append(
+            {"id": "simulation:corner_matrix", "reason": REASON_EMPTY_CORNER_MATRIX}
+        )
     if limits_declared and not measurements_with_limits and unrecognized:
         reasons.append(REASON_UNRECOGNIZED_LIMIT_KEYS)
 
@@ -3357,7 +3386,12 @@ def _build_coverage(
         "measurements_declared": len(measurements_spec),
         "measurements_with_limits": measurements_with_limits,
         "unrecognized_limit_keys": unrecognized,
-        **build_nothing_checked(reasons),
+        **build_check_coverage(
+            checked=checked,
+            skipped=skipped,
+            inapplicable=inapplicable,
+            nothing_checked_reasons=reasons,
+        ),
     }
 
 

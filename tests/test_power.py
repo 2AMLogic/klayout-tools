@@ -532,10 +532,12 @@ def test_cli_json_contract(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    assert main(["power", str(gds), str(spec), "--format", "json"]) == 0
+    assert main(["power", str(gds), str(spec), "--format", "json"]) == 4
     data = json.loads(capsys.readouterr().out)
 
     assert set(data.keys()) == {
+        "coverage",
+        "status",
         "schema_version",
         "file",
         "spec",
@@ -565,7 +567,7 @@ def test_cli_text_output(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    assert main(["power", str(gds), str(spec)]) == 0
+    assert main(["power", str(gds), str(spec)]) == 4
     out = capsys.readouterr().out
     assert "net VPWR: 2 island(s)" in out
     assert "net VGND: 1 island(s)" in out
@@ -578,7 +580,7 @@ def test_cli_text_output_renders_warnings(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec, power_nets=("VPWR", "NOPE"))
 
-    assert main(["power", str(gds), str(spec)]) == 0
+    assert main(["power", str(gds), str(spec)]) == 4
     out = capsys.readouterr().out
     assert "warnings:" in out
     assert "NOPE" in out
@@ -1238,7 +1240,7 @@ def test_cli_text_output_renders_the_ir_drop_summary(tmp_path, capsys):
         },
     )
 
-    assert main(["power", str(gds), str(spec)]) == 0
+    assert main(["power", str(gds), str(spec)]) == 4
     out = capsys.readouterr().out
     assert "ir drop: 1 instance(s) drawing 1 mA through 1 pad(s)" in out
     assert "worst-case droop: 1 mV at VPWR" in out
@@ -1251,7 +1253,7 @@ def test_cli_text_output_has_no_ir_section_without_a_solve(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    assert main(["power", str(gds), str(spec)]) == 0
+    assert main(["power", str(gds), str(spec)]) == 4
     assert "ir drop:" not in capsys.readouterr().out
 
 
@@ -1270,7 +1272,7 @@ def test_cli_json_ir_drop_map_shape(tmp_path, capsys):
         },
     )
 
-    assert main(["power", str(gds), str(spec), "--format", "json"]) == 0
+    assert main(["power", str(gds), str(spec), "--format", "json"]) == 4
     data = json.loads(capsys.readouterr().out)
 
     ir_drop = data["ir_drop_map"]
@@ -1718,7 +1720,7 @@ def test_cli_text_output_renders_the_em_verdict_summary(tmp_path, capsys):
         current_limit_source="unit-test synthetic limit",
     )
 
-    assert main(["power", str(gds), str(spec)]) == 0
+    assert main(["power", str(gds), str(spec)]) == 3
     out = capsys.readouterr().out
     assert "em verdict: FAIL" in out
     assert "net VPWR: fail" in out
@@ -1731,7 +1733,7 @@ def test_cli_text_output_has_no_em_section_without_a_solve(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    assert main(["power", str(gds), str(spec)]) == 0
+    assert main(["power", str(gds), str(spec)]) == 4
     assert "em verdict:" not in capsys.readouterr().out
 
 

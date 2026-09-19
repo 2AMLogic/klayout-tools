@@ -1426,10 +1426,11 @@ def test_cli_json_contract(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    assert main(["erc", str(gds), str(spec), "--format", "json"]) == 0
+    assert main(["erc", str(gds), str(spec), "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
 
     assert set(data.keys()) == {
+        "coverage",
         "schema_version",
         "file",
         "spec",
@@ -1453,7 +1454,7 @@ def test_cli_text_output(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    assert main(["erc", str(gds), str(spec)]) == 0
+    assert main(["erc", str(gds), str(spec)]) == 3
     out = capsys.readouterr().out
     assert "gates: 2" in out
     assert "GATE_A" in out
@@ -1467,7 +1468,7 @@ def test_cli_pdk_json_contract(tmp_path, capsys):
     _basic_spec(spec)
 
     assert (
-        main(["erc", str(gds), str(spec), "--pdk", "sky130", "--format", "json"]) == 0
+        main(["erc", str(gds), str(spec), "--pdk", "sky130", "--format", "json"]) == 3
     )
     data = json.loads(capsys.readouterr().out)
 
@@ -1484,7 +1485,7 @@ def test_cli_pdk_text_output(tmp_path, capsys):
     _basic_fixture(gds)
     _basic_spec(spec)
 
-    assert main(["erc", str(gds), str(spec), "--pdk", "sky130"]) == 0
+    assert main(["erc", str(gds), str(spec), "--pdk", "sky130"]) == 3
     out = capsys.readouterr().out
     assert "pdk: sky130" in out
     assert "antenna_verdict=" in out
@@ -1497,7 +1498,7 @@ def test_cli_text_output_prints_remedy_for_violating_level(tmp_path, capsys):
     _basic_spec(spec)
     _antenna_fixture(gds, li1_um2=80.0)
 
-    assert main(["erc", str(gds), str(spec), "--pdk", "sky130"]) == 0
+    assert main(["erc", str(gds), str(spec), "--pdk", "sky130"]) == 3
     out = capsys.readouterr().out
     assert "verdict=violate" in out
     assert "remedy: layer_jumping -> met1" in out
@@ -1510,7 +1511,7 @@ def test_cli_json_contract_includes_remedy_field(tmp_path, capsys):
     _antenna_fixture(gds, li1_um2=80.0)
 
     assert (
-        main(["erc", str(gds), str(spec), "--pdk", "sky130", "--format", "json"]) == 0
+        main(["erc", str(gds), str(spec), "--pdk", "sky130", "--format", "json"]) == 3
     )
     data = json.loads(capsys.readouterr().out)
     li1_level = next(lvl for lvl in data["gates"][0]["levels"] if lvl["layer"] == "li1")

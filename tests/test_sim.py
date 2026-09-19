@@ -1039,9 +1039,7 @@ def test_evaluate_limits_pass_min_only():
 
 
 def test_build_coverage_empty_corner_matrix_reports_nothing_checked():
-    """A corner matrix that expanded to zero corners leaves every counter at
-    `0`, so the aggregate verdict falls through to `"pass"` -- a verdict
-    about nothing at all. The envelope now says so in a field."""
+    """An empty corner matrix reports known zero actual measurements."""
     coverage = sim._build_coverage([{"name": "vout", "limits": {"max": 1.8}}], [])
 
     assert coverage["corners_simulated"] == 0
@@ -1075,7 +1073,15 @@ def test_build_coverage_one_typo_beside_a_real_limit_is_partial_not_vacuous():
             {"name": "vout", "limits": {"maximum": 1.8}},
             {"name": "gain", "limits": {"min": 20.0}},
         ],
-        [{"corner_id": "tt/1.800V/27C"}],
+        [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [
+                    {"name": "vout", "value": 1.7, "status": "pass"},
+                    {"name": "gain", "value": 21, "status": "pass"},
+                ],
+            }
+        ],
     )
 
     assert coverage["measurements_with_limits"] == 1
@@ -1090,7 +1096,18 @@ def test_build_coverage_a_characterisation_sweep_is_not_flagged():
     """Declaring no `limits` at all is a stated intent (characterise and
     report), not a silent miss -- `measurements_with_limits` lets a reader
     draw that distinction without the run being called vacuous."""
-    coverage = sim._build_coverage([{"name": "vout"}], [{"corner_id": "tt/1.800V/27C"}])
+    coverage = sim._build_coverage(
+        [{"name": "vout"}],
+        [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [
+                    {"name": "vout", "value": 1.7, "status": "pass"},
+                    {"name": "gain", "value": 21, "status": "pass"},
+                ],
+            }
+        ],
+    )
 
     assert coverage["measurements_declared"] == 1
     assert coverage["measurements_with_limits"] == 0
@@ -1115,10 +1132,33 @@ def test_build_coverage_a_real_graded_run_is_not_nothing_checked():
     """The control: real corners, a recognised bound -- an earned verdict."""
     coverage = sim._build_coverage(
         [{"name": "vout", "limits": {"min": 1.6, "max": 1.8}}],
-        [{"corner_id": "tt/1.800V/27C"}, {"corner_id": "ss/1.620V/-40C"}],
+        [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [
+                    {"name": "vout", "value": 1.7, "status": "pass"},
+                    {"name": "gain", "value": 21, "status": "pass"},
+                ],
+            },
+            {
+                "corner_id": "ss/1.620V/-40C",
+                "measurements": [{"name": "vout", "value": 1.7, "status": "pass"}],
+            },
+        ],
     )
 
     assert coverage == {
+        "schema_version": 1,
+        "known": True,
+        "checked": [
+            'limit:[0,"tt/1.800V/27C","vout","max"]',
+            'limit:[0,"tt/1.800V/27C","vout","min"]',
+            'limit:[1,"ss/1.620V/-40C","vout","max"]',
+            'limit:[1,"ss/1.620V/-40C","vout","min"]',
+        ],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
         "corners_simulated": 2,
         "measurements_declared": 1,
         "measurements_with_limits": 1,
@@ -1409,7 +1449,7 @@ def test_run_sim_stubbed_implausible_timeout_surfaces_preflight_warning(
     assert "options.timeout_s" in warning
     # Advisory only -- never blocks the sweep; the stubbed corner still runs
     # and passes normally.
-    assert report["status"] == "pass"
+    assert report["status"] == "not_checked"
 
 
 def test_run_sim_stubbed_plausible_timeout_omits_preflight_warning(
@@ -1765,7 +1805,7 @@ def test_run_sim_fail_fast_probe_disabled_by_default_never_runs(tmp_path, monkey
     report = sim.run_sim(str(request))
 
     assert probe_calls == []
-    assert report["status"] == "pass"
+    assert report["status"] == "not_checked"
     assert "fail_fast_probe" not in report["environment"]
 
 
@@ -1868,7 +1908,7 @@ def test_run_sim_fail_fast_probe_no_abort_leaves_normal_path_unaffected(
 
     report = sim.run_sim(str(request))
 
-    assert report["status"] == "pass"
+    assert report["status"] == "not_checked"
     assert [c["status"] for c in report["corners"]] == ["pass", "pass"]
     assert report["environment"]["fail_fast_probe"]["abort"] is False
 
@@ -1986,7 +2026,7 @@ def test_run_sim_stubbed_netlist_source_absent_omits_environment_key(
     report = sim.run_sim(str(request))
 
     assert "netlist_source" not in report["environment"]
-    assert report["status"] == "pass"
+    assert report["status"] == "not_checked"
 
 
 def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):
@@ -3285,7 +3325,7 @@ def test_run_sim_budget_not_exceeded_is_unreported(tmp_path, monkeypatch):
     budget = report["environment"]["budget"]
     assert budget["exceeded"] is False
     assert budget["corners_skipped"] == 0
-    assert report["status"] == "pass"
+    assert report["status"] == "not_checked"
 
 
 def test_run_sim_omitting_budget_leaves_environment_unchanged(tmp_path, monkeypatch):
@@ -3414,7 +3454,7 @@ def test_run_sim_resume_persists_and_skips_completed_corners(tmp_path, monkeypat
     request_path.write_text(json.dumps(request_doc))
 
     second = sim.run_sim(str(request_path))
-    assert second["status"] == "pass"
+    assert second["status"] == "not_checked"
     assert [c["status"] for c in second["corners"]] == ["pass", "pass", "pass"]
     assert run_calls == [10, 20, 30]  # the completed corner was never re-run
     assert second["environment"]["resume"]["resumed_corners"] == 1
@@ -4380,7 +4420,7 @@ def test_run_sim_bundle_process_corner_writes_one_lib_per_section(
 
     report = sim.run_sim(str(request), artifacts_dir=str(artifacts_dir))
 
-    assert report["status"] == "pass"
+    assert report["status"] == "not_checked"
     by_process = {c["process"]: c for c in report["corners"]}
     assert set(by_process) == {"tt", "ss"}
 
@@ -5231,6 +5271,12 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "corners",
     }
     assert set(data["coverage"].keys()) == {
+        "schema_version",
+        "known",
+        "checked",
+        "skipped",
+        "inapplicable",
+        "unknown",
         "corners_simulated",
         "measurements_declared",
         "measurements_with_limits",
@@ -5275,7 +5321,7 @@ def test_cli_default_format_is_text(tmp_path, monkeypatch, capsys):
 
     exit_code = main(["sim", str(request)])
 
-    assert exit_code == 0
+    assert exit_code == 4
     out = capsys.readouterr().out
     assert "netlist:" in out
     with pytest.raises(json.JSONDecodeError):

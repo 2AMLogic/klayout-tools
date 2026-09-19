@@ -606,16 +606,34 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
 | `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
-| `status`         | string          | (issue #1968) `"clean"` only when `erc_finding_count == 0` **and** no `gates[].levels[].verdict` is `"violate"`; otherwise `"violations"` — a roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict. |
+| `status`         | string          | (issue #1968) `"violations"` if any connectivity/antenna finding exists; otherwise `"not_checked"` if no antenna level was graded, else `"clean"` — a roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
+
+## Checked-work coverage
+
+The [common v1 coverage contract](../coverage-contract.md) is additive to
+this command's existing envelope.
+
+`coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
+actually compared against a limit. Missing PDK or level limits are skipped;
+the gate reference level is inapplicable. Structural connectivity findings
+remain independent. Any finding/antenna violation yields `violations` and
+exit 3; otherwise zero graded antenna levels yields `not_checked` and exit
+4. Checked clean runs exit 0. Existing per-gate partial verdicts are retained;
+Phase 2 owns the overall partial policy.
+
+Completed refusal/failure reports remain on stdout; actual invocation errors
+retain exit 1 and the stderr error envelope.
 
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
-| `0`       | Success — at least one gate net was found and reported. This is unaffected by `erc_findings`: a `0` exit with a non-empty `erc_findings` array means the run *completed* successfully, not that the layout is ERC-clean — check `erc_finding_count` (matching `klt drc`'s own "clean run" vs. "found violations" distinction). |
+| `0` | At least one antenna level was graded, with no antenna or connectivity finding. |
 | `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
+| `3` | Antenna or connectivity violations. |
+| `4` | No actual antenna checks; `status: "not_checked"`. |
 
 ## Cross-checked against klayout's own built-in antenna engine
 

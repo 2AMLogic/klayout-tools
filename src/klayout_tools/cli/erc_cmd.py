@@ -5,11 +5,13 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/erc.md`` for the full table):
-    0 - extraction succeeded, at least one gate net was found
+    0 - at least one antenna level graded, no antenna/connectivity finding
     1 - failed to run (bad file/spec, malformed stackup/via declaration,
         unknown --pdk, ambiguous top cell, or no net carries any gate-role
         geometry at all) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
+    3 - an actual finding/limit failure
+    4 - no relevant checks (not_checked)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand.)
 """
@@ -27,7 +29,7 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("erc", str(exc), args.format)
 
     emit_success(report, args.format, _print_text)
-    return 0
+    return {"clean": 0, "violations": 3, "not_checked": 4}[report["status"]]
 
 
 def _print_text(report: dict) -> None:

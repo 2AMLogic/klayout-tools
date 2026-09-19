@@ -91,7 +91,9 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
 
-    return EXIT_VIOLATIONS if report["status"] == "violations" else EXIT_CLEAN
+    if report["status"] == "violations":
+        return EXIT_VIOLATIONS
+    return EXIT_CLEAN if report["status"] == "clean" else 4
 
 
 def _run_check(args: argparse.Namespace) -> int:

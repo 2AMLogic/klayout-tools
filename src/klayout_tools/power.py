@@ -89,6 +89,7 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
+from .coverage import build_check_coverage, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
 
 if TYPE_CHECKING:
@@ -1023,6 +1024,44 @@ def _round_or_none(
     return None if value is None else round(value * scale, digits)
 
 
+def _em_coverage(
+    networks: list[dict[str, Any]], ir_drop_map: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Track every extracted edge against its own solved current and limit."""
+    currents = {
+        (net["net"], island["island_id"], edge["id"]): edge["current_a"]
+        for net in (ir_drop_map or {}).get("nets", [])
+        for island in net["islands"]
+        for edge in island["edges"]
+    }
+    checked = []
+    skipped = []
+    inapplicable = []
+    for net in networks:
+        for island in net["islands"]:
+            for edge in island["edges"]:
+                key = (net["net"], island["island_id"], edge["id"])
+                identity = work_id("em", *key)
+                if ir_drop_map is None:
+                    inapplicable.append(
+                        {"id": identity, "reason": "no_current_solve_requested"}
+                    )
+                elif edge["current_limit_a"] is None:
+                    skipped.append({"id": identity, "reason": "missing_current_limit"})
+                elif currents.get(key) is None:
+                    skipped.append(
+                        {"id": identity, "reason": "unavailable_branch_current"}
+                    )
+                else:
+                    checked.append(identity)
+    return {
+        "scope": "electromigration",
+        **build_check_coverage(
+            checked=checked, skipped=skipped, inapplicable=inapplicable
+        ),
+    }
+
+
 def _compute_em_verdict(
     networks: list[dict[str, Any]], ir_drop_map: dict[str, Any] | None
 ) -> dict[str, Any] | None:
@@ -1389,6 +1428,7 @@ def run_power(
     # from this same `ir_drop_map`'s per-segment currents (`None` when there
     # was no solve at all -- see `_compute_em_verdict`'s own docstring).
     em_verdict = _compute_em_verdict(networks, ir_drop_map)
+    coverage = _em_coverage(networks, ir_drop_map)
     if em_verdict and em_verdict["fail_count"]:
         warnings.append(
             f"{em_verdict['fail_count']} of {em_verdict['checked_edge_count']} "
@@ -1408,5 +1448,7 @@ def run_power(
         "ir_drop_map": ir_drop_map,
         "worst_case_droop_mv": worst_case_droop_mv,
         "em_verdict": em_verdict,
+        "status": em_verdict["status"] if em_verdict else "not_checked",
+        "coverage": coverage,
         "warnings": warnings,
     }

@@ -295,25 +295,18 @@ real open_pdks install never pays for the extra probe.
   engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
   whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
   clean error rather than a silently-ignored request.
-- **A deck that gates rules behind globals beyond `input`/`report` checks
-  nothing unless you pass them via `--deck-var` — and now says so.** See
-  `--deck-var NAME=VALUE` above: without it, a deck assembled around
-  FEOL/BEOL enable flags or a metal-stack selector this invocation never sets
-  produces a well-formed, empty `.lyrdb` report and a `"status": "clean"`
-  verdict (issue #1302). That `"clean"` is unchanged, but it is no longer
-  *indistinguishable* from a genuinely clean layout: the report declares no
-  rule categories at all, so `coverage.rules_checked` is empty and
-  `coverage.nothing_checked` is `true` with reason `"deck_reported_no_rules"`
-  (issue #1996, see [`coverage.nothing_checked`](#coveragenothing_checked)).
-- **Partial `coverage` population.** Unlike the curated engine's declarative
-  `DrcRule` table, an external deck's rule set is opaque to `klt drc` — the
-  layer-level `coverage` sub-fields (`deck_layers`, `layers_checked`,
-  `layers_in_stream_without_rules`, `rules_skipped`, `voltage_domain_warnings`,
-  `deck_scope`) are all empty lists for this engine, never fabricated. Two
-  sub-fields *are* populated (issue #1996): `rules_checked` (the rule
-  categories the deck's own RDB report declares — the only "which rules ran"
-  evidence such a report carries) and the `nothing_checked` roll-up derived
-  from it.
+- **External rule execution is unknown without instrumentation.** A deck
+  gated by `--deck-var` can produce an empty RDB, but neither an empty report
+  nor nonempty category declarations proves which checks executed. DRC v2
+  preserves declarations as `coverage.rule_categories`; `rules_checked`
+  contains only rules with actual findings. `coverage.known` is false and
+  `unknown` names `unmeasured_rule_execution`. No findings means
+  `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Partial layer coverage information.** External scripts are opaque to
+  the curated rule table, so layer/deck-specific legacy coverage arrays
+  remain empty. They do not claim that nothing or everything was checked.
+  See the [common coverage contract](../coverage-contract.md).
+
 - **`check` is always `"external"` and `layer` echoes the rule id.** An RDB
   report's `<category>` has no structured `width`/`space`/... check-kind
   identity or separate layer name the way this repo's own `DrcRule` does —
@@ -1226,7 +1219,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "design.gds",
   "deck": "sky130",
   "dbu_um": 0.001,
@@ -1236,6 +1229,15 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "metrics": { "drc__error__count": 0 },
   "violations": [],
   "coverage": {
+    "schema_version": 1,
+    "known": true,
+    "checked": ["poly.space.1", "poly.width.1"],
+    "skipped": [
+      {"id": "metal1.space.1", "reason": "absent_input_layer"},
+      {"id": "metal1.width.1", "reason": "absent_input_layer"}
+    ],
+    "inapplicable": [],
+    "unknown": [],
     "deck_layers": ["22/0", "30/0", "33/0", "34/0"],
     "layers_checked": ["22/0", "30/0"],
     "rules_checked": ["poly.space.1", "poly.width.1"],
@@ -1269,7 +1271,7 @@ On a run with findings:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "design.gds",
   "deck": "sky130",
   "dbu_um": 0.001,
@@ -1291,6 +1293,15 @@ On a run with findings:
     }
   ],
   "coverage": {
+    "schema_version": 1,
+    "known": true,
+    "checked": ["poly.space.1", "poly.width.1"],
+    "skipped": [
+      {"id": "metal1.space.1", "reason": "absent_input_layer"},
+      {"id": "metal1.width.1", "reason": "absent_input_layer"}
+    ],
+    "inapplicable": [],
+    "unknown": [],
     "deck_layers": ["65/20", "66/20", "66/44", "68/20"],
     "layers_checked": ["65/20", "66/20", "66/44"],
     "rules_checked": ["licon.width.1", "m1.width.1", "poly.width.1"],
@@ -1308,13 +1319,13 @@ On a run with findings:
 
 | Field             | Type                     | Description                                                             |
 | ----------------- | ------------------------ | ------------------------------------------------------------------------ |
-| `schema_version`  | integer                  | Version of this command's JSON shape (starts at `1`; per-command).       |
+| `schema_version`  | integer                  | Version of this command's JSON shape (`2`; per-command).       |
 | `file`            | string                   | The input path exactly as provided on the command line.                  |
 | `deck`            | string                   | `--engine curated`: the deck name used (`"sky130"` or `"gf180mcu"`). `--engine klayout`: the resolved/given deck script's own path (no separate short name exists for an arbitrary PDK-native script). |
 | `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
 | `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
-| `status`          | `"clean"` \| `"violations"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
+| `status`          | `"clean"` \| `"violations"` \| `"not_checked"` \| `"coverage_unknown"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
@@ -1362,23 +1373,24 @@ builds regardless of the engine's internal shape-enumeration order.
 
 ### `coverage`
 
-Additive field (see [`docs/json-contract.md`](../json-contract.md) — no
-`schema_version` bump): what the run actually checked, distinct from what it
-found. `status: "clean"` alone cannot tell a consumer apart "genuinely
-checked and passed" from "the deck had no rules for anything this layout
-draws" — `coverage` closes that gap. `status`'s own two-value contract
-(`"clean"` / `"violations"`) is unchanged; a non-empty
-`layers_in_stream_without_rules` does not change `status`.
+The [common v1 coverage fields](../coverage-contract.md) accompany the
+verb-specific fields below. New DRC reports use envelope `schema_version: 2`
+because external `rules_checked` now denotes proven checks, not declared
+categories. Known zero curated work becomes `not_checked` (exit 4);
+unknown external execution becomes `coverage_unknown` (exit 4). Actual
+violations take precedence. Partial curated work retains its existing
+`clean`/`violations` semantics pending the Phase 2 policy.
 
 | Field                             | Type            | Description                                                                 |
 | ---------------------------------- | --------------- | ----------------------------------------------------------------------------- |
 | `deck_layers`                      | array\<string\> | Every `"<layer>/<datatype>"` the selected deck's rules reference — a static property of the deck, independent of the input stream. Sorted ascending by `(layer, datatype)`. |
 | `layers_checked`                   | array\<string\> | The subset of `deck_layers` actually present in this stream (i.e. found via `Layout.find_layer(...)`), matching what the per-rule check loop actually ran against. Sorted ascending by `(layer, datatype)`. |
-| `rules_checked`                    | array\<string\> | The complement of `rules_skipped` (issue #1996): rule ids that actually ran against real geometry. `--engine curated`: `rules_checked` and `rules_skipped` partition the deck — every rule is in exactly one. `--engine klayout`: the rule categories the deck's own RDB report declares (see "Engine" → `"klayout"`). Sorted alphabetically. |
+| `rules_checked`                    | array\<string\> | The complement of `rules_skipped` (issue #1996): rule ids that actually ran against real geometry. `--engine curated`: `rules_checked` and `rules_skipped` partition the deck — every rule is in exactly one. `--engine klayout`: only rule IDs with actual findings; declarations are retained separately as `rule_categories`. Sorted alphabetically. |
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
+| `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
 | `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
 | `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
 
@@ -1391,34 +1403,19 @@ semantics.
 
 #### `coverage.nothing_checked`
 
-Additive fields (issue #1996, no `schema_version` bump), implementing the
-shared vacuous-verdict convention defined once in
-[`../json-contract.md`](../json-contract.md) — `klt sim` and `klt pex` emit
-the same two keys for their own equivalents.
+Common coverage v1 requires `nothing_checked == (known && checked == [])`.
+The curated engine retains the reasons `deck_has_no_rules` and
+`all_rules_skipped`; both now produce `not_checked`/4 rather than `clean`/0.
+Missing input layers are named per rule in `skipped` with reason
+`absent_input_layer`. Rules that execute and find no violations still count
+as checked. Partial coverage is not zero coverage.
 
-`nothing_checked` is `true` exactly when this run checked **nothing**, so its
-`"clean"` verdict is vacuously true rather than earned. Three ways that
-happens, one reason code each:
-
-| Reason code               | Engine   | Meaning |
-| ------------------------- | -------- | ------- |
-| `deck_has_no_rules`       | curated  | The selected deck declares no rules at all (a degenerate/empty deck) — there was never anything to run. |
-| `all_rules_skipped`       | curated  | The deck declares rules, but every one was skipped because its input layer(s) are absent from this stream — the case `rules_skipped` already enumerates, rolled up. Typical of an empty or wrong-PDK layout. |
-| `deck_reported_no_rules`  | klayout  | The PDK-native deck script ran to completion, but its own report declares no rule categories — it never reached a single `output(...)` call. The common cause is a deck gating its whole rule set behind a `--deck-var` this invocation never set (see "Engine" → `"klayout"`). |
-
-**`status` is unchanged.** A run with `nothing_checked: true` still reports
-`"clean"` — exactly as it did before this field existed. The field makes the
-emptiness *legible*; it does not restate the verdict.
-
-`nothing_checked` is never a synonym for partial coverage. A run that checked
-one rule out of eighty reports `false`: the eighty-minus-one gap is what
-`rules_skipped` and `layers_in_stream_without_rules` above are for.
-
-[`klt signoff`](signoff.md) consumes this: a DRC envelope reporting
-`nothing_checked: true` never counts as a passing check, and never backs a
-`"met"` item 3 citation (reason `nothing_checked`). For the KLayout engine,
-the actionable fix is almost always to re-run with the deck's own enable
-flags, e.g. `--deck-var feol=true --deck-var beol=true`.
+The external KLayout engine reports `known=false`, an explicit unknown
+execution record and `nothing_checked=false`. The legacy
+`deck_reported_no_rules` reason remains readable in old reports but is no
+longer emitted: categories alone never establish execution coverage.
+`klt signoff` refuses both known-zero and unknown coverage. Changing deck
+enable flags does not provide the missing execution instrumentation.
 
 #### `coverage.voltage_domain_warnings`
 
@@ -1726,9 +1723,12 @@ methodology, the measured results, and the declared shared surface.
 
 ## Exit codes
 
+Known zero or unknown execution returns the completed report on stdout with
+exit `4`; real violations retain exit `3`.
+
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
-| `0`  | Ran clean — no violations. Under `--check`: the committed report still holds (`status: "match"`). |
+| `0`  | At least one curated rule ran, with no violations. Under `--check`: the committed report still holds (`status: "match"`). |
 | `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`). Under `--check`: a missing/unparseable committed report. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Ran successfully, violations found. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
