@@ -110,6 +110,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   Existing coverage fields and verb-specific partial behavior remain;
   [the compatibility mapping](docs/coverage-contract.md) lists migration
   details and the remaining Phase 2 adapters.
+- **Added**: explicit per-family decisions for eight PDK capabilities and a
+  normal-CI check against their live registries/support gates (issue #2132).
+  Missing registrations now fail the invariant with contextual diagnostics;
+  intentional unsupported capabilities require reasons. Registered coefficient-free
+  parasitics remain distinct from missing decks. Existing sparse defaults,
+  support restrictions, coefficients, and CLI/JSON behavior are unchanged.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
