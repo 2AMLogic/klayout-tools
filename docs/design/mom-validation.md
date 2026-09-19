@@ -415,58 +415,66 @@ mutual-term bundle-averaging approximation and the asymptote's own
 ### 5. Generalized filament-pair formula (issue #1842): a spiral fixture
 
 [#1842](https://github.com/2AMLogic/klayout-tools/issues/1842)'s stated
-validation oracle is "FastHenry on a spiral fixture (2-3 turns) — a simple
+validation oracle was "FastHenry on a spiral fixture (2-3 turns) — a simple
 2-3 turn square or octagonal spiral with known FastHenry-computed
-inductance", since FastHenry is the standard reference filament-based PEEC
-extractor for exactly this geometry class. **That oracle was not run for
-this increment, and the fixture below does not stand in for it** — the
-acceptance criterion is tracked as still-open in
-[#1886](https://github.com/2AMLogic/klayout-tools/issues/1886), not closed
-by this section.
+inductance", since FastHenry is the classical reference filament-based PEEC
+extractor for exactly this geometry class. **FastHenry is not that oracle,
+and never will be** — the operator ruling on
+[#1886](https://github.com/2AMLogic/klayout-tools/issues/1886) (2026-09-18)
+resolved the licensing question
+[`em-field-sim-spike.md`](em-field-sim-spike.md) had recorded as open, and it
+resolved against FastHenry on two independent grounds:
 
-FastHenry *is* packaged for Debian/Ubuntu (`apt-get install fasthenry`), so
-the binary is installable in CI, exactly as this repo already installs other
-external oracles and simulators there rather than in a builder sandbox: the
-*"Install the external NEC2++ oracle and run the cross-validation test"*
-step on `.github/workflows/ci.yml`'s mom leg
-([`mom-cross-validation.md`](mom-cross-validation.md)), and
-`scripts/ci-apt-install.sh ngspice` in the Python test job. What blocked it
-*here* is narrower, and only applies to the environment this increment was
-developed in: the builder sandbox has no network access to install or build
-FastHenry, and inventing a specific "FastHenry says X nH" number from memory
-is exactly the "don't transcribe... without independent verification"
-discipline (#797/#836, "Why re-derived, not cited" above) this codebase
-already refuses to apply to closed-form coefficients; the same refusal
-applies to an external tool's output. Wiring an apt-installed FastHenry into
-the mom CI leg — emitting a `.inp` deck for this same fixture, running the
-binary, parsing `Zc.mat` — is a self-contained piece of work in its own
-right, and is tracked as #1886; that work should also settle the licensing
-question [`em-field-sim-spike.md`](em-field-sim-spike.md) records as
-unresolved for the FastHenry/FastCap codebases (a weaker question for
-invoking a distro-packaged binary as a subprocess oracle, as this repo
-already does for PyNEC, than for taking on the code as a dependency — but
-not one the packaging alone answers).
+1. **Unpackaged.** There is no `fasthenry` package in Debian/Ubuntu (`apt-get
+   install fasthenry` → "No such package"), Homebrew, or PyPI. The earlier
+   claim in this section that it "*is* packaged for Debian/Ubuntu" was
+   wrong; CI would have had to build the sources itself.
+2. **Not open source.** Those sources carry MIT RLE's 1990s research notice
+   rather than an OSI license — present in FastHenry's own core
+   (`src/fasthenry/induct.h`, `mulGlobal.h`) and in the FastCap-derived
+   `zbuf/` code in every mirror (`ediloren/FastHenry2`,
+   `ediloren/FastCap2`, and the `fasthenry-3.0wr` tarball inside
+   `wrcad/xictools`, whose Apache-2.0 wrapper explicitly does not override
+   inherited terms):
 
-Instead, `native/mom/src/peec.rs`'s
-`square_spiral_inductance_matches_independent_filament_oracle` validates the
-new capability against **the same method FastHenry uses** — filament-based
-PEEC with Grover's general filament-pair formula — via a from-scratch,
-independent second implementation that shares no code with
-`native/mom/src/peec.rs`'s production path: each spiral segment reduced to a
-single centreline filament (no cross-section bundle averaging), Rosa's
-closed-form self term (the same independent oracle §1 above already uses),
-and `brute_force_mutual_geom_um`'s 2-D Gauss-Legendre quadrature (not
-`mutual_geom_um`/`skew_antiderivative`) for every segment pair's mutual
-term. This is a genuine independent cross-check of the new physics (a real
-spiral corner turns axes; a real spiral's non-adjacent turns are parallel
-but offset and unequal in length — exactly what #1842 unlocks), even though
-it is not literally the FastHenry binary. It is a cross-check of the new
-physics, **not** a substitute for the named oracle: literal FastHenry
-cross-validation stays an open gap, tracked by
-[#1886](https://github.com/2AMLogic/klayout-tools/issues/1886) (see "What is
-not validated here" below, and
-[#895](https://github.com/2AMLogic/klayout-tools/issues/895) for the
-full-wave sweep's identical gap).
+   > Permission to use, copy and modify for internal, noncommercial purposes
+   > is hereby granted. Any distribution of this program or any part thereof
+   > is strictly prohibited without prior written consent of M.I.T. […]
+   > LICENSEE agrees not to make any copies except for LICENSEE'S internal
+   > noncommercial use.
+
+   The distribution clause forecloses not just vendoring but any future
+   clean port of the code, so FastHenry is out permanently: **never a
+   dependency, never an oracle, never ported.**
+
+The criterion is instead closed out against
+**[PyPEEC](https://github.com/otvam/pypeec)** (Dartmouth College, MPL-2.0,
+JOSS [10.21105/joss.06644](https://doi.org/10.21105/joss.06644)) — the
+modern, permissively-licensed solver in the same method class: 3-D
+quasi-magnetostatic PEEC with an FFT-accelerated dense operator, extracting
+terminal R/L from a voxelised geometry. Two independent checks now cover this
+fixture:
+
+- **In-repo, Rust**: `native/mom/src/peec.rs`'s
+  `square_spiral_inductance_matches_independent_filament_oracle` validates
+  the new capability against **the same method** — filament-based PEEC with
+  Grover's general filament-pair formula — via a from-scratch second
+  implementation that shares no code with `native/mom/src/peec.rs`'s
+  production path: each spiral segment reduced to a single centreline
+  filament (no cross-section bundle averaging), Rosa's closed-form self term
+  (the same independent oracle §1 above already uses), and
+  `brute_force_mutual_geom_um`'s 2-D Gauss-Legendre quadrature (not
+  `mutual_geom_um`/`skew_antiderivative`) for every segment pair's mutual
+  term. It is a genuine cross-check of the new physics (a real spiral corner
+  turns axes; a real spiral's non-adjacent turns are parallel but offset and
+  unequal in length — exactly what #1842 unlocks), but it is still this
+  repo's own code, in the same language, by the same author.
+- **External, Python**: `tests/test_mom_pypeec_cross_validation.py` +
+  `scripts/mom_pypeec_reference.py` run PyPEEC on the same fixture in CI and
+  compare — the genuinely-external check, with no correlated failure mode.
+  See [`mom-cross-validation.md`](mom-cross-validation.md)'s "The spiral
+  fixture's oracle" section for the methodology, and the measured numbers
+  below.
 
 Fixture: a 2-turn square spiral (8 segments), starting side 60 µm, 15 µm
 pitch growth per turn, 2×2 µm cross-section, `filament_size_um = 1.0`
@@ -491,12 +499,74 @@ the residual is expected (the oracle's single-filament-per-segment
 approximation skips the cross-section bundle averaging the production path
 does).
 
-Unlike the rest of this "Inductance/resistance" section, this fixture's
-executable form is a **Rust** unit test (there is no Python-level
-equivalent yet) — re-run `cargo test -p klt-mom-native
-square_spiral_inductance -- --nocapture` from `native/mom` to reprint the
-number above, not the `pytest tests/test_mom_peec_validation.py` command
-this document's introduction gives for the rest of this section.
+That fixture's executable form is a **Rust** unit test — re-run `cargo test
+-p klt-mom-native square_spiral_inductance -- --nocapture` from `native/mom`
+to reprint the numbers above, not the `pytest
+tests/test_mom_peec_validation.py` command this document's introduction gives
+for the rest of this section.
+
+#### The external PyPEEC comparison (issue #1886)
+
+`tests/test_mom_pypeec_cross_validation.py` runs the same spiral through
+`klt mom`'s Python entry point (`run_mom`, so the whole `klt mom` stack, not
+just the Rust inductance kernel) and through PyPEEC as a subprocess, at
+`voxel_pitch_um = 1.0` (2 voxels across the bar, 2 through it) and 100 MHz:
+
+| quantity | klt mom PEEC | PyPEEC (external oracle) | rel. error |
+| -------- | ------------ | ------------------------ | ---------- |
+| total inductance | 0.637886 nH (32 filaments) | 0.635732 nH (2640 conductor voxels of 22684) | 0.339%     |
+| DC resistance    | 2.887500 Ω                 | 2.865452 Ω                                   | 0.769%     |
+
+**Stated tolerance**: 2% on the inductance (measured: 0.339%) — the same band
+the Rust fixture states against its in-repo oracle, and for the same reason:
+each solver carries its own discretisation error and the two budgets can add
+rather than cancel. The resistance is a secondary metric with a deliberately
+loose 10% band (measured: 0.769%): the two solvers model the **corners**
+differently — `klt mom` reports the exact 1-D bar resistance summed over the
+eight legs (`ρ · 660 µm / 4 µm²` = 2.8875 Ω, current strictly along each
+leg's own axis) while PyPEEC solves the real 3-D distribution, in which the
+current cuts each corner diagonally and so travels slightly less than the
+full centreline length, which is why PyPEEC's value sits just below.
+
+Two conditions were measured rather than assumed, since the comparison is
+only meaningful if both hold:
+
+- **Frequency independence** (the quasi-DC regime both solvers model — copper's
+  skin depth at 100 MHz is ~6.6 µm, over 3× the bar's largest cross-sectional
+  dimension): PyPEEC reports 0.635732 nH at 10 MHz, 0.635732 nH at 100 MHz,
+  and 0.635730 nH at 500 MHz.
+- **Convergence under voxel refinement**: halving the voxel pitch to 0.5 µm
+  (21120 conductor voxels of 181472, ~9 s and ~230 MB vs. ~2 s at 1.0 µm)
+  moves PyPEEC's answer to 0.636108 nH — +0.059%, i.e. *toward* `klt mom`'s
+  value, and an order of magnitude inside the stated tolerance. CI uses the
+  1.0 µm mesh.
+
+The `klt mom` number here (0.637886 nH) differs slightly from the Rust
+fixture's (0.637718 nH) because the two fixtures handle corner metal
+differently, and deliberately so. The Rust fixture lets adjacent segment
+boxes **overlap** by one 2×2 µm square at each corner (harmless there: it
+calls the inductance path directly). The Python fixture cannot — it goes
+through the full `run_mom`, whose capacitance solver rejects intersecting
+conductors outright (coincident boundary panels make the
+potential-coefficient matrix singular, and `klt mom` detects that and errors
+rather than returning nonsense). Its eight boxes therefore **tile** the
+trace: each end that meets another leg is pushed forward by half a width
+along its own direction, so every corner square belongs to exactly one leg.
+`scripts/mom_pypeec_reference.py` builds PyPEEC's voxel geometry from the
+identical rule, independently implemented, so both solvers in *this*
+comparison see exactly the same metal.
+
+Re-run it with:
+
+```bash
+uv sync --extra dev --group mom --extra mom-pypeec-cross-validation
+uv run --extra dev --group mom --extra mom-pypeec-cross-validation \
+  pytest tests/test_mom_pypeec_cross_validation.py -v --capture=tee-sys
+```
+
+The test skips with an explicit reason when `pypeec` is not installed, and
+`.github/workflows/ci.yml`'s mom leg carries a matching "no silent skip"
+assertion step so a skip can never be the only thing CI sees.
 
 ## Full-wave frequency sweep
 
@@ -605,14 +675,14 @@ discussion frames the tradeoff for the capacitance solve.
   openEMS for full-wave work and geode-fem's quasi-static/DC-extrapolation
   mode as the cheaper in-house cross-check for exactly this regime; either
   would be a natural follow-up, and would test something these analytic
-  oracles cannot (general geometry). [#895](https://github.com/2AMLogic/klayout-tools/issues/895)
-  tracks this specifically for the full-wave sweep above;
-  [#1886](https://github.com/2AMLogic/klayout-tools/issues/1886) tracks the
-  identical gap for literal FastHenry cross-validation of the spiral fixture
-  in "Generalized filament-pair formula (issue #1842)" above (the oracle
-  used there is an independent re-implementation of FastHenry's own method,
-  not the FastHenry binary itself — FastHenry is apt-installable in CI, so
-  that gap is a scheduling matter, not an availability one).
+  oracles cannot (general geometry). This is **no longer a gap** for the two
+  fixtures that have external oracles wired into CI — the full-wave sweep
+  against NEC2++ ([#895](https://github.com/2AMLogic/klayout-tools/issues/895),
+  [`mom-cross-validation.md`](mom-cross-validation.md)) and the spiral
+  against PyPEEC ([#1886](https://github.com/2AMLogic/klayout-tools/issues/1886),
+  "The external PyPEEC comparison" above) — but it remains one for every
+  other fixture in this document, which is checked against closed forms and
+  in-repo re-implementations only.
 - **Multi-box-per-conductor PEEC/full-wave geometry.** Every conductor must
   still reduce to exactly one bar-shaped box —
   [#1841](https://github.com/2AMLogic/klayout-tools/issues/1841) (a separate,
