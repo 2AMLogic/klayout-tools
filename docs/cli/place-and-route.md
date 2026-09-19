@@ -2155,12 +2155,23 @@ DEF was read *and* parsed; then every count is a measurement and a `0` means
 zero. Otherwise it is `"unavailable"`, every count is `null`, and
 `unavailable_reason` says why — no DEF is written at the `"floorplan"`
 stage, the file could not be read, it carries no `COMPONENTS` section, or
-that section is malformed. "Parsed" is deliberately strict: the `COMPONENTS`
-section must contain exactly the number of records its own header declares
-(`END COMPONENTS` itself is optional once they are all present). A section
-cut short — or one whose records ran into the next section because its `END`
-line never arrived — would otherwise report the records nobody read as a
-measured `0 fillers`. A measured zero and unavailable evidence are different
+one of its sections is malformed. "Parsed" is deliberately strict, and
+fails closed:
+
+- the `COMPONENTS` section must contain exactly the number of records its
+  own header declares (`END COMPONENTS` itself is optional once they are
+  all present). A section cut short — or one whose records ran into the
+  next section because its `END` line never arrived — would otherwise
+  report the records nobody read as a measured `0 fillers`;
+- a `SPECIALNETS` section that is present must likewise match its declared
+  record count and terminate its last record's `;`. A file that stops
+  mid-record is unknown evidence, not a smaller grid: an unfinished
+  `NEW met4 10 + SHAPE STRIPE` carries a shape but no geometry, and is
+  never counted as a placed strap (a statement only counts once it carries
+  a routing-point group or a via). A DEF with **no** `SPECIALNETS` section
+  at all stays a measured zero — DEF omits empty sections entirely.
+
+A measured zero and unavailable evidence are different
 answers and are never conflated; a supplied `request.power` whose result
 cannot be verified warns too ("could not be verified"), rather than passing
 by default.

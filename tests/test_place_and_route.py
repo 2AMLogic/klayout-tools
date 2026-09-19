@@ -3765,6 +3765,104 @@ def test_power_audit_no_specialnets_section_is_zero_special_nets():
     assert power_audit.parse_def_special_nets(_LOGIC_ONLY_DEF) == []
 
 
+#: A DEF cut off mid-record: `VSS`'s last wiring statement stops at its
+#: `+ SHAPE STRIPE` header, with no routing points, no terminating `;` and
+#: no `END SPECIALNETS`. Counting that bare header as a placed strap (and
+#: the short read as a measurement) would report a truncated file as a
+#: `complete` grid -- the same "answering when it cannot" failure the
+#: `COMPONENTS` gate exists to prevent.
+_TRUNCATED_SPECIALNETS_DEF = """VERSION 5.8 ;
+DESIGN gcd ;
+COMPONENTS 3 ;
+- t1 sky130_fd_sc_hd__tapvpwrvgnd_1 + PLACED ( 0 0 ) N ;
+- f1 sky130_fd_sc_hd__fill_1 + PLACED ( 10 0 ) N ;
+- n1 sky130_fd_sc_hd__nand2_1 + PLACED ( 20 0 ) N ;
+END COMPONENTS
+SPECIALNETS 2 ;
+- VPWR ( * VPWR )
+  + ROUTED met1 10 + SHAPE FOLLOWPIN ( 0 0 ) ( 10 0 ) via_M1M4_PDN
+    NEW met4 10 + SHAPE STRIPE ( 0 0 ) ( 0 100 ) via_M1M4_PDN
+  + USE POWER
+  ;
+- VGND + USE GROUND
+  + ROUTED met1 10 + SHAPE FOLLOWPIN ( 0 20 ) ( 10 20 ) via_M1M4_PDN
+    NEW met4 10 + SHAPE STRIPE
+"""
+
+#: The positive control for the fixture above: the same two nets, with the
+#: final strap's coordinates, its `;` and `END SPECIALNETS` restored.
+_COMPLETE_SPECIALNETS_DEF = _TRUNCATED_SPECIALNETS_DEF.replace(
+    "    NEW met4 10 + SHAPE STRIPE\n",
+    "    NEW met4 10 + SHAPE STRIPE ( 0 20 ) ( 0 120 ) via_M1M4_PDN\n"
+    "  ;\nEND SPECIALNETS\nEND DESIGN\n",
+)
+
+
+def test_power_audit_truncated_specialnets_section_is_not_a_measurement():
+    """A file that stops mid-record is unknown evidence, not a smaller
+    grid: the scan returns `None` (which the audit reports as
+    `evidence: "unavailable"`), and the unfinished `+ SHAPE STRIPE` header
+    is never counted as a placed strap."""
+    assert power_audit.parse_def_special_nets(_TRUNCATED_SPECIALNETS_DEF) is None
+    # The control proves the rejection is about the truncation, not about
+    # this grid's shape: the same two nets, terminated, measure cleanly.
+    nets = power_audit.parse_def_special_nets(_COMPLETE_SPECIALNETS_DEF)
+    assert [net["name"] for net in nets] == ["VPWR", "VGND"]
+    assert all(net["followpin_segments"] == 1 for net in nets)
+    assert all(net["stripe_segments"] == 1 for net in nets)
+
+
+def test_power_audit_specialnets_count_must_match_its_header():
+    """`SPECIALNETS 99 ;` followed by two records is a malformed section:
+    the 97 records nobody read would otherwise be reported as a measured
+    grid of exactly two."""
+    miscounted = _COMPLETE_SPECIALNETS_DEF.replace(
+        "SPECIALNETS 2 ;", "SPECIALNETS 99 ;"
+    )
+    assert power_audit.parse_def_special_nets(miscounted) is None
+
+
+def test_power_audit_truncated_specialnets_grades_unavailable_not_complete(tmp_path):
+    """End to end: the truncated DEF above must not satisfy the
+    complete-grid gate. Every count is `null`, `status` is `"unknown"`,
+    and the run is warned about rather than silently passing."""
+    def_path = _write(tmp_path / "truncated.def", _TRUNCATED_SPECIALNETS_DEF)
+
+    placed = power_audit.audit_power_delivery(
+        def_path=def_path,
+        unavailable_reason=None,
+        tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
+        endcap_master=None,
+        filler_masters=("sky130_fd_sc_hd__fill_1",),
+        power_net="VPWR",
+        ground_net="VGND",
+        expect_fillers=True,
+    )
+
+    assert placed["evidence"] == "unavailable"
+    assert placed["status"] == "unknown"
+    assert placed["special_nets"] is None
+    assert placed["tapcells"] is None
+    assert "SPECIALNETS" in placed["unavailable_reason"]
+    assert power_audit.power_delivery_warnings(placed, power_requested=True)
+
+    # The same DEF with its final record terminated *is* a measurement --
+    # the gate rejects truncation, not this grid.
+    complete = power_audit.audit_power_delivery(
+        def_path=_write(tmp_path / "complete.def", _COMPLETE_SPECIALNETS_DEF),
+        unavailable_reason=None,
+        tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
+        endcap_master=None,
+        filler_masters=("sky130_fd_sc_hd__fill_1",),
+        power_net="VPWR",
+        ground_net="VGND",
+        expect_fillers=True,
+    )
+    assert complete["evidence"] == "def"
+    assert complete["status"] == "complete"
+    assert complete["missing"] == []
+
+
 def test_stubbed_route_without_power_reports_measured_zeros_and_warns(
     tmp_path, monkeypatch
 ):

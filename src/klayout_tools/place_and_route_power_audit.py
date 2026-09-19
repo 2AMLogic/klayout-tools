@@ -175,7 +175,7 @@ def parse_def_component_masters(text: str) -> dict[str, int] | None:
     return counts
 
 
-def parse_def_special_nets(text: str) -> list[dict[str, Any]]:
+def parse_def_special_nets(text: str) -> list[dict[str, Any]] | None:
     """Parse the ``SPECIALNETS`` section into one record per special net.
 
     Each record is ``{"name", "use", "followpin_segments",
@@ -199,20 +199,32 @@ def parse_def_special_nets(text: str) -> list[dict[str, Any]]:
     otherwise parsed (the caller establishes that via
     :func:`parse_def_component_masters`).
 
-    A section whose ``END SPECIALNETS`` never arrives stops at the next
-    section boundary rather than running on into ``NETS``' own ``- <net>``
-    records. Unlike :func:`parse_def_component_masters`, a short read here
-    needs no declared-count gate to stay honest: under-reading a grid can
-    only ever *under*-state what was placed, which grades as ``partial``/
-    ``absent`` and warns -- it can never turn an absent grid into a
-    measured ``complete``.
+    Returns ``None`` -- "cannot tell", handled by the caller as unavailable
+    evidence -- when a section *is* present but its own structure does not
+    hold up, on the same fail-closed rule
+    :func:`parse_def_component_masters` applies:
+
+    - the number of net records read disagrees with the ``SPECIALNETS
+      <n> ;`` header's declared count, or
+    - the last record was never terminated by its ``;`` (the file, or the
+      section, stops mid-record).
+
+    ``END SPECIALNETS`` itself is optional once both hold, and the scan
+    stops at the next section boundary either way, so a missing terminator
+    never lets ``NETS``' own ``- <net>`` records be read as special nets.
+    A short read is **not** safe to report as a measurement: an unfinished
+    ``NEW met4 10 + SHAPE STRIPE`` carries a shape but no geometry, and
+    counting it would turn a truncated file into a ``complete`` grid.
     """
     section: list[str] = []
     in_section = False
+    declared: int | None = None
     for line in text.splitlines():
         if not in_section:
-            if _SPECIALNETS_BEGIN_RE.match(line):
+            header = _SPECIALNETS_BEGIN_RE.match(line)
+            if header:
                 in_section = True
+                declared = int(header.group(1))
             continue
         if _SPECIALNETS_END_RE.match(line) or _SECTION_BOUNDARY_RE.match(line):
             break
@@ -223,7 +235,11 @@ def parse_def_special_nets(text: str) -> list[dict[str, Any]]:
     tokens: list[str] = []
     for line in section:
         tokens.extend(line.replace("(", " ( ").replace(")", " ) ").split())
-    return _SpecialNetScanner().scan(tokens)
+    scanner = _SpecialNetScanner()
+    nets = scanner.scan(tokens)
+    if scanner.truncated or len(nets) != declared:
+        return None
+    return nets
 
 
 def _at(tokens: list[str], index: int) -> str | None:
@@ -262,12 +278,23 @@ class _SpecialNetScanner:
         self.in_wiring = False
         self.layer: str | None = None
         self.shape: str | None = None
+        #: Whether the wiring statement currently open has produced any
+        #: actual geometry yet (a routing-point group or a via). A
+        #: statement that stops at its ``+ SHAPE STRIPE`` header -- the
+        #: shape of a file truncated mid-record -- has none, and must not
+        #: be counted as a placed strap.
+        self.geometry = False
+        #: ``True`` once the token stream ends inside an unterminated net
+        #: record (no closing ``;``). The caller reports that as
+        #: unavailable evidence rather than as a measurement.
+        self.truncated = False
 
     def scan(self, tokens: list[str]) -> list[dict[str, Any]]:
         index = 0
         while index < len(tokens):
             index = self._step(tokens, index)
         self._flush_segment()
+        self.truncated = self.current is not None
         return self.nets
 
     def _step(self, tokens: list[str], index: int) -> int:
@@ -283,6 +310,7 @@ class _SpecialNetScanner:
         if token == "NEW" and self.in_wiring:
             return self._new_segment(tokens, index)
         if token == "(":
+            self.geometry = self.geometry or self.in_wiring
             return _skip_group(tokens, index)
         return self._maybe_via(token, index)
 
@@ -342,6 +370,7 @@ class _SpecialNetScanner:
         if self.in_wiring and self.current is not None:
             if token not in _DEF_ORIENTATIONS:
                 self.current["vias"] += 1
+                self.geometry = True
         return index + 1
 
     def _open_segment(self, layer: str | None) -> None:
@@ -349,6 +378,7 @@ class _SpecialNetScanner:
         self.in_wiring = True
         self.layer = layer
         self.shape = None
+        self.geometry = False
 
     def _close_wiring(self) -> None:
         self._flush_segment()
@@ -356,9 +386,14 @@ class _SpecialNetScanner:
 
     def _flush_segment(self) -> None:
         net, layer, shape = self.current, self.layer, self.shape
+        geometry = self.geometry
         self.layer = None
         self.shape = None
-        if net is None or layer is None:
+        self.geometry = False
+        # A statement that never got as far as a routing-point group or a
+        # via placed nothing: counting its `+ SHAPE STRIPE` header alone
+        # would report a truncated record as a placed strap.
+        if net is None or layer is None or not geometry:
             return
         if shape == "FOLLOWPIN":
             net["followpin_segments"] += 1
@@ -410,6 +445,17 @@ def audit_power_delivery(
         return _unavailable_block(def_path, reason)
 
     special_nets = parse_def_special_nets(text)
+    if special_nets is None:
+        # A `SPECIALNETS` section that is present but structurally broken
+        # (record count disagrees with its header, or the file stops
+        # mid-record). Its grid cannot be measured, and a short read of it
+        # would grade as a *smaller but complete-looking* grid -- so the
+        # whole block is unavailable evidence, not a measurement.
+        return _unavailable_block(
+            def_path,
+            f"DEF at {def_path} has a truncated or miscounted SPECIALNETS "
+            "section (its power grid cannot be measured)",
+        )
     tapcells = masters.get(tapcell_master, 0) if tapcell_master else 0
     endcaps = masters.get(endcap_master, 0) if endcap_master else 0
     fillers = sum(masters.get(master, 0) for master in filler_masters)

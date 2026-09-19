@@ -179,10 +179,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   document. `--format text` also prints the placed counts unconditionally.
   Measured zeros and unavailable evidence are kept distinct:
   `power.placed.evidence` is `"def"` only when a DEF was read and parsed —
-  which requires its `COMPONENTS` section to carry exactly the number of
-  records it declares, so a truncated or malformed section is reported as
-  unavailable rather than as a measured zero — otherwise every count is
-  `null` with an `unavailable_reason`, never a fabricated `0`. This warns,
+  which requires its `COMPONENTS` and (when present) `SPECIALNETS` sections
+  to carry exactly the number of records they declare and to terminate
+  their last record, so a truncated or miscounted section is reported as
+  unavailable rather than as a measured zero or a smaller-but-complete
+  grid — otherwise every count is `null` with an `unavailable_reason`,
+  never a fabricated `0`. This warns,
   it does not refuse: `status` stays `"ok"` and the exit code stays `0`, so
   a caller wanting a hard gate composes it on a non-empty `warnings` or
   `power.placed.status != "complete"`. Additive throughout; no
