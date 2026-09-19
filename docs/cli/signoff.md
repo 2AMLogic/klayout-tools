@@ -166,6 +166,53 @@ klt sim request.json --format json > sim.json
 klt signoff drc.json lvs.json extract.json sim.json --format json
 ```
 
+### Envelope validation (issue #2033)
+
+Recognising an envelope's kind and trusting its contents are two different
+things. Each recognised kind has a **declared shape** — the fields
+`klt signoff` discriminates on, plus the field it derives that kind's verdict
+from — and every ingested envelope is validated against its kind's shape at
+read time:
+
+| Kind | Required fields |
+| --- | --- |
+| `drc` | `schema_version`, `status`, `violations` |
+| `lvs` | `schema_version`, `status`, `mismatches` |
+| `sim` | `schema_version`, `status`, `measurements`, `corner_count` |
+| `yield` | `schema_version`, `status`, `measurements`, `measurement_count`, `source` |
+| `extract` | `schema_version`, `status`, `device_count`, `nets` |
+| `pex` | `schema_version`, `status`, `delta`, `reference_netlist` |
+| `power` | `schema_version`, `power_nets`, `networks`, `em_verdict` (no top-level `status` — see "`klt power` evidence" below) |
+| `sta` | `schema_version`, `status`, `geometry_source` |
+| `functional-verification` | `schema_version`, `status`, `tests`, `test_count` |
+| `generic` | `schema_version`, `kind`, `status` |
+| `error` | `schema_version`, `error` |
+
+An envelope that matches a kind's discriminating shape but is **missing a
+required field, or carries one of the wrong type, is rejected** — the same
+way an unrecognisable shape always has been: envelope-aggregation mode exits
+`1` with a message naming the kind and the offending field, and `--manifest`
+grading renders the citing item `"unmet"` with
+`reason: "unrecognized_envelope"`. It is never graded as a passing check.
+
+This matters most for `klt extract`, the one kind with no independent
+pass/fail (see step 2 above): before this validation, a truncated extract
+envelope with no `status` at all still produced a passing check, which is
+the "an envelope that cannot fail satisfies a checklist item" failure mode
+issues #1987/#1988 were about.
+
+Every other field this command reads is **optional** by construction, so
+evidence committed before a later-added block existed (a `drc` report with no
+`coverage` block, an `lvs` report with no `power_connectivity` block) still
+validates and still grades exactly as it always did.
+
+**What this does not catch.** This rejects malformed and incomplete
+envelopes. It cannot establish that meaningful work happened upstream, and it
+cannot detect a *semantic* mismatch between two well-formed values — e.g. two
+tools disagreeing about whether an escaped identifier keeps its leading
+backslash (issue #1999): both strings are valid, and both satisfy every shape
+above. Shape validation is a floor, not a correctness proof.
+
 ### Provenance consistency
 
 | Field compared | Populated by (per `provenance` block) | Comparison scope |
@@ -1100,7 +1147,7 @@ actually ran and failed):
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. |
-| `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, or does not match any recognised `klt` envelope shape. |
+| `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
 | `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |

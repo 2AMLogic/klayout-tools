@@ -95,6 +95,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   compose, the blocks' own generator sub-reports), with no rule/model deck and
   no single input layout stream to pin. Purely additive — no `schema_version`
   bump on either command (both stay at `1`).
+- **Changed**: `klt signoff` now validates every ingested envelope against a
+  declared shape for its kind (issue #2033, decomposed from #2011 item 2 — the
+  pilot for a typed, runtime-validated evidence boundary). Each recognised
+  kind is declared as a `TypedDict` (`src/klayout_tools/signoff.py`), and
+  `_classify` checks the incoming JSON against that kind's required fields at
+  read time: an envelope that matches a kind's discriminating shape but is
+  **missing a required field or carries one of the wrong type** is now
+  rejected rather than graded. Envelope-aggregation mode exits `1` naming the
+  kind and the offending field; `--manifest` grading renders the citing item
+  `"unmet"` with `reason: "unrecognized_envelope"`. **Grading change**: the
+  case this closes is `klt extract`, the one kind with no independent
+  pass/fail — a truncated extract envelope with no `status` field previously
+  produced a *passing* check (the "an envelope that cannot fail satisfies a
+  checklist item" failure mode of issues #1987/#1988). Required fields are
+  only each kind's discriminators plus the field its verdict is derived from;
+  every other field this verb reads stays optional, so evidence committed
+  before a later-added block existed (a `drc` report with no `coverage`, an
+  `lvs` report with no `power_connectivity`) validates and grades exactly as
+  before — verified against every `klt` envelope committed under `examples/`
+  and `evidence/`. No JSON shape change (no field added, renamed, removed or
+  nested), and no `schema_version` bump. This catches malformed/incomplete
+  envelopes only: it cannot detect a semantic mismatch between two well-formed
+  values (e.g. issue #1999's escaped-identifier mismatch), and is documented
+  as such in [`docs/cli/signoff.md`](docs/cli/signoff.md)'s new "Envelope
+  validation" section.
 - **Added**: `klt erc --format json` now emits `provenance.spec` as
   `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
   the stackup/vias/nets/ties spec file the run was validated against.

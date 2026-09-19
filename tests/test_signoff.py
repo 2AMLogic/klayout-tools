@@ -2627,6 +2627,163 @@ def test_generic_kind_marker_takes_priority_over_native_structural_shape(tmp_pat
 
 
 # --------------------------------------------------------------------------- #
+# Typed, runtime-validated envelope boundary (issue #2033)
+#
+# `_classify` declares one TypedDict per recognised kind and validates every
+# incoming envelope against it at read time. These tests pin the *negative*
+# half of that contract: a malformed or missing-required-field envelope is
+# rejected (envelope-aggregation mode) or rendered `unrecognized_envelope`
+# (`--manifest` mode), never silently graded as a passing check.
+#
+# Scope note: this catches malformed/incomplete envelopes only. It does not
+# and cannot detect a *semantically* wrong-but-well-formed envelope (see
+# signoff.py's own "Typed, runtime-validated evidence ingestion" docstring
+# section).
+# --------------------------------------------------------------------------- #
+
+#: One (kind label, complete fixture, required field) case per recognised
+#: kind. Each named field is required by that kind's typed shape but is *not*
+#: one of the fields `_classify` discriminates on -- so dropping it produces a
+#: still-recognisable envelope that must nonetheless be rejected, rather than
+#: falling through to the pre-existing "unrecognized shape" path.
+_MISSING_REQUIRED_FIELD_CASES = [
+    ("drc", DRC_CLEAN_ENVELOPE, "status"),
+    ("lvs", LVS_MATCH_ENVELOPE, "status"),
+    ("sim", SIM_PASS_ENVELOPE, "status"),
+    ("yield", YIELD_PASS_ENVELOPE, "status"),
+    ("extract", EXTRACT_ENVELOPE, "status"),
+    ("pex", PEX_PASS_ENVELOPE, "status"),
+    ("power", POWER_PASS_ENVELOPE, "em_verdict"),
+    ("sta", STA_MULTI_CORNER_CLEAN_ENVELOPE, "status"),
+    ("functional-verification", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "status"),
+    ("generic", GENERIC_PASS_ENVELOPE, "status"),
+]
+
+
+def test_extract_envelope_missing_status_is_rejected_not_silently_passed(tmp_path):
+    """The motivating case (#1987/#1988): `extract` is the one kind
+    `_check_passed` counts as passing *unconditionally*, so before this
+    boundary was validated a truncated `klt extract` envelope with no
+    `status` field at all still produced `status: "pass"` with
+    `checks[0].status: null` -- a verdict from an envelope that could not
+    fail."""
+    truncated = {
+        key: value for key, value in EXTRACT_ENVELOPE.items() if key != "status"
+    }
+    path = _write(tmp_path, "extract.json", truncated)
+
+    with pytest.raises(SignoffError, match="required field 'status'"):
+        build_signoff([path])
+
+
+@pytest.mark.parametrize(
+    ("kind", "envelope", "field"),
+    _MISSING_REQUIRED_FIELD_CASES,
+    ids=[f"{kind}-{field}" for kind, _, field in _MISSING_REQUIRED_FIELD_CASES],
+)
+def test_missing_required_field_is_rejected(tmp_path, kind, envelope, field):
+    malformed = {key: value for key, value in envelope.items() if key != field}
+    path = _write(tmp_path, "evidence.json", malformed)
+
+    with pytest.raises(SignoffError) as excinfo:
+        build_signoff([path])
+
+    message = str(excinfo.value)
+    assert f"required field '{field}'" in message
+    # The message names the kind it *did* recognise, so a caller can tell a
+    # truncated envelope of a known kind from an unrecognised shape.
+    assert kind in message
+
+
+@pytest.mark.parametrize(
+    ("envelope", "field", "bad_value"),
+    [
+        (DRC_CLEAN_ENVELOPE, "status", 5),
+        (DRC_CLEAN_ENVELOPE, "schema_version", "1"),
+        (SIM_PASS_ENVELOPE, "corner_count", "three"),
+        (POWER_PASS_ENVELOPE, "em_verdict", "pass"),
+        (FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "test_count", None),
+    ],
+    ids=[
+        "drc-status",
+        "drc-schema_version",
+        "sim-corner_count",
+        "power-em_verdict",
+        "fv-test_count",
+    ],
+)
+def test_required_field_of_wrong_type_is_rejected(tmp_path, envelope, field, bad_value):
+    malformed = {**envelope, field: bad_value}
+    path = _write(tmp_path, "evidence.json", malformed)
+
+    with pytest.raises(SignoffError, match=f"field '{field}'"):
+        build_signoff([path])
+
+
+def test_malformed_envelope_citation_renders_unmet_unrecognized(tmp_path):
+    """`--manifest` mode routes the same rejection to the explicit
+    "unrecognized_envelope" path rather than raising: a T1 item citing a
+    truncated `klt drc` report is `unmet`, never `met`."""
+    truncated = {
+        key: value for key, value in DRC_CLEAN_ENVELOPE.items() if key != "status"
+    }
+    path = _write(tmp_path, "drc.json", truncated)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "unrecognized_envelope"
+    assert item_3["citation"] is None
+
+
+def test_every_recognized_kind_declares_a_typed_shape():
+    """Drift guard: every kind `_classify` can return has a declared typed
+    shape backing it, so adding a kind without a shape (which would silently
+    re-open the unvalidated path for that kind) fails here."""
+    assert set(signoff_module._ENVELOPE_SHAPES) == {
+        "drc",
+        "lvs",
+        "sim",
+        "yield",
+        "extract",
+        "pex",
+        "power",
+        "sta",
+        "functional-verification",
+        "generic",
+        "error",
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "envelope"),
+    [
+        ("drc", DRC_CLEAN_ENVELOPE),
+        ("drc", DRC_CLEAN_NO_COVERAGE_ENVELOPE),
+        ("lvs", LVS_MATCH_ENVELOPE),
+        ("sim", SIM_PASS_ENVELOPE),
+        ("yield", YIELD_PASS_ENVELOPE),
+        ("extract", EXTRACT_ENVELOPE),
+        ("pex", PEX_PASS_ENVELOPE),
+        ("power", POWER_PASS_ENVELOPE),
+        ("power", POWER_NO_SOLVE_ENVELOPE),
+        ("sta", STA_MULTI_CORNER_CLEAN_ENVELOPE),
+        ("sta", STA_SINGLE_CORNER_CLEAN_ENVELOPE),
+        ("functional-verification", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE),
+        ("generic", GENERIC_PASS_ENVELOPE),
+        ("error", DRC_ERROR_ENVELOPE),
+    ],
+)
+def test_documented_fixtures_validate_against_their_typed_shape(kind, envelope):
+    """Positive half: every documented envelope shape this file fixtures --
+    including the deliberately back-compat ones (a `drc` report predating
+    `coverage`, a `power` report with no IR-drop solve) -- still classifies
+    exactly as before, with no new required field invented."""
+    assert signoff_module._classify(envelope, "fixture.json") == kind
+
+
+# --------------------------------------------------------------------------- #
 # CLI (`klt signoff`)
 # --------------------------------------------------------------------------- #
 
@@ -2698,6 +2855,27 @@ def test_cli_missing_file_exits_one_json_error(tmp_path, capsys):
     assert err["error"]["command"] == "signoff"
     assert "file not found" in err["error"]["message"]
     assert capsys.readouterr().out == ""
+
+
+def test_cli_malformed_envelope_exits_one_json_error(tmp_path, capsys):
+    """Issue #2033: a recognised-kind envelope that is malformed for that kind
+    surfaces through the CLI's ordinary error contract -- exit 1, the
+    documented JSON error envelope on stderr, nothing on stdout -- rather
+    than a passing verdict."""
+    truncated = {
+        key: value for key, value in EXTRACT_ENVELOPE.items() if key != "status"
+    }
+    path = _write(tmp_path, "extract.json", truncated)
+
+    exit_code = main(["signoff", path, "--format", "json"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    err = json.loads(captured.err)
+    assert err["error"]["command"] == "signoff"
+    assert "missing required field 'status'" in err["error"]["message"]
+    assert "klt extract shape" in err["error"]["message"]
+    assert captured.out == ""
 
 
 def test_cli_missing_file_exits_one_text_error(tmp_path, capsys):

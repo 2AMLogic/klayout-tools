@@ -481,6 +481,50 @@ this envelope's own verdict say", which is what its other callers ask it --
 so the refusal is applied beside it, once per entry point, by
 :func:`_nothing_checked_reasons`.
 
+## Typed, runtime-validated evidence ingestion (issue #2033)
+
+``CLAUDE.md`` says "JSON is the contract", but every producer/consumer
+boundary in this repo was typed ``dict[str, Any]`` -- a shape no checker and
+no runtime read could enforce. This module's :func:`_classify` is the pilot
+boundary for changing that (issue #2033, decomposed from #2011 item 2), for
+a concrete reason: it is where an envelope that "cannot fail" has already
+cost real verdicts (#1987/#1988).
+
+Two halves, deliberately separate:
+
+1. **A typed shape per recognised kind** -- one ``TypedDict`` per
+   :func:`_classify` kind (:data:`_ENVELOPE_SHAPES`), declaring both the
+   fields that kind's envelope must carry and the optional ones the
+   boundary reads. :func:`_build_check`/:func:`_check_passed`/:func:`_detail`
+   take the resulting union (``_EvidenceEnvelope``) rather than
+   ``dict[str, Any]``.
+2. **Runtime validation at the read boundary** -- a ``TypedDict`` is erased
+   at runtime, so the declaration alone would check nothing about an
+   envelope read off disk. :func:`_validate_envelope` therefore re-reads the
+   *same* declarations (``__required_keys__`` plus the resolved
+   annotations, so the two can never drift) against the actual JSON, and
+   rejects an envelope that matches a kind's discriminating shape but is
+   missing a required field or carries one of the wrong type.
+
+The rejection routes exactly like every other unreadable-evidence case
+already does: :func:`build_signoff` raises :class:`SignoffError` (clean
+stderr, exit 1), and ``--manifest`` grading renders the citing item
+``"unmet"`` with ``reason: "unrecognized_envelope"`` -- never a silent
+``"met"``. The motivating case is ``extract``, the one kind
+:func:`_check_passed` passes *unconditionally*: before this, a truncated
+`klt extract` envelope with no ``status`` at all still produced a passing
+check.
+
+**What this does not catch**, stated plainly because the parent issue asks
+for it: typed envelopes are not a false-pass cure. This catches malformed
+and incomplete envelopes. It cannot establish that meaningful work happened
+upstream, and it cannot catch a *semantic* mismatch between two
+well-formed values -- e.g. #1999's escaped-identifier defect, where one
+parser kept a leading backslash another stripped: both strings are valid
+``str`` and both satisfy every shape declared here. Expansion of this
+pattern to other verbs' boundaries is deliberately deferred until this
+pilot's diagnostics have been seen in practice (#2011).
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -503,8 +547,11 @@ import os
 import shlex
 import subprocess
 import sys
+import types
+from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, Union, cast, get_args, get_origin, get_type_hints
 
 from ._provenance import sha256_file
 from .coverage import coverage_nothing_checked, coverage_nothing_checked_reasons
@@ -799,8 +846,10 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
     "Vacuous-verdict refusal" docstring section.
 
     Raises :class:`SignoffError` if ``sources`` is empty, any entry cannot
-    be read/parsed as JSON, is not a JSON object, or does not match a
-    recognized envelope shape (see :func:`_classify`).
+    be read/parsed as JSON, is not a JSON object, does not match a
+    recognized envelope shape, or matches one but is malformed for it --
+    missing a required field, or carrying one of the wrong type (issue
+    #2033; see :func:`_classify` and :func:`_validate_envelope`).
     """
     if not sources:
         raise SignoffError(
@@ -815,8 +864,12 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
                 f"envelope '{source}' must be a JSON object, got "
                 f"{type(envelope).__name__}"
             )
+        # Issue #2033: `_classify` both recognises the kind *and* validates
+        # the envelope against that kind's declared shape, so the cast below
+        # is backed by a runtime check -- not an assertion about unvalidated
+        # JSON.
         kind = _classify(envelope, source)
-        checks.append(_build_check(kind, envelope, source))
+        checks.append(_build_check(kind, cast(_EvidenceEnvelope, envelope), source))
 
     provenance_consistency = _provenance_consistency(checks)
 
@@ -892,7 +945,356 @@ def _read_envelope(source: str) -> Any:
     return _read_json_source(source, "envelope")
 
 
-def _classify(envelope: dict[str, Any], source: str) -> str:
+# --------------------------------------------------------------------------- #
+# Typed envelope shapes + runtime validation (issue #2033)
+#
+# One TypedDict per `_classify` kind. Each kind's *required* keys are the
+# ones this boundary genuinely cannot work without -- the fields
+# `_classify` discriminates on, plus the field `_check_passed` derives that
+# kind's verdict from. Everything else this boundary reads is declared
+# `total=False`: optional by construction, so evidence committed before a
+# later-added block existed (a `drc` report with no `coverage`, an `lvs`
+# report with no `power_connectivity`) still validates and still grades
+# exactly as it always did.
+#
+# Deliberately *not* an exhaustive transcription of each verb's full JSON
+# schema -- that lives in each verb's own `docs/cli/<verb>.md`, and
+# duplicating it here would create a second contract to keep in sync. These
+# declare the consumer's view: what `klt signoff` reads.
+#
+# See this module's "Typed, runtime-validated evidence ingestion" docstring
+# section for the scope of what this catches (malformed/incomplete
+# envelopes) and what it explicitly does not (semantic mismatches between
+# two well-formed values).
+# --------------------------------------------------------------------------- #
+
+
+class _EnvelopeCommon(TypedDict):
+    """The one field every ``klt`` JSON envelope carries
+    (``docs/json-contract.md``) -- already the first thing
+    :func:`_classify` checks for."""
+
+    schema_version: int
+
+
+class _DrcRequired(_EnvelopeCommon):
+    status: str
+    violations: list[Any]
+
+
+class _DrcEnvelope(_DrcRequired, total=False):
+    file: Any
+    deck: Any
+    violation_count: Any
+    coverage: dict[str, Any]
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _LvsRequired(_EnvelopeCommon):
+    status: str
+    mismatches: list[Any]
+
+
+class _LvsEnvelope(_LvsRequired, total=False):
+    layout: Any
+    reference: Any
+    mismatch_count: Any
+    counts: Any
+    power_connectivity: dict[str, Any] | None
+    body_verification: dict[str, Any] | None
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _SimRequired(_EnvelopeCommon):
+    status: str
+    measurements: list[Any]
+    corner_count: int
+
+
+class _SimEnvelope(_SimRequired, total=False):
+    netlist: Any
+    passed: Any
+    failed: Any
+    errored: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _YieldRequired(_EnvelopeCommon):
+    status: str
+    measurements: list[Any]
+    measurement_count: int
+    source: dict[str, Any]
+
+
+class _YieldEnvelope(_YieldRequired, total=False):
+    samples: Any
+    limits: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _ExtractRequired(_EnvelopeCommon):
+    # `status` is required even though `_check_passed` counts every extract
+    # envelope as passing: an extract report that reached this boundary
+    # without one is truncated, and grading it as the one unconditionally-
+    # passing kind is exactly the #1987/#1988 failure this validation
+    # exists to stop.
+    status: str
+    device_count: int
+    nets: list[Any]
+
+
+class _ExtractEnvelope(_ExtractRequired, total=False):
+    file: Any
+    deck: Any
+    net_count: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _PexRequired(_EnvelopeCommon):
+    status: str
+    delta: list[Any]
+    # `Any`, not `str`: `klt pex` emits the repo-relative `{path, scope}`
+    # object `env_provenance.repo_relative_path` builds (issue #1261),
+    # while older committed evidence carries a bare path string. Presence is
+    # what this boundary discriminates on; the value's own shape belongs to
+    # `docs/cli/pex.md`, not here.
+    reference_netlist: Any
+
+
+class _PexEnvelope(_PexRequired, total=False):
+    netlist: Any
+    corner_count: Any
+    passed: Any
+    failed: Any
+    errored: Any
+    body_bias: dict[str, Any] | None
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _PowerRequired(_EnvelopeCommon):
+    # `klt power` carries no top-level `status` at all (docs/cli/power.md);
+    # `em_verdict` is what `_check_passed` derives its verdict from, and is
+    # always present -- `None` when the spec declared no solve.
+    power_nets: list[Any]
+    networks: list[Any]
+    em_verdict: dict[str, Any] | None
+
+
+class _PowerEnvelope(_PowerRequired, total=False):
+    file: Any
+    spec: Any
+    worst_case_droop_mv: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _StaRequired(_EnvelopeCommon):
+    # `status` is always `"ok"` (docs/cli/sta.md) -- this verb has no
+    # pass/fail concept of its own, so the verdict comes from the per-corner
+    # timing fields below, either flat or under `corners`.
+    status: str
+    geometry_source: str
+
+
+class _StaEnvelope(_StaRequired, total=False):
+    def_path: Any
+    verilog_path: Any
+    spef_path: Any
+    corners: list[Any]
+    timing_status: Any
+    worst_slack_ns: Any
+    worst_hold_slack_ns: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _FunctionalVerificationRequired(_EnvelopeCommon):
+    status: str
+    tests: list[Any]
+    test_count: int
+
+
+class _FunctionalVerificationEnvelope(_FunctionalVerificationRequired, total=False):
+    hdl_toplevel: Any
+    testbench: Any
+    passed_count: Any
+    failed_count: Any
+    skipped_count: Any
+    environment: dict[str, Any] | None
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _GenericRequired(_EnvelopeCommon):
+    # `kind` and `status` are the two fields docs/cli/signoff.md's "Generic
+    # evidence" section declares required; `summary`/`source` are explicitly
+    # optional there and stay optional here.
+    kind: str
+    status: str
+
+
+class _GenericEnvelope(_GenericRequired, total=False):
+    summary: Any
+    source: Any
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+class _ErrorRequired(_EnvelopeCommon):
+    error: dict[str, Any]
+
+
+class _ErrorEnvelope(_ErrorRequired, total=False):
+    metrics: dict[str, Any]
+    provenance: dict[str, Any] | None
+
+
+#: The union every envelope read at this boundary narrows to once
+#: :func:`_classify` has both recognised *and* validated it -- what
+#: :func:`_build_check`/:func:`_check_passed`/:func:`_detail` take in place
+#: of a bare ``dict[str, Any]``.
+_EvidenceEnvelope = (
+    _DrcEnvelope
+    | _LvsEnvelope
+    | _SimEnvelope
+    | _YieldEnvelope
+    | _ExtractEnvelope
+    | _PexEnvelope
+    | _PowerEnvelope
+    | _StaEnvelope
+    | _FunctionalVerificationEnvelope
+    | _GenericEnvelope
+    | _ErrorEnvelope
+)
+
+#: Every kind :func:`_classify` can return, mapped to the shape
+#: :func:`_validate_envelope` enforces for it. A kind added to
+#: :func:`_classify` without an entry here would silently re-open the
+#: unvalidated path for that kind, so the mapping is looked up (not
+#: ``.get``-ed with a fallback) and is covered by a drift test in
+#: ``tests/test_signoff.py``.
+_ENVELOPE_SHAPES: dict[str, Any] = {
+    "drc": _DrcEnvelope,
+    "lvs": _LvsEnvelope,
+    "sim": _SimEnvelope,
+    "yield": _YieldEnvelope,
+    "extract": _ExtractEnvelope,
+    "pex": _PexEnvelope,
+    "power": _PowerEnvelope,
+    "sta": _StaEnvelope,
+    "functional-verification": _FunctionalVerificationEnvelope,
+    "generic": _GenericEnvelope,
+    "error": _ErrorEnvelope,
+}
+
+#: Runtime checks for the scalar annotations used above. ``bool`` is split
+#: out of ``int`` deliberately: ``isinstance(True, int)`` is ``True`` in
+#: Python, so a ``"schema_version": true`` envelope would otherwise validate
+#: as an integer.
+_SCALAR_CHECKS: dict[Any, Any] = {
+    bool: lambda value: isinstance(value, bool),
+    int: lambda value: isinstance(value, int) and not isinstance(value, bool),
+    float: lambda value: (
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+    ),
+    str: lambda value: isinstance(value, str),
+    type(None): lambda value: value is None,
+}
+
+#: ``X | None`` (PEP 604) and ``Optional[X]`` produce different origins at
+#: runtime; both appear in the shapes above.
+_UNION_ORIGINS = (Union, types.UnionType)
+
+
+@cache
+def _shape_hints(kind: str) -> dict[str, Any]:
+    """Resolved annotations for ``kind``'s :data:`_ENVELOPE_SHAPES` entry.
+
+    Resolved rather than read raw off ``__annotations__`` because this
+    module uses ``from __future__ import annotations``, so every annotation
+    above is a *string* until :func:`typing.get_type_hints` evaluates it.
+    Cached because the result is immutable per kind and this runs once per
+    ingested envelope.
+    """
+    return get_type_hints(_ENVELOPE_SHAPES[kind])
+
+
+def _matches_declared_type(annotation: Any, value: Any) -> bool:
+    """Whether ``value`` satisfies ``annotation`` -- the runtime half of a
+    declaration that is otherwise erased.
+
+    Deliberately shallow: containers are checked for their own type only
+    (``list[Any]`` means "a list", not "a list whose entries were also
+    validated"). Element-level validation is each producing verb's own
+    responsibility, and claiming it here would overstate what this boundary
+    proves. ``Any`` means "required to be present, unconstrained in shape"
+    -- used where a field's own value shape is genuinely polymorphic across
+    committed evidence (see ``_PexRequired.reference_netlist``).
+    """
+    if annotation is Any:
+        return True
+    origin = get_origin(annotation)
+    if origin in _UNION_ORIGINS:
+        return any(_matches_declared_type(arg, value) for arg in get_args(annotation))
+    check = _SCALAR_CHECKS.get(annotation)
+    if check is not None:
+        return check(value)
+    return isinstance(value, origin or annotation)
+
+
+def _type_label(annotation: Any) -> str:
+    """A short, human-readable rendering of ``annotation`` for an error
+    message (``dict[str, Any] | None`` rather than a ``typing``-qualified
+    repr)."""
+    return (
+        str(annotation).replace("typing.", "").replace("<class '", "").replace("'>", "")
+    )
+
+
+def _validate_envelope(kind: str, envelope: Mapping[str, Any], source: str) -> None:
+    """Validate an envelope :func:`_classify` has already matched to ``kind``
+    against that kind's declared shape (:data:`_ENVELOPE_SHAPES`), raising
+    :class:`SignoffError` if it does not (issue #2033).
+
+    Checks every *required* key of the shape: present, and of the declared
+    type. Optional keys are not type-checked when present -- an unexpected
+    type there is already handled defensively by each reader
+    (``.get(...) or {}``, ``isinstance`` guards) and hard-failing on one
+    would retroactively reject committed evidence over a field this
+    boundary only reports.
+
+    Raising (rather than downgrading the check to "failed") is deliberate
+    and matches how every other unreadable input is handled here: a
+    malformed envelope means the verdict is unknown, not negative.
+    ``--manifest`` grading converts that into an explicit ``"unmet"`` /
+    ``"unrecognized_envelope"`` item -- see :func:`_grade_evidence`.
+    """
+    hints = _shape_hints(kind)
+    for field in sorted(_ENVELOPE_SHAPES[kind].__required_keys__):
+        if field not in envelope:
+            raise SignoffError(
+                f"envelope '{source}' matches the klt {kind} shape but is "
+                f"missing required field '{field}' -- a malformed or "
+                "incomplete envelope is rejected rather than graded (see "
+                "docs/cli/signoff.md)"
+            )
+        value = envelope[field]
+        if not _matches_declared_type(hints[field], value):
+            raise SignoffError(
+                f"envelope '{source}' matches the klt {kind} shape but its "
+                f"required field '{field}' is {type(value).__name__}, expected "
+                f"{_type_label(hints[field])} -- a malformed envelope is "
+                "rejected rather than graded (see docs/cli/signoff.md)"
+            )
+
+
+def _classify(envelope: Mapping[str, Any], source: str) -> str:
     """Detect an envelope's kind from its own structural shape. Raises
     :class:`SignoffError` for an envelope that matches none of them.
 
@@ -907,6 +1309,16 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     only an explicit, literal ``"kind": "generic"`` self-declaration
     classifies as ``"generic"``, checked first so no such coincidence can
     ever misroute it into a native kind instead.
+
+    Recognition is only half the boundary (issue #2033): once a kind is
+    matched, the envelope is validated against that kind's declared shape
+    (:func:`_validate_envelope`) before the kind is returned, so an envelope
+    that *looks* like a `klt` verb's output but is missing a required field
+    -- or carries one of the wrong type -- is rejected here rather than
+    graded downstream. Callers already handle the raise: ``--manifest``
+    grading turns it into an explicit ``"unrecognized_envelope"`` item (see
+    :func:`_grade_evidence`), and :func:`build_signoff` surfaces it as the
+    CLI's ordinary clean error exit.
     """
     if "schema_version" not in envelope:
         raise SignoffError(
@@ -916,38 +1328,38 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
 
     error = envelope.get("error")
     if isinstance(error, dict) and "message" in error:
-        return "error"
+        kind = "error"
 
     # "generic" (issue #1152): an opt-in envelope for evidence that is not a
     # `klt` verb's own output at all -- e.g. hand-rolled from a Markdown
     # characterization record. See this module's "Generic evidence
     # ingestion" docstring section and docs/cli/signoff.md for this shape's
     # full contract and which --manifest items may cite it.
-    if envelope.get("kind") == "generic":
-        return "generic"
+    elif envelope.get("kind") == "generic":
+        kind = "generic"
 
-    if isinstance(envelope.get("violations"), list):
-        return "drc"
+    elif isinstance(envelope.get("violations"), list):
+        kind = "drc"
 
-    if isinstance(envelope.get("mismatches"), list):
-        return "lvs"
+    elif isinstance(envelope.get("mismatches"), list):
+        kind = "lvs"
 
-    if isinstance(envelope.get("measurements"), list) and "corner_count" in envelope:
-        return "sim"
+    elif isinstance(envelope.get("measurements"), list) and "corner_count" in envelope:
+        kind = "sim"
 
     # `klt yield` (issue #816, Phase 1a of epic #710): also carries a
     # `measurements` list, but never a `corner_count` (checked above first,
     # so the two can never collide) -- `measurement_count` plus a `source`
     # object are unique to this shape (docs/cli/yield.md's JSON schema).
-    if (
+    elif (
         isinstance(envelope.get("measurements"), list)
         and "measurement_count" in envelope
         and isinstance(envelope.get("source"), dict)
     ):
-        return "yield"
+        kind = "yield"
 
-    if "device_count" in envelope and isinstance(envelope.get("nets"), list):
-        return "extract"
+    elif "device_count" in envelope and isinstance(envelope.get("nets"), list):
+        kind = "extract"
 
     # `klt pex` (issue #871, Phase 2b of epic #706; shape ratified by #801,
     # "Define `klt pex`", `src/klayout_tools/pex.py`): a top-level `delta`
@@ -959,8 +1371,8 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     # predates #801 (it recognised a Curator-proposed provisional shape
     # ahead of the real command); #801's real output matches it exactly, so
     # no change was needed here once the real command shipped.
-    if isinstance(envelope.get("delta"), list) and "reference_netlist" in envelope:
-        return "pex"
+    elif isinstance(envelope.get("delta"), list) and "reference_netlist" in envelope:
+        kind = "pex"
 
     # `klt power` (issue #1321, Phase 2 of epic #712; shape from #844/#845/
     # #846): a top-level `power_nets` list plus a `networks` list is unique
@@ -969,10 +1381,10 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     # `extract` (`device_count`+`nets`), or `pex` (`delta`+
     # `reference_netlist`), all checked above. See this module's "`klt
     # power` (IR-drop/EM) evidence ingestion" docstring section.
-    if isinstance(envelope.get("power_nets"), list) and isinstance(
+    elif isinstance(envelope.get("power_nets"), list) and isinstance(
         envelope.get("networks"), list
     ):
-        return "power"
+        kind = "power"
 
     # `klt sta` (issue #1959; docs/cli/sta.md): a top-level
     # `geometry_source` string ("routed"/"placement_estimate"/
@@ -987,10 +1399,10 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     # different verb with a different (unrestricted) corner-sweep contract
     # and stays deliberately unrecognised, see this module's "Digital-flow
     # evidence" docstring section.
-    if isinstance(envelope.get("geometry_source"), str) and (
+    elif isinstance(envelope.get("geometry_source"), str) and (
         "timing_status" in envelope or isinstance(envelope.get("corners"), list)
     ):
-        return "sta"
+        kind = "sta"
 
     # `klt functional-verification` (issue #1959;
     # docs/cli/functional-verification.md): a top-level `tests` list (one
@@ -999,17 +1411,24 @@ def _classify(envelope: dict[str, Any], source: str) -> str:
     # `sim`/`yield` (`measurements`), `extract` (`device_count`+`nets`),
     # `pex` (`delta`+`reference_netlist`), or `power`
     # (`power_nets`+`networks`), all checked above.
-    if isinstance(envelope.get("tests"), list) and "test_count" in envelope:
-        return "functional-verification"
+    elif isinstance(envelope.get("tests"), list) and "test_count" in envelope:
+        kind = "functional-verification"
 
-    raise SignoffError(
-        f"envelope '{source}' has an unrecognized shape (schema_version="
-        f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-        "yield/pex/power/sta/functional-verification success or error "
-        'envelope, and not a generic evidence envelope ("kind": "generic") '
-        "either -- klt signoff aggregates those nine verbs' output plus "
-        "opt-in generic evidence today (see docs/cli/signoff.md)"
-    )
+    else:
+        raise SignoffError(
+            f"envelope '{source}' has an unrecognized shape (schema_version="
+            f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
+            "yield/pex/power/sta/functional-verification success or error "
+            'envelope, and not a generic evidence envelope ("kind": "generic") '
+            "either -- klt signoff aggregates those nine verbs' output plus "
+            "opt-in generic evidence today (see docs/cli/signoff.md)"
+        )
+
+    # Issue #2033: recognised is not the same as well-formed -- see
+    # :func:`_validate_envelope` and this module's "Typed, runtime-validated
+    # evidence ingestion" docstring section.
+    _validate_envelope(kind, envelope, source)
+    return kind
 
 
 # --------------------------------------------------------------------------- #
@@ -1087,7 +1506,10 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     return blockers
 
 
-def _build_check(kind: str, envelope: dict[str, Any], source: str) -> dict[str, Any]:
+def _build_check(kind: str, envelope: _EvidenceEnvelope, source: str) -> dict[str, Any]:
+    """Render one already-classified, already-validated envelope (issue
+    #2033: ``envelope`` is the typed union, not a bare ``dict[str, Any]`` --
+    :func:`_classify` is what narrows it) into one ``checks[]`` entry."""
     status = envelope.get("status") if kind != "error" else "error"
     # Issue #1996: an envelope that states it checked nothing never counts as
     # a passing check, whatever its own `status` says -- see this module's
@@ -1229,8 +1651,13 @@ def _is_post_layout_evidence(kind: str, envelope: dict[str, Any]) -> bool:
     return True
 
 
-def _check_passed(kind: str, envelope: dict[str, Any]) -> bool:
+def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
+
+    ``envelope`` is the typed union declared above (issue #2033), already
+    validated against ``kind``'s shape by :func:`_classify` -- so every
+    field this function reads below is guaranteed present and of the
+    declared type, rather than being defended against inline.
 
     Independent of every kind-specific rule below (issue #1850): if the
     envelope's own ``metrics`` block (issue #247/#1847) carries any
@@ -1542,7 +1969,7 @@ def _pex_body_bias_disclosure(
     }
 
 
-def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
+def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
     """A small, kind-specific excerpt of the source envelope -- not a
     re-export of the full contract (a consumer that wants the raw
     ``violations[]``/``mismatches[]``/``devices[]``/``corners[]`` detail
@@ -2456,14 +2883,21 @@ def _grade_evidence(
         source_label = file
 
     try:
+        # Issue #2033: also rejects an envelope that matches a kind's shape
+        # but is malformed for it (missing/wrong-typed required field) --
+        # rendered here as the same explicit "unrecognized envelope"
+        # outcome an unrecognisable shape has always produced, never a
+        # silent "met".
         check_kind = _classify(envelope, source_label)
     except SignoffError:
         return "unmet", _REASON_UNRECOGNIZED_ENVELOPE, None
 
+    checked = cast(_EvidenceEnvelope, envelope)
+
     if check_kind == "error":
         return "unmet", _REASON_CHECK_ERRORED, None
 
-    if not _check_passed(check_kind, envelope):
+    if not _check_passed(check_kind, checked):
         return "unmet", _REASON_CHECK_FAILED, None
 
     # The two refusals that apply only to a kind this item actually accepts --
