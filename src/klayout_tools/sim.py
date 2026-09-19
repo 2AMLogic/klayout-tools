@@ -84,6 +84,14 @@ from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
+
+#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
+#: 2am's EDA batch fleet. Same relationship to this module as
+#: ``sim_remote``'s: `run_sim` dispatches into them and re-exports their
+#: helpers (self-aliased) so ``klayout_tools.sim.<name>`` resolves them too.
+from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
+from .sim_batch import _resolve_batch_config as _resolve_batch_config
+from .sim_batch import _run_batch, _run_batch_fleet
 from .sim_plot import render_waveform_svg
 
 #: The remaining names below are not called directly from this module's own
@@ -177,8 +185,19 @@ SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
 #: ``docs/design/remote-sim-backend-spike.md`` decisions 2/5. Like
 #: ``engine``, ``backend`` is a request *data* field, not part of the JSON
 #: shape. Unknown names raise :class:`SimError` before any corner runs,
-#: mirroring ``engine`` validation.
-SUPPORTED_BACKENDS = ("local", "local-parallel", "remote")
+#: mirroring ``engine`` validation. ``batch`` (issue #2080) submits the
+#: same ``local-parallel`` invocation to 2am's EDA batch fleet as an S3 job
+#: contract instead of provisioning an instance itself -- see
+#: :mod:`klayout_tools.sim_batch` and docs/cli/sim.md's "Batch backend".
+SUPPORTED_BACKENDS = ("local", "local-parallel", "remote", "batch")
+
+#: Backends whose corner reports this process does **not** construct: the
+#: corners come back from an independently-run box (``remote``) or job
+#: instance (``batch``) as a JSON report, so there is no local
+#: :class:`CornerPoint`-keyed dispatch loop here to gate on a checkpoint, a
+#: deadline, or a calibration probe of *this* host's hardware. Both
+#: ``options.resume`` and the fail-fast probe are refused/skipped for these.
+_OFFHOST_BACKENDS = ("remote", "batch")
 
 #: Recognised values for ``request.monte_carlo.vary`` -- which axis (or
 #: axes) of statistical variation the sample sequence is declared to
@@ -579,10 +598,14 @@ def run_sim(
     ``backend`` selects the execution backend, overriding the request's own
     ``backend`` field when given (the ``--backend`` CLI flag path). When both
     are omitted the backend defaults to ``local``. ``local``,
-    ``local-parallel``, and ``remote`` are implemented; any other name raises
-    :class:`SimError` (see :data:`SUPPORTED_BACKENDS`). ``remote`` requires
-    ``request.remote`` and ``request.models.pdk`` -- see ``docs/cli/sim.md``'s
-    "Remote backend" section.
+    ``local-parallel``, ``remote``, and ``batch`` are implemented; any other
+    name raises :class:`SimError` (see :data:`SUPPORTED_BACKENDS`).
+    ``remote`` requires ``request.remote`` and ``request.models.pdk`` -- see
+    ``docs/cli/sim.md``'s "Remote backend" section. ``batch`` (issue #2080)
+    submits the same ``local-parallel`` invocation to 2am's EDA batch fleet
+    as an S3 job contract and needs a resolvable
+    ``request.batch.provision_script_path``/``$KLT_BATCH_PROVISION_SCRIPT``
+    plus a job bucket -- see "Batch backend" in the same document.
 
     ``max_workers`` bounds the ``local-parallel`` backend's worker pool,
     overriding the request's own ``options.max_workers`` when given (the
@@ -601,9 +624,9 @@ def run_sim(
     decision 4). Defaults to ``1`` when both are omitted, which is exactly
     today's single-host behaviour -- byte-identical, not just
     "equivalent" -- so every existing request/response is unaffected. Must
-    be a positive integer when given explicitly, and (for backend
-    ``remote`` only) no greater than the number of units to dispatch --
-    an idle fleet member would still be billed.
+    be a positive integer when given explicitly, and (for backends
+    ``remote``/``batch`` only) no greater than the number of units to
+    dispatch -- an idle fleet member would still be billed.
 
     For ``local``/``local-parallel``, ``hosts > 1`` fans the already-expanded,
     already-seeded ``CornerPoint`` list across a thread pool in this same
@@ -620,7 +643,10 @@ def run_sim(
     ranges, which would risk two shards disagreeing about which points are
     whose, or reseeding a point differently than an unsharded run would have)
     -- see :func:`_corner_points_to_wire` and ``_build_remote_request``'s
-    ``explicit_points`` parameter.
+    ``explicit_points`` parameter. For backend ``batch``, ``hosts > 1``
+    submits one independent fleet *job* per shard (:func:`_run_batch_fleet`)
+    -- the same per-shard slice contract, with the provisioning half owned
+    by 2am's fleet rather than by this process.
 
     ``budget_s`` bounds the **whole sweep's** wall-clock time, overriding the
     request's own ``options.wall_clock_budget_s`` when given (the
@@ -912,15 +938,15 @@ def run_sim(
     # Resumability (issue #473): only active when the caller opts in, and
     # only for the backends whose corner reports this process itself
     # produces (`local`/`local-parallel`, including any `hosts > 1` shard
-    # built on them -- see `_run_sharded`). `remote`'s corners come back
-    # from an independently-run box via a JSON report this process does not
-    # construct, so there is no local `CornerPoint.corner_id` to reconcile
-    # a checkpoint against yet; mirrors the existing `hosts > 1` + `remote`
-    # restriction above rather than inventing a new error shape.
-    if resume and backend == "remote":
+    # built on them -- see `_run_sharded`). `remote`'s and `batch`'s corners
+    # come back from an independently-run box via a JSON report this process
+    # does not construct, so there is no local `CornerPoint.corner_id` to
+    # reconcile a checkpoint against yet; mirrors the existing `hosts > 1` +
+    # `remote` restriction above rather than inventing a new error shape.
+    if resume and backend in _OFFHOST_BACKENDS:
         raise SimError(
-            "options.resume is not yet supported for backend 'remote' -- "
-            "wiring the remote backend into the same checkpoint machinery "
+            f"options.resume is not yet supported for backend {backend!r} -- "
+            f"wiring the {backend} backend into the same checkpoint machinery "
             "as 'local'/'local-parallel' is tracked follow-up work; use "
             "resume with backend 'local' or 'local-parallel'"
         )
@@ -961,13 +987,14 @@ def run_sim(
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
-    # is dispatched -- not per backend/shard/host, and not for `remote`
-    # (see `_run_remote`'s docstring for why probing this process's own
-    # host is not representative of a provisioned remote box). `None` when
-    # the probe did not run at all (opted out, wrong analysis kind, empty
-    # grid) or came back inconclusive -- see `_run_fail_fast_probe`.
+    # is dispatched -- not per backend/shard/host, and not for `remote`/
+    # `batch` (see `_run_remote`'s and `_run_batch`'s docstrings for why
+    # probing this process's own host is not representative of a
+    # provisioned remote box or a fleet job instance). `None` when the probe
+    # did not run at all (opted out, wrong analysis kind, empty grid) or
+    # came back inconclusive -- see `_run_fail_fast_probe`.
     probe_result: dict[str, Any] | None = None
-    if fail_fast_probe and backend != "remote" and dispatch_points:
+    if fail_fast_probe and backend not in _OFFHOST_BACKENDS and dispatch_points:
         probe_result = _run_fail_fast_probe(
             corner_points=dispatch_points,
             netlist_path=netlist_path,
@@ -1031,15 +1058,18 @@ def run_sim(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
         )
-    elif backend == "remote":
+    elif backend in _OFFHOST_BACKENDS:
         # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
-        # issue #906) -- distinct from the generic `_run_sharded` seam below,
+        # issue #906; `batch`'s own one-job-per-shard analog by issue
+        # #2080) -- distinct from the generic `_run_sharded` seam below,
         # which just re-invokes the already-selected backend per shard
         # in-process. A `remote` shard instead needs its own provisioned
         # instance, guardrails, and teardown, which `_run_remote_fleet`
-        # gets from `remote_fleet.run_fleet` unmodified -- see this
-        # function's docstring on `hosts`.
-        corners_new, backend_engine_version, remote_environment = _run_remote_fleet(
+        # gets from `remote_fleet.run_fleet` unmodified; a `batch` shard
+        # needs its own S3 job contract and launch. See this function's
+        # docstring on `hosts`.
+        fleet_dispatch = _run_remote_fleet if backend == "remote" else _run_batch_fleet
+        corners_new, backend_engine_version, remote_environment = fleet_dispatch(
             corner_points=dispatch_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
@@ -2267,6 +2297,7 @@ _BACKENDS = {
     "local": _run_local,
     "local-parallel": _run_local_parallel,
     "remote": _run_remote,
+    "batch": _run_batch,
 }
 
 
