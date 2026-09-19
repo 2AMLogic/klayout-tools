@@ -43,7 +43,70 @@ from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 
-def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
+class _SupplyPinUniverse(NamedTuple):
+    """The two library-derived name sets :func:`_build_net_correspondence`
+    needs to mark a supply-net correspondence as unverified (issue #2136).
+
+    ``power_pin_names`` is the standard-cell library's own power/ground pin
+    universe (``lvs.py``'s ``_gate_level_power_pin_names``);
+    ``layout_supply_nets`` is the set of layout net names one of those pins
+    demonstrably lands on (``lvs.py``'s ``_layout_supply_net_names``). Both
+    are upper-cased, and both are derived -- never a hardcoded per-PDK name
+    table or a ``V*`` glob. Built only for a ``reference.form:
+    "gate-level-verilog"`` run with resolvable library pin orders; ``None``
+    everywhere else.
+    """
+
+    power_pin_names: frozenset[str]
+    layout_supply_nets: frozenset[str]
+
+
+def _net_name_aliases(name: str | None) -> frozenset[str]:
+    """``name`` upper-cased, plus each of its ``|``-separated aliases.
+
+    A label-merged net is reported as ``VPWR|VDD`` (see ``_name_or_none``),
+    and which alias a given lookup table happens to hold is not something
+    either side controls -- so membership tests in this module consider the
+    joined spelling *and* every alias it joins.
+    """
+    if not name:
+        return frozenset()
+    return frozenset(
+        {name.upper(), *(alias.upper() for alias in name.split("|") if alias)}
+    )
+
+
+def _is_unverified_supply_correspondence(
+    layout_name: str | None,
+    reference_name: str | None,
+    universe: _SupplyPinUniverse | None,
+) -> bool:
+    """True when this pairing puts a layout **supply** net opposite a
+    reference net that is not itself a supply pin (issue #2136).
+
+    A ``reference.form: "gate-level-verilog"`` reference carries no
+    power/ground pins at all (see ``verilog_netlist.py``'s own "No
+    power/ground pins" note), so the comparer never has a same-named
+    candidate for the layout's ``VGND``/``VPWR`` and pairs it with whatever
+    its graph heuristics reach first -- routinely an unrelated signal net.
+    That pairing is reported as an ordinary match today, indistinguishable
+    from one the compare actually verified.
+
+    The reference-side half of the test is not redundant: it is what keeps
+    a genuine supply-to-supply pairing (a reference that *does* declare the
+    supply pin -- possible for a hand-written stub, and the shape every
+    non-``gate-level-verilog`` form has) out of the flag.
+    """
+    if universe is None:
+        return False
+    if not (_net_name_aliases(layout_name) & universe.layout_supply_nets):
+        return False
+    return not (_net_name_aliases(reference_name) & universe.power_pin_names)
+
+
+def _build_net_correspondence(
+    logger: Any, supply_universe: _SupplyPinUniverse | None = None
+) -> list[dict[str, Any]]:
     """Turn ``logger.net_matches`` (every successful net pairing the
     comparer produced -- unambiguous and ambiguous alike) into the
     documented ``net_correspondence[]`` response field (issue #311).
@@ -71,6 +134,18 @@ def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     layout)`` so repeated runs against the same inputs diff clean,
     matching this module's existing determinism guarantee for
     ``mismatches[]`` (see ``_sort_key``).
+
+    ``supply_universe`` (issue #2136, ``None`` for every ``reference.form``
+    other than ``"gate-level-verilog"`` and for any run whose library
+    pin orders could not be resolved) adds a ``heuristic`` boolean to every
+    entry: ``True`` for a pairing that puts a layout supply net opposite a
+    reference net that is not itself a supply pin (see
+    :func:`_is_unverified_supply_correspondence`), ``False`` otherwise. The
+    key is **omitted entirely** when ``supply_universe`` is ``None``, so a
+    caller can tell "checked, and this pairing is genuine" (``False``) apart
+    from "no supply universe was derivable, so nothing here was checked"
+    (absent) -- and so every other reference form's output stays
+    byte-identical to what it was before this issue.
     """
     from .lvs import _name_or_none
 
@@ -81,11 +156,16 @@ def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
         key = (scope, layout_name, reference_name)
         if key in seen:
             continue
-        seen[key] = {
+        entry: dict[str, Any] = {
             "layout": layout_name,
             "reference": reference_name,
             "pin": bool(layout_net is not None and layout_net.pin_count() > 0),
         }
+        if supply_universe is not None:
+            entry["heuristic"] = _is_unverified_supply_correspondence(
+                layout_name, reference_name, supply_universe
+            )
+        seen[key] = entry
     return sorted(
         seen.values(),
         key=lambda entry: (entry["reference"] or "", entry["layout"] or ""),

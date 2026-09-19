@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added**: `klt lvs`'s `net_correspondence[]` entries now carry a
+  `heuristic` boolean for a `reference.form: "gate-level-verilog"` run
+  whose `reference.library` pin orders resolve (issue #2136). Such a
+  reference carries no power/ground pins at all, so the comparer had no
+  same-named candidate for the layout's `VGND`/`VPWR` and paired it with
+  whatever its graph heuristics reached first — routinely an unrelated
+  signal net — reporting that fallback as an ordinary, unmarked
+  correspondence inside a `status: "match"` report. `heuristic: true` now
+  marks a pairing whose layout side is demonstrably a supply net (a pin
+  the library declares power/ground lands on it) while the reference side
+  is not a supply pin; `heuristic: false` marks every pairing the compare
+  stands behind. The key is **omitted** for every other `reference.form`
+  and for any run with no derivable supply universe, so "checked and
+  genuine" stays distinguishable from "never checked" — read it with
+  `entry.get("heuristic")`. Additive: `status`, `mismatches[]`, and the
+  `power_connectivity` block are unchanged, and `power_connectivity`
+  remains the check that actually validates supply connectivity. See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "Supply correspondences are not
+  validated supply connectivity".
 - **Fixed**: `klt extract --deck sg13cmos5l --parasitics` now uses sourced
   nominal R/C coefficients for Metal1-Metal4 and TopMetal1, plus all four
   adjacent vertical-overlap pairs (issue #2113). The registered deck
