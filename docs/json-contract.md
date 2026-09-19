@@ -172,15 +172,23 @@ Use this entry shape for warnings about skipped requested capabilities:
 | `count` | positive integer | Number of occurrences represented by this entry; `1` for a single capability warning. This is not the number of analyses completed or skipped. |
 | `text` | string | Explanation naming the affected capability or capabilities, why they were skipped, and the affected result fields. Include the relevant request value when it identifies the limitation. |
 
-The shared contract is the **entry**, not a replacement for a verb's
-existing warning container. A verb using a `warnings` array places these
-entries in `warnings[]`. `klt synthesize` retains its existing object
+The shared contract is the **entry**. Adoption preserves both a verb's
+existing warning container and its element types. A `warnings` array whose
+documented entries already have this object shape can use it directly.
+An existing `warnings: array<string>` must retain string elements: adding
+objects, including a mixture of strings and objects, breaks that contract.
+Such a verb exposes structured capability entries in a separate, additive,
+documented field, or introduces an explicitly versioned breaking migration
+with a `schema_version` bump.
+
+`klt synthesize` retains its existing object
 `warnings: {total, by_category, representatives}` and places them in
 `warnings.representatives[]`. Its `by_category` map exposes the category
 and count for consumers; its `representatives` entries explain them.
 Existing fields, counts, and engine diagnostic categories keep their
-documented meaning. Adoption must not rename, remove, or restructure an
-already-shipped field, or change `warnings` from an object into an array.
+documented meaning. Additive adoption must not rename, remove, or
+restructure an already-shipped field, change its element types, or change
+`warnings` from an object into an array.
 
 Each verb documents its capability categories and the results they
 qualify. A consumer can mechanically detect a known missing capability by
