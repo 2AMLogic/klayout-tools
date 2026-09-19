@@ -377,10 +377,19 @@ Several verbs can report a passing top-level verdict on a run that measured
 
 | Verb | How | Reason code |
 | ---- | --- | ----------- |
-| `klt drc` (`--engine klayout`) | A PDK-native deck whose whole rule set is gated behind a `--deck-var` this run never set. The deck completes and writes a well-formed, **empty** report: `status: "clean"`, `violation_count: 0`. | `deck_reported_no_rules` |
 | `klt drc` (`--engine curated`) | Every deck rule skipped because its layer(s) are absent from the stream, or a deck that declares no rules at all. | `all_rules_skipped`, `deck_has_no_rules` |
 | `klt sim` | A PVT corner matrix that expanded to zero corners, or a request whose every `measurements[].limits` object used keys `klt sim` does not apply (only `min`/`max` are read). | `empty_corner_matrix`, `unrecognized_limit_keys` |
 | `klt pex` | A run that produced no `delta[]` row at all, so no schematic-vs-extracted comparison was ever performed. | `no_delta_rows` |
+
+**`klt drc --engine klayout` is not in this table** (issue #2108). An
+externally-run deck has no execution instrumentation this module can trust:
+a report declaring zero categories and one declaring several both fail to
+prove a single rule actually ran, so this engine can never assert the
+*known* zero this table requires — it reports the weaker `known: false` /
+`coverage_unknown` instead (exit 4), covered by the `"coverage_unknown"`
+entry in "`reason` values" below and the `drc --engine klayout` row of
+[coverage-contract.md](../coverage-contract.md). Its own
+`coverage.nothing_checked` is always `false`.
 
 Those verbs now declare it themselves, via the shared
 `coverage.nothing_checked` / `coverage.nothing_checked_reasons` convention
@@ -399,7 +408,7 @@ $ klt signoff drc.json --format text
 status: fail
 checks: 0/1 passed
 
-[FAIL] drc      drc.json  status=clean (nothing checked: deck_reported_no_rules)
+[FAIL] drc      drc.json  status=not_checked (nothing checked: all_rules_skipped)
 ```
 
 **Why this one enforces.** A coverage *gap* (`rules_skipped`, an unbiased

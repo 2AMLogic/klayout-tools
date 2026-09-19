@@ -1850,20 +1850,32 @@ def run_drc_klayout_engine(
     empty lists (never fabricated), a known, documented limitation (see
     ``docs/cli/drc.md``, "Engine" -> "klayout").
 
-    Two sub-fields *are* populated (issue #1996).
-    ``coverage.rules_checked`` is the sorted list of rule categories the
-    deck's own report declares -- the only "which rules ran" evidence an
-    RDB report carries (see :func:`_parse_klayout_rdb_report`). When it is
-    empty, ``coverage.nothing_checked`` is ``True`` and
-    ``nothing_checked_reasons`` is ``["deck_reported_no_rules"]``: the deck
-    script completed, wrote a well-formed report, and never reached a single
-    ``output(...)`` call. The common cause is a PDK-native deck that gates
-    its whole rule set behind a feature-toggle global set via ``-rd``
-    (``--deck-var``) which this invocation left unset -- previously
-    indistinguishable from a real ``status: "clean"``, which is exactly the
-    gap this field closes for `klt signoff` (see the shared convention in
-    :mod:`klayout_tools.coverage`). ``status`` itself is unchanged: an empty
-    report is still ``"clean"``, now with the emptiness stated alongside it.
+    Two sub-fields *are* populated, on a distinction issue #2108 sharpened.
+    ``coverage.rule_categories`` (issue #1996) is the sorted list of rule
+    categories the deck's own report declares -- KLayout's DRC DSL opens a
+    ``<category>`` the moment a rule calls ``output(...)``, whether or not
+    that call found anything, so this is the closest thing an RDB report
+    offers to "which rules did you attempt". It is *not* proof of execution,
+    though: a deck that gates its whole rule set behind a feature-toggle
+    global set via ``-rd`` (``--deck-var``) which this invocation left unset
+    produces the same well-formed, zero-category-or-zero-item report as one
+    that genuinely ran everything and found nothing -- previously
+    indistinguishable from a real ``status: "clean"``. ``coverage.checked``
+    (the common contract's identity list, plus this module's own
+    ``coverage.rules_checked`` alias) is therefore *not* ``rule_categories``:
+    it is only the rule ids that actually produced a finding (a real item is
+    the one signal this format cannot fake). Whenever no violation exists --
+    regardless of whether ``rule_categories`` is empty or populated --
+    ``coverage.known`` is ``False`` and ``coverage.unknown`` carries a single
+    ``engine_execution`` sentinel with reason ``unmeasured_rule_execution``,
+    and the envelope's own ``status`` is ``"coverage_unknown"`` (exit 4) --
+    never ``"clean"``. There is no instrumentation interface in this release
+    that lets an externally-run deck claim known-full coverage; see the
+    shared convention in :mod:`klayout_tools.coverage` and the
+    ``drc --engine klayout`` row of ``docs/coverage-contract.md``. A found
+    violation always overrides: ``status`` is ``"violations"`` and that
+    rule's id is recorded as checked, regardless of coverage unknownness
+    elsewhere in the same run.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
