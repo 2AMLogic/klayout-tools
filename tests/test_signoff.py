@@ -3069,6 +3069,8 @@ def test_every_recognized_kind_declares_a_typed_shape():
         "power",
         "sta",
         "functional-verification",
+        "erc",
+        "place-and-route",
         "generic",
         "error",
     }
