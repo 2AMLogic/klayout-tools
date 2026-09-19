@@ -1112,6 +1112,17 @@ touches another pad's base-metal layer, so a same-block bus that would
 otherwise cross #433's own pad-crossing rejection is now routable instead of
 `unrouted_nets[]`.
 
+Each via-drop pad is sized independently for its metal/via pair: its side
+is the maximum of the 0.42 µm baseline, the square root of the metal's
+minimum area, and the width-floored via side plus twice the applicable
+enclosure margin. The margins come from the resolved family's curated DRC
+deck; both sides of every hop are checked. On sky130's via4 hop this grows
+the met4 pad to 1.18 µm (0.8 + 2 × 0.19), while met5's 2 µm area floor
+already exceeds its 1.42 µm enclosure floor (0.8 + 2 × 0.31). Missing
+enclosure rules leave the existing baseline and area floors intact.
+These floors affect the drawn pads; the router's spacing pre-checks retain
+their existing baseline footprint, as for the prior area and via-width floors.
+
 ```json
 {
   "pdk": { "variant": "sky130A" },
