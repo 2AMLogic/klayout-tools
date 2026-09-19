@@ -396,6 +396,15 @@ def _stub_merge_def_to_gds(
                 "single_pin_markers": 0,
                 "unresolved_single_pin_nets": [],
             },
+            "min_area_repair": {
+                "status": "skipped",
+                "reason": "stubbed merge",
+                "patches": 0,
+                "repaired": 0,
+                "remaining": 0,
+                "rules": [],
+                "unrepaired": [],
+            },
         }
 
     monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)

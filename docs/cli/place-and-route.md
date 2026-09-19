@@ -1123,6 +1123,87 @@ covered by drawn conductor — is named in
 `def_net_names.unresolved_single_pin_nets` and simply keeps the pre-#1488
 `$<id>` fallback downstream; the merge itself never fails over it.
 
+### Minimum-area repair (issue #2139)
+
+A routed design's metal on any one layer is the **merge** of everything the
+router, the PDN generator and the PDK's own tech-LEF via cells drew there.
+Two sources routinely contribute a shape that is legal in isolation but
+lands below that layer's own minimum-**area** rule once it is the whole
+merged polygon:
+
+1. **Tech-LEF via enclosures instantiated with too little attached wire.**
+   sky130's `sky130_fd_sc_hd__nom.tlef` defines `VIA L1M1_PR_MR` with a
+   `0.29 x 0.23 um` (`0.0667 um²`) met1 landing and `VIA M2M3_PR` with a
+   `0.33 x 0.33 um` (`0.1089 um²`) met3 landing — both below the *same*
+   PDK's own `m1.6` (`0.083 um²`) / `m3.6` (`0.240 um²`) minimum-area
+   rules. That is legal in the LEF: the enclosure is expected to merge with
+   the routing wire it terminates. It becomes a real violation only where
+   the router leaves too little attached metal on that layer for the merged
+   polygon to clear the rule. The margin is genuinely thin, not
+   theoretical — on the 48-stage inverter-chain reproducer issue #2139
+   filed, re-run here against OpenROAD `26Q3-1510-g6cb3f2b704` and sky130A
+   open_pdks `c6d73a35`, the smallest merged met1 polygon measures
+   `0.0832 um²` against that `0.083 um²` floor (a 0.24% margin), and 38 of
+   that run's 108 merged met1 polygons sit within 10% of it. **Which side
+   of the line such a polygon lands on is decided by the router/`pdngen`
+   build in use, not by the design**: that re-run measured zero violations,
+   whereas issue #2139 reports 81 real `m1.6` (and 18 `m5.4`) violations
+   from the same reproducer on the `openroad/orfs:latest` build it was
+   filed against. That build-to-build swing is exactly why the floor is
+   enforced here rather than assumed: the repair pass is a verified no-op
+   on the clean run (byte-identical merged GDS) and repairs the geometry on
+   a run that is not. The two checked-in routed corpus fixtures (`gcd`,
+   `modexp_canary`) sit on the same knife edge — both clean, both with a
+   smallest met1 polygon of exactly `0.0832 um²`;
+   `tests/test_place_and_route_min_area.py` pins that measured baseline.
+2. **PDN via patches on a strap layer with a large area floor.** sky130's
+   `m5.4` is `4.0 um²`, ~17x met3's; a `1.42 x 1.60 um` (`2.272 um²`) met5
+   via landing violates it by construction.
+
+Neither geometry is `klt`'s to change — one is the foundry's tech LEF, the
+other OpenROAD's `pdngen` — so the DEF→GDS merge applies the same fix PR
+#2075 already shipped on the analog side for `klt gen-compose`'s via-drop
+landing pads: resolve the **landing layer's own** `*.area.*` rule out of the
+resolved PDK family's curated deck (the *same* rule set `klt drc` judges the
+geometry with, never a private hard-coded threshold) and floor the drawn
+metal against it. `gen-compose` authors its landing pads itself and can
+simply draw them bigger; the digital flow receives finished geometry, so the
+floor is applied afterwards, by extending a violating merged polygon with an
+abutting patch drawn into the **top cell** (never into the shared via-cell
+or standard-cell definition, which would replicate it at every other
+instance).
+
+Scope is the intersection of two sets: the `(layer, datatype)` pairs the
+PDK's own KLayout layer map (`layer_map` above) names as *routed net*
+geometry, and the layers the resolved family's curated deck carries a plain
+`*.area.*` rule for. For sky130A that is exactly met1–met5. Standard-cell
+internals on non-routing layers are the foundry's already-signed-off
+geometry and are never touched; a `derived_layer` rule such as
+`met1.holes_area.1` is excluded too, since it checks an interior *void*,
+which drawing more metal can never satisfy.
+
+**Safety.** A repair that traded a minimum-area violation for a *short*
+would be strictly worse than the violation it fixes, so every candidate
+patch must stay inside the DEF's own `DIEAREA`, keep at least the layer's
+own minimum-*spacing* rule away from every other shape already on that layer
+(including patches this same pass drew earlier), be at least the layer's own
+minimum-*width* thick along a shared boundary at least that wide, and be
+*verified* to produce one merged polygon of at least the required area. A
+violation with no passing candidate is reported in
+`min_area_repair.unrepaired[]` rather than repaired unsafely.
+
+**Known limits.** The pass reasons about area, width and spacing only: a
+patch narrower than the side it attaches to leaves a concave step, a *notch*
+geometry no rule modelled here scores — the same scoping trade-off PR
+#2075's `_landing_pad_side_um_for_layer` already documents for
+`gen-compose`. And because `status: "skipped"` is never reported as clean, a
+run with no resolvable layer map or no curated deck says so explicitly
+rather than implying geometry it did not measure. Run `klt drc` on
+`gds_path` for the authoritative verdict either way — note that the
+`met*.area.*` rules themselves only entered the curated `sky130` deck with
+issue #1989, so a `klt` release predating it reports `"status": "clean"` on
+geometry these rules would flag.
+
 ### `*PORTS` lists only real design ports (issue #961 defect 1, fixed)
 
 `--def-net-names` (previous section) gives *every* routed net a real name —
@@ -1702,6 +1783,18 @@ unsure).
     "single_pin_markers": 4,
     "unresolved_single_pin_nets": []
   },
+  "min_area_repair": {
+    "status": "clean",
+    "reason": null,
+    "patches": 99,
+    "repaired": 99,
+    "remaining": 0,
+    "rules": [
+      { "rule": "met1.area.1", "layer": [68, 20], "threshold_um2": 0.083, "violations_before": 81, "violations_after": 0, "patches": 81 },
+      { "rule": "met5.area.1", "layer": [72, 20], "threshold_um2": 4.0, "violations_before": 18, "violations_after": 0, "patches": 18 }
+    ],
+    "unrepaired": []
+  },
   "verilog_path": "/abs/path/.klt/place-and-route/gcd.v",
   "spef_sta": {
     "spef_path": "/abs/path/.klt/place-and-route/gcd_route.spef",
@@ -1799,6 +1892,7 @@ plain string" for the full enumeration and rationale.
 | `gds_path` | string \| null | Populated only once the DEF→GDS merge has also completed; `null` otherwise. |
 | `layer_map` | object \| null | Additive field (issue #1029). `null` unless `stage_reached` is `"route"`, mirroring `gds_path`. `path` — the absolute path to the open_pdks KLayout LEF/DEF layer-map file actually applied to the DEF→GDS merge, or `null` if none was found. `resolution` — `"exact"` when a variant-named file (`<variant>.map`, e.g. `sky130A.map`) matched; `"family"` when no variant-named file existed and the family-level fallback (`<family>.map`, e.g. `gf180mcu.map` for `gf180mcuC`/`gf180mcuD`, whose open_pdks install ships only that shared file — see `_resolve_layer_map`) matched instead; `"none"` when neither existed, in which case the merge proceeded without a guaranteed-matching layer/datatype assignment for routing shapes, matching `def2stream.py`'s own degrade-gracefully behavior. |
 | `def_net_names` | object \| null | Additive field (issue #1488). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own unrouted-single-pin net-name marker pass — see "Unrouted single-pin net names" above. `single_pin_markers` — how many marker shapes were synthesized (one per unrouted single-pin net whose pin geometry resolved); `0` is the normal value for a design with no tie-cell-style nets, and says nothing is missing. `unresolved_single_pin_nets` — every single-pin net the pass could **not** resolve, by DEF net name (sorted): no layer-map file to translate the LEF `PORT` layer name through, a macro or pin the LEF never declares, or a pin centre not covered by drawn conductor. Those nets keep extraction's synthesized `$<id>` name under `klt extract --def-net-names`, exactly as before this field existed — never a merge failure. |
+| `min_area_repair` | object \| null | Additive field (issue #2139). `null` unless `stage_reached` is `"route"`, mirroring `layer_map`. Reports the DEF→GDS merge's own post-route minimum-**area** repair pass — see "Minimum-area repair" below. `status` — `"clean"` (no sub-minimum-area polygon remains on any checked layer), `"violations"` (at least one could not be repaired safely), or `"skipped"` (the pass could not run at all). `reason` — `null` unless `"skipped"`; a `"skipped"` pass is deliberately **not** reported as clean, so "never measured" stays distinguishable from "measured and clean". `patches` — repair patches drawn. `repaired`/`remaining` — violating polygons cleared / still violating, both re-measured against the layer's own post-repair geometry rather than inferred. `rules[]` — per-rule detail (`rule`, `layer`, `threshold_um2`, `violations_before`, `violations_after`, `patches`) for every checked layer that had at least one violation, sorted by rule id; `[]` when nothing violated. `unrepaired[]` — up to 20 still-violating polygons (`rule`, `layer`, `area_um2`, `threshold_um2`, `bbox_um`), so a caller can act on real residual geometry rather than on a bare count. |
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `timing_status` (issue #1865) — the same constrained/unconstrained verdict the top-level field carries, computed from this block's own `worst_slack_ns`. `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
 | `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. |

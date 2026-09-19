@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt place-and-route`'s routed GDS no longer carries metal
+  below the PDK's own minimum-**area** rules, and the response says so
+  either way (issue #2139, the `place-and-route` half of #2072 that PR
+  #2075 could not reproduce). The DEF→GDS merge now runs a post-route
+  minimum-area repair pass: every merged routed-metal polygon is floored
+  against its own layer's plain `*.area.*` rule in the resolved PDK
+  family's curated deck — the *same* rule set `klt drc` judges the geometry
+  with — by drawing an abutting patch into the top cell. Two geometry
+  classes this repo does not author drive it: the foundry tech LEF's own
+  via landings (sky130's `L1M1_PR_MR` met1 landing is `0.0667 um²` against
+  an `m1.6` floor of `0.083 um²`; `M2M3_PR`'s met3 landing is `0.1089 um²`
+  against `m3.6`'s `0.240 um²`), and OpenROAD `pdngen`'s met5 via patches
+  (`2.272 um²` against `m5.4`'s `4.0 um²`). Every patch is bounded by the
+  DEF's own `DIEAREA`, by the layer's own minimum-spacing and
+  minimum-width rules, and by a verified single-merged-polygon area check,
+  so a repair can never author a short or a sliver. **Additive response
+  field** `min_area_repair` (`null` unless `stage_reached` is `"route"`)
+  reports `status`/`patches`/`repaired`/`remaining`, per-rule
+  before/after counts, and any polygon the pass refused to repair — and a
+  pass that could not run at all reports `status: "skipped"` with a
+  `reason` rather than an unmeasured clean. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s
+  "Minimum-area repair".
 - **Added**: `klt lvs`'s `net_correspondence[]` entries now carry a
   `heuristic` boolean for a `reference.form: "gate-level-verilog"` run
   whose `reference.library` pin orders resolve (issue #2136). Such a
