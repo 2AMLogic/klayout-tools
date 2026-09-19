@@ -148,6 +148,23 @@ def test_external_pass_cannot_override_unchecked_or_failed_tests(tmp_path, statu
 def test_external_malformed_count_cannot_qualify(tmp_path, field, value):
     envelope = _envelope(["passed"])
     envelope[field] = value
+    if field == "test_count" and type(value) is not int:
+        # The shared ingestion boundary rejects a malformed required field
+        # before FV's count-consistency check can grade the envelope.
+        path = _write(tmp_path, "functional.json", envelope)
+        with pytest.raises(SignoffError, match="required field 'test_count'"):
+            build_signoff([path])
+        annotated = copy.deepcopy(envelope)
+        annotated["environment"] = {"sdf": {"annotated": True, "corner": "typ"}}
+        sdf_path = _write(tmp_path, "functional-sdf.json", annotated)
+        report = build_tier_report(
+            _manifest(kind="digital", evidence={"5": path, "7": sdf_path})
+        )
+        for item in (item for item in report["items"] if item["id"] in (5, 7)):
+            assert item["status"] == "unmet"
+            assert item["reason"] == "unrecognized_envelope"
+            assert item["citation"] is None
+        return
     _assert_signoff_verdict(tmp_path, envelope, passed=False)
 
 
