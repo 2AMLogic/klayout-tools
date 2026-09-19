@@ -318,6 +318,16 @@ _ABC_STIME_RE = re.compile(
 #:   farads, three orders of magnitude below any real pin in that library,
 #:   so the unit-consistent value for Yosys's femtofarad-denominated
 #:   ``set_load`` is 13.43 fF -- ORFS's own number, converted, not a guess.
+#: - ``gf180mcu_fd_sc_mcu7t5v0`` (issue #2088) ->
+#:   ``gf180mcu_fd_sc_mcu7t5v0__buf_4`` / ``13.43`` fF. Same platform
+#:   policy and pF-to-fF conversion as 9t: ORFS's ``config.mk`` above
+#:   resolves the driver with ``TRACK_OPTION=7t`` but keeps its load
+#:   independent of track height. Verified against ORFS commit
+#:   ``95ebc50a258390f4c7896e5f04db743f62279c2d`` (2026-09-19), including
+#:   its ``flow/platforms/gf180/lib/`` 7t ``tt_025C_5v00`` liberty. That
+#:   file gives ``buf_4`` input ``I`` a capacitance of 0.009315 pF
+#:   (9.315 fF); this is a cross-check, not a replacement for the sourced
+#:   platform output-load policy. No claim of optimal QoR is implied.
 #: - ``sg13g2_stdcell`` (issue #1784) -> ``sg13g2_buf_4`` / ``6.0`` fF. IHP
 #:   ships no ORFS platform config of its own; the source of truth here is
 #:   IHP-Open-PDK's own LibreLane platform config
@@ -337,10 +347,12 @@ _ABC_STIME_RE = re.compile(
 #: here shells out to, reads, or requires an ORFS checkout, and no ORFS file
 #: is vendored. A ``cell_library`` with no entry keeps this command's
 #: pre-#807 behaviour exactly (no ``-constr``, no sizing/buffering, no
-#: ``timing``), rather than guessing a driving cell for it.
+#: ``timing``), with an explicit capability warning rather than guessing
+#: a driving cell for it.
 _ABC_CONSTR_INPUTS: dict[str, tuple[str, float]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__buf_1", 5.0),
     "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__buf_4", 13.43),
+    "gf180mcu_fd_sc_mcu7t5v0": ("gf180mcu_fd_sc_mcu7t5v0__buf_4", 13.43),
     "sg13g2_stdcell": ("sg13g2_buf_4", 6.0),
 }
 
@@ -455,6 +467,10 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
 #:   Deliberately **not** sky130's single dual-output shape carried over by
 #:   analogy -- this library has no ``conb``-equivalent, and its own
 #:   ``__filltie`` cell is a well-tie filler, not a logic constant driver.
+#: - ``gf180mcu_fd_sc_mcu7t5v0`` (issue #2088) -> ``__tieh`` port ``Z``
+#:   and ``__tiel`` port ``ZN``. ORFS's same platform config resolves
+#:   these with ``TRACK_OPTION=7t``; its pinned 7t liberty cited above
+#:   confirms both cells and their respective ``"1"``/``"0"`` functions.
 #: - ``sg13g2_stdcell`` (issue #1784) -> two distinct cells,
 #:   ``sg13g2_tiehi`` port ``L_HI`` and ``sg13g2_tielo`` port ``L_LO`` --
 #:   IHP's own LibreLane platform config's ``SYNTH_TIEHI_PORT``/
@@ -482,8 +498,8 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
 #:
 #: A ``cell_library`` with no entry gets **no** ``hilomap`` pass at all
 #: (byte-identical script to before #854) rather than a guessed cell name --
-#: the same graceful degradation :data:`_ABC_CONSTR_INPUTS`/
-#: :data:`_ABC_DONT_USE_GLOBS` already apply.
+#: :func:`_library_capability_warnings` discloses that both ``setundef``
+#: and ``hilomap`` were skipped, so bare constants can remain unroutable.
 _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "sky130_fd_sc_hd": (
         ("sky130_fd_sc_hd__conb_1", "HI"),
@@ -492,6 +508,10 @@ _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "gf180mcu_fd_sc_mcu9t5v0": (
         ("gf180mcu_fd_sc_mcu9t5v0__tieh", "Z"),
         ("gf180mcu_fd_sc_mcu9t5v0__tiel", "ZN"),
+    ),
+    "gf180mcu_fd_sc_mcu7t5v0": (
+        ("gf180mcu_fd_sc_mcu7t5v0__tieh", "Z"),
+        ("gf180mcu_fd_sc_mcu7t5v0__tiel", "ZN"),
     ),
     "sg13g2_stdcell": (
         ("sg13g2_tiehi", "L_HI"),
@@ -1078,7 +1098,9 @@ def run_synthesize(
     module_stats = _read_stats(stats_path, hdl_toplevel)
     engine_version = _yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
-    warnings_summary = _summarize_warnings(yosys_log)
+    warnings_summary = _summarize_warnings(
+        yosys_log, capability_warnings=_library_capability_warnings(cell_library)
+    )
     instance_counts_by_type = dict(
         sorted((module_stats.get("num_cells_by_type") or {}).items())
     )
@@ -3148,12 +3170,44 @@ def _categorize_warning(message: str) -> str:
     return "other"
 
 
-def _summarize_warnings(log_text: str) -> dict[str, Any]:
+def _library_capability_warnings(cell_library: str) -> dict[str, str]:
+    """Disclose skipped synthesis capabilities without guessing library data.
+
+    Combine missing capabilities into one representative so neither is
+    hidden by warning aggregation. An absent ``dont_use`` entry is not a
+    missing capability: e.g. gf180 intentionally allows minimum-drive cells.
+    """
+    skipped = []
+    if cell_library not in _ABC_CONSTR_INPUTS:
+        skipped.append(
+            "ABC -constr (driving cell/output load), load-driven sizing/buffering "
+            "and ABC timing (timing is null)"
+        )
+    if cell_library not in _TIE_CELLS:
+        skipped.append(
+            "setundef -zero/hilomap (bare 0/1/x constants may remain unroutable "
+            "in place-and-route)"
+        )
+    if not skipped:
+        return {}
+    return {
+        "unsupported_cell_library": (
+            f"cell_library '{cell_library}' has no verified mapping for: "
+            + "; ".join(skipped)
+            + ". These capabilities were skipped."
+        )
+    }
+
+
+def _summarize_warnings(
+    log_text: str, *, capability_warnings: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Build the response's ``warnings`` field (issue #1588): a bounded,
     deterministic summary of every ``Warning: `` line in ``log_text`` --
-    never the raw log itself.
+    never the raw log itself, plus one warning per supplied capability category.
 
-    ``total`` is a raw line count (deliberately **not** deduplicated the
+    ``total`` counts capability warnings plus raw engine warning lines
+    (deliberately **not** deduplicated the
     way :func:`_compute_structural`'s own ``comb_loops``/``multi_driven``
     counts are -- ``synth``'s internal ``check`` calls can reprint an
     unresolved problem's identical text more than once, so this answers
@@ -3163,9 +3217,9 @@ def _summarize_warnings(log_text: str) -> dict[str, Any]:
     :data:`_MAX_WARNING_REPRESENTATIVES` entries, one per category, each the
     first message text seen for that category (bounded, per issue #1588).
     """
-    total = 0
-    by_category: dict[str, int] = {}
-    first_seen: dict[str, str] = {}
+    first_seen = dict(capability_warnings or {})
+    total = len(first_seen)
+    by_category = dict.fromkeys(first_seen, 1)
     for line in log_text.splitlines():
         if not line.startswith("Warning: "):
             continue

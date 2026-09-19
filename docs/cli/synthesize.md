@@ -221,7 +221,8 @@ anywhere in this flow.
 - **`-constr <top>_abc.constr`** is passed whenever the resolved
   `pdk.cell_library` has an entry in `synthesize.py`'s own
   `_ABC_CONSTR_INPUTS` table (`sky130_fd_sc_hd`,
-  `gf180mcu_fd_sc_mcu9t5v0`, `sg13g2_stdcell` today). Its `set_driving_cell`/
+  `gf180mcu_fd_sc_mcu9t5v0`, `gf180mcu_fd_sc_mcu7t5v0`, `sg13g2_stdcell`
+  today). Its `set_driving_cell`/
   `set_load` values are ORFS's own `ABC_DRIVER_CELL`/`ABC_LOAD_IN_FF` for
   that platform (IHP's own LibreLane platform config's `SYNTH_DRIVING_CELL`/
   `OUTPUT_CAP_LOAD` for `sg13g2_stdcell`, which ships no ORFS platform
@@ -247,7 +248,21 @@ anywhere in this flow.
 
 A `cell_library` in **neither** table is never given a guessed driving cell
 or exclusion list: its generated script keeps exactly the pre-#807 shape
-(`abc -liberty <lib>`, no `tee`), and `timing` stays `null`.
+(`abc -liberty <lib>`, no `tee`), and `timing` stays `null`. A missing
+constraint mapping emits an `unsupported_cell_library` warning naming the
+library and the skipped constraints, sizing/buffering, and ABC timing,
+including when the request supplied a clock period.
+
+**gf180 7t load policy (issue #2088).** Both gf180 track variants use
+13.43 fF. The [ORFS gf180 platform config](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts/blob/95ebc50a258390f4c7896e5f04db743f62279c2d/flow/platforms/gf180/config.mk#L39-L44)
+selects `gf180mcu_fd_sc_mcu7t5v0__buf_4` with `TRACK_OPTION=7t` and keeps
+its load value independent of track height. We retain the existing 9t
+policy: interpret the platform's `0.01343` as pF and convert to the fF
+required by Yosys `set_load`. The [same revision's 7t Liberty](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts/blob/95ebc50a258390f4c7896e5f04db743f62279c2d/flow/platforms/gf180/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib.gz)
+declares `capacitive_load_unit(1, pf)` and gives `buf_4` input `I` a
+capacitance of 0.009315 pF (9.315 fF). That pin capacitance cross-checks
+the scale; it does not replace the platform output-load policy. This is
+a sourced default, with no claim that either candidate optimizes QoR.
 
 **Yosys version note.** `abc -dont_use` does not exist in older Yosys
 builds (verified: present in 0.68, absent in Ubuntu 24.04's 0.33, where
@@ -283,9 +298,10 @@ table:
 | --- | --- | --- |
 | `sky130_fd_sc_hd` | `sky130_fd_sc_hd__conb_1` `HI` | `sky130_fd_sc_hd__conb_1` `LO` |
 | `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu9t5v0__tiel` `ZN` |
+| `gf180mcu_fd_sc_mcu7t5v0` | `gf180mcu_fd_sc_mcu7t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu7t5v0__tiel` `ZN` |
 | `sg13g2_stdcell` | `sg13g2_tiehi` `L_HI` | `sg13g2_tielo` `L_LO` |
 
-The first two rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
+The first three rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
 for that platform, cross-checked against the installed liberty (the sky130
 cell drives both constants from one instance; gf180mcu has two distinct
 cells, and its `__filltie` is a well-tie filler, not a logic constant driver
@@ -309,7 +325,10 @@ Two consequences worth knowing:
   `repair_design`.
 
 A `cell_library` with no `_TIE_CELLS` entry emits no `hilomap` line at all,
-rather than a guessed cell name. A design that needs no constant tie (the
+rather than a guessed cell name. Its `unsupported_cell_library` warning
+states that `setundef -zero` and `hilomap` were skipped and that bare
+0/1/x constants may remain unroutable in place-and-route.
+A design that needs no constant tie (the
 repo's own `gcd.v`) is unaffected: its netlist and `stat` output are
 byte-identical with and without the pass.
 
@@ -1108,7 +1127,7 @@ caller decision rather than something this command should pick.
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
-| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log, never the raw log itself: `{total, by_category, representatives}`. `total` is a raw line count (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
+| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
 | `run_script_path` | object | The `.ys` script Yosys was actually handed (issue #1870), same `{path, scope}` shape — the rehydrated `synth_<top>.run.ys` sibling with the real absolute liberty path substituted for `$PDK_ROOT`, or exactly `script_path` when no token was written (a liberty resolving outside the PDK install root). Additive field, no `schema_version` bump. Machine-specific by construction: commit `script_path`, not this. |
@@ -1162,16 +1181,23 @@ heuristic and Yosys's own optimization already resolve these structurally
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
 
-## `warnings`: a bounded summary of the Yosys run log
+## `warnings`: engine diagnostics and missing library capabilities
 
 A bounded, deterministic summary of every `Warning: ` line in the captured
 Yosys run log — never the raw log itself, which is typically thousands of
-lines of interleaved pass output. `total` is a raw line count (deliberately
-not deduplicated the way `structural.comb_loops`/`multi_driven` are — this
+lines of interleaved pass output. Engine warnings are counted per raw line
+(deliberately not deduplicated the way `structural.comb_loops`/`multi_driven` are — this
 answers "how noisy was this run"); `by_category`/`representatives` group
 into a small, sorted taxonomy (`latch_inferred`, `logic_loop`,
 `multiple_drivers`, `undriven_wire`, `other`), capped at 10 representative
-entries.
+entries. The summary also includes one `unsupported_cell_library` warning
+when a library lacks a verified constraint or tie-cell mapping. Its text
+names the library and every skipped capability; `total` counts this
+warning in addition to engine warning lines. These warnings are emitted
+with or without a clock period. Missing constraint and tie mappings are
+checked independently, so a partially supported library reports only
+what it lacks. An absent `-dont_use` entry is intentional for gf180 and
+does not trigger this warning.
 
 ## `baseline`: optional QoR delta against a prior run
 
