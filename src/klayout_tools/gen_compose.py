@@ -179,6 +179,7 @@ from typing import Any
 
 from ._layout import write_layout
 from ._paths import _resolve_relative
+from ._provenance import build_provenance, layout_geometry_digest
 from .decks import (
     ExtractionDeck,
     UnknownDeckError,
@@ -214,6 +215,7 @@ from .gen_compose_routing import (
     _polyline_midpoint_um,
     _resolve_cross_block_route_layer,
     _resolve_label_layer,
+    _resolve_landing_pad_sizes,
     _resolve_route_layer,
     _ring_port_side,
     read_block_layer_geometry,
@@ -2104,6 +2106,23 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
     absolute ``generator_report`` path, or one given as an inline JSON
     object, is unaffected by ``request_dir`` either way.
 
+    The response carries the shared ``provenance`` block (issue #2035) built
+    by :func:`~klayout_tools._provenance.build_provenance` -- see
+    ``docs/json-contract.md``'s "Shared ``provenance`` block". Its point here
+    is ``klt_version``/``klayout_version``: a project that commits a composed
+    layout *and this report* as evidence and recomposes later could otherwise
+    not tell a real geometry change from a klt/KLayout upgrade. A compose
+    request carries no rule/model deck and no single input layout stream (it
+    composes parameters plus the blocks' own generator sub-reports, not a
+    layout file), so ``provenance.deck``/``provenance.input`` are always
+    ``None`` -- matching ``klt lvs`` against a pre-extracted netlist.
+    ``provenance.pdk`` carries the same identity as the response's top-level
+    ``pdk`` field, in the shared block's own ``{name, source, version}``
+    spelling. Additive field, no ``schema_version`` bump -- and additive in
+    the ``blocks[].generator_report`` sense too: a compose response remains a
+    valid input block for a further ``compose()`` call (#1189), which ignores
+    keys it does not consume.
+
     Raises :class:`GenComposeError` for an unresolvable PDK, an unrecognised
     ``request.pdk`` key, a malformed request, an unsupported
     ``placement.strategy``, a ``connectivity[]`` reference to a nonexistent
@@ -3341,6 +3360,26 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 via_drop_size_um[via_pair] = max(
                     _VIA_DROP_SIZE_UM, floor[0] if floor is not None else 0.0
                 )
+    # Issue #2072: `_VIA_LANDING_SIZE_UM` is a guaranteed `met3.area.1`/
+    # `met4.area.1`/`met5.area.1`-class violation whenever a via-drop
+    # ladder's landing pad lands *isolated* on a metal level whose own
+    # minimum-area rule exceeds the fixed 0.42um square's 0.1764um^2 (e.g.
+    # an intermediate hop several levels below a `bond_pad`'s `top_metal`
+    # pin, which never merges with anything else the composition draws on
+    # that level). Derive a per-landing-layer floor from the same resolved
+    # deck `klt drc` judges the drawn pad with -- one lookup per *distinct*
+    # landing layer actually used across every drawn via-drop, mirroring
+    # `via_drop_size_um` immediately above. A layer with no matching "area"
+    # rule (or an unresolvable PDK family) keeps exactly
+    # `_VIA_LANDING_SIZE_UM`, unchanged. The loop itself lives in
+    # `_resolve_landing_pad_sizes` (beside `_landing_pad_side_um_for_layer`,
+    # which was likewise extracted rather than inlined) instead of inline
+    # here, so this function -- already the worst entry in the repo's `C901`
+    # ratchet baseline -- does not grow by drawing DRC-clean landing pads
+    # (PR #2075 review).
+    landing_pad_size_um = _resolve_landing_pad_sizes(
+        routed_geometry, pdk_info["variant"]
+    )
     composed_dbu_um, dbu_rescale_warnings = _write_composed_gds(
         blocks,
         order,
@@ -3353,6 +3392,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         pin_placements,
         array_placement=array_placement_gds,
         via_drop_size_um=via_drop_size_um,
+        landing_pad_size_um=landing_pad_size_um,
     )
     warnings.extend(dbu_rescale_warnings)
 
@@ -3377,6 +3417,7 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # row_pitch_um/col_pitch_um, not one).
         min_spacing_um = spacing_um
 
+    source_digests = _block_source_digests(blocks, order)
     response_blocks = [
         {
             "id": block_id,
@@ -3386,6 +3427,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "source": blocks[block_id]["source"],
             "generator": blocks[block_id]["generator"],
             "cell_name": blocks[block_id]["cell_name"],
+            "source_path": blocks[block_id]["gds_path"],
+            "source_digest": source_digests[blocks[block_id]["gds_path"]],
             "offset_um": offsets_um[block_id],
             "bbox_um": placed_bboxes_um[block_id],
             "orientation": blocks[block_id].get("orientation", "none"),
@@ -3421,7 +3464,40 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             "notes": notes,
         },
         "warnings": warnings,
+        # Issue #2035: the shared `provenance` block every other verb's
+        # report already carries -- see this function's docstring. A compose
+        # request involves no rule/model deck and no single input layout
+        # stream, so `deck`/`input` are both `None` here.
+        "provenance": build_provenance(pdk=pdk_info),
     }
+
+
+def _block_source_digests(
+    blocks: dict[str, dict[str, Any]], order: list[str]
+) -> dict[str, str | None]:
+    """``{gds_path: source_digest}`` for every block's own input stream (#2065).
+
+    A composition is a *snapshot* of inputs that keep moving under it, so the
+    report has to say what it was built from: the stream each block's geometry
+    was read from, plus a digest of that stream, so "is this composition still
+    current?" becomes a comparison rather than a layer-by-layer XOR.
+
+    The digest is deliberately **not** a raw-byte hash
+    (:func:`klayout_tools._provenance.layout_geometry_digest` explains why):
+    an input re-run that emits geometrically identical output still writes
+    different bytes every time, so a byte hash reports drift on every re-run
+    and cannot distinguish a re-write from a real change. ``None`` for a
+    stream that cannot be decoded -- never fabricated.
+
+    Keyed by path (not by block ``id``) so two blocks placed out of the same
+    stream decode it once.
+    """
+    digests: dict[str, str | None] = {}
+    for block_id in order:
+        source_path = blocks[block_id]["gds_path"]
+        if source_path not in digests:
+            digests[source_path] = layout_geometry_digest(source_path)
+    return digests
 
 
 def _collect_matched_groups(
@@ -3500,6 +3576,7 @@ def _write_composed_gds(
     pin_placements: list[dict[str, Any]] | None = None,
     array_placement: dict[str, Any] | None = None,
     via_drop_size_um: dict[tuple[int, int], float] | None = None,
+    landing_pad_size_um: dict[tuple[int, int], float] | None = None,
 ) -> tuple[float, list[str]]:
     """Write ``output_path``: one new top cell (``cell_name``) instantiating
     every block's own top cell as a translated sub-cell instance, plus any
@@ -3568,15 +3645,26 @@ def _write_composed_gds(
     ``_VIA_DROP_SIZE_UM`` constant still draws a DRC-clean via; a caller that
     omits ``via_drop_size_um`` -- e.g. a pre-#1501 unit test constructing
     ``routed_geometry`` directly -- keeps exactly ``_VIA_DROP_SIZE_UM`` for
-    every drop, unchanged), plus a landing-pad square (``_VIA_LANDING_SIZE_UM``, sized
-    independently of the route's own trace width so the via's enclosure
-    requirement holds regardless) on *both* of that hop's ``landing_layers``,
-    all centered on the pin's exact composed-frame position -- the same
-    position the backbone's own drawn ``kdb.Path`` already terminates at, so
-    the first hop's landing pad always overlaps (and merges with) both the
-    backbone and the block's own existing pad on that layer, and every
-    subsequent hop's landing pad merges with the one before it at the same
-    point, chaining the full stack down to the pin's own layer.
+    every drop, unchanged), plus a landing-pad square on *both* of that
+    hop's ``landing_layers``, each sized independently to
+    ``landing_pad_size_um.get(landing_pair, _VIA_LANDING_SIZE_UM)`` (issue
+    #2072, mirroring ``via_drop_size_um`` immediately above: the caller --
+    :func:`compose` -- resolves this per distinct landing layer against
+    that layer's own minimum-*area* DRC rule, so an intermediate hop that
+    never merges with anything else the composition draws on that layer
+    -- e.g. a ladder passing through met3 on its way to a ``bond_pad``'s
+    ``top_metal`` pin -- still clears `met3.area.1`/`met4.area.1`/
+    `met5.area.1` instead of drawing an isolated sub-minimum-area polygon;
+    a caller that omits ``landing_pad_size_um`` keeps exactly
+    ``_VIA_LANDING_SIZE_UM`` for every pad, unchanged), independent of the
+    route's own trace width so the via's enclosure requirement holds
+    regardless, all centered on the pin's exact composed-frame position --
+    the same position the backbone's own drawn ``kdb.Path`` already
+    terminates at, so the first hop's landing pad always overlaps (and
+    merges with) both the backbone and the block's own existing pad on
+    that layer, and every subsequent hop's landing pad merges with the one
+    before it at the same point, chaining the full stack down to the pin's
+    own layer.
 
     Each entry's ``stub_widen`` (:func:`route_two_pin`'s own
     :func:`_endpoint_stub_widen_um`, issue #496) is a list of ``{x_um, y_um,
@@ -3798,7 +3886,18 @@ def _write_composed_gds(
             # constant for any layer the caller didn't resolve a floor for
             # (an unresolvable PDK family, or a pre-#1501 caller that never
             # populates `via_drop_size_um` at all).
-            landing_half_dbu = int(round((_VIA_LANDING_SIZE_UM / 2.0) / dbu))
+            #
+            # Each landing pad's own side (#2072) is looked up the same way,
+            # per its own `landing_pair` layer, in `landing_pad_size_um` --
+            # resolved by `compose()` against that layer's own minimum-*area*
+            # DRC rule (:func:`_landing_pad_side_um_for_layer`), falling back
+            # to the fixed `_VIA_LANDING_SIZE_UM` constant unchanged for any
+            # layer the caller didn't resolve a floor for. A hop's two
+            # `landing_layers` can therefore draw two *differently*-sized
+            # squares at the identical (x, y) -- e.g. a met2 pad at the
+            # pre-#2072 0.42um fixed size alongside a met3 pad floored up to
+            # clear `met3.area.1` -- since each layer's own area minimum is
+            # independent of its neighbour's.
             for drop in route.get("via_drops", []):
                 via_pair = drop["via_layer"]
                 via_layer_index = layout.layer(via_pair[0], via_pair[1])
@@ -3814,13 +3913,17 @@ def _write_composed_gds(
                         cy + via_half_dbu,
                     )
                 )
-                landing_box = kdb.Box(
-                    cx - landing_half_dbu,
-                    cy - landing_half_dbu,
-                    cx + landing_half_dbu,
-                    cy + landing_half_dbu,
-                )
                 for landing_pair in drop.get("landing_layers", ()):
+                    landing_size_um = (landing_pad_size_um or {}).get(
+                        landing_pair, _VIA_LANDING_SIZE_UM
+                    )
+                    landing_half_dbu = int(round((landing_size_um / 2.0) / dbu))
+                    landing_box = kdb.Box(
+                        cx - landing_half_dbu,
+                        cy - landing_half_dbu,
+                        cx + landing_half_dbu,
+                        cy + landing_half_dbu,
+                    )
                     top.shapes(layout.layer(landing_pair[0], landing_pair[1])).insert(
                         landing_box
                     )

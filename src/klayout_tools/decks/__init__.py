@@ -429,12 +429,13 @@ def _resolve_flavour(
 
 
 def _parasitics_registry() -> dict[str, ParasiticsDeck]:
-    from . import gf180mcu, sg13g2, sky130
+    from . import gf180mcu, sg13cmos5l, sg13g2, sky130
 
     return {
         "sky130": sky130.PARASITICS,
         "gf180mcu": gf180mcu.PARASITICS,
         "sg13g2": sg13g2.PARASITICS,
+        "sg13cmos5l": sg13cmos5l.PARASITICS,
     }
 
 

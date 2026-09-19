@@ -40,6 +40,19 @@
     "layers_in_stream_without_rules": [
       "32/0"
     ],
+    "rules_checked": [
+      "comp.enclosing.contact.1",
+      "comp.space.1",
+      "comp.width.1",
+      "contact.space.1",
+      "contact.width.1",
+      "metal1.enclosing.contact.1",
+      "metal1.space.1",
+      "metal1.width.1",
+      "poly2.enclosing.contact.1",
+      "poly2.space.1",
+      "poly2.width.1"
+    ],
     "rules_skipped": [
       "bjt.separation.comp.1",
       "comp.space.mv.1",
@@ -89,6 +102,8 @@
       "7.5 Comp",
       "7.7 Poly2",
       "9.1 Bond Pad"
-    ]
+    ],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
   }
 }

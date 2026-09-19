@@ -1996,6 +1996,15 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     assert report["stages"][2]["clock_skew_ns"] == pytest.approx(0.0421)  # cts
     assert report["stages"][3]["clock_skew_ns"] == pytest.approx(0.0389)  # route
 
+    # Issue #2073: `def_path`/`gds_path`/`verilog_path` are plain absolute
+    # path strings, not the `{path, scope}` envelope `klt synthesize`/`klt
+    # pex`/`klt sim`/`klt size` use for their own output paths -- a
+    # deliberate, documented split (see `docs/json-contract.md`'s
+    # "Output-artifact path fields: envelope vs. plain string"), not an
+    # oversight. These assertions are a regression guard for that shape:
+    # they should keep passing exactly as-is unless a future issue migrates
+    # `place-and-route` onto the envelope (which would also require bumping
+    # `SCHEMA_VERSION` and updating this test accordingly).
     assert report["def_path"] is not None
     assert os.path.isfile(report["def_path"])
     assert report["gds_path"] is not None

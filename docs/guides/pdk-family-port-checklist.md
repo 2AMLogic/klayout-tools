@@ -102,11 +102,11 @@ docstring documents the same list; re-verify line numbers against current
 | `_unmodeled_voltage_marker_registry()` | family → `UNMODELED_VOLTAGE_MARKERS` | Yes |
 | `_nominal_dbu_registry()` | family → `NOMINAL_DBU_UM` | Yes |
 | `_extraction_registry()` | family → `EXTRACTION_DECK` | Yes |
-| `_parasitics_registry()` | family → `PARASITICS` | **No** — parasitics are a later phase; a MOS-only starter has nothing calibrated yet |
+| `_parasitics_registry()` | family → `PARASITICS` | Yes — register the empty `ParasiticsDeck()` the starter declares. `klt extract --parasitics` then runs and discloses every un-curated metal level through `parasitics.metals_without_coefficient` and a `warnings[]` entry (issue #1440); an unregistered family fails outright with "unknown deck" instead |
 
 Each function has an inline `from . import ...` — add the new module name
 to that import line as well as the returned dict literal, in every
-function except `_parasitics_registry()`.
+function (issue #1440 was exactly `_parasitics_registry()` being skipped).
 
 ### 4. Register in `pdk_models.py` for `klt extract --pdk`
 

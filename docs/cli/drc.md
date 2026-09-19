@@ -295,17 +295,25 @@ real open_pdks install never pays for the extra probe.
   engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
   whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
   clean error rather than a silently-ignored request.
-- **A deck that gates rules behind globals beyond `input`/`report` silently
-  checks nothing unless you pass them via `--deck-var`.** See `--deck-var
-  NAME=VALUE` above — without it, a deck assembled around FEOL/BEOL enable
-  flags or a metal-stack selector this invocation never sets can produce a
-  well-formed, empty `.lyrdb` report and a false `"status": "clean"`
-  verdict, indistinguishable from a genuinely clean layout (issue #1302).
-- **No `coverage` population.** Unlike the curated engine's declarative
-  `DrcRule` table, an external deck's rule set is opaque to `klt drc` — every
-  `coverage` sub-field (`deck_layers`, `layers_checked`,
+- **A deck that gates rules behind globals beyond `input`/`report` checks
+  nothing unless you pass them via `--deck-var` — and now says so.** See
+  `--deck-var NAME=VALUE` above: without it, a deck assembled around
+  FEOL/BEOL enable flags or a metal-stack selector this invocation never sets
+  produces a well-formed, empty `.lyrdb` report and a `"status": "clean"`
+  verdict (issue #1302). That `"clean"` is unchanged, but it is no longer
+  *indistinguishable* from a genuinely clean layout: the report declares no
+  rule categories at all, so `coverage.rules_checked` is empty and
+  `coverage.nothing_checked` is `true` with reason `"deck_reported_no_rules"`
+  (issue #1996, see [`coverage.nothing_checked`](#coveragenothing_checked)).
+- **Partial `coverage` population.** Unlike the curated engine's declarative
+  `DrcRule` table, an external deck's rule set is opaque to `klt drc` — the
+  layer-level `coverage` sub-fields (`deck_layers`, `layers_checked`,
   `layers_in_stream_without_rules`, `rules_skipped`, `voltage_domain_warnings`,
-  `deck_scope`) is an empty list for this engine, never fabricated.
+  `deck_scope`) are all empty lists for this engine, never fabricated. Two
+  sub-fields *are* populated (issue #1996): `rules_checked` (the rule
+  categories the deck's own RDB report declares — the only "which rules ran"
+  evidence such a report carries) and the `nothing_checked` roll-up derived
+  from it.
 - **`check` is always `"external"` and `layer` echoes the rule id.** An RDB
   report's `<category>` has no structured `width`/`space`/... check-kind
   identity or separate layer name the way this repo's own `DrcRule` does —
@@ -1230,10 +1238,13 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "coverage": {
     "deck_layers": ["22/0", "30/0", "33/0", "34/0"],
     "layers_checked": ["22/0", "30/0"],
+    "rules_checked": ["poly.space.1", "poly.width.1"],
     "layers_in_stream_without_rules": ["46/0", "75/0"],
     "rules_skipped": ["metal1.width.1", "metal1.space.1"],
     "voltage_domain_warnings": [],
-    "deck_scope": ["7.13 Metaln"]
+    "deck_scope": ["7.13 Metaln"],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
   },
   "provenance": {
     "klt_version": "0.4.2",
@@ -1282,10 +1293,13 @@ On a run with findings:
   "coverage": {
     "deck_layers": ["65/20", "66/20", "66/44", "68/20"],
     "layers_checked": ["65/20", "66/20", "66/44"],
+    "rules_checked": ["licon.width.1", "m1.width.1", "poly.width.1"],
     "layers_in_stream_without_rules": [],
     "rules_skipped": [],
     "voltage_domain_warnings": [],
-    "deck_scope": ["licon", "m1", "poly"]
+    "deck_scope": ["licon", "m1", "poly"],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
   }
 }
 ```
@@ -1360,10 +1374,13 @@ draws" — `coverage` closes that gap. `status`'s own two-value contract
 | ---------------------------------- | --------------- | ----------------------------------------------------------------------------- |
 | `deck_layers`                      | array\<string\> | Every `"<layer>/<datatype>"` the selected deck's rules reference — a static property of the deck, independent of the input stream. Sorted ascending by `(layer, datatype)`. |
 | `layers_checked`                   | array\<string\> | The subset of `deck_layers` actually present in this stream (i.e. found via `Layout.find_layer(...)`), matching what the per-rule check loop actually ran against. Sorted ascending by `(layer, datatype)`. |
+| `rules_checked`                    | array\<string\> | The complement of `rules_skipped` (issue #1996): rule ids that actually ran against real geometry. `--engine curated`: `rules_checked` and `rules_skipped` partition the deck — every rule is in exactly one. `--engine klayout`: the rule categories the deck's own RDB report declares (see "Engine" → `"klayout"`). Sorted alphabetically. |
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
+| `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
+| `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
 
 `layers_checked` and `layers_in_stream_without_rules` are computed from the
 input stream's own layer table (reusing the same per-layer enumeration
@@ -1371,6 +1388,37 @@ input stream's own layer table (reusing the same per-layer enumeration
 layer present in the stream's layer table with zero shapes still counts as
 "in the stream" for this purpose, matching `Layout.find_layer(...)`'s own
 semantics.
+
+#### `coverage.nothing_checked`
+
+Additive fields (issue #1996, no `schema_version` bump), implementing the
+shared vacuous-verdict convention defined once in
+[`../json-contract.md`](../json-contract.md) — `klt sim` and `klt pex` emit
+the same two keys for their own equivalents.
+
+`nothing_checked` is `true` exactly when this run checked **nothing**, so its
+`"clean"` verdict is vacuously true rather than earned. Three ways that
+happens, one reason code each:
+
+| Reason code               | Engine   | Meaning |
+| ------------------------- | -------- | ------- |
+| `deck_has_no_rules`       | curated  | The selected deck declares no rules at all (a degenerate/empty deck) — there was never anything to run. |
+| `all_rules_skipped`       | curated  | The deck declares rules, but every one was skipped because its input layer(s) are absent from this stream — the case `rules_skipped` already enumerates, rolled up. Typical of an empty or wrong-PDK layout. |
+| `deck_reported_no_rules`  | klayout  | The PDK-native deck script ran to completion, but its own report declares no rule categories — it never reached a single `output(...)` call. The common cause is a deck gating its whole rule set behind a `--deck-var` this invocation never set (see "Engine" → `"klayout"`). |
+
+**`status` is unchanged.** A run with `nothing_checked: true` still reports
+`"clean"` — exactly as it did before this field existed. The field makes the
+emptiness *legible*; it does not restate the verdict.
+
+`nothing_checked` is never a synonym for partial coverage. A run that checked
+one rule out of eighty reports `false`: the eighty-minus-one gap is what
+`rules_skipped` and `layers_in_stream_without_rules` above are for.
+
+[`klt signoff`](signoff.md) consumes this: a DRC envelope reporting
+`nothing_checked: true` never counts as a passing check, and never backs a
+`"met"` item 3 citation (reason `nothing_checked`). For the KLayout engine,
+the actionable fix is almost always to re-run with the deck's own enable
+flags, e.g. `--deck-var feol=true --deck-var beol=true`.
 
 #### `coverage.voltage_domain_warnings`
 

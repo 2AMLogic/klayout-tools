@@ -164,6 +164,15 @@ A request naming both, or neither, is a request error.
 }
 ```
 
+**Path field shape (issue #2073).** `def_path`/`verilog_path`/`spef_path`
+below are plain absolute-path strings, not the `{path, scope}` envelope
+`klt synthesize`/`klt pex`/`klt sim`/`klt size` report their own output
+paths as — including `klt place-and-route`'s `def_path` that this command's
+own `def` field typically consumes as input (see "Response" above). This is
+a deliberate, documented split, not an oversight — see
+`docs/json-contract.md`'s "Output-artifact path fields: envelope vs. plain
+string" for the full enumeration and rationale.
+
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. Versioned independently of `klt place-and-route`'s own `schema_version` (each command owns its own). |

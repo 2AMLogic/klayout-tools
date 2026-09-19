@@ -419,6 +419,47 @@ def test_run_drc_coverage_empty_stream(tmp_path):
     )
 
 
+def test_run_drc_coverage_empty_stream_reports_nothing_checked(tmp_path):
+    """Issue #1996: the same degenerate empty stream
+    `test_run_drc_coverage_empty_stream` above pins as `"clean"` now *also*
+    says, in the envelope itself, that the verdict was measured over
+    nothing -- `rules_checked` is empty and `nothing_checked` is `True`.
+
+    The `"clean"` verdict is deliberately unchanged (that behaviour is
+    pinned by the test above); this only makes the emptiness legible, which
+    is what lets `klt signoff` refuse the citation."""
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    path = tmp_path / "empty.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["coverage"]["rules_checked"] == []
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["coverage"]["nothing_checked_reasons"] == ["all_rules_skipped"]
+
+
+def test_run_drc_coverage_rules_checked_is_the_complement_of_rules_skipped(tmp_path):
+    """Issue #1996: `rules_checked` and `rules_skipped` partition the deck --
+    every rule is in exactly one of them -- so a reader can tell "clean over
+    eight rules" from "clean over zero" without knowing the deck's own rule
+    table."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))  # poly.drawing (66/20) only
+
+    report = run_drc(str(path), "sky130")
+
+    checked = report["coverage"]["rules_checked"]
+    skipped = report["coverage"]["rules_skipped"]
+    assert checked  # something ran, so this is not a vacuous verdict
+    assert set(checked).isdisjoint(skipped)
+    assert set(checked) | set(skipped) == {rule.id for rule in get_deck("sky130")}
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["nothing_checked_reasons"] == []
+
+
 def test_run_drc_coverage_fully_covered_stream(tmp_path):
     """A layout drawing a shape on every layer the sky130 deck's rules
     reference reports `layers_checked` == `deck_layers`, an empty
@@ -635,11 +676,20 @@ def test_json_contract(tmp_path, capsys):
         "deck_layers",
         "layers_checked",
         "layers_in_stream_without_rules",
+        "rules_checked",
         "rules_skipped",
         "voltage_domain_warnings",
         "deck_scope",
+        # Issue #1996: the shared vacuous-verdict convention
+        # (`klayout_tools.coverage`), emitted alongside the pre-existing
+        # layer/rule-level fields.
+        "nothing_checked",
+        "nothing_checked_reasons",
     }
+    assert isinstance(coverage["nothing_checked"], bool)
     for key, field in coverage.items():
+        if key == "nothing_checked":
+            continue
         assert isinstance(field, list)
         if key == "voltage_domain_warnings":
             for entry in field:
@@ -648,6 +698,9 @@ def test_json_contract(tmp_path, capsys):
                 assert isinstance(entry["description"], str)
         else:
             assert all(isinstance(v, str) for v in field)
+    # A run that produced violations plainly checked something.
+    assert coverage["nothing_checked"] is False
+    assert coverage["nothing_checked_reasons"] == []
 
 
 def test_provenance_input_hash_tracks_layout_bytes(tmp_path):

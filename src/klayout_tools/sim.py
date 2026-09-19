@@ -79,11 +79,24 @@ from . import remote_transport as remote_transport
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
 from ._provenance import build_provenance, sha256_file
 from ._text import line_containing as _line_containing
+from .coverage import (
+    REASON_EMPTY_CORNER_MATRIX,
+    REASON_UNRECOGNIZED_LIMIT_KEYS,
+    build_nothing_checked,
+)
 from .metrics import is_registered
 from .pdk import PdkNotFoundError, find_pdk
 from .pdk_models import _pdk_variant_family
 from .remote_launcher import RemoteLauncher as RemoteLauncher
 from .remote_launcher import RemoteLaunchError as RemoteLaunchError
+
+#: ``batch`` backend entry points (issue #2080) -- the `klt sim` consumer of
+#: 2am's EDA batch fleet. Same relationship to this module as
+#: ``sim_remote``'s: `run_sim` dispatches into them and re-exports their
+#: helpers (self-aliased) so ``klayout_tools.sim.<name>`` resolves them too.
+from .sim_batch import _build_batch_job_spec as _build_batch_job_spec
+from .sim_batch import _resolve_batch_config as _resolve_batch_config
+from .sim_batch import _run_batch, _run_batch_fleet
 from .sim_plot import render_waveform_svg
 
 #: The remaining names below are not called directly from this module's own
@@ -177,8 +190,19 @@ SUPPORTED_NETLIST_SOURCES = ("schematic", "extracted")
 #: ``docs/design/remote-sim-backend-spike.md`` decisions 2/5. Like
 #: ``engine``, ``backend`` is a request *data* field, not part of the JSON
 #: shape. Unknown names raise :class:`SimError` before any corner runs,
-#: mirroring ``engine`` validation.
-SUPPORTED_BACKENDS = ("local", "local-parallel", "remote")
+#: mirroring ``engine`` validation. ``batch`` (issue #2080) submits the
+#: same ``local-parallel`` invocation to 2am's EDA batch fleet as an S3 job
+#: contract instead of provisioning an instance itself -- see
+#: :mod:`klayout_tools.sim_batch` and docs/cli/sim.md's "Batch backend".
+SUPPORTED_BACKENDS = ("local", "local-parallel", "remote", "batch")
+
+#: Backends whose corner reports this process does **not** construct: the
+#: corners come back from an independently-run box (``remote``) or job
+#: instance (``batch``) as a JSON report, so there is no local
+#: :class:`CornerPoint`-keyed dispatch loop here to gate on a checkpoint, a
+#: deadline, or a calibration probe of *this* host's hardware. Both
+#: ``options.resume`` and the fail-fast probe are refused/skipped for these.
+_OFFHOST_BACKENDS = ("remote", "batch")
 
 #: Recognised values for ``request.monte_carlo.vary`` -- which axis (or
 #: axes) of statistical variation the sample sequence is declared to
@@ -579,10 +603,14 @@ def run_sim(
     ``backend`` selects the execution backend, overriding the request's own
     ``backend`` field when given (the ``--backend`` CLI flag path). When both
     are omitted the backend defaults to ``local``. ``local``,
-    ``local-parallel``, and ``remote`` are implemented; any other name raises
-    :class:`SimError` (see :data:`SUPPORTED_BACKENDS`). ``remote`` requires
-    ``request.remote`` and ``request.models.pdk`` -- see ``docs/cli/sim.md``'s
-    "Remote backend" section.
+    ``local-parallel``, ``remote``, and ``batch`` are implemented; any other
+    name raises :class:`SimError` (see :data:`SUPPORTED_BACKENDS`).
+    ``remote`` requires ``request.remote`` and ``request.models.pdk`` -- see
+    ``docs/cli/sim.md``'s "Remote backend" section. ``batch`` (issue #2080)
+    submits the same ``local-parallel`` invocation to 2am's EDA batch fleet
+    as an S3 job contract and needs a resolvable
+    ``request.batch.provision_script_path``/``$KLT_BATCH_PROVISION_SCRIPT``
+    plus a job bucket -- see "Batch backend" in the same document.
 
     ``max_workers`` bounds the ``local-parallel`` backend's worker pool,
     overriding the request's own ``options.max_workers`` when given (the
@@ -601,9 +629,9 @@ def run_sim(
     decision 4). Defaults to ``1`` when both are omitted, which is exactly
     today's single-host behaviour -- byte-identical, not just
     "equivalent" -- so every existing request/response is unaffected. Must
-    be a positive integer when given explicitly, and (for backend
-    ``remote`` only) no greater than the number of units to dispatch --
-    an idle fleet member would still be billed.
+    be a positive integer when given explicitly, and (for backends
+    ``remote``/``batch`` only) no greater than the number of units to
+    dispatch -- an idle fleet member would still be billed.
 
     For ``local``/``local-parallel``, ``hosts > 1`` fans the already-expanded,
     already-seeded ``CornerPoint`` list across a thread pool in this same
@@ -620,7 +648,10 @@ def run_sim(
     ranges, which would risk two shards disagreeing about which points are
     whose, or reseeding a point differently than an unsharded run would have)
     -- see :func:`_corner_points_to_wire` and ``_build_remote_request``'s
-    ``explicit_points`` parameter.
+    ``explicit_points`` parameter. For backend ``batch``, ``hosts > 1``
+    submits one independent fleet *job* per shard (:func:`_run_batch_fleet`)
+    -- the same per-shard slice contract, with the provisioning half owned
+    by 2am's fleet rather than by this process.
 
     ``budget_s`` bounds the **whole sweep's** wall-clock time, overriding the
     request's own ``options.wall_clock_budget_s`` when given (the
@@ -703,6 +734,30 @@ def run_sim(
     contract (no ``schema_version`` bump).
     ``measurements[].name`` stays out of scope for this registry -- those
     names are caller-supplied via the request spec, not ``klt``-declared.
+
+    ``coverage`` (issue #1996, the shared convention declared in
+    :mod:`klayout_tools.coverage`) is a second always-present, purely
+    additive object (no ``schema_version`` bump) stating what this
+    ``status`` was graded over::
+
+        "coverage": {
+            "corners_simulated": <int>,
+            "measurements_declared": <int>,
+            "measurements_with_limits": <int>,
+            "unrecognized_limit_keys": [
+                {"measurement": <str>, "keys": [<str>, ...]}, ...
+            ],
+            "nothing_checked": <bool>,
+            "nothing_checked_reasons": [<reason code>, ...]
+        }
+
+    ``nothing_checked`` is ``True`` for the two ways this response can reach
+    ``status: "pass"`` having graded nothing -- an empty corner matrix
+    (``"empty_corner_matrix"``), and a request whose every declared
+    ``measurements[].limits`` object used keys `klt sim` does not apply
+    (``"unrecognized_limit_keys"``; only ``min``/``max`` are read, so a
+    typo'd bound silently passes everything). ``status`` itself is
+    unchanged in both cases. See :func:`_build_coverage`.
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/sim.md``). Raises :class:`SimError` for anything that prevents
@@ -912,15 +967,15 @@ def run_sim(
     # Resumability (issue #473): only active when the caller opts in, and
     # only for the backends whose corner reports this process itself
     # produces (`local`/`local-parallel`, including any `hosts > 1` shard
-    # built on them -- see `_run_sharded`). `remote`'s corners come back
-    # from an independently-run box via a JSON report this process does not
-    # construct, so there is no local `CornerPoint.corner_id` to reconcile
-    # a checkpoint against yet; mirrors the existing `hosts > 1` + `remote`
-    # restriction above rather than inventing a new error shape.
-    if resume and backend == "remote":
+    # built on them -- see `_run_sharded`). `remote`'s and `batch`'s corners
+    # come back from an independently-run box via a JSON report this process
+    # does not construct, so there is no local `CornerPoint.corner_id` to
+    # reconcile a checkpoint against yet; mirrors the existing `hosts > 1` +
+    # `remote` restriction above rather than inventing a new error shape.
+    if resume and backend in _OFFHOST_BACKENDS:
         raise SimError(
-            "options.resume is not yet supported for backend 'remote' -- "
-            "wiring the remote backend into the same checkpoint machinery "
+            f"options.resume is not yet supported for backend {backend!r} -- "
+            f"wiring the {backend} backend into the same checkpoint machinery "
             "as 'local'/'local-parallel' is tracked follow-up work; use "
             "resume with backend 'local' or 'local-parallel'"
         )
@@ -961,13 +1016,14 @@ def run_sim(
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/
     # `options.fail_fast_probe`): run once per grid, before any real corner
-    # is dispatched -- not per backend/shard/host, and not for `remote`
-    # (see `_run_remote`'s docstring for why probing this process's own
-    # host is not representative of a provisioned remote box). `None` when
-    # the probe did not run at all (opted out, wrong analysis kind, empty
-    # grid) or came back inconclusive -- see `_run_fail_fast_probe`.
+    # is dispatched -- not per backend/shard/host, and not for `remote`/
+    # `batch` (see `_run_remote`'s and `_run_batch`'s docstrings for why
+    # probing this process's own host is not representative of a
+    # provisioned remote box or a fleet job instance). `None` when the probe
+    # did not run at all (opted out, wrong analysis kind, empty grid) or
+    # came back inconclusive -- see `_run_fail_fast_probe`.
     probe_result: dict[str, Any] | None = None
-    if fail_fast_probe and backend != "remote" and dispatch_points:
+    if fail_fast_probe and backend not in _OFFHOST_BACKENDS and dispatch_points:
         probe_result = _run_fail_fast_probe(
             corner_points=dispatch_points,
             netlist_path=netlist_path,
@@ -1031,15 +1087,18 @@ def run_sim(
             checkpoint=checkpoint,
             probe_abort=probe_abort,
         )
-    elif backend == "remote":
+    elif backend in _OFFHOST_BACKENDS:
         # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
-        # issue #906) -- distinct from the generic `_run_sharded` seam below,
+        # issue #906; `batch`'s own one-job-per-shard analog by issue
+        # #2080) -- distinct from the generic `_run_sharded` seam below,
         # which just re-invokes the already-selected backend per shard
         # in-process. A `remote` shard instead needs its own provisioned
         # instance, guardrails, and teardown, which `_run_remote_fleet`
-        # gets from `remote_fleet.run_fleet` unmodified -- see this
-        # function's docstring on `hosts`.
-        corners_new, backend_engine_version, remote_environment = _run_remote_fleet(
+        # gets from `remote_fleet.run_fleet` unmodified; a `batch` shard
+        # needs its own S3 job contract and launch. See this function's
+        # docstring on `hosts`.
+        fleet_dispatch = _run_remote_fleet if backend == "remote" else _run_batch_fleet
+        corners_new, backend_engine_version, remote_environment = fleet_dispatch(
             corner_points=dispatch_points,
             netlist_path=netlist_path,
             timeout_s=timeout_s,
@@ -1285,6 +1344,12 @@ def run_sim(
             _CORNER_ERRORED_COUNT_METRIC_NAME: errored,
         },
         "environment": environment,
+        # Issue #1996: what this verdict was actually graded over -- always
+        # present, purely additive. `nothing_checked` is the load-bearing
+        # field: an empty corner matrix, or a `limits` object whose keys
+        # `klt sim` never applied, both produce `status: "pass"` from a run
+        # that checked nothing. See `_build_coverage`.
+        "coverage": _build_coverage(measurements_spec, corners),
         "provenance": build_provenance(
             deck_name=(os.path.basename(models_lib) if models_lib else None),
             deck_path=models_lib,
@@ -2267,6 +2332,7 @@ _BACKENDS = {
     "local": _run_local,
     "local-parallel": _run_local_parallel,
     "remote": _run_remote,
+    "batch": _run_batch,
 }
 
 
@@ -3229,6 +3295,70 @@ def _parse_measurements(log_text: str) -> dict[str, float]:
     for name in failed:
         values.pop(name, None)
     return values
+
+
+#: The only ``measurements[].limits`` keys :func:`_evaluate_limits` applies.
+#: Anything else in a ``limits`` object is silently inert -- which is exactly
+#: why :func:`_build_coverage` reports it (issue #1996).
+_RECOGNISED_LIMIT_KEYS = ("min", "max")
+
+
+def _build_coverage(
+    measurements_spec: list[dict[str, Any]],
+    corners: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The shared ``coverage`` block (issue #1996; see
+    :mod:`klayout_tools.coverage`) for one `klt sim` response.
+
+    `klt sim` can report ``status: "pass"`` from a run that graded nothing,
+    in two ways this block makes legible:
+
+    - **An empty corner matrix.** ``corners`` is ``[]``, so
+      ``passed``/``failed``/``errored`` are all ``0`` and the aggregate
+      status falls through to ``"pass"``. Reason
+      ``"empty_corner_matrix"``.
+    - **Limits nobody applied.** ``_evaluate_limits`` reads only ``min`` and
+      ``max``; a measurement declaring ``{"maximum": 1.8}`` (or any other
+      typo) is scored as if it had declared no bound at all, and passes
+      unconditionally. Every offending object is listed in
+      ``unrecognized_limit_keys`` regardless -- a *partial* disclosure, since
+      one typo'd measurement alongside several well-formed ones is still a
+      real gap -- but the run only counts as ``nothing_checked`` when a
+      ``limits`` object was declared somewhere and **no** measurement ended
+      up with a usable bound. Reason ``"unrecognized_limit_keys"``.
+
+    A request that simply declares no ``limits`` at all is *not* flagged: a
+    characterise-and-report sweep deliberately grades nothing, which is a
+    stated intent rather than a silent miss. ``measurements_with_limits``
+    lets a reader draw that distinction themselves.
+    """
+    unrecognized: list[dict[str, Any]] = []
+    limits_declared = 0
+    measurements_with_limits = 0
+    for spec in measurements_spec:
+        limits = spec.get("limits")
+        if not isinstance(limits, dict) or not limits:
+            continue
+        limits_declared += 1
+        unknown = sorted(k for k in limits if k not in _RECOGNISED_LIMIT_KEYS)
+        if unknown:
+            unrecognized.append({"measurement": spec.get("name"), "keys": unknown})
+        if any(limits.get(k) is not None for k in _RECOGNISED_LIMIT_KEYS):
+            measurements_with_limits += 1
+
+    reasons: list[str] = []
+    if not corners:
+        reasons.append(REASON_EMPTY_CORNER_MATRIX)
+    if limits_declared and not measurements_with_limits and unrecognized:
+        reasons.append(REASON_UNRECOGNIZED_LIMIT_KEYS)
+
+    return {
+        "corners_simulated": len(corners),
+        "measurements_declared": len(measurements_spec),
+        "measurements_with_limits": measurements_with_limits,
+        "unrecognized_limit_keys": unrecognized,
+        **build_nothing_checked(reasons),
+    }
 
 
 def _evaluate_limits(
