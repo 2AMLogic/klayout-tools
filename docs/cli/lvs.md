@@ -920,11 +920,12 @@ real OpenROAD-produced layout:
   exact counts shifted) and comparing the layout against it reports
   `status: "match"`, with every device accounted for on both sides
   (`counts.devices` layout = reference = matched = 4857 — no silently-
-  dropped devices at this scale). The only mismatches are the same deck-
-  structural **warnings** the hand-drawn corpus round-trip already carries:
+  dropped devices at this scale). The only mismatches are the same
+  tap-coverage **warnings** the hand-drawn corpus round-trip already carries:
   one `device.body_unverified` (the synthetic-substrate net every NMOS body
   lands on, since sky130 draws no distinct NMOS tap layer — see
-  [`docs/cli/extract.md`](extract.md), "Coverage") plus ambiguous-net and
+  [`docs/cli/extract.md`](extract.md), "Coverage"; no PMOS counterpart, since
+  sky130's `well_label` names every PMOS body here) plus ambiguous-net and
   unused-device-class `topology` warnings. None are `error` severity.
 - **Deliberately-broken variant.** Corrupting exactly one standard-cell-
   region transistor's drawn width in the reference netlist (`W=0.42U` →
@@ -1737,24 +1738,34 @@ synthetic-net behaviour) is involved there:
   (`device.class` is the deck's `nfet_class`, e.g. `"nfet"`) — a device whose
   body terminal resolved to a real, drawn- or derived-tap net (only where a
   layout actually draws one) is not counted.
-- A PMOS entry additionally fires when the layout-side deck has **no tap
-  mechanism at all** — neither a distinct drawn `tap` layer nor a derivable
-  one (`ExtractionDeck.tap`/`tap_nplus`/`tap_pplus` all `None`; gf180mcu
-  before issue #1084) — **and** the layout has one or more PMOS devices
-  (`device.class` is the deck's `pfet_class`, e.g. `"pfet"`). A deck that has
-  *either* mechanism gives PMOS bodies a real, named net unconditionally
-  (every PMOS sits inside an `nwell` by construction), so neither sky130 nor
-  (since #1084) gf180mcu emits this entry — even for a specific device whose
-  own `nwell` island happens to draw no tie, mirroring this deck-structural
-  check's existing (optimistic) treatment for sky130.
+- A PMOS entry fires when the layout has one or more PMOS devices
+  (`device.class` is the deck's `pfet_class`, e.g. `"pfet"`) whose body
+  terminal landed on an **anonymous, KLayout-synthesized net** — the `"$<n>"`
+  placeholder `Net.expanded_name()` returns for a net no label reached — or
+  on no net at all. A device whose body resolved to a real, named net from a
+  drawn `tap`/`well_label` or a derived `tap_nplus`/`tap_pplus` tie is not
+  counted.
+
+  This arm used to be **deck-structural** (issue #2048 corrected it): it
+  fired only when the deck declared no tap mechanism at all
+  (`ExtractionDeck.tap`/`tap_nplus`/`tap_pplus` all `None`; gf180mcu before
+  issue #1084), which treated *declaring* a mechanism as proof that every
+  PMOS in every layout used it. It is not — a gf180mcu layout that draws no
+  well tie still leaves each PMOS body on an anonymous net with no DC bias
+  path, and `klt extract`/`klt pex` have always reported exactly that case
+  (`unbiased_pmos_body_nets[]`, `body_bias.status: "unbiased"`; issue #555).
+  The two commands now agree on the same layout. sky130 still emits no PMOS
+  entry on an ordinary standard cell, but because its `well_label` (64/5)
+  demonstrably names every PMOS body (e.g. `VPB`), not because the deck
+  declares a mechanism.
 
 Both entries reflect real device-level extraction outcomes (per-device for
-NMOS since #490; still deck-structural for PMOS, a property of which deck
-ran extraction rather than of any individual device pairing or `hints`),
-always `severity: "warning"`, and never change `status` or break
-`mismatch_count`'s error semantics — they only make it visible, in-band,
-that this dimension of the compare was not fully verified against the
-schematic.
+NMOS since #490, for PMOS since #2048 — a property of what the layout
+actually drew, not of which deck ran extraction, nor of any individual
+device pairing or `hints`), always `severity: "warning"`, and never change
+`status` or break `mismatch_count`'s error semantics — they only make it
+visible, in-band, that this dimension of the compare was not fully verified
+against the schematic.
 
 ##### The same condition, machine-checkable: `body_verification` (issue #1983)
 
@@ -1790,6 +1801,17 @@ field:
 
 It is rendered from the *same* determination as the `device.body_unverified`
 warnings above, so the two can never disagree.
+
+**It also agrees with `klt pex`'s `body_bias` block** (issue #2048). Both
+now apply the same per-device test to the same layout — a PMOS body on an
+anonymous, KLayout-synthesized net — so a floating well tie that shows up as
+`body_bias.status: "unbiased"` on the post-layout artifact
+([`pex.md`](pex.md)) can no longer be reported as
+`body_verification.status: "verified"` here. The two spell the same
+anonymous net differently (`klt extract`/`klt pex` report the
+backslash-escaped `\$<n>` that matches the written netlist's node spelling,
+issue #1162; `klt lvs` works from KLayout's raw in-memory `$<n>`), but they
+describe the same devices.
 
 **`"unchecked"` never means "verified".** Before this block existed, the
 *absence* of a `device.body_unverified` warning meant "checked and clean" on
