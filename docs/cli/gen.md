@@ -327,7 +327,7 @@ cmos5l's resistor LVS rules are themselves symlinks into the pinned sibling
 `ihp-sg13g2` checkout. The resolved PDK-family *name* also differs from
 every other family here the same way `sg13g2`'s own does: the real
 `ihp-sg13cmos5l` install's own directory name is `"ihp-sg13cmos5l"`, resolved
-via a `_PDK_VARIANT_FAMILY_ALIASES` entry rather than a literal-prefix match
+via a `PDK_VARIANT_FAMILY_ALIASES` entry rather than a literal-prefix match
 — see "Family key and resolution" below.
 
 #### Adding a third PDK family
@@ -341,19 +341,19 @@ higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
 
 - **Family key and resolution**: `_pdk_family()` maps a resolved
   `pdk.variant` string to a family key in `_PDK_ROLE_LAYERS` by delegating to
-  `klayout_tools.pdk_models._pdk_variant_family()` (the same helper `sim.py`
-  already imports directly for its own MOS-model-binding lookup) — a plain
-  literal-prefix match against most variant strings (e.g. `"sky130A"` ->
-  `"sky130"`, `"gf180mcuC"` -> `"gf180mcu"`), *or* an explicit
-  `_PDK_VARIANT_FAMILY_ALIASES` entry for a variant whose resolved name is
-  not a prefix of its own family key at all (`"ihp-sg13g2"` -> `"sg13g2"`,
-  the exact shape a standalone, non-open_pdks-style PDK clone like
-  IHP-Open-PDK's SG13G2 or its sibling SG13CMOS5L produces — see `klt pdk
-  find`'s own flat-layout resolution in [`klt pdk`](pdk.md)). A brand-new
-  family needs a new `_KNOWN_PDK_FAMILIES`
-  entry in `pdk_models.py` (plus an alias there only if its resolved variant
-  name isn't a literal prefix of the family key), not a change to `gen.py`
-  itself.
+  `klayout_tools.pdk_families.pdk_variant_family()` (the package's single
+  authoritative variant→family classifier — no module derives a family from
+  a variant name itself) — a plain literal-prefix match against most variant
+  strings (e.g. `"sky130A"` -> `"sky130"`, `"gf180mcuC"` -> `"gf180mcu"`),
+  *or* an explicit `PDK_VARIANT_FAMILY_ALIASES` entry for a variant whose
+  resolved name is not a prefix of its own family key at all
+  (`"ihp-sg13g2"` -> `"sg13g2"`, the exact shape a standalone,
+  non-open_pdks-style PDK clone like IHP-Open-PDK's SG13G2 or its sibling
+  SG13CMOS5L produces — see `klt pdk find`'s own flat-layout resolution in
+  [`klt pdk`](pdk.md)). A brand-new family needs a new
+  `KNOWN_PDK_FAMILIES` entry in `pdk_families.py` (plus an alias there only
+  if its resolved variant name isn't a literal prefix of the family key),
+  not a change to `gen.py` itself.
 - **Mandatory roles**: `active`, `poly`, `contact`, and `metal` are drawn by
   essentially every generator (the base MOS/resistor unit-device geometry)
   and must resolve to a real `(layer, datatype)` pair — a generator cannot

@@ -85,6 +85,8 @@ from pathlib import Path
 from types import FrameType
 from typing import Any
 
+from .pdk_families import family_subset, pdk_variant_family
+
 #: Step 2 of :func:`load_ami_manifest`'s 4-step resolution order -- an
 #: explicit manifest path, consulted when no ``manifest_path`` argument
 #: (``request.remote.ami_manifest``, plumbed through by ``sim.py``'s
@@ -125,13 +127,27 @@ DEFAULT_MANIFEST_PATH: Path = (
 #: decision 4.
 SUPPORTED_PDKS: tuple[str, ...] = ("sky130A", "gf180mcu")
 
-#: PDK **families**, used to map a request's ``models.pdk`` -- which is a local
-#: *variant* name -- onto the key the AMI manifest publishes under. Longest
-#: first, so a prefix match can never pick the shorter of two overlapping
-#: families. Same convention as ``pdk._CORNER_PDK_FAMILIES`` and
-#: ``pdk_models._pdk_variant_family``; duplicated rather than imported for the
-#: reason those two already duplicate each other -- see #615.
-_AMI_PDK_FAMILIES: tuple[str, ...] = ("gf180mcu", "sky130")
+#: The PDK **families** the remote backend's baked-AMI transport covers, used
+#: to map a request's ``models.pdk`` -- which is a local *variant* name -- onto
+#: the key the AMI manifest publishes under (#615).
+#:
+#: A deliberate, declared *narrowing* of
+#: :data:`klayout_tools.pdk_families.KNOWN_PDK_FAMILIES` (issue #2026): the
+#: remote AMI pipeline genuinely maintains fewer families than the toolkit
+#: supports locally, which is a legitimate subsystem-specific support decision
+#: -- but it is now spelled as a subset rather than as an independent literal,
+#: so "narrowed on purpose" is distinguishable from "typo'd or forgotten" at
+#: this definition site and :func:`~klayout_tools.pdk_families.family_subset`
+#: rejects a non-family name at import time.
+#:
+#: This module deliberately imports nothing else from the package (it shells
+#: out to the AWS CLI and reads a JSON manifest); ``pdk_families`` is a leaf
+#: module whose only imports are stdlib, so depending on it pulls in no PDK
+#: subsystem -- previously this list was duplicated precisely to avoid such a
+#: dependency. Ordering is no longer load-bearing either: :func:`ami_pdk_key`
+#: classifies via :func:`~klayout_tools.pdk_families.pdk_variant_family` and
+#: then tests membership, so there is no longest-prefix-first requirement.
+_AMI_PDK_FAMILIES: frozenset[str] = family_subset("gf180mcu", "sky130")
 
 #: ``c7i`` instance-family sizing ladder: (name, vcpu count), ascending.
 #: Compute-optimized, per the design note's sizing recipe: "ngspice is
@@ -526,15 +542,18 @@ def ami_pdk_key(pdk: str) -> str:
     locally *and* found an AMI.
 
     Exact matches win, so an explicit manifest key still works; otherwise the
-    variant is reduced to its family by prefix.
+    variant is reduced to its family by
+    :func:`~klayout_tools.pdk_families.pdk_variant_family` -- the package's
+    single authoritative variant -> family classifier (issue #2026), rather
+    than a prefix scan restated here -- and that family is accepted only if
+    the remote backend covers it (:data:`_AMI_PDK_FAMILIES`) *and* the AMI
+    pipeline publishes it (:data:`SUPPORTED_PDKS`).
     """
     if pdk in SUPPORTED_PDKS:
         return pdk
-    for family in _AMI_PDK_FAMILIES:
-        if pdk.startswith(family):
-            if family in SUPPORTED_PDKS:
-                return family
-            break
+    family = pdk_variant_family(pdk)
+    if family in _AMI_PDK_FAMILIES and family in SUPPORTED_PDKS:
+        return family
     raise RemoteLaunchError(
         f"unsupported PDK '{pdk}' for the remote backend "
         f"(supported: {', '.join(SUPPORTED_PDKS)}). `models.pdk` carries the "

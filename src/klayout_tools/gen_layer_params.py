@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .pdk_models import _pdk_variant_family
+from .pdk_families import pdk_variant_family
 
 #: Per-PDK-family clearance (um) the unit device's gate-poly landing pad
 #: (issue #461) is held clear of the diffusion's own gate-side edge, drawn as
@@ -1963,20 +1963,20 @@ def _pdk_family(variant: str) -> str:
     (``"sky130"``/``"gf180mcu"``/``"sg13g2"``) in :data:`_PDK_ROLE_LAYERS`.
 
     Delegates the variant -> family classification to
-    :func:`klayout_tools.pdk_models._pdk_variant_family` -- the *same* helper
-    ``sim.py`` already imports directly for its own MOS-model-binding lookup
-    (issue #1448) -- rather than this module's own, narrower prefix-only scan
-    it replaces. This is a deliberate reuse, not a layering violation (see
-    that helper's own module for the equivalent note ``netlist_digest.py``
-    makes): ``pdk_models.py`` has no imports of its own beyond the stdlib, so
-    there is no import cycle. The reuse matters concretely for
+    :func:`klayout_tools.pdk_families.pdk_variant_family` -- the package's
+    single authoritative classifier (issue #2026; this call site, added by
+    issue #1448, is the pattern the rest of the package was refactored onto)
+    -- rather than this module's own, narrower prefix-only scan it replaces.
+    This is a deliberate reuse, not a layering violation:
+    ``pdk_families.py`` is a leaf module with no imports beyond the stdlib,
+    so there is no import cycle. The reuse matters concretely for
     ``"ihp-sg13g2"`` -- IHP-Open-PDK's own install-directory name, and the
     exact ``variant`` string ``klt pdk find`` reports for a real fetched
     install (see ``tests/test_pdk.py``'s flat-layout tests) -- which is
     *not* a literal prefix of this module's ``"sg13g2"`` family key the way
     ``"sky130A"``/``"gf180mcuC"`` are literal prefixes of ``"sky130"``/
     ``"gf180mcu"``; a bare prefix scan here would never match it.
-    :data:`klayout_tools.pdk_models._PDK_VARIANT_FAMILY_ALIASES` is what
+    :data:`klayout_tools.pdk_families.PDK_VARIANT_FAMILY_ALIASES` is what
     resolves that exact mismatch.
 
     Raises :class:`GenError` for any other family -- the PDK-aware
@@ -1985,7 +1985,7 @@ def _pdk_family(variant: str) -> str:
     """
     from .gen import GenError
 
-    family = _pdk_variant_family(variant)
+    family = pdk_variant_family(variant)
     if family in _PDK_ROLE_LAYERS:
         return family
     raise GenError(

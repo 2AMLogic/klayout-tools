@@ -82,6 +82,7 @@ import re
 from typing import Any
 
 from .lef_header import parse_lef_header
+from .pdk_families import family_subset, pdk_variant_family
 
 #: The ciel/volare stores, in resolution order (step 3). ``~`` is expanded at
 #: call time against ``$HOME``. Exposed at module scope so tests can override
@@ -643,23 +644,32 @@ def lvs_deck_file(variant: str | None = None, root: str | None = None) -> str | 
         lvs_dir = nested_lvs_dir
 
     resolved_variant = info["variant"]
-    # Strip a trailing single uppercase PDK-suite designator (sky130A ->
-    # sky130, gf180mcuC -> gf180mcu -- both known families end in a digit
-    # or lowercase letter, never uppercase, so this is unambiguous) --
     # open_pdks names the LVS deck after the bare family, not the lettered
-    # variant. Mirrors `pdk_models._pdk_variant_family`'s own family/variant
-    # split, restated locally rather than imported to avoid a dependency
-    # from this lower-level asset-discovery module onto that higher-level
-    # device-model-resolution one.
-    family = resolved_variant
-    if len(family) > 1 and family[-1].isupper():
-        family = family[:-1]
+    # variant (sky130A -> sky130.lvs, gf180mcuC -> gf180mcu.lvs), so the
+    # family name is a deck-filename candidate. The variant -> family step is
+    # delegated to the package's single authoritative classifier (issue
+    # #2026) rather than restated here: this used to strip a trailing
+    # uppercase suite letter locally, a second algorithm for the same mapping
+    # that only coincidentally agreed with `pdk_families.pdk_variant_family`
+    # on every shipped variant. `pdk_families` is a leaf module (stdlib-only
+    # imports), so depending on it costs this lower-level asset-discovery
+    # module no layering -- the reason the copy existed in the first place.
+    # An unrecognised variant classifies to itself, so it contributes no
+    # extra candidate, matching this module's "never guessed" convention.
+    family = pdk_variant_family(resolved_variant)
 
     candidates = [f"{resolved_variant}.lvs", f"{family}.lvs"]
     # Also drop a leading, hyphen-delimited vendor-prefix segment
-    # (`ihp-sg13cmos5l` -> `sg13cmos5l`) -- a distinct mismatch shape from
-    # the trailing-suite-letter case above (a missing prefix, not a suffix
-    # letter), verified against a real IHP-Open-PDK install (issue #1399).
+    # (`ihp-sg13cmos5l` -> `sg13cmos5l`), verified against a real
+    # IHP-Open-PDK install (issue #1399). This is *filename* guesswork, not
+    # family classification, and deliberately survives issue #2026's
+    # consolidation: for the two declared IHP families the alias table above
+    # already produces this same candidate, but this fallback additionally
+    # covers a vendor-prefixed install of a family this repo has not declared
+    # at all, where there is no family to classify to. It never names a
+    # family -- nothing downstream consumes the string, it is only probed as
+    # a deck filename -- so it introduces no second variant -> family
+    # algorithm.
     if "-" in resolved_variant:
         candidates.append(f"{resolved_variant.rsplit('-', 1)[-1]}.lvs")
 
@@ -1377,18 +1387,29 @@ def _scan_hard_macro_libraries(libs_ref: str) -> list[dict[str, Any]]:
 # `klt pdk corners` -- SPICE process-corner enumeration + completeness check
 # --------------------------------------------------------------------------- #
 
-#: Known PDK families this command understands, matched by variant-name
-#: prefix (``"sky130A"`` -> ``"sky130"``, ``"gf180mcuC"`` -> ``"gf180mcu"``).
-#: Deliberately duplicates the same convention as the private
-#: ``_pdk_variant_family`` helper in ``pdk_models.py`` rather than importing
-#: it across an unrelated module boundary -- this module resolves PDKs in
-#: general, ``pdk_models`` resolves MOS device-model tables for
-#: extraction/LVS specifically, and neither imports the other today. A
-#: variant not matching any entry here is simply unsupported --
+#: The PDK families **this command** has a curated corner-file grouping for
+#: -- a deliberate, declared *narrowing* of
+#: :data:`klayout_tools.pdk_families.KNOWN_PDK_FAMILIES` (issue #2026), not
+#: an independent family list: :func:`~klayout_tools.pdk_families.family_subset`
+#: rejects at import time any name that is not an authoritative family, so a
+#: typo or a renamed family fails loudly here instead of silently narrowing
+#: this command's support. The classification itself
+#: (``"sky130A"`` -> ``"sky130"``, ``"ihp-sg13g2"`` -> ``"sg13g2"``) is not
+#: performed here at all -- :func:`_corner_pdk_family` delegates it to
+#: :func:`~klayout_tools.pdk_families.pdk_variant_family` and then checks
+#: membership in this set, the ``gen_layer_params._pdk_family`` pattern.
+#:
+#: A variant whose family is not in this set is simply unsupported --
 #: :func:`list_corners` returns an explanatory empty result (see its
 #: docstring), matching this module's "empty is a valid answer" convention
-#: (:func:`list_hard_macro_libraries`), never guessed.
-_CORNER_PDK_FAMILIES: tuple[str, ...] = ("sky130", "gf180mcu")
+#: (:func:`list_hard_macro_libraries`), never guessed. Adding a family to
+#: :data:`~klayout_tools.pdk_families.KNOWN_PDK_FAMILIES` deliberately does
+#: *not* add it here: corner scanning needs a per-family model-deck filename
+#: and scanner (see :data:`_GF180MCU_MODEL_FILENAME` /
+#: :data:`_SKY130_MODEL_FILENAME` and :func:`_resolve_corners`), so this is an
+#: optional narrowing with a documented "unsupported" answer rather than a
+#: required registration (``docs/guides/pdk-family-port-checklist.md``).
+_CORNER_PDK_FAMILIES: frozenset[str] = family_subset("sky130", "gf180mcu")
 
 #: gf180mcu's golden ngspice model deck filename, stable across variants
 #: A-D (verified against a real volare install of each, 2026-08-05).
@@ -1621,7 +1642,7 @@ def _resolve_corners(
             None,
             [],
             f"no curated corner-family grouping for PDK variant '{variant}' "
-            f"(recognised families: {', '.join(_CORNER_PDK_FAMILIES)})",
+            f"(recognised families: {', '.join(sorted(_CORNER_PDK_FAMILIES))})",
         )
     if ngspice_dir is None:
         return None, [], f"variant '{variant}' ships no 'ngspice' asset directory"
@@ -1649,11 +1670,16 @@ def _resolve_corners(
 
 
 def _corner_pdk_family(variant: str) -> str | None:
-    """The recognised corner-scanning family for ``variant``, or ``None``."""
-    for family in _CORNER_PDK_FAMILIES:
-        if variant.startswith(family):
-            return family
-    return None
+    """The recognised corner-scanning family for ``variant``, or ``None``.
+
+    Classification is delegated to
+    :func:`~klayout_tools.pdk_families.pdk_variant_family` (the package's
+    single authoritative variant -> family mapping, issue #2026); this
+    function only decides whether *this* command supports the resulting
+    family, per :data:`_CORNER_PDK_FAMILIES`.
+    """
+    family = pdk_variant_family(variant)
+    return family if family in _CORNER_PDK_FAMILIES else None
 
 
 def _parse_named_lib_blocks(text: str) -> dict[str, str]:

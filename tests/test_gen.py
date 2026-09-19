@@ -5910,7 +5910,8 @@ def sg13cmos5l_pdk_root(tmp_path):
 def test_pdk_family_resolves_ihp_sg13cmos5l_variant_alias():
     """`_pdk_family` must resolve the real-world `"ihp-sg13cmos5l"` variant
     string to the `"sg13cmos5l"` family key -- the same
-    `_PDK_VARIANT_FAMILY_ALIASES` mechanism `"ihp-sg13g2"` relies on."""
+    `pdk_families.PDK_VARIANT_FAMILY_ALIASES` mechanism `"ihp-sg13g2"`
+    relies on."""
     assert gen._pdk_family(_SG13CMOS5L_VARIANT) == "sg13cmos5l"
 
 
