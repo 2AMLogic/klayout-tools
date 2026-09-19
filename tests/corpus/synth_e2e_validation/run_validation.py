@@ -109,11 +109,11 @@ def klt_synthesize(
         ) from exc
 
 
-def synth_netlist_path(workdir: Path, hdl_toplevel: str) -> Path:
+def synth_netlist_path(workdir: Path, hdl_toplevel: str, report: dict) -> Path:
     """The real filesystem path `klt synthesize` wrote its mapped netlist
     to, reconstructed directly from its own documented convention
     (`synthesize.py`'s module docstring): `.klt/synthesize/
-    <hdl_toplevel>_synth.v`, next to the request file (`klt_synthesize`
+    <run_id>/<hdl_toplevel>_synth.v`, next to the request file (`klt_synthesize`
     above always writes it to `workdir / "req.json"`).
 
     Issue #1844 normalized the JSON response's own `netlist_path` field to
@@ -123,7 +123,12 @@ def synth_netlist_path(workdir: Path, hdl_toplevel: str) -> Path:
     the (potentially-committed) response. Callers that need the real path
     reconstruct it via this helper instead of reading the response field.
     """
-    return workdir / ".klt" / "synthesize" / f"{hdl_toplevel}_synth.v"
+    run_id = report.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise ValueError("invalid synthesis run_id")
+    return workdir / ".klt" / "synthesize" / run_id / f"{hdl_toplevel}_synth.v"
 
 
 def seq_equiv_check(
@@ -395,7 +400,7 @@ def validate_modexp() -> dict:
         report = klt_synthesize(
             workdir, ["modexp.v"], "modexp", verify_equivalence=False
         )
-        gate_netlist = synth_netlist_path(workdir, "modexp")
+        gate_netlist = synth_netlist_path(workdir, "modexp", report)
 
         seq_proven, seq_log_tail = seq_equiv_check(
             workdir, "modexp", str(gate_netlist), 16, ["modexp.v"]
@@ -452,7 +457,7 @@ def validate_tt_design(
         report = klt_synthesize(
             workdir, sources, top, verify_equivalence=verify_equivalence
         )
-        gate_netlist = synth_netlist_path(workdir, top)
+        gate_netlist = synth_netlist_path(workdir, top, report)
 
         result: dict = {
             "design": macro,

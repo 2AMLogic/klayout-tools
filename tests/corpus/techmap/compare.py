@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -128,11 +129,16 @@ def run_yosys_oracle(design: str, liberty: str, scratch: str) -> dict:
     # reports `scope: "external"`, `path: None`. Reconstruct the real
     # filesystem path directly from `run_synthesize`'s own documented
     # convention (`synthesize.py`'s module docstring):
-    # `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the request file
+    # `.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v`, next to the request file
     # (`request_path` above), and stash it under a key this script owns
     # rather than overwriting the response's own (now-normalized) field.
+    run_id = report.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise ValueError("invalid synthesis run_id")
     report["_netlist_path"] = os.path.join(
-        design_dir, ".klt", "synthesize", f"{design}_synth.v"
+        design_dir, ".klt", "synthesize", run_id, f"{design}_synth.v"
     )
     return report
 

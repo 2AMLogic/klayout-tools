@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -244,7 +245,7 @@ def _side(sources: list[str], top: str = "top", **extra) -> dict:
     return {"sources": sources, "top": top, **extra}
 
 
-def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str) -> str:
+def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str, run_id: str) -> str:
     """The real absolute path `run_synthesize` wrote its mapped netlist to.
 
     Issue #1844 normalized the response's own `netlist_path` field to the
@@ -253,11 +254,17 @@ def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str) -> str:
     path). These integration tests still need the real filesystem path to
     wire into a downstream request, so this reconstructs it directly from
     `run_synthesize`'s own documented convention (`synthesize.py`'s module
-    docstring): `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the
+    docstring): `.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v`, next to the
     request file.
     """
     request_dir = os.path.dirname(os.path.abspath(synth_request_path))
-    return os.path.join(request_dir, ".klt", "synthesize", f"{hdl_toplevel}_synth.v")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise ValueError("invalid synthesis run_id")
+    return os.path.join(
+        request_dir, ".klt", "synthesize", run_id, f"{hdl_toplevel}_synth.v"
+    )
 
 
 HAVE_YOSYS = shutil.which("yosys") is not None
@@ -2302,7 +2309,9 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
         pnr_dir / "pnr.json",
         {
             "engine": "openroad",
-            "netlist": _synth_netlist_path(synth_request, "gcd"),
+            "netlist": _synth_netlist_path(
+                synth_request, "gcd", synth_report["run_id"]
+            ),
             "hdl_toplevel": "gcd",
             "pdk": {"cell_library": cell_library, "corner": corner},
             "floorplan": {
@@ -2332,7 +2341,7 @@ def test_sequential_engine_real_pnr_register_preserving_transformation(
         equiv_dir / "equiv.json",
         {
             "gold": _side(
-                [_synth_netlist_path(synth_request, "gcd")],
+                [_synth_netlist_path(synth_request, "gcd", synth_report["run_id"])],
                 top="gcd",
                 liberty=liberty_path,
             ),
@@ -2427,7 +2436,9 @@ def test_sequential_engine_real_pnr_mult8_register_preserving_transformation(
         pnr_dir / "pnr.json",
         {
             "engine": "openroad",
-            "netlist": _synth_netlist_path(synth_request, "mult8"),
+            "netlist": _synth_netlist_path(
+                synth_request, "mult8", synth_report["run_id"]
+            ),
             "hdl_toplevel": "mult8",
             "pdk": {"cell_library": cell_library, "corner": corner},
             "floorplan": {
@@ -2457,7 +2468,7 @@ def test_sequential_engine_real_pnr_mult8_register_preserving_transformation(
         equiv_dir / "equiv.json",
         {
             "gold": _side(
-                [_synth_netlist_path(synth_request, "mult8")],
+                [_synth_netlist_path(synth_request, "mult8", synth_report["run_id"])],
                 top="mult8",
                 liberty=liberty_path,
             ),
@@ -2727,7 +2738,11 @@ def test_corpus_rtl_vs_real_synthesized_gates(tmp_path, monkeypatch):
         {
             "gold": _side([gold_rtl], top="adder4"),
             "gate": _side(
-                [_synth_netlist_path(good_synth_request, "adder4")],
+                [
+                    _synth_netlist_path(
+                        good_synth_request, "adder4", good_synth_report["run_id"]
+                    )
+                ],
                 top="adder4",
                 liberty=liberty_path,
             ),
@@ -2743,7 +2758,11 @@ def test_corpus_rtl_vs_real_synthesized_gates(tmp_path, monkeypatch):
         {
             "gold": _side([gold_rtl], top="adder4"),
             "gate": _side(
-                [_synth_netlist_path(bad_synth_request, "adder4")],
+                [
+                    _synth_netlist_path(
+                        bad_synth_request, "adder4", bad_synth_report["run_id"]
+                    )
+                ],
                 top="adder4",
                 liberty=liberty_path,
             ),

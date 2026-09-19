@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 
 import pytest
@@ -433,9 +434,12 @@ def _synth_script_path(tmp_path, report, hdl_toplevel: str = "adders") -> str:
     docstring): `.klt/synthesize/<run_id>/synth_<hdl_toplevel>.ys`, next to the
     request file.
     """
-    return str(
-        tmp_path / ".klt" / "synthesize" / report["run_id"] / f"synth_{hdl_toplevel}.ys"
-    )
+    run_id = report.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise ValueError("invalid synthesis run_id")
+    return str(tmp_path / ".klt" / "synthesize" / run_id / f"synth_{hdl_toplevel}.ys")
 
 
 @requires_engine

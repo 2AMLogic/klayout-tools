@@ -109,6 +109,10 @@ def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str, run_id: str)
     the request file.
     """
     request_dir = os.path.dirname(os.path.abspath(synth_request_path))
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise ValueError("invalid synthesis run_id")
     return os.path.join(
         request_dir, ".klt", "synthesize", run_id, f"{hdl_toplevel}_synth.v"
     )

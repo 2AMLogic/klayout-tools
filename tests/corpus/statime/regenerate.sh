@@ -39,6 +39,7 @@ for DESIGN in gcd mult8 modexp; do
   cat > "$SCRATCH/${DESIGN}_synth_request.json" <<JSON
 {
   "schema": "klt.synthesize.request/1",
+  "run_id": "corpus-${DESIGN}",
   "engine": "yosys",
   "sources": ["$DESIGN.v"],
   "hdl_toplevel": "$DESIGN",
@@ -55,7 +56,7 @@ JSON
   ( cd "$SCRATCH" && PATH="/usr/bin:$PATH" PDK=sky130A uv --project "$REPO_ROOT" run klt synthesize \
       "$SCRATCH/${DESIGN}_synth_request.json" --format json )
 
-  cp "$SCRATCH/.klt/synthesize/${DESIGN}_synth.v" "$REPO_ROOT/tests/corpus/statime/${DESIGN}_netlist.v"
+  cp "$SCRATCH/.klt/synthesize/corpus-${DESIGN}/${DESIGN}_synth.v" "$REPO_ROOT/tests/corpus/statime/${DESIGN}_netlist.v"
 done
 
 echo "Done. Review the diff:"
