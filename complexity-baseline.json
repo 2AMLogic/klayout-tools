@@ -190,16 +190,6 @@
     },
     {
       "file": "src/klayout_tools/extract.py",
-      "function": "_describe_devices",
-      "complexity": 14
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
-      "function": "_describe_matched_device_groups",
-      "complexity": 11
-    },
-    {
-      "file": "src/klayout_tools/extract.py",
       "function": "_detect_diode_substrate_label_divergence",
       "complexity": 19
     },
@@ -247,6 +237,16 @@
       "file": "src/klayout_tools/extract_parasitics.py",
       "function": "_inject_parasitics",
       "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/extract_report.py",
+      "function": "_describe_devices",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/extract_report.py",
+      "function": "_describe_matched_device_groups",
+      "complexity": 11
     },
     {
       "file": "src/klayout_tools/extract_spef.py",
