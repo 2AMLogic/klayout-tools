@@ -479,18 +479,26 @@ macro-specific PDN grids (``define_pdn_grid -macro``, with their own
 halo/orientation config) -- a design with hard macros needs a caller-supplied
 macro halo/grid spec this field does not yet expose, so ``pdngen`` here
 builds only the flat standard-cell grid (:func:`_power_delivery_lines`).
-Real per-instance tapcell/filler *placement counts* are also not reported in
-the additive ``power`` response field below (only which cell masters/net
-names this run was configured with) -- OpenROAD reports these only via
-``report_design_area``'s free-text summary or a custom
-``get_cells -filter``/``utl::metric_integer`` combination, neither of which
-this module currently threads through its existing per-stage ``-metrics
-<file>.json`` mechanism; both are natural, separable follow-ups (each would
-need the same "verified live" rigor the rest of this response contract
-carries, not a guess). Neither exclusion changes any existing field's
-behaviour, and both can be added later as additive request/response fields
-without a contract-shape change -- the same precedent every other v1
-exclusion in this module's docstring already follows.
+This exclusion changes no existing field's behaviour, and can be added later
+as an additive request/response field without a contract-shape change --
+the same precedent every other v1 exclusion in this module's docstring
+already follows.
+
+Real per-instance tapcell/endcap/filler *placement counts* were originally
+excluded here too, on the grounds that OpenROAD reports them only via
+``report_design_area``'s free-text summary or a custom ``get_cells
+-filter``/``utl::metric_integer`` combination this module does not thread
+through its per-stage ``-metrics <file>.json`` mechanism. Issue #2086
+closed that gap from the other side -- by reading the DEF the run already
+wrote -- because the exclusion had a cost the original scoping missed: a
+``request.power``-less run *completes*, exits 0, and produces a layout
+whose power delivery (none at all on a library with no row-rail fallback;
+rails and fill but no taps, straps or PDN vias on one that has it) was
+indistinguishable in the response from a power-complete one. The additive
+``power.placed`` block now reports those counts plus the ``SPECIALNETS``
+grid structure, and the additive top-level ``warnings`` field says --
+quoting the measured numbers, never a fixed template -- exactly which of
+them are zero. See :mod:`klayout_tools.place_and_route_power_audit`.
 
 ``straps[].spacing_um`` and ``connects[]`` (issue #1133) close a further gap:
 sourcing strap geometry from a real platform's own PDN config (e.g. gf180's
@@ -597,6 +605,20 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+
+# The power-delivery audit (issue #2086): reads the DEF this run wrote and
+# reports what was actually *placed* (tapcells/endcaps/fillers, PDN
+# special-net structure), plus the loud `warnings` strings an absent or
+# partial power delivery earns. Kept in its own module for the same reason
+# `place_and_route_sta.py` is -- a self-contained, single-purpose subsystem
+# (DEF text parsing + grading) that does not belong in this file's stage
+# orchestration.
+from .place_and_route_power_audit import (
+    audit_power_delivery as audit_power_delivery,
+)
+from .place_and_route_power_audit import (
+    power_delivery_warnings as power_delivery_warnings,
+)
 from .place_and_route_reports import (
     count_route_drc_violations as _count_route_drc_violations,
 )
@@ -1845,6 +1867,54 @@ def run_place_and_route(
             "row_rail": row_rail_info,
         }
 
+    # Additive field (issue #2086): what this run's own DEF says was
+    # *actually placed*, as opposed to the fields above, which report what
+    # the run was *configured* with. A `request.power`-less run completes,
+    # exits 0 and writes a plausible-looking layout with zero tapcells,
+    # zero PDN and zero fillers -- and, before this block existed, said so
+    # nowhere. `power.placed` measures those counts from the DEF, and
+    # `warnings` below turns an absent/partial power delivery into a loud,
+    # machine-readable statement in the artifact itself rather than leaving
+    # it visible only in the absence of a complaint. See
+    # :mod:`klayout_tools.place_and_route_power_audit`.
+    #
+    # The masters handed to the audit are the *library's* (not
+    # `power_info`'s, which are `None`/`[]` exactly when `request.power`
+    # was omitted -- the case that most needs measuring). The DEF graded is
+    # whichever one this response points a caller at: the routed
+    # `def_path` at `"route"`, the pre-route `unrouted_def_path` at
+    # `"place"`/`"cts"`, and none at all at `"floorplan"` (no DEF is
+    # written there, reported as `evidence: "unavailable"` rather than a
+    # fabricated zero).
+    audit_tap_master, audit_endcap_master, _audit_distance_um = _TAPCELL_CELLS.get(
+        cell_library, (None, None, 0)
+    )
+    audited_def_path = def_path or unrouted_def_path
+    power_info["placed"] = audit_power_delivery(
+        def_path=audited_def_path,
+        unavailable_reason=(
+            None
+            if audited_def_path is not None
+            else f"no DEF is written at the '{target_stage}' stage"
+        ),
+        tapcell_master=audit_tap_master,
+        endcap_master=audit_endcap_master,
+        filler_masters=_FILLER_CELLS.get(cell_library, ()),
+        power_net=(
+            power["power_net"] if power is not None else row_rail_info["power_net"]
+        ),
+        ground_net=(
+            power["ground_net"] if power is not None else row_rail_info["ground_net"]
+        ),
+        # `filler_placement` is a `"route"`-stage-only call -- a `"place"`/
+        # `"cts"` DEF legitimately has no fillers, and grading it for them
+        # would be a false alarm.
+        expect_fillers=target_stage == "route",
+    )
+    warnings = power_delivery_warnings(
+        power_info["placed"], power_requested=power is not None
+    )
+
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
 
@@ -1953,6 +2023,18 @@ def run_place_and_route(
         "spef_sta": spef_sta,
         # Additive field (issue #1091) -- see the construction comment above.
         "power": power_info,
+        # Additive field (issue #2086): non-fatal conditions a caller must
+        # see before trusting this run's numbers. Always present (`[]` when
+        # there is nothing to say), never `null`, mirroring the same
+        # `warnings: [str, ...]` shape `klt extract`/`klt pdk`/`klt
+        # lef-abstract` already use. Today's only producer is the
+        # power-delivery audit above -- a run that placed no tapcells, no
+        # PDN and no fillers now says so in its own artifact instead of
+        # being distinguishable from a power-complete run only by its
+        # silence. This is a warning, not a refusal: `request.power` stays
+        # optional (a floorplan-exploration run has no reason to build a
+        # PDN), so `status`/exit codes are unchanged.
+        "warnings": warnings,
         "provenance": provenance,
     }
 

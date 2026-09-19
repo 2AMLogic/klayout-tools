@@ -154,6 +154,41 @@ not `klt --version`, if you need to detect this kind of drift. See
   claim can now see when that claim rests on uncorroborated evidence
   (`corroborated: false`, with a `reason` naming the master(s) involved)
   instead of having to reverse-engineer it from the netlist.
+- **Added**: `klt place-and-route` now reports the power delivery it
+  actually *placed*, and warns loudly when there is none (issue #2086).
+  `request.power` is optional, and omitting it produced a run that
+  completes — exit 0, a routed DEF, a merged GDS, real area/timing numbers
+  — on a layout with **no PDN, no substrate/well taps, and (on a library
+  with no row-rail fallback) no fill at all**, with nothing in the output
+  saying so. The response's new `power.placed` block is
+  measured from the DEF the run wrote (`components`/`tapcells`/`endcaps`/
+  `fillers` instance counts, plus one `special_nets[]` entry per DEF
+  `SPECIALNETS` net with its `FOLLOWPIN` rail segments, `STRIPE` strap
+  segments, `stripe_layers` and PDN `vias`), graded into
+  `status`/`missing`. A new top-level `warnings` array (`[]` when empty,
+  never `null`) fires both when `request.power` was omitted and when a
+  *supplied* block produced an incomplete grid — the transcription-error
+  case, where a strap layer that draws nothing is just as silent. Every
+  warning's prose is derived from the measured counts (an omitted-block run
+  on `sky130_fd_sc_hd` really does place rails and fillers via the issue
+  #1442 row-rail fallback, and the warning narrows to the taps, straps and
+  PDN vias that are genuinely absent), and each expected supply is graded
+  on its own, so a routed `VDD` beside a bare `VSS` entry grades `partial`
+  rather than `complete`. The CLI writes each warning to **stderr** in both
+  `--format json` and `--format text`, leaving stdout a single parseable
+  document. `--format text` also prints the placed counts unconditionally.
+  Measured zeros and unavailable evidence are kept distinct:
+  `power.placed.evidence` is `"def"` only when a DEF was read and parsed —
+  which requires its `COMPONENTS` and (when present) `SPECIALNETS` sections
+  to carry exactly the number of records they declare and to terminate
+  their last record, so a truncated or miscounted section is reported as
+  unavailable rather than as a measured zero or a smaller-but-complete
+  grid — otherwise every count is `null` with an `unavailable_reason`,
+  never a fabricated `0`. This warns,
+  it does not refuse: `status` stays `"ok"` and the exit code stays `0`, so
+  a caller wanting a hard gate composes it on a non-empty `warnings` or
+  `power.placed.status != "complete"`. Additive throughout; no
+  `schema_version` bump.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
