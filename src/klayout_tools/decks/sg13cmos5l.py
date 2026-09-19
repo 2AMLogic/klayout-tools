@@ -72,11 +72,14 @@ recognition; it has since grown three follow-on increments the way
   ``EXTRACTION_DECK.poly_label``'s own inline note for why ``.pin`` rather
   than the ``.label`` (5/1) purpose ``sg13g2.py`` picked for the identical
   layer-numbering gap.
+- **Added by #2113**: nominal first-order metal parasitics for all five
+  levels and four adjacent vertical-overlap pairs. See ``PARASITICS`` for
+  SG13CMOS5L-specific source values and the uncalibrated model's limits.
 - **Still out of scope**, left for follow-on issues: the
   ``res_metal1``..``res_topmetal1`` metal-resistor family (now reachable
   in principle now that #1417 lands the metal stack those bodies sit on,
   but not transcribed by this issue -- see the resistor note below), plus
-  diodes and parasitics.
+  diodes and non-metal parasitics.
 
 Source, read directly from a real ``ihp-sg13cmos5l`` install (standalone
 clone of https://github.com/IHP-GmbH/ihp-sg13cmos5l, Apache-2.0), **not**
@@ -306,6 +309,7 @@ from __future__ import annotations
 from . import (
     DrcRule,
     ExtractionDeck,
+    LayerRC,
     MomCapacitorDevice,
     MOSFlavour,
     ParasiticsDeck,
@@ -1324,10 +1328,71 @@ EXTRACTION_DECK = ExtractionDeck(
     ),
 )
 
-# No sheet-resistance/parallel-plate-capacitance table curated for this
-# MOS-only starter pass -- parasitics are explicitly out of scope for #1400
-# (deferred to the parasitics registry per its own Background note). `klt
-# extract --parasitics` against the `"sg13cmos5l"` deck runs (no error),
-# just reports zero R/C for every net, exactly as any deck declaring no
-# `ParasiticsDeck` role does.
-PARASITICS = ParasiticsDeck()
+# Nominal, first-order, uncalibrated metal R/C (issue #2113).
+# Source: this PDK's own non-symlinked, Apache-2.0 file
+# `libs.tech/magic/ihp-sg13cmos5l-extract.tech`, at
+# `_IHP_SG13CMOS5L_REPO` / `_IHP_SG13CMOS5L_COMMIT` above:
+# https://github.com/IHP-GmbH/ihp-sg13cmos5l/blob/607e18d4bd9214a52575c194b4181ef449f9252f/libs.tech/magic/ihp-sg13cmos5l-extract.tech
+# Resistances: `variants (),(lvs)`, lines 68-88, milliohms/square (line 59).
+# Capacitances: `variants ()`, lines 170-370, aF/um² for area/overlap and
+# aF/um for perimeter (line 158). Divide each by 1000 for our units.
+# Do not use the separate high/low-R or high/low-C variant blocks.
+# The source identifies approximate fringe terms and capiche generation;
+# this table does not add calibration, corner selection, or PVT signoff.
+#
+# R cross-check: cmos5l's `libs.tech/klayout/tech/lvs/rule_decks/
+# res_extraction.lvs` explicitly symlinks into the G2 sibling pinned by
+# `.github/ihp-sg13g2.ref` (`_IHP_OPEN_PDK_G2_PIN_COMMIT`). Its lines 65-68,
+# 70 agree for RSH_RES_METAL1..4/RSH_RES_TOPMETAL1. Capacitances below come
+# directly from CMOS5L, and differ from the related SG13G2 stack.
+# Magic's `allm5`/`metal5` is CMOS5L TopMetal1 (126/0), confirmed by its own
+# `ihp-sg13cmos5l-cifout.tech` lines 590-601, not physical Metal5 (67/0).
+#
+# Follow `defaultperimeter` exactly: M2/M4's 35.540/29.210 differ from the
+# source's `defaultsideoverlap`-to-substrate values 34.540/28.210. They are
+# distinct primitives; do not substitute the latter for our fringe term.
+# Diffusion/poly, via R, and lateral coupling remain uncurated.
+PARASITICS = ParasiticsDeck(
+    metals=(
+        # Metal1: `resist (allm1)/metal1 110` (77);
+        # `defaultareacap allm1 metal1 35.015` (194),
+        # `defaultperimeter allm1 metal1 39.488` (195).
+        LayerRC(
+            sheet_res_ohm_sq=0.110, cap_area_ff_um2=0.035015, cap_perim_ff_um=0.039488
+        ),
+        # Metal2: `resist (allm2)/metal2 88` (78);
+        # `defaultareacap allm2 metal2 18.180` (220),
+        # `defaultperimeter allm2 metal2 35.540` (221).
+        LayerRC(
+            sheet_res_ohm_sq=0.088, cap_area_ff_um2=0.018180, cap_perim_ff_um=0.035540
+        ),
+        # Metal3: `resist (allm3)/metal3 88` (79);
+        # `defaultareacap allm3 metal3 11.994` (251),
+        # `defaultperimeter allm3 metal3 30.657` (252).
+        LayerRC(
+            sheet_res_ohm_sq=0.088, cap_area_ff_um2=0.011994, cap_perim_ff_um=0.030657
+        ),
+        # Metal4: `resist (allm4)/metal4 88` (80);
+        # `defaultareacap allm4 metal4 8.948` (287),
+        # `defaultperimeter allm4 metal4 29.210` (288).
+        LayerRC(
+            sheet_res_ohm_sq=0.088, cap_area_ff_um2=0.008948, cap_perim_ff_um=0.029210
+        ),
+        # TopMetal1: `resist (allm5)/metal5 18` (81);
+        # `defaultareacap allm5 metal5 6.727` (328),
+        # `defaultperimeter allm5 metal5 34.527` (329).
+        LayerRC(
+            sheet_res_ohm_sq=0.018, cap_area_ff_um2=0.006727, cap_perim_ff_um=0.034527
+        ),
+    ),
+    metal_overlaps=(
+        # `defaultoverlap allm2 metal2 allm1 metal1 67.225` (245): M1-M2.
+        0.067225,
+        # `defaultoverlap allm3 metal3 allm2 metal2 67.225` (281): M2-M3.
+        0.067225,
+        # `defaultoverlap allm4 metal4 allm3 metal3 67.225` (322): M3-M4.
+        0.067225,
+        # `defaultoverlap allm5 metal5 allm4 metal4 42.708` (368): M4-TM1.
+        0.042708,
+    ),
+)
