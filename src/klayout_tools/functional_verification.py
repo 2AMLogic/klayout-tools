@@ -1298,6 +1298,27 @@ def parse_results_xml(results_xml: str) -> list[dict[str, Any]]:
     return tests
 
 
+def _executed_result_counts(
+    tests: list[dict[str, Any]], module: str
+) -> tuple[int, int, int]:
+    """Count parsed outcomes, refusing regressions that verified nothing."""
+    if not tests:
+        raise FunctionalVerificationError(
+            f"testbench module '{module}' registered no tests -- the run "
+            "verified nothing (a regression with zero @cocotb.test() "
+            "functions is not a pass)"
+        )
+    passed = sum(1 for test in tests if test["status"] == "passed")
+    failed = sum(1 for test in tests if test["status"] == "failed")
+    skipped = sum(1 for test in tests if test["status"] == "skipped")
+    if passed + failed == 0:
+        raise FunctionalVerificationError(
+            f"testbench module '{module}': all tests were skipped -- "
+            "zero executed tests verified nothing; this regression is not a pass"
+        )
+    return passed, failed, skipped
+
+
 def _maybe_float(value: str | None) -> float | None:
     """``float(value)``, or ``None`` when the attribute is absent or not a
     number -- an unparseable timing attribute must never sink a run whose
@@ -2036,20 +2057,7 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             "built for a different CPython than the one running klt (an "
             "ABI-mismatched wheel)"
         ) from exc
-    if not tests:
-        # An empty regression is not a pass. Reporting `status: "pass"` here
-        # would hand `klt eval` a vacuous `valid: true` for a design nothing
-        # was ever checked against -- the exact failure Epic #391's own
-        # framing ("the hard gate in #387's valid field") exists to prevent.
-        raise FunctionalVerificationError(
-            f"testbench module '{module}' registered no tests -- the run "
-            "verified nothing (a regression with zero @cocotb.test() "
-            "functions is not a pass)"
-        )
-
-    passed_count = sum(1 for test in tests if test["status"] == "passed")
-    failed_count = sum(1 for test in tests if test["status"] == "failed")
-    skipped_count = sum(1 for test in tests if test["status"] == "skipped")
+    passed_count, failed_count, skipped_count = _executed_result_counts(tests, module)
 
     coverage = None
     if coverage_requested:

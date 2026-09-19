@@ -874,7 +874,19 @@ FUNCTIONAL_VERIFICATION_PASS_ENVELOPE = {
             "status": "passed",
             "sim_time_ns": 520.0,
             "real_time_s": 0.0051,
-        }
+        },
+        {
+            "name": "test_gcd_random_pairs",
+            "status": "passed",
+            "sim_time_ns": 4720.0,
+            "real_time_s": 0.0347,
+        },
+        {
+            "name": "test_gcd_corner_cases",
+            "status": "passed",
+            "sim_time_ns": 120.0,
+            "real_time_s": 0.0025,
+        },
     ],
     "coverage": None,
     "trace": None,
@@ -893,6 +905,15 @@ FUNCTIONAL_VERIFICATION_FAIL_ENVELOPE = {
     "status": "fail",
     "passed_count": 2,
     "failed_count": 1,
+    "tests": [
+        *FUNCTIONAL_VERIFICATION_PASS_ENVELOPE["tests"][:2],
+        {
+            **FUNCTIONAL_VERIFICATION_PASS_ENVELOPE["tests"][2],
+            "status": "failed",
+            "error_type": "AssertionError",
+            "error_message": "deliberate failure",
+        },
+    ],
 }
 
 #: The digital item-7 artifact (issue #1959): the same regression re-run

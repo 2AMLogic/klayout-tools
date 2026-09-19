@@ -104,7 +104,8 @@ two steps:
    `em_verdict.status: "pass"` (see "`klt power` evidence (envelope
    aggregation only)" below — `klt power`'s envelope carries no top-level
    `status` field at all, unlike every other kind), `klt
-   functional-verification` on `status: "pass"` (`failed_count == 0` —
+   functional-verification` on `status: "pass"` with consistent counts,
+   at least one passing test and no failures (skips are allowed —
    [`functional-verification.md`](functional-verification.md)), `klt sta` on
    its *reported timing* rather than a `status` field (that verb's `status`
    is always `"ok"`: every corner it reports must be `timing_status:
@@ -843,7 +844,15 @@ raises "unrecognized shape", exactly as before.
 — the bit-exact functional regression half of item 5's Digital column, and
 (SDF-annotated) the whole of item 7's. Recognised structurally by a
 top-level `tests` list plus `test_count`. It passes on its own
-`status: "pass"` (`failed_count == 0`), mirroring `klt sim`.
+`status: "pass"` only when the reported counts are nonnegative integers
+(not booleans), agree with every entry in `tests`, and satisfy
+`passed_count + failed_count + skipped_count == test_count == len(tests)`.
+There must be at least one passing test and zero failing tests. Mixed
+passing/skipped runs qualify; empty or all-skipped runs do not, including
+old or external envelopes that claim `status: "pass"`. Missing, malformed,
+or contradictory counts cannot qualify either. These checks apply to both
+plain aggregation and digital manifest citations (items 5 and 7). Optional
+Verilator code-coverage percentages are not required or consulted.
 
 Whether the run was SDF-annotated is **not** a pass/fail input — an
 unannotated regression is a perfectly valid pre-layout check, and satisfies
