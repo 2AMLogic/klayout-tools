@@ -168,6 +168,19 @@ equivalent generalization for the frequency-domain sweep to follow.
    geometry class (already cited as the architectural analogue in "Path 1"
    above and in `peec.rs`'s own module docs, "the standard technique used by
    filament-based PEEC/partial-inductance extractors (e.g. FastHenry)").
+
+   **Superseded as written (2026-09-18).** FastHenry itself is out
+   permanently — unpackaged everywhere this repo installs from, and licensed
+   under MIT RLE's noncommercial/no-redistribution research notice rather
+   than an OSI license (the operator ruling on
+   [#1886](https://github.com/2AMLogic/klayout-tools/issues/1886); full
+   citation in [`em-field-sim-spike.md`](em-field-sim-spike.md)'s Section 3
+   license row). The oracle role is filled instead by **PyPEEC** (Dartmouth
+   College, MPL-2.0), the same method class, on the same 2-turn square spiral
+   fixture this section asks for: see
+   [`mom-cross-validation.md`](mom-cross-validation.md)'s "The spiral
+   fixture's oracle" and [`mom-validation.md`](mom-validation.md)'s "The
+   external PyPEEC comparison".
 2. **The existing analytic two-parallel-bars case** (same oracle as
    increment (i), `peec.rs`'s Grover-formula tests) — as a **regression**
    check that the generalized formula reduces exactly to the existing

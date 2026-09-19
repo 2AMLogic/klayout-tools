@@ -1121,3 +1121,13 @@ are exhaustive forever.
   Phase 2c), backed by `scripts/mom_nec_reference.py`'s subprocess-invoked
   reference solve — see `docs/design/mom-cross-validation.md` for the full
   methodology.
+- `tests/test_mom_pypeec_cross_validation.py` — the same pattern for the
+  PEEC inductance path: cross-validation of the spiral fixture's total
+  partial inductance against the external PyPEEC oracle
+  ([#1886](https://github.com/2AMLogic/klayout-tools/issues/1886), closing
+  out [#1842](https://github.com/2AMLogic/klayout-tools/issues/1842)'s
+  acceptance criterion 3), backed by `scripts/mom_pypeec_reference.py`'s
+  subprocess-invoked reference solve. The measured comparison lives in
+  [`docs/design/mom-validation.md`](../design/mom-validation.md); the oracle
+  choice (and why FastHenry is permanently out) in
+  [`docs/design/mom-cross-validation.md`](../design/mom-cross-validation.md).

@@ -408,6 +408,58 @@ jobs:
           fi
           echo "FastCap capacitance oracle ran to completion (not skipped)."
 
+      - name: Install the external PyPEEC oracle and run the spiral cross-validation test
+        # tests/test_mom_pypeec_cross_validation.py (issue #1886) closes out
+        # issue #1842's acceptance criterion 3: it checks klt mom's PEEC
+        # *spiral* partial-inductance sum against PyPEEC, an independently
+        # implemented external PEEC solver (Dartmouth College, MPL-2.0) --
+        # the same method class #1842 named FastHenry for. FastHenry itself
+        # is out: the operator ruling on #1886 (2026-09-18) found it
+        # unpackaged everywhere this repo installs from AND licensed under
+        # MIT RLE's noncommercial/no-distribution research notice rather than
+        # an OSI license, so `scripts/ci-apt-install.sh fasthenry` (#1886's
+        # original plan) could never have worked and the code could never be
+        # ported. See docs/design/mom-cross-validation.md's "The spiral
+        # fixture's oracle" section.
+        #
+        # Same shape as the NEC2++ step above and for the same reasons:
+        # pypeec is never imported by this repo's own code, only by
+        # scripts/mom_pypeec_reference.py, always invoked as its own
+        # subprocess; and it lives in its own extra so a failure here
+        # attributes to exactly one oracle. mom-only (guarded so it does not
+        # run on the congestion/yield legs).
+        #
+        # timeout-minutes (the per-step discipline issues #1204/#1219
+        # established for every external-tool install step): pypeec's
+        # declared dependencies pull its plotting/GUI stack (vtk, pyvista,
+        # pyside6 -- no extras to opt out of), ~1.6 GB installed, so a cold
+        # uv cache downloads several hundred MB here. 20 minutes is generous
+        # against a warm-cache time of seconds and a solve time of ~2s, while
+        # still converting a hung download into a visible failure well inside
+        # this leg's own 30-minute budget.
+        if: matrix.crate == 'mom'
+        timeout-minutes: 20
+        working-directory: .
+        run: |
+          uv sync --locked --extra dev --group mom --extra mom-pypeec-cross-validation
+          uv run --frozen --extra dev --group mom --extra mom-pypeec-cross-validation \
+            pytest tests/test_mom_pypeec_cross_validation.py -v --capture=tee-sys
+
+      - name: Assert the PyPEEC cross-validation test actually ran (no silent skip)
+        # The test module skips itself (with an explicit reason) when pypeec
+        # is not importable -- by design, so a network-less sandbox degrades
+        # gracefully. This step is what makes sure a silent skip is never the
+        # only thing CI ever sees, exactly like the PyNEC assert above.
+        if: matrix.crate == 'mom'
+        timeout-minutes: 5
+        working-directory: .
+        run: |
+          uv run --frozen --extra dev --group mom --extra mom-pypeec-cross-validation \
+            python -c "import pypeec" || {
+            echo "::error::pypeec did not install -- tests/test_mom_pypeec_cross_validation.py would have skipped"
+            exit 1
+          }
+
   native-statime:
     name: Native engines (Rust) — static timing
     # `native/statime/` (issue #809, Epic #704 Phase 1c) shipped as a plain
