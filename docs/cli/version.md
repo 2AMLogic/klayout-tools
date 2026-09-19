@@ -54,8 +54,7 @@ a release.
 - `version` — the identity-bearing version string above, also recorded as
   `provenance.klt_version` in reports.
 - `package_version` — the plain package version (`klayout_tools.__version__`).
-  Equals `version` exactly
-  when `is_release` is `true`.
+  Equals `version` exactly when `is_release` is `true`.
 - `git_commit` — the commit the build was made from, or `null` when
   unrecoverable.
 - `git_tag` — the tag the build sits exactly on, or `null`. A tag belonging to

@@ -46,6 +46,8 @@ from klayout_tools import size
 from klayout_tools.cli import main
 from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 #: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
 #: by CI) opts a host with ngspice installed out of this slow tier too; see
 #: `tests/test_extract.py`'s `HAVE_NGSPICE` for the full rationale (issue #1651).

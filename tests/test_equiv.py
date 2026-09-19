@@ -90,6 +90,8 @@ from klayout_tools.cli import main
 from klayout_tools.equiv import EquivError, run_equiv
 from klayout_tools.synthesize import run_synthesize
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 # --------------------------------------------------------------------------- #
 # Fixtures (RTL sources)
 # --------------------------------------------------------------------------- #

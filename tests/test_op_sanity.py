@@ -31,6 +31,8 @@ from klayout_tools import op_sanity
 from klayout_tools.cli import main
 from klayout_tools.pdk import PdkNotFoundError, find_pdk
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 HAVE_NGSPICE = shutil.which("ngspice") is not None
 
 EXAMPLES = Path(__file__).parent.parent / "examples"

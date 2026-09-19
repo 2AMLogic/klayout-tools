@@ -55,6 +55,8 @@ from klayout_tools.cli import main
 from klayout_tools.equiv import EquivError
 from klayout_tools.synthesize import SynthesizeError, load_request, run_synthesize
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 _GCD_RTL = """\
 module gcd #(
     parameter WIDTH = 16

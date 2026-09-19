@@ -48,6 +48,8 @@ from klayout_tools import lvs, lvs_netgen, pdk
 from klayout_tools.cli import main
 from klayout_tools.lvs import LvsError, run_lvs
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 #: Real-binary integration gate for the netgen engine tests below, mirroring
 #: `tests/test_sim.py`'s own `HAVE_NGSPICE`/`_SKIP_NO_NGSPICE` pattern for
 #: `ngspice`. Unlike `ngspice`, CI does not currently install `netgen` (it
