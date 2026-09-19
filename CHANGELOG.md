@@ -122,6 +122,38 @@ not `klt --version`, if you need to detect this kind of drift. See
   digital item 7 unmet with `not_post_layout`, while preserving a valid
   pre-layout regression's plain PASS and item-5 eligibility. Malformed
   `environment` containers also no longer crash the plain detail renderer.
+- **Fixed**: `klt lvs`'s `power_connectivity` check no longer admits a
+  dangling signal output as a power/ground pin when the design's only
+  carrier of that pin name leaves it unconnected (issue #2076). An ordinary
+  `place-and-route` output hits this: CTS hangs clock-load cells off each
+  leaf clock net with their outputs unconnected, so if no other instantiated
+  cell declares a pin of the same name (flip-flops output `Q`, clock buffers
+  `X`), nothing in the converted reference mentioned the inverter's `Y` and
+  it was admitted beside the real supplies. That inflated `power_pins`, and
+  — with clock loads on two different leaf nets, the normal case on anything
+  bigger than a toy — reported `power_connectivity.status: "mismatch"` with a
+  `power.inconsistent_pin_net` finding on a pin that was never a supply,
+  making the check unusable as a gate on exactly the designs it is most
+  needed for. A pin name is now admitted only when **every** library cell the
+  reference instantiates declares it *and* no reference circuit carries it;
+  the previously documented behaviour for real supplies, filler/tap pruning,
+  and genuine supply defects is unchanged (all still derived structurally,
+  with no per-PDK power-pin name table). See `docs/cli/lvs.md` → "How the
+  power-pin universe is derived".
+- **Added**: `klt lvs`'s `power_connectivity` block now carries
+  `power_pins_derivation` (issue #2076) — the rule that produced
+  `power_pins`, the library masters the reference instantiates (the evidence
+  it was applied to), and whether the instantiated masters' declared pin
+  shapes genuinely corroborate each other. `corroborated` is `true` only when
+  at least two instantiated masters declare *distinct* pin sets — not merely
+  when more than one master name is instantiated: two drive-strength variants
+  of one logical cell (e.g. `mylib__inv_1`/`mylib__inv_2`, both
+  `A VGND VNB VPB VPWR Y`) declare the identical shape and corroborate
+  nothing, the same evidentiary gap a single master has. Purely additive, so
+  no `schema_version` bump: a consumer that quotes `power_pins` as a coverage
+  claim can now see when that claim rests on uncorroborated evidence
+  (`corroborated: false`, with a `reason` naming the master(s) involved)
+  instead of having to reverse-engineer it from the netlist.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
