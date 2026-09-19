@@ -56,7 +56,7 @@ def count_route_drc_violations(drc_report_path: str) -> int | None:
     try:
         with open(drc_report_path, encoding="utf-8") as handle:
             content = handle.read()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     records = re.split(r"(?m)^violation type:[ \t]*", content)[1:]
     distinct = set()

@@ -196,3 +196,9 @@ def test_missing_final_report_does_not_fall_back_to_engine_or_earlier_pass(
         "gcd_route_metrics.json"
     )
     assert json.loads(metrics_path.read_text())["route__drc_errors"] is None
+
+
+def test_unreadable_route_report_is_unknown(tmp_path):
+    report = tmp_path / "route.rpt"
+    report.write_bytes(b"\xff\xfe")
+    assert place_and_route._count_route_drc_violations(str(report)) is None
