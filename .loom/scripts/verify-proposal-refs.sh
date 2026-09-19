@@ -124,7 +124,10 @@ is_recognized_top() {
 # Slash-qualified paths retain the recognized-top-level filter. Bare
 # basenames require an extension starting with a letter and a line suffix,
 # so prose filenames and version numbers do not become citations. The
-# leading boundary excludes suffixes of paths and URL host:port strings.
+# leading boundary excludes suffixes of paths and scheme-qualified URL
+# host:port strings; a bare (schemeless) host:port mention is excluded
+# separately below, by requiring the "extension" to be one that actually
+# occurs on a tracked basename in origin/main (see KNOWN_EXTENSIONS).
 PATH_RE='[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+(:[0-9]+(-[0-9]+)?)?'
 BASENAME_RE='(^|[^A-Za-z0-9_./:-])[A-Za-z0-9_.-]+\.[A-Za-z][A-Za-z0-9_-]*:[0-9]+(-[0-9]+)?'
 
@@ -148,6 +151,24 @@ BASENAME_RE='(^|[^A-Za-z0-9_./:-])[A-Za-z0-9_.-]+\.[A-Za-z][A-Za-z0-9_-]*:[0-9]+
 # here-string (`<<<`) has no separate writer process to race, so it can't
 # be interrupted by the reader's early exit.
 FULL_TREE_CACHE="$(git -C "$WORKSPACE" ls-tree -r origin/main --name-only)"
+
+# Extensions that actually occur on a tracked basename in origin/main.
+# BASENAME_RE's `\.[A-Za-z][A-Za-z0-9_-]*:[0-9]+` shape is indistinguishable
+# from a bare (schemeless) host:port mention with a letter-leading TLD, e.g.
+# `svc.internal.io:8443` — "io" parses as an extension and "8443" as a line
+# number just as readily as a real `name.ext:L` citation does. Restricting
+# candidates to extensions this tree actually uses is self-scoping (no
+# hardcoded allowlist to maintain across repos) and correct by construction:
+# an extension that appears on zero tracked files can never resolve to a
+# real basename anyway, so treating it as a citation only ever produces a
+# false MISSING FILE.
+declare -A KNOWN_EXTENSIONS
+while IFS= read -r tree_path; do
+    base="${tree_path##*/}"
+    if [[ "$base" == *.* && "$base" != .* ]]; then
+        KNOWN_EXTENSIONS["${base##*.}"]=1
+    fi
+done <<< "$FULL_TREE_CACHE"
 
 # One alternation consumes a qualified path as a whole, never again as its
 # basename suffix. Strip a basename's leading delimiter before deduplication.
@@ -174,6 +195,8 @@ for raw_candidate in "${CANDIDATES[@]}"; do
 
     if [[ "$path" == */* ]]; then
         is_recognized_top "$path" || continue
+    else
+        [[ -n "${KNOWN_EXTENSIONS[${path##*.}]:-}" ]] || continue
     fi
     CHECKED_PATHS=$((CHECKED_PATHS + 1))
 

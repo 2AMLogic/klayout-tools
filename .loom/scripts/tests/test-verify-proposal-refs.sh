@@ -312,6 +312,17 @@ assert_eq "0" "$RC" "prose, versions and URLs do not become missing basenames"
 assert_contains "$OUT" "checked 0 path ref(s)" "basenames without a line suffix are ignored"
 
 echo
+echo "=== Fixture 9b: a bare (non-//-prefixed) host:port is not a false citation ==="
+HOSTPORT_BODY="$BODY_DIR/hostport.md"
+cat > "$HOSTPORT_BODY" <<'EOF'
+The daemon listens on svc.internal.io:8443 for health checks.
+EOF
+OUT="$(run_vpr "$HOSTPORT_BODY")"
+RC=$?
+assert_eq "0" "$RC" "a bare host:port with a letter-leading TLD is not flagged as a missing citation"
+assert_contains "$OUT" "checked 0 path ref(s)" "the host:port is not counted as a checked path ref"
+
+echo
 echo "=== Usage / prerequisite errors ==="
 OUT="$("$VPR" 2>&1)"
 RC=$?
