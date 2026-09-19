@@ -380,6 +380,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CANNOT_RUN
 
     includes_queue = started_at is not None
+    # Without --run-json (or a run payload missing both timestamp fields) the
+    # pre-run queue wait is unknowable, so this falls back to the earliest job
+    # start: wall_clock_seconds below is the job span only and silently
+    # excludes whatever time the run spent queued before any job started.
+    # `includes_queue` records that so callers (render_text, --format json)
+    # can say so rather than presenting a job-span number as the real thing.
     wall_start = started_at if includes_queue else first_start
     wall_clock_seconds = max(0, int((last_end - wall_start).total_seconds()))
     total_seconds = sum(t.seconds for t in timings)
@@ -436,8 +442,14 @@ def main(argv: list[str] | None = None) -> int:
         print(report)
 
     if args.annotate:
-        level = "warning" if args.report_only else "error"
+        # Mirror the exit-code rule per breach, not per run: a queue breach
+        # never fails the build (see the `EXIT_BREACH` gate below), so it must
+        # never read `::error::` either -- a red annotation on a green job
+        # just trains people to stop reading annotations. Only a compute
+        # breach on a non-report-only run is the one case that reddens the
+        # build, and only that case gets `::error::`.
         for b in breaches:
+            level = "warning" if (args.report_only or b.kind != "compute") else "error"
             print(
                 f"::{level} file=.github/ci-wall-clock-budget.json,"
                 f"title=CI wall-clock budget ({b.kind})::{b.message}"
