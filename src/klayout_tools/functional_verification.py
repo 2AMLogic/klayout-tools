@@ -735,9 +735,10 @@ def _scan_interpreter_mismatch_diagnostics(*log_paths: str) -> str | None:
     mode (issue #1103), or ``None``.
 
     Fallback for whatever :func:`_check_cocotb_abi_compatibility`'s pre-flight
-    ``WHEEL``-tag check doesn't catch. Modeled directly on
-    :func:`_scan_sdf_diagnostics`: never raises -- a missing/unreadable
-    transcript contributes nothing, the same posture :func:`_log_tail` takes.
+    ``WHEEL``-tag check doesn't catch. This diagnostic-only fallback never
+    raises: a missing/unreadable transcript contributes nothing, the same
+    posture :func:`_log_tail` takes. The affirmative SDF annotation gate
+    separately requires readable transcripts (issue #2130).
     """
     for log_path in log_paths:
         try:
