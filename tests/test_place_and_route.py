@@ -1611,10 +1611,8 @@ def _script_write_verilog_path(script_path: str) -> str | None:
 
 def _script_output_drc_path(script_path: str) -> str | None:
     """The `detailed_route -output_drc <rpt>` path a `"route"`-stage script
-    names -- both `detailed_route` calls in the route branch (pre/post
-    `repair_antennas`) write to the same deterministic path, so the first
-    match is sufficient (issue #938)."""
-    for line in _script_lines(script_path):
+    names for the final pass, after every antenna-repair reroute."""
+    for line in reversed(_script_lines(script_path)):
         match = _OUTPUT_DRC_RE.match(line)
         if match:
             return match.group(1)
@@ -5404,7 +5402,7 @@ def test_max_antenna_repair_iterations_defaults_to_single_pass(tmp_path, monkeyp
     assert len(repair_indices) == 1
 
 
-@pytest.mark.parametrize("value", [0, 9, 1.5, "3", True])
+@pytest.mark.parametrize("value", [-1, 9, 1.5, "3", True])
 def test_max_antenna_repair_iterations_rejects_invalid_values(
     tmp_path, monkeypatch, value
 ):

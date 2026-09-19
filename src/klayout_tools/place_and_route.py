@@ -362,8 +362,8 @@ exact behaviour if this risk ever manifests as a real mismatch.
   then ``check_antennas``, repeated up to a bound. This stage now mirrors
   that exact shape via the optional ``request.max_antenna_repair_iterations``
   field (:func:`_validate_max_antenna_repair_iterations`, integer
-  ``1``-``8``, default ``1``) -- ``1`` reproduces today's exact generated
-  Tcl, byte-for-byte; a higher value repeats the ``repair_antennas``/
+  ``0``-``8``, default ``1``). Zero skips repair; the default keeps a
+  single repair/reroute pass; a higher value repeats the ``repair_antennas``/
   ``detailed_route`` pair that many times unconditionally (no Tcl-level
   early exit on a zero-violation ``check_antennas`` result -- a deliberate
   simplification: every other generated script in this module is a flat,
@@ -597,6 +597,14 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+from .place_and_route_reports import (
+    count_route_drc_violations as _count_route_drc_violations,
+)
+from .place_and_route_reports import (
+    detailed_route_lines,
+    route_metrics_object,
+    write_route_metrics,
+)
 
 # The post-route multi-corner sweep + SPEF-annotated STA subsystem (issues
 # #949/#948/#961) lives in `place_and_route_sta.py` (issue #1808 split). The
@@ -1185,17 +1193,6 @@ _MAX_CAPACITANCE_VIOLATIONS_END = "===KLT_MAX_CAPACITANCE_VIOLATIONS_END==="
 _ANTENNA_VIOLATIONS_BEGIN = "===KLT_ANTENNA_VIOLATIONS_BEGIN==="
 _ANTENNA_VIOLATIONS_END = "===KLT_ANTENNA_VIOLATIONS_END==="
 
-#: Literal per-violation header line TritonRoute writes to its own
-#: `detailed_route -output_drc <rpt>` report -- one per violation, e.g.
-#: ``"violation type: Metal Short"`` followed by indented `srcs:`/`bbox =
-#: (...)`/`Layer: ...` detail lines. Confirmed live (`strings` against a
-#: real `openroad/orfs:latest` build's `openroad` binary) as the exact
-#: literal the binary both *writes* (`"violation type: "` -- issue #938)
-#: and internally *re-parses* the same report format with
-#: (`"\\s*violation type: (.*)"`) -- not guessed from documentation. See
-#: :func:`_count_route_drc_violations`.
-_ROUTE_DRC_VIOLATION_TYPE_LINE = "violation type: "
-
 #: Same marker convention as the setup/hold/antenna pairs above, isolating
 #: the ``request.post_route_spef`` net-name-correlation check's own report
 #: (issue #948, extended to two lines by #951) -- see
@@ -1591,6 +1588,9 @@ def run_place_and_route(
             # #938).
             drc_report_path = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
             route_drc_count = _count_route_drc_violations(drc_report_path)
+            write_route_metrics(
+                metrics_path, metrics, route_drc_count, error_cls=PlaceAndRouteError
+            )
 
             # Issue #949: sweep every corner `cell_library` ships for
             # setup/hold slack, as a second OpenROAD invocation over the
@@ -2778,8 +2778,8 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     """Optional ``request.max_antenna_repair_iterations`` (issue #939) -- a
     bounded multi-pass generalisation of the ``"route"`` stage's existing
     single ``repair_antennas``+``detailed_route`` reroute pass (issue #759).
-    Omitted/``None`` defaults to ``1``, reproducing today's exact generated
-    Tcl byte-for-byte. See this module's own docstring, "Timing-driven
+    Omitted/``None`` defaults to ``1``; ``0`` disables repair/reroute passes.
+    See this module's own docstring, "Timing-driven
     global routing + bounded antenna-repair iteration"."""
     if value is None:
         return 1
@@ -2787,9 +2787,9 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
         raise PlaceAndRouteError(
             "request.max_antenna_repair_iterations must be an integer"
         )
-    if not (1 <= value <= _MAX_ANTENNA_REPAIR_ITERATIONS_CAP):
+    if not (0 <= value <= _MAX_ANTENNA_REPAIR_ITERATIONS_CAP):
         raise PlaceAndRouteError(
-            "request.max_antenna_repair_iterations must be between 1 and "
+            "request.max_antenna_repair_iterations must be between 0 and "
             f"{_MAX_ANTENNA_REPAIR_ITERATIONS_CAP}"
         )
     return value
@@ -3678,12 +3678,6 @@ def _stage_script_lines(
     else:  # stage == "route"
         routing_range = _ROUTING_LAYER_RANGE[cell_library]
         diode_cell = _ANTENNA_DIODE_CELLS[cell_library][0]
-        drc_report = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
-        maze_log = os.path.join(output_dir, f"{hdl_toplevel}_route_maze.log")
-        detailed_route_call = (
-            f"detailed_route -output_drc {drc_report} -output_maze {maze_log} "
-            f"-or_seed {seed}"
-        )
         # `-critical_nets_percentage` (issue #939, native-routing survey
         # section 4.1): a real, documented `global_route` flag -- see this
         # module's own docstring, "Timing-driven global routing + bounded
@@ -3717,8 +3711,10 @@ def _stage_script_lines(
         lines += [
             f"set_routing_layers -signal {routing_range}",
             global_route_call,
-            detailed_route_call,
         ]
+        lines += detailed_route_lines(
+            output_dir, hdl_toplevel, seed, 0, max_antenna_repair_iterations
+        )
         # Post-route antenna repair (survey section 2.7/3.3): inserting a
         # diode instance on a violating net changes that net's routing,
         # so -- mirroring ORFS's own `flow/scripts/detail_route.tcl`,
@@ -3726,8 +3722,8 @@ def _stage_script_lines(
         # `repair_antennas` to route/legalize each new diode instance --
         # this repeats the `repair_antennas`/`detailed_route` pair
         # `max_antenna_repair_iterations` times (issue #939; default `1`,
-        # reproducing the original single repair+reroute pass byte-for-
-        # byte). `repair_antennas` itself is never called with `-iterations`
+        # keeping the original single repair+reroute pass). `repair_antennas`
+        # itself is never called with `-iterations`
         # here -- OpenROAD's own `GlobalRouter.cpp` explicitly warns against
         # `-iterations != 1` once `detailed_route` has already run, exactly
         # this stage's own call pattern (see the module docstring for the
@@ -3737,11 +3733,15 @@ def _stage_script_lines(
         # inactive/single-pass, in ORFS's own default flow).
         # `check_antennas` then reports the post-repair violation count
         # unconditionally, exactly as ORFS's own flow does.
-        for _ in range(max_antenna_repair_iterations):
-            lines += [
-                f"repair_antennas {diode_cell}",
-                detailed_route_call,
-            ]
+        for pass_index in range(1, max_antenna_repair_iterations + 1):
+            lines += [f"repair_antennas {diode_cell}"]
+            lines += detailed_route_lines(
+                output_dir,
+                hdl_toplevel,
+                seed,
+                pass_index,
+                max_antenna_repair_iterations,
+            )
         lines += _antenna_check_lines()
         # `request.power` (issue #1091): gap-filler cell insertion, right
         # after the antenna-repair loop above (mirroring ORFS's own
@@ -4143,35 +4143,6 @@ def _count_antenna_violations(stdout: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _count_route_drc_violations(drc_report_path: str) -> int | None:
-    """Count TritonRoute's own `detailed_route -output_drc <rpt>` violation
-    entries -- each violation in the report begins with a literal
-    ``"violation type: "`` header line (see
-    :data:`_ROUTE_DRC_VIOLATION_TYPE_LINE`; confirmed live via `strings`
-    against a real `openroad/orfs:latest` build's `openroad` binary, which
-    embeds this exact literal both to *write* the report and to *re-parse*
-    it internally), so counting occurrences of that line is exact -- one
-    per violation, never a partial match on unrelated report text (`comment:
-    `/`bbox = (...)`/`Layer: ...` detail lines never themselves start with
-    `"violation type: "`).
-
-    A 0-byte report -- confirmed live for a real, DRC-clean `detailed_route`
-    run on this repo's own `gcd` corpus fixture (issue #938) -- means zero
-    violations, correctly returned as ``0``, not ``None``. Returns ``None``
-    (never ``0`` defensively) only when the report file itself cannot be
-    read -- should not happen for a successful `"route"` stage run
-    (`detailed_route` always writes its `-output_drc` target, even when
-    empty), and keeps a genuinely missing signal distinguishable from a
-    confirmed-zero violation count, mirroring
-    :func:`_count_antenna_violations`."""
-    try:
-        with open(drc_report_path, encoding="utf-8") as handle:
-            content = handle.read()
-    except OSError:
-        return None
-    return content.count(_ROUTE_DRC_VIOLATION_TYPE_LINE)
-
-
 def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
     if not os.path.isfile(metrics_path):
         raise PlaceAndRouteError(
@@ -4180,7 +4151,10 @@ def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
         )
     try:
         with open(metrics_path, encoding="utf-8") as handle:
-            data = json.load(handle)
+            data = json.load(
+                handle,
+                object_pairs_hook=route_metrics_object if stage == "route" else dict,
+            )
     except (OSError, UnicodeDecodeError) as exc:
         raise PlaceAndRouteError(
             f"could not read '{stage}' stage metrics '{metrics_path}': {exc}"
