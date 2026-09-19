@@ -240,6 +240,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   rebuilt without rewriting the others, and gates a power-bearing fixture on
   a real gate-level `klt lvs` `power_connectivity` check before committing
   it. No `klt` command behavior changed.
+- **Added**: `klt place-and-route` and `klt sta` now retain every OpenROAD
+  script invocation's `stdout.log`, `stderr.log`, and `invocation.json` under
+  `.klt/place-and-route/openroad-logs/<invocation_id>/` and
+  `.klt/sta/openroad-logs/<invocation_id>/` respectively (issue #2124) — main
+  stages, corner sweeps, and the optional SPEF timing session each get their
+  own directory, and a retry allocates a new invocation ID rather than
+  overwriting an earlier transcript. Successful JSON responses expose these
+  as new fields: `klt place-and-route` adds `engine_logs`, an array in
+  invocation order; `klt sta` adds `engine_log` for a single-corner response
+  and `corners[].engine_log` per corner for a multi-corner response. Each
+  entry carries `invocation_id`, `script_name`/`script_sha256`,
+  `script_path`/`metrics_path`, `directory`/`stdout_path`/`stderr_path`/
+  `metadata_path` (the new path fields use the shared `{path, scope}`
+  envelope), `outcome`/`returncode`, and `retention_errors` for any secondary
+  write failure. An engine or missing-metrics error keeps its existing
+  diagnosis and appends the invocation's log locations to `error.message`;
+  a log-write failure never masks or replaces the underlying engine result.
+  Purely additive — no `schema_version` bump for either command. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md#retained-openroad-logs)
+  and [`docs/cli/sta.md`](docs/cli/sta.md#retained-openroad-logs).
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`

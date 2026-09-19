@@ -655,6 +655,42 @@ Because `def` never changes either way, every corner analyses the identical
 placed-and-routed geometry — a real characterization of one design, not of N
 different place-and-route outcomes.
 
+## Retained OpenROAD logs
+
+Each STA script invocation retains `stdout.log`, `stderr.log`, and
+`invocation.json` under `.klt/sta/openroad-logs/<invocation_id>/`, beside its
+generated script. A retry creates a new invocation ID and preserves previous
+logs. Single-corner JSON responses add `engine_log`; multi-corner responses
+add `corners[].engine_log` for each actual session.
+
+The entry has the same [fields and retention semantics as P&R](place-and-route.md#retained-openroad-logs):
+invocation ID, script filename/hash, normalized script/metrics/log paths,
+process outcome/return code, and `retention_errors`. New paths use
+`{path, scope}` envelopes; existing `def_path`, `verilog_path`, and
+`spef_path` fields retain their original shapes. `repo` paths resolve from
+the invoking repository root. For withheld `external` paths, find
+`openroad-logs/<invocation_id>/` beside the generated script in the request's
+`.klt/sta/` directory.
+
+Engine and missing-metrics errors retain their original diagnosis and append
+` -- openroad invocation: <JSON entry>` to `error.message`. Retention
+failures are secondary diagnostics and do not mask the engine failure.
+Both captured streams remain separate and unabridged; the raw transcripts
+may contain engine-emitted absolute paths. Log retention does not make a
+partial output into successful timing evidence or isolate other STA artifacts.
+
+```sh
+klt sta request.json --format json >sta.json 2>sta.error.json
+status=$?
+# Inspect status and sta.error.json before consuming sta.json.
+```
+
+The JSON error is on stderr with exit status `1`; stdout is empty on an
+application failure. An empty redirected `sta.json` is created by the shell,
+not evidence of a completed analysis. No timeout is added, and logs are
+written after capture: timeout/interrupt data is retained when available,
+but an abrupt termination cannot guarantee a complete transcript.
+
 ## Exit codes
 
 | Code | Meaning |
