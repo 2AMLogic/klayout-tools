@@ -1254,7 +1254,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
     "klayout_version_mismatch": false,
     "pdk": null,
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
 ```

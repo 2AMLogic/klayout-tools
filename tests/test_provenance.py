@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from klayout_tools import _provenance
 from klayout_tools.decks import deck_source_path
 
@@ -301,7 +303,7 @@ def test_build_provenance_input_hash_is_sha256_prefixed(tmp_path):
 
     prov = _provenance.build_provenance(input_path=str(layout_file))
     digest = hashlib.sha256(b"gds bytes\n").hexdigest()
-    assert prov["input"] == {"content_hash": f"sha256:{digest}"}
+    assert prov["input"] == {"content_hash": f"sha256:{digest}", "role": "layout"}
 
 
 def test_build_provenance_input_none_when_path_not_given():
@@ -329,7 +331,60 @@ def test_build_provenance_input_hash_null_for_unresolvable_path(tmp_path):
     # name-without-resolvable-path behaviour.
     missing = tmp_path / "nope.gds"
     prov = _provenance.build_provenance(input_path=str(missing))
-    assert prov["input"] == {"content_hash": None}
+    assert prov["input"] == {"content_hash": None, "role": "layout"}
+
+
+# --------------------------------------------------------------------------- #
+# provenance.input.role (issue #2027)
+# --------------------------------------------------------------------------- #
+#
+# The hash alone is kind-blind. `klt drc`/`klt extract` hash a layout stream,
+# but `klt lvs` hashes a SPICE netlist for its pre-extracted
+# `layout.netlist` request shape, and `klt place-and-route` hashes the
+# gate-level netlist it placed. `klt signoff`'s provenance cross-check
+# compares `input.content_hash` across checks -- without a discriminator it
+# compared a netlist digest against a layout digest and *refused* to
+# aggregate a consistent bundle.
+
+
+def test_build_provenance_input_role_defaults_to_layout(tmp_path):
+    # The default is the field's pre-#2027 meaning ("the input layout stream
+    # the run was made against"), so every layout-hashing caller keeps
+    # emitting exactly what it emitted before the discriminator existed.
+    layout_file = tmp_path / "top.gds"
+    layout_file.write_bytes(b"gds bytes\n")
+
+    prov = _provenance.build_provenance(input_path=str(layout_file))
+
+    assert prov["input"]["role"] == _provenance.INPUT_ROLE_LAYOUT
+
+
+def test_build_provenance_input_role_is_recorded_verbatim(tmp_path):
+    netlist_file = tmp_path / "layout.spice"
+    netlist_file.write_text("* pre-extracted\n", encoding="utf-8")
+
+    prov = _provenance.build_provenance(
+        input_path=str(netlist_file), input_role=_provenance.INPUT_ROLE_NETLIST
+    )
+
+    assert prov["input"]["role"] == "netlist"
+
+
+def test_build_provenance_input_role_absent_when_no_input_pinned():
+    # `role` describes a hash; with no hash there is nothing to describe, so
+    # the whole block stays `None` rather than degrading to a role-only stub.
+    assert _provenance.build_provenance(input_role="netlist")["input"] is None
+
+
+def test_build_provenance_rejects_an_unknown_input_role(tmp_path):
+    # A typo'd role must fail loudly here rather than silently reaching
+    # `klt signoff`, where an unrecognised role becomes a group of one and
+    # quietly exempts the verb from the cross-check it was meant to join.
+    layout_file = tmp_path / "top.gds"
+    layout_file.write_bytes(b"gds bytes\n")
+
+    with pytest.raises(ValueError, match="unknown provenance input role"):
+        _provenance.build_provenance(input_path=str(layout_file), input_role="laoyut")
 
 
 # --------------------------------------------------------------------------- #

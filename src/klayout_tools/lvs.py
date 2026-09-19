@@ -128,6 +128,8 @@ from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
+    INPUT_ROLE_LAYOUT,
+    INPUT_ROLE_NETLIST,
     _content_hash,
     _klayout_version,
     _klt_version,
@@ -914,6 +916,20 @@ def run_lvs(request: str) -> dict[str, Any]:
         _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
         supply_nets,
         layout_net_label_positions,
+    )
+
+    # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
+    # `provenance.input.role`. `_resolve_layout` returns the original
+    # GDS/OASIS stream for the `layout.file` (inline extraction) shape and
+    # the caller-supplied SPICE file for the pre-extracted `layout.netlist`
+    # shape -- byte-identical to what `klt drc` hashes in the first case, a
+    # netlist in the second. `klt signoff`'s provenance cross-check compares
+    # `input.content_hash` only within one role, so declaring this is what
+    # stops a pre-extracted LVS report from "disagreeing" with the DRC
+    # report of the very same design. `_resolve_layout` has already rejected
+    # a spec with both keys (or neither), so this mirrors its own branch.
+    layout_input_role = (
+        INPUT_ROLE_NETLIST if "netlist" in layout_spec else INPUT_ROLE_LAYOUT
     )
 
     flatten_warnings: list[dict[str, Any]] = []
@@ -2045,6 +2061,15 @@ def run_lvs(request: str) -> dict[str, Any]:
             # `sha256:`-prefixed form, so the two are redundant in content
             # but not interchangeable in shape.
             input_path=layout_hash_source,
+            # Issue #2027: and say *what* that hash is of -- `"layout"` for
+            # the `layout.file` shape (the original stream, the same bytes
+            # `klt drc` hashes), `"netlist"` for the pre-extracted
+            # `layout.netlist` shape. Without this discriminator `klt
+            # signoff` compared a pre-extracted run's SPICE digest against a
+            # DRC report's layout digest and refused to aggregate a
+            # perfectly consistent pair (the repo's own `examples/signoff/`
+            # pair reproduced it).
+            input_role=layout_input_role,
             # Issue #600: echo the resolved `layout.deck_options` mapping
             # under `provenance.deck.options`, matching `klt extract`'s
             # shape exactly (`_deck_block` omits the key entirely when

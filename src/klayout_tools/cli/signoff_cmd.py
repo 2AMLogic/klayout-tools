@@ -208,7 +208,15 @@ def _print_text(result: dict) -> None:
         print()
         print("provenance mismatches (refusing to aggregate):")
         for mismatch in consistency["mismatches"]:
-            print(f"  {mismatch['field']}:")
+            # Issue #2027: `input.content_hash` is compared per
+            # `provenance.input.role`, so a bundle can carry more than one
+            # entry under that same field name -- qualify the heading with
+            # the role rather than printing the same line twice. Every other
+            # field (and any pre-#2027 report replayed through this
+            # renderer) carries no `role` and prints exactly as before.
+            role = mismatch.get("role")
+            qualifier = f" (role: {role})" if role else ""
+            print(f"  {mismatch['field']}{qualifier}:")
             for entry in mismatch["values"]:
                 print(f"    {entry['source']}: {entry['value']}")
 

@@ -193,7 +193,13 @@ from ._paths import (
     _tcl_net_list,
     validate_request_shape,
 )
-from ._provenance import _deck_block, build_provenance, sha256_file
+from ._provenance import (
+    INPUT_ROLE_LAYOUT,
+    INPUT_ROLE_NETLIST,
+    _deck_block,
+    build_provenance,
+    sha256_file,
+)
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 
@@ -526,6 +532,12 @@ def run_sta(
         deck_path=resolution["liberty_path"],
         pdk=resolution["pdk_info"],
         input_path=input_path,
+        # Issue #2027: `input_path` is the DEF (a layout stream) when
+        # the request supplied one, and the gate-level Verilog netlist
+        # otherwise -- the two are not comparable artifacts, so the
+        # role follows the same `has_def` branch `input_path` itself
+        # does.
+        input_role=INPUT_ROLE_LAYOUT if has_def else INPUT_ROLE_NETLIST,
     )
 
     response: dict[str, Any] = {
@@ -826,6 +838,12 @@ def _run_multi_corner(
         deck_path=None,
         pdk=shared_pdk_info,
         input_path=input_path,
+        # Issue #2027: `input_path` is the DEF (a layout stream) when
+        # the request supplied one, and the gate-level Verilog netlist
+        # otherwise -- the two are not comparable artifacts, so the
+        # role follows the same `has_def` branch `input_path` itself
+        # does.
+        input_role=INPUT_ROLE_LAYOUT if has_def else INPUT_ROLE_NETLIST,
     )
 
     return {

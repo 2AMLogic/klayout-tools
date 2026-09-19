@@ -13,7 +13,7 @@ this module builds:
         "klayout_version": "0.29.8",
         "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
         "deck": {"name": "sky130", "content_hash": "sha256:...", "released": true},
-        "input": {"content_hash": "sha256:..."}
+        "input": {"content_hash": "sha256:...", "role": "layout"}
     }
 
 The block is purely *additive* to the shared envelope (see
@@ -427,12 +427,42 @@ def _deck_block(
     return block
 
 
-def _input_block(path: str | None) -> dict[str, Any] | None:
-    """The provenance ``input`` shape ``{content_hash}``, mirroring ``deck``;
-    ``None`` when no input path was given (or it can't be hashed)."""
+#: ``provenance.input.role`` -- *what kind of artifact* ``content_hash``
+#: covers (issue #2027). The field exists because the hash alone is
+#: kind-blind: ``klt drc``/``klt extract`` hash an input layout stream, but
+#: ``klt lvs`` hashes a *SPICE netlist* for the pre-extracted
+#: ``layout.netlist`` request shape, and ``klt place-and-route`` hashes the
+#: gate-level netlist it placed. ``klt signoff``'s cross-check compares
+#: ``input.content_hash`` across checks; without a discriminator it compared
+#: a netlist digest against a layout digest and *refused* to aggregate a
+#: perfectly consistent ``drc`` + ``lvs`` pair. Consumers compare hashes
+#: only within one role.
+INPUT_ROLE_LAYOUT = "layout"
+INPUT_ROLE_NETLIST = "netlist"
+INPUT_ROLE_SOURCE = "source"
+
+#: Every recognised :data:`INPUT_ROLE_LAYOUT`-style value, as
+#: ``docs/json-contract.md`` documents them. Adding a value here is a
+#: contract change: a consumer that groups by role treats an unknown role as
+#: its own group, so a typo would silently disable the cross-check for that
+#: verb rather than fail loudly -- hence :func:`build_provenance` validates
+#: against this set instead of accepting any string.
+INPUT_ROLES = frozenset({INPUT_ROLE_LAYOUT, INPUT_ROLE_NETLIST, INPUT_ROLE_SOURCE})
+
+
+def _input_block(path: str | None, role: str) -> dict[str, Any] | None:
+    """The provenance ``input`` shape ``{content_hash, role}``, mirroring
+    ``deck``'s ``{name, content_hash, released}``; ``None`` when no input
+    path was given (or it can't be hashed).
+
+    ``role`` (issue #2027) names the *kind* of artifact hashed -- see
+    :data:`INPUT_ROLES`. It is always present when the block is, so a
+    consumer never has to infer the kind from a file extension or from which
+    verb produced the envelope.
+    """
     if path is None:
         return None
-    return {"content_hash": _content_hash(path)}
+    return {"content_hash": _content_hash(path), "role": role}
 
 
 class UnknownProvenanceDeckError(Exception):
@@ -473,6 +503,7 @@ def build_provenance(
     deck_path: str | None = None,
     pdk: dict[str, Any] | None = None,
     input_path: str | None = None,
+    input_role: str = INPUT_ROLE_LAYOUT,
     deck_options: Mapping[str, str] | None = None,
     include_klayout_version_mismatch: bool = False,
 ) -> dict[str, Any]:
@@ -482,9 +513,9 @@ def build_provenance(
     and the file whose content is hashed to pin it; pass both ``None`` when no
     deck was involved. ``pdk`` is a :func:`klayout_tools.pdk.find_pdk`-style
     dict (``variant``/``resolved_via``/``version``), or ``None`` when the run
-    resolved no PDK. ``input_path`` is the input layout stream a verb ran
+    resolved no PDK. ``input_path`` is the single input artifact a verb ran
     against; when given, its content hash is recorded as ``provenance.input``
-    (the same ``{content_hash}`` shape as ``deck``) so a stale committed
+    (``{content_hash, role}``, mirroring ``deck``) so a stale committed
     report is a one-line diff against a freshly computed hash. Pass ``None``
     (the default) only when the verb genuinely has no single input stream to
     pin. A verb that pins its input under a *verb-specific* key of its own is
@@ -498,6 +529,22 @@ def build_provenance(
     ``klt lvs`` now passes its layout-side hash source here too, and the
     per-verb duplication is the intended cost of a field generic consumers
     can actually read.
+
+    ``input_role`` (issue #2027) declares *which kind* of artifact
+    ``input_path`` is -- see :data:`INPUT_ROLES`. It defaults to
+    :data:`INPUT_ROLE_LAYOUT`, which is what the field meant before it
+    existed ("the input layout stream the run was made against"), so every
+    layout-hashing caller is unchanged. Callers that pin something else must
+    say so: ``klt lvs``'s pre-extracted ``layout.netlist`` shape hashes a
+    SPICE netlist, ``klt place-and-route`` hashes the gate-level netlist it
+    placed, and ``klt synthesize``/``klt equiv`` hash HDL sources. The field
+    exists because ``klt signoff``'s provenance cross-check compares
+    ``input.content_hash`` across every check that populates it: with no
+    discriminator it compared ``klt lvs``'s *netlist* digest against ``klt
+    drc``'s *layout* digest and refused to aggregate a consistent pair, a
+    false alarm rather than caught staleness. Raises :class:`ValueError` for
+    a role outside :data:`INPUT_ROLES` -- a silently-unknown role would
+    disable the cross-check for that verb instead of failing loudly.
     ``deck_options`` (issue #595) is echoed onto ``provenance.deck.options``
     via :func:`_deck_block` when non-empty -- see that function's docstring.
     ``klt_version``/``klayout_version`` are read at call time.
@@ -513,13 +560,18 @@ def build_provenance(
     one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
     caller sees the drift even without inspecting the JSON.
     """
+    if input_role not in INPUT_ROLES:
+        raise ValueError(
+            f"unknown provenance input role {input_role!r} "
+            f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
+        )
     actual_klayout_version = _klayout_version()
     block: dict[str, Any] = {
         "klt_version": _klt_version(),
         "klayout_version": actual_klayout_version,
         "pdk": _pdk_block(pdk),
         "deck": _deck_block(deck_name, deck_path, deck_options),
-        "input": _input_block(input_path),
+        "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:
         # Build-time-recorded only -- deliberately *not*

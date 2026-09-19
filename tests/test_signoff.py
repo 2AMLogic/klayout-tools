@@ -2742,11 +2742,15 @@ def test_sim_does_not_participate_in_the_input_hash_cross_check(tmp_path):
     library -- there is no input *layout* stream to pin), so it never
     contributes a value to the `input.content_hash` comparison.
 
-    This is the reason `klt sim` did *not* get `klt lvs`'s issue-#1969
-    treatment: a netlist digest is not comparable with the layout digests
+    This was the reason `klt sim` did *not* get `klt lvs`'s issue-#1969
+    treatment: a netlist digest was not comparable with the layout digests
     `drc`/`extract`/`lvs`/`pex` contribute, so populating the shared field
-    with one would turn every legitimate layout-plus-simulation manifest
-    into a permanent `provenance_consistency` refusal.
+    with one would have turned every legitimate layout-plus-simulation
+    manifest into a permanent `provenance_consistency` refusal. Issue #2027
+    removes that obstacle -- `provenance.input.role` now says which kind of
+    artifact a hash covers, and hashes are compared only within a role -- but
+    wiring `klt sim` itself up is separate work; until then its `input` stays
+    `None` and this test pins that.
     """
     assert SIM_PASS_ENVELOPE["provenance"]["input"] is None
 
@@ -2759,6 +2763,186 @@ def test_sim_does_not_participate_in_the_input_hash_cross_check(tmp_path):
     assert result["provenance_consistency"]["ok"] is True
     assert result["provenance_consistency"]["mismatches"] == []
     assert result["status"] == "pass"
+
+
+# --------------------------------------------------------------------------- #
+# `provenance.input.role` (issue #2027): the cross-check compares hashes only
+# within one kind of artifact.
+#
+# `klt lvs`'s pre-extracted (`layout.netlist`) request shape hashes a *SPICE
+# netlist*, not a layout stream. Comparing that digest against a `klt drc`
+# report's *layout* digest can never agree, even when both describe the same
+# design -- the repo's own `examples/signoff/` pair (whose
+# `lvs.request.json` uses exactly that shape) reproduced the false refusal.
+# --------------------------------------------------------------------------- #
+
+
+#: A `klt drc` envelope carrying the post-#2027 `input` shape: the same
+#: layout hash `DRC_CLEAN_ENVELOPE` pins, now explicitly declared as a
+#: layout-stream digest.
+DRC_CLEAN_ROLE_LAYOUT_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "provenance": {
+        **DRC_CLEAN_ENVELOPE["provenance"],
+        "input": {"content_hash": "sha256:layoutA", "role": "layout"},
+    },
+}
+
+#: A `klt lvs` envelope from the pre-extracted `layout.netlist` request
+#: shape: its `input.content_hash` is the digest of the SPICE netlist it was
+#: handed, which has no reason on earth to equal any layout hash.
+LVS_MATCH_PRE_EXTRACTED_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "provenance": {
+        **LVS_MATCH_ENVELOPE["provenance"],
+        "input": {"content_hash": "sha256:layoutAspice", "role": "netlist"},
+    },
+}
+
+
+def test_pre_extracted_lvs_netlist_hash_does_not_refuse_against_drc(tmp_path):
+    """Issue #2027: a `klt drc` report and a pre-extracted-shape `klt lvs`
+    report of the *same design* must aggregate, not refuse.
+
+    This is the issue's own reproduction, minus the engine run: the two
+    checks pin different digests because they hashed different *kinds* of
+    artifact (a GDS and the SPICE extracted from it), which the cross-check
+    used to read as "these ran against two different layout revisions". Both
+    checks pass and both describe one block, so the only correct verdict is
+    `pass`.
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+
+    # Precondition: the two digests really are different, so this test is
+    # about the roles and not about fixtures that happen to agree.
+    assert (
+        DRC_CLEAN_ROLE_LAYOUT_ENVELOPE["provenance"]["input"]["content_hash"]
+        != LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"]["input"]["content_hash"]
+    )
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
+def test_layout_role_hashes_still_refuse_when_they_genuinely_disagree(tmp_path):
+    """Issue #2027's other half: role-grouping must not widen the gate into
+    a no-op. Two checks that *both* declare `role: "layout"` and pin
+    different layout digests are the genuine staleness this gate exists to
+    catch, and must still be refused.
+    """
+    other_layout_drc = {
+        **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE,
+        "provenance": {
+            **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:layoutB", "role": "layout"},
+        },
+    }
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+    stale_drc_path = _write(tmp_path, "drc-stale.json", other_layout_drc)
+
+    result = build_signoff([drc_path, extract_path, stale_drc_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    assert mismatches[0]["role"] == "layout"
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[drc_path] == "sha256:layoutA"
+    assert values[stale_drc_path] == "sha256:layoutB"
+
+
+def test_two_netlist_role_hashes_that_disagree_are_also_refused(tmp_path):
+    """The rule is per-role, not layout-only: two checks that both hashed a
+    netlist and disagree are just as much a stale pairing as two layouts
+    that disagree, and the emitted mismatch names the role it applies to.
+    """
+    other_netlist_lvs = {
+        **LVS_MATCH_PRE_EXTRACTED_ENVELOPE,
+        "provenance": {
+            **LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:otherspice", "role": "netlist"},
+        },
+    }
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+    other_path = _write(tmp_path, "lvs-other.json", other_netlist_lvs)
+
+    result = build_signoff([lvs_path, other_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    assert mismatches[0]["role"] == "netlist"
+
+
+def test_disagreement_in_two_roles_yields_one_mismatch_per_role(tmp_path):
+    """A bundle that disagrees on both roles at once reports both, as two
+    separately-attributable entries -- the `field` string stays the
+    documented `"input.content_hash"` for each, disambiguated by `role`.
+    """
+    stale_drc = {
+        **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE,
+        "provenance": {
+            **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:layoutB", "role": "layout"},
+        },
+    }
+    other_netlist_lvs = {
+        **LVS_MATCH_PRE_EXTRACTED_ENVELOPE,
+        "provenance": {
+            **LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:otherspice", "role": "netlist"},
+        },
+    }
+    paths = [
+        _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE),
+        _write(tmp_path, "drc-stale.json", stale_drc),
+        _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE),
+        _write(tmp_path, "lvs-other.json", other_netlist_lvs),
+    ]
+
+    result = build_signoff(paths)
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == [
+        "input.content_hash",
+        "input.content_hash",
+    ]
+    assert [entry["role"] for entry in mismatches] == ["layout", "netlist"]
+
+
+def test_role_less_envelope_is_read_as_a_layout_hash(tmp_path):
+    """Back-compat: evidence committed before `role` existed carries only
+    `{content_hash}`. `"the input layout stream the run was made against"`
+    was that field's one documented meaning, so such an envelope keeps
+    participating in the layout-side comparison rather than dropping into a
+    bucket of its own -- otherwise shipping the discriminator would have
+    silently *weakened* the gate for every archived report.
+    """
+    assert "role" not in DRC_CLEAN_ENVELOPE["provenance"]["input"]
+    stale_role_bearing_drc = {
+        **DRC_CLEAN_ENVELOPE,
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:layoutB", "role": "layout"},
+        },
+    }
+    old_path = _write(tmp_path, "drc-old.json", DRC_CLEAN_ENVELOPE)
+    new_path = _write(tmp_path, "drc-new.json", stale_role_bearing_drc)
+
+    result = build_signoff([old_path, new_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert mismatches[0]["role"] == "layout"
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[old_path] == "sha256:layoutA"
+    assert values[new_path] == "sha256:layoutB"
 
 
 def test_mismatched_pdk_name_is_refused(tmp_path):

@@ -80,9 +80,12 @@ two steps:
    #251, [`../json-contract.md`](../json-contract.md#shared-provenance-block))
    is compared: all checks that resolved a PDK must name the same
    `pdk.name`/`pdk.version`; all checks that populate `provenance.input`
-   (`klt drc`/`klt extract`, and `klt pex`, which pins its own extracted
-   layout the same way — see [`pex.md`](pex.md)) must
-   agree on `input.content_hash`; any two
+   (`klt drc`/`klt extract`, `klt lvs`, and `klt pex`, which pins its own
+   extracted layout the same way — see [`pex.md`](pex.md)) must
+   agree on `input.content_hash` **with the other checks declaring the same
+   `input.role`** (issue #2027 — a `klt lvs` run given a pre-extracted
+   netlist hashes a SPICE file, not a layout stream, so its digest is never
+   compared against a layout digest); any two
    checks naming the *same* deck must agree on that deck's
    `content_hash`. If any of these disagree, `klt signoff` **refuses** to
    produce a pass/fail verdict at all (`status: "refused"`) — a "clean" DRC
@@ -221,7 +224,7 @@ above. Shape validation is a floor, not a correctness proof.
 | --- | --- | --- |
 | `pdk.name` | Any check that resolved a PDK (`klt lvs`, `klt extract`, `klt sim`, `klt pex`; `klt drc` resolves none) | All checks that populate it, together |
 | `pdk.version` | Same as `pdk.name` | All checks that populate it, together |
-| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | All checks that populate it, together |
+| `input.content_hash` | `klt drc`, `klt extract`, `klt lvs` (pins the layout side it compared, issue #1969), `klt pex` (pins the layout it extracted from — see [`pex.md`](pex.md)); a `generic` envelope only if its author chose to include one (see "Generic evidence" below) | Only checks declaring the *same* `input.role` (issue #2027). An envelope with no `role` — everything committed before #2027 — is read as `"layout"`, the field's only documented meaning at the time |
 | `deck[<name>].content_hash` | Any check naming a deck | Only checks naming the *same* deck `<name>` |
 
 A check with no `provenance` block (an `error`-kind entry, a `klt yield`
@@ -1455,7 +1458,8 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 | Field    | Type              | Description                                                                            |
 | -------- | ------------------ | ------------------------------------------------------------------------------------------ |
 | `field`  | string              | `"pdk.name"`, `"pdk.version"`, `"input.content_hash"`, or `"deck[<name>].content_hash"`.  |
-| `values` | array\<object\>     | `{"source": <str>, "value": <str>}` for every check that populated this field, in file order. |
+| `role`   | string \| absent    | `input.content_hash` entries only (issue #2027): which `provenance.input.role` the disagreeing checks declared. Hashes are compared only within one role, so a bundle that disagrees on two roles produces two entries — same `field`, different `role`. |
+| `values` | array\<object\>     | `{"source": <str>, "value": <str>}` for every check that populated this field *with this entry's `role`*, in file order. |
 
 Empty (`ok: true`, `mismatches: []`) when every input's provenance agrees,
 or no two inputs share a comparable field at all (e.g. a single-input run).
@@ -1528,7 +1532,7 @@ status: refused
 checks: 2/2 passed
 
 provenance mismatches (refusing to aggregate):
-  input.content_hash:
+  input.content_hash (role: layout):
     drc.json: sha256:da6049448a5669dfb8f6a9af6e1394249b18cd451f42e9bcbb118bb69de4a3db
     extract.json: sha256:9f2c000000000000000000000000000000000000000000000000000000000
 
