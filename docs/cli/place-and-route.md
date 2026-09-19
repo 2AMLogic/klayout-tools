@@ -2325,6 +2325,64 @@ is a **failed run** (exit `1`, no envelope emitted). `stage_reached` in a
 successful response always equals or exceeds the request's own
 `target_stage`; a response where those differ is never emitted.
 
+## Retained OpenROAD logs
+
+Every script invocation retains separate `stdout.log`, `stderr.log`, and
+`invocation.json` files under
+`.klt/place-and-route/openroad-logs/<invocation_id>/`, beside the generated
+scripts. This includes main stages, the combined and individual corner
+sweeps, and the optional SPEF timing session. Retries allocate new IDs and
+never overwrite earlier transcripts. Other P&R artifacts keep their existing
+names; log retention does not isolate all outputs between retries.
+
+Successful JSON responses add `engine_logs`, an array in invocation order.
+Each entry contains:
+
+| Field | Meaning |
+| --- | --- |
+| `invocation_id` | Opaque identifier, fixed for this invocation and distinct on retry. |
+| `script_name`, `script_sha256` | Invoked script filename and raw-byte SHA-256 captured before launch; hash is `null` if unreadable. |
+| `script_path`, `metrics_path` | Normalized locations of the invoked script and requested metrics output; these files can be replaced by a later run. |
+| `directory`, `stdout_path`, `stderr_path`, `metadata_path` | Normalized retained-log locations. |
+| `outcome`, `returncode` | `exited` with the actual process code, or `launch_failed`, `timed_out`, or `interrupted` with a null code. |
+| `retention_errors` | Secondary write failures, each with `artifact` and `error`; empty when all logs were written. |
+
+New path fields use the shared `{path, scope}` convention: `repo` paths are
+relative to the invoking repository root; `external` paths are withheld;
+`absent` means no successfully retained artifact at that field. For an
+external request, locate the directory beside its generated script using
+the invocation ID and the fixed `openroad-logs/<invocation_id>/` suffix.
+The transcripts themselves contain the engine's unredacted captured text.
+
+Engine and missing-metrics errors keep their existing diagnosis and append
+` -- openroad invocation: <JSON entry>` to `error.message`, including the
+log locations and any secondary retention failure. An existing DEF, ODB,
+or SPEF does not turn a nonzero engine exit into success. A log-write error
+also does not replace the original engine error; a successful engine run
+reports retention problems in its `engine_logs` entry.
+
+The runner retains raw captured bytes after the process returns. Diagnostic
+parsers decode UTF-8 with replacement for invalid bytes; the retained logs
+keep those bytes and original line endings intact. Launch
+failures retain empty streams and a `launch_failed` metadata record. No
+timeout is added. If a timeout or interrupt supplies partial captured data,
+those bytes are retained; an interrupt remains an interrupt. Stdlib
+interrupts may supply no captured data, and abrupt process termination or
+power loss cannot guarantee retention. `openroad -version` probes are not
+script invocations and are excluded.
+
+Keep the CLI's structured error alongside the full logs:
+
+```sh
+klt place-and-route request.json --format json >pnr.json 2>pnr.error.json
+status=$?
+# Inspect status and pnr.error.json before consuming pnr.json.
+```
+
+On application failure the JSON error goes to stderr, exit status is `1`,
+and stdout is empty. The shell may create an empty `pnr.json` through the
+redirection above; klt does not control caller-created output files.
+
 ## Exit codes
 
 | Code | Meaning |

@@ -559,12 +559,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
+    _OpenRoadResult,
     _run_openroad,
     _timing_status,
 )
@@ -1541,6 +1542,7 @@ def run_place_and_route(
         ) from exc
 
     stages: list[dict[str, Any]] = []
+    engine_logs: list[dict[str, Any]] = []
     checkpoint_path: str | None = None
 
     for stage in stages_to_run:
@@ -1577,14 +1579,18 @@ def run_place_and_route(
         _write_script(script_path, lines)
 
         completed = _run_openroad(
-            script_path, metrics_path, error_cls=PlaceAndRouteError
+            script_path,
+            metrics_path,
+            error_cls=PlaceAndRouteError,
+            engine_logs=engine_logs,
         )
-        if completed.returncode != 0:
-            raise PlaceAndRouteError(
-                _engine_error_message(stage, completed, pdk_info=pdk_info)
-            )
+        with completed.diagnostics(PlaceAndRouteError):
+            if completed.returncode != 0:
+                raise PlaceAndRouteError(
+                    _engine_error_message(stage, completed, pdk_info=pdk_info)
+                )
 
-        metrics = _read_metrics(metrics_path, stage)
+            metrics = _read_metrics(metrics_path, stage)
         setup_count, hold_count = (None, None)
         if stage != "floorplan":
             setup_count = _count_violations(
@@ -1652,6 +1658,7 @@ def run_place_and_route(
                 max_transition_violation_count,
                 max_capacitance_violation_count,
             ) = _run_corner_sweep(
+                engine_logs=engine_logs,
                 checkpoint_in=next_checkpoint,
                 corners=corners,
                 io_spec=io_spec,
@@ -1729,6 +1736,7 @@ def run_place_and_route(
         # `_validate_post_route_spef`'s own docstring for why.
         if post_route_spef:
             spef_sta = _post_route_spef_metrics(
+                engine_logs=engine_logs,
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
                 gds_path=gds_path,
@@ -1947,6 +1955,7 @@ def run_place_and_route(
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
+        "engine_logs": engine_logs,
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
         "stage_reached": target_stage,
@@ -4024,7 +4033,7 @@ _ABS_PATH_RE = re.compile(r"\"?(/[^\s\"]+)")
 
 def _engine_error_message(
     stage: str,
-    completed: subprocess.CompletedProcess,
+    completed: _OpenRoadResult,
     *,
     pdk_info: dict[str, Any] | None = None,
 ) -> str:
@@ -4086,7 +4095,7 @@ def _engine_error_message(
 
 
 def _mount_namespace_hint(
-    completed: subprocess.CompletedProcess, pdk_info: dict[str, Any] | None
+    completed: _OpenRoadResult, pdk_info: dict[str, Any] | None
 ) -> str | None:
     """``None``, or an actionable hint that ``openroad`` and this process do
     not share a filesystem view (issue #1868).
@@ -4158,7 +4167,7 @@ def _mount_namespace_hint(
 
 
 def _constant_tie_diagnosis(
-    completed: subprocess.CompletedProcess,
+    completed: _OpenRoadResult,
 ) -> tuple[str, str] | None:
     """``(error_line, hint)`` when a failed run hit ``DRT-0305``, else
     ``None`` (issue #854).

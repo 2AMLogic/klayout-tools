@@ -178,12 +178,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
 from typing import Any
 
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
+    _OpenRoadResult,
     _run_openroad,
     _timing_status,
 )
@@ -591,6 +592,7 @@ def run_sta(
     }
 
     response["spef_annotation"] = corner_fields["spef_annotation"]
+    response["engine_log"] = corner_fields["engine_log"]
 
     return response
 
@@ -685,10 +687,11 @@ def _run_corner_session(
     _write_script(script_path, lines)
 
     completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
-    if completed.returncode != 0:
-        raise PostRouteStaError(_engine_error_message(completed))
+    with completed.diagnostics(PostRouteStaError):
+        if completed.returncode != 0:
+            raise PostRouteStaError(_engine_error_message(completed))
 
-    metrics = _read_metrics(metrics_path)
+        metrics = _read_metrics(metrics_path)
     setup_violation_count = _count_violations(
         completed.stdout, _SETUP_VIOLATIONS_BEGIN, _SETUP_VIOLATIONS_END
     )
@@ -705,6 +708,7 @@ def _run_corner_session(
     clock_skew = metrics.get("clock__skew__setup")
 
     corner_fields: dict[str, Any] = {
+        "engine_log": completed.engine_log,
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
         "worst_hold_slack_ns": (
@@ -867,7 +871,7 @@ def _run_multi_corner(
 
 
 def _spef_annotation_block(
-    completed: subprocess.CompletedProcess,
+    completed: _OpenRoadResult,
     spef_net_names: list[str] | None,
 ) -> dict[str, Any]:
     """Assemble the ``spef_annotation`` response block from one completed
@@ -1598,7 +1602,7 @@ def _spef_net_names(spef_path: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _engine_error_message(completed: subprocess.CompletedProcess) -> str:
+def _engine_error_message(completed: _OpenRoadResult) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
     Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed
