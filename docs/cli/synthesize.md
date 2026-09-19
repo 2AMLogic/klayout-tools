@@ -1199,6 +1199,12 @@ checked independently, so a partially supported library reports only
 what it lacks. An absent `-dont_use` entry is intentional for gf180 and
 does not trigger this warning.
 
+These capability entries follow the shared
+[requested-but-unperformed analysis contract](../json-contract.md#requested-but-unperformed-analysis).
+They retain the existing `{category, count, text}` shape inside
+`warnings.representatives`; a successful netlist with a capability warning
+does not verify the skipped analysis or guarantee downstream routability.
+
 ## `baseline`: optional QoR delta against a prior run
 
 [Issue #1588](https://github.com/2AMLogic/klayout-tools/issues/1588):
