@@ -527,7 +527,7 @@ Every verb's numeric fields are named ad hoc today (`violation_count`,
 polarity semantics — nothing states how a metric rolls up across blocks
 (sum? max?), whether a larger value is better, or which metrics are critical
 enough to gate signoff. `src/klayout_tools/metrics.py` is a **data-only
-registry** — declared name -> `{aggregator, higher_is_better, critical}` —
+registry** — declared name -> `{aggregator, higher_is_better, critical, domain}` —
 that answers those questions mechanically, modeled on LibreLane/OpenROAD's
 METRICS2.1 convention (hierarchical, double-underscore names such as
 `design__instance__count`, `drc__error__count`). Full rationale, the
@@ -559,7 +559,24 @@ convention).
   values roll up to a parent), `higher_is_better` (`true`/`false`/`null` —
   `null` for a purely structural/descriptive count with no declared quality
   polarity, not a placeholder), and `critical` (whether a failing value
-  should mechanically gate signoff).
+  should mechanically gate signoff), plus `domain` (`"finite_number"` by
+  default, or `"nonnegative_integer"` for declared critical error counts).
+  Domains are independent of polarity: signed finite measurements remain
+  valid values, while counts reject negatives, fractions, booleans, strings,
+  nulls, arrays, and objects. A JSON `0.0` is a float, not an integer count.
+- `klt signoff` fails malformed known-critical metrics with a structured
+  `detail.critical_metric_blockers` entry containing `metric`, `value`,
+  `higher_is_better`, `domain`, and `reason` (`expected_integer`,
+  `expected_number`, `below_minimum`, or `non_finite`). The same detail is
+  included on failed manifest tier items; their `citation` remains null.
+  Ordinary threshold failures retain their existing blocker shape. Unknown
+  optional metrics and legacy envelopes without metrics retain their grading.
+- Signoff's envelope, manifest, fleet, and command-evidence readers reject
+  `NaN`, `Infinity`, `-Infinity`, and numeric literals overflowing to infinity
+  before grading. This includes stdin and nested fleet manifest files.
+  Invalid top-level JSON produces the normal error envelope; unreadable
+  manifest evidence leaves its item unmet. No nonfinite input is echoed into
+  signoff output.
 - **Adoption is per-verb and incremental.** `klt layout-metrics` was the
   pilot integration (see
   [`docs/cli/layout-metrics.md`](cli/layout-metrics.md)'s `metrics` field);
