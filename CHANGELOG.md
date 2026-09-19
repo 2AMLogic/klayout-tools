@@ -324,6 +324,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   `power_delivery`, alongside the unchanged single-citation fields. Four
   new `reason` values distinguish which artifact to go fix: `no_pdn`,
   `supply_spec_incomplete`, `supply_not_continuous`, `lvs_supply_unproven`.
+- **Changed**: `klt signoff --manifest`/`--fleet` now restricts T1 items 5
+  ("Full corner verification vs a ratified spec"), 6 ("Statistical claims carry
+  Monte Carlo evidence") and 8 ("Characterization report") to the evidence
+  kinds `docs/design-evidence-tiers.md` actually names for them (issue #2044),
+  completing what issue #1987 started for items 3 and 4. All three previously
+  accepted *any* recognised, passing envelope kind — including `klt extract`,
+  which has no failure verdict and so always counts as passed, so a manifest
+  citing `{"5": "extract.json"}` graded a corner-verification claim `met` on a
+  report that ran no simulation and could not have failed. **Grading change**:
+  item 5 accepts `sim` for an analog partition and `sta`/
+  `functional-verification`/`sim` for a digital one (`sim` being the
+  full-custom digital sub-case's own artifact); item 6 accepts `yield`; item 8
+  accepts `generic`, the purpose-built envelope issue #1152 gave the one T1
+  item naming no `klt` verb. Any other kind moves from `met` to `unmet` with
+  `reason: "wrong_kind"`. Items 1, 2, 9 and 10 are deliberately unchanged and
+  still accept any passing envelope, `extract` included — the doc documents
+  them as having no tool behind them, so there is no right artifact to restrict
+  them to. `klt extract` is otherwise untouched: its envelope still aggregates
+  normally in envelope-aggregation mode (`checks[]`, device/net counts) and its
+  `provenance` still participates in the consistency check that binds LVS to
+  the DRC'd layout. `examples/signoff/manifest.json` cites only items 3 and 4
+  and is unaffected. No JSON shape change (no field added, renamed, removed or
+  nested).
 - **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
   and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
   block kind (issue #1987). Both items previously accepted *any* recognised,

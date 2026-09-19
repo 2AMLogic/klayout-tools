@@ -204,7 +204,10 @@ touch items 3-6's separate, pre-existing permissiveness toward *other*
 recognised native kinds (when it shipped, :data:`_ITEM_ALLOWED_KINDS` named
 only item 7) -- closing that wider gap was out of *that* issue's scope, and
 was done for items 3 and 4 by issue #1987 (they now accept only ``"drc"``
-and ``"lvs"`` respectively -- see :data:`_ITEM_ALLOWED_KINDS`).
+and ``"lvs"`` respectively -- see :data:`_ITEM_ALLOWED_KINDS`) and for
+items 5, 6 and 8 by issue #2044 (see "Kind-restricting items 5, 6 and 8"
+below -- item 8 is now ``"generic"``-only, so the two mechanisms agree on it
+instead of one being a superset of the other).
 
 ## `klt power` (IR-drop/EM) evidence ingestion (issue #1321, Phase 2 of epic #712)
 
@@ -319,14 +322,66 @@ module deliberately does **not** recognise `klt place-and-route`'s
 ``worst_setup_slack_ns``, whose corner set is the PDK's full shipped list
 rather than a declared one.
 
-**Item 5 stays unrestricted** (``allowed_kinds is None``), exactly as
-before: this phase widens what is *recognised*, it does not tighten what
-item 5 accepts -- an analog block's item 5, and a full-custom digital
-block's `klt sim` corner-matrix citation for it, grade exactly as they did
-before. **Direction 3 of issue #1959 -- letting a ``"generic"`` citation
-satisfy items 5/7 for digital blocks -- is deliberately not implemented**:
-it would weaken precisely the guarantee :data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE`
-exists to preserve.
+**Item 5 stayed unrestricted** (``allowed_kinds is None``) through this
+phase: it widened what is *recognised*, it did not tighten what item 5
+accepts -- an analog block's item 5, and a full-custom digital block's `klt
+sim` corner-matrix citation for it, graded exactly as they did before.
+Issue #2044 later closed that permissiveness (see the next section), while
+keeping both of those citations accepted. **Direction 3 of issue #1959 --
+letting a ``"generic"`` citation satisfy items 5/7 for digital blocks -- is
+deliberately not implemented**: it would weaken precisely the guarantee
+:data:`_ITEMS_ACCEPTING_GENERIC_EVIDENCE` exists to preserve.
+
+## Kind-restricting items 5, 6 and 8 (issue #2044)
+
+Issue #1987 restricted items 3 and 4 to ``"drc"``/``"lvs"`` because a `klt
+extract` citation -- which :func:`_check_passed` counts as passing
+unconditionally, since `klt extract` has no independent pass/fail (it
+either emits a ``status: "extracted"`` envelope or raises) -- could
+otherwise stand in for a DRC/LVS check it never ran. That reasoning was
+never specific to items 3 and 4: **items 5, 6 and 8 each name their
+evidence in ``docs/design-evidence-tiers.md`` just as explicitly**, and
+each was still unrestricted, so a bare `klt extract` envelope graded all
+three ``"met"``:
+
+- **Item 5** ("Full corner verification vs a ratified spec") names a PVT
+  corner-matrix simulation for the Analog column (`klt sim`), and
+  multi-corner STA plus a bit-exact functional regression for the Digital
+  column -- "the machine-checkable evidence for the RTL-flow artifacts is a
+  `klt sta` JSON report ... and a `klt functional-verification` JSON report"
+  (issue #1959). The full-custom digital sub-case satisfies it "instead by
+  PVT corner-matrix SPICE simulation", so ``"sim"`` stays accepted for a
+  digital partition too.
+- **Item 6** ("Statistical claims carry Monte Carlo evidence") names `klt
+  yield` -- "a `klt yield` JSON report ... is the machine-checkable evidence
+  for this item".
+- **Item 8** ("Characterization report") names no verb, but it is not
+  therefore evidence-free: the doc gives it a purpose-built substitute, the
+  opt-in ``"generic"`` envelope (issue #1152, "``klt signoff --manifest``
+  grades it via an opt-in generic evidence envelope"). So item 8 accepts
+  ``"generic"`` and nothing else -- its previous willingness to also accept
+  any passing native kind (a clean `klt drc` report satisfying a
+  characterization claim) was the same borrowed-pass hole, one kind wider.
+
+This is a **narrowing** of :data:`_ITEM_ALLOWED_KINDS` only. It does not
+touch :func:`_check_passed` (``extract`` still passes unconditionally
+there), does not drop ``extract`` from :func:`build_signoff`'s ``checks[]``,
+and does not change its participation in :func:`_provenance_consistency` or
+its device/net-count reporting -- exactly as issue #1987 left them. What
+changes is only whether an `extract` citation (or any other wrong-kind one)
+can satisfy a *numbered tier item*.
+
+**Items 1, 2, 9 and 10 are deliberately left unrestricted.** Unlike items
+3-8 they name no evidence at all -- ``docs/design-evidence-tiers.md`` says
+so outright ("items **1**, **2**, **9**, and **10** have none ... Citing
+them honestly is the claimant's responsibility, not something the tool
+verifies"), and ``docs/cli/signoff.md``'s "Items 1, 2, 9, and 10" section
+states the grading consequence plainly: any recognised, passing native kind
+satisfies them, topical relevance included. Excluding ``extract`` there
+specifically would be arbitrary -- a `klt drc` citation for item 9
+("Testbenches shipped") is exactly as irrelevant and still counts by
+design. Binding those four to real evidence needs an artifact for them to
+bind *to*, which is a separate question from this one.
 
 ## Power delivery (structural): item 11 <- `klt erc` + `klt lvs` (+ P&R) (issue #2025)
 
@@ -654,34 +709,52 @@ _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 #: kinds may satisfy that item (issue #871, Phase 2b of epic #706; made
 #: per-block-kind by issue #1959) -- resolved by :func:`_allowed_kinds_for`
 #: and passed as :func:`_build_tier_item`'s ``allowed_kinds`` parameter. An
-#: item id absent from this map (every id but 3, 4 and 7, today) is
+#: item id absent from this map (items 1, 2, 9 and 10, today) is
 #: unrestricted (``None``), preserving the original Phase 0/1 behaviour where
 #: any recognised, passing envelope kind satisfies any item.
 #:
-#: Items 3 ("DRC clean"), 4 ("LVS clean") and 7 ("Post-layout verification")
-#: are the restricted ones today -- items 3 and 4 joined in issue #1987, so
-#: a `klt extract` report (which :func:`_check_passed` counts as passing
-#: unconditionally) can no longer stand in for a check it never ran.
+#: **Every T1 item that names evidence is restricted here** (issue #2044):
+#: items 3-8. The four absent ids are exactly the four
+#: ``docs/design-evidence-tiers.md`` documents as having no tool behind them
+#: at all ("items **1**, **2**, **9**, and **10** have none ... Citing them
+#: honestly is the claimant's responsibility, not something the tool
+#: verifies"), so leaving them unrestricted is the documented behaviour, not
+#: an oversight -- there is no verb to bind them to, and singling out one
+#: irrelevant kind for them would be arbitrary when every other irrelevant
+#: kind still satisfies them by design.
+#:
 #: The inner map is keyed by the **partition kind** being graded
 #: (``"analog"``/``"digital"`` -- a ``"mixed-signal"`` manifest grades both,
 #: one per partition, so that value never appears here) and must name every
 #: partition kind, since :func:`_allowed_kinds_for` falls back to the
 #: strictest (analog) set rather than silently becoming unrestricted.
-#: Items 3 and 4 name the same single kind for both partition kinds (a DRC
-#: clean is a DRC clean whichever flow drew the block); item 7's two sets
-#: genuinely differ:
+#: Items 3, 4, 6 and 8 name the same set for both partition kinds (a DRC
+#: clean is a DRC clean whichever flow drew the block, and items 6 and 8 are
+#: kind-independent in the doc's own checklist); items 5 and 7 are per-kind
+#: checklist items whose two columns name genuinely different artifacts:
 #:
-#: - **analog** (and a mixed-signal block's analog partition): a
+#: - **item 5, analog** (and a mixed-signal block's analog partition): a
+#:   ``"sim"``-kind citation only -- the doc's "PVT corner-matrix simulation
+#:   results covering every spec row at its bound corners".
+#: - **item 5, digital**: ``"sta"`` or ``"functional-verification"`` (the
+#:   doc's Digital column, "multi-corner static timing analysis ... plus a
+#:   bit-exact functional test suite", recognised as first-class evidence
+#:   kinds by issue #1959) *or* ``"sim"``, which keeps the full-custom
+#:   digital sub-case working: that partition declares ``kind: "digital"``
+#:   but satisfies item 5 "instead by PVT corner-matrix SPICE simulation",
+#:   i.e. exactly an analog partition's artifact.
+#: - **item 7, analog** (and a mixed-signal block's analog partition): a
 #:   ``"pex"``-kind citation only -- the `klt pex`
 #:   schematic-vs-extracted-netlist delta report (see this module's
 #:   "Post-layout binding" docstring section). Unchanged by issue #1959.
-#: - **digital**: ``"pex"`` *or* ``"functional-verification"``. ``"pex"``
-#:   keeps the full-custom digital sub-case working unchanged (it declares
-#:   ``kind: "digital"`` and produces exactly an analog block's post-layout
-#:   artifact -- ``docs/design-evidence-tiers.md``'s "Full-custom digital
-#:   sub-case"); ``"functional-verification"`` is the RTL-flow artifact the
-#:   doc's own Digital column names, and is additionally required to be
-#:   SDF-annotated (see :data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE`).
+#: - **item 7, digital**: ``"pex"`` *or* ``"functional-verification"``.
+#:   ``"pex"`` keeps the full-custom digital sub-case working unchanged (it
+#:   declares ``kind: "digital"`` and produces exactly an analog block's
+#:   post-layout artifact -- ``docs/design-evidence-tiers.md``'s "Full-custom
+#:   digital sub-case"); ``"functional-verification"`` is the RTL-flow
+#:   artifact the doc's own Digital column names, and is additionally
+#:   required to be SDF-annotated (see
+#:   :data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE`).
 _ITEM_ALLOWED_KINDS: dict[int, dict[str, set[str]]] = {
     # Issue #1987: items 3 ("DRC clean") and 4 ("LVS clean") name their
     # verb in docs/design-evidence-tiers.md, so only that verb's own
@@ -689,10 +762,25 @@ _ITEM_ALLOWED_KINDS: dict[int, dict[str, set[str]]] = {
     # report, which `_check_passed` counts as passing unconditionally.
     3: {"analog": {"drc"}, "digital": {"drc"}},
     4: {"analog": {"lvs"}, "digital": {"lvs"}},
+    # Issue #2044: items 5, 6 and 8 name their evidence in the doc just as
+    # explicitly as items 3/4/7 do, so they get the same treatment -- see
+    # this module's "Kind-restricting items 5, 6 and 8" docstring section.
+    5: {
+        "analog": {"sim"},
+        "digital": {"sta", "functional-verification", "sim"},
+    },
+    6: {"analog": {"yield"}, "digital": {"yield"}},
     7: {
         "analog": {"pex"},
         "digital": {"pex", "functional-verification"},
     },
+    # Item 8's only machine-checkable evidence is the purpose-built generic
+    # envelope (issue #1152). Naming it here is a *narrowing* of item 8's
+    # native-kind permissiveness, not a second gate on "generic" itself --
+    # `_ITEMS_ACCEPTING_GENERIC_EVIDENCE` still decides which items a
+    # "generic" citation may satisfy, and the two agree on item 8 rather
+    # than double-restricting it.
+    8: {"analog": {"generic"}, "digital": {"generic"}},
 }
 
 #: T1 item ids whose evidence must prove a **post-layout** run, not merely a
@@ -2692,9 +2780,22 @@ def build_tier_report(
     passing kind (notably ``"extract"``, which :func:`_check_passed` never
     fails) renders ``"unmet"`` with ``reason: "wrong_kind"``.
 
+    **Items 5, 6 and 8 are kind-restricted too** (issue #2044, extending
+    #1987's reasoning to every remaining item that names evidence -- see
+    this module's "Kind-restricting items 5, 6 and 8" docstring section):
+    item 5 ("Full corner verification") accepts ``"sim"`` for an analog
+    partition and ``"sta"``/``"functional-verification"``/``"sim"`` for a
+    digital one (``"sim"`` being the full-custom digital sub-case's own
+    artifact), item 6 ("Statistical claims carry Monte Carlo evidence")
+    accepts only ``"yield"``, and item 8 ("Characterization report") accepts
+    only ``"generic"`` -- the purpose-built envelope the doc gives the one
+    item naming no `klt` verb. Items 1, 2, 9 and 10 stay unrestricted, as
+    ``docs/design-evidence-tiers.md`` documents: they name no evidence at
+    all, so there is nothing to bind them to.
+
     **Item 7 is kind-restricted, per block kind** (issue #871, Phase 2b of
-    epic #706; made per-block-kind by issue #1959): every other T1 item
-    accepts any recognised, passing envelope kind, but item 7 ("Post-layout
+    epic #706; made per-block-kind by issue #1959): items 1, 2, 9 and 10
+    accept any recognised, passing envelope kind, but item 7 ("Post-layout
     verification") accepts only the kind(s) named by
     :data:`_ITEM_ALLOWED_KINDS` for the partition kind being graded
     (:func:`_allowed_kinds_for`) -- for an analog partition (or a
@@ -2715,12 +2816,14 @@ def build_tier_report(
     ``"generic"``-kind citation (see "Generic evidence ingestion" above)
     satisfies only the T1 items whose own checklist text names no specific
     `klt` verb -- today, item 8 ("Characterization report") alone. Every
-    other item, including the six otherwise-unrestricted items 1, 2, 5, 6, 9
-    and 10 that accept any *native* recognised kind (items 3, 4 and 7 carry
-    their own kind restriction, see above), renders ``"unmet"`` with
-    ``reason: "wrong_kind"`` for a ``"generic"`` citation -- this does not
-    loosen items 3-7's own evidence requirements, only adds a new kind item
-    8 alone may satisfy.
+    other item, including the four unrestricted items 1, 2, 9 and 10 that
+    accept any *native* recognised kind (items 3-8 carry their own kind
+    restriction, see above), renders ``"unmet"`` with ``reason:
+    "wrong_kind"`` for a ``"generic"`` citation -- this does not loosen
+    items 3-7's own evidence requirements, only adds a new kind item 8 alone
+    may satisfy. Since issue #2044 item 8's own ``allowed_kinds`` is
+    ``{"generic"}`` as well, so the two mechanisms agree exactly rather than
+    one being broader than the other.
 
     **Item 11 is compound, and per block kind** (issue #2025): "Power
     delivery (structural)" is the one T1 item no single artifact proves, so
@@ -2977,7 +3080,8 @@ def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
     mixed-signal block's digital partition as to a pure ``"digital"`` block,
     with no separate wiring.
 
-    ``None`` means unrestricted (every item but 3, 4 and 7 today). An item
+    ``None`` means unrestricted (items 1, 2, 9 and 10 today -- every item
+    that names no evidence at all, issue #2044). An item
     present in
     :data:`_ITEM_ALLOWED_KINDS` but with no entry for this partition kind
     falls back to the ``"analog"`` (strictest) set rather than becoming
@@ -3838,9 +3942,10 @@ def _build_tier_item(
     set -- otherwise the item is downgraded to ``"unmet"`` with ``reason:
     "wrong_kind"`` and no citation. ``None`` (the default) means no
     restriction, preserving Phase 0/1's original behaviour where any
-    recognised, passing envelope kind satisfies any item -- every T1 item
-    except items 3, 4 and 7 still passes ``None`` (see
-    :data:`_ITEM_ALLOWED_KINDS` and :func:`_allowed_kinds_for`).
+    recognised, passing envelope kind satisfies any item -- since issue
+    #2044 only T1 items 1, 2, 9 and 10 (the four naming no evidence at all)
+    still pass ``None`` (see :data:`_ITEM_ALLOWED_KINDS` and
+    :func:`_allowed_kinds_for`).
 
     ``require_post_layout`` (issue #1959) is forwarded to
     :func:`_grade_evidence` for the items in
@@ -3854,7 +3959,11 @@ def _build_tier_item(
     first, so ``"generic"`` never borrows a pass from an item's otherwise
     unrestricted ``allowed_kinds=None`` (which was written for the six
     `klt`-verb-native kinds, before ``"generic"`` existed, and would
-    otherwise happily accept it too).
+    otherwise happily accept it too). The two gates agree on item 8 (issue
+    #2044 gave it ``allowed_kinds={"generic"}``) rather than
+    double-restricting it: a ``"generic"`` citation for item 8 passes both,
+    and a native-kind citation for item 8 is rejected by ``allowed_kinds``
+    alone.
 
     A ``"power"``-kind citation (issue #1321) is gated the same way, against
     :data:`_ITEMS_ACCEPTING_POWER_EVIDENCE` -- deliberately empty today, since
