@@ -137,7 +137,7 @@ def _write_request(path: Path, request: dict) -> str:
     return str(path)
 
 
-def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str) -> str:
+def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str, run_id: str) -> str:
     """The real absolute path `run_synthesize` wrote its mapped netlist to.
 
     Issue #1844 normalized the response's own `netlist_path` field to the
@@ -147,10 +147,16 @@ def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str) -> str:
     the actual filesystem path to wire into a downstream request, so this
     reconstructs it directly from `run_synthesize`'s own documented
     convention (`synthesize.py`'s module docstring): `.klt/synthesize/
-    <hdl_toplevel>_synth.v`, next to the request file.
+    <run_id>/<hdl_toplevel>_synth.v`, next to the request file.
     """
     request_dir = os.path.dirname(os.path.abspath(synth_request_path))
-    return os.path.join(request_dir, ".klt", "synthesize", f"{hdl_toplevel}_synth.v")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise ValueError("invalid synthesis run_id")
+    return os.path.join(
+        request_dir, ".klt", "synthesize", run_id, f"{hdl_toplevel}_synth.v"
+    )
 
 
 def _base_request(**overrides) -> dict:
@@ -7703,11 +7709,13 @@ def test_integration_real_openroad_gcd_worked_example(tmp_path, monkeypatch):
             "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
         },
     )
-    run_synthesize(synth_request)
+    synth_report = run_synthesize(synth_request)
 
     request_path = _write_request(
         tmp_path / "pnr_request.json",
-        _base_request(netlist=_synth_netlist_path(synth_request, "gcd")),
+        _base_request(
+            netlist=_synth_netlist_path(synth_request, "gcd", synth_report["run_id"])
+        ),
     )
 
     report = run_place_and_route(request_path)
@@ -7769,12 +7777,12 @@ def test_integration_real_openroad_gcd_worked_example_gf180mcu(tmp_path, monkeyp
             "pdk": {"cell_library": _GF180MCU_CELL_LIBRARY},
         },
     )
-    run_synthesize(synth_request)
+    synth_report = run_synthesize(synth_request)
 
     request_path = _write_request(
         tmp_path / "pnr_request.json",
         _base_request(
-            netlist=_synth_netlist_path(synth_request, "gcd"),
+            netlist=_synth_netlist_path(synth_request, "gcd", synth_report["run_id"]),
             pdk={"cell_library": _GF180MCU_CELL_LIBRARY},
             floorplan={
                 "method": "utilization",
@@ -7856,12 +7864,12 @@ def test_integration_real_openroad_gcd_worked_example_sg13g2(tmp_path, monkeypat
             "pdk": {"cell_library": _SG13G2_CELL_LIBRARY},
         },
     )
-    run_synthesize(synth_request)
+    synth_report = run_synthesize(synth_request)
 
     request_path = _write_request(
         tmp_path / "pnr_request.json",
         _base_request(
-            netlist=_synth_netlist_path(synth_request, "gcd"),
+            netlist=_synth_netlist_path(synth_request, "gcd", synth_report["run_id"]),
             pdk={"cell_library": _SG13G2_CELL_LIBRARY},
             floorplan={
                 "method": "utilization",

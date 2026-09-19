@@ -379,7 +379,7 @@ def validate_design(
         # `scope: "external"`, `path: None`. Reconstruct the real
         # filesystem path directly from `run_synthesize`'s own documented
         # convention (`synthesize.py`'s module docstring):
-        # `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the request
+        # `.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v`, next to the request
         # file (`workdir / "synth_request.json"`, see `klt_synthesize`
         # above).
         #
@@ -389,7 +389,12 @@ def validate_design(
         # a mismatched symlink/real-path prefix produces a bogus `../../..`
         # chain that no longer resolves once rebased onto the container's
         # `/workdir/scratch` mount point.
-        netlist_path = workdir / ".klt" / "synthesize" / f"{top}_synth.v"
+        run_id = synth_report.get("run_id")
+        if not isinstance(run_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+        ):
+            raise ValueError("invalid synthesis run_id")
+        netlist_path = workdir / ".klt" / "synthesize" / run_id / f"{top}_synth.v"
         netlist_rel = os.path.relpath(netlist_path.resolve(), workdir.resolve())
 
         par_report = klt_place_and_route(

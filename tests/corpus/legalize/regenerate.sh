@@ -38,6 +38,7 @@ for DESIGN in gcd modexp; do
   cat > "$SCRATCH/${DESIGN}_synth_request.json" <<JSON
 {
   "schema": "klt.synthesize.request/1",
+  "run_id": "corpus-${DESIGN}",
   "engine": "yosys",
   "sources": ["$DESIGN.v"],
   "hdl_toplevel": "$DESIGN",
@@ -77,7 +78,7 @@ ${DOCKER:-docker} run --rm --platform linux/amd64 \
     for DESIGN in gcd modexp; do
       echo "--> $DESIGN"
       python3 /workdir/repo/tests/corpus/legalize/generate_checkpoints.py \
-        --netlist "/workdir/scratch/.klt/synthesize/${DESIGN}_synth.v" \
+        --netlist "/workdir/scratch/.klt/synthesize/corpus-${DESIGN}/${DESIGN}_synth.v" \
         --toplevel "$DESIGN" \
         --cell-library sky130_fd_sc_hd --corner tt_025C_1v80 \
         --utilization 38 --aspect-ratio 1.0 --core-margin 2.0 --site unithd \

@@ -78,7 +78,9 @@ def test_gf180_7t_activates_constraints_and_constant_mapping(tmp_path, monkeypat
         f"hilomap -hicell {_LIBRARY}__tieh Z -locell {_LIBRARY}__tiel ZN\n"
         "tee -q -o "
     ) in script
-    constr = tmp_path / ".klt/synthesize/regression_abc.constr"
+    constr = Path(_abs_path(report["script_path"], tmp_path)).with_name(
+        "regression_abc.constr"
+    )
     assert constr.read_text() == (
         f"set_driving_cell {_LIBRARY}__buf_4\nset_load 13.43\n"
     )
