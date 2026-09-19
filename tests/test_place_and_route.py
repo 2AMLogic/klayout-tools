@@ -72,6 +72,7 @@ from helpers.subprocess_fakes import fake_completed
 from klayout_tools import extract as extract_module
 from klayout_tools import pdk as pdk_module
 from klayout_tools import place_and_route
+from klayout_tools import place_and_route_power_audit as power_audit
 from klayout_tools._openroad_engine import _timing_status
 from klayout_tools.cli import main
 from klayout_tools.place_and_route import (
@@ -157,6 +158,81 @@ def _synth_netlist_path(synth_request_path: str, hdl_toplevel: str, run_id: str)
     return os.path.join(
         request_dir, ".klt", "synthesize", run_id, f"{hdl_toplevel}_synth.v"
     )
+
+
+def _power_without_placed(report: dict) -> dict:
+    """The response's `power` block minus issue #2086's additive `placed`
+    audit, so an exact-dict assertion can still pin every other member.
+
+    `power.placed` carries a `tmp_path`-derived `def_path`, which cannot be
+    spelled in a literal -- every caller asserts on it separately.
+    """
+    return {key: value for key, value in report["power"].items() if key != "placed"}
+
+
+def _fake_def(
+    *,
+    masters: dict[str, int] | None = None,
+    special_nets: tuple[tuple[str, int, int, int], ...] = (),
+) -> str:
+    """A structurally real (if geometrically meaningless) DEF, for issue
+    #2086's power-delivery audit.
+
+    `masters` maps a macro name to how many `COMPONENTS` records to write
+    for it; `special_nets` is one `(name, followpin_segments,
+    stripe_segments, vias)` tuple per `SPECIALNETS` entry. The sections are
+    real LEF/DEF 5.8 syntax -- the audit is a text scan of exactly these
+    two sections, so a fixture that fakes their *shape* exercises it
+    faithfully without needing a real OpenROAD run. `special_nets=()`
+    writes no `SPECIALNETS` section at all, which is what a DEF from a run
+    with no PDN genuinely looks like (DEF omits empty sections).
+    """
+    records = [
+        f"- inst_{master}_{index} {master} + PLACED ( {index * 10} 0 ) N ;"
+        for master, count in (masters or {}).items()
+        for index in range(count)
+    ]
+    lines = [
+        "VERSION 5.8 ;",
+        "DESIGN gcd ;",
+        "UNITS DISTANCE MICRONS 1000 ;",
+        f"COMPONENTS {len(records)} ;",
+        *records,
+        "END COMPONENTS",
+    ]
+    if special_nets:
+        lines.append(f"SPECIALNETS {len(special_nets)} ;")
+        for name, followpins, stripes, vias in special_nets:
+            lines.append(f"- {name} ( * {name} )")
+            wiring = [
+                f"  + ROUTED met1 480 + SHAPE FOLLOWPIN ( 0 {i * 100} ) ( 5000 * )"
+                if i == 0
+                else f"    NEW met1 480 + SHAPE FOLLOWPIN ( 0 {i * 100} ) ( 5000 * )"
+                for i in range(followpins)
+            ]
+            # `vias` of the `stripes` strap statements carry a via instance
+            # (a single-point `SHAPE STRIPE` statement naming a via master,
+            # exactly how `pdngen` writes a PDN via) -- so the parsed
+            # `stripe_segments` is `stripes` and `vias` is `min(vias,
+            # stripes)`, never double-counted.
+            wiring += [
+                (
+                    f"    NEW met1 0 + SHAPE STRIPE ( {i * 100} 0 ) via_M1M4_PDN"
+                    if i < vias
+                    else "    NEW met4 1600 + SHAPE STRIPE "
+                    f"( {i * 100} 0 ) ( {i * 100} 5000 )"
+                )
+                for i in range(stripes)
+            ]
+            if not wiring:
+                wiring = ["  + USE POWER"]
+            else:
+                wiring.append("  + USE POWER")
+            lines += wiring
+            lines.append("  ;")
+        lines.append("END SPECIALNETS")
+    lines.append("END DESIGN")
+    return "\n".join(lines) + "\n"
 
 
 def _base_request(**overrides) -> dict:
@@ -1723,6 +1799,7 @@ def _stub_openroad_success(
     per_corner_design_rule_violations: dict[str, tuple[int, int]] | None = None,
     stage_metrics: dict[str, dict[str, float]] | None = None,
     version: str = "26Q3-771-gdeadbeef",
+    def_text: str | None = None,
 ) -> None:
     setup_violations = setup_violations or {}
     hold_violations = hold_violations or {}
@@ -1862,7 +1939,13 @@ def _stub_openroad_success(
 
         def_path = _script_write_def_path(script_path)
         if def_path is not None:
-            Path(def_path).write_text("fake def\n")
+            # Issue #2086: `def_text` lets a test substitute a structurally
+            # real DEF (see `_fake_def`) so the power-delivery audit has
+            # something to measure. The default placeholder is deliberately
+            # left as-is -- a file with no `COMPONENTS` section is exactly
+            # the "evidence unavailable" case the audit must *not* report
+            # as a measured zero.
+            Path(def_path).write_text(def_text or "fake def\n")
 
         # Issue #996: the `"route"` stage's own `write_verilog` artifact --
         # parsed out of the generated script exactly like the `write_def`
@@ -2054,7 +2137,13 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
     # `global_connect` pair (issue #1091's existing call, previously gated
     # on `request.power` alone) also runs, closing every row gap safely --
     # see `_ROW_RAIL_STRAP`'s own docstring for the live-verified evidence.
-    assert report["power"] == {
+    #
+    # Issue #2086's own additive `power.placed` block is compared
+    # separately below (it carries a tmp-path `def_path`, so it cannot be
+    # spelled inline here) -- this assertion still pins every *other*
+    # `power` member exactly, so a future field addition has to be
+    # deliberate.
+    assert _power_without_placed(report) == {
         "pdn": False,
         "global_connect": False,
         "power_net": None,
@@ -2077,6 +2166,12 @@ def test_stubbed_full_route_success(tmp_path, monkeypatch):
             ],
         },
     }
+    # Issue #2086: this stub writes a placeholder DEF (no `COMPONENTS`
+    # section), so the audit reports *unavailable evidence* -- never a
+    # fabricated `0`. The measured-count path has its own tests below.
+    assert report["power"]["placed"]["evidence"] == "unavailable"
+    assert report["power"]["placed"]["status"] == "unknown"
+    assert report["power"]["placed"]["tapcells"] is None
     floorplan_script = os.path.join(
         os.path.dirname(request_path),
         ".klt",
@@ -2266,7 +2361,9 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
-    assert report["power"] == {
+    # Issue #2086's additive `power.placed` block is asserted separately
+    # below (tmp-path `def_path`); every other member is still pinned here.
+    assert _power_without_placed(report) == {
         "pdn": True,
         "global_connect": True,
         "power_net": "VDD",
@@ -2313,6 +2410,13 @@ def test_stubbed_full_route_with_power_emits_pdn_tapcell_and_filler_tcl(
             "filler_masters": [],
         },
     }
+    # Issue #2086: this stub writes a placeholder DEF, so the audit says
+    # "unavailable", never a fabricated zero -- and a supplied
+    # `request.power` whose result cannot be verified still earns a warning.
+    assert report["power"]["placed"]["evidence"] == "unavailable"
+    assert report["power"]["placed"]["status"] == "unknown"
+    assert len(report["warnings"]) == 1
+    assert "could not be verified" in report["warnings"][0]
 
     floorplan_script = os.path.join(
         os.path.dirname(request_path),
@@ -3487,6 +3591,294 @@ def test_stubbed_engine_failure_mid_stage(tmp_path, monkeypatch):
         PlaceAndRouteError, match=r"openroad 'place' stage failed:.*PPL-0001"
     ):
         run_place_and_route(request_path)
+
+
+# --------------------------------------------------------------------------- #
+# Power-delivery audit -- `power.placed` + `warnings` (issue #2086)
+# --------------------------------------------------------------------------- #
+
+
+_LOGIC_ONLY_DEF = _fake_def(
+    masters={"sky130_fd_sc_hd__nand2_1": 4, "sky130_fd_sc_hd__dfxtp_1": 2}
+)
+
+#: A DEF from a power-complete run: tapcells, fillers, and a VPWR/VGND
+#: grid with rails, straps and vias. `VPWR`/`VGND` are `sky130_fd_sc_hd`'s
+#: own pin names (and the row-rail fallback's nets), not `request.power`'s
+#: `"VDD"`/`"VSS"` defaults -- the power-bearing tests below request them
+#: explicitly so the request and this fixture agree.
+_POWER_COMPLETE_DEF = _fake_def(
+    masters={
+        "sky130_fd_sc_hd__nand2_1": 4,
+        "sky130_fd_sc_hd__tapvpwrvgnd_1": 3,
+        "sky130_fd_sc_hd__fill_1": 5,
+        "sky130_fd_sc_hd__fill_8": 2,
+    },
+    special_nets=(("VPWR", 6, 4, 2), ("VGND", 6, 4, 2)),
+)
+
+
+def test_power_audit_counts_component_records_per_master():
+    counts = power_audit.parse_def_component_masters(_POWER_COMPLETE_DEF)
+    assert counts == {
+        "sky130_fd_sc_hd__nand2_1": 4,
+        "sky130_fd_sc_hd__tapvpwrvgnd_1": 3,
+        "sky130_fd_sc_hd__fill_1": 5,
+        "sky130_fd_sc_hd__fill_8": 2,
+    }
+
+
+def test_power_audit_component_masters_none_without_a_components_section():
+    """Issue #2086's central distinction: a file that carries no
+    `COMPONENTS` section yields `None` ("cannot tell"), never `{}` ("zero
+    instances"). A caller that conflated the two would report a fabricated
+    `0 tapcells` for an unreadable artifact -- exactly the "answering when
+    it cannot" failure this audit exists to prevent."""
+    assert power_audit.parse_def_component_masters("fake def\n") is None
+    assert power_audit.parse_def_component_masters("COMPONENTS 0 ;\n") == {}
+
+
+def test_power_audit_parses_rails_straps_and_vias_per_special_net():
+    nets = power_audit.parse_def_special_nets(_POWER_COMPLETE_DEF)
+    assert [net["name"] for net in nets] == ["VPWR", "VGND"]
+    for net in nets:
+        assert net["followpin_segments"] == 6
+        assert net["stripe_segments"] == 4
+        # Two of the four strap statements carry a via instance; the
+        # `+ USE POWER` attribute and the `( * VPWR )` connection group
+        # must not be miscounted as one.
+        assert net["vias"] == 2
+        assert net["use"] == "POWER"
+        assert sorted(net["stripe_layers"]) == ["met1", "met4"]
+
+
+def test_power_audit_no_specialnets_section_is_zero_special_nets():
+    """DEF omits empty sections entirely, so a `COMPONENTS`-bearing file
+    with no `SPECIALNETS` section really does have no power grid -- unlike
+    a missing `COMPONENTS` section, this one *is* a measured zero."""
+    assert power_audit.parse_def_special_nets(_LOGIC_ONLY_DEF) == []
+
+
+def test_stubbed_route_without_power_reports_measured_zeros_and_warns(
+    tmp_path, monkeypatch
+):
+    """Issue #2086, the reported trap: with no `request.power` the run
+    completes and writes a plausible layout carrying **no tapcells, no PDN
+    and no fillers**. The response must say so in numbers a caller can
+    read, and warn loudly -- not merely fail to complain."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, def_text=_LOGIC_ONLY_DEF)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    placed = report["power"]["placed"]
+    assert placed["evidence"] == "def"
+    assert placed["status"] == "absent"
+    assert placed["components"] == 6
+    assert placed["tapcells"] == 0
+    assert placed["fillers"] == 0
+    assert placed["special_nets"] == []
+    assert placed["missing"] == [
+        "tapcells",
+        "fillers",
+        "power_special_net",
+        "ground_special_net",
+        "followpin_segments",
+        "stripe_segments",
+        "pdn_vias",
+    ]
+
+    assert len(report["warnings"]) == 1
+    warning = report["warnings"][0]
+    assert "request.power was omitted" in warning
+    assert "0 tapcell(s)" in warning
+    assert "0 filler cell(s)" in warning
+    assert "0 STRIPE strap segment(s)" in warning
+    assert "not a signoff result" in warning
+
+
+def test_stubbed_route_with_complete_power_reports_complete_and_no_warnings(
+    tmp_path, monkeypatch
+):
+    """The positive control the filer supplied: a run whose DEF really does
+    carry tapcells, fillers and a VPWR/VGND grid grades `complete` and
+    earns no warning -- so the warning above is a signal, not noise."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        power={
+            "power_net": "VPWR",
+            "ground_net": "VGND",
+            "straps": _BASE_STRAPS,
+        },
+    )
+    _stub_openroad_success(monkeypatch, def_text=_POWER_COMPLETE_DEF)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    placed = report["power"]["placed"]
+    assert placed["evidence"] == "def"
+    assert placed["status"] == "complete"
+    assert placed["tapcells"] == 3
+    assert placed["fillers"] == 7
+    assert placed["missing"] == []
+    assert report["warnings"] == []
+
+
+def test_stubbed_route_with_power_but_no_straps_reports_partial_and_warns(
+    tmp_path, monkeypatch
+):
+    """The transcription-error case the filer flagged as equally silent: a
+    supplied `request.power` whose straps draw nothing produces tapcells,
+    fillers and rails but no straps and no PDN vias. The same audit catches
+    it -- `partial`, naming exactly what is missing."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        power={
+            "power_net": "VPWR",
+            "ground_net": "VGND",
+            "straps": _BASE_STRAPS,
+        },
+    )
+    _stub_openroad_success(
+        monkeypatch,
+        def_text=_fake_def(
+            masters={
+                "sky130_fd_sc_hd__nand2_1": 4,
+                "sky130_fd_sc_hd__tapvpwrvgnd_1": 3,
+                "sky130_fd_sc_hd__fill_1": 5,
+            },
+            special_nets=(("VPWR", 6, 0, 0), ("VGND", 6, 0, 0)),
+        ),
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    placed = report["power"]["placed"]
+    assert placed["status"] == "partial"
+    assert placed["tapcells"] == 3
+    assert placed["missing"] == ["stripe_segments", "pdn_vias"]
+
+    assert len(report["warnings"]) == 1
+    warning = report["warnings"][0]
+    assert "request.power was supplied" in warning
+    assert "STRIPE strap segments" in warning
+    assert "PDN vias" in warning
+
+
+def test_stubbed_floorplan_stage_power_audit_is_unavailable_not_zero(
+    tmp_path, monkeypatch
+):
+    """No DEF is written at `"floorplan"`, so every count is `null` with a
+    stated reason -- never `0`, which would be an invented measurement."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        constraints=None,
+        io=None,
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    placed = report["power"]["placed"]
+    assert placed["evidence"] == "unavailable"
+    assert placed["status"] == "unknown"
+    assert placed["def_path"] is None
+    assert placed["tapcells"] is None
+    assert placed["special_nets"] is None
+    assert (
+        "no DEF is written at the 'floorplan' stage" in (placed["unavailable_reason"])
+    )
+    assert "placed counts unavailable" in report["warnings"][0]
+
+
+def test_stubbed_place_stage_audits_the_unrouted_def_without_grading_fillers(
+    tmp_path, monkeypatch
+):
+    """`filler_placement` is a `"route"`-stage-only call, so a `"place"`
+    DEF legitimately carries no fillers -- grading it for them would be a
+    false alarm. Everything else is still graded, off `unrouted_def_path`."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="place",
+        power={
+            "power_net": "VPWR",
+            "ground_net": "VGND",
+            "straps": _BASE_STRAPS,
+        },
+    )
+    _stub_openroad_success(
+        monkeypatch,
+        stages=("floorplan", "place"),
+        def_text=_fake_def(
+            masters={
+                "sky130_fd_sc_hd__nand2_1": 4,
+                "sky130_fd_sc_hd__tapvpwrvgnd_1": 3,
+            },
+            special_nets=(("VPWR", 6, 4, 2), ("VGND", 6, 4, 2)),
+        ),
+    )
+
+    report = run_place_and_route(request_path)
+
+    placed = report["power"]["placed"]
+    assert placed["def_path"] == report["unrouted_def_path"]
+    assert placed["fillers"] == 0
+    assert "fillers" not in placed["missing"]
+    assert placed["status"] == "complete"
+    assert report["warnings"] == []
+
+
+def test_cli_json_keeps_stdout_clean_and_warns_on_stderr(tmp_path, monkeypatch, capsys):
+    """Issue #2086: the warning has to reach an operator who never opens
+    the JSON -- so it goes to stderr in `--format json` too, leaving
+    stdout a single parseable document and the exit code unchanged."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, def_text=_LOGIC_ONLY_DEF)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    exit_code = main(["place-and-route", request_path, "--format", "json"])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["warnings"] == [captured.err.split("warning: ", 1)[1].strip()]
+    assert captured.err.startswith("klt place-and-route: warning: ")
+
+
+def test_cli_text_reports_placed_power_counts_regardless(tmp_path, monkeypatch, capsys):
+    """Issue #2086, suggestion 3: the counts appear in the run summary
+    whether or not they are a problem, so a wrong run is visible in the
+    artifact rather than only in the absence of a complaint."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        power={
+            "power_net": "VPWR",
+            "ground_net": "VGND",
+            "straps": _BASE_STRAPS,
+        },
+    )
+    _stub_openroad_success(monkeypatch, def_text=_POWER_COMPLETE_DEF)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    exit_code = main(["place-and-route", request_path])
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "power delivery (complete, evidence: def):" in captured.out
+    assert "  tapcells: 3" in captured.out
+    assert "  fillers: 7" in captured.out
+    assert "    VPWR: 6 followpin, 4 stripe, 2 via" in captured.out
+    assert captured.err == ""
 
 
 # --------------------------------------------------------------------------- #
