@@ -736,8 +736,7 @@ def test_scan_interpreter_mismatch_diagnostics_none_when_absent(tmp_path):
 
 
 def test_scan_interpreter_mismatch_diagnostics_tolerates_a_missing_log(tmp_path):
-    """Never raises -- a missing/unreadable transcript contributes nothing,
-    the same posture `_scan_sdf_diagnostics`/`_log_tail` already take."""
+    """Missing ABI diagnostics are best-effort, unlike the required SDF gate."""
     assert fv._scan_interpreter_mismatch_diagnostics(str(tmp_path / "nope.log")) is None
 
 
