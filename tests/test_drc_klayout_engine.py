@@ -28,6 +28,8 @@ from klayout_tools import pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import DrcError, run_drc_klayout_engine
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 #: Real-binary integration gate, mirroring `tests/test_lvs.py`'s
 #: `HAVE_NETGEN`/`_SKIP_NO_NETGEN` pattern for netgen.
 HAVE_KLAYOUT_BINARY = shutil.which("klayout") is not None

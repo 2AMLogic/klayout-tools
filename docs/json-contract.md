@@ -315,15 +315,17 @@ geometry change from a klt/KLayout upgrade. See
 }
 ```
 
-- `klt_version` — the running `klt` package version
-  (`klayout_tools.__version__`). This is the plain, static package version —
-  deliberately *not* the build-identity string (issue #1202), which a
-  post-tag source build reports as `X.Y.Z+g<sha>`; that one is available from
-  `klt version --format json` as `version`, alongside `git_commit` and the
-  tri-state `is_release`. Record it beside a report when "which build
-  produced this?" has to remain answerable later; `klt_version` alone cannot
-  tell a release from a source build made after that release's tag. See
-  `docs/cli/version.md`.
+- `klt_version` — the running `klt` build identity (issue #2090), resolved by
+  `build_identity.build_version()` exactly like `klt --version` and
+  `klt version --format json`'s `version`: `X.Y.Z` for a confirmed clean
+  release, `X.Y.Z+g<12-char sha>` for a post-tag build, an additional
+  `.dirty` for uncommitted changes, or `X.Y.Z+unknown` when no git provenance
+  can be recovered. Packaged builds use their build-time record; source
+  installs probe their checkout. Reports now carry the build identity
+  themselves. Reports from before this fix carry only the static package
+  version and cannot distinguish releases from post-tag builds.
+  `klayout_tools.__version__` and the version command's `package_version`
+  remain the plain package version. See `docs/cli/version.md`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see

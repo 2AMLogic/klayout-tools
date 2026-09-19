@@ -43,6 +43,7 @@ import types
 from pathlib import Path
 
 import klayout.db as kdb
+import pytest
 
 from helpers.cocotb_fakes import FakeCocotbRunner as _FakeRunner
 from helpers.subprocess_fakes import fake_completed
@@ -56,6 +57,8 @@ from klayout_tools.trajectory import (
     read_log,
     record_from_eval,
 )
+
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 # --------------------------------------------------------------------------- #
 # RTL / testbench fixtures (trimmed from tests/test_synthesize.py /

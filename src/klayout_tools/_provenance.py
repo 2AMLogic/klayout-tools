@@ -308,15 +308,10 @@ def _content_hash(path: str | None) -> str | None:
     return f"sha256:{digest}" if digest is not None else None
 
 
-def _klt_version() -> str | None:
-    """``klayout_tools.__version__`` (the ``klt --version`` string), or
-    ``None`` if unresolvable."""
-    try:
-        import klayout_tools
-
-        return getattr(klayout_tools, "__version__", None)
-    except Exception:
-        return None
+def _klt_version() -> str:
+    """The same build identity as ``klt --version``, including ``+unknown``
+    when no git provenance can be recovered."""
+    return build_identity.build_version()
 
 
 def _klayout_version() -> str | None:

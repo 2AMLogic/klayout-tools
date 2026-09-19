@@ -4,10 +4,14 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from klayout_tools import digital_fleet, synthesize
 from klayout_tools import eval as evaluate
 from test_digital_fleet import _base_candidate
 from test_synthesize import _setup_success_env, _stub_yosys_success
+
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 
 
 def test_fleet_handoff_uses_one_current_isolated_synthesis(tmp_path, monkeypatch):

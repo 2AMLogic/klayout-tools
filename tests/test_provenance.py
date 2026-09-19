@@ -64,8 +64,7 @@ def test_build_provenance_always_reports_versions():
         "deck",
         "input",
     }
-    # klt_version resolves from the installed package metadata.
-    assert isinstance(prov["klt_version"], str)
+    assert prov["klt_version"] == _provenance.build_identity.build_version()
 
 
 def test_build_provenance_no_deck_no_pdk_no_input_are_null():
@@ -174,6 +173,9 @@ def test_build_provenance_mismatch_check_does_not_shell_out(monkeypatch):
     def _fail(*_args, **_kwargs):  # pragma: no cover - must not be reached
         raise AssertionError("build_provenance shelled out to compute the pin")
 
+    # Build identity intentionally probes source installs; isolate the
+    # engine-pin check this test covers from that independent resolution.
+    monkeypatch.setattr(_provenance.build_identity, "build_version", lambda: "0.5.0")
     monkeypatch.setattr(_provenance.subprocess, "run", _fail)
     prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
     assert prov["klayout_version_mismatch"] in (True, False)

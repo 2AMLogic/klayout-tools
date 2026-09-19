@@ -17,6 +17,8 @@ from test_synthesize import (
     _write_request,
 )
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 _LIBRARY = "gf180mcu_fd_sc_mcu7t5v0"
 _CORNER = "tt_025C_5v00"
 _RTL = """\
