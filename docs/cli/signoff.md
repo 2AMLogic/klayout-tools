@@ -736,6 +736,17 @@ unannotated (but passing) regression cited for item 7 renders `"unmet"` with
 what is missing: `"wrong_kind"` means "cite a different artifact",
 `"not_post_layout"` means "re-run *this* artifact against the layout".
 
+Only the literal JSON boolean `true` in `environment.sdf.annotated` grants
+annotation credit. False, null, missing fields, strings (including `"true"`
+and `"false"`), numbers, arrays, and objects do not qualify. Malformed optional
+`environment` or `sdf` containers are treated the same way: an otherwise
+passing regression remains a passing plain check and valid item-5 evidence,
+but item 7 is `"unmet"` with `reason: "not_post_layout"` and no citation.
+The plain check's `detail.sdf_annotated` uses this same strict predicate and
+reports `false`; malformed optional metadata does not cause an envelope
+error. This validates the annotation flag's domain, not the simulator's
+correctness or the completeness of SDF annotation.
+
 **`klt pex`'s envelope shape.** At the time issue #871 wired this
 restriction, `klt pex` (Epic #709) did not exist yet, so `klt signoff`
 recognised a **Curator-proposed, provisional** shape ahead of the real
