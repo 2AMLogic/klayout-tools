@@ -144,6 +144,25 @@ entries" below) — `[{"metric": <name>, "value": <number>, "higher_is_better":
 mechanism for free, since they grade evidence through this same per-check
 pass/fail logic.
 
+Known critical metrics must also satisfy their declared value domain. The
+DRC error count and simulator failed/errored corner counts are
+`nonnegative_integer`: negative integers, floats (including `0.0`), booleans,
+strings, nulls, arrays, and objects are invalid evidence. Invalid values
+produce a blocker with additional `domain` and `reason` fields, such as
+`{"metric": "drc__error__count", "value": -1, "higher_is_better": false,
+"domain": "nonnegative_integer", "reason": "below_minimum"}`. Manifest
+items expose these blockers under `detail.critical_metric_blockers` and
+retain `reason: "check_failed"` with no passing citation. Signed finite
+measurements use their own domains and polarity; negative slack is not an
+invalid count. Unknown optional metrics and legacy envelopes without a
+metrics block retain their existing behavior.
+
+Every signoff JSON reader rejects nonstandard `NaN`/infinity constants and
+numbers that overflow to infinity, including envelope files/stdin,
+manifest/fleet files/stdin, nested fleet manifests, and command evidence.
+Malformed top-level JSON produces exit code 1 with the usual error envelope;
+malformed evidence leaves its tier item unmet with `unreadable_evidence`.
+
 **Vacuous-verdict refusal (issue #1996).** Also independently of the
 kind-specific `status` rules above, a check fails if the envelope's own
 `coverage` block reports `nothing_checked: true` — the shared convention in
