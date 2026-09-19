@@ -46,6 +46,14 @@ from klayout_tools.ir_solver import solve_ir_drop
 from klayout_tools.power import run_power
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
+# Deliberately the fixture routed **without** `request.power` (issue #2079).
+# What this file cross-checks against ngspice is the *solver*, on a network
+# small enough to read: the gridless fixture's 34 islands / 68 nodes / 34
+# edges. The power-complete sibling `gcd-pdn.gds.gz` collapses that to 2
+# islands / 500 nodes / 1594 edges -- a strictly larger ngspice job that
+# exercises no solver path this one does not, on a topology whose per-island
+# arithmetic is no longer hand-checkable. `tests/test_power.py` pins the
+# gridded fixture's own island topology instead.
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 
 #: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never

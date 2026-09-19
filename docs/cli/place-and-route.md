@@ -2291,6 +2291,23 @@ regression fixture should move to a dedicated, frozen copy (e.g.
 implicitly coupled to whatever `tests/corpus/place_and_route/gcd.gds.gz`
 happens to contain after each future regeneration.
 
+**Resolved by issue #2079 — and not the way the paragraph above predicted.**
+Rather than regenerating `gcd.gds.gz` *with* a PDN and freezing a
+`gcd_no_pdn.gds.gz` snapshot of the old contents,
+`tests/corpus/place_and_route/gcd-pdn.gds.gz` was added **beside** it: the
+same design, the same pipeline, with a real `request.power` PDN (ORFS's own
+`platforms/sky130hd/pdn.tcl` met1-followpins rail plus met4/met5 straps,
+`power_net`/`ground_net` = `VPWR`/`VGND`). That inverts the freeze —
+`gcd.gds.gz` *is* the frozen "no PDN" copy, left byte-identical, so every
+pinned count cited against it (`klt drc`/`klt extract`/`klt lvs`/`klt
+power`'s own) stays valid and nothing needed re-pinning. The two are paired
+controls, chosen by what is under test: this design's supplies resolve to
+**17 islands per net** on `gcd.gds.gz` and to exactly **one** on
+`gcd-pdn.gds.gz`, where `klt lvs`'s `power_connectivity` block reports
+`"match"` across 1349 instances. See `tests/corpus/README.md`'s "`gcd-pdn`"
+section for the full provenance and the four checks `regenerate.sh` gates
+that fixture on.
+
 ## Partial completion (`target_stage`)
 
 A request with `target_stage: "place"` asks only for floorplan through

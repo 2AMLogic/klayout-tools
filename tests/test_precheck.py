@@ -20,6 +20,13 @@ from klayout_tools.precheck import CHECK_NAMES, PrecheckError, run_precheck
 # `klt precheck` against machine-generated, macro-scale layout rather than
 # the hand-drawn analog fixtures above. See tests/corpus/README.md's
 # "Machine-generated macro-scale fixture" section for full provenance.
+#
+# Deliberately the fixture routed **without** `request.power` (issue #2079).
+# `klt precheck` asks structural questions (off-grid geometry, zero-area
+# shapes, cell names, pin labels) that a power grid does not change --
+# verified on the power-complete sibling `gcd-pdn.gds.gz`, which passes
+# identically -- so this file stays on the fixture its assertions were
+# measured against. Use `gcd-pdn.gds.gz` when power delivery is under test.
 CORPUS_DIR = Path(__file__).parent / "corpus"
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 

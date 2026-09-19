@@ -1362,6 +1362,14 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
 # hand-drawn analog fixtures above. See
 # tests/corpus/place_and_route/README.md (in tests/corpus/README.md's
 # "Machine-generated macro-scale fixture" section) for full provenance.
+#
+# Deliberately the fixture routed **without** `request.power` (issue #2079).
+# Its power-complete sibling, `gcd-pdn.gds.gz`, is `klt drc --deck sky130`
+# clean too (`violation_count: 0`, measured on the regeneration that
+# committed it), so switching would neither strengthen nor weaken this
+# check -- while re-pinning `violation_count` against a different artifact
+# than the one #1420/#1430/#1443's whole `nwell`-rule history was measured
+# on. Reach for `gcd-pdn.gds.gz` when power delivery is what is under test.
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 
 
