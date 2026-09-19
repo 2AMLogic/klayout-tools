@@ -1541,6 +1541,7 @@ def run_place_and_route(
         ) from exc
 
     stages: list[dict[str, Any]] = []
+    engine_logs: list[dict[str, Any]] = []
     checkpoint_path: str | None = None
 
     for stage in stages_to_run:
@@ -1577,14 +1578,18 @@ def run_place_and_route(
         _write_script(script_path, lines)
 
         completed = _run_openroad(
-            script_path, metrics_path, error_cls=PlaceAndRouteError
+            script_path,
+            metrics_path,
+            error_cls=PlaceAndRouteError,
+            engine_logs=engine_logs,
         )
-        if completed.returncode != 0:
-            raise PlaceAndRouteError(
-                _engine_error_message(stage, completed, pdk_info=pdk_info)
-            )
+        with completed.diagnostics(PlaceAndRouteError):
+            if completed.returncode != 0:
+                raise PlaceAndRouteError(
+                    _engine_error_message(stage, completed, pdk_info=pdk_info)
+                )
 
-        metrics = _read_metrics(metrics_path, stage)
+            metrics = _read_metrics(metrics_path, stage)
         setup_count, hold_count = (None, None)
         if stage != "floorplan":
             setup_count = _count_violations(
@@ -1652,6 +1657,7 @@ def run_place_and_route(
                 max_transition_violation_count,
                 max_capacitance_violation_count,
             ) = _run_corner_sweep(
+                engine_logs=engine_logs,
                 checkpoint_in=next_checkpoint,
                 corners=corners,
                 io_spec=io_spec,
@@ -1729,6 +1735,7 @@ def run_place_and_route(
         # `_validate_post_route_spef`'s own docstring for why.
         if post_route_spef:
             spef_sta = _post_route_spef_metrics(
+                engine_logs=engine_logs,
                 output_dir=output_dir,
                 hdl_toplevel=hdl_toplevel,
                 gds_path=gds_path,
@@ -1947,6 +1954,7 @@ def run_place_and_route(
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
+        "engine_logs": engine_logs,
         "hdl_toplevel": hdl_toplevel,
         "status": "ok",
         "stage_reached": target_stage,

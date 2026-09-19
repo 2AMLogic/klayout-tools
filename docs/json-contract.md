@@ -614,6 +614,7 @@ probing the value's Python type at runtime.
 | `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,schematic_netlist}` | 2 | #1261 |
 | `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
 | `size` | `models_lib` | 2 | #1274 |
+| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
 
 **Plain-string fields** — intentionally unchanged by this issue:
 

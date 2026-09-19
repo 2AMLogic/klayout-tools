@@ -434,6 +434,7 @@ def _post_route_spef_metrics(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    engine_logs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """``request.post_route_spef``'s own pipeline (issue #948, Epic #700
     Phase 3): extract real per-net R/C from the just-merged routed GDS via
@@ -679,24 +680,30 @@ def _post_route_spef_metrics(
     )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path, error_cls=PlaceAndRouteError)
-    if completed.returncode != 0:
-        raise PlaceAndRouteError(_engine_error_message("route_spef_sta", completed))
+    completed = _run_openroad(
+        script_path,
+        metrics_path,
+        error_cls=PlaceAndRouteError,
+        engine_logs=engine_logs,
+    )
+    with completed.diagnostics(PlaceAndRouteError):
+        if completed.returncode != 0:
+            raise PlaceAndRouteError(_engine_error_message("route_spef_sta", completed))
 
-    # Fail loud rather than reporting a path to a file that is not there
-    # (issue #1002): a `sdf_path` in the response is a promise a downstream
-    # `klt functional-verification --options.sdf` run will consume, and a
-    # missing-but-reported artifact would surface there as a *silent*
-    # zero-delay run (Icarus's `$sdf_annotate` treats an unopenable file as a
-    # non-fatal `SDF WARNING`, `vvp` still exits 0 -- see
-    # `docs/design/sdf-annotate-feasibility-spike.md` §3.3).
-    if sdf_path is not None and not os.path.isfile(sdf_path):
-        raise PlaceAndRouteError(
-            "request.post_route_sdf: the post-route OpenSTA session reported "
-            f"success but wrote no SDF file at '{sdf_path}'"
-        )
+        # Fail loud rather than reporting a path to a file that is not there
+        # (issue #1002): a `sdf_path` in the response is a promise a downstream
+        # `klt functional-verification --options.sdf` run will consume, and a
+        # missing-but-reported artifact would surface there as a *silent*
+        # zero-delay run (Icarus's `$sdf_annotate` treats an unopenable file as a
+        # non-fatal `SDF WARNING`, `vvp` still exits 0 -- see
+        # `docs/design/sdf-annotate-feasibility-spike.md` §3.3).
+        if sdf_path is not None and not os.path.isfile(sdf_path):
+            raise PlaceAndRouteError(
+                "request.post_route_sdf: the post-route OpenSTA session reported "
+                f"success but wrote no SDF file at '{sdf_path}'"
+            )
 
-    metrics = _read_metrics(metrics_path, "route_spef_sta")
+        metrics = _read_metrics(metrics_path, "route_spef_sta")
     setup_violation_count = _count_violations(
         completed.stdout, _SETUP_VIOLATIONS_BEGIN, _SETUP_VIOLATIONS_END
     )
@@ -776,6 +783,7 @@ def _run_corner_sweep(
     max_fanout: float | None = None,
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
+    engine_logs: list[dict[str, Any]] | None = None,
 ) -> tuple[float | None, float | None, list[dict[str, Any]], int | None, int | None]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
@@ -898,13 +906,19 @@ def _run_corner_sweep(
     )
     _write_script(script_path, lines)
 
-    completed = _run_openroad(script_path, metrics_path, error_cls=PlaceAndRouteError)
-    if completed.returncode != 0:
-        raise PlaceAndRouteError(
-            _engine_error_message("route (corner sweep)", completed)
-        )
+    completed = _run_openroad(
+        script_path,
+        metrics_path,
+        error_cls=PlaceAndRouteError,
+        engine_logs=engine_logs,
+    )
+    with completed.diagnostics(PlaceAndRouteError):
+        if completed.returncode != 0:
+            raise PlaceAndRouteError(
+                _engine_error_message("route (corner sweep)", completed)
+            )
 
-    metrics = _read_metrics(metrics_path, "route (corner sweep)")
+        metrics = _read_metrics(metrics_path, "route (corner sweep)")
     worst_setup_raw = metrics.get("timing__setup__ws")
     worst_hold_raw = metrics.get("timing__hold__ws")
     worst_setup = round(worst_setup_raw, 5) if worst_setup_raw is not None else None
@@ -986,14 +1000,18 @@ def _run_corner_sweep(
 
         corner_stage_name = f"route (corner sweep: {corner_name})"
         corner_completed = _run_openroad(
-            corner_script_path, corner_metrics_path, error_cls=PlaceAndRouteError
+            corner_script_path,
+            corner_metrics_path,
+            error_cls=PlaceAndRouteError,
+            engine_logs=engine_logs,
         )
-        if corner_completed.returncode != 0:
-            raise PlaceAndRouteError(
-                _engine_error_message(corner_stage_name, corner_completed)
-            )
+        with corner_completed.diagnostics(PlaceAndRouteError):
+            if corner_completed.returncode != 0:
+                raise PlaceAndRouteError(
+                    _engine_error_message(corner_stage_name, corner_completed)
+                )
 
-        corner_metrics = _read_metrics(corner_metrics_path, corner_stage_name)
+            corner_metrics = _read_metrics(corner_metrics_path, corner_stage_name)
         corner_setup_raw = corner_metrics.get("timing__setup__ws")
         corner_hold_raw = corner_metrics.get("timing__hold__ws")
         # Issue #1866: this corner's own TNS pair, from this same
