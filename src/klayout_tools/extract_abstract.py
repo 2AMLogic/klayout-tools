@@ -97,6 +97,22 @@ _INSTANCE_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]")
 #: which is a diagnostic, not a message a caller should have to read in full.
 _ABSTRACT_TIED_PIN_WARNING_EXAMPLES = 5
 
+#: The :func:`_wire_abstract_cells` ``probe_layers`` roles that are **body
+#: identity** rather than signal interconnect -- issue #2142.
+#:
+#: ``nwell``/``tap`` are *field* layers: a well strap or a substrate/guard
+#: ring is one electrically continuous shape spanning most of a block, so the
+#: net probed off one is the same net for every coordinate it covers. That
+#: makes them uniquely dangerous as a *fallback* probe target for an
+#: abstracted cell's pin -- every pin whose own conductor happens to miss at
+#: its access point lands on the **same** design-wide net, which is exactly
+#: the "several of one macro's separately declared pins collapsed onto one
+#: net, and that net is a top-level net that is not one of the macro's ports"
+#: shape issue #2142 reports. They are therefore probed only when a pin's own
+#: declared role *is* that layer (a ``deck.well_label`` pin), never as a
+#: cross-layer fallback -- see :func:`_probe_single_abstract_pin_point`.
+_BODY_IDENTITY_PROBE_ROLES = frozenset({"nwell", "tap"})
+
 
 def _sanitize_instance_name(name: str) -> str:
     """Map every character outside ``[A-Za-z0-9_]`` in a parasitic *device
@@ -260,14 +276,15 @@ def _abstract_cell_body_identity_cover(
     (and with either of the other two cells abstracted), but collapse to
     ``VDDTAP|VSSG`` as soon as the well-drawing cell is abstracted.
 
-    So the cover is captured here, pre-erasure, and unioned back into the
-    *classification* side only (see ``_extract_netlist``'s
-    ``nwell_body_cover``/``isolation_region``). The erased, post-abstraction
-    ``nwell`` region stays the **conductor**: an abstracted cell is still a
-    black box (its well is not a wire the parent can route through, and
-    ``_probe_abstract_pin_net`` still cannot bind a pin onto it), and the
-    PMOS ``"W"`` terminal still reads the conductor region, so no device can
-    be recognised with a body terminal that has no geometry.
+    The cover is captured here, pre-erasure, and unioned back into the
+    classification regions (``nwell_body_cover``/``isolation_region``).
+    The nwell cover also restores the actual well conductor for body-pin
+    probing and connectivity (#2082). Abutted standard cells share this
+    physical conductor: erasing it split one real well into false per-cell
+    body-pin islands. Exact polygons and placement transforms preserve real
+    well gaps; no pin names or bounding boxes are used to invent continuity.
+    Active/poly and other device-recognition layers remain erased, so this
+    does not reintroduce devices or internal signal ties into black boxes.
     """
     import klayout.db as kdb
 
@@ -505,7 +522,7 @@ def _local_pin_candidate_points(
     layout: kdb.Layout,
     cell: kdb.Cell,
     deck: ExtractionDeck,
-) -> dict[str, list[kdb.Point]]:
+) -> dict[str, list[tuple[kdb.Point, str]]]:
     """Extra local (cell-frame) candidate access points for every in-cell
     metal-label pin of ``cell``, discovered from the cell's own *pre-erasure*
     internal routing -- issue #1183.
@@ -550,8 +567,14 @@ def _local_pin_candidate_points(
     honours, so it can never introduce a false merge that the real
     extraction pass would not also recognise.
 
-    Returns ``{<pin label text>: [<extra local dbu point>, ...]}`` -- built
-    only from labels drawn on one of ``deck.metal_labels`` (the
+    Returns ``{<pin label text>: [(<extra local dbu point>, <probe-layer
+    role>), ...]}`` -- each candidate carries the conductor it was actually
+    discovered on (``"metal<i>"`` for ``deck.metals[i]``), so
+    :func:`_probe_abstract_pin_net` probes it against *that* layer rather
+    than against some single cell-wide role (issue #2142; the role is per
+    *point*, not per pin, for the same reason a pin's own labels are --
+    see :func:`_resolve_abstract_cell_pins`). Built only from labels drawn
+    on one of ``deck.metal_labels`` (the
     overwhelmingly common case for a standard cell's signal pins);
     ``well_label``/``poly_label`` pins are left with their original
     single-point resolution, unchanged. A label whose own point resolves to
@@ -659,13 +682,14 @@ def _local_pin_candidate_points(
             if net is not None:
                 names_by_net.setdefault(net.cluster_id, set()).add(text.string)
 
-    extra_points: dict[str, list[kdb.Point]] = {}
+    extra_points: dict[str, list[tuple[kdb.Point, str]]] = {}
     for metal_index, layer in enumerate(deck.metal_labels):
         if layer is None or metal_index >= len(metals):
             continue
         layer_index = layout.find_layer(*layer)
         if layer_index is None:
             continue
+        role = f"metal{metal_index}"
         target_region = metals[metal_index]
         for text in kdb.Texts(cell.shapes(layer_index)).each():
             point = kdb.Point(text.x, text.y)
@@ -684,7 +708,7 @@ def _local_pin_candidate_points(
             for polygon in kdb.Region(shapes).merged().each():
                 if crossed and not any(polygon.inside(own) for own in own_points):
                     continue
-                candidate = _polygon_interior_point(polygon)
+                candidate = (_polygon_interior_point(polygon), role)
                 if candidate not in points:
                     points.append(candidate)
     return extra_points
@@ -759,15 +783,41 @@ def _resolve_abstract_cell_pins(
     cell: kdb.Cell,
     deck: ExtractionDeck,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
-    local_candidates: dict[str, list[kdb.Point]] | None = None,
+    local_candidates: dict[str, list[tuple[kdb.Point, str]]] | None = None,
 ) -> tuple[
-    list[tuple[str, list[kdb.Point], str | None]], str | None, str | None, list[str]
+    list[tuple[str, list[tuple[kdb.Point, str | None]]]],
+    str | None,
+    str | None,
+    list[str],
 ]:
     """Resolve one abstracted cell type's pins (issue #620).
 
     Returns ``(pins, resolution_source, lef_path, warnings)`` where ``pins`` is
-    ``[(pin name, access points in **cell-local dbu**, probe layer role or
-    ``None``), ...]`` sorted by pin name (the stable ``.subckt`` pin order).
+    ``[(pin name, [(access point in **cell-local dbu**, probe layer role or
+    ``None``), ...]), ...]`` sorted by pin name (the stable ``.subckt`` pin
+    order).
+
+    **The probe-layer role is per access *point*, not per pin** (issue
+    #2142). A hard macro routinely labels one port on more than one
+    conductor -- an ``li1.pin`` text on the pad its interior drives and a
+    ``met2.pin`` text on the stub the parent actually routes to are the same
+    declared pin -- and carrying a single cell-wide role for the pin meant
+    every one of its points was probed against whichever label layer came
+    first in ``label_roles`` order. The points drawn on the *other* layers
+    then missed that layer entirely and fell through
+    :func:`_probe_single_abstract_pin_point`'s bottom-up cross-layer
+    fallback, which takes the first conductor that has *any* geometry at
+    that coordinate -- in a real block, the parent's power strap running
+    underneath the macro's upper-metal ports. Because
+    :func:`_abstract_pin_net_score` (correctly) prefers a named net over the
+    unnamed island a black-boxed macro's own interior pad becomes, that
+    strap then won for *every* such pin at once: several of one instance's
+    separately declared pins collapsed onto one net, and that net was a
+    top-level net that is not one of the macro's ports at all -- exactly
+    what issue #2142 reports. Recording the layer each point was read from
+    makes every candidate probe the conductor its own label names, so the
+    fallback is never reached for a correctly drawn pin.
+
     ``access points`` is a *list* rather than a single point (issue #1181): a
     LEF ``PIN`` may legally declare multiple disjoint same-layer ``PORT``
     rectangles for one electrical node (and an in-cell label may likewise be
@@ -802,7 +852,8 @@ def _resolve_abstract_cell_pins(
       real PDK tooling. The LEF layer name is not translated to a GDS layer
       (that would need a PDK layer map ``klt extract`` does not resolve), so
       these pins carry no layer role and are probed against the deck's
-      conductor layers bottom-up instead.
+      *signal* conductor layers bottom-up instead -- never against
+      ``nwell``/``tap``, see :data:`_BODY_IDENTITY_PROBE_ROLES`.
     - ``None`` -- neither source resolved anything; the caller turns this
       into an :class:`ExtractError` when the cell type actually has
       instances.
@@ -825,8 +876,9 @@ def _resolve_abstract_cell_pins(
     geometry-less).
 
     ``local_candidates`` (issue #1183) is
-    :func:`_local_pin_candidate_points`'s ``{<pin name>: [<extra local
-    point>, ...]}`` result, computed by the caller *before* this cell type's
+    :func:`_local_pin_candidate_points`'s ``{<pin name>: [(<extra local
+    point>, <role>), ...]}`` result, computed by the caller *before* this
+    cell type's
     device-recognition geometry was erased for abstraction -- ``None`` (the
     default) or an empty dict behaves exactly as before this issue's fix.
     Only consulted on the ``"in_cell_labels"`` path (a ``"lef_abstract"``
@@ -847,7 +899,7 @@ def _resolve_abstract_cell_pins(
         (layer, f"metal{index}") for index, layer in enumerate(deck.metal_labels)
     ]
 
-    in_cell: dict[str, tuple[list[kdb.Point], str]] = {}
+    in_cell: dict[str, list[tuple[kdb.Point, str]]] = {}
     for layer, role in label_roles:
         if layer is None:
             continue
@@ -863,19 +915,23 @@ def _resolve_abstract_cell_pins(
             # mode this issue reports for LEF-declared multi-rectangle pins.
             # `_probe_abstract_pin_net` probes every candidate and picks
             # whichever one actually resolves to routed geometry, so keeping
-            # every point here is what makes that possible. The role
-            # recorded is the first-seen layer's (a real pin's labels should
-            # all share one layer role; `label_roles`'s fixed order still
-            # makes this deterministic if they don't).
-            points, _role = in_cell.setdefault(text.string, ([], role))
-            points.append(kdb.Point(text.x, text.y))
+            # every point here is what makes that possible. Each point
+            # carries *its own* layer's role (issue #2142): a pin labelled on
+            # more than one conductor is normal for a hard macro, and a
+            # single cell-wide role made every one of that pin's points probe
+            # the first-seen label layer -- see this function's docstring.
+            in_cell.setdefault(text.string, []).append(
+                (kdb.Point(text.x, text.y), role)
+            )
 
     if in_cell:
-        for name, (points, _role) in in_cell.items():
+        for name, points in in_cell.items():
             for extra_point in (local_candidates or {}).get(name, []):
                 if extra_point not in points:
                     points.append(extra_point)
-        pins = [(name, points, role) for name, (points, role) in in_cell.items()]
+        pins: list[tuple[str, list[tuple[kdb.Point, str | None]]]] = [
+            (name, list(points)) for name, points in in_cell.items()
+        ]
         pins.sort(key=lambda entry: entry[0])
         return pins, "in_cell_labels", None, []
 
@@ -883,7 +939,7 @@ def _resolve_abstract_cell_pins(
     if entry is not None:
         lef_path, lef_pins = entry
         dbu = layout.dbu
-        lef_resolved: list[tuple[str, list[kdb.Point], str | None]] = []
+        lef_resolved: list[tuple[str, list[tuple[kdb.Point, str | None]]]] = []
         lef_warnings: list[str] = []
         for pin_name in sorted(lef_pins):
             boxes = lef_pins[pin_name]
@@ -907,14 +963,17 @@ def _resolve_abstract_cell_pins(
             # island net instead of the routed net. `_probe_abstract_pin_net`
             # probes every candidate point and keeps whichever one actually
             # lands on routed geometry.
-            points = [
-                kdb.Point(
-                    round(((x0 + x1) / 2) / dbu),
-                    round(((y0 + y1) / 2) / dbu),
+            lef_points: list[tuple[kdb.Point, str | None]] = [
+                (
+                    kdb.Point(
+                        round(((x0 + x1) / 2) / dbu),
+                        round(((y0 + y1) / 2) / dbu),
+                    ),
+                    None,
                 )
                 for x0, y0, x1, y1 in (box["bbox_um"] for box in boxes)
             ]
-            lef_resolved.append((pin_name, points, None))
+            lef_resolved.append((pin_name, lef_points))
         if lef_resolved:
             return lef_resolved, "lef_abstract", lef_path, lef_warnings
 
@@ -1084,14 +1143,32 @@ def _probe_single_abstract_pin_point(
     """The extracted net at exactly one candidate ``point``, via
     ``LayoutToNetlist.probe_net(<layer>, <dbu point>)``.
 
-    ``role`` (present for a label-resolved pin) names the conductor the pin's
-    own label was drawn on, so that layer is probed first and its answer is
-    authoritative. A pin with no role (the LEF fallback, whose LEF layer name
-    is not translated to a GDS layer) falls back to probing every conductor
-    in ``probe_layers`` order -- metals bottom-up, then poly/nwell/tap -- and
-    takes the first hit, since a standard cell's pins land on the lowest
-    metal available. Returns ``None`` when no conductor carries geometry at
-    that point at all.
+    ``role`` names the conductor **this point** was read off -- the layer its
+    own label was drawn on, or the ``deck.metals`` level a
+    :func:`_local_pin_candidate_points` fragment was discovered on. It is a
+    property of the point, not of the pin (issue #2142): a hard macro
+    routinely labels one declared pin on several conductors, and probing all
+    of that pin's points against one cell-wide role is what sent the
+    off-role points into the cross-layer fallback below. That layer is
+    probed first and its answer is authoritative. ``None`` (the LEF
+    fallback, whose LEF layer name is not translated to a GDS layer) has no
+    declared layer to be authoritative about.
+
+    **The cross-layer fallback never reaches ``nwell``/``tap``** unless one
+    of them *is* this point's own ``role`` (a ``deck.well_label`` pin) --
+    :data:`_BODY_IDENTITY_PROBE_ROLES`. Those are field layers whose probed
+    net is the same design-wide net at every coordinate a well strap or
+    guard/substrate ring covers, so using one as a "nothing else is here"
+    fallback answer binds *every* pin that misses its own conductor onto the
+    same foreign net at once -- the collapse issue #2142 reports, and the
+    residual half of the exposure PR #622's review only reordered
+    ``probe_layers`` for. A point with nothing but well/tap under it now
+    resolves to ``None`` instead, which :func:`_wire_abstract_cells` already
+    reports as a per-instance "no conductor found at its resolved access
+    point" warning rather than silently shorting the pin into a rail.
+
+    Returns ``None`` when no eligible conductor carries geometry at that
+    point at all.
 
     This is the single-candidate core :func:`_probe_abstract_pin_net` calls
     once per access-point candidate for a pin (issue #1181) -- kept separate
@@ -1105,7 +1182,9 @@ def _probe_single_abstract_pin_point(
                 if net is not None:
                     return net
                 break
-    for _name, region in probe_layers:
+    for name, region in probe_layers:
+        if name in _BODY_IDENTITY_PROBE_ROLES and name != role:
+            continue
         net = l2n.probe_net(region, point)
         if net is not None:
             return net
@@ -1193,8 +1272,7 @@ def _abstract_pin_net_score(net: kdb.Net) -> tuple[int, int]:
 
 def _probe_abstract_pin_net(
     l2n: kdb.LayoutToNetlist,
-    points: list[kdb.Point],
-    role: str | None,
+    points: list[tuple[kdb.Point, str | None]],
     probe_layers: list[tuple[str, kdb.Region]],
 ) -> kdb.Net | None:
     """The best-resolved net across every candidate access point for one
@@ -1208,6 +1286,11 @@ def _probe_abstract_pin_net(
     blind: if the externally-routed rectangle/label is not first, the pin
     resolves onto an isolated single-shape island net instead of the net the
     design actually routes it to (the bug this issue reports).
+
+    ``points`` is ``[(<top-cell dbu point>, <probe-layer role or ``None``>),
+    ...]`` -- each candidate carries the conductor it was read off, so it is
+    probed against *that* layer rather than against one role shared by the
+    whole pin (issue #2142; see :func:`_resolve_abstract_cell_pins`).
 
     Every point in ``points`` is probed independently via
     :func:`_probe_single_abstract_pin_point`; among every point that
@@ -1240,7 +1323,7 @@ def _probe_abstract_pin_net(
     """
     best_net: kdb.Net | None = None
     best_score: tuple[int, int] | None = None
-    for point in points:
+    for point, role in points:
         net = _probe_single_abstract_pin_point(l2n, point, role, probe_layers)
         if net is None:
             continue
@@ -1319,7 +1402,9 @@ def _wire_abstract_cells(
     instances: list[tuple[int, kdb.ICplxTrans]],
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]],
     probe_layers: list[tuple[str, kdb.Region]],
-    local_candidates_by_cell: dict[int, dict[str, list[kdb.Point]]] | None = None,
+    local_candidates_by_cell: (
+        dict[int, dict[str, list[tuple[kdb.Point, str]]]] | None
+    ) = None,
     global_net_ports_by_cell: dict[int, int] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Wire every ``--abstract-cells``-matched instance into ``netlist`` as a
@@ -1458,7 +1543,7 @@ def _wire_abstract_cells(
         black_box_circuit = kdb.Circuit()
         black_box_circuit.name = cell.name
         pin_ids: dict[str, int] = {}
-        for pin_name, _points, _role in pins:
+        for pin_name, _points in pins:
             pin = black_box_circuit.create_pin(pin_name)
             net = black_box_circuit.create_net(pin_name)
             black_box_circuit.connect_pin(pin, net)
@@ -1475,9 +1560,9 @@ def _wire_abstract_cells(
             # issue #1366's single observable signature for both of its
             # reported impossible bindings.
             pins_by_net: dict[str, list[str]] = {}
-            for pin_name, points, role in pins:
-                global_points = [trans * point for point in points]
-                net = _probe_abstract_pin_net(l2n, global_points, role, probe_layers)
+            for pin_name, points in pins:
+                global_points = [(trans * point, role) for point, role in points]
+                net = _probe_abstract_pin_net(l2n, global_points, probe_layers)
                 if net is None:
                     net = top_circuit.create_net(f"{instance_name}__{pin_name}")
                     warnings.append(

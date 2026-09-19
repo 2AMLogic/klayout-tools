@@ -14,12 +14,181 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract --abstract-cells` no longer binds several of one
+  abstracted macro's own separately declared pins onto a single synthesized
+  net, nor absorbs a top-level net that is not one of that macro's pins
+  (issue #2142 — a different mechanism from #1911/#1934's cross-instance
+  well reclassification, as that report's own ablation matrix showed). Two
+  probe-layer defects caused it. (1) The conductor a pin was probed on was
+  tracked **per pin**, not per access point: a macro that labels one port on
+  two conductors (an `li1.pin` text on the pad its interior drives plus a
+  `met2.pin` text on the stub the parent routes to — ordinary hard-macro
+  drawing) had every one of that pin's points probed against the
+  first-seen label layer, so the off-layer points missed and fell through
+  the bottom-up cross-layer fallback onto the first conductor with *any*
+  geometry at that coordinate — in a real block, the parent's power strap
+  running underneath. Because a named net correctly outranks the unnamed
+  island a black-boxed macro's own pad becomes, that strap then won for
+  *every* such pin at once. The probe layer is now a property of the access
+  point, so each candidate probes the conductor its own label names. (2)
+  The `nwell`/`tap` field layers are no longer a cross-layer fallback
+  answer unless one of them is the access point's own declared layer: a
+  well strap or guard/substrate ring is one continuous shape whose probed
+  net is the same design-wide net everywhere it covers, so using it as a
+  "nothing else is drawn here" answer merged every pin that missed its own
+  conductor onto that one foreign net (PR #622's review had only *demoted*
+  well/tap below the metals, not stopped them answering). Such a point now
+  resolves to nothing and surfaces through the existing per-instance "no
+  conductor found at its resolved access point" warning. The `#1366`
+  two-pins-one-net self-check stays a warning rather than becoming a hard
+  failure — on a real sky130 block every abstracted standard cell trips it
+  legitimately via its `VPB`/`VPWR` and `VNB`/`VGND` body-tie pairs. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Pin resolution".
+- **Fixed**: `klt place-and-route`'s routed GDS no longer carries metal
+  below the PDK's own minimum-**area** rules, and the response says so
+  either way (issue #2139, the `place-and-route` half of #2072 that PR
+  #2075 could not reproduce). The DEF→GDS merge now runs a post-route
+  minimum-area repair pass: every merged routed-metal polygon is floored
+  against its own layer's plain `*.area.*` rule in the resolved PDK
+  family's curated deck — the *same* rule set `klt drc` judges the geometry
+  with — by drawing an abutting patch into the top cell. Two geometry
+  classes this repo does not author drive it: the foundry tech LEF's own
+  via landings (sky130's `L1M1_PR_MR` met1 landing is `0.0667 um²` against
+  an `m1.6` floor of `0.083 um²`; `M2M3_PR`'s met3 landing is `0.1089 um²`
+  against `m3.6`'s `0.240 um²`), and OpenROAD `pdngen`'s met5 via patches
+  (`2.272 um²` against `m5.4`'s `4.0 um²`). Every patch is bounded by the
+  DEF's own `DIEAREA`, by the layer's own minimum-spacing and
+  minimum-width rules, and by a verified single-merged-polygon area check,
+  so a repair can never author a short or a sliver. **Additive response
+  field** `min_area_repair` (`null` unless `stage_reached` is `"route"`)
+  reports `status`/`patches`/`repaired`/`remaining`, per-rule
+  before/after counts, and any polygon the pass refused to repair — and a
+  pass that could not run at all reports `status: "skipped"` with a
+  `reason` rather than an unmeasured clean. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s
+  "Minimum-area repair".
+- **Added**: `klt lvs`'s `net_correspondence[]` entries now carry a
+  `heuristic` boolean for a `reference.form: "gate-level-verilog"` run
+  whose `reference.library` pin orders resolve (issue #2136). Such a
+  reference carries no power/ground pins at all, so the comparer had no
+  same-named candidate for the layout's `VGND`/`VPWR` and paired it with
+  whatever its graph heuristics reached first — routinely an unrelated
+  signal net — reporting that fallback as an ordinary, unmarked
+  correspondence inside a `status: "match"` report. `heuristic: true` now
+  marks a pairing whose layout side is demonstrably a supply net (a pin
+  the library declares power/ground lands on it) while the reference side
+  is not a supply pin; `heuristic: false` marks every pairing the compare
+  stands behind. The key is **omitted** for every other `reference.form`
+  and for any run with no derivable supply universe, so "checked and
+  genuine" stays distinguishable from "never checked" — read it with
+  `entry.get("heuristic")`. Additive: `status`, `mismatches[]`, and the
+  `power_connectivity` block are unchanged, and `power_connectivity`
+  remains the check that actually validates supply connectivity. See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "Supply correspondences are not
+  validated supply connectivity".
 - **Fixed**: `klt extract --deck sg13cmos5l --parasitics` now uses sourced
   nominal R/C coefficients for Metal1-Metal4 and TopMetal1, plus all four
   adjacent vertical-overlap pairs (issue #2113). The registered deck
   previously reported zero wire R/C and missing coefficients. Values come
   from SG13CMOS5L's own pinned Magic extraction table; the model remains
   first-order and uncalibrated, without process-corner selection.
+- **Fixed**: `klt functional-verification` now refuses requested SDF
+  annotation when either required build/test transcript is missing,
+  unreadable, or fails during reading (issue #2130). Previously those logs
+  were silently treated as clean scans, allowing `annotated: true` and
+  post-layout signoff credit without inspected diagnostics. The refusal
+  uses the existing error path (exit 1, no success envelope). Readable empty
+  logs, known-benign partial-coverage reporting, and non-SDF runs retain
+  their existing behavior; no JSON shape change.
+- **Fixed** (#2108): DRC, ERC antenna, power EM, simulation and PEX report
+  versioned checked-work coverage and refuse known zero checks (`not_checked`,
+  exit 4). External KLayout category declarations no longer prove execution:
+  absent findings it reports `coverage_unknown`/4. DRC envelope v2 retains
+  declarations in `coverage.rule_categories` and corrects `rules_checked`.
+  Real failures retain precedence (including ERC/power exit 3). Plain,
+  numbered and compound signoff refuse zero, unknown and malformed coverage.
+  Existing coverage fields and verb-specific partial behavior remain;
+  [the compatibility mapping](docs/coverage-contract.md) lists migration
+  details and the remaining Phase 2 adapters.
+- **Added**: explicit per-family decisions for eight PDK capabilities and a
+  normal-CI check against their live registries/support gates (issue #2132).
+  Missing registrations now fail the invariant with contextual diagnostics;
+  intentional unsupported capabilities require reasons. Registered coefficient-free
+  parasitics remain distinct from missing decks. Existing sparse defaults,
+  support restrictions, coefficients, and CLI/JSON behavior are unchanged.
+- **Fixed**: `klt signoff` now grants SDF post-layout credit only for literal
+  JSON `true` in `environment.sdf.annotated` (issue #2131). Strings, numbers,
+  and malformed optional metadata report `sdf_annotated: false` and leave
+  digital item 7 unmet with `not_post_layout`, while preserving a valid
+  pre-layout regression's plain PASS and item-5 eligibility. Malformed
+  `environment` containers also no longer crash the plain detail renderer.
+- **Fixed**: `klt lvs`'s `power_connectivity` check no longer admits a
+  dangling signal output as a power/ground pin when the design's only
+  carrier of that pin name leaves it unconnected (issue #2076). An ordinary
+  `place-and-route` output hits this: CTS hangs clock-load cells off each
+  leaf clock net with their outputs unconnected, so if no other instantiated
+  cell declares a pin of the same name (flip-flops output `Q`, clock buffers
+  `X`), nothing in the converted reference mentioned the inverter's `Y` and
+  it was admitted beside the real supplies. That inflated `power_pins`, and
+  — with clock loads on two different leaf nets, the normal case on anything
+  bigger than a toy — reported `power_connectivity.status: "mismatch"` with a
+  `power.inconsistent_pin_net` finding on a pin that was never a supply,
+  making the check unusable as a gate on exactly the designs it is most
+  needed for. A pin name is now admitted only when **every** library cell the
+  reference instantiates declares it *and* no reference circuit carries it;
+  the previously documented behaviour for real supplies, filler/tap pruning,
+  and genuine supply defects is unchanged (all still derived structurally,
+  with no per-PDK power-pin name table). See `docs/cli/lvs.md` → "How the
+  power-pin universe is derived".
+- **Added**: `klt lvs`'s `power_connectivity` block now carries
+  `power_pins_derivation` (issue #2076) — the rule that produced
+  `power_pins`, the library masters the reference instantiates (the evidence
+  it was applied to), and whether the instantiated masters' declared pin
+  shapes genuinely corroborate each other. `corroborated` is `true` only when
+  at least two instantiated masters declare *distinct* pin sets — not merely
+  when more than one master name is instantiated: two drive-strength variants
+  of one logical cell (e.g. `mylib__inv_1`/`mylib__inv_2`, both
+  `A VGND VNB VPB VPWR Y`) declare the identical shape and corroborate
+  nothing, the same evidentiary gap a single master has. Purely additive, so
+  no `schema_version` bump: a consumer that quotes `power_pins` as a coverage
+  claim can now see when that claim rests on uncorroborated evidence
+  (`corroborated: false`, with a `reason` naming the master(s) involved)
+  instead of having to reverse-engineer it from the netlist.
+- **Added**: `klt place-and-route` now reports the power delivery it
+  actually *placed*, and warns loudly when there is none (issue #2086).
+  `request.power` is optional, and omitting it produced a run that
+  completes — exit 0, a routed DEF, a merged GDS, real area/timing numbers
+  — on a layout with **no PDN, no substrate/well taps, and (on a library
+  with no row-rail fallback) no fill at all**, with nothing in the output
+  saying so. The response's new `power.placed` block is
+  measured from the DEF the run wrote (`components`/`tapcells`/`endcaps`/
+  `fillers` instance counts, plus one `special_nets[]` entry per DEF
+  `SPECIALNETS` net with its `FOLLOWPIN` rail segments, `STRIPE` strap
+  segments, `stripe_layers` and PDN `vias`), graded into
+  `status`/`missing`. A new top-level `warnings` array (`[]` when empty,
+  never `null`) fires both when `request.power` was omitted and when a
+  *supplied* block produced an incomplete grid — the transcription-error
+  case, where a strap layer that draws nothing is just as silent. Every
+  warning's prose is derived from the measured counts (an omitted-block run
+  on `sky130_fd_sc_hd` really does place rails and fillers via the issue
+  #1442 row-rail fallback, and the warning narrows to the taps, straps and
+  PDN vias that are genuinely absent), and each expected supply is graded
+  on its own, so a routed `VDD` beside a bare `VSS` entry grades `partial`
+  rather than `complete`. The CLI writes each warning to **stderr** in both
+  `--format json` and `--format text`, leaving stdout a single parseable
+  document. `--format text` also prints the placed counts unconditionally.
+  Measured zeros and unavailable evidence are kept distinct:
+  `power.placed.evidence` is `"def"` only when a DEF was read and parsed —
+  which requires its `COMPONENTS` and (when present) `SPECIALNETS` sections
+  to carry exactly the number of records they declare and to terminate
+  their last record, so a truncated or miscounted section is reported as
+  unavailable rather than as a measured zero or a smaller-but-complete
+  grid — otherwise every count is `null` with an `unavailable_reason`,
+  never a fabricated `0`. This warns,
+  it does not refuse: `status` stays `"ok"` and the exit code stays `0`, so
+  a caller wanting a hard gate composes it on a non-empty `warnings` or
+  `power.placed.status != "complete"`. Additive throughout; no
+  `schema_version` bump.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
@@ -164,6 +333,58 @@ not `klt --version`, if you need to detect this kind of drift. See
   that `klt sim` (and any other netlist-only verb) *can* now populate
   `provenance.input` for the `--manifest` staleness pin without poisoning the
   cross-check; wiring that up is separate work.
+- **Added / Changed**: the T1 (bronze) evidence checklist in
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) gains
+  **item 11, "Power delivery (structural)"** (issue #2025, operator ruling
+  2026-09-17), and `klt signoff --manifest`/`--fleet` grades it. A fleet
+  survey found 2 of 7 committed digital layouts had no power delivery
+  network at all while still citing an LVS `match` toward item 4 — nothing
+  in T1 required a power grid to *exist*. Item 11 asks the structural
+  question directly, per block kind:
+  - **digital** (RTL flow) — the cited `klt place-and-route` response
+    reports `power.pdn: true` with a `power.tapcell_master` named, every
+    `power.straps[].layer` is covered by the cited `klt erc` spec's own
+    stackup, and the cited `klt lvs` report's `power_connectivity.status`
+    is `"match"` (`"unchecked"` satisfies item 4 but **not** item 11).
+  - **analog / custom** (and the doc's full-custom digital sub-case, which
+    has no P&R run to cite) — the cited `klt lvs` report's
+    `net_correspondence` pairs every declared supply net to a
+    reference-side net, i.e. the reference netlist carried the supplies. A
+    SPICE reference satisfies this by construction.
+  - **both** — a `klt erc` **supply-spec** run declaring at least one
+    `"kind": "supply"` net and at least one `ties[]` entry, reporting no
+    `erc.unconnected_net`/`erc.supply_short` on a declared supply and no
+    `erc.missing_tie`. Item 11 grades those rules specifically, *not* the
+    ERC envelope's own `status`, so an antenna verdict on an unrelated
+    signal net (or the tie-cell false positives issue #1994 tracks) cannot
+    block a power-delivery claim.
+
+  IR-drop and EM (`klt power`) deliberately stay **out** of T1 (silver-tier
+  material): `_ITEMS_ACCEPTING_POWER_EVIDENCE` is still empty, and item 11
+  is the *structural* question ("is the supply connected to what it
+  powers"), never the *analysis* one. **Grading change**: `t1_item_count`
+  is now `11` (`22` for `mixed-signal`), so every block that was at T1
+  before reports one more item and drops to `tier: null` until it cites
+  item 11 — which is precisely why the doc required an operator ruling
+  before this item could be added (#1982). The count was already the parsed
+  checklist's own length, never a literal in code.
+
+  Supporting additive changes, all documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md): `klt erc` and `klt
+  place-and-route` responses are now recognised envelope kinds (`"erc"`,
+  `"place-and-route"`) in both modes, each **opt-in to item 11 alone** the
+  way `"generic"` is scoped to item 8 — an `erc` or `place-and-route`
+  citation for any other item renders `wrong_kind`, which matters most for
+  the latter, since a P&R response passes on `status: "ok"` alone and an
+  unrestricted citation would reopen the "cannot fail, therefore always
+  passes" hole issue #1987 closed for `klt extract`. Item 11's manifest
+  entry may be a **JSON array** of ordinary evidence entries (the first
+  compound item; every other item still takes exactly one), each resolved
+  through the same read/run/classify/hash path as any single citation. Its
+  `citation` gains two item-11-only members, `parts[]` and
+  `power_delivery`, alongside the unchanged single-citation fields. Four
+  new `reason` values distinguish which artifact to go fix: `no_pdn`,
+  `supply_spec_incomplete`, `supply_not_continuous`, `lvs_supply_unproven`.
 - **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
   and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
   block kind (issue #1987). Both items previously accepted *any* recognised,

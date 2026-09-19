@@ -54,8 +54,8 @@ from ._report_verify import load_committed_report as _load_committed_report
 from .coverage import (
     REASON_ALL_RULES_SKIPPED,
     REASON_DECK_HAS_NO_RULES,
-    REASON_DECK_REPORTED_NO_RULES,
-    build_nothing_checked,
+    build_check_coverage,
+    work_id,
 )
 from .decks import (
     DrcRule,
@@ -204,8 +204,8 @@ def _curated_nothing_checked_reasons(
 ) -> list[str]:
     """The curated engine's ``coverage.nothing_checked_reasons`` (issue #1996).
 
-    A deck that ran not one rule produces a ``"clean"`` verdict that is
-    vacuously true. ``rules_checked`` states what the verdict was actually
+    A deck that ran not one rule produces ``"not_checked"``.
+    ``rules_checked`` states what the verdict was actually
     measured over, so its emptiness -- and only its emptiness -- is the
     condition; the two reason codes then distinguish *why* there was nothing
     to run. A degenerate deck declaring no rules at all reports
@@ -236,7 +236,7 @@ def run_drc(
     ``docs/cli/drc.md``)::
 
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "file": <path as provided>,
             "deck": <deck name>,
             "dbu_um": <database unit in micrometres, float>,
@@ -959,15 +959,30 @@ def run_drc(
         # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
         # refuse a "clean" verdict measured over nothing without re-deriving
         # that emptiness from `rules_skipped` vs. the deck's own rule count.
-        **build_nothing_checked(_curated_nothing_checked_reasons(deck, rules_checked)),
+        **build_check_coverage(
+            checked=sorted(rules_checked),
+            skipped=[
+                {"id": rule, "reason": "absent_input_layer"}
+                for rule in sorted(rules_skipped)
+            ],
+            nothing_checked_reasons=_curated_nothing_checked_reasons(
+                deck, rules_checked
+            ),
+        ),
     }
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "file": path,
         "deck": deck_name,
         "dbu_um": layout.dbu,
-        "status": "violations" if violations else "clean",
+        "status": (
+            "violations"
+            if violations
+            else "not_checked"
+            if coverage["nothing_checked"]
+            else "clean"
+        ),
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
@@ -1981,7 +1996,7 @@ def run_drc_klayout_engine(
     )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "file": path,
         "deck": deck_file,
         "engine": "klayout",
@@ -2000,24 +2015,34 @@ def run_drc_klayout_engine(
             else {}
         ),
         "dbu_um": dbu,
-        "status": "violations" if violations else "clean",
+        "status": "violations" if violations else "coverage_unknown",
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "violations": violations,
         "coverage": {
             "deck_layers": [],
             "layers_checked": [],
-            # Issue #1996: the one coverage sub-field this engine *can*
-            # populate honestly -- the rule categories the deck's own report
-            # declares. Empty means the deck never reached an `output(...)`
-            # call, which is what `nothing_checked` below reports on.
-            "rules_checked": rule_categories,
+            # Categories are declarations, not execution instrumentation.
+            # An actual finding proves only that finding's rule ran.
+            "rule_categories": rule_categories,
+            "rules_checked": sorted(rule_counts),
             "layers_in_stream_without_rules": [],
             "rules_skipped": [],
             "voltage_domain_warnings": [],
             "deck_scope": [],
-            **build_nothing_checked(
-                [] if rule_categories else [REASON_DECK_REPORTED_NO_RULES]
+            **build_check_coverage(
+                checked=sorted(rule_counts),
+                # `work_id` namespaces this sentinel (via its JSON-encoded
+                # parts) so it cannot collide with a real RDB category name
+                # in `rule_counts` -- an external deck's rule names are
+                # caller-chosen and could otherwise coincidentally match a
+                # bare literal like "klayout:execution".
+                unknown=[
+                    {
+                        "id": work_id("engine_execution", "klayout"),
+                        "reason": "unmeasured_rule_execution",
+                    }
+                ],
             ),
         },
         "provenance": build_provenance(

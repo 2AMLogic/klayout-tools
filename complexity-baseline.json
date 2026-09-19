@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "max_complexity": 10,
-  "generated_by": "scripts/check_complexity_baseline.py --update-baseline (ruff 0.16.0)",
+  "generated_by": "scripts/check_complexity_baseline.py --update-baseline (ruff 0.16.2)",
   "violations": [
     {
       "file": "scripts/derive-module-ownership.py",
@@ -501,7 +501,7 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "function": "run_lvs",
-      "complexity": 61
+      "complexity": 60
     },
     {
       "file": "src/klayout_tools/lvs_mismatch.py",
@@ -696,21 +696,16 @@
     {
       "file": "src/klayout_tools/signoff.py",
       "function": "_check_passed",
-      "complexity": 12
-    },
-    {
-      "file": "src/klayout_tools/signoff.py",
-      "function": "_classify",
-      "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/signoff.py",
-      "function": "_detail",
       "complexity": 14
     },
     {
       "file": "src/klayout_tools/signoff.py",
-      "function": "_grade_evidence",
+      "function": "_classify",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "function": "_detail",
       "complexity": 16
     },
     {
@@ -791,7 +786,7 @@
     {
       "file": "src/klayout_tools/synthesize.py",
       "function": "run_synthesize",
-      "complexity": 17
+      "complexity": 16
     },
     {
       "file": "src/klayout_tools/trajectory.py",

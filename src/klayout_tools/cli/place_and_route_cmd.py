@@ -18,6 +18,7 @@ gate. See ``docs/design/digital-flow-contracts-spike.md`` section 5.)
 """
 
 import argparse
+import sys
 
 from ..place_and_route import PlaceAndRouteError, run_place_and_route
 from .output import emit_error, emit_success
@@ -32,6 +33,15 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("place-and-route", str(exc), args.format)
 
     emit_success(report, args.format, _print_text)
+    # Issue #2086: the response's own `warnings` list also goes to stderr,
+    # in *both* formats. A run that placed no tapcells, no PDN and no
+    # fillers is the failure mode this exists for -- it completes, exits 0,
+    # and its output looks exactly like data -- so the complaint has to be
+    # visible to an operator who never opens the JSON. stderr, not stdout:
+    # `--format json`'s stdout stays a single parseable document (see
+    # `output.py`'s own envelope note), and the exit code is unchanged.
+    for warning in report.get("warnings", ()):
+        print(f"klt place-and-route: warning: {warning}", file=sys.stderr)
 
     return 0
 
@@ -64,6 +74,32 @@ def _print_text(report: dict) -> None:
                 f"{key}={value}" for key, value in stage.items() if key != "name"
             )
             print(f"  {stage['name']}: {fields}")
+
+    # Issue #2086, suggestion 3: the placed power-delivery counts appear in
+    # the run summary *regardless* of whether they are a problem, so a
+    # power-less run is visible in the artifact rather than only in the
+    # absence of a complaint. `null` counts (unavailable evidence) render as
+    # `unknown`, never as `0`.
+    placed = report["power"]["placed"]
+    print()
+    print(f"power delivery ({placed['status']}, evidence: {placed['evidence']}):")
+    for label, key in (
+        ("tapcells", "tapcells"),
+        ("endcaps", "endcaps"),
+        ("fillers", "fillers"),
+    ):
+        value = placed[key]
+        print(f"  {label}: {'unknown' if value is None else value}")
+    nets = placed["special_nets"]
+    if nets is None:
+        print("  pdn_special_nets: unknown")
+    else:
+        print(f"  pdn_special_nets: {len(nets)}")
+        for net in nets:
+            print(
+                f"    {net['name']}: {net['followpin_segments']} followpin, "
+                f"{net['stripe_segments']} stripe, {net['vias']} via"
+            )
 
     print()
     print(f"def_path: {report['def_path']}")

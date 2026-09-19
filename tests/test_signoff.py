@@ -919,10 +919,17 @@ FUNCTIONAL_VERIFICATION_SDF_ENVELOPE = {
     },
 }
 
-#: A `klt place-and-route` response (docs/cli/place-and-route.md) -- trimmed
-#: to the fields that overlap `klt sta`'s own shape. Not a recognised kind,
-#: and adding `sta`/`functional-verification` recognition must not
-#: accidentally start classifying it as one (issue #1959).
+#: A `klt place-and-route` response (docs/cli/place-and-route.md), trimmed to
+#: the fields this module reasons about plus the ones that overlap `klt
+#: sta`'s own shape. Two things are being asserted by this fixture at once:
+#: it must classify as `place-and-route` (issue #2025, for T1 item 11's
+#: digital branch) and it must *never* classify as `sta` (issue #1959 -- the
+#: two verbs share `worst_slack_ns`/`timing_status`/`corners` but have
+#: different corner-sweep contracts).
+#:
+#: `power` is the PDN-complete shape: `request.power` was given, so `pdn`/
+#: `global_connect` are `true`, a real per-library `tapcell_master` was
+#: placed, and `straps[]` lists the layers the grid was drawn on.
 PLACE_AND_ROUTE_ENVELOPE = {
     "schema_version": 1,
     "engine": "openroad",
@@ -946,6 +953,245 @@ PLACE_AND_ROUTE_ENVELOPE = {
     "def_path": "/abs/path/gcd.def",
     "gds_path": "/abs/path/gcd.gds",
     "verilog_path": "/abs/path/gcd.v",
+    "power": {
+        "pdn": True,
+        "global_connect": True,
+        "power_net": "VPWR",
+        "ground_net": "VGND",
+        "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "endcap_master": None,
+        "filler_masters": ["sky130_fd_sc_hd__fill_1"],
+        "straps": [
+            {"layer": "met1", "spacing_um": None},
+            {"layer": "met4", "spacing_um": 0.56},
+        ],
+        "connects": [],
+        "row_rail": {"emitted": False},
+    },
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": {"name": "sky130A", "source": "volare", "version": "20240101"},
+        "deck": None,
+        # `klt place-and-route`'s own `provenance.input` hashes the *netlist*
+        # it routed, not the layout -- deliberately different from the
+        # layout hash `klt erc`/`klt lvs` pin, so a test that pins one must
+        # not accidentally pin the other.
+        "input": {"content_hash": "sha256:netlistA"},
+    },
+}
+
+#: Issue #2025: the same run with no `request.power` block at all -- the
+#: exact shape the fleet survey found on sky130-fpga and sky130-usb2-phy,
+#: where every T1 item but this one was satisfied on a layout with no power
+#: grid routed.
+PLACE_AND_ROUTE_NO_PDN_ENVELOPE = {
+    **PLACE_AND_ROUTE_ENVELOPE,
+    "power": {
+        "pdn": False,
+        "global_connect": False,
+        "power_net": None,
+        "ground_net": None,
+        "tapcell_master": None,
+        "endcap_master": None,
+        "filler_masters": [],
+        "straps": [],
+        "connects": [],
+        "row_rail": {"emitted": False},
+    },
+}
+
+#: Issue #2025: the `klt erc` **spec document** (docs/cli/erc.md, "Spec
+#: file") a supply-continuity run is driven by. `klt erc`'s envelope echoes
+#: this document's *path* but not its content, so `klt signoff` reads it to
+#: learn which supplies were actually declared -- without it, "no supply was
+#: ever declared" and "every declared supply resolved to one island" are
+#: indistinguishable (both report zero findings).
+ERC_SUPPLY_SPEC = {
+    "stackup": [
+        {"name": "poly", "layer": "66/20", "role": "gate"},
+        {"name": "li1", "layer": "67/20"},
+        {"name": "met1", "layer": "68/20", "label_layer": "68/5"},
+        {"name": "met4", "layer": "71/20", "label_layer": "71/5"},
+    ],
+    "vias": [
+        {"name": "licon1", "layer": "66/44", "between": ["poly", "li1"]},
+        {"name": "mcon", "layer": "67/44", "between": ["li1", "met1"]},
+    ],
+    "nets": [
+        {"name": "VPWR", "kind": "supply"},
+        {"name": "VGND", "kind": "supply"},
+        {"name": "A", "kind": "signal"},
+    ],
+    "ties": [
+        {
+            "name": "nwell_tie",
+            "well_layer": "64/20",
+            "tap_layer": "65/44",
+            "connect_to": "li1",
+            "net": "VPWR",
+        }
+    ],
+}
+
+#: Issue #2025: a `klt erc` envelope reporting no findings at all. The
+#: `spec` path is filled in per-test by `_erc_envelope` below, since it must
+#: point at a real, readable spec document on disk.
+ERC_CLEAN_ENVELOPE = {
+    "schema_version": 1,
+    "file": "routed.gds",
+    "spec": "erc-supply.json",
+    "pdk": "sky130",
+    "gate_role": "poly",
+    "gate_count": 1,
+    "gates": [
+        {
+            "gate_id": "gate0",
+            "net": "A",
+            "gate_area_um2": 2.0,
+            "antenna_verdict": "pass",
+            "levels": [],
+        }
+    ],
+    "erc_findings": [],
+    "erc_finding_count": 0,
+    "status": "clean",
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": {"name": "sky130", "source": "built-in", "version": None},
+        "deck": None,
+        # Same layout the DRC/LVS fixtures pin -- a real T1 package runs
+        # every layout-side check against one stream.
+        "input": {"content_hash": "sha256:layoutA"},
+    },
+}
+
+#: Issue #2025: an ERC run whose antenna check found a violation on an
+#: unrelated *signal* net, with the supply rails perfectly continuous. The
+#: envelope's own `status` is `"violations"`, so this fixture is what proves
+#: item 11 grades the supply rules it names rather than the envelope's
+#: global verdict (#1994's tie-cell false positives are the same shape).
+ERC_ANTENNA_VIOLATION_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "gates": [
+        {
+            "gate_id": "gate0",
+            "net": "A",
+            "gate_area_um2": 2.0,
+            "antenna_verdict": "violate",
+            "levels": [
+                {
+                    "layer": "met1",
+                    "antenna_ratio": 431.0,
+                    "antenna_ratio_max": 400.0,
+                    "verdict": "violate",
+                }
+            ],
+        }
+    ],
+}
+
+#: Issue #2025: a declared supply that resolved to more than one island --
+#: the rail is split into pieces that never touch.
+ERC_SPLIT_SUPPLY_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "erc_findings": [
+        {
+            "rule": "erc.unconnected_net",
+            "description": "declared net 'VGND' matched 3 disconnected islands",
+            "net": "VGND",
+            "other_net": None,
+            "gate_id": None,
+            "layer": None,
+            "bbox": None,
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: Issue #2025: a well/tub with no connected tap.
+ERC_MISSING_TIE_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "erc_findings": [
+        {
+            "rule": "erc.missing_tie",
+            "description": "well shape has no tap connected to 'VPWR'",
+            "net": "VPWR",
+            "other_net": None,
+            "gate_id": None,
+            "layer": "nwell_tie",
+            "bbox": {"left": 0, "bottom": 0, "right": 1000, "top": 1000},
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: Issue #2025: a floating-gate finding on a signal net, with both supplies
+#: clean. Like the antenna fixture above, this must not block item 11.
+ERC_FLOATING_GATE_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "erc_findings": [
+        {
+            "rule": "erc.floating_gate",
+            "description": "gate net has no connected geometry above the gate layer",
+            "net": None,
+            "other_net": None,
+            "gate_id": "gate1",
+            "layer": "poly",
+            "bbox": None,
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: Issue #2025: the analog/full-custom half of item 11's LVS condition -- a
+#: SPICE-reference compare, whose `power_connectivity` is `"unchecked"`
+#: (that form's reference carries its own supplies) and whose
+#: `net_correspondence` therefore pairs both supply nets to a reference-side
+#: net. The digital half needs no new fixture: it is
+#: `LVS_MATCH_POWER_MATCH_ENVELOPE` (defined above for issue #1965).
+LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_ENVELOPE,
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": "VGND", "pin": True},
+        {"layout": "VPWR", "reference": "VPWR", "pin": True},
+    ],
+}
+
+#: Issue #2025: a signal-only gate-level compare, whose reference netlist
+#: never declared the supplies -- they exist on the layout side alone, so
+#: they never pair. A block citing this one must prove item 11 through the
+#: PDN branch instead.
+LVS_MATCH_SIGNAL_ONLY_CORRESPONDENCE_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_ENVELOPE,
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": None, "pin": False},
+        {"layout": "VPWR", "reference": None, "pin": False},
+    ],
+}
+
+#: PR #2057 review follow-up: a `gate-level-verilog` reference that *does*
+#: declare explicit power ports, so its supplies pair in
+#: `net_correspondence` exactly like `LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE`
+#: -- but the caller explicitly disabled the power/ground check
+#: (`options.power_connectivity: false`). Pairing alone must not be enough
+#: to satisfy item 11's no-PAR branch: without the check having actually
+#: run, nothing verified the supplies landed on the right nets.
+LVS_MATCH_SUPPLY_CORRESPONDENCE_DISABLED_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_DISABLED_ENVELOPE,
+    "options": {"power_connectivity": False},
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": "VGND", "pin": True},
+        {"layout": "VPWR", "reference": "VPWR", "pin": True},
+    ],
 }
 
 DRC_ERROR_ENVELOPE = {
@@ -958,6 +1204,78 @@ def _write(tmp_path, name: str, payload: dict) -> str:
     path = tmp_path / name
     path.write_text(json.dumps(payload))
     return str(path)
+
+
+def _erc_evidence(
+    tmp_path,
+    envelope: dict = ERC_CLEAN_ENVELOPE,
+    spec: dict = ERC_SUPPLY_SPEC,
+    *,
+    prefix: str = "erc",
+) -> str:
+    """Write a `klt erc` envelope plus the spec document it names (issue
+    #2025) and return the envelope's path.
+
+    `klt erc`'s envelope echoes its spec's *path*, and `klt signoff` reads
+    that document to learn which supplies were declared -- so the two can
+    never be written independently in a test, or the grading would be
+    reading a spec that does not exist.
+    """
+    spec_path = _write(tmp_path, f"{prefix}-spec.json", spec)
+    return _write(tmp_path, f"{prefix}.json", {**envelope, "spec": spec_path})
+
+
+def _power_delivery_evidence(
+    tmp_path,
+    *,
+    kind: str = "analog",
+    erc_envelope: dict = ERC_CLEAN_ENVELOPE,
+    erc_spec: dict = ERC_SUPPLY_SPEC,
+    lvs_envelope: dict | None = None,
+    par_envelope: dict | None = PLACE_AND_ROUTE_ENVELOPE,
+    prefix: str = "pd",
+) -> list[str]:
+    """A complete, *passing* T1 item-11 citation (issue #2025): the compound
+    list of evidence paths a manifest names for "Power delivery
+    (structural)".
+
+    `kind="analog"` renders the analog/full-custom branch (a `klt erc` supply
+    run plus a SPICE-reference LVS report whose `net_correspondence` carries
+    the supplies, no P&R citation); `kind="digital"` renders the RTL-flow
+    branch (the same ERC run, a gate-level LVS report whose
+    `power_connectivity` matched, and the `klt place-and-route` response
+    proving a PDN was built).
+    """
+    if lvs_envelope is None:
+        lvs_envelope = (
+            LVS_MATCH_POWER_MATCH_ENVELOPE
+            if kind == "digital"
+            else LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE
+        )
+    parts = [
+        _erc_evidence(tmp_path, erc_envelope, erc_spec, prefix=f"{prefix}-erc"),
+        _write(tmp_path, f"{prefix}-lvs.json", lvs_envelope),
+    ]
+    if kind == "digital" and par_envelope is not None:
+        parts.append(_write(tmp_path, f"{prefix}-par.json", par_envelope))
+    return parts
+
+
+def _full_t1_evidence(tmp_path, *, kind: str = "analog") -> dict:
+    """Evidence naming a genuinely passing artifact for every T1 item --
+    the shared "this block really is at T1" fixture the roll-up and
+    tier-verdict tests build their negative cases from by removing one
+    entry.
+
+    Items 3, 4, 7, and 11 are kind-restricted or compound; every other item
+    is unrestricted and accepts the shared DRC fixture.
+    """
+    drc_path = _write(tmp_path, f"{kind}-drc.json", DRC_CLEAN_ENVELOPE)
+    evidence: dict = {str(item_id): drc_path for item_id in range(1, 11)}
+    evidence["4"] = _write(tmp_path, f"{kind}-lvs.json", LVS_MATCH_ENVELOPE)
+    evidence["7"] = _write(tmp_path, f"{kind}-pex.json", PEX_PASS_ENVELOPE)
+    evidence["11"] = _power_delivery_evidence(tmp_path, kind=kind, prefix=kind)
+    return evidence
 
 
 # --------------------------------------------------------------------------- #
@@ -2935,6 +3253,8 @@ def test_every_recognized_kind_declares_a_typed_shape():
         "power",
         "sta",
         "functional-verification",
+        "erc",
+        "place-and-route",
         "generic",
         "error",
     }
@@ -3094,20 +3414,23 @@ def _manifest(**overrides) -> dict:
     return base
 
 
-def test_analog_manifest_renders_ten_t1_items_plus_three_ladder_rows():
+def test_analog_manifest_renders_eleven_t1_items_plus_three_ladder_rows():
     result = build_tier_report(_manifest(kind="analog"))
 
     assert result["schema_version"] == 1
     assert result["block"] == "demo-block"
     assert result["kind"] == "analog"
-    assert result["t1_item_count"] == 10
+    # Eleven since issue #2025 added item 11 ("Power delivery (structural)")
+    # -- the count is `len(doc["t1_items"])`, never a literal, so this
+    # assertion is the guard that the doc and this command agree.
+    assert result["t1_item_count"] == 11
     assert result["t1_met_count"] == 0
     assert result["tier"] is None
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
 
     t1_items = [item for item in result["items"] if item["tier"] == "T1"]
     ladder_items = [item for item in result["items"] if item["tier"] != "T1"]
-    assert [item["id"] for item in t1_items] == list(range(1, 11))
+    assert [item["id"] for item in t1_items] == list(range(1, 12))
     assert {item["tier"] for item in ladder_items} == {"T2", "T3", "T4"}
     assert all(item["status"] == "unmet" for item in result["items"])
 
@@ -3188,12 +3511,12 @@ def test_digital_column_documents_the_full_custom_sub_case_for_items_1_2_5():
 def test_mixed_signal_manifest_doubles_up_kind_independent_items():
     result = build_tier_report(_manifest(kind="mixed-signal"))
 
-    # Items 1/2/5/7 split per-kind, items 3/4/6/8/9/10 are kind-independent
-    # but still rendered once per partition per the doc's mixed-signal
-    # guidance -- 10 items x 2 partitions.
+    # Items 1/2/5/7/11 split per-kind, items 3/4/6/8/9/10 are
+    # kind-independent but still rendered once per partition per the doc's
+    # mixed-signal guidance -- 11 items x 2 partitions.
     t1_items = [item for item in result["items"] if item["tier"] == "T1"]
-    assert len(t1_items) == 20
-    assert result["t1_item_count"] == 20
+    assert len(t1_items) == 22
+    assert result["t1_item_count"] == 22
     partitions = {item["partition"] for item in t1_items}
     assert partitions == {"analog", "digital"}
 
@@ -3620,15 +3943,16 @@ def test_items_other_than_3_4_and_7_are_unaffected_by_the_kind_restriction(
     tmp_path,
 ):
     """Regression: items 1, 2, 5, 6 and 8-10 still accept any recognised,
-    passing envelope kind -- only items 3, 4 (issue #1987) and 7 are
-    kind-restricted."""
+    passing envelope kind -- only items 3, 4 (issue #1987), 7, and 11
+    (issue #2025, which is compound rather than kind-restricted) are
+    restricted."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
 
     evidence = {str(i): drc_path for i in range(1, 11) if i not in (4, 7)}
     result = build_tier_report(_manifest(evidence=evidence))
 
     for item in result["items"]:
-        if item["tier"] == "T1" and item["id"] not in (4, 7):
+        if item["tier"] == "T1" and item["id"] not in (4, 7, 11):
             assert item["status"] == "met", item["id"]
             assert item["citation"]["kind"] == "drc"
 
@@ -3937,15 +4261,8 @@ def test_deliberately_skipped_check_is_caught_amid_otherwise_full_evidence(tmp_p
     it, render it unmet with a "no runnable check" reason, and must not
     let the block reach tier T1 despite every other item being genuinely
     met."""
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-
-    evidence = {str(i): drc_path for i in range(2, 11)}  # 2-10, never 1
-    evidence["4"] = lvs_path
-    # Item 7 is kind-restricted (issue #871) -- give it real `pex` evidence
-    # so this test's "every other item is genuinely met" claim still holds.
-    evidence["7"] = pex_path
+    evidence = _full_t1_evidence(tmp_path)
+    del evidence["1"]  # never run, as if the check simply was not done
 
     result = build_tier_report(_manifest(evidence=evidence))
 
@@ -3964,25 +4281,16 @@ def test_deliberately_skipped_check_is_caught_amid_otherwise_full_evidence(tmp_p
 
     # The skipped item is exactly what stops the tier from being T1 -- a
     # skipped check must never silently pass through as "assumed met".
-    assert result["t1_met_count"] == 9
-    assert result["t1_item_count"] == 10
+    assert result["t1_met_count"] == 10
+    assert result["t1_item_count"] == 11
     assert result["tier"] is None
 
 
-def test_all_ten_t1_items_met_yields_tier_t1(tmp_path):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+def test_all_eleven_t1_items_met_yields_tier_t1(tmp_path):
+    result = build_tier_report(_manifest(evidence=_full_t1_evidence(tmp_path)))
 
-    # Item 7 is kind-restricted (issue #871) -- a `pex`-shaped citation is
-    # required there; every other item still accepts the shared DRC fixture.
-    evidence = {str(i): drc_path for i in range(1, 11)}
-    evidence["4"] = lvs_path
-    evidence["7"] = pex_path
-
-    result = build_tier_report(_manifest(evidence=evidence))
-
-    assert result["t1_met_count"] == 10
+    assert result["t1_met_count"] == 11
+    assert result["t1_item_count"] == 11
     assert result["tier"] == "T1"
 
 
@@ -4529,14 +4837,9 @@ def test_cli_manifest_json_output(tmp_path, capsys):
 
 
 def test_cli_manifest_all_met_exits_zero(tmp_path, capsys):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-    evidence = {str(i): drc_path for i in range(1, 11)}
-    evidence["4"] = lvs_path
-    # Item 7 is kind-restricted to `pex` evidence (issue #871).
-    evidence["7"] = pex_path
-    manifest_path = _write(tmp_path, "manifest.json", _manifest(evidence=evidence))
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence=_full_t1_evidence(tmp_path))
+    )
 
     exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
 
@@ -4817,14 +5120,10 @@ def _fleet_write(tmp_path, blocks: list) -> str:
 
 def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
 
-    # canary-a: every T1 item met -> T1, no blocking item. Item 7 is
-    # kind-restricted to `pex` evidence (issue #871).
-    full_evidence = {str(i): drc_path for i in range(1, 11)}
-    full_evidence["4"] = lvs_path
-    full_evidence["7"] = pex_path
+    # canary-a: every T1 item met -> T1, no blocking item. Items 4/7/11 are
+    # kind-restricted or compound (issues #871/#1987/#2025).
+    full_evidence = _full_t1_evidence(tmp_path)
     block_a = _fleet_block_manifest("canary-a", evidence=full_evidence)
 
     # canary-b: everything but item 4 (LVS clean) met -> blocked on #4.
@@ -4845,7 +5144,7 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
     by_name = {block["block"]: block for block in result["blocks"]}
 
     assert by_name["canary-a"]["tier"] == "T1"
-    assert by_name["canary-a"]["t1_met_count"] == 10
+    assert by_name["canary-a"]["t1_met_count"] == 11
     assert by_name["canary-a"]["blocking_item"] is None
 
     assert by_name["canary-b"]["tier"] is None
@@ -4888,7 +5187,8 @@ def test_fleet_report_never_reparses_evidence_itself(tmp_path):
 # build_fleet_report() needed no code change to pick these two items up: it
 # already reduces whatever items[] build_tier_report() renders (see its own
 # "Fleet roll-up" docstring section), and build_tier_report() has rendered
-# all 10 T1 items -- including item 6 (statistical) and item 7 (post-layout)
+# every T1 item the doc lists -- including item 6 (statistical) and item 7
+# (post-layout)
 # -- since Phase 0 (#722). What changed under #870/#871 is which evidence
 # shapes those two items can now be *satisfied by* (a `klt yield` report for
 # item 6, a `klt pex` report -- and only that kind -- for item 7); before
@@ -4914,12 +5214,12 @@ def test_fleet_blocking_item_walks_through_statistical_then_post_layout_items(
     directly -- this is `build_fleet_report()`'s own blocking-item
     determination being exercised end to end."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
     yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
     pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
 
-    base_evidence = {str(i): drc_path for i in range(1, 11) if i not in (6, 7)}
-    base_evidence["4"] = lvs_path
+    base_evidence = _full_t1_evidence(tmp_path)
+    del base_evidence["6"]
+    del base_evidence["7"]
 
     def _row(evidence: dict[str, str]) -> dict[str, object]:
         block = _fleet_block_manifest("stat-postlayout-canary", evidence=evidence)
@@ -4965,7 +5265,7 @@ def test_fleet_blocking_item_walks_through_statistical_then_post_layout_items(
     fully_met = dict(with_item_6, **{"7": pex_path})
     row = _row(fully_met)
     assert row["tier"] == "T1"
-    assert row["t1_met_count"] == 10
+    assert row["t1_met_count"] == 11
     assert row["blocking_item"] is None
 
 
@@ -5128,16 +5428,10 @@ def test_fleet_block_manifest_non_object_raises(tmp_path):
 
 
 def test_cli_fleet_json_output(tmp_path, capsys):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-    full_evidence = {str(i): drc_path for i in range(1, 11)}
-    full_evidence["4"] = lvs_path
-    full_evidence["7"] = pex_path  # item 7 is kind-restricted (issue #871)
     fleet_path = _fleet_write(
         tmp_path,
         [
-            _fleet_block_manifest("canary-a", evidence=full_evidence),
+            _fleet_block_manifest("canary-a", evidence=_full_t1_evidence(tmp_path)),
             _fleet_block_manifest("canary-b", evidence={}),
         ],
     )
@@ -5151,14 +5445,9 @@ def test_cli_fleet_json_output(tmp_path, capsys):
 
 
 def test_cli_fleet_all_t1_exits_zero(tmp_path, capsys):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-    full_evidence = {str(i): drc_path for i in range(1, 11)}
-    full_evidence["4"] = lvs_path
-    full_evidence["7"] = pex_path  # item 7 is kind-restricted (issue #871)
     fleet_path = _fleet_write(
-        tmp_path, [_fleet_block_manifest("canary-a", evidence=full_evidence)]
+        tmp_path,
+        [_fleet_block_manifest("canary-a", evidence=_full_t1_evidence(tmp_path))],
     )
 
     exit_code = main(["signoff", "--fleet", fleet_path, "--format", "json"])
@@ -5408,15 +5697,35 @@ def test_sdf_annotated_functional_verification_is_marked_in_detail(tmp_path):
     assert result["checks"][0]["detail"]["sdf_corner"] == "typ"
 
 
-def test_place_and_route_envelope_is_still_unrecognized(tmp_path):
+def test_place_and_route_envelope_is_never_classified_as_sta(tmp_path):
     """`klt place-and-route`'s response overlaps `klt sta`'s timing fields
     (`worst_slack_ns`/`timing_status`/`corners`) but is a different verb with
-    a different corner-sweep contract -- recognising `sta` must not start
-    silently classifying it as one."""
+    a different corner-sweep contract. It became a recognised kind of its own
+    in issue #2025 (for T1 item 11's PDN condition) -- which must not make it
+    classify as, or stand in for, `sta`."""
     pnr_path = _write(tmp_path, "pnr.json", PLACE_AND_ROUTE_ENVELOPE)
 
-    with pytest.raises(SignoffError, match="unrecognized shape"):
-        build_signoff([pnr_path])
+    result = build_signoff([pnr_path])
+
+    assert result["checks"][0]["kind"] == "place-and-route"
+    assert result["checks"][0]["passed"] is True  # `status: "ok"` -- it ran
+    assert result["checks"][0]["detail"]["power_pdn"] is True
+    assert result["checks"][0]["detail"]["strap_layers"] == ["met1", "met4"]
+
+
+def test_place_and_route_citation_cannot_satisfy_the_timing_item(tmp_path):
+    """Issue #2025: recognising the P&R response must not let it borrow a
+    pass for item 5 (multi-corner timing), whose evidence is a `klt sta` run
+    against a *declared* corner set -- the P&R response's own sweep is the
+    PDK's full shipped list. It is accepted by item 11 alone."""
+    pnr_path = _write(tmp_path, "pnr.json", PLACE_AND_ROUTE_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": pnr_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "wrong_kind"
+    assert item_5["citation"] is None
 
 
 def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
@@ -5695,3 +6004,589 @@ def test_fleet_rollup_blocking_item_reflects_the_new_digital_kinds(tmp_path):
     block = result["blocks"][0]
     assert block["blocking_item"]["id"] == 1
     assert block["blocking_item"]["reason"] == "no_evidence"
+
+
+# --------------------------------------------------------------------------- #
+# T1 item 11: power delivery (structural) -- issue #2025
+#
+# The operator ruling that added this item (approved 2026-09-17) settled a
+# question `docs/design-evidence-tiers.md` had deliberately left open: no T1
+# item required a power grid to *exist*, so 2 of 7 committed digital layouts
+# in the fleet survey satisfied every item while being unpowerable. Item 11
+# is the first compound T1 item -- its manifest entry is a *list* of evidence
+# entries, and no single artifact can satisfy it.
+#
+# Two properties are load-bearing enough to test from several angles:
+#
+# 1. **It never fabricates a "met".** An ERC run whose spec declared no
+#    supply (or no ties) reports zero supply findings for the same reason a
+#    DRC deck with no rules reports zero violations -- it never asked. That
+#    must render `supply_spec_incomplete`, not a pass.
+# 2. **It grades only the rules it names.** An antenna violation or a
+#    floating-gate finding makes the ERC envelope's own `status`
+#    `"violations"`, but neither is power delivery -- and #1994 tracks a
+#    known tie-cell false-positive of exactly that shape. Item 11 must not be
+#    blocked by them.
+# --------------------------------------------------------------------------- #
+
+
+def _item_11(result: dict, partition: str | None = None) -> dict:
+    return next(
+        item
+        for item in result["items"]
+        if item["id"] == 11 and item["partition"] == partition
+    )
+
+
+def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="digital")},
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    # The leading part keeps the single-citation contract every existing
+    # consumer reads; `parts` carries the whole cited set.
+    assert item["citation"]["kind"] == "erc"
+    assert [part["kind"] for part in item["citation"]["parts"]] == [
+        "erc",
+        "lvs",
+        "place-and-route",
+    ]
+    assert item["citation"]["power_delivery"] == {
+        "partition_kind": "digital",
+        "supply_nets": ["VPWR", "VGND"],
+        "pdn": True,
+        "strap_layers": ["met1", "met4"],
+        "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "power_connectivity_status": "match",
+    }
+
+
+def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="analog")},
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert [part["kind"] for part in item["citation"]["parts"]] == ["erc", "lvs"]
+    assert item["citation"]["power_delivery"]["pdn"] is False
+    assert item["citation"]["power_delivery"]["power_connectivity_status"] == (
+        "unchecked"
+    )
+
+
+def test_item_11_digital_unmet_when_no_pdn_was_built(tmp_path):
+    """The headline case from the fleet survey: a routed digital block whose
+    P&R request carried no `power` block at all. Every other T1 item can be
+    met on that layout; item 11 must not be."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    par_envelope=PLACE_AND_ROUTE_NO_PDN_ENVELOPE,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "no_pdn"
+    assert item["citation"] is None
+
+
+def test_item_11_digital_unmet_when_no_tapcell_master_was_placed(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {**PLACE_AND_ROUTE_ENVELOPE["power"], "tapcell_master": None},
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "no_pdn"
+
+
+@pytest.mark.parametrize(
+    "power_connectivity",
+    [POWER_CONNECTIVITY_UNCHECKED, POWER_CONNECTIVITY_UNCHECKED_DISABLED],
+    ids=["unchecked", "explicitly-disabled"],
+)
+def test_item_11_digital_rejects_unchecked_power_connectivity(
+    tmp_path, power_connectivity
+):
+    """`"unchecked"` satisfies item 4 (it means "the question does not apply
+    here") but must never satisfy item 11, which is the question."""
+    lvs = {**LVS_MATCH_ENVELOPE, "power_connectivity": power_connectivity}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", lvs_envelope=lvs
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_supply_unproven"
+
+
+def test_item_11_analog_unmet_when_the_reference_never_carried_the_supplies(
+    tmp_path,
+):
+    """A signal-only gate-level reference leaves the supply nets unpaired in
+    `net_correspondence` -- so an RTL-flow digital block cannot reach `met`
+    by simply omitting its P&R citation and falling into the analog branch."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    lvs_envelope=LVS_MATCH_SIGNAL_ONLY_CORRESPONDENCE_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_supply_unproven"
+
+
+def test_item_11_full_custom_digital_is_met_through_the_analog_artifacts(tmp_path):
+    """The doc's "Full-custom digital sub-case": a hand-captured digital
+    block declares `kind: "digital"` but has no P&R run to cite, exactly as
+    for items 1, 2, and 5. Its SPICE-reference LVS carries the supplies."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    lvs_envelope=LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["pdn"] is False
+    assert item["citation"]["power_delivery"]["partition_kind"] == "digital"
+
+
+def test_item_11_rejects_supply_correspondence_when_power_connectivity_disabled(
+    tmp_path,
+):
+    """PR #2057 review follow-up: a `gate-level-verilog` reference can
+    declare explicit power ports, so its supplies pair in
+    `net_correspondence` even though the caller disabled the power/ground
+    check (`options.power_connectivity: false`). Net-correspondence pairing
+    alone must not satisfy the no-PAR branch -- the check never actually
+    ran, so nothing verified the supplies landed on the right nets."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    lvs_envelope=LVS_MATCH_SUPPLY_CORRESPONDENCE_DISABLED_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_supply_unproven"
+
+
+@pytest.mark.parametrize(
+    ("envelope", "label"),
+    [
+        (ERC_SPLIT_SUPPLY_ENVELOPE, "a declared supply split across islands"),
+        (ERC_MISSING_TIE_ENVELOPE, "a well with no connected tap"),
+    ],
+)
+def test_item_11_unmet_when_erc_reports_a_supply_side_finding(
+    tmp_path, envelope, label
+):
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet", label
+    assert item["reason"] == "supply_not_continuous", label
+
+
+def test_item_11_unmet_when_two_declared_supplies_are_shorted(tmp_path):
+    erc = {
+        **ERC_CLEAN_ENVELOPE,
+        "status": "violations",
+        "erc_findings": [
+            {
+                "rule": "erc.supply_short",
+                "description": "'VPWR' and 'VGND' resolve to the same island",
+                "net": "VPWR",
+                "other_net": "VGND",
+                "gate_id": None,
+                "layer": None,
+                "bbox": None,
+            }
+        ],
+        "erc_finding_count": 1,
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=erc
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_not_continuous"
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [ERC_ANTENNA_VIOLATION_ENVELOPE, ERC_FLOATING_GATE_ENVELOPE],
+    ids=["antenna-violation", "floating-gate"],
+)
+def test_item_11_is_not_blocked_by_a_non_supply_erc_finding(tmp_path, envelope):
+    """Item 11 grades the supply-continuity rules its checklist text names,
+    not the ERC envelope's own `status` -- otherwise an antenna violation on
+    an unrelated signal net (or #1994's tie-cell false positives) would block
+    a power-delivery claim it says nothing about."""
+    assert envelope["status"] == "violations"
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["check_status"] == "violations"
+
+
+def test_item_11_unmet_when_the_erc_spec_declared_no_supply_net(tmp_path):
+    """The "it never asked" case: `klt erc` computes the supply rules only
+    for declared nets, so a spec with none reports zero findings. That must
+    never read as a clean supply."""
+    spec = {**ERC_SUPPLY_SPEC, "nets": [{"name": "A", "kind": "signal"}]}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_when_the_erc_spec_declared_no_ties(tmp_path):
+    """Same rule, other half: `erc.missing_tie` is never computed when the
+    spec omits `ties[]`, so zero tie findings proves nothing."""
+    spec = {key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_when_a_strap_layer_is_outside_the_erc_spec_stackup(tmp_path):
+    """The ERC run must actually look at the layers the supply is routed on
+    -- a "one island" verdict computed over met1 alone says nothing about a
+    grid whose straps also run on met4."""
+    spec = {
+        **ERC_SUPPLY_SPEC,
+        "stackup": [
+            entry
+            for entry in ERC_SUPPLY_SPEC["stackup"]
+            if entry["name"] not in {"met4"}
+        ],
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_when_the_erc_spec_document_cannot_be_read(tmp_path):
+    """`klt erc`'s envelope echoes its spec's path but not its content, so a
+    spec that has since been deleted leaves the item unprovable -- unmet,
+    never assumed."""
+    erc_path = _write(
+        tmp_path,
+        "erc.json",
+        {**ERC_CLEAN_ENVELOPE, "spec": str(tmp_path / "does-not-exist.json")},
+    )
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    par_path = _write(tmp_path, "par.json", PLACE_AND_ROUTE_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"11": [erc_path, lvs_path, par_path]})
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_requires_both_an_erc_and_an_lvs_citation(tmp_path):
+    """An ERC run alone proves supply continuity but says nothing about
+    whether the supplies were part of the LVS compare -- "cite a different
+    artifact", which is what `wrong_kind` means everywhere in this module."""
+    erc_path = _erc_evidence(tmp_path)
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": erc_path}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["citation"] is None
+
+
+def test_item_11_rejects_an_unrelated_kind_in_the_cited_set(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    parts = _power_delivery_evidence(tmp_path, kind="analog") + [drc_path]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    assert _item_11(result)["reason"] == "wrong_kind"
+
+
+def test_item_11_unmet_when_the_cited_lvs_report_itself_fails(tmp_path):
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", lvs_envelope=LVS_MISMATCH_ENVELOPE
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_item_11_unmet_with_no_evidence_at_all(tmp_path):
+    result = build_tier_report(_manifest(kind="digital"))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "no_evidence"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [[], [{"neither": "file-nor-command"}], 42],
+    ids=["empty-list", "malformed-part", "not-an-entry"],
+)
+def test_item_11_invalid_evidence_shapes(tmp_path, entry):
+    """One malformed part renders the whole item invalid rather than being
+    silently dropped from the cited set -- a shortened set is exactly how a
+    compound item would reach `met` without the artifact that was mistyped."""
+    parts = entry
+    if isinstance(entry, list) and entry:
+        parts = _power_delivery_evidence(tmp_path, kind="analog") + entry
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    assert _item_11(result)["reason"] == "invalid_evidence"
+
+
+def test_item_11_parts_honour_their_own_pinned_content_hash(tmp_path):
+    parts = _power_delivery_evidence(tmp_path, kind="analog")
+    pinned = [
+        {"file": parts[0], "content_hash": "sha256:a-different-layout"},
+        parts[1],
+    ]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": pinned}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+def test_item_11_accepts_a_command_backed_part(tmp_path, monkeypatch):
+    """Compound parts go through the same resolution path every other item's
+    single citation does, so a gate-bound (command-backed) `klt erc` run
+    works with no separate wiring."""
+    spec_path = _write(tmp_path, "erc-spec.json", ERC_SUPPLY_SPEC)
+    erc_envelope = {**ERC_CLEAN_ENVELOPE, "spec": spec_path}
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE)
+
+    def fake_run(command, **kwargs):
+        return fake_completed(returncode=0, stdout=json.dumps(erc_envelope))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": [
+                    {"command": ["klt", "erc", "routed.gds", spec_path]},
+                    lvs_path,
+                ]
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["command"] == f"klt erc routed.gds {spec_path}"
+    assert item["citation"]["file"] is None
+
+
+def test_item_11_keys_per_partition_for_a_mixed_signal_block(tmp_path):
+    """Item 11 is a per-kind item, so a mixed-signal manifest cites it once
+    per partition -- the analog partition through its SPICE-reference LVS,
+    the digital one through its PDN."""
+    result = build_tier_report(
+        _manifest(
+            kind="mixed-signal",
+            evidence={
+                "11.analog": _power_delivery_evidence(
+                    tmp_path, kind="analog", prefix="a"
+                ),
+                "11.digital": _power_delivery_evidence(
+                    tmp_path, kind="digital", prefix="d"
+                ),
+            },
+        )
+    )
+
+    analog = _item_11(result, partition="analog")
+    digital = _item_11(result, partition="digital")
+    assert analog["status"] == "met"
+    assert digital["status"] == "met"
+    assert analog["citation"]["power_delivery"]["pdn"] is False
+    assert digital["citation"]["power_delivery"]["pdn"] is True
+
+
+@pytest.mark.parametrize("item_id", [3, 5, 6, 8, 10])
+def test_erc_citation_cannot_satisfy_any_other_item(tmp_path, item_id):
+    """`erc` is opt-in per item, exactly like `generic`: it proves supply
+    continuity and antenna ratios, not DRC cleanliness, corner coverage,
+    characterization, or repo hygiene."""
+    erc_path = _erc_evidence(tmp_path)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={str(item_id): erc_path})
+    )
+
+    item = next(i for i in result["items"] if i["id"] == item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_erc_envelope_is_graded_in_envelope_aggregation_mode(tmp_path):
+    """Unlike tier-verdict mode, aggregation mode grades an `erc` check on
+    the envelope's own `status` roll-up (`docs/cli/erc.md`)."""
+    clean_path = _erc_evidence(tmp_path, prefix="clean")
+    violations_path = _erc_evidence(
+        tmp_path, ERC_ANTENNA_VIOLATION_ENVELOPE, prefix="violations"
+    )
+
+    clean = build_signoff([clean_path])
+    assert clean["checks"][0]["kind"] == "erc"
+    assert clean["checks"][0]["passed"] is True
+    assert clean["checks"][0]["detail"]["gate_role"] == "poly"
+
+    violations = build_signoff([violations_path])
+    assert violations["checks"][0]["passed"] is False
+    assert violations["status"] == "fail"
+
+
+def test_erc_detail_breaks_findings_down_by_rule(tmp_path):
+    path = _erc_evidence(tmp_path, ERC_MISSING_TIE_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["erc_rule_counts"] == {"erc.missing_tie": 1}
+
+
+def test_cli_item_11_text_output_names_every_cited_part(tmp_path, capsys):
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            kind="digital",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="digital")},
+        ),
+    )
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert "Power delivery (structural)" in out
+    assert "also:" in out  # the non-leading parts of the compound citation
+    assert "kind=place-and-route" in out
+    assert "power delivery: supplies=VPWR, VGND" in out
+    assert "power_connectivity=match" in out

@@ -9914,9 +9914,13 @@ def test_local_pin_candidate_points_stops_at_a_second_declared_pin():
     out_pad = kdb.Box(1000, 700, 1400, 1300)
     rail = kdb.Box(2600, 700, 3000, 1300)
     assert candidates["OUT"], candidates
-    for point in candidates["OUT"]:
+    for point, role in candidates["OUT"]:
         assert out_pad.contains(point), f"{point.to_s()} escaped the OUT pad"
         assert not rail.contains(point), f"{point.to_s()} landed on the supply rail"
+        # Issue #2142: each derived candidate carries the `deck.metals` level
+        # it was discovered on, so it is probed against that conductor rather
+        # than against a single cell-wide role.
+        assert role == "metal0", (point.to_s(), role)
     # The supply pin's own candidates are untouched -- its met1 label sits on
     # the rail, which is where its candidates belong.
     assert candidates["VPWR"]
@@ -10343,6 +10347,219 @@ def test_abstract_cells_warns_when_one_instance_ties_two_declared_pins(tmp_path)
     spice = Path(report["netlist_path"]).read_text()
     (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
     assert x_line.split()[1:3] == ["TIED", "TIED"], x_line
+
+
+def _make_multi_layer_pin_macro_layout(extra_pin: bool = False) -> kdb.Layout:
+    """Issue #2142's reproduction layout: one macro whose declared pins are
+    each labelled on **two** conductors, over a parent-level power strap.
+
+    ``MACRO`` declares three (or, with ``extra_pin``, four) electrically
+    independent ports. Each port draws:
+
+    - an ``li1`` pad inside the macro carrying an ``li1.pin`` label -- the
+      pad the macro's own (erased-on-abstraction) interior would drive, so
+      once the cell is black-boxed it is an isolated, **unnamed** island;
+    - a ``met2`` stub carrying a ``met2.pin`` label with the same string --
+      the port the parent actually routes to.
+
+    ``TOP`` routes each ``met2`` stub out to its own distinct, separately
+    labelled net (``NA``/``NB``/``NC``[/``ND``]), and draws one wide
+    ``met1`` power strap (``VPWR``) that runs *underneath* every ``met2``
+    stub without touching any of them -- ordinary, legal geometry: met1 and
+    met2 only connect through a ``via``, and none is drawn here.
+
+    Flat, that extracts as four (five) clean nets. Abstracted, it used to
+    collapse: ``_resolve_abstract_cell_pins`` kept one cell-wide probe-layer
+    role per pin (the first-seen label layer, ``li1``), so each pin's
+    ``met2`` label point was probed against ``li1``, missed, and fell
+    through ``_probe_single_abstract_pin_point``'s bottom-up cross-layer
+    fallback onto the first conductor with *any* geometry at that
+    coordinate -- the ``VPWR`` strap. ``_abstract_pin_net_score`` then
+    (correctly, on its own terms) preferred that named net over the pin's
+    own unnamed island, so **every** pin bound to ``VPWR`` at once:
+    ``XMACRO_0 VPWR VPWR VPWR MACRO``, with the macro's three separately
+    declared pins merged onto one net that is not one of its ports at all.
+    """
+    layout = kdb.Layout()
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(cell, layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    names = ["PA", "PB", "PC"] + (["PD"] if extra_pin else [])
+    macro = layout.create_cell("MACRO")
+    for index, name in enumerate(names):
+        x = 1000 + index * 3000
+        draw(macro, 67, 20, kdb.Box(x, 0, x + 800, 800))  # li1 pad
+        label(macro, 67, 5, name, x + 400, 400)  # li1.pin
+        draw(macro, 69, 20, kdb.Box(x, 3000, x + 800, 3800))  # met2 port
+        label(macro, 69, 5, name, x + 400, 3400)  # met2.pin
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(macro.cell_index(), kdb.Trans(0, 0)))
+    # Parent-level met1 power strap running under every met2 port. No via is
+    # drawn, so this touches none of them electrically.
+    draw(top, 68, 20, kdb.Box(0, 3000, 3000 + len(names) * 3000, 3800))
+    label(top, 68, 5, "VPWR", 2000 + len(names) * 3000, 3400)
+    # Parent-level met2 routing: one distinct named net per port.
+    for index, name in enumerate(["NA", "NB", "NC", "ND"][: len(names)]):
+        x = 1000 + index * 3000
+        draw(top, 69, 20, kdb.Box(x, 3000, x + 800, 6000 + index * 800))
+        label(top, 69, 5, name, x + 400, 5500 + index * 400)
+    return layout
+
+
+@pytest.mark.parametrize("extra_pin", [False, True])
+def test_abstract_cells_multi_layer_pin_labels_do_not_collapse(tmp_path, extra_pin):
+    """Issue #2142: ``--abstract-cells`` must not bind several of one
+    macro's own separately declared pins onto a single synthesized net, and
+    must never absorb a top-level net that is not one of that macro's pins.
+
+    Drives :func:`_make_multi_layer_pin_macro_layout` -- a macro whose ports
+    are each labelled on both ``li1`` and ``met2``, over a parent ``met1``
+    power strap. Every pin must resolve to its **own** routed ``met2`` net,
+    the strap must stay out of the instance's pin list entirely, and the
+    ``#1366`` two-pins-one-net self-check must stay quiet.
+
+    ``extra_pin`` re-runs the same assertions with one more declared port,
+    mirroring the reporter's own ablation: completing the macro's pin list
+    changed nothing about the composite net before the fix, and must
+    likewise change nothing about the correct answer after it.
+    """
+    names = ["PA", "PB", "PC"] + (["PD"] if extra_pin else [])
+    expected = ["NA", "NB", "NC", "ND"][: len(names)]
+
+    layout = _make_multi_layer_pin_macro_layout(extra_pin=extra_pin)
+    path = _write_gds(layout, tmp_path / "multi_layer_pin.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "multi_layer_pin.spice"),
+        abstract_cell_patterns=("MACRO",),
+    )
+
+    assert report["status"] == "extracted"
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == len(names)
+    assert entry["resolution_source"] == "in_cell_labels"
+
+    spice = Path(report["netlist_path"]).read_text()
+    assert f".SUBCKT MACRO {' '.join(names)}" in spice
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    bound = x_line.split()[1:-1]
+
+    # Each pin on its own routed net -- not all three/four on the strap.
+    assert bound == expected, x_line
+    # The strap is a top-level net that is not one of the macro's ports: it
+    # must not be absorbed into the black box's connections at all.
+    assert "VPWR" not in bound, x_line
+    # ...and no two declared pins share a net.
+    assert len(set(bound)) == len(bound), x_line
+
+    assert not any(
+        "separately declared pins onto the same net" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
+
+
+def test_abstract_cells_pin_never_falls_back_onto_a_parent_well_ring(tmp_path):
+    """Issue #2142: a pin whose access point lands on no *signal* conductor
+    must not be rescued by whatever body-identity field layer happens to
+    cover that coordinate.
+
+    A parent-level ``nwell`` guard ring (or substrate ``tap`` ring) is one
+    electrically continuous shape spanning the macro's whole footprint, so
+    probing it answers with the same design-wide net at every coordinate.
+    Used as a fallback, it binds *every* pin that misses its own conductor
+    onto that one net at once -- the same "several declared pins collapsed
+    onto one foreign net" shape this issue reports, reached through a second
+    route. ``probe_layers`` ordering (PR #622's review fix, guarded by
+    :func:`test_abstract_cells_lef_fallback_prefers_metal_over_parent_nwell`)
+    only demoted well/tap below the metals; it did not stop them answering
+    when no metal is there at all.
+
+    Both pins here declare a LEF ``PORT`` over drawn-conductor-free space
+    inside a parent well ring, so before the fix both bound to the ring's
+    ``VNWSTRAP`` net. They must now come back unconnected, with the existing
+    per-instance "no conductor found" warning naming each one.
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("LEF_WELL_PROBE")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Real drawn geometry, but nowhere near either declared PORT below.
+    draw(leaf, 65, 20, kdb.Box(0, 0, 2000, 1000))
+    draw(leaf, 66, 20, kdb.Box(800, -200, 1200, 1200))
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    # A parent-level nwell ring covering the whole macro footprint, named by
+    # its own top-level label.
+    draw(top, 64, 20, kdb.Box(-2000, -2000, 8000, 6000))
+    top.shapes(layout.layer(64, 5)).insert(kdb.Text("VNWSTRAP", kdb.Trans(7000, 5000)))
+
+    path = _write_gds(layout, tmp_path / "lef_well_probe.gds")
+    lef_path = tmp_path / "lef_well_probe.lef"
+    lef_path.write_text(
+        "VERSION 5.7 ;\n"
+        "MACRO LEF_WELL_PROBE\n"
+        "  ORIGIN 0.000 0.000 ;\n"
+        "  SIZE 6.000 BY 4.000 ;\n"
+        "  PIN A\n"
+        "    DIRECTION INPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 3.000 2.000 3.400 2.400 ;\n"
+        "    END\n"
+        "  END A\n"
+        "  PIN Y\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 4.000 3.000 4.400 3.400 ;\n"
+        "    END\n"
+        "  END Y\n"
+        "END LEF_WELL_PROBE\n"
+    )
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lef_well_probe.spice"),
+        abstract_cell_patterns=("LEF_WELL_PROBE",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+
+    assert report["status"] == "extracted"
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    # Before the fix both pins probed the covering nwell and silently bound
+    # to the ring's own net, merging two declared pins onto one foreign net.
+    assert "VNWSTRAP" not in x_line, x_line
+    bound = x_line.split()[1:-1]
+    assert len(set(bound)) == len(bound), x_line
+
+    missed = [
+        warning
+        for warning in report["warnings"]
+        if "no conductor found at its resolved access point" in warning
+    ]
+    assert len(missed) == 2, report["warnings"]
+    assert any("pin 'A'" in warning for warning in missed), missed
+    assert any("pin 'Y'" in warning for warning in missed), missed
+
+    # And the self-check never fires -- the two pins are on separate,
+    # freshly created nets rather than merged onto the ring.
+    assert not any(
+        "separately declared pins onto the same net" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
 
 
 def _make_global_net_port_layout() -> kdb.Layout:

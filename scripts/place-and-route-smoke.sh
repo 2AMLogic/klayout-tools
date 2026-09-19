@@ -139,9 +139,11 @@ JSON
     # reports `scope: "external"`, `path: null` (correctly omitting the
     # absolute path). Reconstruct the real filesystem path directly from
     # `klt synthesize`'s own documented convention (`docs/cli/
-    # synthesize.md`): `.klt/synthesize/<hdl_toplevel>_synth.v`, next to
+    # synthesize.md`): `.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v`, next to
     # the request file (`$SCRATCH/synth_request.json` above).
-    NETLIST_PATH="$SCRATCH/.klt/synthesize/${DESIGN}_synth.v"
+    SYNTH_RUN_ID="$(jq -er '.run_id | select(type == "string")' "$SYNTH_JSON")"
+    [[ "$SYNTH_RUN_ID" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$ ]] || die "$DESIGN: invalid synthesis run_id"
+    NETLIST_PATH="$SCRATCH/.klt/synthesize/${SYNTH_RUN_ID}/${DESIGN}_synth.v"
     [[ -f "$NETLIST_PATH" ]] || die "$DESIGN: synthesize did not produce the expected netlist '$NETLIST_PATH'"
 
     cat >"$SCRATCH/par_request.json" <<JSON

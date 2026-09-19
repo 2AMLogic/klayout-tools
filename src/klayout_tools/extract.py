@@ -3290,7 +3290,9 @@ def extract_netlist_from_layout(
     # `_wire_abstract_cells`.
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] = []
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] = {}
-    abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] = {}
+    abstract_cell_local_candidates: dict[
+        int, dict[str, list[tuple[kdb.Point, str]]]
+    ] = {}
     abstract_cell_global_net_ports: dict[int, int] = {}
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     if abstract_cell_patterns:
@@ -5346,7 +5348,9 @@ def _extract_netlist(
     abstract_cell_patterns: tuple[str, ...] = (),
     abstract_instances: list[tuple[int, kdb.ICplxTrans]] | None = None,
     lef_macros: dict[str, tuple[str, dict[str, list[dict[str, Any]]]]] | None = None,
-    abstract_cell_local_candidates: dict[int, dict[str, list[kdb.Point]]] | None = None,
+    abstract_cell_local_candidates: (
+        dict[int, dict[str, list[tuple[kdb.Point, str]]]] | None
+    ) = None,
     abstract_cell_global_net_ports: dict[int, int] | None = None,
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     mom_net: str | None = None,
@@ -5602,31 +5606,14 @@ def _extract_netlist(
         metal_labels,
     )
 
-    # Body-identity *classification* cover (issue #1911). `nwell` is read
-    # below in two structurally different roles, and `--abstract-cells`
-    # erasure must only affect one of them:
-    #
-    # - as a **conductor** (`l2n.connect(nwell, ...)`, the PMOS "W"
-    #   terminal, `probe_layers`) -- the erased region is correct there: a
-    #   black box's well is not a wire the parent may route through, and a
-    #   device may not be recognised with a body terminal whose geometry was
-    #   erased;
-    # - as the right-hand side of a whole-layout **classification** split --
-    #   `tap - nwell` (well tie vs. substrate tie, #490), the derived-tap
-    #   split for a deck with no drawn `tap` layer (#1084), and (via
-    #   `substrate_isolation`) the per-isolated-region substrate identities
-    #   (#1128). These decide the *body identity* of geometry anywhere in
-    #   the design, including geometry drawn outside the abstracted cell
-    #   that merely happens to sit inside the well that cell drew.
-    #
-    # Using the erased region for the second role is what issue #1911
-    # reports: an outside well tie flips to a substrate tie and joins the
-    # deck's `substrate_net` global -- and `connect_global` is not
-    # geometric, so that one flip merges its net with *every* other
-    # substrate-tied net in the design and KLayout comma-joins all of their
-    # drawn labels into one `a|b|c|...` composite name. Unioning the matched
-    # cells' own pre-erasure cover back in here keeps the classification
-    # exactly what a flat (un-abstracted) extraction computes.
+    # A well crosses cell boundaries physically. Capture from the original
+    # layout both its body-identity classification (#1911) and electrical
+    # continuity (#2082): erasure must neither turn an outside well tie into
+    # a substrate tie nor split an abutted row's body pins into false islands.
+    # The cover contains the exact instance-transformed polygons, so real
+    # gaps remain gaps. Active/poly and other device-recognition geometry
+    # stay erased inside black boxes; restoring well geometry cannot restore
+    # their transistor channels or internal signal ties.
     abstract_nwell_cover, abstract_isolation_cover = (
         abstract_body_identity_cover
         if abstract_body_identity_cover is not None
@@ -5635,6 +5622,11 @@ def _extract_netlist(
     nwell_body_cover = (
         nwell if abstract_nwell_cover.is_empty() else nwell + abstract_nwell_cover
     )
+    # Wells conduct across abutting cell boundaries even when the devices
+    # inside those cells are abstracted. Keep the captured, transformed well
+    # geometry for connectivity and body-pin probing (#2082); active/poly
+    # geometry remains erased, so the black boxes still contain no devices.
+    nwell = nwell_body_cover
 
     # Dummy-device marker layer (issue #295, extended to resistors/bipolars
     # in #462): resolved *before* `_resolve_resistors` below so a resistor
@@ -6766,10 +6758,9 @@ def _extract_netlist(
         # parent-level well/tap shape (e.g. a guard ring) overlapping a
         # LEF-fallback pin's footprint would silently win over the metal net
         # the pin is actually routed to, since `_probe_abstract_pin_net`
-        # takes the first hit. The abstracted cell's *own* nwell/poly/tap
-        # cannot cause this -- `_abstract_cell_mask_layers` erases those
-        # inside its definition before probing runs -- so the exposure is
-        # specifically parent-level geometry.
+        # takes the first hit. Well geometry includes the abstracted cells'
+        # preserved cover (#2082); it must still never outrank a LEF pin's
+        # drawn metal access. Poly/tap inside black boxes remain erased.
         probe_layers: list[tuple[str, kdb.Region]] = [
             (f"metal{index}", region) for index, region in enumerate(metals)
         ] + [("poly", poly), ("nwell", nwell), ("tap", tap)]

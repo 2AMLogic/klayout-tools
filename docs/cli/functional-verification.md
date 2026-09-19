@@ -369,6 +369,13 @@ class is exempt: `TIMINGCHECK not supported`, which fires on *correct* input
 delays but not SDF timing checks) and does not affect the delays it does
 apply.
 
+Both build and test transcripts must have been captured and successfully
+read when SDF annotation is requested (issue #2130). A missing, unreadable,
+or incompletely read transcript is an explicit error (exit 1), with no
+success envelope or post-layout credit. A successfully read empty transcript
+contains no observed diagnostic; it does not establish full annotation
+coverage. Ordinary runs without SDF do not acquire this requirement.
+
 Only a **well-formed** diagnostic counts — one shaped
 `SDF WARNING:`/`SDF ERROR:` followed by Icarus's own `<file>:<line>:`
 locator. A marker-bearing line without that shape is a *corrupted* line, not
@@ -476,8 +483,9 @@ machine-readable instead of requiring a transcript hand-count:
 ```
 
 `partial` is `false` and `dropped` is `{}` on a run where no benign
-diagnostic class was filtered out of the transcript scan (delays *and* every
-timing check applied cleanly). Both keys are additive, alongside the existing
+diagnostic class was filtered out of the completed transcript scan. These
+values describe observed diagnostics, not proof that every delay and timing
+check applied. Both keys are additive, alongside the existing
 `file`/`corner`/`annotated`.
 
 ## Mutation testing: `--mutations`

@@ -396,6 +396,15 @@ def _stub_merge_def_to_gds(
                 "single_pin_markers": 0,
                 "unresolved_single_pin_nets": [],
             },
+            "min_area_repair": {
+                "status": "skipped",
+                "reason": "stubbed merge",
+                "patches": 0,
+                "repaired": 0,
+                "remaining": 0,
+                "rules": [],
+                "unrepaired": [],
+            },
         }
 
     monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
@@ -455,17 +464,18 @@ def test_full_digital_flow_produces_one_verdict_and_one_trajectory_entry(
         tmp_path / "synth_request.json",
         {
             "engine": "yosys",
+            "run_id": "trajectory-gcd",
             "sources": ["gcd.v"],
             "hdl_toplevel": "gcd",
             "pdk": {"cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80"},
         },
     )
 
-    # `run_place_and_route`'s own `netlist_path` output convention (verified
-    # against synthesize.py's `run_synthesize`) -- the synthesize *gate*
-    # below runs first (declared first in the descriptor's `gates` list),
-    # so this file exists by the time the place-and-route gate resolves it.
-    synth_netlist_path = tmp_path / ".klt" / "synthesize" / "gcd_synth.v"
+    # Reserve this invocation's ID so the next gate can name its exact output.
+    # Synthesis runs first and refuses an already-existing run directory.
+    synth_netlist_path = (
+        tmp_path / ".klt" / "synthesize" / "trajectory-gcd" / "gcd_synth.v"
+    )
 
     _write_json(
         tmp_path / "fv_request.json",

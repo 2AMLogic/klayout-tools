@@ -1655,7 +1655,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | --------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | `schema_version`| integer         | Version of this command's JSON shape (`3` as of issue #1274, which extended issue #1261's `{path, scope}` path-normalization to `environment.models_lib`; per-command, per `docs/json-contract.md`).                 |
 | `netlist`       | object          | `{path, scope}` — the resolved `netlist` path, normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when it sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
-| `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
+| `status`        | string          | Aggregate: `"pass"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence: `error` > `fail` > `not_checked` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. |
@@ -1713,52 +1713,27 @@ corner-sweep rollup fields above are declared.
 
 ### `coverage`
 
-Additive field (issue #1996, no `schema_version` bump), implementing the
-shared vacuous-verdict convention defined once in
-[`../json-contract.md`](../json-contract.md) — `klt drc` and `klt pex` emit
-the same two roll-up keys for their own equivalents.
+The [common v1 coverage contract](../coverage-contract.md) reports actual
+corner/measurement work alongside the existing `corners_simulated`,
+`measurements_declared`, `measurements_with_limits` and
+`unrecognized_limit_keys` fields. Those counters retain their original
+meanings (`corners_simulated == corner_count`, including errored attempts);
+common `checked` counts actual applied min/max bounds or deliberate
+characterization observations.
 
-```json
-{
-  "coverage": {
-    "corners_simulated": 8,
-    "measurements_declared": 3,
-    "measurements_with_limits": 2,
-    "unrecognized_limit_keys": [],
-    "nothing_checked": false,
-    "nothing_checked_reasons": []
-  }
-}
-```
+An empty corner matrix (`empty_corner_matrix`), no requested measurements,
+unavailable measurement values, null bounds, and unrecognized limit keys
+are explicit skips. Only `min` and `max` are applied. A typo such as
+`{"maximum": 1.8}` cannot count as an applied bound. Partial valid bounds
+and skipped bounds remain distinguishable by identity.
 
-| Field                      | Type            | Description |
-| -------------------------- | --------------- | ----------- |
-| `corners_simulated`        | integer         | `== corner_count`, restated here so the whole coverage story is in one block. |
-| `measurements_declared`    | integer         | How many `measurements[]` entries the request declared. |
-| `measurements_with_limits` | integer         | How many of those ended up with a bound `klt sim` actually applies (a `min` and/or `max` that is not `null`). |
-| `unrecognized_limit_keys`  | array\<object\> | `{"measurement": <name>, "keys": [<key>, ...]}` — every declared `limits` object containing a key `klt sim` does not read. Reported whenever present, even for a run that also has usable bounds: one typo'd measurement alongside several well-formed ones is still a real gap. |
-| `nothing_checked`          | boolean         | Whether this run graded *nothing*, so its `status` says nothing about the design. |
-| `nothing_checked_reasons`  | array\<string\> | Why. Empty exactly when `nothing_checked` is `false`. |
-
-Two ways a `status: "pass"` can be vacuous, one reason code each:
-
-| Reason code                | Meaning |
-| -------------------------- | ------- |
-| `empty_corner_matrix`      | The PVT corner matrix expanded to zero corners, so `passed`/`failed`/`errored` are all `0` and the aggregate falls through to `"pass"`. Nothing simulated. |
-| `unrecognized_limit_keys`  | Every declared `measurements[].limits` object used only keys `klt sim` does not apply. **Only `min` and `max` are read**, so a typo'd bound (`{"maximum": 1.8}`) is scored as if no bound had been declared, and every measurement passes unconditionally. |
-
-**`status` is unchanged** in both cases, exactly as before this block
-existed — the field makes the emptiness legible, it does not restate the
-verdict.
-
-A request that declares **no** `limits` at all is deliberately *not*
-flagged: a characterise-and-report sweep grades nothing on purpose, which is
-a stated intent rather than a silent miss. `measurements_with_limits` lets a
-reader draw that distinction themselves.
-
-[`klt signoff`](signoff.md) consumes this: a `sim` envelope reporting
-`nothing_checked: true` never counts as a passing check, and never backs a
-`"met"` tier-report item (reason `nothing_checked`).
+A deliberate no-limit characterization counts a produced measurement as
+checked and its omitted limit as inapplicable. A launched corner alone does
+not count. With no failure/error, zero actual checks yields
+`status: "not_checked"` and exit 4. Real corner errors and failed bounds
+(including Monte Carlo sigma windows) retain precedence and their existing
+exit codes. `klt signoff` refuses zero/unknown/malformed common coverage;
+Phase 2 owns any new generic partial-success policy.
 
 ### Semantics and guarantees
 
@@ -1810,11 +1785,11 @@ the full reasoning):
 
 | Code | Meaning                                                                    |
 | ---- | ---------------------------------------------------------------------------- |
-| `0`  | Every corner passed.                                                         |
+| `0`  | Checked at least one measurement/bound and no corner or rollup failed.                                                         |
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
+| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), or at least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
 
 Under `--op-lint` the same four codes keep the same *meanings* against that
 mode's own verdict: `0` ran with no `error`-severity finding (a

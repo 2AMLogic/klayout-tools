@@ -91,7 +91,7 @@ nothing else about the run.
 ## Generated `.ys` script
 
 Per the Yosys survey's own recommendation, `klt synthesize` generates a
-`.ys` script into `.klt/synthesize/` (next to the request file — the same
+`.ys` script into `.klt/synthesize/<run_id>/` (next to the request file — the same
 "next to the input" default `klt sim`'s `.klt/sim/` artifacts directory
 already uses) and invokes `yosys -s <script>`, rather than string-
 interpolating an ever-growing `-p` command line. The script is kept as a
@@ -128,7 +128,7 @@ immediately below.
 
 **Embedded paths (issue #1844).** Every path embedded in the script *except*
 the resolved liberty is repo-relative when it resolves inside the invocation's
-repo — the RTL `sources`/adder sources, and the `.klt/synthesize/` output
+repo — the RTL `sources`/adder sources, and the `.klt/synthesize/<run_id>/` output
 paths (`tee -o`, `write_verilog`) — so a `.ys` produced inside a repo can be
 committed as a reproducible evidence artifact without leaking the author's
 home directory or worktree layout. Such a script is **run with `cwd` set to
@@ -149,7 +149,7 @@ exports. The generated `synth_<top>.ys` is now scan-clean in *every* embedded
 path, so committing it leaks nothing:
 
 ```console
-$ klt env-provenance scan .klt/synthesize/synth_counter.ys
+$ klt env-provenance scan ".klt/synthesize/<run_id>/synth_counter.ys"
 clean: 0 leak(s) in 1 file(s)            # exit 0
 ```
 
@@ -167,7 +167,7 @@ substitution, and needs nothing from `klt`:
 
 ```console
 $ sed "s|\$PDK_ROOT|$(klt pdk find --format json | jq -r .root)|g" \
-    .klt/synthesize/synth_counter.ys > /tmp/synth_counter.run.ys
+    ".klt/synthesize/<run_id>/synth_counter.ys" > /tmp/synth_counter.run.ys
 $ yosys -s /tmp/synth_counter.run.ys            # run from the repo root
 ```
 
@@ -198,7 +198,44 @@ not resolve inside a repo. Where relative paths *are* written, the pairing is
 explicit and local: the same `repo_root` is both the rewrite base and the
 `cwd` the script is run with.
 
-### Artifacts written to `.klt/synthesize/`
+### Artifacts written to `.klt/synthesize/<run_id>/`
+
+Each invocation exclusively creates a new directory beneath the request file's
+`.klt/synthesize/` directory. The response's additive `run_id` identifies it;
+all existing `{path, scope}` fields retain their meaning and refer to this
+invocation's files. There is no mutable "latest" alias. Earlier successful and
+failed runs are retained, including arithmetic trials, baseline scripts, and
+equivalence artifacts. Callers manage retention; this command does not prune them.
+
+Ordinary requests omit `run_id` and receive a generated `run-<UUID hex>` ID.
+A pipeline that must prepare a downstream request in advance may supply its own
+`run_id`: 1–64 ASCII letters, digits, underscores, or hyphens, starting with a
+letter or digit. An existing directory is an error, even after failure; retry
+with a new ID. Exclusive directory creation also rejects concurrent callers
+that supply the same ID, while automatically allocated runs remain isolated.
+
+A zero engine exit is insufficient: the current run must contain a readable,
+nonempty netlist, parseable synthesis statistics, and its ABC log when the
+library enables ABC constraints. Missing artifacts fail explicitly. A current
+ABC log without a readable `stime` summary produces `timing: null` and a
+`timing_unavailable` warning; any requested clock target remains unverified.
+Unknown-library capability warnings still describe unavailable ABC constraints.
+
+Provenance hashes are computed before engine execution. Before returning,
+synthesis checks the declared RTL files, request file, and resolved Liberty for
+replacement or changes in size, modification time, or change time. A changed
+or removed input causes an error, including edits that restore the old bytes.
+The guard spans optional arithmetic, equivalence, restructuring, and baseline
+analysis. **This is a mutation check on declared inputs, not a snapshot of
+transitive Verilog includes or an immutable copy of the PDK.** Keep those
+untracked dependencies stable while the run executes.
+
+This changes the former fixed `<request_dir>/.klt/synthesize/<top>_synth.v`
+convention. Consume the response paths, or reconstruct the request-relative
+path using this response's `run_id`; do not search for a newest directory.
+For a request outside any repository the normalized path remains
+`{"path": null, "scope": "external"}`, and `run_id` still identifies the
+retained directory next to that request.
 
 | File | Contents |
 | --- | --- |
@@ -207,6 +244,7 @@ explicit and local: the same `repo_root` is both the rewrite base and the
 | `<top>_synth.v` | The mapped gate-level netlist (`netlist_path`). |
 | `<top>_stats.json` | The captured `stat -liberty … -json` output this command parses for `instance_count`/`area_um2`. |
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
+| `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
 
 ### ABC constraints, delay target, and cell exclusions
@@ -364,7 +402,7 @@ verbatim (`output signed [15:0] sample;`) and offers no flag to suppress it
 at the floorplan stage, rejects the keyword outright:
 
 ```
-[ERROR STA-0171] .../.klt/synthesize/<top>_synth.v line 963, syntax error
+[ERROR STA-0171] .../.klt/synthesize/<run_id>/<top>_synth.v line 963, syntax error
 ```
 
 Nothing in yosys's pass set clears a wire's `is_signed` attribute either, so
@@ -684,7 +722,7 @@ to verify.
   "resizes_applied": [
     {"instance": "_377_", "from_cell": "sky130_fd_sc_hd__xnor2_1", "to_cell": "sky130_fd_sc_hd__xnor2_2"}
   ],
-  "restructured_netlist_path": { "path": ".klt/synthesize/gcd_synth_restructured.v", "scope": "repo" },
+  "restructured_netlist_path": { "path": ".klt/synthesize/<run_id>/gcd_synth_restructured.v", "scope": "repo" },
   "equivalence": {"status": "equivalent", "engine": "yosys", "engine_version": "0.67+post", "timeout_s": 60.0, "elapsed_s": 0.05, "artifacts": {"...": "..."}}
 }
 ```
@@ -748,7 +786,7 @@ it did before this field existed, and `response.arithmetic` is `null`.
    reported as `status: "no-wide-adders"` and the run continues untouched.
 2. **Generate.** Each candidate architecture is generated at every probed
    width by [`klt arith-gen`](arith-gen.md)'s own generator, into
-   `.klt/synthesize/arith/<architecture>/rtl/`.
+   `.klt/synthesize/<run_id>/arith/<architecture>/rtl/`.
 3. **Prove** (unless `verify_adders: false`). Each generated adder is proven
    equivalent to a behavioural `a + b + cin` of the same width by
    [`klt equiv`](equiv.md). See "Equivalence gate for substituted adders"
@@ -779,7 +817,7 @@ Every surviving candidate — **plus Yosys's own default expansion**, as a real
 row in the table — gets a full trial synthesis using exactly the engine
 configuration the real run will use (same liberty, same
 `-constr`/`-D`/`-dont_use`/`hilomap` knobs), into its own
-`.klt/synthesize/arith/<label>/` directory. Every trial's script, netlist,
+`.klt/synthesize/<run_id>/arith/<label>/` directory. Every trial's script, netlist,
 stats and ABC log survive as debuggable artifacts: "measured, not guessed" is
 only a real claim if the measurement is reproducible afterwards.
 
@@ -869,8 +907,8 @@ The `arithmetic` field, `null` unless `request.arithmetic` was given:
         "delay_source": "abc_stime",
         "meets_constraint": false,
         "label": "default",
-        "netlist_path": { "path": ".klt/synthesize/arith/default/modexp_synth.v", "scope": "repo" },
-        "script_path": { "path": ".klt/synthesize/arith/default/synth_modexp.ys", "scope": "repo" }
+        "netlist_path": { "path": ".klt/synthesize/<run_id>/arith/default/modexp_synth.v", "scope": "repo" },
+        "script_path": { "path": ".klt/synthesize/<run_id>/arith/default/synth_modexp.ys", "scope": "repo" }
       }
     },
     {
@@ -972,7 +1010,7 @@ synthesis run used (so the netlist's standard-cell instances resolve as
 real combinational logic, not an undefined blackbox — see `klt equiv`'s
 "Request" section) — and runs it. The generated equiv request and its own
 artifacts (the `.ys` script, the flattened combined netlist, the raw Yosys
-log) land under `.klt/synthesize/.klt/equiv/`, alongside this run's own
+log) land under `.klt/synthesize/<run_id>/.klt/equiv/`, alongside this run's own
 `script_path`/`netlist_path` — never deleted, kept as debuggable artifacts
 like every other file this command writes. The outcome:
 
@@ -1021,7 +1059,8 @@ separately if it turns out to matter for evidence-record committing.
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"yosys"` (default; only value implemented). |
 | `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. |
-| `hdl_toplevel` | string | The design's top module name. Required. |
+| `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
+| `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
@@ -1053,6 +1092,7 @@ caller decision rather than something this command should pick.
   "engine": "yosys",
   "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
+  "run_id": "run-example",
   "status": "ok",
   "instance_count": 347,
   "area_um2": 3238.1056,
@@ -1095,9 +1135,9 @@ caller decision rather than something this command should pick.
     "by_category": {},
     "representatives": []
   },
-  "netlist_path": { "path": ".klt/synthesize/gcd_synth.v", "scope": "repo" },
-  "script_path": { "path": ".klt/synthesize/synth_gcd.ys", "scope": "repo" },
-  "run_script_path": { "path": ".klt/synthesize/synth_gcd.run.ys", "scope": "repo" },
+  "netlist_path": { "path": ".klt/synthesize/run-example/gcd_synth.v", "scope": "repo" },
+  "script_path": { "path": ".klt/synthesize/run-example/synth_gcd.ys", "scope": "repo" },
+  "run_script_path": { "path": ".klt/synthesize/run-example/synth_gcd.run.ys", "scope": "repo" },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
@@ -1117,6 +1157,7 @@ caller decision rather than something this command should pick.
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`'s own version token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string | Echo of the request. |
+| `run_id` | string | Identifier of this invocation's retained directory, relative to `<request_dir>/.klt/synthesize/`. Additive; includes failed-run collision protection when supplied in a request. |
 | `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own from *this field's* point of view; a failed run never emits this envelope at all. The response-level pass/fail signal issue #1588 adds is `structural.has_critical`/exit code `3` below — `status` itself is unaffected and stays `"ok"` either way. |
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). `0.0` for a design whose only cells are internal, non-liberty primitives (e.g. an inferred latch — Yosys's own `stat -liberty ... -json` omits the `area` key entirely in that case; verified live, issue #1588). |
@@ -1131,7 +1172,7 @@ caller decision rather than something this command should pick.
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
 | `run_script_path` | object | The `.ys` script Yosys was actually handed (issue #1870), same `{path, scope}` shape — the rehydrated `synth_<top>.run.ys` sibling with the real absolute liberty path substituted for `$PDK_ROOT`, or exactly `script_path` when no token was written (a liberty resolving outside the PDK install root). Additive field, no `schema_version` bump. Machine-specific by construction: commit `script_path`, not this. |
-| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given), with `input.role: "source"` (issue #2027 — RTL source, not a layout stream or a netlist). |
+| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the pre-execution content hash of declared `sources` (a combined, order-independent hash when more than one source file is given), with `input.role: "source"` (issue #2027 — RTL source, not a layout stream or a netlist); mutation of declared inputs before return is an error. Transitive includes are not snapshotted. |
 | `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 | `restructuring` | object \| null | `null` unless `--restructure-timing` was given: `{target_period_ns, max_iterations, initial_worst_path_delay_ns, final_worst_path_delay_ns, converged, iterations_used, gave_up_reason, resizes_applied, restructured_netlist_path, equivalence}` — see "Timing-driven restructuring" above for the full field-by-field description, including the `restructured_netlist_path` netlist-handoff contract for #700 (`klt par`). |
 | `arithmetic` | object \| null | `null` unless `request.arithmetic` was given (issue #1722) — the arithmetic-architecture substitution and, in `"auto"` mode, the per-candidate delay/area table it selected from: `{mode, requested, min_width, status, reason, adder_widths, target_period_ns, selected_architecture, candidates, selected_measured}`. See "Arithmetic architecture" above for the full field-by-field description; each `candidates[].measured.netlist_path`/`script_path` is the same `{path, scope}` shape as the top-level fields (issue #1844). |
@@ -1312,6 +1353,7 @@ $ klt synthesize request.json --format json
   "engine": "yosys",
   "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
+  "run_id": "run-example",
   "status": "ok",
   "instance_count": 347,
   "area_um2": 3238.1056,
@@ -1404,9 +1446,9 @@ $ klt synthesize adder4_request.json --verify-equivalence --format json
     "timeout_s": 60.0,
     "elapsed_s": 0.08,
     "artifacts": {
-      "script_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.ys",
-      "netlist_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv_netlist.v",
-      "log_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.log"
+      "script_path": "/abs/path/.klt/synthesize/<run_id>/.klt/equiv/equiv.ys",
+      "netlist_path": "/abs/path/.klt/synthesize/<run_id>/.klt/equiv/equiv_netlist.v",
+      "log_path": "/abs/path/.klt/synthesize/<run_id>/.klt/equiv/equiv.log"
     }
   }
 }
@@ -1529,11 +1571,13 @@ area_um2: 0.0, critical_path_ns: 0.0}` — see
   resolved against the *request file's* directory (see
   [`docs/cli/place-and-route.md`](place-and-route.md)) — a different base
   in the common case where the request file does not sit at the repo root.
-  Rather than reconcile the two bases, a caller wiring the two commands
-  together should use this command's own deterministic output convention
-  (`<request_dir>/.klt/synthesize/<hdl_toplevel>_synth.v`, see "Artifacts"
-  above) regardless of `netlist_path.scope` — `klayout_tools.digital_fleet`
-  already does this.
+  Resolve a populated `netlist_path.path` against the repository root, or
+  use `<request_dir>/.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v` with
+  this response's `run_id`. `klayout_tools.digital_fleet` prepares a unique
+  safe ID per job, passes it in the synthesis request, and pins the P&R
+  request to that exact directory. Its first eval gate completes synthesis;
+  the metrics stage reuses the same cached result. A directory collision
+  refuses the run before P&R can consume previous evidence.
 - **Fleet-scale evaluation of many design-space candidates.** See
   [`docs/cli/place-and-route.md`](place-and-route.md)'s "Fleet evaluation of
   digital candidates" section (Epic #391 Phase 6) — `klayout_tools.digital_fleet`

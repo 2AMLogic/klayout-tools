@@ -715,9 +715,10 @@ compare *against*. The check does not need one. It needs:
 
 - **which pins are power/ground** — derived from the resolved standard-cell
   library's own `.subckt` pin orders (the same structural derivation issue
-  #1622's power-only pruning already uses: the library's full pin order
-  minus the reference's signal-pin universe). No hardcoded per-PDK power-pin
-  table, no `fill_*`/`tap*` cell-name glob.
+  #1622's power-only pruning already uses). No hardcoded per-PDK power-pin
+  table, no `fill_*`/`tap*` cell-name glob. See
+  "How the power-pin universe is derived" below for the exact rule, the
+  evidence it rests on, and where it stops.
 - **what each instance's power pins are connected to** — the layout netlist
   already carries it. `klt extract --abstract-cells` resolves and probes
   *every* declared pin, power pins included; the signal-only compare simply
@@ -727,6 +728,72 @@ compare *against*. The check does not need one. It needs:
 
 > In a single-power-domain block (what `klt place-and-route` produces),
 > every instance's same-named supply pin must reach the same net.
+
+When the layout SPICE comes from `klt extract --abstract-cells`, extraction
+preserves the original instance-transformed well polygons as conductors.
+Abutted cells' well/body pins therefore retain their real continuity; actual
+well gaps, wrong well ties, and metal-supply disconnects remain detectable.
+This is resolved in the extracted connectivity, with no pin-name exception
+in LVS. Re-extract older standalone SPICE artifacts that lost well geometry:
+without their layout, LVS cannot distinguish that loss from a real defect.
+See [cell abstraction](extract.md#cell-level-black-box--pins-abstraction---abstract-cells-issue-620).
+
+### How the power-pin universe is derived (issue #2076)
+
+A pin name is admitted to the power/ground universe — the `power_pins` list,
+and the same universe issue #1622's filler/tap pruning classifies against —
+only when **both** of these hold:
+
+1. **No circuit in the reference carries that pin name.** The Verilog
+   conversion emits, per cell, only the pins the Verilog actually connects,
+   and it structurally never connects a supply — so any pin name the
+   reference does carry is a signal pin.
+2. **Every library cell the reference instantiates declares that pin name.**
+   A genuine supply is declared by every standard cell in the library's logic
+   set; a signal pin is declared by only some of them.
+
+Condition 2 is what issue #2076 added, and condition 1 alone is not enough.
+An ordinary `place-and-route` output breaks it: CTS hangs clock-load cells
+off each leaf clock net with **their outputs unconnected** —
+
+```verilog
+sky130_fd_sc_hd__inv_1 clkload0 (.A(clknet_1_0__leaf_clk));   // Y dangling
+```
+
+— so if no other instantiated cell declares a pin of the same name (the
+flip-flops output `Q`, the clock buffers `X`), nothing in the converted
+reference mentions `Y` at all, condition 1 has nothing to subtract, and a
+signal output was admitted as a supply. That inflated `power_pins`, and with
+clock loads on two different leaf nets it produced a spurious
+`power.inconsistent_pin_net` finding — a `power_connectivity.status:
+"mismatch"` naming a pin that was never a supply, on a layout whose supplies
+were perfectly connected.
+
+**Where the evidence stops, and what the report says about it.** Condition 2
+is a *cross-master* corroboration, so it corroborates nothing when the
+instantiated masters are all the same declared-pin **shape** — either a
+single standard-cell master, or several drive-strength variants of one
+logical cell (`mylib__inv_1`/`mylib__inv_2`, both `A VGND VNB VPB VPWR Y`):
+a pin any of them declares but never connects is then indistinguishable from
+their supplies, and `len(masters) > 1` is not by itself evidence otherwise —
+two identically-shaped masters corroborate exactly as little as one. The
+check still runs (the common single-master case connects every signal pin,
+and the universe is exactly right), and `power_pins_derivation.corroborated`
+is `false` with a `reason` naming the limitation (which masters, and whether
+it's a single master or several sharing one shape), rather than a guessed
+universe presented as a corroborated one.
+
+Narrowing further — requiring a supply to be declared by every cell in the
+*whole* library, not just the instantiated ones — was measured against both
+supported PDKs and rejected: 9 of sky130's 437 `sky130_fd_sc_hd` cells and 2
+of gf180mcu's 229 `gf180mcu_fd_sc_mcu7t5v0` cells omit a well-tie pin. (Six of
+sky130's nine are actually `sky130_fd_sc_hd__lpflow_lsbuf_*_isowell_tap_*`
+level-shifter buffers, not physical tap/endcap cells — but `klt synthesize`
+denylists the whole `lpflow_*` family, so none of them can reach a reference
+netlist through this flow anyway.) That rule admits only `VGND`/`VPWR` (resp.
+`VDD`/`VSS`) and drops the well ties out of both the checked universe and the
+tap-cell classification — real supply-defect coverage traded away to fix a
+case the rule above already fixes.
 
 ### The three finding rules
 
@@ -765,6 +832,13 @@ would silently exempt them.
   "status": "mismatch",
   "reason": null,
   "power_pins": ["VGND", "VNB", "VPB", "VPWR"],
+  "power_pins_derivation": {
+    "rule": "declared-by-every-instantiated-master",
+    "masters": ["SKY130_FD_SC_HD__BUF_1", "SKY130_FD_SC_HD__DFXTP_1", "SKY130_FD_SC_HD__INV_1"],
+    "master_count": 3,
+    "corroborated": true,
+    "reason": null
+  },
   "instance_count": 462,
   "expected_nets": null,
   "unchecked_expected_pins": [],
@@ -801,6 +875,7 @@ would silently exempt them.
 | `status` | `"match"` \| `"mismatch"` \| `"unchecked"` | The power/ground verdict, **independent of the report's top-level `status`** (which stays exactly `NetlistComparer.compare()`'s own signal-connectivity result). `"match"` when the check ran and found nothing; `"mismatch"` when it produced findings; `"unchecked"` when it did not run — never a clean verdict on absent evidence. |
 | `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
 | `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
+| `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` today; a future rule would be a new value, never a silent change of meaning for this one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` only when the instantiated masters include at least two genuinely distinct declared-pin shapes — not merely more than one master *name*; two drive-strength variants of one logical cell declare the same shape and corroborate nothing), and `reason` (`null` when corroborated; otherwise what the evidence could not establish, including a same-shape-only multi-master case). Populated — never `null` — whenever `reference.form` is `"gate-level-verilog"` and `power_connectivity` was not disabled, even when the reference instantiates no cell of the resolved library at all (`masters: []`, `reason` naming that). `null` only when the check never attempted a derivation: a non-gate-level `reference.form`, or the `power_connectivity: false` opt-out. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
 | `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
 | `unchecked_expected_pins` | array\<string\> | Issue #1978. `expected_nets` keys that named a power/ground pin no layout-side instance was actually observed to carry — a typo, or a PDK standard cell whose tie pin has no in-cell label/LEF port at all. Such a pin matches zero rows in `_power_pin_connections` and so produces zero findings, which reads identically to "checked and found correct" unless this field is consulted; a non-empty list means at least one declared expectation was never exercised by this run. `[]` on a clean check, and always `[]` when `status` is `"unchecked"`. |
@@ -1298,9 +1373,10 @@ isomorphism reimplemented downstream.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `layout` | string | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. |
-| `reference` | string | The paired reference net's name, same convention. |
+| `layout` | string \| `null` | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. `null` in the symmetric case to `reference` below (the comparer's `match_nets`/`match_ambiguous_nets` event carried no layout-side net object) — not observed in practice as of this writing, but not structurally ruled out either, so it is typed nullable here too. |
+| `reference` | string \| `null` | The paired reference net's name, same convention. **`null`** when the comparer's `match_nets`/`match_ambiguous_nets` event fired with no reference-side net object at all — observed today for a `reference.form: "gate-level-verilog"` run's layout-only supply pins (`VGND`/`VPWR`; see "No power/ground pins" above): the reference has nothing to pair them with, yet the comparer still logs a successful pairing for the layout side rather than a `net_mismatch`. This is a real entry with a `null` counterpart, not a missing one — see the paragraph below. |
 | `pin` | boolean | Whether this net is one of the compared circuit's declared pins (`Net.pin_count() > 0`), read from the layout side. `same_circuits` pins the layout/reference top circuits together before the compare runs, so a matched pair's declared-pin status agrees on both sides by construction. |
+| `heuristic` | boolean *(present only for a `reference.form: "gate-level-verilog"` run — see "Supply correspondences are not validated supply connectivity" below)* | `true` when this pairing puts a layout **supply** net opposite a reference net that is not itself a supply pin — a fallback the comparer had to guess at, not a correspondence it verified. `false` for every other pairing in such a run. The key is **omitted entirely** when no supply universe could be derived (every other `reference.form`, and any `gate-level-verilog` run whose `reference.library` pin orders did not resolve), so "checked, and this pairing is genuine" (`false`) stays distinguishable from "never checked" (absent). Read it with `entry.get("heuristic")`, not `entry["heuristic"]`. |
 
 Populated for every successful pairing the comparer made — both an
 unambiguous `match_nets` event and an ambiguously-resolved
@@ -1310,20 +1386,87 @@ pairing" below; a pairing can appear in both places at once, since one
 documents *that* an ambiguity was resolved and the other documents *what*
 it resolved to). Emitted whenever the comparer produced at least one net
 pairing, regardless of `status` — on a partial/failed compare, the pairs
-that *did* match are still useful for localising the ones that did not (a
-net with no counterpart at all, e.g. one side dropped a device entirely,
-simply has no entry). `device_correspondence` (the same idea for devices)
-is not yet implemented — track it separately if needed.
+that *did* match are still useful for localising the ones that did not.
+
+**A net the comparer never matched at all has no entry here** — e.g. one
+side dropped a device entirely, so the comparer reports a `net_mismatch`
+event instead of a pairing; look for it in `mismatches[]` instead. That is
+a genuinely different case from a *successful* pairing whose counterpart
+is `null` (see the `layout`/`reference` rows above): such a pairing **does**
+get an entry — the comparer logged a real `match_nets`/`match_ambiguous_nets`
+event for it — it just names no net on one side. In practice this shows up
+as `reference: null` for a `reference.form: "gate-level-verilog"` run's
+layout-only supply pins; do not read a `null` counterpart as "no entry" or
+skip it when consuming this field. `device_correspondence` (the same idea
+for devices) is not yet implemented — track it separately if needed.
 
 Sorted by `(reference, layout)`, so repeated runs against the same inputs
 produce identical, diff-clean output — the same ordering guarantee
-`mismatches[]` makes. Deduplication is scoped **per circuit** (by the
-comparer's circuit scope, not by net name alone): a hierarchical netlist
-routinely reuses a local net name — `MID`, `OUT`, `A` — across unrelated
-subcircuits, and each such net is a distinct correspondence with its own
-`pin` flag. Two entries can therefore share the same `layout`/`reference`
-name (one per circuit) — that is expected, and is what keeps
-`len(net_correspondence) == counts.nets.matched` exact across a hierarchy.
+`mismatches[]` makes; a `null` `reference` (or `layout`) sorts as the empty
+string in this ordering, so every `reference: null` entry sorts *before*
+every entry naming a reference net, not after. Deduplication is scoped
+**per circuit** (by the comparer's circuit scope, not by net name alone): a
+hierarchical netlist routinely reuses a local net name — `MID`, `OUT`, `A`
+— across unrelated subcircuits, and each such net is a distinct
+correspondence with its own `pin` flag. Two entries can therefore share the
+same `layout`/`reference` name (one per circuit) — that is expected, and is
+what keeps `len(net_correspondence) == counts.nets.matched` exact across a
+hierarchy. That invariant holds **including** every null-counterpart entry:
+the comparer's `match_nets`/`match_ambiguous_nets` callback increments
+`counts.nets.matched` on every invocation with no exemption for a missing
+net object on either side, so a `reference: null` (or `layout: null`) entry
+is counted in `counts.nets.matched` exactly like an ordinary two-sided
+pairing — no separate accounting, and no adjustment needed to keep the
+invariant exact.
+
+#### Supply correspondences are not validated supply connectivity
+
+**A `net_correspondence` entry naming a supply net is not, on its own,
+evidence that the layout's power grid is correct** (issue #2136). A
+`reference.form: "gate-level-verilog"` reference carries no power/ground
+pins at all (see "No power/ground pins" above), so the comparer never has a
+same-named candidate for the layout's `VGND`/`VPWR` and pairs it with
+whatever its graph heuristics reach first — routinely an unrelated signal
+net (a spare `oen`-style port is a common one), or with nothing at all.
+Before this was disclosed, the two readings below produced identical
+output:
+
+- "this design's power grid is fine and the two happened to line up", and
+- "this design has no power grid the reference could describe, and the
+  comparer had nothing better to guess with".
+
+The `heuristic` field separates them. For a `gate-level-verilog` run whose
+`reference.library` pin orders resolve, every entry carries it:
+
+- `heuristic: true` — the layout side is demonstrably a supply net (some
+  pin the *library* declares to be a power/ground pin lands on it) and the
+  reference side is not a supply pin. The pairing is a fallback; do not
+  read it as verified.
+- `heuristic: false` — an ordinary pairing the compare stands behind.
+
+Like every other power/ground-aware behaviour here, "is this a supply net?"
+is derived structurally from `reference.library`'s own `.subckt` pin orders
+— never a hardcoded PDK power-pin table (sky130's
+`VPWR`/`VGND`/`VPB`/`VNB` vs. gf180mcu's `VDD`/`VSS`/`VNW`/`VPW`) and never
+a `V*` name glob. A rail named after nothing in particular (`VSS_RAIL`) is
+recognised because a cell's `VGND` pin lands on it; a signal net named
+`VGND_MONITOR` is not, because none does.
+
+The key is **absent** for every other `reference.form`. Those references
+carry their own power nets and pins, which take part in the ordinary
+compare, so there is no fallback to disclose — and nothing there licenses
+calling any pin name a power pin (the same restriction that scopes the
+power-only prune and the `power_connectivity` check). It is also absent for
+a `gate-level-verilog` run whose library pin orders did not resolve: that
+run checked nothing, and says so by omission rather than by a misleading
+`false`.
+
+**`heuristic` never changes `status`.** It is a disclosure about what the
+signal compare did and did not verify, exactly like
+`power_connectivity`'s separate verdict — and `power_connectivity` (see
+below) remains the check that actually validates the layout's supply
+connectivity, keyed on the library's own declared supply pins rather than
+on the reference.
 
 #### Supply fragmentation: `net.supply_fragmented`
 

@@ -410,14 +410,17 @@ def test_build_delta_rows_iterates_extracted_corner_order():
 
 
 def test_build_coverage_empty_delta_reports_nothing_checked():
-    """An empty `delta[]` means no schematic-vs-extracted comparison was
-    performed at all -- a `status: "pass"` that says nothing about the
-    layout. The envelope now states that in a field instead of leaving a
-    reader to infer it from a zero row count."""
+    """An empty delta reports known zero actual comparisons."""
     coverage = _build_coverage(testbenches_summary=[], delta=[], corner_count=0)
 
     assert coverage == {
         "testbenches": 0,
+        "schema_version": 1,
+        "known": True,
+        "checked": [],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
         "delta_rows": 0,
         "corners_compared": 0,
         "nothing_checked": True,
@@ -444,11 +447,21 @@ def test_build_coverage_real_comparison_with_zero_differences_is_not_nothing_che
     assert [row["delta_pct"] for row in rows] == [0.0]
 
     coverage = _build_coverage(
-        testbenches_summary=[{"request": "tb.json"}], delta=rows, corner_count=1
+        testbenches_summary=[
+            {"request": "tb.json", "corner_count": 1, "measurement_names": ["vout"]}
+        ],
+        delta=rows,
+        corner_count=1,
     )
 
     assert coverage == {
         "testbenches": 1,
+        "schema_version": 1,
+        "known": True,
+        "checked": ['comparison:[0,"tt/1.800V/27C","vout"]'],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
         "delta_rows": 1,
         "corners_compared": 1,
         "nothing_checked": False,
@@ -456,12 +469,8 @@ def test_build_coverage_real_comparison_with_zero_differences_is_not_nothing_che
     }
 
 
-def test_build_coverage_errored_rows_still_count_as_checked():
-    """A run whose extracted side was unrunnable emits one `error` row per
-    schematic-side pair (`_unextracted_delta_rows`). That is a *failed*
-    comparison, not an absent one -- `status` is already `"error"`, which
-    says so -- so it must not additionally read as `nothing_checked`, which
-    is reserved for a passing verdict measured over nothing."""
+def test_build_coverage_errored_rows_are_unavailable_comparisons():
+    """Error rows are unavailable comparisons; the producer retains error status."""
     rows = _unextracted_delta_rows(
         spec_row_prefix=None,
         schematic_report=_sim_report(
@@ -470,12 +479,16 @@ def test_build_coverage_errored_rows_still_count_as_checked():
     )
 
     coverage = _build_coverage(
-        testbenches_summary=[{"request": "tb.json"}], delta=rows, corner_count=1
+        testbenches_summary=[
+            {"request": "tb.json", "corner_count": 1, "measurement_names": ["vout"]}
+        ],
+        delta=rows,
+        corner_count=1,
     )
 
     assert coverage["delta_rows"] == 1
-    assert coverage["nothing_checked"] is False
-    assert coverage["nothing_checked_reasons"] == []
+    assert coverage["nothing_checked"] is True
+    assert coverage["nothing_checked_reasons"] == ["unavailable_comparison"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1400,6 +1413,12 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
     # only against a hand-built row list.
     assert report["coverage"] == {
         "testbenches": 1,
+        "schema_version": 1,
+        "known": True,
+        "checked": ['comparison:[0,"default/novdd/27C","vout"]'],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
         "delta_rows": 1,
         "corners_compared": 1,
         "nothing_checked": False,

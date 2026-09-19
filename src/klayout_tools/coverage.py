@@ -1,56 +1,37 @@
-"""The shared ``coverage`` block convention (issue #1996).
+"""Versioned checked-work coverage and legacy readers (issues #1996/#2108).
 
-Several `klt` verbs can reach a top-level ``"pass"``/``"clean"`` verdict on a
-run that checked **nothing** -- a DRC deck whose every rule is gated behind a
-feature toggle the caller never set, a `klt sim` request whose PVT corner
-matrix expanded to zero corners, a `klt pex` run whose testbenches produced no
-comparable ``(corner, measurement)`` pair at all. Each of those is a perfectly
-well-formed envelope whose verdict is *vacuously* true, and until this module
-existed there was no field a downstream reader (`klt signoff`, a fleet report,
-a human) could consult to tell one apart from a real, earned pass.
+Version 1 adds ``schema_version``, ``known``, ``checked`` identities and
+``skipped``/``inapplicable``/``unknown`` identity/reason records to a producer's
+existing ``coverage`` fields. ``nothing_checked`` remains available, but
+requires *known* zero checked work: unknown execution is not proof of zero
+or complete execution. Skips describe requested work; inapplicable records
+never count as skipped requests. All identities are unique within a block.
 
-This module is **data-only**: it declares the convention's reason codes and
-the two reader helpers consumers use. It runs nothing and imports nothing from
-the rest of the package, exactly like :mod:`klayout_tools.metrics`.
+``coverage_state`` validates the versioned contract before classifying it.
+It reports full/partial/zero/unknown/malformed or legacy; it does not impose
+the Phase 2 partial-success policy. Optional Verilator code-coverage data
+and older envelopes without the common fields remain legacy data. An old
+explicit ``nothing_checked: true`` still reports zero.
 
-## The convention
-
-A verb that can produce a vacuous verdict emits a top-level ``coverage``
-object carrying, alongside whatever verb-specific fields it already reports::
-
-    "coverage": {
-        "...": "the verb's own coverage fields, unchanged",
-        "nothing_checked": <bool>,
-        "nothing_checked_reasons": [<reason code>, ...]
-    }
-
-- ``nothing_checked`` is ``true`` **only** when the run performed zero actual
-  checks, so its own ``status`` says nothing about the design. It is never a
-  synonym for "partial coverage": a run that checked one rule out of eighty
-  reports ``false`` (the eighty-minus-one gap is what the verb's own
-  coverage fields -- `klt drc`'s ``rules_skipped``/
-  ``layers_in_stream_without_rules``, etc. -- are for).
-- ``nothing_checked_reasons`` names *why*, using the stable codes below, and
-  is always a list: empty exactly when ``nothing_checked`` is ``false``. More
-  than one code can apply to the same run.
-- Both keys are **additive**: adding them to a verb's existing ``coverage``
-  block, or adding a ``coverage`` block to a verb that had none, earns no
-  ``schema_version`` bump (``docs/json-contract.md``).
-- An envelope with **no** ``coverage`` key, or one whose ``coverage`` predates
-  this convention, reads as "makes no coverage statement" -- see
-  :func:`coverage_nothing_checked`, which returns ``False`` for it rather
-  than guessing. Absence is never evidence of a gap, and never evidence of
-  full coverage either.
-
-Consumers read it through :func:`coverage_nothing_checked` /
-:func:`coverage_nothing_checked_reasons` rather than reaching into the dict,
-so the "missing/malformed block reads as no statement" rule is applied
-identically everywhere.
+The JSON Schema is ``docs/schemas/coverage.schema.json``. Cross-list identity
+uniqueness is additionally enforced here. This module imports no producer or
+consumer; the contract can be shared without changing verb boundaries.
 """
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
+
+COVERAGE_SCHEMA_VERSION = 1
+REASON_NO_RELEVANT_CHECKS = "no_relevant_checks"
+
+
+def work_id(domain: str, *parts: str | int) -> str:
+    """Stable, unambiguous identities even when user names contain separators."""
+    return domain + ":" + json.dumps(parts, separators=(",", ":"), ensure_ascii=True)
+
 
 #: The reason codes :data:`NOTHING_CHECKED_REASONS` documents, as module
 #: constants so producers never spell one wrong and consumers can match on
@@ -65,11 +46,8 @@ REASON_DECK_HAS_NO_RULES = "deck_has_no_rules"
 #: all-rules-skipped case ``coverage.rules_skipped`` already enumerates.
 REASON_ALL_RULES_SKIPPED = "all_rules_skipped"
 
-#: `klt drc`, KLayout engine: the PDK-native deck script ran to completion but
-#: its own report declares **no rule categories**, i.e. it never reached a
-#: single ``output(...)`` call. The common cause is a deck that gates its
-#: whole rule set behind a feature-toggle global set via ``-rd``/``--deck-var``
-#: that this invocation never set.
+#: Legacy DRC v1 reason. RDB categories do not establish rule execution;
+#: DRC v2 reports uninstrumented external execution as unknown instead.
 REASON_DECK_REPORTED_NO_RULES = "deck_reported_no_rules"
 
 #: `klt sim`: the request's PVT corner matrix expanded to zero corners, so no
@@ -98,9 +76,9 @@ NOTHING_CHECKED_REASONS: dict[str, str] = {
         "every deck rule was skipped (its layer(s) are absent from the stream)"
     ),
     REASON_DECK_REPORTED_NO_RULES: (
-        "the deck script's report declares no rule categories -- typically a "
-        "rule set gated behind a --deck-var this run never set"
+        "the legacy deck report declares no rule categories (execution unknown)"
     ),
+    REASON_NO_RELEVANT_CHECKS: "no relevant check was performed",
     REASON_EMPTY_CORNER_MATRIX: "the corner matrix expanded to zero corners",
     REASON_UNRECOGNIZED_LIMIT_KEYS: (
         "every declared measurements[].limits object used only unrecognised "
@@ -127,6 +105,141 @@ def build_nothing_checked(reasons: list[str]) -> dict[str, Any]:
     }
 
 
+def _identity_list_error(value: Any, *, records: bool) -> str | None:
+    if not isinstance(value, list):
+        return "work must be an array"
+    identities = []
+    for item in value:
+        if records:
+            if not isinstance(item, dict) or set(item) != {"id", "reason"}:
+                return "work records require id and reason"
+            reason = item["reason"]
+            if not isinstance(reason, str) or not re.fullmatch(
+                r"[a-z][a-z0-9_]*", reason
+            ):
+                return "work reason must be a nonempty stable code"
+            item = item["id"]
+        if not isinstance(item, str) or not item.strip():
+            return "work identity must be a nonempty string"
+        identities.append(item)
+    if len(set(identities)) != len(identities):
+        return "work identities must be unique"
+    return None
+
+
+def _work_lists_error(block: dict[str, Any]) -> str | None:
+    identities = []
+    for field in ("checked", "skipped", "inapplicable", "unknown"):
+        error = _identity_list_error(block.get(field), records=field != "checked")
+        if error:
+            return f"{field}: {error}"
+        identities.extend(
+            block[field] if field == "checked" else [r["id"] for r in block[field]]
+        )
+    if len(set(identities)) != len(identities):
+        return "work identity occurs in more than one coverage category"
+    return None
+
+
+def coverage_validation_error(block: Any) -> str | None:
+    """Validate a common v1 block, including consistency of derived fields."""
+    if not isinstance(block, dict):
+        return "coverage must be an object"
+    version = block.get("schema_version")
+    if type(version) is not int or version != COVERAGE_SCHEMA_VERSION:
+        return "unsupported or missing coverage.schema_version"
+    if type(block.get("known")) is not bool:
+        return "coverage.known must be a boolean"
+    error = _work_lists_error(block)
+    if error:
+        return error
+    return _coverage_consistency_error(block)
+
+
+def _coverage_consistency_error(block: dict[str, Any]) -> str | None:
+    if block["known"] != (not block["unknown"]):
+        return "known contradicts unknown work"
+    zero = block["known"] and not block["checked"]
+    if type(block.get("nothing_checked")) is not bool:
+        return "nothing_checked must be a boolean"
+    if block["nothing_checked"] != zero:
+        return "nothing_checked contradicts checked/unknown work"
+    reasons = block.get("nothing_checked_reasons")
+    error = _identity_list_error(reasons, records=False)
+    if error:
+        return f"nothing_checked_reasons: {error}"
+    if any(not re.fullmatch(r"[a-z][a-z0-9_]*", reason) for reason in reasons):
+        return "nothing_checked_reasons must be stable reason codes"
+    if bool(reasons) != zero:
+        return "nothing_checked_reasons contradicts nothing_checked"
+    return None
+
+
+def build_check_coverage(
+    *,
+    checked: list[str],
+    skipped: list[dict[str, str]] | None = None,
+    inapplicable: list[dict[str, str]] | None = None,
+    unknown: list[dict[str, str]] | None = None,
+    nothing_checked_reasons: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build one deterministic common block without aliasing producer data."""
+    block: dict[str, Any] = {
+        "schema_version": COVERAGE_SCHEMA_VERSION,
+        "known": not bool(unknown),
+        "checked": sorted(checked),
+    }
+    for key, values in (
+        ("skipped", skipped),
+        ("inapplicable", inapplicable),
+        ("unknown", unknown),
+    ):
+        block[key] = sorted((dict(r) for r in values or []), key=lambda r: r["id"])
+    zero = block["known"] and not checked
+    reasons = nothing_checked_reasons or sorted(
+        {r["reason"] for r in (skipped or []) + (inapplicable or [])}
+    )
+    block.update(
+        build_nothing_checked((reasons or [REASON_NO_RELEVANT_CHECKS]) if zero else [])
+    )
+    error = coverage_validation_error(block)
+    if error:
+        raise ValueError(f"invalid coverage: {error}")
+    return block
+
+
+def coverage_state(envelope: dict[str, Any]) -> str:
+    """Classify validated checked-work coverage; never infer legacy fullness."""
+    block = envelope.get("coverage")
+    legacy = (
+        "unknown"
+        if envelope.get("engine") == "klayout"
+        and isinstance(envelope.get("violations"), list)
+        else "legacy"
+    )
+    if block is None:
+        return legacy
+    if not isinstance(block, dict):
+        return "malformed"
+    fields = {
+        "schema_version",
+        "known",
+        "checked",
+        "skipped",
+        "inapplicable",
+        "unknown",
+    }
+    if not fields.intersection(block):
+        return "zero" if block.get("nothing_checked") is True else legacy
+    if coverage_validation_error(block):
+        return "malformed"
+    if not block["known"]:
+        return "unknown"
+    if block["nothing_checked"]:
+        return "zero"
+    return "partial" if block["skipped"] else "full"
+
+
 def coverage_nothing_checked(envelope: dict[str, Any]) -> bool:
     """Whether ``envelope`` states that it checked nothing.
 
@@ -140,10 +253,16 @@ def coverage_nothing_checked(envelope: dict[str, Any]) -> bool:
     string from a hand-rolled generic envelope, say) is not mistaken for the
     boolean the convention specifies.
     """
-    coverage = envelope.get("coverage")
-    if not isinstance(coverage, dict):
-        return False
-    return coverage.get("nothing_checked") is True
+    return coverage_state(envelope) == "zero"
+
+
+def coverage_refusal_reason(envelope: dict[str, Any]) -> str | None:
+    """Phase 1 qualification gate; partial-work policy belongs to Phase 2."""
+    return {
+        "zero": "nothing_checked",
+        "unknown": "coverage_unknown",
+        "malformed": "malformed_coverage",
+    }.get(coverage_state(envelope))
 
 
 def coverage_nothing_checked_reasons(envelope: dict[str, Any]) -> list[str]:

@@ -588,7 +588,7 @@ full `repo`/`external`/`absent` scope meanings.
 | Field               | Type              | Description                                                                          |
 | ------------------- | ----------------- | -------------------------------------------------------------------------------------- |
 | `schema_version`    | integer           | Version of this command's JSON shape (`2` as of issue #1261's `{path, scope}` path-normalization change, per `docs/json-contract.md`).      |
-| `status`             | string            | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass` — mirrors `klt sim`. |
+| `status`             | string            | Aggregate: `"pass"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence: `error` > `fail` > `not_checked` > `pass` — mirrors `klt sim`. |
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
@@ -616,52 +616,30 @@ full `repo`/`external`/`absent` scope meanings.
 
 ### `coverage`: an empty `delta[]` is not a pass
 
-Additive field (issue #1996, no `schema_version` bump), implementing the
-shared vacuous-verdict convention defined once in
-[`../json-contract.md`](../json-contract.md) — `klt drc` and `klt sim` emit
-the same two roll-up keys for their own equivalents.
+The [common v1 coverage contract](../coverage-contract.md) accompanies the
+existing `testbenches`, `delta_rows` and `corners_compared` coverage counters.
+`checked` names actual `(corner, spec_row)` comparisons with pass/fail
+results. Error rows are `unavailable_comparison` skips; a testbench with no
+corners or measurements is a `no_comparison_pairs` skip.
 
-`status` is `"pass"` when no `delta[]` row failed or errored — and an
-**empty** `delta[]` satisfies that vacuously. The two cases a reader has to
-tell apart are *not* conflated in this report:
+A comparison with identical values still produces a checked row and can
+pass. An empty `delta` is known zero (`no_delta_rows`): without another
+failure/error it now returns `status: "not_checked"`, exit 4. Error rows can
+also leave zero actual comparisons, but the aggregate remains `error` with
+exit 4. The legacy counters continue to include all delta rows, so a row
+count alone must not be treated as proof of comparison.
 
-- **A comparison ran and found nothing wrong.** Every compared
-  `(corner, measurement)` pair emits its own `delta[]` row carrying both
-  values and `status: "pass"`, whether or not the two sides differ — there
-  is no "within tolerance, so omit the row" path. So a real comparison always
-  leaves `delta` non-empty, and `nothing_checked` is `false`.
-- **No comparison happened at all.** `delta` is `[]` — no testbench produced
-  a single `(corner, measurement)` pair to diff (e.g. every testbench's
-  `measurements[]` is empty, or its corner matrix expanded to zero corners).
-  `status` is still `"pass"`, and it says nothing whatever about the layout.
-  `nothing_checked` is `true`, reason `no_delta_rows`.
-
-| Field                     | Type            | Description |
-| ------------------------- | --------------- | ----------- |
-| `testbenches`             | integer         | `== len(testbenches)`, restated here so the whole coverage story is in one block. |
-| `delta_rows`              | integer         | `== len(delta)` — the load-bearing count. |
-| `corners_compared`        | integer         | `== corner_count`. |
-| `nothing_checked`         | boolean         | Whether this run compared nothing, so its `status` says nothing about the layout. |
-| `nothing_checked_reasons` | array\<string\> | Why. Empty exactly when `nothing_checked` is `false`. |
-
-A run whose extracted side was unrunnable (`pin_count_mismatch` /
-`flat_dut_mismatch`) still emits one `error` row per schematic-side pair, so
-it reports `nothing_checked: false` — that is a *failed* comparison, not an
-absent one, and `status: "error"` already says so. `nothing_checked` is
-reserved for a **passing** verdict measured over nothing.
-
-[`klt signoff`](signoff.md) consumes this: a `pex` envelope reporting
-`nothing_checked: true` never counts as a passing check, and never backs a
-`"met"` item 7 citation (reason `nothing_checked`).
+`klt signoff` refuses zero, unknown or malformed common coverage. Partial
+comparisons remain disclosed for the Phase 2 success policy.
 
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |
 | --------- | -------------------------------------------------------------------------------------------- |
-| `0`       | Every `delta[]` row passed.                                                                   |
+| `0`       | At least one actual comparison ran and every `delta[]` row passed.                                                                   |
 | `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
-| `4`       | Ran successfully; at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2). |
+| `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2). |
 
 (`2` is reserved for argparse usage errors, as with every other `klt`
 subcommand. Exit codes `3`/`4` mirror `klt sim`'s own precedent — see

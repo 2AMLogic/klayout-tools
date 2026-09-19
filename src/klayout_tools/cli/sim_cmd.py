@@ -61,7 +61,7 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
 
-    if report["status"] == "error":
+    if report["status"] in {"error", "not_checked"}:
         return EXIT_CORNER_ERRORED
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED

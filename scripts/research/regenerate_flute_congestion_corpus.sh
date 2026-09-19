@@ -67,9 +67,12 @@ for trial_spec in "${TRIALS[@]}"; do
   mkdir -p "$scratch"
   cp "$REPO_ROOT/examples/functional-verification/gcd.v" "$scratch/gcd.v"
 
+  # A generated UUID is a safe path component, reserved by this invocation only.
+  SYNTH_RUN_ID="run-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
   cat >"$scratch/synth_request.json" <<JSON
 {
   "schema": "klt.synthesize.request/1",
+  "run_id": "$SYNTH_RUN_ID",
   "engine": "yosys",
   "sources": ["gcd.v"],
   "hdl_toplevel": "gcd",
@@ -82,7 +85,7 @@ JSON
 {
   "schema": "klt.place_and_route.request/1",
   "engine": "openroad",
-  "netlist": ".klt/synthesize/gcd_synth.v",
+  "netlist": ".klt/synthesize/${SYNTH_RUN_ID}/gcd_synth.v",
   "hdl_toplevel": "gcd",
   "pdk": { "cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80" },
   "floorplan": {

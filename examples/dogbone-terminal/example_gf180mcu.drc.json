@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "examples/dogbone-terminal/example_gf180mcu.gds",
   "deck": "gf180mcu",
   "dbu_um": 0.001,
@@ -103,6 +103,165 @@
       "7.7 Poly2",
       "9.1 Bond Pad"
     ],
+    "schema_version": 1,
+    "known": true,
+    "checked": [
+      "comp.enclosing.contact.1",
+      "comp.space.1",
+      "comp.width.1",
+      "contact.space.1",
+      "contact.width.1",
+      "metal1.enclosing.contact.1",
+      "metal1.space.1",
+      "metal1.width.1",
+      "poly2.enclosing.contact.1",
+      "poly2.space.1",
+      "poly2.width.1"
+    ],
+    "skipped": [
+      {
+        "id": "bjt.separation.comp.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "comp.space.mv.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "comp.width.mv.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal1.enclosing.via1.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal2.enclosing.via1.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal2.enclosing.via2.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal2.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal2.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal3.enclosing.via2.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal3.enclosing.via3.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal3.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal3.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal4.enclosing.via3.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal4.enclosing.via4.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal4.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal4.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal5.enclosing.via4.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal5.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metal5.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metaltop.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "metaltop.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "mim.enclosing.fusetop.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "mim.enclosing.via4.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "mim.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "nwell.enclosing.comp.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "nwell.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "pad.enclosing.metal5.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via1.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via1.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via2.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via2.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via3.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via3.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via4.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via4.width.1",
+        "reason": "absent_input_layer"
+      }
+    ],
+    "inapplicable": [],
+    "unknown": [],
     "nothing_checked": false,
     "nothing_checked_reasons": []
   }

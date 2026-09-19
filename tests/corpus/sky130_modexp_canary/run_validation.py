@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -301,10 +302,17 @@ def _run_validation(workdir: Path) -> int:
     # git repo, so it reports `scope: "external"`, `path: None`.
     # Reconstruct the real filesystem path directly from `run_synthesize`'s
     # own documented convention (`synthesize.py`'s module docstring):
-    # `.klt/synthesize/<hdl_toplevel>_synth.v`, next to the request file
+    # `.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v`, next to the request file
     # (`klt_synthesize` above always writes `synth_request.json`).
+    run_id = synth.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise ValueError("invalid synthesis run_id")
     netlist_rel = str(
-        (workdir / ".klt" / "synthesize" / "modexp_synth.v").relative_to(workdir)
+        (workdir / ".klt" / "synthesize" / run_id / "modexp_synth.v").relative_to(
+            workdir
+        )
     )
 
     print("--> klt place-and-route modexp (real OpenROAD, openroad/orfs)")

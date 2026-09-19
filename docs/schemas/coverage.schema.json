@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://2amlogic.com/klayout-tools/schemas/coverage.schema.json",
+  "title": "Checked-work coverage version 1",
+  "description": "Shared work records; existing verb-specific fields may coexist. Work IDs must also be unique across all four categories (checked by the runtime validator).",
+  "type": "object",
+  "required": ["schema_version", "known", "checked", "skipped", "inapplicable", "unknown", "nothing_checked", "nothing_checked_reasons"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "known": {"type": "boolean"},
+    "checked": {"$ref": "#/$defs/identities"},
+    "skipped": {"$ref": "#/$defs/records"},
+    "inapplicable": {"$ref": "#/$defs/records"},
+    "unknown": {"$ref": "#/$defs/records"},
+    "nothing_checked": {"type": "boolean"},
+    "nothing_checked_reasons": {"type": "array", "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}, "uniqueItems": true}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "identity": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "identities": {"type": "array", "items": {"$ref": "#/$defs/identity"}, "uniqueItems": true},
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "reason"],
+        "properties": {
+          "id": {"$ref": "#/$defs/identity"},
+          "reason": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}
+        },
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"known": {"const": true}}},
+      "then": {"properties": {"unknown": {"maxItems": 0}}},
+      "else": {"properties": {"unknown": {"minItems": 1}}}
+    },
+    {
+      "if": {"properties": {"known": {"const": true}, "checked": {"maxItems": 0}}},
+      "then": {"properties": {"nothing_checked": {"const": true}, "nothing_checked_reasons": {"minItems": 1}}},
+      "else": {"properties": {"nothing_checked": {"const": false}, "nothing_checked_reasons": {"maxItems": 0}}}
+    }
+  ]
+}

@@ -87,6 +87,7 @@ for DESIGN in gcd mult8; do
   cat > "$SCRATCH/synth_request.json" <<JSON
 {
   "schema": "klt.synthesize.request/1",
+  "run_id": "corpus-${DESIGN}",
   "engine": "yosys",
   "sources": ["$DESIGN.v"],
   "hdl_toplevel": "$DESIGN",
@@ -99,7 +100,7 @@ JSON
 {
   "schema": "klt.place_and_route.request/1",
   "engine": "openroad",
-  "netlist": ".klt/synthesize/${DESIGN}_synth.v",
+  "netlist": ".klt/synthesize/corpus-${DESIGN}/${DESIGN}_synth.v",
   "hdl_toplevel": "$DESIGN",
   "pdk": { "cell_library": "sky130_fd_sc_hd", "corner": "tt_025C_1v80" },
   "floorplan": {

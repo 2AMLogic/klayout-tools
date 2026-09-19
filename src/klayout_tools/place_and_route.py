@@ -362,8 +362,8 @@ exact behaviour if this risk ever manifests as a real mismatch.
   then ``check_antennas``, repeated up to a bound. This stage now mirrors
   that exact shape via the optional ``request.max_antenna_repair_iterations``
   field (:func:`_validate_max_antenna_repair_iterations`, integer
-  ``1``-``8``, default ``1``) -- ``1`` reproduces today's exact generated
-  Tcl, byte-for-byte; a higher value repeats the ``repair_antennas``/
+  ``0``-``8``, default ``1``). Zero skips repair; the default keeps a
+  single repair/reroute pass; a higher value repeats the ``repair_antennas``/
   ``detailed_route`` pair that many times unconditionally (no Tcl-level
   early exit on a zero-violation ``check_antennas`` result -- a deliberate
   simplification: every other generated script in this module is a flat,
@@ -479,18 +479,26 @@ macro-specific PDN grids (``define_pdn_grid -macro``, with their own
 halo/orientation config) -- a design with hard macros needs a caller-supplied
 macro halo/grid spec this field does not yet expose, so ``pdngen`` here
 builds only the flat standard-cell grid (:func:`_power_delivery_lines`).
-Real per-instance tapcell/filler *placement counts* are also not reported in
-the additive ``power`` response field below (only which cell masters/net
-names this run was configured with) -- OpenROAD reports these only via
-``report_design_area``'s free-text summary or a custom
-``get_cells -filter``/``utl::metric_integer`` combination, neither of which
-this module currently threads through its existing per-stage ``-metrics
-<file>.json`` mechanism; both are natural, separable follow-ups (each would
-need the same "verified live" rigor the rest of this response contract
-carries, not a guess). Neither exclusion changes any existing field's
-behaviour, and both can be added later as additive request/response fields
-without a contract-shape change -- the same precedent every other v1
-exclusion in this module's docstring already follows.
+This exclusion changes no existing field's behaviour, and can be added later
+as an additive request/response field without a contract-shape change --
+the same precedent every other v1 exclusion in this module's docstring
+already follows.
+
+Real per-instance tapcell/endcap/filler *placement counts* were originally
+excluded here too, on the grounds that OpenROAD reports them only via
+``report_design_area``'s free-text summary or a custom ``get_cells
+-filter``/``utl::metric_integer`` combination this module does not thread
+through its per-stage ``-metrics <file>.json`` mechanism. Issue #2086
+closed that gap from the other side -- by reading the DEF the run already
+wrote -- because the exclusion had a cost the original scoping missed: a
+``request.power``-less run *completes*, exits 0, and produces a layout
+whose power delivery (none at all on a library with no row-rail fallback;
+rails and fill but no taps, straps or PDN vias on one that has it) was
+indistinguishable in the response from a power-complete one. The additive
+``power.placed`` block now reports those counts plus the ``SPECIALNETS``
+grid structure, and the additive top-level ``warnings`` field says --
+quoting the measured numbers, never a fixed template -- exactly which of
+them are zero. See :mod:`klayout_tools.place_and_route_power_audit`.
 
 ``straps[].spacing_um`` and ``connects[]`` (issue #1133) close a further gap:
 sourcing strap geometry from a real platform's own PDN config (e.g. gf180's
@@ -597,6 +605,28 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+
+# The power-delivery audit (issue #2086): reads the DEF this run wrote and
+# reports what was actually *placed* (tapcells/endcaps/fillers, PDN
+# special-net structure), plus the loud `warnings` strings an absent or
+# partial power delivery earns. Kept in its own module for the same reason
+# `place_and_route_sta.py` is -- a self-contained, single-purpose subsystem
+# (DEF text parsing + grading) that does not belong in this file's stage
+# orchestration.
+from .place_and_route_power_audit import (
+    audit_power_delivery as audit_power_delivery,
+)
+from .place_and_route_power_audit import (
+    power_delivery_warnings as power_delivery_warnings,
+)
+from .place_and_route_reports import (
+    count_route_drc_violations as _count_route_drc_violations,
+)
+from .place_and_route_reports import (
+    detailed_route_lines,
+    route_metrics_object,
+    write_route_metrics,
+)
 
 # The post-route multi-corner sweep + SPEF-annotated STA subsystem (issues
 # #949/#948/#961) lives in `place_and_route_sta.py` (issue #1808 split). The
@@ -1185,17 +1215,6 @@ _MAX_CAPACITANCE_VIOLATIONS_END = "===KLT_MAX_CAPACITANCE_VIOLATIONS_END==="
 _ANTENNA_VIOLATIONS_BEGIN = "===KLT_ANTENNA_VIOLATIONS_BEGIN==="
 _ANTENNA_VIOLATIONS_END = "===KLT_ANTENNA_VIOLATIONS_END==="
 
-#: Literal per-violation header line TritonRoute writes to its own
-#: `detailed_route -output_drc <rpt>` report -- one per violation, e.g.
-#: ``"violation type: Metal Short"`` followed by indented `srcs:`/`bbox =
-#: (...)`/`Layer: ...` detail lines. Confirmed live (`strings` against a
-#: real `openroad/orfs:latest` build's `openroad` binary) as the exact
-#: literal the binary both *writes* (`"violation type: "` -- issue #938)
-#: and internally *re-parses* the same report format with
-#: (`"\\s*violation type: (.*)"`) -- not guessed from documentation. See
-#: :func:`_count_route_drc_violations`.
-_ROUTE_DRC_VIOLATION_TYPE_LINE = "violation type: "
-
 #: Same marker convention as the setup/hold/antenna pairs above, isolating
 #: the ``request.post_route_spef`` net-name-correlation check's own report
 #: (issue #948, extended to two lines by #951) -- see
@@ -1591,6 +1610,9 @@ def run_place_and_route(
             # #938).
             drc_report_path = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
             route_drc_count = _count_route_drc_violations(drc_report_path)
+            write_route_metrics(
+                metrics_path, metrics, route_drc_count, error_cls=PlaceAndRouteError
+            )
 
             # Issue #949: sweep every corner `cell_library` ships for
             # setup/hold slack, as a second OpenROAD invocation over the
@@ -1666,6 +1688,7 @@ def run_place_and_route(
     spef_sta: dict[str, Any] | None = None
     layer_map_info: dict[str, Any] | None = None
     def_net_names_info: dict[str, Any] | None = None
+    min_area_repair_info: dict[str, Any] | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
@@ -1689,6 +1712,7 @@ def run_place_and_route(
             "resolution": merge_info["resolution"],
         }
         def_net_names_info = merge_info["def_net_names"]
+        min_area_repair_info = merge_info["min_area_repair"]
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
         # the GDS just merged above, fed back into a fresh OpenSTA session
@@ -1843,6 +1867,54 @@ def run_place_and_route(
             "row_rail": row_rail_info,
         }
 
+    # Additive field (issue #2086): what this run's own DEF says was
+    # *actually placed*, as opposed to the fields above, which report what
+    # the run was *configured* with. A `request.power`-less run completes,
+    # exits 0 and writes a plausible-looking layout with zero tapcells,
+    # zero PDN and zero fillers -- and, before this block existed, said so
+    # nowhere. `power.placed` measures those counts from the DEF, and
+    # `warnings` below turns an absent/partial power delivery into a loud,
+    # machine-readable statement in the artifact itself rather than leaving
+    # it visible only in the absence of a complaint. See
+    # :mod:`klayout_tools.place_and_route_power_audit`.
+    #
+    # The masters handed to the audit are the *library's* (not
+    # `power_info`'s, which are `None`/`[]` exactly when `request.power`
+    # was omitted -- the case that most needs measuring). The DEF graded is
+    # whichever one this response points a caller at: the routed
+    # `def_path` at `"route"`, the pre-route `unrouted_def_path` at
+    # `"place"`/`"cts"`, and none at all at `"floorplan"` (no DEF is
+    # written there, reported as `evidence: "unavailable"` rather than a
+    # fabricated zero).
+    audit_tap_master, audit_endcap_master, _audit_distance_um = _TAPCELL_CELLS.get(
+        cell_library, (None, None, 0)
+    )
+    audited_def_path = def_path or unrouted_def_path
+    power_info["placed"] = audit_power_delivery(
+        def_path=audited_def_path,
+        unavailable_reason=(
+            None
+            if audited_def_path is not None
+            else f"no DEF is written at the '{target_stage}' stage"
+        ),
+        tapcell_master=audit_tap_master,
+        endcap_master=audit_endcap_master,
+        filler_masters=_FILLER_CELLS.get(cell_library, ()),
+        power_net=(
+            power["power_net"] if power is not None else row_rail_info["power_net"]
+        ),
+        ground_net=(
+            power["ground_net"] if power is not None else row_rail_info["ground_net"]
+        ),
+        # `filler_placement` is a `"route"`-stage-only call -- a `"place"`/
+        # `"cts"` DEF legitimately has no fillers, and grading it for them
+        # would be a false alarm.
+        expect_fillers=target_stage == "route",
+    )
+    warnings = power_delivery_warnings(
+        power_info["placed"], power_requested=power is not None
+    )
+
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
 
@@ -1925,6 +1997,18 @@ def run_place_and_route(
         # those keep the pre-#1488 fallback rather than failing the merge.
         # `null` unless `stage_reached` is `"route"`, mirroring `layer_map`.
         "def_net_names": def_net_names_info,
+        # Additive field (issue #2139): what the DEF->GDS merge's own
+        # post-route minimum-*area* repair pass did, so a caller can tell a
+        # routed GDS that genuinely clears the PDK's own `*.area.*` rules
+        # from one that merely was not measured. `status` is `"clean"`,
+        # `"violations"` (see `unrepaired`) or `"skipped"` (with a
+        # `reason`); `patches`/`repaired`/`remaining` count what was drawn
+        # and what is left; `rules[]` carries the per-rule before/after
+        # detail. A `"skipped"` pass is deliberately NOT reported as clean
+        # -- an unmeasured layer and a measured-and-clean one are different
+        # answers. `null` unless `stage_reached` is `"route"`, mirroring
+        # `layer_map`.
+        "min_area_repair": min_area_repair_info,
         # Additive field (issue #996): the `write_verilog`-produced,
         # *as-built* gate-level netlist -- the design as CTS/timing repair/
         # antenna repair actually left it, i.e. the netlist the routed
@@ -1944,6 +2028,18 @@ def run_place_and_route(
         "spef_sta": spef_sta,
         # Additive field (issue #1091) -- see the construction comment above.
         "power": power_info,
+        # Additive field (issue #2086): non-fatal conditions a caller must
+        # see before trusting this run's numbers. Always present (`[]` when
+        # there is nothing to say), never `null`, mirroring the same
+        # `warnings: [str, ...]` shape `klt extract`/`klt pdk`/`klt
+        # lef-abstract` already use. Today's only producer is the
+        # power-delivery audit above -- a run that placed no tapcells, no
+        # PDN and no fillers now says so in its own artifact instead of
+        # being distinguishable from a power-complete run only by its
+        # silence. This is a warning, not a refusal: `request.power` stays
+        # optional (a floorplan-exploration run has no reason to build a
+        # PDN), so `status`/exit codes are unchanged.
+        "warnings": warnings,
         "provenance": provenance,
     }
 
@@ -2783,8 +2879,8 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
     """Optional ``request.max_antenna_repair_iterations`` (issue #939) -- a
     bounded multi-pass generalisation of the ``"route"`` stage's existing
     single ``repair_antennas``+``detailed_route`` reroute pass (issue #759).
-    Omitted/``None`` defaults to ``1``, reproducing today's exact generated
-    Tcl byte-for-byte. See this module's own docstring, "Timing-driven
+    Omitted/``None`` defaults to ``1``; ``0`` disables repair/reroute passes.
+    See this module's own docstring, "Timing-driven
     global routing + bounded antenna-repair iteration"."""
     if value is None:
         return 1
@@ -2792,9 +2888,9 @@ def _validate_max_antenna_repair_iterations(value: Any) -> int:
         raise PlaceAndRouteError(
             "request.max_antenna_repair_iterations must be an integer"
         )
-    if not (1 <= value <= _MAX_ANTENNA_REPAIR_ITERATIONS_CAP):
+    if not (0 <= value <= _MAX_ANTENNA_REPAIR_ITERATIONS_CAP):
         raise PlaceAndRouteError(
-            "request.max_antenna_repair_iterations must be between 1 and "
+            "request.max_antenna_repair_iterations must be between 0 and "
             f"{_MAX_ANTENNA_REPAIR_ITERATIONS_CAP}"
         )
     return value
@@ -3683,12 +3779,6 @@ def _stage_script_lines(
     else:  # stage == "route"
         routing_range = _ROUTING_LAYER_RANGE[cell_library]
         diode_cell = _ANTENNA_DIODE_CELLS[cell_library][0]
-        drc_report = os.path.join(output_dir, f"{hdl_toplevel}_route_drc.rpt")
-        maze_log = os.path.join(output_dir, f"{hdl_toplevel}_route_maze.log")
-        detailed_route_call = (
-            f"detailed_route -output_drc {drc_report} -output_maze {maze_log} "
-            f"-or_seed {seed}"
-        )
         # `-critical_nets_percentage` (issue #939, native-routing survey
         # section 4.1): a real, documented `global_route` flag -- see this
         # module's own docstring, "Timing-driven global routing + bounded
@@ -3722,8 +3812,10 @@ def _stage_script_lines(
         lines += [
             f"set_routing_layers -signal {routing_range}",
             global_route_call,
-            detailed_route_call,
         ]
+        lines += detailed_route_lines(
+            output_dir, hdl_toplevel, seed, 0, max_antenna_repair_iterations
+        )
         # Post-route antenna repair (survey section 2.7/3.3): inserting a
         # diode instance on a violating net changes that net's routing,
         # so -- mirroring ORFS's own `flow/scripts/detail_route.tcl`,
@@ -3731,8 +3823,8 @@ def _stage_script_lines(
         # `repair_antennas` to route/legalize each new diode instance --
         # this repeats the `repair_antennas`/`detailed_route` pair
         # `max_antenna_repair_iterations` times (issue #939; default `1`,
-        # reproducing the original single repair+reroute pass byte-for-
-        # byte). `repair_antennas` itself is never called with `-iterations`
+        # keeping the original single repair+reroute pass). `repair_antennas`
+        # itself is never called with `-iterations`
         # here -- OpenROAD's own `GlobalRouter.cpp` explicitly warns against
         # `-iterations != 1` once `detailed_route` has already run, exactly
         # this stage's own call pattern (see the module docstring for the
@@ -3742,11 +3834,15 @@ def _stage_script_lines(
         # inactive/single-pass, in ORFS's own default flow).
         # `check_antennas` then reports the post-repair violation count
         # unconditionally, exactly as ORFS's own flow does.
-        for _ in range(max_antenna_repair_iterations):
-            lines += [
-                f"repair_antennas {diode_cell}",
-                detailed_route_call,
-            ]
+        for pass_index in range(1, max_antenna_repair_iterations + 1):
+            lines += [f"repair_antennas {diode_cell}"]
+            lines += detailed_route_lines(
+                output_dir,
+                hdl_toplevel,
+                seed,
+                pass_index,
+                max_antenna_repair_iterations,
+            )
         lines += _antenna_check_lines()
         # `request.power` (issue #1091): gap-filler cell insertion, right
         # after the antenna-repair loop above (mirroring ORFS's own
@@ -4148,35 +4244,6 @@ def _count_antenna_violations(stdout: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _count_route_drc_violations(drc_report_path: str) -> int | None:
-    """Count TritonRoute's own `detailed_route -output_drc <rpt>` violation
-    entries -- each violation in the report begins with a literal
-    ``"violation type: "`` header line (see
-    :data:`_ROUTE_DRC_VIOLATION_TYPE_LINE`; confirmed live via `strings`
-    against a real `openroad/orfs:latest` build's `openroad` binary, which
-    embeds this exact literal both to *write* the report and to *re-parse*
-    it internally), so counting occurrences of that line is exact -- one
-    per violation, never a partial match on unrelated report text (`comment:
-    `/`bbox = (...)`/`Layer: ...` detail lines never themselves start with
-    `"violation type: "`).
-
-    A 0-byte report -- confirmed live for a real, DRC-clean `detailed_route`
-    run on this repo's own `gcd` corpus fixture (issue #938) -- means zero
-    violations, correctly returned as ``0``, not ``None``. Returns ``None``
-    (never ``0`` defensively) only when the report file itself cannot be
-    read -- should not happen for a successful `"route"` stage run
-    (`detailed_route` always writes its `-output_drc` target, even when
-    empty), and keeps a genuinely missing signal distinguishable from a
-    confirmed-zero violation count, mirroring
-    :func:`_count_antenna_violations`."""
-    try:
-        with open(drc_report_path, encoding="utf-8") as handle:
-            content = handle.read()
-    except OSError:
-        return None
-    return content.count(_ROUTE_DRC_VIOLATION_TYPE_LINE)
-
-
 def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
     if not os.path.isfile(metrics_path):
         raise PlaceAndRouteError(
@@ -4185,7 +4252,10 @@ def _read_metrics(metrics_path: str, stage: str) -> dict[str, Any]:
         )
     try:
         with open(metrics_path, encoding="utf-8") as handle:
-            data = json.load(handle)
+            data = json.load(
+                handle,
+                object_pairs_hook=route_metrics_object if stage == "route" else dict,
+            )
     except (OSError, UnicodeDecodeError) as exc:
         raise PlaceAndRouteError(
             f"could not read '{stage}' stage metrics '{metrics_path}': {exc}"

@@ -40,9 +40,11 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
-  sim`/`klt yield`/`klt pex`/`klt power` JSON envelope files (`--format json`
-  output from any of those seven verbs), or a hand-rolled **generic evidence
-  envelope** (`"kind": "generic"`, issue #1152 — see "Generic evidence
+  sim`/`klt yield`/`klt pex`/`klt power`/`klt sta`/`klt
+  functional-verification`/`klt erc`/`klt place-and-route` JSON envelope
+  files (`--format json` output from any of those eleven verbs), or a
+  hand-rolled **generic evidence envelope** (`"kind": "generic"`, issue
+  #1152 — see "Generic evidence
   (opt-in, non-`klt`-native)" below), in the order they should appear in
   `checks[]`. Any entry may be `-`, which reads one envelope from stdin
   (same convention as `klt report`/`klt lvs`). Mutually exclusive with
@@ -737,6 +739,17 @@ unannotated (but passing) regression cited for item 7 renders `"unmet"` with
 what is missing: `"wrong_kind"` means "cite a different artifact",
 `"not_post_layout"` means "re-run *this* artifact against the layout".
 
+Only the literal JSON boolean `true` in `environment.sdf.annotated` grants
+annotation credit. False, null, missing fields, strings (including `"true"`
+and `"false"`), numbers, arrays, and objects do not qualify. Malformed optional
+`environment` or `sdf` containers are treated the same way: an otherwise
+passing regression remains a passing plain check and valid item-5 evidence,
+but item 7 is `"unmet"` with `reason: "not_post_layout"` and no citation.
+The plain check's `detail.sdf_annotated` uses this same strict predicate and
+reports `false`; malformed optional metadata does not cause an envelope
+error. This validates the annotation flag's domain, not the simulator's
+correctness or the completeness of SDF annotation.
+
 **`klt pex`'s envelope shape.** At the time issue #871 wired this
 restriction, `klt pex` (Epic #709) did not exist yet, so `klt signoff`
 recognised a **Curator-proposed, provisional** shape ahead of the real
@@ -938,6 +951,82 @@ Item 8 itself is otherwise unrestricted (as it always was): it still also
 accepts any native kind's passing citation, exactly as before this issue —
 `generic` is an *additional* accepted kind for item 8, not a replacement.
 
+### Item 11 is compound: power delivery (structural)
+
+T1 item 11 ("Power delivery (structural)", issue #2025) is the first item no
+single artifact proves, so **its `evidence` entry may be a JSON array** of
+ordinary evidence entries — each a bare path string, a `{"file": ...,
+"content_hash": ...}` object, or a command-backed `{"command": [...]}` entry,
+exactly as every other item accepts:
+
+```json
+{
+  "block": "my-digital-block",
+  "kind": "digital",
+  "evidence": {
+    "11": [
+      {"file": "erc-supply.json", "content_hash": "sha256:<layout hash>"},
+      "lvs.json",
+      "par.json"
+    ]
+  }
+}
+```
+
+Every part must independently resolve to a readable, recognised envelope of
+a kind item 11 accepts (`erc`, `lvs`, `place-and-route`) — one malformed part
+renders the whole item `invalid_evidence` rather than being silently dropped
+from the cited set, and a part of any other kind renders `wrong_kind`.
+
+**What the cited set must prove**, per `docs/design-evidence-tiers.md`'s own
+item text:
+
+| Condition | Read from | Unmet reason |
+| --------- | --------- | ------------ |
+| The ERC spec declares at least one `"kind": "supply"` net, at least one `ties[]` entry, and (with a PDN citation) a stackup covering every `power.straps[].layer` | the spec document `klt erc`'s envelope names — see below | `supply_spec_incomplete` |
+| No `erc.unconnected_net`/`erc.supply_short` on a declared supply, and no `erc.missing_tie` | the `erc` citation's `erc_findings[]` | `supply_not_continuous` |
+| **With a `place-and-route` citation** (RTL-flow digital): `power.pdn: true` with a `power.tapcell_master` named | the `place-and-route` citation | `no_pdn` |
+| **With a `place-and-route` citation**: `power_connectivity.status == "match"` — `"unchecked"` satisfies item 4 but **not** item 11 | the `lvs` citation | `lvs_supply_unproven` |
+| **Without one** (analog, or the doc's full-custom digital sub-case): every declared supply net paired to a reference-side net in `net_correspondence`, i.e. the reference netlist carried the supplies | the `lvs` citation | `lvs_supply_unproven` |
+| The cited LVS report passes on its own terms (`status: "match"`, `power_connectivity` not `"mismatch"`) | the `lvs` citation | `check_failed` |
+
+Which branch applies is decided by **whether a `place-and-route` citation is
+present**, not by `kind` alone: the doc's "Full-custom digital sub-case"
+declares `kind: "digital"` for a hand-captured block that has no P&R run to
+cite, exactly as it does for items 1, 2, and 5. An RTL-flow digital block
+cannot reach `met` by simply omitting its P&R citation — its signal-only
+`gate-level-verilog` reference leaves the supplies unpaired in
+`net_correspondence`, so the other branch fails too.
+
+**Item 11 does not grade the ERC envelope's own `status`.** A `klt erc`
+report is `"clean"` only when it has zero findings of *any* rule and no
+antenna violation anywhere; item 11 grades exactly the three supply rules
+above. An antenna verdict on an unrelated signal net, a floating-gate
+finding, or the tie-cell false positives issue #1994 tracks therefore do not
+block a power-delivery claim they say nothing about. Envelope-aggregation
+mode (`klt signoff erc.json ...`) still grades an `erc` check on `status`.
+
+**`klt signoff` reads the ERC spec document off disk.** `klt erc`'s envelope
+echoes its spec's *path* (`spec`) but not its content — not the declared
+nets, not their `kind`, not the stackup, not the ties. Without reading it,
+"every declared supply resolved to one island" and "no supply was ever
+declared" are indistinguishable: both report zero findings. So the spec is
+read, resolved the same way `klt yield`'s samples document is (relative to a
+command-backed entry's `cwd`, else this process's own). A spec that has since
+moved or been deleted renders `supply_spec_incomplete` — unprovable, never
+assumed. Keep the spec committed beside the evidence.
+
+**`erc` and `place-and-route` are accepted by item 11 alone.** Both are
+opt-in kinds, scoped exactly the way `generic` is scoped to item 8: an
+`erc` citation for any other item renders `wrong_kind`, and so does a
+`place-and-route` citation. That matters most for the latter — a `klt
+place-and-route` response passes on `status: "ok"` alone (a run that
+completed; negative slack is expected, not an error), so an unrestricted
+citation of one would reopen the "cannot fail, therefore always passes" hole
+issue #1987 closed for `klt extract` on items 3 and 4. In particular it can
+never satisfy item 5: the corner set that response sweeps is the PDK's full
+shipped list, not a declared one — `klt sta` is item 5's timing evidence.
+
 ### No T1 item accepts `power` evidence
 
 `klt power`'s IR-drop/EM verdict (issue #1321, Phase 2 of epic #712 —
@@ -946,8 +1035,13 @@ accepts any native kind's passing citation, exactly as before this issue —
 IR-drop/EM evidence at all — unlike `generic` (scoped to item 8 above), no
 T1 item names `klt power`. A `power`-kind citation therefore renders
 `"unmet"`/`"wrong_kind"` for **every** item, including item 8 — it is never
-graded `"met"` in `--manifest`/`--fleet` mode. Extending the T1 item list to
-cover power/IR-drop is a separate, larger decision this phase does not make.
+graded `"met"` in `--manifest`/`--fleet` mode.
+
+**Item 11 did not change this.** The operator ruling that added "Power
+delivery (structural)" (#2025) deliberately kept the *analysis* question —
+how far does the supply droop, does any segment exceed its EM limit — out of
+T1, and graded only the *structural* one ("is the supply connected to what it
+powers"). Item 11's evidence is `erc`/`lvs`/`place-and-route`, never `power`.
 `klt power` evidence is consumed today only by envelope-aggregation mode —
 see "`klt power` evidence (envelope aggregation only)" below.
 
@@ -1045,7 +1139,7 @@ required.
   "block": "my-block",
   "kind": "analog",
   "tier": null,
-  "t1_item_count": 10,
+  "t1_item_count": 11,
   "t1_met_count": 1,
   "source_doc": "docs/design-evidence-tiers.md",
   "items": [
@@ -1104,7 +1198,7 @@ required.
 | `block`         | string \| null       | Echoed from the manifest's `block` field.                                                |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the manifest.                  |
 | `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"`; otherwise `null` — no partial credit.  |
-| `t1_item_count` | integer              | Number of rendered T1 items (10 for `analog`/`digital`, 20 for `mixed-signal`).          |
+| `t1_item_count` | integer              | Number of rendered T1 items (11 for `analog`/`digital`, 22 for `mixed-signal`). Eleven since issue #2025 added item 11 ("Power delivery (structural)"); the value is the parsed checklist's own length, never a literal in code. |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `items`         | array\<object\>      | One entry per T1 checklist item (per partition, for `mixed-signal`), then one entry per T2-T4 ladder row. |
@@ -1114,14 +1208,14 @@ required.
 | Field       | Type              | Description                                                                          |
 | ----------- | ------------------ | ---------------------------------------------------------------------------------------- |
 | `tier`      | string              | `"T1"`, `"T2"`, `"T3"`, or `"T4"`.                                                        |
-| `id`        | integer \| null     | The T1 checklist item number (1-10), or `null` for a T2-T4 ladder row.                   |
+| `id`        | integer \| null     | The T1 checklist item number (1-11), or `null` for a T2-T4 ladder row.                   |
 | `title`     | string              | The item's/tier's bold title from the doc.                                               |
 | `partition` | string \| null      | `"analog"`/`"digital"` for a `mixed-signal` manifest's per-partition row, else `null`.    |
 | `text`      | string \| null      | The item's body text (the matching column for a per-kind item, or the shared text).      |
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, and `body_bias` for a `pex` citation whose envelope reports one (issue #1983). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, and `body_bias` for a `pex` citation whose envelope reports one (issue #1983), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
 
@@ -1129,11 +1223,13 @@ required.
 | --------------- | --------------- | ------------------------------------------------------------------------------------- |
 | `file`          | string \| null  | The evidence file path, for a file-backed entry; `null` for a command-backed entry (no static file backs it). |
 | `command`       | string \| null  | The executed argv, joined for display, for a command-backed entry; `null` for a file-backed entry (no command was run to produce it). |
-| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, or `"generic"` — the resolved envelope's classified kind. |
+| `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
+| `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. **Absent** for every other item. |
+| `power_delivery`| object          | **Item 11 citations only** (issue #2025): `{"partition_kind", "supply_nets", "pdn", "strap_layers", "tapcell_master", "power_connectivity_status"}` — what the grading actually resolved, so a `met` verdict states which supplies were declared and which branch proved them. `pdn` is `false` (with `strap_layers: []`, `tapcell_master: null`) for an analog or full-custom block that cited no `place-and-route` response — "no PDN citation", not "a PDN was checked and found missing", which renders `unmet`/`no_pdn` instead. |
 | `coverage`      | object          | **`drc` citations only**, and only when the cited envelope carries a `coverage` block (issue #2002): `{"layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`, quoted verbatim from it — the three fields [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3 requires a DRC claim to disclose. **Absent** for any other kind, and for DRC evidence committed before `klt drc` reported coverage — an absent `coverage` means "this artifact reported no coverage", never "this deck has no gaps". See "DRC coverage is reported, not graded" above. |
 
 #### `reason` values
@@ -1156,9 +1252,15 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
-| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), and **every** item rejects a `"power"` citation. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), every item other than item 11 rejects an `"erc"` or `"place-and-route"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`, or no `power.tapcell_master` was placed. Re-run P&R with a `request.power` block. |
+| `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read, declares no `"kind": "supply"` net, declares no `ties[]` (so `erc.missing_tie` was never computed — an uncomputed check is not a clean one), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. |
+| `"supply_not_continuous"` | no  | **Item 11 only** (issue #2025). The ERC run *did* ask, and the answer is no: a declared supply resolved to zero or several islands (`erc.unconnected_net`), two declared supplies resolved to the same island (`erc.supply_short`), or a well/tub has no connected tap (`erc.missing_tie`). |
+| `"lvs_supply_unproven"`   | no  | **Item 11 only** (issue #2025). The LVS half of the item is unproven: with a PDN citation, the same report's `power_connectivity.status` is not `"match"` (`"unchecked"` satisfies item 4, but not this item, which *is* the question); without one, its `net_correspondence` does not pair every declared supply net to a reference-side net, so the supplies were not part of the compare. |
 | `"not_post_layout"`       | yes | The evidence resolved to a recognised, *passing* envelope **of a kind this item accepts**, but that run is not the post-layout run the item requires — today, a `klt functional-verification` regression cited for item 7 that ran without SDF back-annotation (`environment.sdf` is `null`), i.e. the pre-layout zero-delay simulation item 7's own checklist text excludes. Deliberately distinct from `"wrong_kind"`: the artifact *is* the right one, it just has to be re-run against the post-route netlist with SDF timing. |
 | `"nothing_checked"`       | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, whose own `coverage` block states that the run checked **nothing** (`coverage.nothing_checked: true`, issue #1996) — a DRC deck gated behind an unset `--deck-var`, a `klt sim` corner matrix that expanded to zero corners, a `klt pex` run with no `delta[]` row. The cited check did not fail on its own terms; it measured nothing, so its passing `status` says nothing about the design. See "A check that checked nothing is refused, not reported" above. |
+| `"coverage_unknown"`      | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its coverage cannot be classified: either its `coverage` block explicitly declares `known: false`, or (the legacy path) it is a KLayout-engine DRC result carrying a raw `violations` list with no `coverage` block at all to consult. The cited check did not fail on its own terms; it just does not establish whether the requested work was covered. |
+| `"malformed_coverage"`    | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, but its `coverage` block is present and structurally invalid — it is not an object, or it fails the schema/consistency checks a v1 block must satisfy. The cited check did not fail on its own terms; its own coverage claim simply cannot be trusted. |
 
 ## Fleet roll-up (`--fleet`)
 
@@ -1219,8 +1321,8 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
       "source": "manifests/sky130-bandgap.json",
       "kind": "analog",
       "tier": "T1",
-      "t1_item_count": 10,
-      "t1_met_count": 10,
+      "t1_item_count": 11,
+      "t1_met_count": 11,
       "blocking_item": null,
       "drc_coverage": [
         {
@@ -1237,7 +1339,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
       "source": null,
       "kind": "analog",
       "tier": null,
-      "t1_item_count": 10,
+      "t1_item_count": 11,
       "t1_met_count": 3,
       "blocking_item": {
         "id": 4,
@@ -1268,7 +1370,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 | `source`        | string \| null       | The fleet manifest entry's file path, or `null` for an inline block manifest.             |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the block's manifest.           |
 | `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
-| `t1_item_count` | integer              | This block's rendered T1 item count (10, or 20 for `mixed-signal`).                      |
+| `t1_item_count` | integer              | This block's rendered T1 item count (11, or 22 for `mixed-signal`).                      |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the first unmet T1 item — see below.                 |
 | `drc_coverage`  | array\<object\>      | What this block's DRC evidence reported it did *not* check (issue #2002): one entry per `"met"` `drc`-kind citation whose envelope carries a `coverage` block, shaped `{"item", "partition", "layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`. `[]` when no such citation exists — an unmet item 3, a pre-`coverage` envelope, or a block whose evidence is not DRC — so `[]` means "nothing reported", never "no gaps". Reduced from this block's own tier report, never re-graded; it changes no block's `tier`. |
@@ -1277,7 +1379,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 
 | Field       | Type              | Description                                                                          |
 | ----------- | ------------------ | ---------------------------------------------------------------------------------------- |
-| `id`        | integer              | The blocking T1 checklist item's number (1-10).                                          |
+| `id`        | integer              | The blocking T1 checklist item's number (1-11).                                          |
 | `title`     | string               | The item's title.                                                                        |
 | `partition` | string \| null       | `"analog"`/`"digital"` for a `mixed-signal` block's per-partition item, else `null`.      |
 | `reason`    | string               | Why this item is unmet — one of the `reason` values documented under "Tier-verdict report" above. |
@@ -1451,7 +1553,7 @@ $ cat manifest.json
 $ klt signoff --manifest manifest.json
 block: my-bandgap  kind: analog
 tier: none
-T1: 1/10 items met
+T1: 1/11 items met
 
 [UNMET] T1 #1 Design sources
         reason: no_evidence
@@ -1773,12 +1875,12 @@ $ cat fleet.json
 $ klt signoff --fleet fleet.json
 fleet: 1/4 blocks at T1 (3 not yet)
 
-[T1   ] sky130-bandgap (analog)  T1: 10/10 items met
-[not-T1] gf180-bandgap (analog)  T1: 3/10 items met
+[T1   ] sky130-bandgap (analog)  T1: 11/11 items met
+[not-T1] gf180-bandgap (analog)  T1: 3/11 items met
         blocking: #4 LVS clean (reason: no_evidence)
-[not-T1] gf180-sar-adc (analog)  T1: 9/10 items met
+[not-T1] gf180-sar-adc (analog)  T1: 9/11 items met
         blocking: #6 Statistical claims carry Monte Carlo evidence (reason: no_evidence)
-[not-T1] sky130-ota-5t (analog)  T1: 0/10 items met
+[not-T1] sky130-ota-5t (analog)  T1: 0/11 items met
         blocking: #1 Design sources (reason: no_evidence)
 
 source: docs/design-evidence-tiers.md
@@ -1802,7 +1904,7 @@ special-casing; its row in `--format json` is:
   "source": "manifests/gf180-sar-adc.json",
   "kind": "analog",
   "tier": null,
-  "t1_item_count": 10,
+  "t1_item_count": 11,
   "t1_met_count": 9,
   "blocking_item": {
     "id": 6,
@@ -1824,11 +1926,11 @@ nothing else changed:
 $ klt signoff --fleet fleet.json
 fleet: 2/4 blocks at T1 (2 not yet)
 
-[T1   ] sky130-bandgap (analog)  T1: 10/10 items met
-[not-T1] gf180-bandgap (analog)  T1: 3/10 items met
+[T1   ] sky130-bandgap (analog)  T1: 11/11 items met
+[not-T1] gf180-bandgap (analog)  T1: 3/11 items met
         blocking: #4 LVS clean (reason: no_evidence)
-[T1   ] gf180-sar-adc (analog)  T1: 10/10 items met
-[not-T1] sky130-ota-5t (analog)  T1: 0/10 items met
+[T1   ] gf180-sar-adc (analog)  T1: 11/11 items met
+[not-T1] sky130-ota-5t (analog)  T1: 0/11 items met
         blocking: #1 Design sources (reason: no_evidence)
 
 source: docs/design-evidence-tiers.md
