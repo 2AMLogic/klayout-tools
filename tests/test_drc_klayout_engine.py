@@ -258,7 +258,12 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
         "checked": [],
         "skipped": [],
         "inapplicable": [],
-        "unknown": [{"id": "klayout:execution", "reason": "unmeasured_rule_execution"}],
+        "unknown": [
+            {
+                "id": 'engine_execution:["klayout"]',
+                "reason": "unmeasured_rule_execution",
+            }
+        ],
         "rule_categories": [],
         "nothing_checked_reasons": [],
     }

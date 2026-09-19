@@ -213,7 +213,8 @@ def coverage_state(envelope: dict[str, Any]) -> str:
     block = envelope.get("coverage")
     legacy = (
         "unknown"
-        if envelope.get("engine") == "klayout" and "violation_count" in envelope
+        if envelope.get("engine") == "klayout"
+        and isinstance(envelope.get("violations"), list)
         else "legacy"
     )
     if block is None:

@@ -3287,11 +3287,20 @@ _RECOGNISED_LIMIT_KEYS = ("min", "max")
 
 
 def _measurement_coverage(
-    spec: dict[str, Any], corner: dict[str, Any]
+    spec: dict[str, Any], corner: dict[str, Any], corner_index: int
 ) -> tuple[list[str], list[dict[str, str]], list[dict[str, str]]]:
-    """Count actual observations or applied bounds, never corner declarations."""
+    """Count actual observations or applied bounds, never corner declarations.
+
+    ``corner_index`` (this corner's position in the report's own ``corners``
+    list) scopes every identity built here -- ``corner_id`` alone is a
+    *display* label (e.g. supply voltage rounded to 3 decimals) and distinct
+    corners can legitimately round to the same one, which would otherwise
+    collide as the same "unique" work identity and make
+    :func:`~klayout_tools.coverage.build_check_coverage` reject two genuinely
+    separate checks as a duplicate.
+    """
     name = spec["name"]
-    identity = work_id("measurement", corner["corner_id"], name)
+    identity = work_id("measurement", corner_index, corner["corner_id"], name)
     limits = spec.get("limits") or {}
     measurement = next(
         (m for m in corner.get("measurements", []) if m["name"] == name), {}
@@ -3314,7 +3323,7 @@ def _measurement_coverage(
                 {"id": identity + "/observation", "reason": "unavailable_measurement"}
             )
     for key, value in limits.items():
-        bound_id = work_id("limit", corner["corner_id"], name, key)
+        bound_id = work_id("limit", corner_index, corner["corner_id"], name, key)
         if key not in _RECOGNISED_LIMIT_KEYS:
             skipped.append({"id": bound_id, "reason": "unrecognized_limit_key"})
         elif value is None:
@@ -3348,16 +3357,18 @@ def _build_coverage(
     checked = []
     skipped = []
     inapplicable = []
-    for corner in corners:
+    for corner_index, corner in enumerate(corners):
         if not measurements_spec:
             skipped.append(
                 {
-                    "id": work_id("corner", corner["corner_id"]),
+                    "id": work_id("corner", corner_index, corner["corner_id"]),
                     "reason": "no_requested_measurements",
                 }
             )
         for spec in measurements_spec:
-            actual, missing, irrelevant = _measurement_coverage(spec, corner)
+            actual, missing, irrelevant = _measurement_coverage(
+                spec, corner, corner_index
+            )
             checked.extend(actual)
             skipped.extend(missing)
             inapplicable.extend(irrelevant)

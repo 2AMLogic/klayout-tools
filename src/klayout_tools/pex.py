@@ -870,8 +870,15 @@ def _build_coverage(
     """Comparison coverage counts only rows with two comparable measurements."""
     checked = []
     skipped = []
-    for row in delta:
-        identity = work_id("comparison", row["corner_id"], row["spec_row"])
+    for row_index, row in enumerate(delta):
+        # `row_index` (this row's own position in the report's `delta` list)
+        # scopes the identity -- `spec_row` is a *display* label
+        # (`<testbench file stem>.<name>`, docs/cli/pex.md), and two distinct
+        # testbench files sharing a basename in different directories (e.g.
+        # `a/request.json` and `b/request.json`) produce the same stem, which
+        # would otherwise collide as one "unique" work identity for two
+        # genuinely separate comparisons.
+        identity = work_id("comparison", row_index, row["corner_id"], row["spec_row"])
         if row["status"] in {"pass", "fail"}:
             checked.append(identity)
         else:

@@ -145,6 +145,22 @@ def test_legacy_klayout_lvs_is_not_external_drc_unknown_coverage():
     assert coverage.coverage_refusal_reason(envelope) is None
 
 
+def test_legacy_klayout_drc_is_unknown_even_without_violation_count():
+    # A legacy external DRC envelope is identified by its recognized shape
+    # (a "violations" list), not by the optional "violation_count" field --
+    # omitting that field must not downgrade "unknown" coverage to "legacy"
+    # and thereby bypass refusal.
+    envelope = {
+        "schema_version": 1,
+        "engine": "klayout",
+        "status": "clean",
+        "violations": [],
+        "coverage": {"rules_checked": ["DECLARED"], "nothing_checked": False},
+    }
+    assert coverage.coverage_state(envelope) == "unknown"
+    assert coverage.coverage_refusal_reason(envelope) == "coverage_unknown"
+
+
 def test_zero_inapplicable_work_names_why_no_assessment_was_requested():
     block = coverage.build_check_coverage(
         checked=[], inapplicable=[{"id": "em", "reason": "no_current_solve_requested"}]

@@ -55,6 +55,7 @@ from .coverage import (
     REASON_ALL_RULES_SKIPPED,
     REASON_DECK_HAS_NO_RULES,
     build_check_coverage,
+    work_id,
 )
 from .decks import (
     DrcRule,
@@ -2031,8 +2032,16 @@ def run_drc_klayout_engine(
             "deck_scope": [],
             **build_check_coverage(
                 checked=sorted(rule_counts),
+                # `work_id` namespaces this sentinel (via its JSON-encoded
+                # parts) so it cannot collide with a real RDB category name
+                # in `rule_counts` -- an external deck's rule names are
+                # caller-chosen and could otherwise coincidentally match a
+                # bare literal like "klayout:execution".
                 unknown=[
-                    {"id": "klayout:execution", "reason": "unmeasured_rule_execution"}
+                    {
+                        "id": work_id("engine_execution", "klayout"),
+                        "reason": "unmeasured_rule_execution",
+                    }
                 ],
             ),
         },

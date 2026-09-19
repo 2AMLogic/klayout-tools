@@ -43,10 +43,14 @@ across the four work arrays. The Python validator additionally checks this
 cross-array constraint, which the JSON Schema cannot express. Producers sort
 identities deterministically; identity is not a count or free-form prose.
 DRC uses its rule IDs. Other adapters use `domain:` followed by a compact JSON
-array of scope components (for example `limit:["tt/1.800V/27C","vout","max"]`).
-JSON quoting prevents names containing separators from colliding. These are
-identities within a report, not content hashes or identities across design
-revisions; provenance provides the latter connection.
+array of scope components (for example
+`limit:[0,"tt/1.800V/27C","vout","max"]`). JSON quoting prevents names
+containing separators from colliding; a leading occurrence index (a corner's
+or row's own position in the producer's report) additionally guards against
+two distinct occurrences that happen to share the same *display* label (e.g.
+a supply voltage rounded for `corner_id`) colliding as one identity. These
+are identities within a report, not content hashes or identities across
+design revisions; provenance provides the latter connection.
 
 `coverage_state()` derives `full`, `partial`, `zero`, `unknown`, `malformed`,
 or `legacy`. Full and partial require known, nonempty checked work; partial

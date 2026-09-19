@@ -458,7 +458,7 @@ def test_build_coverage_real_comparison_with_zero_differences_is_not_nothing_che
         "testbenches": 1,
         "schema_version": 1,
         "known": True,
-        "checked": ['comparison:["tt/1.800V/27C","vout"]'],
+        "checked": ['comparison:[0,"tt/1.800V/27C","vout"]'],
         "skipped": [],
         "inapplicable": [],
         "unknown": [],
@@ -1413,6 +1413,12 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
     # only against a hand-built row list.
     assert report["coverage"] == {
         "testbenches": 1,
+        "schema_version": 1,
+        "known": True,
+        "checked": ['comparison:[0,"default/novdd/27C","vout"]'],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
         "delta_rows": 1,
         "corners_compared": 1,
         "nothing_checked": False,
