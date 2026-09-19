@@ -1831,6 +1831,15 @@ def _sta_worst_corner(envelope: dict[str, Any]) -> dict[str, Any]:
     return min(entries, key=sort_key)
 
 
+def _sdf_metadata(envelope: dict[str, Any]) -> dict[str, Any]:
+    """Read optional SDF metadata without trusting its container types."""
+    environment = envelope.get("environment")
+    if not isinstance(environment, dict):
+        return {}
+    sdf = environment.get("sdf")
+    return sdf if isinstance(sdf, dict) else {}
+
+
 def _is_sdf_annotated(envelope: dict[str, Any]) -> bool:
     """Whether a `klt functional-verification` envelope reports a run with
     back-annotated SDF timing (issue #1959).
@@ -1840,12 +1849,10 @@ def _is_sdf_annotated(envelope: dict[str, Any]) -> bool:
     ``docs/cli/functional-verification.md``, "an annotated run is
     identifiable from the JSON alone", which is exactly the property item 7
     needs to tell a post-route gate-level re-simulation from the pre-layout
-    regression its own checklist text excludes."""
-    environment = envelope.get("environment")
-    if not isinstance(environment, dict):
-        return False
-    sdf = environment.get("sdf")
-    return isinstance(sdf, dict) and bool(sdf.get("annotated"))
+    regression its own checklist text excludes. Only literal JSON ``true``
+    qualifies; missing or malformed optional metadata gives no annotation
+    credit (issue #2131)."""
+    return _sdf_metadata(envelope).get("annotated") is True
 
 
 def _is_post_layout_evidence(kind: str, envelope: dict[str, Any]) -> bool:
@@ -2346,8 +2353,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "timing_status": worst.get("timing_status"),
         }
     elif kind == "functional-verification":
-        environment = envelope.get("environment") or {}
-        sdf = environment.get("sdf")
+        sdf = _sdf_metadata(envelope)
         detail = {
             "hdl_toplevel": envelope.get("hdl_toplevel"),
             "testbench": envelope.get("testbench"),
@@ -2359,7 +2365,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             # -- informational here, load-bearing for item 7 (see
             # :func:`_is_post_layout_evidence`).
             "sdf_annotated": _is_sdf_annotated(envelope),
-            "sdf_corner": sdf.get("corner") if isinstance(sdf, dict) else None,
+            "sdf_corner": sdf.get("corner"),
         }
     elif kind == "erc":
         detail = _erc_detail(envelope)

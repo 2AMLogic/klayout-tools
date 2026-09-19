@@ -116,6 +116,12 @@ not `klt --version`, if you need to detect this kind of drift. See
   intentional unsupported capabilities require reasons. Registered coefficient-free
   parasitics remain distinct from missing decks. Existing sparse defaults,
   support restrictions, coefficients, and CLI/JSON behavior are unchanged.
+- **Fixed**: `klt signoff` now grants SDF post-layout credit only for literal
+  JSON `true` in `environment.sdf.annotated` (issue #2131). Strings, numbers,
+  and malformed optional metadata report `sdf_annotated: false` and leave
+  digital item 7 unmet with `not_post_layout`, while preserving a valid
+  pre-layout regression's plain PASS and item-5 eligibility. Malformed
+  `environment` containers also no longer crash the plain detail renderer.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
