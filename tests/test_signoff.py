@@ -1288,13 +1288,22 @@ def _full_t1_evidence(tmp_path, *, kind: str = "analog") -> dict:
     tier-verdict tests build their negative cases from by removing one
     entry.
 
-    Items 3, 4, 7, and 11 are kind-restricted or compound; every other item
-    is unrestricted and accepts the shared DRC fixture.
+    Items 3-8 are kind-restricted (`_ITEM_ALLOWED_KINDS`): 3 -> `drc`,
+    4 -> `lvs`, 5 -> `sim`, 6 -> `yield`, 7 -> `pex`, 8 -> `generic` (issues
+    #871/#1152/#1959/#1987/#2044); item 11 is compound (issue #2025). Items
+    1, 2, 9 and 10 name no evidence at all in
+    `docs/design-evidence-tiers.md`, so they stay unrestricted and accept
+    the shared DRC fixture.
     """
     drc_path = _write(tmp_path, f"{kind}-drc.json", DRC_CLEAN_ENVELOPE)
     evidence: dict = {str(item_id): drc_path for item_id in range(1, 11)}
     evidence["4"] = _write(tmp_path, f"{kind}-lvs.json", LVS_MATCH_ENVELOPE)
+    evidence["5"] = _write(tmp_path, f"{kind}-sim.json", SIM_PASS_ENVELOPE)
+    evidence["6"] = _write(tmp_path, f"{kind}-yield.json", YIELD_PASS_ENVELOPE)
     evidence["7"] = _write(tmp_path, f"{kind}-pex.json", PEX_PASS_ENVELOPE)
+    evidence["8"] = _write(
+        tmp_path, f"{kind}-characterization.json", GENERIC_PASS_ENVELOPE
+    )
     evidence["11"] = _power_delivery_evidence(tmp_path, kind=kind, prefix=kind)
     return evidence
 
@@ -3960,20 +3969,23 @@ def test_command_evidence_pex_wrong_kind_renders_unmet(monkeypatch):
     assert item_7["citation"] is None
 
 
-def test_items_other_than_3_4_and_7_are_unaffected_by_the_kind_restriction(
+def test_items_1_2_9_and_10_are_unaffected_by_the_kind_restriction(
     tmp_path,
 ):
-    """Regression: items 1, 2, 5, 6 and 8-10 still accept any recognised,
-    passing envelope kind -- only items 3, 4 (issue #1987), 7, and 11
-    (issue #2025, which is compound rather than kind-restricted) are
-    restricted."""
+    """Regression: items 1, 2, 9 and 10 still accept any recognised,
+    passing envelope kind. They are the four `docs/design-evidence-tiers.md`
+    documents as having no tool behind them ("Citing them honestly is the
+    claimant's responsibility"), so they are the only unrestricted items left
+    after issue #2044 -- every item that names evidence (3-8) is
+    kind-restricted, and item 11 (issue #2025) is compound rather than
+    kind-restricted."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
 
-    evidence = {str(i): drc_path for i in range(1, 11) if i not in (4, 7)}
+    evidence = {str(i): drc_path for i in (1, 2, 3, 9, 10)}
     result = build_tier_report(_manifest(evidence=evidence))
 
     for item in result["items"]:
-        if item["tier"] == "T1" and item["id"] not in (4, 7, 11):
+        if item["tier"] == "T1" and item["id"] in (1, 2, 3, 9, 10):
             assert item["status"] == "met", item["id"]
             assert item["citation"]["kind"] == "drc"
 
@@ -4012,6 +4024,200 @@ def test_items_3_and_4_reject_a_passing_extract_envelope(tmp_path, kind):
 
 
 # --------------------------------------------------------------------------- #
+# Items 5, 6 and 8 are kind-restricted too (issue #2044)
+#
+# #1987 restricted items 3 and 4 because a `klt extract` citation -- which
+# `_check_passed` counts as passing unconditionally -- could otherwise stand
+# in for a check it never ran. Items 5, 6 and 8 name their evidence in
+# docs/design-evidence-tiers.md just as explicitly, and were still
+# unrestricted, so the same bare extract envelope graded all three "met".
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("kind", ["analog", "digital"])
+@pytest.mark.parametrize("item_id", [5, 6, 8])
+def test_items_5_6_and_8_reject_a_passing_extract_envelope(tmp_path, kind, item_id):
+    """The headline regression: a `klt extract` report, which cannot fail,
+    must never satisfy the corner-verification, Monte-Carlo, or
+    characterization items -- for either block kind."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={str(item_id): extract_path})
+    )
+
+    item = next(i for i in result["items"] if i["id"] == item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize("kind", ["analog", "digital"])
+def test_items_5_6_and_8_reject_a_wrong_kind_native_citation(tmp_path, kind):
+    """Not extract-specific: any kind the doc does not name for these items
+    is refused, exactly as it already was for items 3, 4 and 7. A clean DRC
+    report proves nothing about corner coverage, Monte Carlo sampling, or a
+    characterization sweep."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"5": drc_path, "6": drc_path, "8": drc_path})
+    )
+
+    for item_id in (5, 6, 8):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "unmet", item_id
+        assert item["reason"] == "wrong_kind", item_id
+        assert item["citation"] is None, item_id
+
+
+def test_genuine_evidence_for_items_5_6_and_8_still_renders_met(tmp_path):
+    """The other half of the restriction: the kinds the doc *does* name for
+    these items grade exactly as before -- `klt sim` (analog item 5), `klt
+    yield` (item 6), and the generic characterization envelope (item 8)."""
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "5": _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE),
+                "6": _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE),
+                "8": _write(tmp_path, "char.json", GENERIC_PASS_ENVELOPE),
+            },
+        )
+    )
+
+    by_id = {item["id"]: item for item in result["items"] if item["tier"] == "T1"}
+    assert by_id[5]["status"] == "met"
+    assert by_id[5]["citation"]["kind"] == "sim"
+    assert by_id[6]["status"] == "met"
+    assert by_id[6]["citation"]["kind"] == "yield"
+    assert by_id[8]["status"] == "met"
+    assert by_id[8]["citation"]["kind"] == "generic"
+
+
+@pytest.mark.parametrize(
+    "envelope,expected_kind",
+    [
+        (STA_MULTI_CORNER_CLEAN_ENVELOPE, "sta"),
+        (FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "functional-verification"),
+        (SIM_PASS_ENVELOPE, "sim"),
+    ],
+)
+def test_digital_item_5_still_accepts_every_kind_the_doc_names(
+    tmp_path, envelope, expected_kind
+):
+    """A digital partition's item 5 accepts all three artifacts the doc
+    names for it: `klt sta` and `klt functional-verification` for the RTL
+    flow (#1959), and `klt sim` for the full-custom sub-case, which
+    satisfies item 5 "instead by PVT corner-matrix SPICE simulation"."""
+    path = _write(tmp_path, "evidence.json", envelope)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": path}))
+
+    item_5 = next(i for i in result["items"] if i["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["kind"] == expected_kind
+
+
+def test_analog_item_5_rejects_the_digital_column_artifacts(tmp_path):
+    """Item 5's restriction is per partition kind, like item 7's: an analog
+    partition's corner verification is a PVT corner-matrix simulation, not
+    STA or a functional regression."""
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    for path in (sta_path, fv_path):
+        result = build_tier_report(_manifest(kind="analog", evidence={"5": path}))
+        item_5 = next(i for i in result["items"] if i["id"] == 5)
+        assert item_5["status"] == "unmet"
+        assert item_5["reason"] == "wrong_kind"
+        assert item_5["citation"] is None
+
+
+def test_mixed_signal_partitions_apply_their_own_item_5_rule(tmp_path):
+    """A mixed-signal block grades one partition at a time, so its analog
+    partition requires `sim` while its digital partition accepts `sta` --
+    with no extra manifest syntax beyond the existing `<id>.<partition>`
+    key."""
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            kind="mixed-signal",
+            evidence={"5.analog": sim_path, "5.digital": sta_path},
+        )
+    )
+
+    item_5 = {
+        item["partition"]: item
+        for item in result["items"]
+        if item["id"] == 5 and item["tier"] == "T1"
+    }
+    assert item_5["analog"]["status"] == "met"
+    assert item_5["analog"]["citation"]["kind"] == "sim"
+    assert item_5["digital"]["status"] == "met"
+    assert item_5["digital"]["citation"]["kind"] == "sta"
+
+    # And the swap is refused in both directions.
+    swapped = build_tier_report(
+        _manifest(
+            kind="mixed-signal",
+            evidence={
+                "5.analog": sta_path,
+                "5.digital": _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE),
+            },
+        )
+    )
+    for item in swapped["items"]:
+        if item["id"] == 5 and item["tier"] == "T1":
+            assert item["status"] == "unmet", item["partition"]
+            assert item["reason"] == "wrong_kind", item["partition"]
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_extract_still_satisfies_the_four_items_with_no_evidence_behind_them(
+    tmp_path, item_id
+):
+    """Deliberately out of scope for issue #2044: items 1, 2, 9 and 10 name
+    no evidence at all ("items 1, 2, 9, and 10 have none ... Citing them
+    honestly is the claimant's responsibility, not something the tool
+    verifies"), so they are graded on whether *some* passing envelope was
+    cited, topical relevance included -- and `extract` is no more irrelevant
+    there than the `drc` report that also satisfies them. Restricting them
+    needs an artifact to bind them to, which is a separate question."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={str(item_id): extract_path}))
+
+    item = next(i for i in result["items"] if i["id"] == item_id)
+    assert item["status"] == "met"
+    assert item["citation"]["kind"] == "extract"
+
+
+def test_extract_still_aggregates_normally_in_envelope_mode(tmp_path):
+    """Issue #2044 changes only whether an `extract` citation satisfies a
+    numbered tier item. Envelope-aggregation mode is untouched: the extract
+    check still appears in `checks[]`, still counts as passed, still reports
+    its device/net counts, and its provenance still participates in the
+    cross-envelope consistency check."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_signoff([extract_path, drc_path])
+
+    assert result["status"] == "pass"
+    assert result["check_count"] == 2
+    assert result["failed_count"] == 0
+    extract_check = next(c for c in result["checks"] if c["kind"] == "extract")
+    assert extract_check["status"] == "extracted"
+    assert extract_check["passed"] is True
+    assert extract_check["detail"]["device_count"] == EXTRACT_ENVELOPE["device_count"]
+    assert extract_check["provenance"] is not None
+    assert result["provenance_consistency"] == {"ok": True, "mismatches": []}
+
+
+# --------------------------------------------------------------------------- #
 # Generic evidence binding: item 8 only (issue #1152)
 # --------------------------------------------------------------------------- #
 
@@ -4045,18 +4251,20 @@ def test_generic_fail_status_for_item_8_renders_unmet_check_failed(tmp_path):
     assert item_8["citation"] is None
 
 
-def test_item_8_still_accepts_a_native_kind_too(tmp_path):
-    """Item 8 was, and remains, otherwise unrestricted: "generic" is an
-    *additional* accepted kind for it, not a replacement for the existing
-    any-native-kind permissiveness (issue #871's docstring, "every item
-    except item 7 accepts any recognised, passing envelope kind")."""
+def test_item_8_no_longer_accepts_a_native_kind(tmp_path):
+    """Issue #2044 closed item 8's any-native-kind permissiveness: `generic`
+    is now the *only* kind it accepts, because the generic envelope is the
+    only evidence `docs/design-evidence-tiers.md` gives it ("`klt signoff
+    --manifest` grades it via an opt-in generic evidence envelope"). A clean
+    `klt drc` report proves nothing about a characterization claim."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
 
     result = build_tier_report(_manifest(evidence={"8": drc_path}))
 
     item_8 = next(item for item in result["items"] if item["id"] == 8)
-    assert item_8["status"] == "met"
-    assert item_8["citation"]["kind"] == "drc"
+    assert item_8["status"] == "unmet"
+    assert item_8["reason"] == "wrong_kind"
+    assert item_8["citation"] is None
 
 
 @pytest.mark.parametrize("item_id", [3, 4, 5, 6, 7])
@@ -5140,15 +5348,15 @@ def _fleet_write(tmp_path, blocks: list) -> str:
 
 
 def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-
-    # canary-a: every T1 item met -> T1, no blocking item. Items 4/7/11 are
-    # kind-restricted or compound (issues #871/#1987/#2025).
+    # canary-a: every T1 item met -> T1, no blocking item. Items 3-8 are
+    # kind-restricted (issues #871/#1152/#1987/#2044) and item 11 is
+    # compound (issue #2025), so each cites the kind it actually accepts --
+    # see _full_t1_evidence().
     full_evidence = _full_t1_evidence(tmp_path)
     block_a = _fleet_block_manifest("canary-a", evidence=full_evidence)
 
     # canary-b: everything but item 4 (LVS clean) met -> blocked on #4.
-    partial_evidence = {str(i): drc_path for i in range(1, 11) if i != 4}
+    partial_evidence = {k: v for k, v in full_evidence.items() if k != "4"}
     block_b = _fleet_block_manifest("canary-b", evidence=partial_evidence)
 
     # canary-c: nothing met -> blocked on item 1 (the first T1 item).
@@ -5235,12 +5443,11 @@ def test_fleet_blocking_item_walks_through_statistical_then_post_layout_items(
     directly -- this is `build_fleet_report()`'s own blocking-item
     determination being exercised end to end."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+    full_evidence = _full_t1_evidence(tmp_path)
+    yield_path = full_evidence["6"]
+    pex_path = full_evidence["7"]
 
-    base_evidence = _full_t1_evidence(tmp_path)
-    del base_evidence["6"]
-    del base_evidence["7"]
+    base_evidence = {k: v for k, v in full_evidence.items() if k not in ("6", "7")}
 
     def _row(evidence: dict[str, str]) -> dict[str, object]:
         block = _fleet_block_manifest("stat-postlayout-canary", evidence=evidence)
@@ -5304,13 +5511,7 @@ def test_fleet_tier_verdict_changes_once_real_yield_evidence_is_bound(tmp_path):
     over that campaign -> item 6 "met" on a freshly-observed exit status
     and envelope, block reaches T1.
     """
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-
-    base_evidence = {str(i): drc_path for i in range(1, 11) if i != 6}
-    base_evidence["4"] = lvs_path
-    base_evidence["7"] = pex_path
+    base_evidence = {k: v for k, v in _full_t1_evidence(tmp_path).items() if k != "6"}
 
     before_block = _fleet_block_manifest("gf180-sar-adc-canary", evidence=base_evidence)
     before = build_fleet_report({"blocks": [before_block]})
@@ -5860,15 +6061,20 @@ def test_analog_item_7_still_requires_pex(tmp_path):
     assert item_7["citation"] is None
 
 
-def test_analog_item_5_accepts_any_recognised_kind_as_before(tmp_path):
-    """Regression: item 5 stays unrestricted for every block kind -- this
-    phase widens what is *recognised*, it does not tighten what item 5
-    accepts."""
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+def test_item_5_accepts_the_sim_corner_matrix_for_both_block_kinds(tmp_path):
+    """Item 5's Analog column names a PVT corner-matrix simulation, and the
+    full-custom digital sub-case satisfies it "instead by PVT corner-matrix
+    SPICE simulation" -- so a `klt sim` citation is accepted for both block
+    kinds. Issue #2044 restricted item 5's accepted kinds (a clean `klt drc`
+    report no longer satisfies it -- see
+    `test_item_5_rejects_a_wrong_kind_citation`), but deliberately kept both
+    of these paths open."""
     sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
 
-    analog = build_tier_report(_manifest(kind="analog", evidence={"5": drc_path}))
-    assert next(i for i in analog["items"] if i["id"] == 5)["status"] == "met"
+    analog = build_tier_report(_manifest(kind="analog", evidence={"5": sim_path}))
+    item_5 = next(i for i in analog["items"] if i["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["kind"] == "sim"
 
     full_custom_digital = build_tier_report(
         _manifest(kind="digital", evidence={"5": sim_path})

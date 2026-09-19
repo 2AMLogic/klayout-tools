@@ -24,7 +24,9 @@ Three modes, one verb:
    post-layout-verification item — the only item this mode kind-restricted
    until issue #1152 (Phase 3) additionally let item 8 ("Characterization
    report"), the one T1 item with no named `klt` verb, accept a generic
-   evidence citation too — no other item may cite one.
+   evidence citation too — no other item may cite one. Since issue #2044
+   **every T1 item that names evidence (3-8) is kind-restricted**; only
+   items 1, 2, 9 and 10, which name none, still accept any passing envelope.
    See "Tier-verdict report" below.
 3. **Fleet roll-up** (`--fleet`, issue #827 — Phase 1c of epic #706) — grade
    every block named in a **fleet manifest** (one tier-verdict report per
@@ -584,8 +586,11 @@ malformed entry, an unreadable/unparsable evidence file, a command-backed
 entry whose subprocess couldn't be launched/timed out/exited
 nonzero/produced stdout that isn't valid JSON, an unrecognised envelope
 shape, a failing check, or a passing check of a kind that item does not
-accept (item 7 accepts `pex` for an analog block and `pex` or an
-SDF-annotated `functional-verification` run for a digital one; every item
+accept (items 3-8 each accept only the kind(s) `design-evidence-tiers.md`
+names for them — see "Item 7 is kind-restricted, per block kind" and "Items
+5, 6 and 8 are kind-restricted too" below, e.g. item 7
+accepts `pex` for an analog block and `pex` or an SDF-annotated
+`functional-verification` run for a digital one; every item
 other than item 8 rejects a `generic` citation; **every** item rejects a
 `power` citation — see "No T1
 item accepts `power` evidence" below) — also renders `"unmet"`: **this phase
@@ -639,6 +644,15 @@ drc` report for item 3 and again for item 10 produces two `MET` rows, and
 restrictions still apply: a `generic` citation satisfies item 8 only, and a
 `power` citation satisfies no item at all — so neither can be used here.)
 
+**These four are the only unrestricted items left** (issue #2044). Every
+item that names evidence — 3 through 8 — accepts only the kind(s) named for
+it. That asymmetry is deliberate and not an oversight here: the restriction
+mechanism works by naming the right artifact, and for items 1, 2, 9 and 10
+there is no right artifact to name. In particular a `klt extract` report,
+which cannot fail, still satisfies these four exactly like a clean `klt drc`
+report does — equally irrelevant, equally accepted, for the same structural
+reason.
+
 What `klt signoff` *does* verify for these items is what it verifies
 everywhere: that the evidence resolves to a readable, recognised envelope;
 that the check it reports actually passed; and that it is fresh against any
@@ -687,15 +701,18 @@ never rendered from a partially-understood doc.
 
 ### Item 7 is kind-restricted, per block kind
 
-Every T1 item except items 3, 4 and 7 accepts *any* recognised, *native*
+T1 items 1, 2, 9 and 10 accept *any* recognised, *native*
 envelope kind — a `klt drc` report can satisfy item 1 just as well as a `klt
 lvs` one, since Phase
 0/1 (issues #722/#825) graded each item purely on whether *some* passing
 check was cited, not on whether that check was the *right kind* of check.
 (This is unchanged by issue #1152's `generic` kind below — that issue adds a
 *separate*, narrower restriction gating `generic` specifically, on top of,
-not instead of, this native-kind permissiveness.) Items 3 and 4 left that
-permissiveness in issue #1987 — each accepts only its own verb's envelope,
+not instead of, this native-kind permissiveness.) Every item that names
+evidence has since left that permissiveness: items 3 and 4 in issue #1987,
+and items 5, 6 and 8 in issue #2044 (see "Items 5, 6 and 8 are
+kind-restricted too" below). Items 3 and 4 each accept only their own verb's
+envelope,
 `drc` and `lvs` respectively, so a `klt extract` report, which has no
 independent pass/fail and therefore always counts as passed, can no longer
 satisfy a "DRC clean" or "LVS clean" claim. Item 7 ("Post-layout
@@ -872,21 +889,63 @@ carries, and the same "stale, not a false pass" rule every other kind gets.
 Pin no `content_hash` on such an entry unless and until that verb grows a
 `provenance` block.
 
-**Item 5 itself stays unrestricted.** This phase widens what `klt signoff`
-*recognises*; it does not tighten what item 5 *accepts*. An analog block's
-item 5, and a full-custom digital block's `klt sim` corner-matrix citation
-for it, grade exactly as they did before — see "Items 1, 2, 9, and 10: `klt
-signoff` cannot check topical relevance" above for the standing caveat that
-an unrestricted item is graded on whether *some* passing check was cited,
-not on topical relevance.
+**Item 5 stayed unrestricted through this phase.** It widened what `klt
+signoff` *recognises*; it did not tighten what item 5 *accepts*. Issue #2044
+later closed that permissiveness — see "Items 5, 6 and 8 are kind-restricted
+too" immediately below, which keeps every artifact named here accepted and
+only refuses the kinds the doc never named.
 
 **Direction 3 of issue #1959 — letting a `generic` citation satisfy items 5
 and 7 for digital blocks — is deliberately not implemented.** It would
 weaken exactly the guarantee the `generic` kind's item-8-only scoping exists
-to preserve (see "Generic evidence" immediately below): a hand-rolled "yep,
+to preserve (see "Generic evidence" below): a hand-rolled "yep,
 it's fine" JSON record must not stand in for corner or post-layout evidence
 it never proved. A `generic` citation for items 5 or 7 still renders
 `wrong_kind`, for every block kind.
+
+### Items 5, 6 and 8 are kind-restricted too
+
+Issue #1987 restricted items 3 and 4 to `drc`/`lvs` for a concrete reason: a
+`klt extract` report has no independent pass/fail — it either produces a
+`status: "extracted"` envelope or raises — so `klt signoff` counts it as
+passing unconditionally, and an unrestricted item citing one is graded `met`
+having proved nothing. That reasoning was never specific to items 3 and 4.
+Items **5**, **6** and **8** each name their evidence in
+[`../design-evidence-tiers.md`](../design-evidence-tiers.md) just as
+explicitly, and were still unrestricted — so the same bare `extract`
+envelope graded all three `met`. Issue #2044 closes that:
+
+| Item | Partition graded | Accepted kinds | The artifact the doc names |
+|---|---|---|---|
+| **5** — Full corner verification vs a ratified spec | `analog` | `sim` | "PVT corner-matrix simulation results covering every spec row at its bound corners" |
+| **5** | `digital` | `sta`, `functional-verification`, **or** `sim` | Multi-corner STA plus a bit-exact functional regression for the RTL flow (both first-class evidence kinds since #1959); `sim` for the full-custom sub-case, which satisfies item 5 "instead by PVT corner-matrix SPICE simulation" |
+| **6** — Statistical claims carry Monte Carlo evidence | both | `yield` | "A `klt yield` JSON report … is the machine-checkable evidence for this item" (kind-independent — item 6 applies to whichever spec rows are statistical, regardless of block kind) |
+| **8** — Characterization report | both | `generic` | The purpose-built generic evidence envelope (issue #1152): "`klt signoff --manifest` grades it via an opt-in generic evidence envelope" — the doc's substitute for the `klt` verb this item does not have |
+
+A citation of any other kind renders `"unmet"` with `reason: "wrong_kind"`,
+exactly as it already did for items 3, 4 and 7 — the cited check did not
+fail on its own terms, it simply does not prove what the item requires.
+
+**What this does not change.** `klt extract` is untouched everywhere else:
+its envelope still aggregates normally in envelope-aggregation mode (it
+still appears in `checks[]`, still counts as passed, still reports its
+device/net counts), and its `provenance` block still participates in the
+provenance-consistency check that binds LVS to the DRC'd layout. Only
+whether an `extract` citation can satisfy a *numbered tier item* changed.
+
+**Item 8's two gates agree rather than stacking.** `generic` was already
+scoped to item 8 alone (see "Generic evidence" below), which controls what a
+`generic` citation may satisfy; item 8's entry in the kind restriction
+controls what item 8 may accept. Both now name exactly `generic` for item 8,
+so a generic characterization citation passes both gates and a native-kind
+citation is refused by the second — no item is doubly restricted into
+accepting nothing.
+
+**Items 1, 2, 9 and 10 are deliberately left alone**, including for
+`extract` — see "Items 1, 2, 9, and 10: `klt signoff` cannot check topical
+relevance" above. They name no evidence at all, so there is no right
+artifact to restrict them *to*, and singling out one irrelevant kind while
+every other irrelevant kind still counts would be arbitrary.
 
 ### Generic evidence (opt-in, non-`klt`-native)
 
@@ -956,9 +1015,12 @@ restriction: a `generic` citation for **any item other than item 8** —
 including items 3-7, and including the otherwise-unrestricted items 1, 2,
 9, and 10 — renders `"unmet"` with `reason: "wrong_kind"`, never a borrowed
 pass, even when the generic envelope's own `status` genuinely is `"pass"`.
-Item 8 itself is otherwise unrestricted (as it always was): it still also
-accepts any native kind's passing citation, exactly as before this issue —
-`generic` is an *additional* accepted kind for item 8, not a replacement.
+Item 8 itself was otherwise unrestricted when this shipped: it also accepted
+any native kind's passing citation, `generic` being an *additional* accepted
+kind for item 8 rather than a replacement. Issue #2044 closed that half too
+— item 8 now accepts `generic` and nothing else, since the generic envelope
+is the only evidence `design-evidence-tiers.md` gives it (see "Items 5, 6
+and 8 are kind-restricted too" above).
 
 ### Item 11 is compound: power delivery (structural)
 
@@ -1261,7 +1323,7 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
-| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), every item other than item 11 rejects an `"erc"` or `"place-and-route"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
+| `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), every item other than item 11 rejects an `"erc"` or `"place-and-route"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`, or no `power.tapcell_master` was placed. Re-run P&R with a `request.power` block. |
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read, declares no `"kind": "supply"` net, declares no `ties[]` (so `erc.missing_tie` was never computed — an uncomputed check is not a clean one), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. |
 | `"supply_not_continuous"` | no  | **Item 11 only** (issue #2025). The ERC run *did* ask, and the answer is no: a declared supply resolved to zero or several islands (`erc.unconnected_net`), two declared supplies resolved to the same island (`erc.supply_short`), or a well/tub has no connected tap (`erc.missing_tie`). |
@@ -1817,11 +1879,13 @@ as a schematic and verified via SPICE + PVT sweep — no RTL, no synthesis
 step, e.g. because no compatible open standard-cell library exists for the
 PDK/voltage combination — as a **sub-case of the Digital column**, not a new
 column or a new manifest `kind`. Grading needs no code change either: items
-1, 2, and 5 already accept *any* recognised evidence kind (only items 3, 4
-and 7 are kind-restricted — items 3 and 4 to `drc`/`lvs` respectively, per
-issue #1987; item 7 per "Item 7 is kind-restricted, per block kind" above,
-where a `kind: "digital"` manifest accepts `pex`, which is exactly what a
-full-custom partition produces), so a
+1 and 2 accept *any* recognised evidence kind, and every kind-restricted
+item names the full-custom partition's own artifact for a `kind: "digital"`
+manifest — item 5 accepts `sim` (the doc's own full-custom substitute, "PVT
+corner-matrix SPICE simulation") alongside the RTL flow's `sta`/
+`functional-verification`, per "Items 5, 6 and 8 are kind-restricted too"
+above, and item 7 accepts `pex`, which is exactly what a full-custom
+partition produces, per "Item 7 is kind-restricted, per block kind" — so a
 full-custom partition's `klt lvs`/`klt drc`/`klt sim`/`klt pex` evidence
 grades exactly like an RTL/synthesis-flow digital block's would, under the
 same `kind: "digital"` manifest:
