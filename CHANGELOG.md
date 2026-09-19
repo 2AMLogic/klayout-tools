@@ -14,6 +14,12 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract --deck sg13cmos5l --parasitics` now uses sourced
+  nominal R/C coefficients for Metal1-Metal4 and TopMetal1, plus all four
+  adjacent vertical-overlap pairs (issue #2113). The registered deck
+  previously reported zero wire R/C and missing coefficients. Values come
+  from SG13CMOS5L's own pinned Magic extraction table; the model remains
+  first-order and uncalibrated, without process-corner selection.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`

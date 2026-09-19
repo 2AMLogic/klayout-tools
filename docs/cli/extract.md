@@ -3274,11 +3274,13 @@ counting them here would double-count it (#226):
   comment their active-layer parasitic caps out for the same reason.
 
 The coefficients are curated per-PDK-family in each deck module's `PARASITICS`
-table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py` / `sg13g2.py`),
+table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py` / `sg13g2.py` /
+`sg13cmos5l.py`),
 **transcribed with citations from each PDK's public magic-format technology
 file** — `sky130.tech` / `gf180mcu.tech` in fossi-foundation/open-pdks
 (GPLv3), and `libs.tech/magic/ihp-sg13g2-extract.tech` in
-IHP-GmbH/IHP-Open-PDK (Apache-2.0) — sheet resistances from its `resist`
+IHP-GmbH/IHP-Open-PDK and `libs.tech/magic/ihp-sg13cmos5l-extract.tech`
+in IHP-GmbH/ihp-sg13cmos5l (both Apache-2.0) — sheet resistances from its `resist`
 entries, area/fringe capacitances from its `defaultareacap` /
 `defaultperimeter` entries, vertical-overlap coupling from its
 `defaultoverlap` entries — never NDA'd, the same public-source curation
@@ -3295,6 +3297,20 @@ full rationale, including why `ihp-sg13g2-extract.tech` (not
 `libs.tech/parasitics/itf/sg13g2_typ.itf`) is the source: the `.itf` file
 carries only a raw process-stack description with no directly-transcribable
 area/perimeter-capacitance table.
+
+`sg13cmos5l` covers all five metal levels (Metal1-Metal4, TopMetal1) and
+four adjacent vertical-overlap pairs (issue #2113). Its coefficients come
+from its own [pinned Magic extraction file](https://github.com/IHP-GmbH/ihp-sg13cmos5l/blob/607e18d4bd9214a52575c194b4181ef449f9252f/libs.tech/magic/ihp-sg13cmos5l-extract.tech),
+using nominal `variants (),(lvs)` resistance and `variants ()` capacitance.
+Source mΩ/square and aF-based capacitances are divided by 1000 for Ω/square
+and fF-based coefficients. Magic's `metal5` here is **TopMetal1 (126/0)**;
+SG13G2's Metal5 and TopMetal1 capacitances do not describe this stack.
+The table uses the source's `defaultperimeter` values, including M2/M4
+entries that differ from its `defaultsideoverlap`-to-substrate primitive.
+This adds nominal, first-order interconnect R/C to the existing extraction
+model; it does not add process-corner selection or calibrated PLL/PVT
+signoff. Diffusion/poly, via resistance, and lateral coupling coefficients
+remain uncurated for this deck.
 
 Even so, the R/C values remain **order-of-magnitude and uncalibrated to
 silicon**: while now sourced and re-verifiable against the published process
