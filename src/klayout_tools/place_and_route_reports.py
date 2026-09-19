@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from typing import Any
 
 # Supports both TritonRoute's inline ``on Layer Metal2`` and its multiline
@@ -100,12 +101,19 @@ def write_route_metrics(
 
     None deliberately replaces an engine counter when the final report is
     unavailable: the saved metric and response must agree that count is unknown.
+    Replace the inode atomically: a Docker engine may own the readable
+    original file even though its containing directory belongs to this user.
     """
     metrics["route__drc_errors"] = drc_count
     try:
-        with open(metrics_path, "w", encoding="utf-8") as handle:
-            json.dump(metrics, handle, indent=2)
-            handle.write("\n")
+        with tempfile.TemporaryDirectory(
+            prefix=".klt-route-metrics-", dir=os.path.dirname(metrics_path) or "."
+        ) as temporary:
+            replacement = os.path.join(temporary, "metrics.json")
+            with open(replacement, "w", encoding="utf-8") as handle:
+                json.dump(metrics, handle, indent=2)
+                handle.write("\n")
+            os.replace(replacement, metrics_path)
     except OSError as exc:
         raise error_cls(
             f"could not write final route metrics '{metrics_path}': {exc}"

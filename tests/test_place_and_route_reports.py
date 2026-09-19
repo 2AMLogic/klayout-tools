@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import place_and_route
+from klayout_tools import place_and_route, place_and_route_reports
 from test_place_and_route import (
     _script_lines,
     _setup_success_env,
@@ -202,3 +202,36 @@ def test_unreadable_route_report_is_unknown(tmp_path):
     report = tmp_path / "route.rpt"
     report.write_bytes(b"\xff\xfe")
     assert place_and_route._count_route_drc_violations(str(report)) is None
+
+
+def test_final_metrics_replace_read_only_engine_artifact(tmp_path):
+    metrics_path = tmp_path / "route_metrics.json"
+    metrics_path.write_text('{"route__drc_errors": 46}\n')
+    # Docker OpenROAD writes a root-owned 0644 inode in a user-owned
+    # directory. Removing our own write permission reproduces that boundary.
+    metrics_path.chmod(0o444)
+    place_and_route_reports.write_route_metrics(
+        str(metrics_path), {"route__wirelength": 42}, 23, error_cls=RuntimeError
+    )
+    assert json.loads(metrics_path.read_text()) == {
+        "route__wirelength": 42,
+        "route__drc_errors": 23,
+    }
+    assert list(tmp_path.iterdir()) == [metrics_path]
+
+
+def test_failed_metrics_publication_preserves_engine_artifact(tmp_path, monkeypatch):
+    metrics_path = tmp_path / "route_metrics.json"
+    original = '{"route__drc_errors": 46}\n'
+    metrics_path.write_text(original)
+
+    def fail_replace(*args):
+        raise OSError("publication denied")
+
+    monkeypatch.setattr(place_and_route_reports.os, "replace", fail_replace)
+    with pytest.raises(RuntimeError, match="publication denied"):
+        place_and_route_reports.write_route_metrics(
+            str(metrics_path), {}, 23, error_cls=RuntimeError
+        )
+    assert metrics_path.read_text() == original
+    assert list(tmp_path.iterdir()) == [metrics_path]
