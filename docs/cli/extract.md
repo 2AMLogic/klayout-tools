@@ -4992,6 +4992,74 @@ deterministic across runs of the same layout/deck but is **not** meaningful
 on its own — use `net_id`, not the `_dup<n>` count, to identify which net an
 instance name's card belongs to.
 
+### Hierarchical net names are dot-free (issue #2145)
+
+A net can arrive carrying an **instance path** in its name, joined with a
+dot — `XBIAS.vb1`, `XS1.nh`. The two ways this happens today are
+`--def-net-names` (issue #951), which replays `klt place-and-route`'s own
+DEF net names onto the extracted nets, and a drawn label that spells the
+same convention by hand. It is precisely the internal nodes of a composed,
+routed cell — the set a `--parasitics` post-layout run wants to probe — that
+get named this way.
+
+`.` is **ngspice's own hierarchy separator**, so a node token containing one
+is read as a path expression, not as a flat identifier:
+`v(xdut.XBIAS.vb1)` parses as instance `xdut` → instance `XBIAS` → node
+`vb1`. Since the flattened cell has no instance called `XBIAS`, the node
+cannot be probed, `.meas`'d, or `.ic`'d by the very name the netlist wrote
+for it — and the same token means one thing in the `.SUBCKT` pin list and
+another wherever a node reference is parsed. Unlike the comma and
+leading-`$` cases above, KLayout's `NetlistSpiceWriter` applies no escape of
+its own here: a net named `XBIAS.vb1` was written verbatim.
+
+**`klt extract` therefore renames the net itself, to `_`:**
+
+| Original net name | Reported and written as |
+|---|---|
+| `XBIAS.vb1` | `XBIAS_vb1` |
+| `XS1.nh,XS1.nt` (also label-merged) | `XS1_nh\|XS1_nt` |
+| `VPWR` (no dot) | `VPWR` — unchanged |
+
+The exact rule, so a consumer never has to re-derive it:
+
+- **Only net/node tokens are rewritten.** SPICE dot-commands (`.SUBCKT`,
+  `.ENDS`, `.GLOBAL`, `.model`, …) and numeric literals with a decimal point
+  (`L=0.28U`, `3.99494e-16`) are a different lexical class entirely, written
+  from different inputs, and are never touched.
+- **Every dot in the name is replaced**, not only the first — `A.b.c`
+  becomes `A_b_c`.
+- **The rewrite composes with the other two** (`,` → `|`, leading `$` →
+  `\$`) rather than replacing them; all three are applied to the same name.
+- **One spelling everywhere.** The renamed net is what the written SPICE
+  netlist, `nets[].name`, `devices[].nets[...]`, `merged_net_labels[].net`,
+  `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`, the `--spef`
+  output, and `klt lvs`'s `net_correspondence[]`/`mismatches[].net` all
+  carry — the same cross-artifact join-by-name property the `,`/`$` rules
+  already preserve. A simulated node name still maps back to the report by
+  exact string match.
+- **Collisions are resolved per netlist, not per name.** No rewrite that
+  leaves dot-free names alone can be injective, so `a.b` can land on a
+  pre-existing `a_b`, and `a.b_c` and `a_b.c` both want `a_b_c`. Within one
+  circuit the first claimant keeps the unsuffixed spelling and each later
+  one gets the smallest free `_<n>` suffix (`a_b_1`, `a_b_2`, …), so two
+  distinct nets never share a name in one written netlist. Use `net_id`
+  (`Net.cluster_id`), not the suffix, to identify a net.
+- **It is disclosed, not silent.** Every run that renames at least one net
+  appends a `warnings[]` entry naming the count and up to five
+  `before -> after` examples.
+- **CLI net-name arguments use the rewritten spelling.**
+  `--critical-net`, `--distributed-rc`, `--mom-net` and `--mom-rlc-net` all
+  match against the post-rename namespace — i.e. against exactly what
+  `nets[].name` reports. (`--pins`/`--def-pins`/`--top-cell-pins` are
+  matched *before* the rename, against the raw drawn-label text, the same as
+  for the `,` case — see "Declared pins" above.)
+- **`klt lvs` is unaffected in its matching.** `NetlistComparer` pairs nets
+  by connectivity, never by name (see "Anonymous net numbering" above), so
+  renaming a layout net changes what is *reported*, not what is *matched*.
+
+A net whose name never contained a dot — the overwhelming majority — is
+byte-identical to a run before this rule existed.
+
 ## Verified compatible with `klt sim`'s netlist convention
 
 Hard acceptance bar (Epic #153: "`klt extract` output feeds `klt sim`
