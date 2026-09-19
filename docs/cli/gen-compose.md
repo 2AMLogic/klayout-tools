@@ -1925,7 +1925,14 @@ exit codes).
     ],
     "notes": []
   },
-  "warnings": []
+  "warnings": [],
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.29.8",
+    "pdk": { "name": "sky130A", "source": "volare", "version": "open_pdks 0fe599b" },
+    "deck": null,
+    "input": null
+  }
 }
 ```
 
@@ -1949,6 +1956,7 @@ exit codes).
 | `unrouted_nets[]` | array\<string\> | Net labels the router could not *fully* connect — an unroutable 2-pin net, or a bundle net whose pins could not all be joined into one spanning tree (#1073), including a `status: "partial"` net that drew some but not all of its legs (#1169; see `nets[].status` to tell partial from fully-unrouted). Under a declare-only request (#1188), **every** `connectivity[]` net lands here (nothing was routed by request, not by failure — see `nets[].legs[].reason`). Always present, empty when everything routed. **A non-empty array is a partial success** (exit code `3`), not silently dropped connectivity. A listed net's *drawn* legs (if any — `nets[].legs[]`/`nets[].status` say which) are still real, DRC-checked metal; only the stranded pins are left for the caller to wire themselves. |
 | `drc_hints` | object | Advisory, same "not authoritative" semantics as `klt gen`'s own `drc_hints` — `klt drc` remains the actual authority on rule compliance. See fields below. |
 | `warnings[]` | array\<string\> | Non-fatal notes. Always present, empty when there is nothing to report. |
+| `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A compose request involves no rule/model deck and no single input layout stream (it composes parameters plus block sub-reports, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `drc_hints` fields
 

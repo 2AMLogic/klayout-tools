@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from ._layout import write_layout
+from ._provenance import build_provenance
 from .gen_layer_params import (
     _CAP_GEOMETRY_MIN_KEYS as _CAP_GEOMETRY_MIN_KEYS,
 )
@@ -2497,7 +2498,23 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
             "ports": [...],
             "drc_hints": {...},
             "warnings": [...],
+            "provenance": {...},
         }
+
+    ``provenance`` (issue #2035) is the same shared block ``klt drc``/``klt
+    lvs``/``klt extract``/``klt sta`` already emit, built via
+    :func:`~klayout_tools._provenance.build_provenance` -- see
+    ``docs/json-contract.md``'s "Shared ``provenance`` block". Its point
+    here is ``klt_version``/``klayout_version``: a project that commits
+    generated geometry *and this report* as evidence and regenerates later
+    could otherwise not tell a real geometry change from a klt/KLayout
+    upgrade. A generator request carries no rule/model deck and no single
+    input layout stream (the request is parameters, not a layout file), so
+    ``provenance.deck``/``provenance.input`` are always ``None`` -- matching
+    ``klt lvs`` against a pre-extracted netlist. ``provenance.pdk`` carries
+    the same identity as the top-level ``pdk`` field above, in the shared
+    block's own ``{name, source, version}`` spelling. Additive field, no
+    ``schema_version`` bump.
 
     ``dbu_um`` (issue #1496) reports the database unit the output stream was
     actually written at -- resolved from the *resolved PDK's own tech LEF*
@@ -2594,6 +2611,11 @@ def generate(request: dict[str, Any]) -> dict[str, Any]:
         "navigable_regions": described.get("navigable_regions", []),
         "drc_hints": described["drc_hints"],
         "warnings": described["warnings"],
+        # Issue #2035: the shared `provenance` block every other verb's
+        # report already carries -- see this function's docstring. A `gen`
+        # request involves no rule/model deck and no single input layout
+        # stream, so `deck`/`input` are both `None` here.
+        "provenance": build_provenance(pdk=pdk_info),
     }
 
 
