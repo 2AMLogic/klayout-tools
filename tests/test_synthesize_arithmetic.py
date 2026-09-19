@@ -422,7 +422,7 @@ def _write_request(tmp_path, arithmetic, **extra):
     return str(request_path)
 
 
-def _synth_script_path(tmp_path, hdl_toplevel: str = "adders") -> str:
+def _synth_script_path(tmp_path, report, hdl_toplevel: str = "adders") -> str:
     """The real absolute path `run_synthesize` wrote its `.ys` script to.
 
     Issue #1844 normalized the response's own `script_path` field to the
@@ -430,10 +430,12 @@ def _synth_script_path(tmp_path, hdl_toplevel: str = "adders") -> str:
     `scope: "external"`, `path: None` -- correctly omitting the absolute
     path). This reconstructs the real filesystem path directly from
     `run_synthesize`'s own documented convention (`synthesize.py`'s module
-    docstring): `.klt/synthesize/synth_<hdl_toplevel>.ys`, next to the
+    docstring): `.klt/synthesize/<run_id>/synth_<hdl_toplevel>.ys`, next to the
     request file.
     """
-    return str(tmp_path / ".klt" / "synthesize" / f"synth_{hdl_toplevel}.ys")
+    return str(
+        tmp_path / ".klt" / "synthesize" / report["run_id"] / f"synth_{hdl_toplevel}.ys"
+    )
 
 
 @requires_engine
@@ -514,7 +516,7 @@ def test_integration_explicit_architecture_substitutes_and_stays_equivalent(tmp_
     assert arithmetic["selected_measured"] is not None
     assert report["equivalence"]["status"] == "equivalent"
 
-    script = open(_synth_script_path(tmp_path), encoding="utf-8").read()
+    script = open(_synth_script_path(tmp_path, report), encoding="utf-8").read()
     assert "techmap -map" in script
     assert "klt_add_kogge_stone_16.v" in script
 
@@ -543,7 +545,7 @@ def test_integration_adders_default_is_an_explicit_no_op(tmp_path):
     arithmetic = report["arithmetic"]
     assert arithmetic["status"] == "not-requested"
     assert arithmetic["candidates"] == []
-    script = open(_synth_script_path(tmp_path), encoding="utf-8").read()
+    script = open(_synth_script_path(tmp_path, report), encoding="utf-8").read()
     assert "techmap -map" not in script
 
 
