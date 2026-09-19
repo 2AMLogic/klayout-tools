@@ -605,14 +605,6 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
-from .place_and_route_reports import (
-    count_route_drc_violations as _count_route_drc_violations,
-)
-from .place_and_route_reports import (
-    detailed_route_lines,
-    route_metrics_object,
-    write_route_metrics,
-)
 
 # The power-delivery audit (issue #2086): reads the DEF this run wrote and
 # reports what was actually *placed* (tapcells/endcaps/fillers, PDN
@@ -626,6 +618,14 @@ from .place_and_route_power_audit import (
 )
 from .place_and_route_power_audit import (
     power_delivery_warnings as power_delivery_warnings,
+)
+from .place_and_route_reports import (
+    count_route_drc_violations as _count_route_drc_violations,
+)
+from .place_and_route_reports import (
+    detailed_route_lines,
+    route_metrics_object,
+    write_route_metrics,
 )
 
 # The post-route multi-corner sweep + SPEF-annotated STA subsystem (issues
