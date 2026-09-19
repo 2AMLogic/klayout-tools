@@ -96,6 +96,7 @@ The `place_and_route` verb runs placement, global/detail routing, and post-PnR o
 - **place_and_route_cmd** (`cli/place_and_route_cmd.py`): CLI interface, JSON envelope and request document handling
 - **place_and_route** (`place_and_route.py`): Core place-and-route engine coordination (tool invocation, flow control)
 - **place_and_route_gds_merge** (`place_and_route_gds_merge.py`): Post-PnR GDS file merging, port cleanup, and design finalization
+- **place_and_route_min_area** (`place_and_route_min_area.py`): Post-route minimum-**area** repair pass over the merged GDS — floors routed metal against the resolved PDK family's own `*.area.*` deck rules and reports what it could not repair safely (issue #2139); called only from `place_and_route_gds_merge._merge_def_to_gds`
 - **place_and_route_sta** (`place_and_route_sta.py`): Post-routing static timing analysis integration (timing closure, slew/delay annotation)
 
 ### signoff

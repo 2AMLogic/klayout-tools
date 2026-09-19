@@ -1666,6 +1666,7 @@ def run_place_and_route(
     spef_sta: dict[str, Any] | None = None
     layer_map_info: dict[str, Any] | None = None
     def_net_names_info: dict[str, Any] | None = None
+    min_area_repair_info: dict[str, Any] | None = None
     if target_stage == "route":
         def_path = os.path.join(output_dir, f"{hdl_toplevel}.def")
         gds_path = os.path.join(output_dir, f"{hdl_toplevel}.gds")
@@ -1689,6 +1690,7 @@ def run_place_and_route(
             "resolution": merge_info["resolution"],
         }
         def_net_names_info = merge_info["def_net_names"]
+        min_area_repair_info = merge_info["min_area_repair"]
         # `request.post_route_spef` (issue #948, Epic #700 Phase 3): real
         # routed-geometry parasitics, via `klt extract --parasitics` against
         # the GDS just merged above, fed back into a fresh OpenSTA session
@@ -1920,6 +1922,18 @@ def run_place_and_route(
         # those keep the pre-#1488 fallback rather than failing the merge.
         # `null` unless `stage_reached` is `"route"`, mirroring `layer_map`.
         "def_net_names": def_net_names_info,
+        # Additive field (issue #2139): what the DEF->GDS merge's own
+        # post-route minimum-*area* repair pass did, so a caller can tell a
+        # routed GDS that genuinely clears the PDK's own `*.area.*` rules
+        # from one that merely was not measured. `status` is `"clean"`,
+        # `"violations"` (see `unrepaired`) or `"skipped"` (with a
+        # `reason`); `patches`/`repaired`/`remaining` count what was drawn
+        # and what is left; `rules[]` carries the per-rule before/after
+        # detail. A `"skipped"` pass is deliberately NOT reported as clean
+        # -- an unmeasured layer and a measured-and-clean one are different
+        # answers. `null` unless `stage_reached` is `"route"`, mirroring
+        # `layer_map`.
+        "min_area_repair": min_area_repair_info,
         # Additive field (issue #996): the `write_verilog`-produced,
         # *as-built* gate-level netlist -- the design as CTS/timing repair/
         # antenna repair actually left it, i.e. the netlist the routed

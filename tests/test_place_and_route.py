@@ -1892,6 +1892,15 @@ def _stub_merge_def_to_gds(monkeypatch) -> list[dict]:
                 "single_pin_markers": 0,
                 "unresolved_single_pin_nets": [],
             },
+            "min_area_repair": {
+                "status": "skipped",
+                "reason": "stubbed merge",
+                "patches": 0,
+                "repaired": 0,
+                "remaining": 0,
+                "rules": [],
+                "unrepaired": [],
+            },
         }
 
     monkeypatch.setattr(place_and_route, "_merge_def_to_gds", fake_merge)
@@ -6252,6 +6261,24 @@ def test_merge_def_to_gds_success(tmp_path):
         # This DEF declares no `NETS` section at all, so the issue #1488
         # single-pin marker pass has nothing to do.
         "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
+        # Issue #2139: no layer map resolved here either, so the merged
+        # GDS's routed-net layers cannot be matched against the deck's own
+        # `*.area.*` rules -- reported as a named skip, never a silent
+        # clean. See `tests/test_place_and_route_min_area.py` for the pass
+        # exercised against a fixture that *does* carry a layer map.
+        "min_area_repair": {
+            "status": "skipped",
+            "reason": (
+                "no KLayout LEF/DEF layer map resolved, so the merged GDS's "
+                "routed-net layers cannot be matched against the deck's own "
+                "minimum-area rules"
+            ),
+            "patches": 0,
+            "repaired": 0,
+            "remaining": 0,
+            "rules": [],
+            "unrepaired": [],
+        },
     }
 
 
@@ -6350,6 +6377,22 @@ def test_merge_def_to_gds_applies_family_fallback_layer_map_for_gf180mcu(tmp_pat
         "path": str(map_path),
         "resolution": "family",
         "def_net_names": {"single_pin_markers": 0, "unresolved_single_pin_nets": []},
+        # Issue #2139: this fixture's map does resolve `met1` -> `68/20`, so
+        # the repair pass runs; the gf180mcu deck carries no plain
+        # `*.area.*` rule on that layer, so it has nothing to check and says
+        # so rather than reporting a clean it never measured.
+        "min_area_repair": {
+            "status": "skipped",
+            "reason": (
+                "the curated deck for PDK variant 'gf180mcuC' carries no "
+                "plain minimum-area rule on any routed-net layer"
+            ),
+            "patches": 0,
+            "repaired": 0,
+            "remaining": 0,
+            "rules": [],
+            "unrepaired": [],
+        },
     }
 
 
