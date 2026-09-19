@@ -9,6 +9,17 @@ regenerative-feedback / PTAT-CTAT bias-generator work, i.e. *tightening*
 the PVT spread rather than clearing the band) is deliberately **not**
 attempted here, per #1814's own ordering.
 
+**Superseded in part by #1795 (2026-09-18).** This document records the
+netlist as #1814 shipped it — an all-`res_xhigh_po` reference divider,
+38% period spread, ~6% band margin. #1795 then replaced each divider leg
+with a zero-TC `res_xhigh_po` + `res_generic_nd` composite, taking the
+spread to 4.5% and the margin to 23.5%/21.8%, and ruled the PTAT/CTAT
+half of scope item 5 out on algebra rather than deferring it (`{ib}`
+cancels out of the period, so shaping it cannot be a first-order fix).
+Every measured number below is #1814-era and is kept as the historical
+record; the current data and the compensation's own derivation live in
+[`benchmarks/design-agent/reference/rc-relaxation-oscillator/device-oscillator/README.md`](../../benchmarks/design-agent/reference/rc-relaxation-oscillator/device-oscillator/README.md).
+
 ## Chain
 
 `#1789` (first device-level oscillator attempt; 18-corner period sweep,
