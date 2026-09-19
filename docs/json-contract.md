@@ -642,7 +642,27 @@ percentages remain distinct from executed functional-verification tests.
 `klt signoff` refuses zero, unknown and malformed common coverage in plain,
 numbered and compound evidence while preserving actual failure precedence.
 The full [compatibility mapping and public-path inventory](coverage-contract.md)
-also records which adapters and partial-success policy remain for Phase 2.
+also records which per-path adapters remain outstanding.
+
+### The common rollup rule (#2109)
+
+One decision table maps a producer's own outcome plus its coverage state onto
+eight rows — `errored`, `failed`, `malformed`, `unknown`, `zero`, `partial`,
+`legacy`, `full` — each with a stable `reason` code and an exit code (`0`
+success, `3` findings, `4` no verdict reached). Errors and real failures are
+decided before coverage, so a defect is never masked by a coverage gap and a
+gap is never dissolved by a clean status.
+
+Successful checks alongside a nonempty list of skipped *requested* work are
+`partial`: a real, exit-0 result that is **not** the verb's unconditional
+success token. Adapters report `f"{success}_partial"` (`clean_partial`,
+`pass_partial`) for it. Only `full` asserts positively established complete
+applicable coverage; missing common coverage (`legacy`) keeps grading by the
+verb-specific rules that always governed it and is never counted as proof of
+completeness. Optional Verilator code-coverage percentages are `legacy` and
+are never a requested-check claim. The
+[full table, field names and adapter migration contract](coverage-contract.md)
+are normative.
 
 ## Error shape
 

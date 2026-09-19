@@ -30,6 +30,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import signoff as signoff_module
 from klayout_tools.cli import main
+from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import DesignEvidenceTiersError
 from klayout_tools.signoff import (
     SignoffError,
@@ -2231,6 +2232,202 @@ def test_cli_manifest_text_names_a_refused_citation(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert "reason: nothing_checked" in out
+
+
+# --------------------------------------------------------------------------- #
+# Partial-coverage qualification (issue #2109, Phase 2 of epic #1988): a run
+# that passed every check it ran *and* skipped requested work.
+# --------------------------------------------------------------------------- #
+
+#: A curated DRC run that executed one rule and skipped another whose input
+#: layer is absent, declared through the versioned checked-work contract.
+#: Its producer has **not** yet adopted the Phase 2 rollup (its own status is
+#: still the unconditional `"clean"`) -- the pre-adapter state every audited
+#: verb is in until its own child issue of #1988 lands.
+DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": build_check_coverage(
+        checked=["poly.width.1"],
+        skipped=[{"id": "met5.width.1", "reason": "absent_input_layer"}],
+    ),
+}
+
+#: The same run from a producer that *has* adopted the rollup: identical
+#: coverage, but its status is the partial token `rollup_status` derives.
+DRC_PARTIAL_STATUS_ENVELOPE = {
+    **DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE,
+    "status": "clean_partial",
+}
+
+#: The control: complete applicable coverage, positively established.
+DRC_FULL_COVERAGE_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": build_check_coverage(checked=["poly.width.1"]),
+}
+
+
+def test_partial_status_is_refused_as_partial_not_as_a_failure(tmp_path):
+    """The reason has to name the actionable problem (issue #826): a
+    `"clean_partial"` DRC report did not find a defect, it skipped requested
+    work. Before #2109 it landed on `check_failed` purely because the token
+    is not the kind's success word, sending a reader after a violation that
+    does not exist."""
+    path = _write(tmp_path, "drc.json", DRC_PARTIAL_STATUS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "partial_coverage"
+    assert item_3["citation"] is None
+
+
+def test_partial_status_never_aggregates_as_a_passing_check(tmp_path):
+    path = _write(tmp_path, "drc.json", DRC_PARTIAL_STATUS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["status"] == "clean_partial"
+    assert check["passed"] is False
+    assert check["detail"]["coverage_state"] == "partial"
+    assert check["detail"]["coverage_qualification"] == {
+        "reason": "partial_coverage",
+        "skipped": [{"id": "met5.width.1", "reason": "absent_input_layer"}],
+    }
+    assert result["status"] == "fail"
+
+
+def test_power_em_pass_partial_is_refused_as_partial_not_as_a_failure(tmp_path):
+    """#1997's already-shipped partial verdict keeps working, and now reports
+    the accurate reason: one checked EM edge alongside three unchecked ones
+    is a coverage gap, not a current-density violation."""
+    path = _write(tmp_path, "power.json", POWER_EM_PASS_PARTIAL_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+    aggregate = build_signoff([path])
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "partial_coverage"
+    assert aggregate["checks"][0]["passed"] is False
+
+
+def test_a_real_failure_still_outranks_a_partial_coverage_report(tmp_path):
+    """Failure precedence: a run that found a defect reports its failure
+    token, never the partial one, so the two can never be confused."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {
+            **DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE,
+            "status": "violations",
+            "violation_count": 1,
+        },
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["reason"] == "check_failed"
+
+
+def test_a_met_item_discloses_the_requested_work_its_evidence_skipped(tmp_path):
+    """The pre-adapter case. `klt drc` still reports the unconditional
+    `"clean"` on a partial run until #2110 lands, and item 3's verdict is
+    still that status alone (docs/design-evidence-tiers.md item 3 leaves the
+    weighing to the claimant) -- but the citation now *says* the run skipped
+    requested work, so the gap is visible in the report instead of silent."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["coverage_qualification"] == {
+        "reason": "partial_coverage",
+        "skipped": [{"id": "met5.width.1", "reason": "absent_input_layer"}],
+    }
+
+
+def test_complete_coverage_makes_no_qualification_claim(tmp_path):
+    """The control: positively established complete applicable coverage
+    carries no qualification key at all, on either path."""
+    path = _write(tmp_path, "drc.json", DRC_FULL_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    aggregate = build_signoff([path])
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert "coverage_qualification" not in item_3["citation"]
+    assert aggregate["checks"][0]["passed"] is True
+    assert aggregate["checks"][0]["detail"]["coverage_state"] == "full"
+    assert "coverage_qualification" not in aggregate["checks"][0]["detail"]
+
+
+def test_legacy_coverage_gaps_are_not_relabelled_as_a_partial_claim(tmp_path):
+    """Migration policy, stated as a test: a pre-contract envelope whose own
+    verb-specific fields describe a gap (`rules_skipped`) makes no common
+    coverage claim at all. It is neither refused nor re-read as `partial`."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    aggregate = build_signoff([path])
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert "coverage_qualification" not in item_3["citation"]
+    # The legacy disclosure #2002 added is untouched and still reported.
+    assert item_3["citation"]["coverage"]["rules_skipped"] == ["met5.4", "met5.5"]
+    assert "coverage_state" not in aggregate["checks"][0]["detail"]
+
+
+@pytest.mark.parametrize(
+    ("envelope", "reason"),
+    [
+        (DRC_CLEAN_NOTHING_CHECKED_ENVELOPE, "nothing_checked"),
+        (
+            {
+                **DRC_CLEAN_ENVELOPE,
+                "coverage": {"schema_version": 1, "known": "yes"},
+            },
+            "malformed_coverage",
+        ),
+    ],
+)
+def test_evidence_that_reached_no_verdict_is_still_refused_outright(
+    tmp_path, envelope, reason
+):
+    """Phase 2 widens what is *qualified*, never what is refused: the three
+    no-verdict rows keep their existing hard refusal and their own reasons."""
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == reason
+
+
+def test_partial_coverage_is_ordered_like_check_failed_not_like_wrong_kind(tmp_path):
+    """`partial_coverage` replaces `check_failed` on the verdict path, so it
+    is reported for a kind the item does not accept too -- exactly as a
+    *failing* DRC report cited for item 7 reports `check_failed` rather than
+    `wrong_kind`. The kind gate only ever downgrades a would-be `"met"`."""
+    partial = _write(tmp_path, "partial.json", DRC_PARTIAL_STATUS_ENVELOPE)
+    failing = _write(tmp_path, "failing.json", DRC_VIOLATIONS_ENVELOPE)
+
+    reasons = {
+        name: next(
+            item
+            for item in build_tier_report(_manifest(evidence={"7": path}))["items"]
+            if item["id"] == 7
+        )["reason"]
+        for name, path in (("partial", partial), ("failing", failing))
+    }
+
+    assert reasons == {"partial": "partial_coverage", "failing": "check_failed"}
 
 
 def test_cli_fleet_text_flags_blocks_whose_deck_left_gaps(tmp_path, capsys):
