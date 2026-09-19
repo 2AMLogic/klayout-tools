@@ -19,6 +19,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -40,6 +42,13 @@ from klayout_tools.signoff import (
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Match the real-engine tier in test_sim.py and test_pex.py. CI installs
+# ngspice; the local check:ci command deliberately opts out of this tier.
+requires_ngspice = pytest.mark.skipif(
+    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
+    reason="ngspice is unavailable or disabled by KLT_SKIP_NGSPICE_TESTS=1",
+)
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -4029,6 +4038,7 @@ def test_real_extract_gate_reproduces_the_canarys_netlist_regeneration(tmp_path)
     not (_DESIGN_PIPELINE_DIR / "09-sim.request.json").exists(),
     reason="examples/design-pipeline/09-sim.request.json not present in this checkout",
 )
+@requires_ngspice
 def test_real_sim_gate_reproduces_the_canarys_corner_sim_pass():
     # "corner sim" (issue #825's phrasing): the post-extraction corner
     # sweep -- a real, multi-corner `klt sim` run against the layout's own
@@ -4062,6 +4072,7 @@ def test_real_sim_gate_reproduces_the_canarys_corner_sim_pass():
     not (_DESIGN_PIPELINE_DIR / "06-layout.gds").exists(),
     reason="examples/design-pipeline/06-layout.gds not present in this checkout",
 )
+@requires_ngspice
 def test_real_pex_gate_reproduces_the_canarys_post_layout_delta_pass(tmp_path):
     # Epic #709 Phase 1c (#803): item 7 ("Post-layout verification") is
     # kind-restricted to `pex`-kind evidence only (issue #871) -- this is
