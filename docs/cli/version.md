@@ -51,10 +51,10 @@ a release.
 }
 ```
 
-- `version` — the identity-bearing version string above; the one field to
-  record alongside a report.
-- `package_version` — the plain package version (`klayout_tools.__version__`,
-  the same value `provenance.klt_version` carries). Equals `version` exactly
+- `version` — the identity-bearing version string above, also recorded as
+  `provenance.klt_version` in reports.
+- `package_version` — the plain package version (`klayout_tools.__version__`).
+  Equals `version` exactly
   when `is_release` is `true`.
 - `git_commit` — the commit the build was made from, or `null` when
   unrecoverable.
@@ -146,6 +146,6 @@ klt deck hash --deck sky130 --format json \
   | jq -e '.content_hash == "sha256:<the hash your evidence was produced against>"'
 ```
 
-`provenance.klt_version` in a report still carries the plain package version
-(`package_version` above), unchanged — see
+`provenance.klt_version` in a report carries the same build identity as
+`version` above (issue #2090) — see
 [`../json-contract.md`](../json-contract.md).

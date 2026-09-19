@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from klayout_tools import __version__, build_identity
+from klayout_tools import __version__, _provenance, build_identity
 from klayout_tools.cli import main
 
 # --------------------------------------------------------------------------- #
@@ -268,6 +268,75 @@ def test_git_helper_never_raises_when_git_is_missing(monkeypatch, tmp_path):
 
     monkeypatch.setattr(build_identity.subprocess, "run", _raise)
     assert build_identity._git(str(tmp_path), "rev-parse", "HEAD") is None
+
+
+# --------------------------------------------------------------------------- #
+# provenance wiring (issue #2090)
+# --------------------------------------------------------------------------- #
+
+
+def _assert_provenance_matches_cli(expected: str, capsys) -> None:
+    assert _provenance.build_provenance()["klt_version"] == expected
+    assert main(["version"]) == 0
+    assert capsys.readouterr().out.strip() == f"klt {expected}"
+    assert main(["version", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["version"] == expected
+    # Package metadata keeps its separate, static-version contract.
+    assert payload["package_version"] == __version__
+
+
+@pytest.mark.parametrize("state", ["release", "post-tag", "dirty", "unknown"])
+def test_provenance_identifies_source_build(state, tmp_path, monkeypatch, capsys):
+    repo = tmp_path / "source"
+    if state == "unknown":
+        repo.mkdir()
+        expected = f"{__version__}+unknown"
+    else:
+        _make_repo(repo)
+        _git(repo, "tag", f"v{__version__}")
+        if state in {"post-tag", "dirty"}:
+            (repo / "tracked.py").write_text("x = 2\n")
+        if state == "post-tag":
+            _git(repo, "commit", "-qam", "after the tag")
+        commit = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        expected = __version__
+        if state != "release":
+            expected += f"+g{commit[:12]}"
+        if state == "dirty":
+            expected += ".dirty"
+
+    monkeypatch.setattr(build_identity, "_recorded_identity", lambda _v: None)
+    monkeypatch.setattr(build_identity, "__file__", str(repo / "tracked.py"))
+    _assert_provenance_matches_cli(expected, capsys)
+
+
+@pytest.mark.parametrize(
+    "tagged,dirty,commit,suffix",
+    [
+        (True, False, "b" * 40, ""),
+        (False, False, "b" * 40, "+g" + "b" * 12),
+        (True, True, "b" * 40, "+g" + "b" * 12 + ".dirty"),
+        (False, None, None, "+unknown"),
+    ],
+    ids=["release", "post-tag", "dirty", "unknown"],
+)
+def test_provenance_identifies_packaged_build(
+    tagged, dirty, commit, suffix, monkeypatch, capsys
+):
+    module = type(sys)("klayout_tools._build_info")
+    module.GIT_COMMIT = commit
+    module.GIT_TAG = f"v{__version__}" if tagged else None
+    module.GIT_DIRTY = dirty
+    monkeypatch.setitem(sys.modules, "klayout_tools._build_info", module)
+
+    def _fail(*args, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("packaged provenance must not probe the checkout")
+
+    monkeypatch.setattr(build_identity, "_checkout_identity", _fail)
+    _assert_provenance_matches_cli(f"{__version__}{suffix}", capsys)
 
 
 # --------------------------------------------------------------------------- #
