@@ -178,9 +178,42 @@ def _min_area_um2_for_layer(
     return best
 
 
+def _min_enclosing_margin_um_for_layer(
+    variant: str,
+    layer: tuple[int, int] | None,
+    other_layer: tuple[int, int] | None,
+) -> tuple[float, str] | None:
+    """Tightest plain enclosure rule for the ordered metal/via layer pair.
+
+    Like the width/area lookups above, convert the resolved family's deck
+    threshold from its nominal dbu to um, and return ``None`` for a missing
+    rule or unresolvable family/deck. Derived-region rules do not describe
+    a plain landing-pad square and are deliberately excluded.
+    """
+    if layer is None or other_layer is None:
+        return None
+    try:
+        family = _pdk_family(variant)
+        deck_rules = get_deck(family)
+        nominal_dbu_um = get_nominal_dbu(family)
+    except (GenError, UnknownDeckError):
+        return None
+    candidates = (
+        (rule.threshold_dbu * nominal_dbu_um, rule.id)
+        for rule in deck_rules
+        if rule.check == "enclosing"
+        and rule.layer == layer
+        and rule.other_layer == other_layer
+        and rule.derived_layer is None
+    )
+    return max(candidates, key=lambda entry: entry[0], default=None)
+
+
 def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> float:
-    """A via-drop landing pad's own drawn side length (um) on ``layer``,
-    floored against that layer's own minimum-*area* DRC rule (issue #2072).
+    """A landing pad's baseline/area side length (um) on ``layer`` (#2072).
+
+    :func:`_resolve_landing_pad_sizes` additionally applies each hop's
+    via-enclosure floor before passing the final size into drawing (#2074).
 
     A via-drop's landing pad (``_VIA_LANDING_SIZE_UM``, sized from the PDK's
     contact-enclosure convention) is drawn on *every* hop of a multi-level
@@ -228,37 +261,39 @@ def _landing_pad_side_um_for_layer(variant: str, layer: tuple[int, int]) -> floa
 
 
 def _resolve_landing_pad_sizes(
-    routed_geometry: list[dict[str, Any]], variant: str
-) -> dict[tuple[int, int], float]:
-    """Per-``(layer, datatype)`` via-drop landing-pad side lengths (um) for
-    every distinct landing layer drawn across ``routed_geometry`` (issue
-    #2072).
+    routed_geometry: list[dict[str, Any]],
+    variant: str,
+    via_drop_size_um: dict[tuple[int, int], float],
+) -> dict[tuple[tuple[int, int], tuple[int, int]], float]:
+    """Landing-pad sides keyed by ``(landing_layer, via_layer)`` (#2074).
 
-    One :func:`_landing_pad_side_um_for_layer` lookup per *distinct* landing
-    layer actually used by a drawn via-drop -- never per drop, and never a
-    private threshold -- mirroring the shape of
-    :func:`~klayout_tools.gen_compose.compose`'s own ``via_drop_size_um``
-    resolution (issue #1501) against :func:`_min_width_um_for_layer`. The
-    result is threaded into
-    :func:`~klayout_tools.gen_compose._write_composed_gds`, which falls back
-    to the fixed ``_VIA_LANDING_SIZE_UM`` for any layer missing from this
-    map.
+    Each side of each hop independently clears the fixed baseline, its
+    metal's area floor (#2072), and the actual via side plus twice that
+    pair's enclosure margin. Include the via in the key: the same metal
+    can enclose different cuts with different margins on adjacent hops.
+    Missing enclosure rules leave the baseline/area floor unchanged.
 
-    Extracted out of ``compose()`` rather than inlined there (PR #2075
-    review): ``compose()`` is the single most complex function in the
-    repo's ``C901`` ratchet baseline, and inlining this triple-nested loop
-    pushed it past its recorded value. Behaviour is identical to the inlined
-    form -- a layer with no matching ``"area"`` rule (or an unresolvable PDK
-    family) still resolves to exactly ``_VIA_LANDING_SIZE_UM``.
+    Resolve once per distinct pair and pass the result into drawing; the
+    router's existing spacing pre-checks keep their baseline footprint,
+    as with the area and via-width floors described above.
     """
-    landing_pad_size_um: dict[tuple[int, int], float] = {}
+    from .gen_compose import _VIA_DROP_SIZE_UM
+
+    landing_pad_size_um: dict[tuple[tuple[int, int], tuple[int, int]], float] = {}
     for route in routed_geometry:
         for drop in route.get("via_drops", []):
+            via_layer = drop["via_layer"]
             for pad_layer in drop.get("landing_layers", ()):
-                if pad_layer not in landing_pad_size_um:
-                    landing_pad_size_um[pad_layer] = _landing_pad_side_um_for_layer(
-                        variant, pad_layer
+                pair = (pad_layer, via_layer)
+                if pair not in landing_pad_size_um:
+                    side = _landing_pad_side_um_for_layer(variant, pad_layer)
+                    enclosure = _min_enclosing_margin_um_for_layer(
+                        variant, pad_layer, via_layer
                     )
+                    if enclosure is not None:
+                        via_side = via_drop_size_um.get(via_layer, _VIA_DROP_SIZE_UM)
+                        side = max(side, via_side + 2 * enclosure[0])
+                    landing_pad_size_um[pair] = side
     return landing_pad_size_um
 
 
@@ -389,9 +424,9 @@ def _resolve_via_drop_layer(
       below instead. The caller draws a via square on each hop's own
       ``via_layer`` plus a landing pad on each of that hop's ``metal_a``/
       ``metal_b``, all at the pin's own position, exactly as the single-hop
-      case always has; consecutive hops share a landing pad at the
-      intermediate level they have in common (harmless redundancy, not a
-      second, larger pad). Since issue #1894, a ``port_layer`` on the deck's
+      case always has; consecutive hops' pads merge on their common
+      intermediate level, with each sized for its own via enclosure.
+      Since issue #1894, a ``port_layer`` on the deck's
       diffusion role (``deck.active``) also resolves this way: the ladder's
       first hop is ``deck.contact`` (the licon/comp-contact that lands on
       ``deck.metals[0]``), followed by the ordinary metals-stack hops up to
