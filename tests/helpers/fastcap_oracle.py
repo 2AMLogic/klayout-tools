@@ -227,19 +227,24 @@ def _minmax(a: float, b: float) -> tuple[float, float]:
 def segment_count(extent_um: float, panel_size_um: float) -> int:
     """Number of panels along an edge of length ``extent_um``.
 
-    A verbatim port of `native/mom/src/geometry.rs`'s `face_segment_count`
+    Matches `native/mom/src/geometry.rs`'s `face_segment_count`
     (``round(extent / panel_size)``, floored at 1, and 0 for a degenerate
     extent). Matching it exactly is the point: it makes the *mesh* -- not
     only the geometry -- identical on both sides, so what the comparison
     measures is the two kernels and nothing else. See
     docs/design/fastcap-oracle.md's "Matched inputs".
+
+    Rust rounds halfway values away from zero; Python's ``round`` uses
+    ties-to-even. Compare the fractional part explicitly, avoiding both
+    that tie mismatch and precision loss from adding 0.5 before flooring.
     """
     if abs(extent_um) < EPS_UM:
         return 0
-    n = round(abs(extent_um) / panel_size_um)
+    n = abs(extent_um) / panel_size_um
     if not math.isfinite(n) or n < 1:
         return 1
-    return int(n)
+    whole = math.floor(n)
+    return whole + int(n - whole >= 0.5)
 
 
 def _face_quads(

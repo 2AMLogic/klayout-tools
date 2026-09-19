@@ -48,6 +48,7 @@ encode one implementation's discretisation error as the specification.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -781,6 +782,51 @@ def test_exported_mesh_matches_the_rust_discretisation(tmp_path):
                 f"panel {panel_size_um} um: exporter wrote {exported} panels, "
                 f"klt mom discretised {klt_report['panel_count']}"
             )
+
+
+@pytest.mark.parametrize("thickness_um", [0.0, 1.0])
+@pytest.mark.parametrize(
+    ("extent_um", "expected_segments"),
+    [
+        (math.nextafter(2.5, 0.0), 2),
+        (2.5, 3),
+        (math.nextafter(2.5, math.inf), 3),
+        (math.nextafter(3.5, 0.0), 3),
+        (3.5, 4),
+        (math.nextafter(3.5, math.inf), 4),
+        (4.5, 5),
+    ],
+)
+def test_exported_mesh_matches_rust_at_half_panel_boundaries(
+    tmp_path, extent_um, expected_segments, thickness_um
+):
+    """Rust rounds half away from zero; Python's round uses ties-to-even.
+
+    Cross-check actual native panel counts for laminae and six-face boxes,
+    including adjacent floats so a shifted rounding threshold is caught.
+    """
+    conductors = [
+        {
+            "name": "plate",
+            "boxes": [
+                {
+                    "x0_um": 0.0,
+                    "y0_um": 0.0,
+                    "x1_um": extent_um,
+                    "y1_um": 1.0,
+                    "z0_um": 0.0,
+                    "z1_um": thickness_um,
+                }
+            ],
+        }
+    ]
+    assert fastcap_oracle.segment_count(extent_um, 1.0) == expected_segments
+    klt_report = solve_capacitance_matrix(conductors, 1.0, panel_size_um=1.0)
+    exported, _ = fastcap_oracle.write_qui(tmp_path / "boundary.qui", conductors, 1.0)
+    expected_panels = (
+        expected_segments if thickness_um == 0.0 else 4 * expected_segments + 2
+    )
+    assert exported == klt_report["panel_count"] == expected_panels
 
 
 # --------------------------------------------------------------------------- #
