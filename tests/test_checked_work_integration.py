@@ -23,7 +23,7 @@ from klayout_tools.coverage import (
     coverage_validation_error,
 )
 from klayout_tools.decks import DrcRule
-from klayout_tools.signoff import build_signoff, build_tier_report
+from klayout_tools.signoff import SignoffError, build_signoff, build_tier_report
 from test_signoff import DRC_CLEAN_ENVELOPE
 
 _SCHEMA = json.loads(
@@ -128,6 +128,21 @@ def test_erc_antenna_actual_levels(
     report = erc.run_erc(str(gds), str(spec), pdk=pdk)
     _assert_contract(report, state)
     assert report["status"] == status
+    if state == "zero":
+        # ERC is first-class only after #2057: old readers reject its shape;
+        # a reader that recognizes it must still reject this actual zero run.
+        evidence = tmp_path / "erc-evidence.json"
+        evidence.write_text(json.dumps(report))
+        try:
+            plain = build_signoff([str(evidence)])
+        except SignoffError as exc:
+            assert "unrecognized shape" in str(exc)
+        else:
+            assert plain["checks"][0]["passed"] is False
+        tier = build_tier_report(
+            {"block": "coverage", "kind": "analog", "evidence": {"1": str(evidence)}}
+        )
+        assert next(row for row in tier["items"] if row["id"] == 1)["status"] == "unmet"
     assert len(report["coverage"]["inapplicable"]) == 1
     assert report["coverage"]["inapplicable"][0]["reason"] == "gate_reference_level"
     if not partial:
