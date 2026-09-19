@@ -12617,6 +12617,60 @@ def test_net_correspondence_omits_heuristic_for_a_spice_reference(tmp_path):
     assert all(set(e) == {"layout", "reference", "pin"} for e in correspondence)
 
 
+def test_net_correspondence_reference_null_for_unmatched_gate_level_supply_pin(
+    tmp_path,
+):
+    """Issue #2141: `docs/cli/lvs.md` typed `net_correspondence[].reference`
+    as a bare `string`, but a `reference.form: "gate-level-verilog"`
+    reference carries no power/ground pins at all (see "No power/ground
+    pins" in the docs), so the comparer has no reference-side net object to
+    pair with the layout's `VGND`/`VPWR` -- yet it still logs a successful
+    `match_nets`/`match_ambiguous_nets` event for them rather than a
+    `net_mismatch`. `_build_net_correspondence` (`lvs_mismatch.py`) then
+    emits a real entry naming the layout net with `reference: null`, not no
+    entry at all.
+
+    This is the same fixture
+    `test_run_lvs_gate_level_verilog_tolerates_layout_side_power_pins` uses;
+    regression-tested here on the field-shape/invariant, independent of the
+    `heuristic` flag issue #2136/PR #2140 separately adds beside these
+    entries (out of scope for this test)."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER)
+    reference_path = _write(tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG)
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+    correspondence = report["net_correspondence"]
+    # The layout's declared supply pins (`VGND`/`VPWR`) each have at least
+    # one entry with a `null` reference counterpart -- a real entry, not a
+    # missing one.
+    null_reference_entries = [e for e in correspondence if e["reference"] is None]
+    assert null_reference_entries, "expected at least one null-reference entry"
+    assert {e["layout"] for e in null_reference_entries} == {"VGND", "VPWR"}
+    assert all(e["pin"] is True for e in null_reference_entries)
+
+    # Documented invariant (docs/cli/lvs.md, "net_correspondence[] entries"):
+    # every entry -- including a null-counterpart one -- is counted in
+    # `counts.nets.matched`, because the comparer's `match_nets`/
+    # `match_ambiguous_nets` callback increments it on every invocation
+    # regardless of whether either side's net object is `None`.
+    assert len(correspondence) == report["counts"]["nets"]["matched"]
+
+
 def _gate_level_power_request(tmp_path, layout_spice, **options):
     """A `reference.form: "gate-level-verilog"` request against the
     power-pin-carrying fixtures, with an optional `options` block (issue
