@@ -122,6 +122,7 @@ import json
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _load_request_json, _resolve_relative
@@ -1030,6 +1031,7 @@ def run_lvs(request: str) -> dict[str, Any]:
     # library file -- the conversion's own `pin_order_lookup` and, below,
     # the power-pin universe `_prune_power_only_layout_circuits` needs.
     reference_pin_orders: dict[str, list[str]] | None = None
+    reference_pin_uses: dict[str, dict[str, str]] | None = None
     # Issue #1901: the PDK `_resolve_gate_level_pin_orders` resolves
     # internally to read the library's pin-order source -- reused here (not
     # re-resolved) purely so `provenance.pdk` can record it below, matching
@@ -1041,6 +1043,9 @@ def run_lvs(request: str) -> dict[str, Any]:
             reference_spec.get("library"),
             reference_spec.get("pdk"),
             reference_spec.get("pdk_root"),
+        )
+        reference_pin_uses = _resolve_gate_level_pin_uses(
+            reference_spec["library"], reference_pdk_info
         )
     # Issue #1907: populated by the `form: "subckt-call"` conversion with every
     # resistor/capacitor device class it wrote the literal `0` placeholder
@@ -1087,6 +1092,7 @@ def run_lvs(request: str) -> dict[str, Any]:
                 layout_netlist,
                 reference_netlist,
                 reference_pin_orders,
+                library_pin_uses=reference_pin_uses,
                 expected_nets=power_connectivity_expected_nets,
             )
         else:
@@ -1107,6 +1113,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             layout_netlist,
             reference_netlist,
             reference_pin_orders,
+            library_pin_uses=reference_pin_uses,
             keep_name=layout_spec.get("top"),
         )
         if power_only_pruning_warning is not None:
@@ -2973,6 +2980,43 @@ def _resolve_gate_level_pin_orders(
     )
 
 
+def _resolve_gate_level_pin_uses(
+    library: str, pdk_info: Mapping[str, Any]
+) -> dict[str, dict[str, str]] | None:
+    """Read authoritative pin roles from the resolved library's macro LEFs.
+
+    SPICE pin order alone cannot distinguish an omitted signal from a
+    supply. Missing/unreadable LEF data leaves PG checking unverified;
+    conversion and the signal comparison still use the SPICE pin order.
+    """
+    from .lef_header import read_lef_header
+
+    libs_ref = pdk_info["assets"].get("libs_ref")
+    if not libs_ref:
+        return None
+    result: dict[str, dict[str, str]] = {}
+    try:
+        for path in sorted((Path(libs_ref) / library / "lef").glob("*.lef")):
+            _merge_library_pin_uses(result, read_lef_header(str(path))["macros"])
+    except OSError:
+        return None
+    return result or None
+
+
+def _merge_library_pin_uses(
+    result: dict[str, dict[str, str]], macros: list[dict[str, Any]]
+) -> None:
+    """Merge LEF declarations; conflicting roles remain explicitly unusable."""
+    for macro in macros:
+        uses = result.setdefault(macro["name"].upper(), {})
+        for pin in macro["pins"]:
+            name = pin["name"].upper()
+            # LEF/DEF 5.8, MACRO PIN USE: omitted USE defaults to SIGNAL.
+            # https://coriolis.lip6.fr/doc/lefdef/lefdefref/LEFSyntax.html
+            use = (pin["use"] or "SIGNAL").upper()
+            uses[name] = use if uses.get(name, use) == use else "CONFLICT"
+
+
 def _parse_combine_devices(options: Mapping[str, Any]) -> bool | list[str]:
     """Resolve ``options.combine_devices`` into either a bool (the original
     shape, unchanged) or a normalised list of device-class names (issue
@@ -4713,69 +4757,57 @@ def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
     return frozenset(names)
 
 
+def _declared_cell_pin_uses(
+    pins: list[str], uses: Mapping[str, str] | None
+) -> dict[str, str] | None:
+    """Complete, recognized LEF roles for a cell's SPICE pins, or no evidence."""
+    if uses is None:
+        return None
+    normalized = {name.upper(): use.upper() for name, use in uses.items()}
+    names = {pin.upper() for pin in pins if pin}
+    if not names <= normalized.keys():
+        return None
+    declared = {pin: normalized[pin] for pin in names}
+    if not set(declared.values()) <= {"POWER", "GROUND", "SIGNAL", "ANALOG", "CLOCK"}:
+        return None
+    return declared
+
+
 def _gate_level_power_pin_names(
     reference_netlist: Any | None,
     library_pin_orders: Mapping[str, list[str]] | None,
+    library_pin_uses: Mapping[str, Mapping[str, str]] | None = None,
 ) -> frozenset[str] | None:
-    """The set of pin names (upper-cased) that are demonstrably **power/
-    ground** pins of this PDK's standard-cell library, derived from data
-    ``run_lvs`` has already read -- or ``None`` when there is not enough
-    evidence to derive one (issue #1622).
+    """Supply names established by the instantiated cells' library LEF roles.
 
-    The derivation, and why each half of it is load-bearing:
-
-    * ``library_pin_orders`` is the standard-cell library's own
-      ``.subckt`` data (see :func:`_resolve_gate_level_pin_orders`), i.e.
-      each cell's **full** PDK pin order -- signal *and* power/ground.
-    * :func:`~klayout_tools.verilog_netlist.convert_gate_level_verilog`
-      emits, for each cell the Verilog instantiates, only the pins that
-      Verilog actually connects -- structurally never a power/ground pin.
-
-    So for a cell the reference *does* instantiate, every pin the library
-    declares but the conversion did not carry is a power/ground pin. Taking
-    that difference over exactly the cells the reference declares, and then
-    subtracting :func:`_reference_signal_pin_names` (so a signal pin that
-    happens to be left unconnected on one cell but is connected on another
-    can never leak in), gives a power-pin universe with no hardcoded
-    per-PDK name table (sky130's ``VPWR``/``VGND``/``VPB``/``VNB`` vs.
-    gf180mcu's ``VDD``/``VSS``/``VNW``/``VPW``) and no cell-name glob
-    (``fill_*``/``tap*``, the superseded ``docs/cli/lvs.md`` workaround).
-
-    **Restricting the candidate set to cells the reference instantiates is
-    the whole point, not an optimisation.** The obvious wider version --
-    "every pin name anywhere in the library that is not in the reference's
-    signal-pin universe" -- is unsound in exactly the direction this
-    function exists to prevent: in a library containing ``dfxtp_1``
-    (``CLK D Q VGND VNB VPB VPWR``), a reference that only instantiates
-    inverters and buffers mentions ``CLK``/``D``/``Q`` nowhere, so they
-    would be admitted as "power" pins and a stray, genuinely
-    signal-bearing ``dfxtp_1`` master in the layout would be pruned as
-    power-only -- masking a real missing-cell defect. A cell the reference
-    never instantiates contributes nothing here, so its signal pins can
-    never be mistaken for power pins.
-
-    Returns ``None`` when either input is missing/unusable, and an empty
-    set when nothing qualifies; :func:`_is_power_only_circuit` treats both
-    as "no evidence" and prunes nothing.
+    A pin absent from the converted reference can be either a supply or a
+    dangling signal (issue #2076), even when every instance of a single
+    master omits it. Only library ``USE POWER``/``USE GROUND`` declarations
+    establish supply identity. Every SPICE pin on an instantiated master
+    must have a known LEF role; incomplete or conflicting evidence returns
+    ``None`` so both PG checking and power-only pruning disclose/no-op.
     """
-    if not library_pin_orders:
+    each_circuit = getattr(reference_netlist, "each_circuit", None)
+    if not callable(each_circuit) or not library_pin_orders or not library_pin_uses:
         return None
-    signal_pin_names = _reference_signal_pin_names(reference_netlist)
-    if signal_pin_names is None:
-        return None
-    # Case-folded once: library cell names are verbatim from the `.subckt`
-    # header (lower case, in both supported libraries), while the reference
-    # circuit names come back from `NetlistSpiceReader` upper-cased.
-    by_upper_name = {
-        str(cell).upper(): pins for cell, pins in library_pin_orders.items()
+    orders = {name.upper(): pins for name, pins in library_pin_orders.items()}
+    uses = {name.upper(): pins for name, pins in library_pin_uses.items()}
+    cells = {str(circuit.name).upper() for circuit in each_circuit()} & orders.keys()
+    power_pins: set[str] = set()
+    for cell in cells:
+        declared = _declared_cell_pin_uses(orders[cell], uses.get(cell))
+        if declared is None:
+            return None
+        power_pins.update(pin for pin, use in declared.items() if use in {"POWER", "GROUND"})
+    # A name used as a signal elsewhere in this library cannot safely feed
+    # the name-based power-only pruning or per-pin connectivity grouping.
+    signal_pins = {
+        pin.upper()
+        for pins in uses.values()
+        for pin, use in pins.items()
+        if use.upper() not in {"POWER", "GROUND"}
     }
-    candidates: set[str] = set()
-    for circuit in reference_netlist.each_circuit():
-        pins = by_upper_name.get(str(circuit.name).upper())
-        if pins is None:
-            continue
-        candidates.update(pin.upper() for pin in pins if pin)
-    return frozenset(candidates - signal_pin_names)
+    return None if power_pins & signal_pins else frozenset(power_pins)
 
 
 def _is_power_only_circuit(
@@ -4954,6 +4986,7 @@ def _prune_power_only_layout_circuits(
     reference_netlist: Any,
     library_pin_orders: Mapping[str, list[str]] | None,
     *,
+    library_pin_uses: Mapping[str, Mapping[str, str]] | None = None,
     keep_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Issue #1622: remove every layout-side circuit whose entire declared
@@ -5040,7 +5073,9 @@ def _prune_power_only_layout_circuits(
     ``reference_netlist`` with no library-cell circuits at all), in which
     case there is nothing to disclose.
     """
-    power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
+    power_pin_names = _gate_level_power_pin_names(
+        reference_netlist, library_pin_orders, library_pin_uses
+    )
     if not power_pin_names:
         return None
     # Resolved through the netlist's own `circuit_by_name` (whatever
@@ -5503,6 +5538,7 @@ def _power_connectivity_report(
     reference_netlist: Any,
     library_pin_orders: Mapping[str, list[str]] | None,
     *,
+    library_pin_uses: Mapping[str, Mapping[str, str]] | None = None,
     expected_nets: dict[str, str] | None,
 ) -> dict[str, Any]:
     """The ``power_connectivity`` block for a
@@ -5552,12 +5588,15 @@ def _power_connectivity_report(
     found correct". ``unchecked_expected_pins`` below names exactly those
     keys, so a caller can tell the two cases apart.
     """
-    power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
+    power_pin_names = _gate_level_power_pin_names(
+        reference_netlist, library_pin_orders, library_pin_uses
+    )
     if not power_pin_names:
         return _power_connectivity_unchecked(
-            "no power/ground pin universe could be derived from the "
-            "reference library's own pin-order data -- nothing establishes "
-            "which of this design's pins are power/ground pins"
+            "no complete, unambiguous power/ground pin universe could be "
+            "established from the reference library's LEF PIN USE declarations "
+            "for its instantiated cells -- SPICE pin order and unconnected "
+            "Verilog pins alone do not establish supply identity"
         )
     rows = _power_pin_connections(layout_netlist, power_pin_names)
     if not rows:
