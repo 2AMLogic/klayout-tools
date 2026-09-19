@@ -39,6 +39,14 @@ not `klt --version`, if you need to detect this kind of drift. See
   previously reported zero wire R/C and missing coefficients. Values come
   from SG13CMOS5L's own pinned Magic extraction table; the model remains
   first-order and uncalibrated, without process-corner selection.
+- **Fixed**: `klt functional-verification` now refuses requested SDF
+  annotation when either required build/test transcript is missing,
+  unreadable, or fails during reading (issue #2130). Previously those logs
+  were silently treated as clean scans, allowing `annotated: true` and
+  post-layout signoff credit without inspected diagnostics. The refusal
+  uses the existing error path (exit 1, no success envelope). Readable empty
+  logs, known-benign partial-coverage reporting, and non-SDF runs retain
+  their existing behavior; no JSON shape change.
 - **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
   ladder's intermediate landing pads against each landing layer's own
   minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`

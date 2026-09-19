@@ -780,9 +780,9 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     Icarus does not implement, and a gate that rejected them would reject
     every real post-route SDF. Counting them, rather than silently discarding
     them the way this function did before issue #1102, is what lets a caller
-    tell "every check in the SDF was applied" apart from "every delay was
-    applied and every TIMINGCHECK was dropped" -- both of which otherwise
-    report ``annotated: true`` identically.
+    distinguish a scan with no observed benign diagnostic from one that
+    observed dropped TIMINGCHECKs -- both otherwise report ``annotated: true``
+    identically. These counts do not establish complete annotation coverage.
 
     A marker-bearing line is classified at all only once it matches
     :data:`SDF_DIAGNOSTIC_LINE_RE` -- the ``SDF WARNING:``/``SDF ERROR:``
@@ -806,14 +806,19 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
     line an interleaved flush lands in, leaving every sibling intact and the
     gate firing on those.
 
-    Never raises: a missing/unreadable transcript contributes nothing, the
-    same posture :func:`_log_tail` takes.
+    Every supplied transcript must be successfully read. Missing, unreadable,
+    or incompletely read logs raise ``FunctionalVerificationError``: this scan
+    gates affirmative annotation credit, so unavailable observation cannot be
+    treated as an observed clean result (issue #2130). An empty, successfully
+    read log contains no observed diagnostic; it is not proof of complete
+    annotation coverage.
     """
     from .functional_verification import (
         SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS,
         SDF_DIAGNOSTIC_LINE_RE,
         SDF_DIAGNOSTIC_MARKERS,
         SDF_OMITTED_ANNOTATION_MARKER,
+        FunctionalVerificationError,
     )
 
     actionable: list[str] = []
@@ -822,8 +827,12 @@ def _scan_sdf_diagnostics(*log_paths: str) -> tuple[list[str], dict[str, int]]:
         try:
             with open(log_path, encoding="utf-8", errors="replace") as handle:
                 lines = handle.readlines()
-        except OSError:
-            continue
+        except OSError as exc:
+            raise FunctionalVerificationError(
+                f"could not read required SDF annotation transcript '{log_path}': "
+                f"{exc} -- annotation diagnostics are unavailable; this run "
+                "cannot qualify as SDF-annotated evidence"
+            ) from exc
         for line in lines:
             stripped = line.strip()
             if SDF_OMITTED_ANNOTATION_MARKER in stripped:
