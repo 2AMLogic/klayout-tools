@@ -1358,12 +1358,16 @@ def test_cli_klayout_engine_real_binary_resolves_sg13cmos5l_via_pdk_flags(
         ]
     )
 
-    assert exit_code == 0
+    # Zero violations leaves rule_counts empty, which cannot by itself
+    # establish that the declared category actually executed -- this PDK
+    # flag path refuses "coverage_unknown"/4, matching the mocked-subprocess
+    # coverage established in test_klayout_engine_clean_report.
+    assert exit_code == 4
 
     import json
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "clean"
+    assert payload["status"] == "coverage_unknown"
     assert payload["violation_count"] == 0
     assert payload["deck"] == str(
         pdk_root / "libs.tech" / "klayout" / "tech" / "drc" / "ihp-sg13cmos5l.drc"
