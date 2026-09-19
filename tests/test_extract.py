@@ -50,11 +50,12 @@ from klayout_tools.extract import (
     _promote_orphan_named_nets,
     _purge_preserving_named_nets,
     _region,
+    _rewrite_dotted_net_names,
     def_net_instance_pins,
     run_extract,
 )
 from klayout_tools.extract_abstract import _abstract_pin_net_score
-from klayout_tools.extract_parasitics import _n_squares
+from klayout_tools.extract_parasitics import _n_squares, spice_safe_net_name
 from klayout_tools.gen_compose import _write_composed_gds
 from klayout_tools.pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
@@ -13524,6 +13525,236 @@ def test_anonymous_net_json_spelling_matches_written_netlist_node_token(tmp_path
     # *second* backslash from `NetlistSpiceWriter`'s own escaping).
     for leg_net in leg_nets:
         assert not leg_net.startswith("\\\\")
+
+
+# --------------------------------------------------------------------------- #
+# Hierarchical (dot-joined) net names (issue #2145)
+# --------------------------------------------------------------------------- #
+
+
+def _spice_node_tokens(netlist_text: str) -> set[str]:
+    """Every whitespace-delimited token on a non-comment, non-dot-command
+    line of a written SPICE netlist -- the superset of "places a node
+    reference can appear" the issue #1162 escaping tests already use."""
+    tokens: set[str] = set()
+    for line in netlist_text.splitlines():
+        if line.startswith((".", "*")):
+            continue
+        tokens.update(line.split())
+    return tokens
+
+
+def test_hierarchical_dotted_net_name_is_rewritten_to_spice_safe_form(tmp_path):
+    """Regression (issue #2145): a net whose name carries an instance path
+    joined with `.` -- what `klt place-and-route`'s DEF net names and a
+    hierarchy-qualified drawn label both produce -- used to be written
+    verbatim (`XBIAS.vb1`) into the `.SUBCKT` pin list and onto every device
+    card. `.` is ngspice's *own* hierarchy separator, so that token parses as
+    a path expression (instance `XBIAS` -> node `vb1`) rather than as the
+    flat node it names: the node is unaddressable by its written name in
+    `v()`/`.meas`/`.ic`, which is exactly the set of internal nodes a
+    `--parasitics` post-layout run wants to probe.
+
+    Asserts the issue's own repro shape: no node-reference position in the
+    written netlist contains a literal `.`, while the two lexical classes
+    that legitimately do -- SPICE dot-commands and numeric literals -- are
+    untouched."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="XTAP.vsub"), tmp_path / "dotted.gds"
+    )
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "dotted.spice"), parasitics=True
+    )
+
+    # The layout's dotted label reaches `nets[]` in the `_`-joined spelling.
+    net_names = {n["name"] for n in report["nets"]}
+    assert "XTAP_vsub" in net_names
+    assert "XTAP.vsub" not in net_names
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+
+    # No node-reference token anywhere carries a dot (the issue's own
+    # `grep` reproduction, expressed structurally).
+    dotted_nodes = sorted(t for t in _spice_node_tokens(netlist_text) if "." in t)
+    # Numeric literals (`L=0.4U`, `3.99e-16`) share these lines -- they are
+    # legal and must survive, so only *non-numeric* dotted tokens are a bug.
+    assert [t for t in dotted_nodes if not re.search(r"\d\.\d", t)] == []
+
+    # Dot-commands are untouched: the extraction still writes a well-formed
+    # `.SUBCKT`/`.ENDS` pair and (with --parasitics) a `.GLOBAL` card.
+    assert ".SUBCKT TOP " in netlist_text
+    assert ".ENDS TOP" in netlist_text
+    assert "\n.GLOBAL " in netlist_text
+    # ... and so are numeric literals with a decimal point.
+    assert re.search(r"\bL=0\.\d+U\b", netlist_text), netlist_text
+
+    # The `.SUBCKT` pin list -- the exact line the issue greps -- carries the
+    # rewritten spelling as a whole port token.
+    subckt_line = next(
+        line for line in netlist_text.splitlines() if line.startswith(".SUBCKT ")
+    )
+    assert "XTAP_vsub" in subckt_line.split()
+
+    # Structural, not silent: the rename is disclosed in `warnings[]`.
+    assert any(
+        "XTAP.vsub -> XTAP_vsub" in w and "hierarchy separator" in w
+        for w in report["warnings"]
+    ), report["warnings"]
+
+
+def test_hierarchical_dotted_net_json_spelling_matches_written_netlist_node_token(
+    tmp_path,
+):
+    """Issue #2145, the cross-artifact half: the rewritten spelling is
+    byte-identical everywhere this net is reported -- `nets[].name`,
+    `devices[].nets[...]`,
+    `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`, the `--spef`
+    output, and the written netlist's own node tokens -- so a caller can
+    still join a simulated node name back to the report by exact match.
+    Mirrors `test_anonymous_net_json_spelling_matches_written_netlist_node_token`
+    (issue #1162) and `test_merged_net_label_spelling_matches_written_netlist`
+    (issue #696) for the third rewrite."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="XTAP.vsub"), tmp_path / "dotted.gds"
+    )
+    spef_path = tmp_path / "dotted.spef"
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "dotted.spice"),
+        parasitics=True,
+        spef_output=str(spef_path),
+    )
+
+    safe_name = "XTAP_vsub"
+    netlist_text = Path(report["netlist_path"]).read_text()
+    node_tokens = _spice_node_tokens(netlist_text)
+
+    assert safe_name in {n["name"] for n in report["nets"]}
+
+    # `devices[].nets[...]`: the NMOS body sits on this substrate tie.
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    assert nfet["nets"]["b"] == safe_name
+
+    # `parasitics.nets[]` -- `net`, `hub_net`, and every `terminals[].leg_net`
+    # are each a real node token of the written netlist.
+    para_entry = next(n for n in report["parasitics"]["nets"] if n["net"] == safe_name)
+    assert para_entry["hub_net"] in node_tokens
+    assert para_entry["terminals"]
+    for terminal in para_entry["terminals"]:
+        assert "." not in terminal["leg_net"]
+        assert terminal["leg_net"] in node_tokens
+
+    # The `--spef` output names the same net.
+    spef_text = spef_path.read_text()
+    assert f"*D_NET {safe_name} " in spef_text
+    assert "XTAP.vsub" not in spef_text
+
+
+def test_hierarchical_dotted_net_composes_with_the_merged_label_rewrite(tmp_path):
+    """Issue #2145 composes with issue #696 rather than replacing it: a net
+    that is *both* label-merged and hierarchy-qualified (`XBIAS.vb1` drawn on
+    the same pad as `Y`, joined by KLayout as `XBIAS.vb1,Y`) is reported --
+    and written into the `.SUBCKT` pin list -- as `XBIAS_vb1|Y`, with both
+    rewrites applied and `merged_net_labels[].labels` split on the rewritten
+    spelling."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="XBIAS.vb1"), tmp_path / "both.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "both.spice"))
+
+    assert report["merged_net_labels"] == [
+        {"net": "XBIAS_vb1|Y", "labels": ["XBIAS_vb1", "Y"]}
+    ]
+    assert "XBIAS_vb1|Y" in {n["name"] for n in report["nets"]}
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+    subckt_line = next(
+        line for line in netlist_text.splitlines() if line.startswith(".SUBCKT ")
+    )
+    assert "XBIAS_vb1|Y" in subckt_line.split()
+
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    assert "XBIAS_vb1|Y" in pfet["nets"].values()
+
+    assert any(
+        "XBIAS.vb1|Y -> XBIAS_vb1|Y" in w and "hierarchy separator" in w
+        for w in report["warnings"]
+    ), report["warnings"]
+
+
+def test_hierarchical_dotted_net_rewrite_is_a_noop_without_a_dotted_name(tmp_path):
+    """Issue #2145 must not perturb the overwhelmingly common case: the same
+    fixture with an ordinary second label extracts exactly as before -- no
+    rename, no `warnings[]` entry, `|`-joined name unchanged."""
+    path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "plain.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
+
+    assert report["merged_net_labels"] == [{"net": "Y|Y2", "labels": ["Y", "Y2"]}]
+    assert not any("hierarchy separator" in w for w in report["warnings"])
+
+
+def test_rewrite_dotted_net_names_disambiguates_collisions():
+    """Issue #2145's collision criterion: no `.` -> `_` rewrite that leaves
+    dot-free names alone can be injective (the dot-free namespace is already
+    occupied), so two distinct originals can land on one spelling. The pass
+    resolves that per-circuit: the first claimant keeps the unsuffixed name,
+    later ones get the smallest free `_<n>` suffix, and every net in the
+    circuit still has a distinct name."""
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    # `a_b` is already taken by a dot-free net; `a.b_c` and `a_b.c` also both
+    # want `a_b_c`.
+    for name in ("a_b", "a.b", "a.b_c", "a_b.c", "plain"):
+        circuit.create_net(name)
+
+    renamed = _rewrite_dotted_net_names(netlist)
+
+    names = [net.expanded_name() for net in circuit.each_net()]
+    assert len(names) == len(set(names)), names
+    assert not any("." in name for name in names)
+    # The pre-existing dot-free names are untouched.
+    assert "a_b" in names
+    assert "plain" in names
+    # Only the dotted nets were renamed, reported as (circuit, before, after).
+    assert [(before, after) for _circuit, before, after in renamed] == [
+        ("a.b", "a_b_1"),
+        ("a.b_c", "a_b_c"),
+        ("a_b.c", "a_b_c_1"),
+    ]
+
+
+def test_rewrite_dotted_net_names_also_renames_promoted_pins():
+    """A pin promoted off a dotted net (`make_top_level_pins()` names a pin
+    after its net) is renamed alongside it, so the netlist's leading
+    `* pin ...` comment cannot disagree with the `.SUBCKT` line below it."""
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    net = circuit.create_net("XBIAS.vb1")
+    pin = circuit.create_pin("XBIAS.vb1")
+    circuit.connect_pin(pin.id(), net)
+
+    _rewrite_dotted_net_names(netlist)
+
+    assert net.expanded_name() == "XBIAS_vb1"
+    assert [p.name() for p in circuit.each_pin()] == ["XBIAS_vb1"]
+
+
+def test_spice_safe_net_name_rewrites_the_ngspice_hierarchy_separator():
+    """Issue #2145 at the shared rewrite point: `.` becomes `_`, composes
+    with the pre-existing `,` -> `|` (issue #696) and leading-`$` (issue
+    #1162) rules, is idempotent, and is a no-op for a name with no dot."""
+    assert spice_safe_net_name("XBIAS.vb1") == "XBIAS_vb1"
+    assert spice_safe_net_name("XS1.nh,XS1.nt") == "XS1_nh|XS1_nt"
+    assert spice_safe_net_name("$2.x") == "\\$2_x"
+    # Idempotent -- re-applying it to its own output changes nothing.
+    assert spice_safe_net_name(spice_safe_net_name("XBIAS.vb1")) == "XBIAS_vb1"
+    # Untouched: the overwhelmingly common dot-free name.
+    assert spice_safe_net_name("VPWR") == "VPWR"
 
 
 def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(

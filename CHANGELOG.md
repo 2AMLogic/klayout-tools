@@ -14,6 +14,42 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract` no longer writes a net name containing `.` into a
+  node-reference position of its SPICE output (issue #2145). A net can arrive
+  carrying an instance path joined with a dot — `XBIAS.vb1` — either from
+  `klt place-and-route`'s own DEF net names replayed by `--def-net-names`
+  (issue #951) or from a drawn label spelling the same convention by hand,
+  and those are precisely the internal nodes of a composed, routed cell that
+  a `--parasitics` post-layout run wants to probe. `.` is ngspice's own
+  hierarchy separator, so such a token was read as a path expression
+  (instance `XBIAS` → node `vb1`) wherever a node reference is parsed: the
+  node could not be probed, `.meas`'d or `.ic`'d by the very name the netlist
+  wrote for it, and the same token meant one thing in the `.SUBCKT` pin list
+  and another in a probe directive. Unlike the merged-label comma (issue
+  #696) and the leading `$` (issue #1162), KLayout's `NetlistSpiceWriter`
+  applies no escape of its own here, so the net itself is now renamed to the
+  `_`-joined spelling before the netlist is written: `XBIAS.vb1` →
+  `XBIAS_vb1`. Only net/node tokens are affected — SPICE dot-commands
+  (`.SUBCKT`, `.ENDS`, `.GLOBAL`) and numeric literals (`L=0.28U`) are a
+  different lexical class, written from different inputs, and are untouched.
+  The renamed spelling is what every artifact carries, so a simulated node
+  name still joins back to the report by exact string match: `nets[].name`,
+  `devices[].nets[...]`, `merged_net_labels[].net`,
+  `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`, the `--spef`
+  output, and `klt lvs`'s `net_correspondence[]`/`mismatches[].net`.
+  `--critical-net`/`--distributed-rc`/`--mom-net`/`--mom-rlc-net` match
+  against the post-rename namespace (`--pins`/`--def-pins`/`--top-cell-pins`
+  still match the raw drawn-label text, as they already did for the comma
+  case). Because no dot-free-preserving rewrite can be injective, collisions
+  are resolved per netlist rather than per name — the first claimant keeps
+  the unsuffixed spelling and each later one takes the smallest free `_<n>`
+  suffix — so two distinct nets never share a name in one written netlist;
+  identify a net by `net_id`, not by the suffix. Every run that renames at
+  least one net says so in `warnings[]`, with the count and up to five
+  `before -> after` examples. A net name that never contained a dot — the
+  overwhelming majority — is byte-identical to before. No `schema_version`
+  bump: no field changes shape, only the net-name values in them. See
+  `docs/cli/extract.md`'s "Hierarchical net names are dot-free".
 - **Fixed**: `klt extract --abstract-cells` no longer binds several of one
   abstracted macro's own separately declared pins onto a single synthesized
   net, nor absorbs a top-level net that is not one of that macro's pins

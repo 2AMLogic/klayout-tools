@@ -198,6 +198,8 @@ from .extract_abstract import _sanitize_instance_name as _sanitize_instance_name
 # re-exported (`X as X`) because it has external importers of its own
 # (`lvs.py`, `netlist_digest.py`) as well as many call sites in this module.
 from .extract_parasitics import (
+    SPICE_HIERARCHY_SEPARATOR,
+    SPICE_SAFE_HIERARCHY_JOIN,
     _compute_parasitics,
     _detect_dead_metal,
     _inject_parasitics,
@@ -4145,6 +4147,173 @@ def _purge_truly_floating_nets(netlist: kdb.Netlist) -> None:
             circuit.remove_net(net)
 
 
+def _dotted_rename_display(name: str) -> str:
+    """:func:`spice_safe_net_name`'s reporting spelling with its ``.`` ->
+    ``_`` rewrite (issue #2145) deliberately *left out* -- the only correct
+    way to show the "before" side of a :func:`_rewrite_dotted_net_names`
+    rename in a ``warnings[]`` message.
+
+    Passing the pre-rename name through ``spice_safe_net_name`` itself would
+    apply the very rewrite the message is reporting, printing a useless
+    ``X_y -> X_y``; printing the raw ``Net.expanded_name()`` instead would
+    show a comma-joined (``X.y,Z``) or bare-``$`` spelling that appears in no
+    other artifact. This keeps the other two rewrites so both sides of the
+    arrow read in the same namespace as ``nets[].name``.
+    """
+    shown = name.replace(",", "|")
+    return "\\" + shown if shown.startswith("$") else shown
+
+
+#: How many `before -> after` examples a `_dotted_rename_warnings` entry
+#: spells out before collapsing the rest into a `+<n> more` tail -- the same
+#: "show a handful, count the rest" shape `--def-net-names`' own unresolved
+#: -name warning already uses.
+_DOTTED_RENAME_WARNING_EXAMPLES = 5
+
+
+def _dotted_rename_warnings(renames: list[tuple[str, str, str]]) -> list[str]:
+    """Zero or one ``warnings[]`` entry disclosing what
+    :func:`_rewrite_dotted_net_names` renamed (issue #2145).
+
+    Returns a list (empty when nothing was renamed, which is the usual case)
+    so the call site in :func:`_extract_netlist` stays a single unconditional
+    ``warnings.extend(...)`` rather than another branch in an already very
+    long function.
+
+    The rename is deliberately loud rather than silent: a caller holding a
+    net name from *outside* this run -- a DEF, a schematic, a previous
+    report, a hand-written ``--critical-net`` argument -- needs to know its
+    dotted spelling no longer appears in any artifact.
+    """
+    if not renames:
+        return []
+    shown = renames[:_DOTTED_RENAME_WARNING_EXAMPLES]
+    examples = ", ".join(
+        f"{_dotted_rename_display(before)} -> {spice_safe_net_name(after)}"
+        for _circuit, before, after in shown
+    )
+    more = len(renames) - len(shown)
+    count_phrase = (
+        "1 net carried a hierarchical name"
+        if len(renames) == 1
+        else f"{len(renames)} nets carried hierarchical names"
+    )
+    verb = "was" if len(renames) == 1 else "were"
+    return [
+        f"{count_phrase} containing '.' (ngspice's own hierarchy separator, "
+        f"which makes the node unaddressable by its written name) and "
+        f"{verb} renamed with '_' instead ({examples}"
+        + (f", +{more} more" if more > 0 else "")
+        + ") -- nets[], the written netlist, the SPEF and any `klt lvs` "
+        "output all use the renamed spelling, and so must "
+        "--critical-net/--distributed-rc/--mom-net/--mom-rlc-net"
+    ]
+
+
+def _rewrite_dotted_net_names(netlist: kdb.Netlist) -> list[tuple[str, str, str]]:
+    """Rename every net whose name contains ngspice's hierarchy separator
+    (``.``) to the SPICE-addressable ``_`` spelling
+    :func:`~klayout_tools.extract_parasitics.spice_safe_net_name` reports
+    (issue #2145). Returns the ``(circuit, before, after)`` triples it
+    renamed, in circuit/net iteration order (empty -- and the netlist
+    untouched -- for the overwhelming majority of layouts, whose net names
+    carry no dot at all).
+
+    **Why the rename has to happen on the real ``kdb.Net``.** The two other
+    SPICE-hazard characters this repo reconciles between its JSON report and
+    its written netlist (a merged-label ``,``, issue #696; a leading ``$``,
+    issue #1162) are escaped by ``NetlistSpiceWriter`` *itself*, so
+    ``spice_safe_net_name`` only has to *predict* what the writer will emit.
+    ``.`` is different: confirmed against a live ``NetlistSpiceWriter`` run,
+    a net named ``XBIAS.vb1`` writes verbatim as ``XBIAS.vb1`` in the
+    ``.SUBCKT`` pin list and on every device card. Since ``.`` is ngspice's
+    own hierarchy separator, that token is then read as a path expression
+    (instance ``XBIAS`` -> node ``vb1``) wherever a node reference is
+    parsed: the node is unaddressable by its written name in
+    ``v()``/``.meas``/``.ic``, and the same token means one thing in the
+    ``.SUBCKT`` header and another in a probe directive. The only way to
+    make the *written* netlist safe is to change what the net is called
+    before the writer sees it.
+
+    Dot-qualified names are not hypothetical: ``klt place-and-route``'s DEF
+    net names (replayed onto the extracted nets by ``--def-net-names``,
+    issue #951) spell a sub-instance's internal net with its instance path,
+    and a drawn label may carry the same convention. They are exactly the
+    internal nodes a ``--parasitics`` post-layout run wants to probe.
+
+    **Where this runs, and what it therefore covers.** Called from
+    :func:`_extract_netlist` immediately after the purge pass and *before*
+    anything reads a net name: the ``devices[]``/``nets[]`` report,
+    ``merged_net_labels[]``, ``_compute_parasitics``/``_inject_parasitics``
+    (whose synthesized leg/hub nets are named off their parent net, so they
+    inherit the safe spelling rather than needing a second pass), the SPEF
+    writer, ``klt lvs``'s ``net_correspondence``/``mismatches[].net``, and
+    the written netlist all see one spelling. It touches **only** net names
+    -- a SPICE dot-command (``.SUBCKT``/``.ENDS``/``.GLOBAL``) and a numeric
+    literal (``L=0.28U``) are emitted by the writer from entirely different
+    inputs and are structurally out of reach of this pass.
+
+    **Collisions are resolved per-circuit, not per-name.** No rewrite that
+    leaves dot-free names alone can be injective (the dot-free namespace is
+    already fully occupied), so ``a.b`` can land on a pre-existing ``a_b``,
+    and ``a.b_c``/``a_b.c`` can land on each other. Each circuit's existing
+    names are tracked as the renames are applied, and a candidate that is
+    already taken gets the smallest ``_<n>`` suffix that is not -- so no two
+    distinct nets ever share a name in one written netlist. Renaming in
+    ``each_net()`` order makes the outcome deterministic for a given
+    circuit.
+
+    Because ``--critical-net``/``--distributed-rc``/``--mom-net``/
+    ``--mom-rlc-net`` match against the post-rename namespace (they run
+    inside ``_compute_parasitics``, after this pass), a dot-qualified net
+    must be named to those flags in the rewritten spelling -- the same
+    spelling ``nets[].name`` reports. See ``docs/cli/extract.md``'s
+    "Hierarchical net names are dot-free".
+    """
+    renamed: list[tuple[str, str, str]] = []
+    for circuit in netlist.each_circuit():
+        taken = {net.expanded_name() for net in circuit.each_net()}
+        # Snapshot first: renaming while iterating `each_net()` mutates the
+        # collection the iterator is walking.
+        dotted = [
+            (net, net.expanded_name())
+            for net in circuit.each_net()
+            if SPICE_HIERARCHY_SEPARATOR in net.expanded_name()
+        ]
+        for net, before in dotted:
+            # The name being replaced stops occupying the namespace, so a
+            # net can keep an unsuffixed candidate that only collided with
+            # its own former spelling.
+            taken.discard(before)
+            candidate = before.replace(
+                SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN
+            )
+            if candidate in taken:
+                base = candidate
+                index = 1
+                while f"{base}{SPICE_SAFE_HIERARCHY_JOIN}{index}" in taken:
+                    index += 1
+                candidate = f"{base}{SPICE_SAFE_HIERARCHY_JOIN}{index}"
+            taken.add(candidate)
+            net.name = candidate
+            renamed.append((circuit.name, before, candidate))
+
+        # Pin names are cosmetic (`NetlistSpiceWriter` writes the *net*
+        # name in the `.SUBCKT` header and on every instance line when
+        # `use_net_names` is set -- a pin's own name only reaches the
+        # leading `* pin ...` comment), but `make_top_level_pins()` names a
+        # promoted pin after its net, so leaving them behind would print a
+        # dotted `* pin` comment above a dot-free `.SUBCKT` line.
+        for pin in circuit.each_pin():
+            pin_net = circuit.net_for_pin(pin.id())
+            if pin_net is None or not pin.name():
+                continue
+            if SPICE_HIERARCHY_SEPARATOR not in pin.name():
+                continue
+            circuit.rename_pin(pin.id(), pin_net.expanded_name())
+    return renamed
+
+
 def _resolve_black_box_regions(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -7147,6 +7316,19 @@ def _extract_netlist(
         _purge_truly_floating_nets(netlist)
     else:
         _purge_preserving_named_nets(netlist)
+
+    # Hierarchical net names (issue #2145): a net whose name carries an
+    # instance path joined with `.` -- what `klt place-and-route`'s DEF net
+    # names (`--def-net-names`) and hierarchy-qualified drawn labels both
+    # produce -- is renamed to the `_`-joined, SPICE-addressable spelling
+    # *here*, after the purge (so a net that is about to be dropped is never
+    # renamed) and before anything reads a net name: the `devices[]`/`nets[]`
+    # report, the parasitics passes (whose synthesized leg/hub nets are named
+    # off their parent), the SPEF writer, `klt lvs`, and the written netlist
+    # all then see one spelling. Unlike the `,`/leading-`$` cases,
+    # `NetlistSpiceWriter` applies no escape of its own for `.`, so this has
+    # to change the real net's name -- see `_rewrite_dotted_net_names`.
+    warnings.extend(_dotted_rename_warnings(_rewrite_dotted_net_names(netlist)))
 
     # Post-extraction device-parameter corrections (issues #512, #518, #521):
     # applied to the live `kdb.Device` objects here -- *before* the netlist is
