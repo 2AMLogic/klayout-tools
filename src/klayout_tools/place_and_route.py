@@ -559,12 +559,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401 -- tests patch place_and_route.subprocess.run
 from typing import Any
 
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
+    _OpenRoadResult,
     _run_openroad,
     _timing_status,
 )
@@ -4032,7 +4033,7 @@ _ABS_PATH_RE = re.compile(r"\"?(/[^\s\"]+)")
 
 def _engine_error_message(
     stage: str,
-    completed: subprocess.CompletedProcess,
+    completed: _OpenRoadResult,
     *,
     pdk_info: dict[str, Any] | None = None,
 ) -> str:
@@ -4094,7 +4095,7 @@ def _engine_error_message(
 
 
 def _mount_namespace_hint(
-    completed: subprocess.CompletedProcess, pdk_info: dict[str, Any] | None
+    completed: _OpenRoadResult, pdk_info: dict[str, Any] | None
 ) -> str | None:
     """``None``, or an actionable hint that ``openroad`` and this process do
     not share a filesystem view (issue #1868).
@@ -4166,7 +4167,7 @@ def _mount_namespace_hint(
 
 
 def _constant_tie_diagnosis(
-    completed: subprocess.CompletedProcess,
+    completed: _OpenRoadResult,
 ) -> tuple[str, str] | None:
     """``(error_line, hint)`` when a failed run hit ``DRT-0305``, else
     ``None`` (issue #854).
