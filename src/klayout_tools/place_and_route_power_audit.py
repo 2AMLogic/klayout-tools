@@ -92,6 +92,13 @@ _COMPONENTS_END_RE = re.compile(r"^\s*END\s+COMPONENTS\s*$")
 _COMPONENT_START_RE = re.compile(r"^\s*-\s+(\S+)\s+(\S+)")
 _SPECIALNETS_BEGIN_RE = re.compile(r"^\s*SPECIALNETS\s+(\d+)\s*;\s*$")
 _SPECIALNETS_END_RE = re.compile(r"^\s*END\s+SPECIALNETS\s*$")
+#: A line that opens another DEF section (``<SECTION> <n> ;``) or closes one
+#: (``END <SECTION>``). Used as a hard stop while scanning a section whose own
+#: ``END`` line never arrives, so a truncated ``COMPONENTS`` section cannot
+#: swallow the ``- VPWR``/``- VGND`` records of the ``SPECIALNETS`` section
+#: that follows it -- which would otherwise report those nets as placed
+#: component instances.
+_SECTION_BOUNDARY_RE = re.compile(r"^\s*(?:END\s+\S+|[A-Z][A-Z0-9]*\s+\d+\s*;)\s*$")
 
 #: Wiring-statement keywords that open a special-net wiring attribute
 #: (``+ ROUTED``/``+ FIXED``/``+ COVER``/``+ SHIELD``, LEF/DEF 5.8 section
@@ -122,27 +129,50 @@ def read_def_text(def_path: str) -> str | None:
 def parse_def_component_masters(text: str) -> dict[str, int] | None:
     """Count ``COMPONENTS`` records per macro (master) name.
 
-    Returns ``None`` when ``text`` carries no ``COMPONENTS <n> ;`` header at
-    all -- an unparseable or truncated file, which is *not* the same answer
-    as a design with zero instances. A header that is present but followed
-    by no records returns ``{}`` (a genuine, measured "zero instances").
+    Returns ``None`` -- "cannot tell", never a fabricated zero -- for every
+    shape whose record list this scan cannot trust:
+
+    - no ``COMPONENTS <n> ;`` header at all (an unparseable file, or one
+      truncated before the section began);
+    - a header whose declared record count disagrees with the number of
+      records actually found. A section cut off mid-way (or one whose
+      records ran into the next section because ``END COMPONENTS`` never
+      arrived) would otherwise grade as a complete measurement -- reporting
+      e.g. a measured ``0 fillers`` for a design whose filler records were
+      simply never read. That is exactly the "answering when it cannot"
+      failure this module exists to prevent, so a declared/found mismatch
+      is reported as unavailable evidence instead.
+
+    A header that is present, agrees with what was found, and is followed by
+    no records returns ``{}`` -- a genuine, measured "zero instances".
+    ``END COMPONENTS`` itself is *not* required once the declared count is
+    satisfied: a DEF whose every declared record was read is a complete
+    measurement even if the file was cut off immediately after the last one.
     """
     counts: dict[str, int] = {}
+    declared: int | None = None
+    records = 0
     in_section = False
     for line in text.splitlines():
         if not in_section:
-            if _COMPONENTS_BEGIN_RE.match(line):
+            header = _COMPONENTS_BEGIN_RE.match(line)
+            if header:
                 in_section = True
+                declared = int(header.group(1))
             continue
         if _COMPONENTS_END_RE.match(line):
-            return counts
+            break
+        if _SECTION_BOUNDARY_RE.match(line):
+            # Another section opened without `END COMPONENTS`: stop here so
+            # its own `- <name> …` records are never counted as components.
+            break
         match = _COMPONENT_START_RE.match(line)
         if match:
+            records += 1
             counts[match.group(2)] = counts.get(match.group(2), 0) + 1
-    # A `COMPONENTS` header with no `END COMPONENTS` is a truncated file:
-    # report what was counted rather than discarding it, since the header
-    # itself already proves the file is a real DEF.
-    return counts if in_section else None
+    if not in_section or records != declared:
+        return None
+    return counts
 
 
 def parse_def_special_nets(text: str) -> list[dict[str, Any]]:
@@ -168,6 +198,14 @@ def parse_def_special_nets(text: str) -> list[dict[str, Any]]:
     so "no ``SPECIALNETS`` section" *is* "no special nets" for a file that
     otherwise parsed (the caller establishes that via
     :func:`parse_def_component_masters`).
+
+    A section whose ``END SPECIALNETS`` never arrives stops at the next
+    section boundary rather than running on into ``NETS``' own ``- <net>``
+    records. Unlike :func:`parse_def_component_masters`, a short read here
+    needs no declared-count gate to stay honest: under-reading a grid can
+    only ever *under*-state what was placed, which grades as ``partial``/
+    ``absent`` and warns -- it can never turn an absent grid into a
+    measured ``complete``.
     """
     section: list[str] = []
     in_section = False
@@ -176,7 +214,7 @@ def parse_def_special_nets(text: str) -> list[dict[str, Any]]:
             if _SPECIALNETS_BEGIN_RE.match(line):
                 in_section = True
             continue
-        if _SPECIALNETS_END_RE.match(line):
+        if _SPECIALNETS_END_RE.match(line) or _SECTION_BOUNDARY_RE.match(line):
             break
         section.append(line)
     if not in_section:
@@ -278,8 +316,8 @@ class _SpecialNetScanner:
             self.shape = _at(tokens, index + 2)
             return index + 3
         if keyword == "USE":
-            assert self.current is not None
-            self.current["use"] = _at(tokens, index + 2)
+            if self.current is not None:
+                self.current["use"] = _at(tokens, index + 2)
             self._close_wiring()
             return index + 3
         # Any other net-level attribute (`+ SOURCE`, `+ WEIGHT`, …) ends the
@@ -292,11 +330,18 @@ class _SpecialNetScanner:
         return index + 3  # NEW layerName routeWidth
 
     def _maybe_via(self, token: str, index: int) -> int:
-        # A bare identifier inside a wiring statement is a via instance --
-        # unless it is the orientation that may follow one.
-        if self.in_wiring and token not in _DEF_ORIENTATIONS:
-            assert self.current is not None
-            self.current["vias"] += 1
+        """Count a bare token inside a wiring statement as a via instance.
+
+        Scope note (see the module docstring): this is the ``pdngen``
+        grammar only -- a via name optionally followed by its orientation.
+        A ``+ MASK <maskNum>`` prefix on a routing point, or a net-level
+        ``+ VIA viaName`` attribute, would be miscounted/uncounted; neither
+        shape appears in the DEFs this audit grades, and ``vias`` is a
+        count metric rather than geometry.
+        """
+        if self.in_wiring and self.current is not None:
+            if token not in _DEF_ORIENTATIONS:
+                self.current["vias"] += 1
         return index + 1
 
     def _open_segment(self, layer: str | None) -> None:
@@ -460,6 +505,13 @@ def _power_checks(
     expected power/ground nets only when their names are known -- otherwise
     across every special net the DEF declares, which is the strongest
     honest statement available without inventing a net name.
+
+    Each graded net must satisfy the structure checks **on its own**: a
+    ``SPECIALNETS`` entry that exists but carries no rails, no straps and
+    no vias (e.g. a bare ``- VSS + USE GROUND ;``) is a name, not a grid,
+    and a power delivery that reaches only one supply is not complete. So
+    these are ``all(... > 0)`` across the graded nets rather than a sum,
+    which a single fully-routed net could otherwise satisfy for both.
     """
     expected = [net for net in (power_net, ground_net) if net]
     by_name = {net["name"]: net for net in special_nets}
@@ -482,12 +534,19 @@ def _power_checks(
         checks.append(("ground_special_net", ground_net in by_name))
     if not expected:
         checks.append(("special_nets", bool(special_nets)))
-    checks.append(
-        ("followpin_segments", sum(n["followpin_segments"] for n in graded) > 0)
-    )
-    checks.append(("stripe_segments", sum(n["stripe_segments"] for n in graded) > 0))
-    checks.append(("pdn_vias", sum(n["vias"] for n in graded) > 0))
+    checks.append(("followpin_segments", _every_net(graded, "followpin_segments")))
+    checks.append(("stripe_segments", _every_net(graded, "stripe_segments")))
+    checks.append(("pdn_vias", _every_net(graded, "vias")))
     return checks
+
+
+def _every_net(graded: list[dict[str, Any]], key: str) -> bool:
+    """``True`` when *every* graded net carries at least one ``key``.
+
+    Empty is ``False``: no nets to grade means the structure is absent,
+    never vacuously present.
+    """
+    return bool(graded) and all(net[key] > 0 for net in graded)
 
 
 def _grade(checks: list[tuple[str, bool]], missing: list[str]) -> str:
@@ -513,6 +572,83 @@ def _counts_phrase(placed: dict[str, Any]) -> str:
     )
 
 
+def _missing_phrase(placed: dict[str, Any]) -> str:
+    """The measured ``missing`` tokens as human labels, naming the special
+    net responsible when only *some* of them are deficient.
+
+    Each structure check is graded per net (see :func:`_power_checks`), so
+    "no PDN vias" can mean a grid that is fully routed on one supply and a
+    bare name on the other. When that asymmetry is the finding, the warning
+    says which net, rather than leaving a caller to diff ``special_nets[]``
+    by hand; when every net is equally deficient the labels already say it.
+    """
+    labels = ", ".join(CHECK_LABELS.get(token, token) for token in placed["missing"])
+    structural = {"followpin_segments", "stripe_segments", "pdn_vias"}
+    nets = placed["special_nets"] or []
+    if not structural.intersection(placed["missing"]):
+        return labels
+    deficient = [
+        net["name"]
+        for net in nets
+        if not (net["followpin_segments"] and net["stripe_segments"] and net["vias"])
+    ]
+    if not deficient or len(deficient) == len(nets):
+        return labels
+    return f"{labels} (on special net(s) {', '.join(deficient)})"
+
+
+def _omitted_power_warning(placed: dict[str, Any]) -> str:
+    """The warning for a run that supplied no ``request.power`` block.
+
+    Every clause here is derived from what the DEF actually measured
+    (issue #2086's own defect class is an *unmeasured* claim rendered as if
+    it were a measurement). It deliberately does **not** assert that the
+    layout has no rails or no fill: on ``sky130_fd_sc_hd`` at the
+    ``"route"`` stage the row-rail fallback (issue #1442) draws real
+    ``SPECIALNETS`` rails and runs ``filler_placement`` without any
+    ``request.power`` at all, so a fixed "no fill" template would
+    contradict its own measured counts. What is always true, and is what
+    this says, is that no power-delivery block was *requested*.
+    """
+    counts = _counts_phrase(placed)
+    tail = (
+        "Supply request.power (see docs/cli/place-and-route.md, 'Power "
+        "delivery') to build one."
+    )
+    # "requested", not "configured": the row-rail fallback *does* emit
+    # `define_pdn_grid`/`pdngen` Tcl on this path, so only the request side
+    # of the statement is unconditionally true.
+    head = "request.power was omitted: no power delivery was requested for this run"
+    if placed["evidence"] != EVIDENCE_DEF:
+        return (
+            f"{head}, and what it placed could not be measured ({counts}). "
+            "Treat its area, timing and DRC numbers as unverified for "
+            f"signoff. {tail}"
+        )
+    if placed["status"] == STATUS_COMPLETE:
+        return (
+            f"{head}. The produced DEF nonetheless carries every power "
+            f"structure this audit checks for ({counts}) -- whatever drew "
+            "them (the cell library's row-rail fallback, or a pre-existing "
+            "grid) is not a requested PDN, so this run's area, timing and "
+            f"DRC numbers are still not a signoff result. {tail}"
+        )
+    if placed["status"] == STATUS_ABSENT:
+        return (
+            f"{head}, and the produced DEF has no {_missing_phrase(placed)} "
+            f"({counts}). The layout has no power delivery, no substrate/"
+            "well taps and no fill -- its area, timing and DRC numbers are "
+            f"not a signoff result. {tail}"
+        )
+    return (
+        f"{head}, and the produced DEF has no {_missing_phrase(placed)} "
+        f"({counts}). What it does carry (the cell library's row-rail "
+        "fallback, issue #1442) is not a power grid on its own, so this "
+        "run's area, timing and DRC numbers are not a signoff result. "
+        f"{tail}"
+    )
+
+
 def power_delivery_warnings(
     placed: dict[str, Any], *, power_requested: bool
 ) -> list[str]:
@@ -522,9 +658,14 @@ def power_delivery_warnings(
     the evidence rather than only the absence of a complaint (issue #2086):
 
     - ``request.power`` omitted -- always warned about. Omitting it is a
-      legal, supported request, but the result is a layout with no power
-      delivery whose area/timing/DRC numbers are not a signoff result, and
-      nothing else in the response says so at a glance.
+      legal, supported request, but no power delivery was *asked for*, so
+      the run's area/timing/DRC numbers are not a signoff result and
+      nothing else in the response says so at a glance. The prose is built
+      from the measured counts (see :func:`_omitted_power_warning`), never
+      from a fixed template -- the row-rail fallback (issue #1442) really
+      does place rails and fillers on this path, and a warning that
+      asserted otherwise would be the very defect this module exists to
+      report.
     - ``request.power`` supplied but the DEF is missing part of it -- the
       *transcription*-error case: a strap layer or pitch that draws nothing
       silently produces the same structurally-empty grid as omitting the
@@ -535,16 +676,8 @@ def power_delivery_warnings(
     genuinely nothing to say (never true here -- unavailable evidence on a
     supplied block is still reported, because "cannot tell" is not "fine").
     """
-    counts = _counts_phrase(placed)
     if not power_requested:
-        return [
-            "request.power was omitted: no tapcells, no PDN and no filler "
-            "cells were configured for this run "
-            f"({counts}). The layout has no power delivery, no substrate/well "
-            "taps and no fill -- its area, timing and DRC numbers are not a "
-            "signoff result. Supply request.power (see "
-            "docs/cli/place-and-route.md, 'Power delivery') to close this."
-        ]
+        return [_omitted_power_warning(placed)]
     if placed["status"] == STATUS_COMPLETE:
         return []
     if placed["evidence"] != EVIDENCE_DEF:
@@ -553,7 +686,8 @@ def power_delivery_warnings(
             f"verified ({placed['unavailable_reason']}). Treat this run's "
             "power delivery as unconfirmed."
         ]
-    labels = ", ".join(CHECK_LABELS.get(token, token) for token in placed["missing"])
+    counts = _counts_phrase(placed)
+    labels = _missing_phrase(placed)
     return [
         f"request.power was supplied but the produced DEF has no {labels} "
         f"({counts}). Power delivery is {placed['status']} -- check the "

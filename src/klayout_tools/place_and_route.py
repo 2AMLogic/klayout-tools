@@ -491,12 +491,14 @@ excluded here too, on the grounds that OpenROAD reports them only via
 through its per-stage ``-metrics <file>.json`` mechanism. Issue #2086
 closed that gap from the other side -- by reading the DEF the run already
 wrote -- because the exclusion had a cost the original scoping missed: a
-``request.power``-less run *completes*, exits 0, and produces a layout with
-no power delivery, no taps and no fill that is indistinguishable in the
-response from a power-complete one. The additive ``power.placed`` block now
-reports those counts plus the ``SPECIALNETS`` grid structure, and the
-additive top-level ``warnings`` field says so loudly when they are zero.
-See :mod:`klayout_tools.place_and_route_power_audit`.
+``request.power``-less run *completes*, exits 0, and produces a layout
+whose power delivery (none at all on a library with no row-rail fallback;
+rails and fill but no taps, straps or PDN vias on one that has it) was
+indistinguishable in the response from a power-complete one. The additive
+``power.placed`` block now reports those counts plus the ``SPECIALNETS``
+grid structure, and the additive top-level ``warnings`` field says --
+quoting the measured numbers, never a fixed template -- exactly which of
+them are zero. See :mod:`klayout_tools.place_and_route_power_audit`.
 
 ``straps[].spacing_um`` and ``connects[]`` (issue #1133) close a further gap:
 sourcing strap geometry from a real platform's own PDN config (e.g. gf180's

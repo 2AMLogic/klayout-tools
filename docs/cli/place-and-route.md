@@ -2118,19 +2118,49 @@ Every response now carries two additive fields that close this:
 
 Two conditions warn:
 
-1. **`request.power` omitted.** Always warned, quoting the measured counts —
-   "0 tapcell(s), 0 endcap(s), 0 filler cell(s), 0 power special net(s), …".
+1. **`request.power` omitted.** Always warned — no power delivery was
+   *requested*, so the run's numbers are not a signoff result whatever the
+   DEF turns out to contain. The rest of the sentence is **derived from the
+   measured counts**, never from a fixed template, because what an omitted
+   block actually places is library- and stage-dependent:
+   - on `gf180mcu_fd_sc_mcu9t5v0`/`gf180mcu_fd_sc_mcu7t5v0` (no row-rail
+     fallback) the DEF really is empty of power delivery, and the warning
+     says so: "…the produced DEF has no tapcell instances, endcap
+     instances, filler-cell instances, a SPECIALNETS section, FOLLOWPIN
+     rail segments, STRIPE strap segments, PDN vias (0 tapcell(s), 0
+     endcap(s), 0 filler cell(s), …). The layout has no power delivery, no
+     substrate/well taps and no fill…";
+   - on `sky130_fd_sc_hd` at `target_stage: "route"` the row-rail fallback
+     (issue #1442, below) draws real VPWR/VGND `FOLLOWPIN` rails and runs
+     `filler_placement`, so the warning narrows to what is genuinely
+     absent: "…the produced DEF has no tapcell instances, STRIPE strap
+     segments, PDN vias (0 tapcell(s), 0 endcap(s), 5 filler cell(s), 2
+     power special net(s), 12 FOLLOWPIN rail segment(s), 0 STRIPE strap
+     segment(s), 0 PDN via(s)). What it does carry (the cell library's
+     row-rail fallback, issue #1442) is not a power grid on its own…".
 2. **`request.power` supplied but the DEF is missing part of it.** The
    transcription-error case: a strap layer/pitch/width that draws nothing
    produces the same structurally-empty grid as omitting the block, and is
    just as silent. The warning names exactly which checks failed.
 
+**Each supply is graded on its own.** The `followpin_segments`/
+`stripe_segments`/`pdn_vias` checks require *every* expected net to carry
+that structure, not the pair to sum to one: a DEF with a fully routed `VDD`
+and a bare `- VSS + USE GROUND ;` entry is a grid on one supply and a name
+on the other, and grades `partial`, with the warning naming the deficient
+net ("… (on special net(s) VSS)").
+
 **Evidence, not assumption.** `power.placed.evidence` is `"def"` only when a
-DEF was read *and* parsed (it declares a `COMPONENTS` section); then every
-count is a measurement and a `0` means zero. Otherwise it is `"unavailable"`,
-every count is `null`, and `unavailable_reason` says why — no DEF is written
-at the `"floorplan"` stage, the file could not be read, or it carries no
-`COMPONENTS` section. A measured zero and unavailable evidence are different
+DEF was read *and* parsed; then every count is a measurement and a `0` means
+zero. Otherwise it is `"unavailable"`, every count is `null`, and
+`unavailable_reason` says why — no DEF is written at the `"floorplan"`
+stage, the file could not be read, it carries no `COMPONENTS` section, or
+that section is malformed. "Parsed" is deliberately strict: the `COMPONENTS`
+section must contain exactly the number of records its own header declares
+(`END COMPONENTS` itself is optional once they are all present). A section
+cut short — or one whose records ran into the next section because its `END`
+line never arrived — would otherwise report the records nobody read as a
+measured `0 fillers`. A measured zero and unavailable evidence are different
 answers and are never conflated; a supplied `request.power` whose result
 cannot be verified warns too ("could not be verified"), rather than passing
 by default.

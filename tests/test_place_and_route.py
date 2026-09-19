@@ -3602,6 +3602,35 @@ _LOGIC_ONLY_DEF = _fake_def(
     masters={"sky130_fd_sc_hd__nand2_1": 4, "sky130_fd_sc_hd__dfxtp_1": 2}
 )
 
+#: What a `request.power`-less run *actually* writes on the library whose
+#: row-rail fallback (issue #1442) runs anyway: `gf180mcu_fd_sc_mcu9t5v0` has
+#: no `_ROW_RAIL_STRAP` entry, so nothing draws rails and nothing calls
+#: `filler_placement` -- logic cells only, no `SPECIALNETS` section at all.
+#: This is the shape issue #2086 was reported from (a real
+#: `gf180mcu_fd_sc_mcu7t5v0` run).
+_GF180MCU_LOGIC_ONLY_DEF = _fake_def(
+    masters={
+        "gf180mcu_fd_sc_mcu9t5v0__nand2_1": 4,
+        "gf180mcu_fd_sc_mcu9t5v0__dffq_1": 2,
+    }
+)
+
+#: What a `request.power`-less `"route"` run on `sky130_fd_sc_hd` actually
+#: writes: the row-rail fallback (issue #1442) draws real `SPECIALNETS`
+#: VPWR/VGND `FOLLOWPIN` rails and drives the same `"route"`-stage
+#: `filler_placement` call -- but no tapcells, no `STRIPE` straps and no PDN
+#: vias, because no PDN was requested. Any fixture claiming that path emits
+#: *nothing* would pin behaviour the code cannot produce.
+_ROW_RAIL_FALLBACK_DEF = _fake_def(
+    masters={
+        "sky130_fd_sc_hd__nand2_1": 4,
+        "sky130_fd_sc_hd__dfxtp_1": 2,
+        "sky130_fd_sc_hd__fill_1": 3,
+        "sky130_fd_sc_hd__fill_2": 2,
+    },
+    special_nets=(("VPWR", 6, 0, 0), ("VGND", 6, 0, 0)),
+)
+
 #: A DEF from a power-complete run: tapcells, fillers, and a VPWR/VGND
 #: grid with rails, straps and vias. `VPWR`/`VGND` are `sky130_fd_sc_hd`'s
 #: own pin names (and the row-rail fallback's nets), not `request.power`'s
@@ -3638,6 +3667,83 @@ def test_power_audit_component_masters_none_without_a_components_section():
     assert power_audit.parse_def_component_masters("COMPONENTS 0 ;\n") == {}
 
 
+def test_power_audit_component_masters_none_when_the_declared_count_disagrees():
+    """A `COMPONENTS 99 ;` header with three records and no `END
+    COMPONENTS` is a truncated/malformed section, not a measurement: the
+    records that were never read would otherwise be reported as a measured
+    zero (e.g. "0 filler cells") for a design that has them. The section
+    boundary also stops the scan, so the `SPECIALNETS` records that follow
+    are never miscounted as component instances."""
+    text = "\n".join(
+        [
+            "COMPONENTS 99 ;",
+            "- inst_0 sky130_fd_sc_hd__nand2_1 + PLACED ( 0 0 ) N ;",
+            "- inst_1 sky130_fd_sc_hd__nand2_1 + PLACED ( 10 0 ) N ;",
+            "SPECIALNETS 2 ;",
+            "- VPWR ( * VPWR )",
+            "  + USE POWER",
+            "  ;",
+            "- VGND ( * VGND )",
+            "  + USE GROUND",
+            "  ;",
+            "END SPECIALNETS",
+            "END DESIGN",
+            "",
+        ]
+    )
+    assert power_audit.parse_def_component_masters(text) is None
+
+
+def test_power_audit_component_masters_measured_when_every_record_is_present():
+    """The lenient half of the same rule: a file whose declared records
+    were all read is a complete measurement even if `END COMPONENTS` never
+    arrived -- the missing terminator costs no information."""
+    text = "COMPONENTS 1 ;\n- inst_0 sky130_fd_sc_hd__nand2_1 + PLACED ( 0 0 ) N ;\n"
+    assert power_audit.parse_def_component_masters(text) == {
+        "sky130_fd_sc_hd__nand2_1": 1
+    }
+
+
+def test_power_audit_one_routed_supply_is_not_a_complete_grid(tmp_path):
+    """A `SPECIALNETS` entry that exists but carries no rails, no straps
+    and no vias is a name, not a grid: grading the structure checks as a
+    *sum* across both supplies let a fully-routed VPWR mask an unrouted
+    VGND and report `complete`. Each expected supply is graded on its own,
+    and the warning names the deficient net."""
+    def_path = _write(
+        tmp_path / "one_supply.def",
+        _fake_def(
+            masters={
+                "sky130_fd_sc_hd__nand2_1": 4,
+                "sky130_fd_sc_hd__tapvpwrvgnd_1": 3,
+                "sky130_fd_sc_hd__fill_1": 5,
+            },
+            special_nets=(("VPWR", 6, 4, 2), ("VGND", 0, 0, 0)),
+        ),
+    )
+
+    placed = power_audit.audit_power_delivery(
+        def_path=def_path,
+        unavailable_reason=None,
+        tapcell_master="sky130_fd_sc_hd__tapvpwrvgnd_1",
+        endcap_master=None,
+        filler_masters=("sky130_fd_sc_hd__fill_1",),
+        power_net="VPWR",
+        ground_net="VGND",
+        expect_fillers=True,
+    )
+
+    assert placed["status"] == "partial"
+    assert placed["missing"] == [
+        "followpin_segments",
+        "stripe_segments",
+        "pdn_vias",
+    ]
+
+    warning = power_audit.power_delivery_warnings(placed, power_requested=True)[0]
+    assert "on special net(s) VGND" in warning
+
+
 def test_power_audit_parses_rails_straps_and_vias_per_special_net():
     nets = power_audit.parse_def_special_nets(_POWER_COMPLETE_DEF)
     assert [net["name"] for net in nets] == ["VPWR", "VGND"]
@@ -3662,29 +3768,32 @@ def test_power_audit_no_specialnets_section_is_zero_special_nets():
 def test_stubbed_route_without_power_reports_measured_zeros_and_warns(
     tmp_path, monkeypatch
 ):
-    """Issue #2086, the reported trap: with no `request.power` the run
-    completes and writes a plausible layout carrying **no tapcells, no PDN
+    """Issue #2086, the reported trap, on the library it was reported from:
+    `gf180mcu_fd_sc_mcu9t5v0` has no row-rail fallback entry, so a run with
+    no `request.power` really does complete carrying **no tapcells, no PDN
     and no fillers**. The response must say so in numbers a caller can
     read, and warn loudly -- not merely fail to complain."""
-    request_path = _setup_success_env(tmp_path, monkeypatch)
-    _stub_openroad_success(monkeypatch, def_text=_LOGIC_ONLY_DEF)
+    request_path = _setup_gf180mcu_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, def_text=_GF180MCU_LOGIC_ONLY_DEF)
     _stub_merge_def_to_gds(monkeypatch)
 
     report = run_place_and_route(request_path)
 
     assert report["status"] == "ok"
+    assert report["power"]["row_rail"]["emitted"] is False
     placed = report["power"]["placed"]
     assert placed["evidence"] == "def"
     assert placed["status"] == "absent"
     assert placed["components"] == 6
     assert placed["tapcells"] == 0
+    assert placed["endcaps"] == 0
     assert placed["fillers"] == 0
     assert placed["special_nets"] == []
     assert placed["missing"] == [
         "tapcells",
+        "endcaps",
         "fillers",
-        "power_special_net",
-        "ground_special_net",
+        "special_nets",
         "followpin_segments",
         "stripe_segments",
         "pdn_vias",
@@ -3696,7 +3805,50 @@ def test_stubbed_route_without_power_reports_measured_zeros_and_warns(
     assert "0 tapcell(s)" in warning
     assert "0 filler cell(s)" in warning
     assert "0 STRIPE strap segment(s)" in warning
+    # Only *this* shape -- measured zeros across the board -- earns the
+    # flat "no power delivery ... and no fill" prose.
+    assert "no substrate/well taps and no fill" in warning
     assert "not a signoff result" in warning
+
+
+def test_stubbed_route_without_power_on_sky130_describes_the_row_rail_fallback(
+    tmp_path, monkeypatch
+):
+    """The default code path, measured honestly. On `sky130_fd_sc_hd` at
+    `"route"` an omitted `request.power` still runs the row-rail fallback
+    (issue #1442): real VPWR/VGND `FOLLOWPIN` rails and a real
+    `filler_placement` call, but no tapcells, no straps and no PDN vias.
+    The warning must describe *that* -- a fixed "no filler cells ... no
+    fill" template would contradict its own parenthetical counts, which is
+    the exact unmeasured-claim defect issue #2086 exists to remove."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, def_text=_ROW_RAIL_FALLBACK_DEF)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["power"]["row_rail"]["emitted"] is True
+    placed = report["power"]["placed"]
+    assert placed["evidence"] == "def"
+    assert placed["status"] == "partial"
+    assert placed["tapcells"] == 0
+    assert placed["fillers"] == 5
+    assert [net["name"] for net in placed["special_nets"]] == ["VPWR", "VGND"]
+    assert placed["missing"] == ["tapcells", "stripe_segments", "pdn_vias"]
+
+    assert len(report["warnings"]) == 1
+    warning = report["warnings"][0]
+    assert "request.power was omitted" in warning
+    # Measured, and therefore true: what the fallback did *not* place.
+    assert "tapcell instances" in warning
+    assert "STRIPE strap segments" in warning
+    assert "PDN vias" in warning
+    assert "5 filler cell(s)" in warning
+    assert "12 FOLLOWPIN rail segment(s)" in warning
+    assert "not a signoff result" in warning
+    # Never the unmeasured claim: the DEF this path writes has both.
+    assert "no fill" not in warning
+    assert "no filler cell" not in warning
 
 
 def test_stubbed_route_with_complete_power_reports_complete_and_no_warnings(
@@ -3842,7 +3994,9 @@ def test_cli_json_keeps_stdout_clean_and_warns_on_stderr(tmp_path, monkeypatch, 
     the JSON -- so it goes to stderr in `--format json` too, leaving
     stdout a single parseable document and the exit code unchanged."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
-    _stub_openroad_success(monkeypatch, def_text=_LOGIC_ONLY_DEF)
+    # The DEF this default (`request.power`-less, sky130) path really
+    # writes: the row-rail fallback's rails and fillers, no straps or vias.
+    _stub_openroad_success(monkeypatch, def_text=_ROW_RAIL_FALLBACK_DEF)
     _stub_merge_def_to_gds(monkeypatch)
 
     exit_code = main(["place-and-route", request_path, "--format", "json"])
