@@ -3916,7 +3916,17 @@ def _write_composed_gds(
                     landing_size_um = (landing_pad_size_um or {}).get(
                         (landing_pair, via_pair), _VIA_LANDING_SIZE_UM
                     )
-                    landing_half_dbu = int(round((landing_size_um / 2.0) / dbu))
+                    # Round minimum sizes outward, preserving the margin
+                    # against the *rounded* via too. The epsilon only removes
+                    # floating-point noise at an integer grid coordinate.
+                    landing_half_dbu = math.ceil(
+                        max(
+                            landing_size_um / (2.0 * dbu),
+                            via_half_dbu
+                            + (landing_size_um - via_size_um) / (2.0 * dbu),
+                        )
+                        - 1e-9
+                    )
                     landing_box = kdb.Box(
                         cx - landing_half_dbu,
                         cy - landing_half_dbu,

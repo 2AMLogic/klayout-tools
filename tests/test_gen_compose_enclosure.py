@@ -8,7 +8,7 @@ import pytest
 from klayout_tools import gen_compose_routing as routing
 from klayout_tools.decks import DerivedLayer, get_deck
 from klayout_tools.drc import run_drc
-from klayout_tools.gen_compose import compose
+from klayout_tools.gen_compose import _write_composed_gds, compose
 from test_gen_compose import _gen_block
 from test_gen_compose import _isolate as _isolate
 from test_gen_compose import pdk_root as pdk_root
@@ -157,3 +157,45 @@ def test_met5_enclosure_controls_size_when_via_is_upsized(
             if shape.is_box()
         ]
         assert any(box.width() * layout.dbu >= side - 1e-9 for box in boxes)
+
+
+@pytest.mark.parametrize("dbu", [0.001, 0.006])
+def test_enclosure_floor_survives_rounding_to_the_output_grid(tmp_path, dbu):
+    seed = kdb.Layout()
+    seed.dbu = dbu
+    seed.create_cell("seed")
+    seed_path = str(tmp_path / "seed.gds")
+    seed.write(seed_path)
+    routes = [
+        {
+            "points_um": [(0, 0), (10, 0)],
+            "width_um": 1.8,
+            "label": False,
+            "via_drops": [
+                {
+                    "x_um": 0,
+                    "y_um": 0,
+                    "via_layer": (71, 44),
+                    "landing_layers": ((71, 20), (72, 20)),
+                }
+            ],
+        }
+    ]
+    via_sizes = {(71, 44): 0.8}
+    pad_sizes = routing._resolve_landing_pad_sizes(routes, "sky130A", via_sizes)
+    output = str(tmp_path / "coarse.gds")
+    _write_composed_gds(
+        {"seed": {"gds_path": seed_path, "cell_name": "seed"}},
+        ["seed"],
+        {"seed": {"x": 0, "y": 0}},
+        "coarse",
+        output,
+        routes,
+        (72, 20),
+        via_drop_size_um=via_sizes,
+        landing_pad_size_um=pad_sizes,
+    )
+    # At 0.006um/dbu, nearest rounding shrinks the 1.18um floor to
+    # 1.176um and leaves four enclosure violations around the actual cut.
+    drc = run_drc(output, "sky130")
+    assert not (_CHECKED_RULES & drc["rule_counts"].keys()), drc["rule_counts"]

@@ -1120,6 +1120,8 @@ deck; both sides of every hop are checked. On sky130's via4 hop this grows
 the met4 pad to 1.18 µm (0.8 + 2 × 0.19), while met5's 2 µm area floor
 already exceeds its 1.42 µm enclosure floor (0.8 + 2 × 0.31). Missing
 enclosure rules leave the existing baseline and area floors intact.
+Pads round outward onto the output grid, preserving their margin against
+the rounded via cut as well as their minimum size.
 These floors affect the drawn pads; the router's spacing pre-checks retain
 their existing baseline footprint, as for the prior area and via-width floors.
 
