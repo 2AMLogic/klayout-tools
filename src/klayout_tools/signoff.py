@@ -589,6 +589,40 @@ this envelope's own verdict say", which is what its other callers ask it --
 so the refusal is applied beside it, once per entry point, by
 :func:`_nothing_checked_reasons`.
 
+## Partial-coverage qualification (issue #2109)
+
+The case between the two above: a run that passed every check it ran **and**
+skipped requested work. :mod:`klayout_tools.coverage`'s common rollup rule
+calls that ``partial`` -- a real, exit-0 result that is neither the verb's
+unconditional success nor complete signoff evidence -- and this module
+applies it in two places, neither of which re-derives it:
+
+- A producer that has adopted the rollup reports its partial status token
+  (``"clean_partial"``, ``"pass_partial"``, :data:`_PARTIAL_STATUS_BY_KIND`).
+  :func:`_check_passed` already declines it, since it is not the kind's
+  success token; what :func:`_non_passing_reason` adds is that the item says
+  :data:`_REASON_PARTIAL_COVERAGE` instead of :data:`_REASON_CHECK_FAILED`,
+  so a reader is sent to the skipped work rather than to a violation that
+  does not exist. Failure precedence is structural, not an ordering here: a
+  run that found a defect reports its *failure* token, because
+  :func:`~klayout_tools.coverage.coverage_rollup` decides ``failed`` before
+  it consults coverage at all.
+- Until a verb's Phase 2 adapter lands (#2110/#2111/#2115/#2116/#2117/#2118),
+  its status can still be the unconditional success word on a run whose
+  common coverage says ``partial``. That verdict is unchanged here -- item
+  3's grading rule is ``docs/design-evidence-tiers.md``'s to set, and it
+  deliberately leaves the weighing of a coverage gap to the claimant -- but
+  :func:`_partial_coverage_disclosure` now states the gap on both the
+  ``checks[]`` and ``"met"``-citation paths, so it is visible in the report
+  rather than only in the source envelope.
+
+Unlike ``nothing_checked``, partial is **not** a hard refusal: the run did
+check something, and discarding it would throw away a real result rather
+than qualify it. What no path here does is read it as complete --
+:func:`~klayout_tools.coverage.coverage_refusal_reason` (no verdict reached)
+and :func:`~klayout_tools.coverage.coverage_qualification_reason` (not an
+unconditional success) are separate questions for exactly that reason.
+
 ## Typed, runtime-validated evidence ingestion (issue #2033)
 
 ``CLAUDE.md`` says "JSON is the contract", but every producer/consumer
@@ -666,6 +700,7 @@ from .coverage import (
     coverage_nothing_checked,
     coverage_nothing_checked_reasons,
     coverage_refusal_reason,
+    coverage_skipped_work,
     coverage_state,
     coverage_validation_error,
 )
@@ -962,6 +997,64 @@ _REASON_NOT_POST_LAYOUT = "not_post_layout"
 #: check did not fail on its own terms, it simply measured nothing -- and the
 #: fix is to re-run it with something to check, not to fix a defect it found.
 _REASON_NOTHING_CHECKED = "nothing_checked"
+
+#: Issue #2109: the evidence resolved to a readable, recognised envelope of a
+#: kind this item accepts, whose producer applied the common rollup rule
+#: (:func:`~klayout_tools.coverage.coverage_rollup`) and reported its
+#: **partial** status token -- ``"clean_partial"``, ``"pass_partial"``, the
+#: per-kind spelling in :data:`_PARTIAL_STATUS_BY_KIND`. Every check it ran
+#: passed, and it also skipped requested work, so its result is real but not
+#: unconditional.
+#:
+#: It *names* the same class of problem as the "no runnable check proves
+#: this item" reasons (:data:`_REASON_WRONG_KIND`,
+#: :data:`_REASON_NOT_POST_LAYOUT`, :data:`_REASON_NOTHING_CHECKED`), per
+#: issue #826's invariant: the cited check did not fail on its own terms,
+#: and the fix is to re-run it over the work it skipped, not to fix a defect
+#: it found. Reporting it as ``check_failed`` -- which is what happened
+#: before this constant existed, since a partial token simply is not the
+#: kind's success token -- sent a reader looking for a violation that does
+#: not exist.
+#:
+#: It is *ordered* like :data:`_REASON_CHECK_FAILED` rather than like those
+#: three, because it replaces that reason on the same code path: it is
+#: decided from the envelope's own verdict, before :func:`_build_tier_item`'s
+#: kind gate (which only ever downgrades a would-be ``"met"``). So a partial
+#: report cited for an item that does not accept its kind reports
+#: ``partial_coverage``, exactly as a *failing* report of that kind reports
+#: ``check_failed`` rather than ``wrong_kind`` today. The three gated
+#: refusals differ because they apply to an envelope that *passed*, where
+#: "cite a different artifact" really is the more actionable answer.
+_REASON_PARTIAL_COVERAGE = "partial_coverage"
+
+#: The status token each kind reports for a partial result (issue #2109):
+#: the kind's own success token from :func:`_check_passed`, suffixed
+#: ``_partial``, exactly as
+#: :func:`~klayout_tools.coverage.rollup_status` derives it by default. This
+#: table is what lets :func:`_non_passing_reason` tell "checked everything it
+#: was asked to and something failed" apart from "passed everything it ran
+#: and skipped some of what it was asked to".
+#:
+#: Two kinds are deliberately absent. ``extract`` has no pass/fail verdict to
+#: qualify (:func:`_check_passed` returns ``True`` for any present envelope),
+#: and ``sta``'s verdict is derived from per-corner timing fields rather than
+#: a status token, so a partial spelling would have nothing to match against;
+#: their adapters must decide how a partial timing/extraction result is
+#: reported before either belongs here. ``power`` matches inside
+#: ``em_verdict`` rather than at the top level, mirroring
+#: :func:`_check_passed`, and is handled in :func:`_reports_partial_status`.
+_PARTIAL_STATUS_BY_KIND: dict[str, str] = {
+    "drc": "clean_partial",
+    "erc": "clean_partial",
+    "lvs": "match_partial",
+    "sim": "pass_partial",
+    "pex": "pass_partial",
+    "yield": "pass_partial",
+    "functional-verification": "pass_partial",
+    "place-and-route": "ok_partial",
+    "generic": "pass_partial",
+    "power": "pass_partial",
+}
 
 #: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Four
 #: reasons, not one, for the same reason :data:`_REASON_NOT_POST_LAYOUT` is
@@ -2259,7 +2352,71 @@ def _nothing_checked_detail(envelope: dict[str, Any]) -> dict[str, Any]:
         detail["coverage_state"] = state
     if state == "malformed":
         detail["coverage_error"] = coverage_validation_error(envelope.get("coverage"))
+    partial = _partial_coverage_disclosure(envelope)
+    if partial is not None:
+        detail["coverage_qualification"] = partial
     return detail
+
+
+def _partial_coverage_disclosure(envelope: dict[str, Any]) -> dict[str, Any] | None:
+    """The cited envelope's own statement that it skipped requested work
+    (issue #2109) -- or ``None`` when it makes no such statement.
+
+    ``None`` for every row of the common rollup table except ``partial``,
+    including a legacy envelope whose verb-specific fields describe a gap
+    (`klt drc`'s ``rules_skipped``, surfaced separately and unchanged by
+    :func:`_drc_coverage_disclosure`). Re-reading those here would relabel
+    pre-contract data as a common partial claim, which is exactly the
+    "missing legacy coverage is not evidence either way" rule
+    :mod:`klayout_tools.coverage` exists to apply identically everywhere.
+
+    Quoted, never graded on: a `klt signoff` verdict still rests on the
+    producer's own status token (see :func:`_non_passing_reason`). Until a
+    verb's Phase 2 adapter lands, that token can still be the kind's
+    unconditional success word on a run whose common coverage says
+    ``partial`` -- and when it is, this key is what makes the gap visible in
+    the report rather than silent, on both the ``checks[]`` and the
+    ``"met"``-citation paths.
+    """
+    skipped = coverage_skipped_work(envelope)
+    if not skipped:
+        return None
+    return {"reason": _REASON_PARTIAL_COVERAGE, "skipped": skipped}
+
+
+def _reports_partial_status(kind: str, envelope: dict[str, Any]) -> bool:
+    """Whether ``envelope``'s own status token is ``kind``'s *partial* one
+    (issue #2109) -- the producer applied the common rollup rule and landed
+    on :data:`~klayout_tools.coverage.RESULT_PARTIAL`.
+
+    Matched against :data:`_PARTIAL_STATUS_BY_KIND`, and for ``power``
+    inside ``em_verdict`` rather than at the top level, mirroring exactly
+    where :func:`_check_passed` reads each kind's success token from -- so
+    the two can never disagree about which field carries the verdict.
+    """
+    expected = _PARTIAL_STATUS_BY_KIND.get(kind)
+    if expected is None:
+        return False
+    if kind == "power":
+        em_verdict = envelope.get("em_verdict")
+        return isinstance(em_verdict, dict) and em_verdict.get("status") == expected
+    return envelope.get("status") == expected
+
+
+def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
+    """Why a non-passing envelope of a kind this item accepts is not
+    evidence: :data:`_REASON_PARTIAL_COVERAGE` or
+    :data:`_REASON_CHECK_FAILED` (issue #2109).
+
+    Real failures keep precedence by construction, not by ordering here: a
+    run that found a defect reports its *failure* token, never the partial
+    one (:func:`~klayout_tools.coverage.coverage_rollup` decides ``failed``
+    before it ever consults coverage), so the two cases are disjoint at the
+    producer and this function only has to read which one was reported.
+    """
+    if _reports_partial_status(kind, envelope):
+        return _REASON_PARTIAL_COVERAGE
+    return _REASON_CHECK_FAILED
 
 
 def _kind_is_accepted(check_kind: str, allowed_kinds: set[str] | None) -> bool:
@@ -3446,7 +3603,7 @@ def _grade_evidence(
         return "unmet", _REASON_CHECK_ERRORED, None
 
     if not _check_passed(check_kind, checked):
-        return "unmet", _REASON_CHECK_FAILED, None
+        return "unmet", _non_passing_reason(check_kind, envelope), None
 
     # The two refusals that apply only to a kind this item actually accepts --
     # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
@@ -3595,6 +3752,15 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     body_bias = _pex_body_bias_disclosure(resolution["kind"], resolution["envelope"])
     if body_bias is not None:
         citation["body_bias"] = body_bias
+    # Issue #2109: a citation whose cited run's common coverage reports
+    # skipped *requested* work carries that statement, so an item graded
+    # `"met"` off a pre-adapter producer -- one still reporting its
+    # unconditional success token on a partial run -- discloses the gap
+    # instead of hiding it. Present only for a v1 `coverage` block that says
+    # `partial`, and never consulted by any grading rule.
+    partial = _partial_coverage_disclosure(resolution["envelope"])
+    if partial is not None:
+        citation["coverage_qualification"] = partial
     return citation
 
 

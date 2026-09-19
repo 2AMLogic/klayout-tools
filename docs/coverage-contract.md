@@ -3,9 +3,11 @@
 `klt` distinguishes completed checks, requested work it skipped, work that
 was inapplicable, and execution it cannot measure. This is Phase 1 of
 [#1988](https://github.com/2AMLogic/klayout-tools/issues/1988), implemented in
-[#2108](https://github.com/2AMLogic/klayout-tools/issues/2108). The contract
-supports Phase 2's partial-success policy (#2109); Phase 1 changes zero-check
-success and unknown execution, without imposing that later policy.
+[#2108](https://github.com/2AMLogic/klayout-tools/issues/2108). Phase 1
+changed zero-check success and unknown execution; the common partial-success
+rollup rule that reads this schema is
+[#2109](https://github.com/2AMLogic/klayout-tools/issues/2109), documented in
+"The common rollup rule" below and consumed by the six per-path adapters.
 
 The machine schema is [coverage.schema.json](schemas/coverage.schema.json).
 The independent `coverage.schema_version` is `1`; the producing command's
@@ -58,6 +60,151 @@ also has requested skips. A full scope does not assert physical signoff for
 every possible rule or analysis: curated decks still disclose their limited
 rule scope, and antenna/EM adapters identify their scope explicitly.
 
+## The common rollup rule, version 2109
+
+This is Phase 2's single decision table, implemented once as
+`coverage_rollup()` in `klayout_tools/coverage.py` and applied identically by
+every producer and every consumer. Its purpose is that a partial result can
+never be rendered as an unconditional success by one path while another
+refuses it.
+
+Two inputs: the producer's own non-coverage outcome (`errored`, then
+`failed`), and `coverage_state()`. Eight rows, in precedence order:
+
+| Row | When | `reason` | Exit | `unconditional` | `complete` |
+| --- | --- | --- | --- | --- | --- |
+| `errored` | The run could not complete | `check_errored` | 4 | no | no |
+| `failed` | An executed check found a defect | `check_failed` | 3 | no | no |
+| `malformed` | The `coverage` block is present and structurally invalid or self-contradictory | `malformed_coverage` | 4 | no | no |
+| `unknown` | Execution extent cannot be measured (`known: false`) | `coverage_unknown` | 4 | no | no |
+| `zero` | Known zero checked work | `nothing_checked` | 4 | no | no |
+| `partial` | Every executed check succeeded **and** requested work was skipped | `partial_coverage` | 0 | no | no |
+| `legacy` | No common coverage block — the envelope makes no claim | `coverage_not_reported` | 0 | yes | no |
+| `full` | Known, nonempty checked work with no skipped request | — | 0 | yes | yes |
+
+**Real failures retain precedence.** `errored` and `failed` are decided
+before coverage is consulted at all, so a run that found a defect is reported
+as that defect and never masked by a coverage gap — and conversely a
+coverage gap is never dissolved by a clean-looking status. `errored` outranks
+`failed`: a run that did not complete cannot vouch for the findings it emitted.
+
+**Zero-check results cannot become success.** `zero`, `unknown` and
+`malformed` all exit 4 and reach no verdict. Nothing in this table promotes
+them; `unknown` in particular is not evidence of either zero or complete
+execution.
+
+**Unconditional success requires positively established complete applicable
+coverage.** Only `full` is `complete`. Successful checks plus a nonempty
+skip list are explicitly `partial`: a real, exit-0, reportable result that is
+*not* the verb's unconditional success. Inapplicable work is not a skipped
+request, so it never makes an otherwise complete run partial — the rule can
+be strict about skips precisely because it does not punish a verb for work
+the invocation never asked for.
+
+### Result, reason and status fields
+
+`CoverageRollup` exposes `result` (the row name), `reason` (the stable code
+above, `None` only for `full`), `exit_code`, `unconditional`, `complete`, and
+the derived `successful` (exit 0) / `reached_verdict` (not exit 4). Those
+names are the machine-readable contract; the human rendering is not.
+
+`rollup_status(rollup, success=..., partial=..., failure=...)` maps a row
+onto the verb's own status vocabulary. Verbs differ in what they call success
+(`clean` for `klt drc`, `pass` for most others) but must not differ in *when*
+they may say it, so the vocabulary is a parameter and the mapping is not.
+`partial` defaults to `f"{success}_partial"`, reproducing the `pass_partial`
+token #1997 already shipped rather than competing with it. The non-verdict
+rows keep the tokens already fixed for them: `not_checked` and
+`coverage_unknown`, both exit 4.
+
+A producer building its block through `build_check_coverage()` can never
+reach the `malformed` or `legacy` rows — that helper validates what it emits
+and always emits the common fields. Both rows exist for consumers reading
+external, hand-edited or pre-contract evidence.
+
+### Legacy and unknown policy, stated explicitly
+
+Missing common coverage (`legacy`) keeps grading exactly as the verb-specific
+rules that always governed it say, and is **never** counted as proof of
+completeness: `unconditional` is true, `complete` is false, and the row
+carries its own reason code `coverage_not_reported`. This is the migration
+policy, not an inference — it exists because retrofitting a refusal onto
+every historical artifact would invalidate evidence whose coverage nobody
+ever claimed, and it is why `complete` exists as a separate question from
+`unconditional`. A consumer that must assert positively established coverage
+reads `complete`, which no legacy envelope can satisfy. Each adapter shrinks
+the legacy set for its own path; none of them relabels it.
+
+`unknown` is the opposite policy and is unchanged from Phase 1: uninstrumented
+execution stays unknown rather than becoming either a gap or a guarantee.
+Neither policy permits renaming inapplicable work into skips, or skips into
+inapplicable work, to reach a nicer row.
+
+Optional HDL code-coverage percentages (Verilator's `line_pct`/`branch_pct`)
+share the `coverage` key name and nothing else. They classify as `legacy`
+and are never read as a complete, partial or zero *requested-check* claim.
+
+### Signoff qualification
+
+`klt signoff` applies two distinct gates from the same table:
+
+| Gate | Helper | Rows it stops |
+| --- | --- | --- |
+| Hard refusal — the evidence states no usable verdict | `coverage_refusal_reason()` | `zero`, `unknown`, `malformed` |
+| Qualification — the evidence is not an unconditional success | `coverage_qualification_reason()` | those three **and** `partial` |
+
+The hard refusal is unchanged by Phase 2: a partial run did check something,
+so refusing it outright would discard a real result rather than qualify it.
+What Phase 2 adds on the consumer side is that partial evidence can never be
+read as complete, and is never *silent*:
+
+- A producer that has adopted the rollup reports its partial token
+  (`clean_partial`, `pass_partial`, …). `klt signoff` does not count it as a
+  passing check, and names the reason `partial_coverage` rather than
+  `check_failed` — the cited run did not find a defect, it skipped requested
+  work. This is how the operator's distinction reaches signoff: the
+  producer's verdict carries it, and signoff grades that verdict.
+- Until a verb's adapter lands, its status can still be the unconditional
+  success word on a run whose common coverage says `partial`. Those
+  citations now carry `coverage_qualification` (the reason plus the skipped
+  work) on both the `checks[].detail` and `"met"`-citation paths, so the gap
+  is visible in the report instead of inferred by re-opening the envelope.
+  Item 3's verdict itself remains `status` alone, as
+  [design-evidence-tiers.md](design-evidence-tiers.md) item 3 specifies —
+  changing which item text grades on what is that document's decision, not
+  this contract's.
+
+### Migration contract for the per-path adapters
+
+Each of the six Phase 2 adapter issues (#2110, #2111, #2115, #2116, #2117,
+#2118) owns one public path and does the same four things:
+
+1. Build the v1 block with `build_check_coverage()`, classifying each piece
+   of work as `checked`, `skipped` (a *requested* check that did not run),
+   `inapplicable` (outside this invocation's assessment) or `unknown`. Do
+   not move work between those categories to reach a nicer row — but do
+   settle the classification deliberately, because it decides the row. The
+   open one today is curated DRC's `absent_input_layer`: Phase 1 records a
+   rule whose input layer is not drawn as a `skipped` request, which makes
+   an ordinary sky130 run on a small block `partial` (7 of 57 rules checked
+   on `examples/design-pipeline/06-layout.gds`). #2110 owns deciding whether
+   that is a requested-but-unchecked rule or work the invocation never made
+   applicable; this rule applies whichever answer it reaches.
+2. Derive the verdict with `coverage_rollup(envelope, failed=…, errored=…)`,
+   passing the path's own existing failure/error determination. Do not
+   re-derive precedence locally.
+3. Report `rollup_status(...)` as the top-level status and `rollup.exit_code`
+   as the exit code, keeping the verb's existing success/failure words as
+   the `success=`/`failure=` arguments. A verb whose partial token is
+   already shipped (`klt power`'s `pass_partial`, #1997) passes it
+   explicitly rather than renaming it.
+4. Close with the path's exact false-pass regression **and** a checked-success
+   control, per #1988's completion rule.
+
+Adapters do not change this table, the reason codes, the exit codes or the
+signoff gates. A path that needs a row this table does not have is a change
+to this document first.
+
 ## Producer and compatibility mapping
 
 | Public path | Checked work and exclusions | Phase 1 result and CLI |
@@ -105,8 +252,9 @@ does not retroactively require versioned coverage from every historical
 artifact. Optional functional-verification `coverage` percentages retain
 their separate Verilator meaning; executed test counts and all-skipped
 refusal (#2096/#2107) remain authoritative independently. Common partial
-coverage alone does not add a new refusal in Phase 1, and existing stricter
-verb-specific gates remain intact.
+coverage adds no new *hard refusal* — see "Signoff qualification" above for
+the qualification gate and disclosure Phase 2 adds instead — and existing
+stricter verb-specific gates remain intact.
 
 ## Public skip-capable inventory and remaining adapters
 
@@ -134,5 +282,6 @@ LEF abstraction do not assert a checking verdict merely because they omit
 irrelevant data. `equiv`'s unconstrained initial-state reasoning is a formal
 proof model, not skipped execution. Those word matches are not coverage
 adapters. `ring-check` already refuses an empty/uncheckable ring; its optional
-scopes can adopt the common format separately. This issue does not claim to
-complete all inventory adapters or the Phase 2 success policy.
+scopes can adopt the common format separately. Phase 1 did not claim to
+complete all inventory adapters; the rollup rule above is the Phase 2 success
+policy, and the six per-path adapters remain outstanding against it.
