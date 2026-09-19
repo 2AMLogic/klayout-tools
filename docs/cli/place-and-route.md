@@ -1802,6 +1802,8 @@ plain string" for the full enumeration and rationale.
 | `verilog_path` | string \| null | Additive field (issue #996). The **as-built** gate-level Verilog netlist — OpenROAD's own `write_verilog` output, written from the same linked design `write_def` dumped, so it describes the exact design state `def_path`/`gds_path` implement (CTS buffers, `repair_design`/`repair_timing` resizes, and `repair_antennas` diodes all included). Populated once the `"route"` stage has run (i.e. `stage_reached` is `"route"`); `null` otherwise, exactly like `def_path`. See "As-built netlist (`verilog_path`)" below. |
 | `spef_sta` | object \| null | Additive field (issue #948; `design_nets_*` added by #951). `null` unless `post_route_spef: true` **and** `stage_reached` is `"route"`. `spef_path` — the written SPEF file. `sdf_path` (issue #1002) — the written IEEE-1497 SDF file, or `null` unless `post_route_sdf: true`; see "SDF export". `worst_slack_ns`/`total_negative_slack_ns`/`setup_violation_count`/`hold_violation_count` — the `read_spef`-fed re-report, directly comparable to the top-level fields above (same design, same checkpoint, different parasitics source). `timing_status` (issue #1865) — the same constrained/unconstrained verdict the top-level field carries, computed from this block's own `worst_slack_ns`. `nets_annotated`/`nets_total` — SPEF-side correlation (`get_nets -quiet` against every SPEF-declared net name, run before `read_spef`); flat extraction also emits intra-standard-cell nodes the gate-level design never had, so this ratio cannot reach 1 by construction. `design_nets_annotated`/`design_nets_total` — design-side correlation: how many of the nets OpenSTA times the SPEF names at all; **check this pair before trusting the timing numbers**. `annotation_complete` — `true` only when the design-side pair is equal and non-zero. `annotation_warning` — `null` when complete, otherwise a sentence naming the shortfall and stating that the timing values are not a real-parasitics measurement to the extent annotation is missing. |
 | `power` | object | Additive field (issue #1091). Always present (never `null`) so a caller can tell a signal-only "route" result from a power-complete one without parsing the DEF for a missing `SPECIALNETS` section — see "Power delivery" below. `pdn`/`global_connect` — `false`/`false` unless `request.power` was given, in which case both are `true` (they always run together, at the end of the `"floorplan"` stage). `power_net`/`ground_net` — echo of the request (or its `"VDD"`/`"VSS"` defaults), `null` when `request.power` was omitted. `tapcell_master`/`endcap_master` — the per-library masters `tapcell` actually used, `null`/`null` when `request.power` was omitted. `filler_masters` — the per-library masters the `"route"` stage's own `filler_placement` call used; `[]` unless `request.power` was given **and** `stage_reached` is `"route"` (`filler_placement` is a `"route"`-stage-only call). **Not** a live placed-instance count — see "Power delivery" below. `straps`/`connects` — additive (issue #1133); `[]`/`[]` when `request.power` was omitted. `straps[].spacing_um` echoes each strap's applied `-spacing` value (`null` when not given). `connects[]` lists one entry per consecutive `power.straps` pair (regardless of whether the caller's own `request.power.connects[]` tuned it) with the `max_columns`/`ongrid`/`split_cuts` actually applied to that pair's `add_pdn_connect` call — `null` for any flag not applied. Lets a caller citing a real platform PDN config confirm whether its request reproduced that config's via-stack tuning or silently fell back to this command's plain defaults, without re-deriving it from the request document itself. `row_rail` — additive (issue #1442): the separate, `request.power`-*independent* row-rail obstruction fallback (`emitted`/`layer`/`power_net`/`ground_net`/`filler_masters`) — see "Row-rail fallback" below. `emitted` is `true` only once a run both omitted `request.power` *and* reached the `"route"` stage on a `cell_library` this defect affects (`sky130_fd_sc_hd` today). `filler_masters` mirrors `power.filler_masters`'s own shape: the per-library masters this fallback's own `filler_placement` call used, `[]` whenever `emitted` is `false`. |
+| `power_observation` | object | Observed placed physical-cell counts, PDN structures, evidence status, and missing-structure diagnostics from the produced DEF; see "Observed power structure" below. |
+| `warnings` | array\<object\> | `{code, message}` diagnostics for omitted power configuration, incomplete power structures, or unavailable physical evidence. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `netlist`. |
 
 ## As-built netlist (`verilog_path`, issue #996)
@@ -1958,15 +1960,47 @@ plain defaults.
 
 **Response `power` field: what it reports, and what it doesn't.** `pdn`/
 `global_connect`/`power_net`/`ground_net`/`tapcell_master`/`endcap_master`
-name what this run was *configured* with — not a live placed-instance
-count. OpenROAD reports real per-master instance counts only via a
-`report_design_area`/`get_cells -filter`-style query this command does not
-yet thread through its per-stage `-metrics <file>.json` mechanism (the same
-mechanism `stages[]`'s own metric fields already use); adding that is a
-natural, separable follow-up. `filler_masters` is `[]` unless `stage_reached`
-is `"route"` (`filler_placement` is a `"route"`-stage-only call) — it names
-the masters passed to that call, not how many filler instances OpenROAD
-actually placed.
+name what this run was configured with. `filler_masters` is `[]` unless
+`stage_reached` is `"route"`; it names the masters passed to insertion,
+not the number placed. Use `power_observation` for measured physical evidence.
+
+**Observed power structure (issue #2086).** Every response includes
+`power_observation` and `warnings`. The optional `request.power` API and exit
+codes stay the same. Omitting the power block now emits a
+`power_not_requested` warning, including when the sky130 row-rail fallback
+runs. A supplied recipe is checked against the produced design as well, so a
+partial or ineffective recipe cannot be mistaken for observed power delivery.
+
+| Field | Meaning |
+|-------|---------|
+| `power_observation.status` | `structure_present` when a routed DEF passes the structural checks below; `incomplete` when required structures are missing; `not_routed` when a place/CTS DEF passes checks appropriate to that stage; `unavailable` when the evidence cannot be read or parsed. |
+| `power_observation.source_def` | Plain-string path to the inspected final DEF or pre-route DEF. `null` at floorplan, which does not produce a DEF. |
+| `power_observation.counts` | Actual DEF `instances`, `placed_instances`, and placed `tap`, `endcap`, `filler`, and `tie` counts. `null` when the component evidence is unavailable. Only `PLACED`, `FIXED`, and `COVER` components contribute to role counts. |
+| `power_observation.special_nets` | Map keyed by the requested power/ground nets, or the platform's verified net names when power is omitted. Each reports `present`, `followpin_segments`, `upper_stripe_segments`, `via_count`, and `segments_by_layer` (layer → shape → segment count). `null` when that evidence is unavailable. |
+| `power_observation.issues` | Reasons for missing structure or unavailable evidence. |
+| `warnings` | Array of `{code, message}` records: `power_not_requested`, `power_delivery_incomplete`, or `power_evidence_unavailable`. Text output prints these as `WARNING [code]` alongside observed counts. JSON keeps them in the response. |
+
+Cell roles come from LEF `CLASS` declarations and the repository's verified
+platform master mappings. A gf180 `filltie` instance counts as a tap, not a
+constant-logic tie; tie classification uses `TIEHIGH`/`TIELOW` or the verified
+synthesis mappings. If no tie classification is available, `counts.tie` is
+`null`. Counts are never inferred from requested masters, estimated density,
+or an emitted `tapcell` / `filler_placement` command.
+
+The checks require each power net to have a `SPECIALNET`, `FOLLOWPIN` rail
+segments on the platform's rail layer, `STRIPE` segments above that layer in
+the technology LEF's routing-layer order, and placed PDN vias. They also require
+tap and endcap cells where the platform uses them, and fillers at the routed
+stage. Via counts describe placements (including `DO ... BY ...` arrays), not
+the number of via definitions. Empty but valid sections yield measured zeros;
+missing/truncated/unreadable evidence yields `null` and a diagnostic. If PDN
+parsing fails after component parsing succeeds, the measured cell counts remain
+available. Floorplan reports unavailable physical evidence; place/CTS counts
+remain usable and do not require fillers before their insertion stage.
+
+`structure_present` establishes only these structural observations. It does
+not certify power connectivity, DRC, IR drop, or macro-grid coverage. No platform
+PDN defaults are invented or silently applied.
 
 **Macro-specific PDN grids are out of scope for this v1.** `pdngen` here
 builds only the flat standard-cell grid (`define_pdn_grid` with no

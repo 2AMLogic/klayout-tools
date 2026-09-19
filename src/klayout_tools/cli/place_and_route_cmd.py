@@ -55,6 +55,8 @@ def _print_text(report: dict) -> None:
     print(f"estimated_power_mw: {report['estimated_power_mw']}")
     print(f"clock_skew_ns: {report['clock_skew_ns']}")
 
+    _print_power_observation(report)
+
     stages = report["stages"]
     if stages:
         print()
@@ -69,3 +71,23 @@ def _print_text(report: dict) -> None:
     print(f"def_path: {report['def_path']}")
     print(f"gds_path: {report['gds_path']}")
     print(f"verilog_path: {report['verilog_path']}")
+
+
+def _print_power_observation(report: dict) -> None:
+    observation = report.get("power_observation")
+    if observation:
+        print(f"power_observation: {observation['status']}")
+        counts = observation["counts"]
+        if counts is not None:
+            print(
+                "physical_cells: "
+                + ", ".join(f"{key}={value}" for key, value in counts.items())
+            )
+        for net, counts in (observation["special_nets"] or {}).items():
+            print(
+                f"  {net}: followpin_segments={counts['followpin_segments']}, "
+                f"upper_stripe_segments={counts['upper_stripe_segments']}, "
+                f"via_count={counts['via_count']}"
+            )
+    for warning in report.get("warnings", []):
+        print(f"WARNING [{warning['code']}]: {warning['message']}")

@@ -479,18 +479,11 @@ macro-specific PDN grids (``define_pdn_grid -macro``, with their own
 halo/orientation config) -- a design with hard macros needs a caller-supplied
 macro halo/grid spec this field does not yet expose, so ``pdngen`` here
 builds only the flat standard-cell grid (:func:`_power_delivery_lines`).
-Real per-instance tapcell/filler *placement counts* are also not reported in
-the additive ``power`` response field below (only which cell masters/net
-names this run was configured with) -- OpenROAD reports these only via
-``report_design_area``'s free-text summary or a custom
-``get_cells -filter``/``utl::metric_integer`` combination, neither of which
-this module currently threads through its existing per-stage ``-metrics
-<file>.json`` mechanism; both are natural, separable follow-ups (each would
-need the same "verified live" rigor the rest of this response contract
-carries, not a guess). Neither exclusion changes any existing field's
-behaviour, and both can be added later as additive request/response fields
-without a contract-shape change -- the same precedent every other v1
-exclusion in this module's docstring already follows.
+Actual placed-cell counts and PDN structure are reported separately in
+``power_observation`` from the produced DEF (issue #2086), with explicit
+warnings for omitted power configuration, incomplete structures, or
+unavailable evidence. The existing ``power`` object still describes the
+configured commands; it does not certify that those commands placed a grid.
 
 ``straps[].spacing_um`` and ``connects[]`` (issue #1133) close a further gap:
 sourcing strap geometry from a real platform's own PDN config (e.g. gf180's
@@ -597,6 +590,7 @@ from .place_and_route_gds_merge import (
     _SINGLE_PIN_NET_MARKER_HALF_DBU as _SINGLE_PIN_NET_MARKER_HALF_DBU,
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
+from .place_and_route_power_observation import observe_power
 from .place_and_route_reports import (
     count_route_drc_violations as _count_route_drc_violations,
 )
@@ -1757,11 +1751,8 @@ def run_place_and_route(
     # end of the `"floorplan"` stage -- every run reaches at least that
     # stage). `tapcell_master`/`endcap_master`/`filler_masters` name the
     # per-library masters :func:`_power_delivery_lines`/the `"route"` stage's
-    # own `filler_placement` call actually used -- **not** a live placed-
-    # instance count (OpenROAD reports that only via a
-    # `report_design_area`/`get_cells`-style query this module does not yet
-    # thread through its per-stage `-metrics` mechanism; see the module
-    # docstring's own "Scope deliberately excluded" note). `filler_masters`
+    # `filler_placement` call used. Actual DEF placement counts and PDN
+    # evidence live in the separate `power_observation` object. `filler_masters`
     # is `[]` unless this run actually reached the `"route"` stage (the
     # `"floorplan"`-stage `tapcell`/PDN Tcl always runs first, but
     # `filler_placement` is a `"route"`-stage-only call). `straps`/`connects`
@@ -1842,6 +1833,16 @@ def run_place_and_route(
             "connects": _pdn_connects_applied(power),
             "row_rail": row_rail_info,
         }
+
+    power_observation, power_warnings = observe_power(
+        def_path=def_path,
+        unrouted_def_path=unrouted_def_path,
+        stage=target_stage,
+        power=power,
+        cell_library=cell_library,
+        cell_lef=cell_lef,
+        tech_lef=tech_lef,
+    )
 
     last_stage = stages[-1]
     top_metrics = {key: last_stage.get(key) for key in _TOP_LEVEL_METRIC_KEYS}
@@ -1939,6 +1940,8 @@ def run_place_and_route(
         "spef_sta": spef_sta,
         # Additive field (issue #1091) -- see the construction comment above.
         "power": power_info,
+        "power_observation": power_observation,
+        "warnings": power_warnings,
         "provenance": provenance,
     }
 
