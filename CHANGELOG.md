@@ -331,6 +331,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   values (e.g. issue #1999's escaped-identifier mismatch), and is documented
   as such in [`docs/cli/signoff.md`](docs/cli/signoff.md)'s new "Envelope
   validation" section.
+- **Added**: a FastCap-backed **capacitance cross-validation oracle** for
+  `klt mom` (issue #2015, pairing #4 of tracking issue #2007). `klt mom`'s
+  Maxwell capacitance matrix came from one implementation
+  (`native/mom/src/solver.rs`) with only two checks on its numerics: analytic
+  closed forms, which exist for about four idealised shapes, and the NEC2++
+  cross-check, which covers the *full-wave* solver path and says nothing about
+  capacitance. `tests/test_mom_capacitance_oracle.py` now runs
+  [FastCap 2.0](https://github.com/ediloren/FastCap2) — the 1992 M.I.T. solver
+  `solver.rs` itself cites as the method it implements, with analytic
+  panel-to-panel integrals where this repo's core uses a point-charge kernel —
+  over the *same* conductor geometry, meshed to the same panel set, and
+  compares every Maxwell-matrix entry inside a stated band. Measured
+  agreement: **0.17%** on a coupled-line pair, **1.29%** on a three-conductor
+  shielded triple, **3.29%** on the flat-lamina parallel-plate fixture (whose
+  larger difference is a documented kernel accuracy gap, not a defect); two
+  seeded geometry defects — a 0.5 µm spacing error and a deleted ground plane
+  — move entries by 19% and 39%, an order of magnitude outside that band, and
+  both solvers size each defect to within 1.3% of each other. FastCap was chosen
+  over Palace (#2007's other candidate) because it is the same method class,
+  takes exactly the panel set `klt mom` already builds, and builds in ~7
+  seconds with no dependencies, so it gates every PR rather than needing its
+  own opt-in workflow. New provisioning: `scripts/install-fastcap.sh` (pinned,
+  checksummed `ediloren/FastCap2` `master` — M.I.T.'s permissive 2003
+  relicensing, not the `WRCad` branch's noncommercial one — plus
+  `scripts/patches/fastcap-2.0-modern-toolchain.patch`, two build-only hunks
+  for a 2020s C compiler), wired into `ci.yml`'s existing `Native engines
+  (Rust)` (`mom`) leg with a no-silent-skip gate. The module skips cleanly
+  when `fastcap` is absent. No `klt` runtime behaviour or JSON shape changes —
+  FastCap stays an oracle, never a runtime dependency. Methodology, the
+  FastCap-vs-Palace decision, measured results, the declared shared surface
+  and the unsupported cases: `docs/design/fastcap-oracle.md`.
 - **Added**: `klt erc --format json` now emits `provenance.spec` as
   `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
   the stackup/vias/nets/ties spec file the run was validated against.
