@@ -144,6 +144,16 @@ entries" below) — `[{"metric": <name>, "value": <number>, "higher_is_better":
 mechanism for free, since they grade evidence through this same per-check
 pass/fail logic.
 
+**Vacuous-verdict refusal (issue #1996).** Also independently of the
+kind-specific `status` rules above, a check fails if the envelope's own
+`coverage` block reports `nothing_checked: true` — the shared convention in
+[`../json-contract.md`](../json-contract.md) by which a verb declares that
+this run checked nothing at all, so its passing `status` says nothing about
+the design. Read generically from that convention, never hard-coded
+per-verb, so a future verb adopting it is picked up automatically. An
+envelope with no `coverage` block, or one reporting `false`, is unaffected.
+See "A check that checked nothing is refused, not reported" below.
+
 `klt signoff` never re-runs the underlying verb — like `klt report`, it is a
 pure, additive transform of JSON envelopes that already exist on disk, so it
 composes into a pipeline:
@@ -300,6 +310,73 @@ error. `klt lvs`'s own coverage-shaped disclosures (warnings-only
 mismatches, `power_connectivity: "unchecked"`) get no equivalent treatment
 for item 4 — that, and whether a non-empty gap should ever change item 3's
 verdict, are open questions #2002 deliberately left unanswered.
+
+### A check that checked nothing is refused, not reported
+
+The two surfacing phases above (`coverage`, `body_bias`) deliberately report
+a **partial** coverage gap without changing any verdict. This one is
+different, and enforces.
+
+Several verbs can report a passing top-level verdict on a run that measured
+**nothing at all** — not a gap in the coverage, the total absence of it:
+
+| Verb | How | Reason code |
+| ---- | --- | ----------- |
+| `klt drc` (`--engine klayout`) | A PDK-native deck whose whole rule set is gated behind a `--deck-var` this run never set. The deck completes and writes a well-formed, **empty** report: `status: "clean"`, `violation_count: 0`. | `deck_reported_no_rules` |
+| `klt drc` (`--engine curated`) | Every deck rule skipped because its layer(s) are absent from the stream, or a deck that declares no rules at all. | `all_rules_skipped`, `deck_has_no_rules` |
+| `klt sim` | A PVT corner matrix that expanded to zero corners, or a request whose every `measurements[].limits` object used keys `klt sim` does not apply (only `min`/`max` are read). | `empty_corner_matrix`, `unrecognized_limit_keys` |
+| `klt pex` | A run that produced no `delta[]` row at all, so no schematic-vs-extracted comparison was ever performed. | `no_delta_rows` |
+
+Those verbs now declare it themselves, via the shared
+`coverage.nothing_checked` / `coverage.nothing_checked_reasons` convention
+defined once in [`../json-contract.md`](../json-contract.md). `klt signoff`
+reads it — through that convention's own accessor, so the rule is applied
+identically everywhere — and **refuses the evidence**:
+
+| Mode | Effect |
+| ---- | ------ |
+| Envelope aggregation | That check's `passed` is `false` whatever its own `status` says, and `checks[].detail.nothing_checked_reasons` names why |
+| Tier-verdict report (`--manifest`) | The item renders `"unmet"` with `reason: "nothing_checked"` and no citation |
+| Fleet roll-up (`--fleet`) | Inherited: the block's `blocking_item` reports that item and reason |
+
+```
+$ klt signoff drc.json --format text
+status: fail
+checks: 0/1 passed
+
+[FAIL] drc      drc.json  status=clean (nothing checked: deck_reported_no_rules)
+```
+
+**Why this one enforces.** A coverage *gap* (`rules_skipped`, an unbiased
+device body) is a partial result whose cost to a claim is a judgement this
+command cannot make — hence "report, not enforce" above. `nothing_checked`
+is the total case: the cited artifact contains no statement about the design
+whatsoever, so there is nothing for a reviewer to weigh. Letting it back a
+`"met"` item would mean an empty report is indistinguishable from a real
+one, which is exactly the gap this closes.
+
+**`nothing_checked` is never a synonym for partial coverage.** A run that
+checked one rule out of eighty reports `false`; only a run that checked zero
+reports `true`. A `klt pex` comparison that ran and found every row within
+tolerance emits one `delta[]` row per compared pair, so it is `false` too —
+"nothing changed" and "nothing was compared" are structurally distinct in
+that verb's report, not conflated.
+
+**Absence is not evidence.** An envelope with no `coverage` block, one
+predating the convention, or one reporting `nothing_checked: false` all
+grade exactly as they did before: the refusal fires only on an explicit
+`true`. `detail.nothing_checked_reasons` is likewise present only for a
+refused check, never as an empty list on a passing one. A reason code this
+`klt` build does not recognise (a newer producer) is carried through
+verbatim and still refuses.
+
+`"nothing_checked"` is grouped with the *"no runnable check proves this
+item"* reasons (`wrong_kind`, `not_post_layout`), never with
+`check_failed` — per issue #826's invariant, the cited check did not fail on
+its own terms, it simply measured nothing, and the fix is to re-run it with
+something to check. Where both apply, the more actionable reason wins:
+`check_failed` (the run did fail) and `wrong_kind` ("cite a different
+artifact") both take precedence over `nothing_checked`.
 
 ### Device-body bias is reported, not graded
 
@@ -1031,6 +1108,7 @@ actually ran and failed):
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), and **every** item rejects a `"power"` citation. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"not_post_layout"`       | yes | The evidence resolved to a recognised, *passing* envelope **of a kind this item accepts**, but that run is not the post-layout run the item requires — today, a `klt functional-verification` regression cited for item 7 that ran without SDF back-annotation (`environment.sdf` is `null`), i.e. the pre-layout zero-delay simulation item 7's own checklist text excludes. Deliberately distinct from `"wrong_kind"`: the artifact *is* the right one, it just has to be re-run against the post-route netlist with SDF timing. |
+| `"nothing_checked"`       | yes | The evidence resolved to a recognised, *passing* envelope of a kind this item accepts, whose own `coverage` block states that the run checked **nothing** (`coverage.nothing_checked: true`, issue #1996) — a DRC deck gated behind an unset `--deck-var`, a `klt sim` corner matrix that expanded to zero corners, a `klt pex` run with no `delta[]` row. The cited check did not fail on its own terms; it measured nothing, so its passing `status` says nothing about the design. See "A check that checked nothing is refused, not reported" above. |
 
 ## Fleet roll-up (`--fleet`)
 
@@ -1241,7 +1319,7 @@ or no two inputs share a comparable field at all (e.g. a single-input run).
 | `kind`        | string              | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"power"`, `"generic"`, or `"error"` — see "What it does" above. |
 | `status`      | string \| null      | The source envelope's own `status` field, or `"error"` for an `error`-kind check.         |
 | `passed`      | boolean             | Whether this check counts toward `passed_count`/`failed_count` — see "What it does".      |
-| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. |
+| `detail`      | object              | A small, kind-specific excerpt of the source envelope (not the full `violations[]`/`mismatches[]`/`devices[]`/`corners[]` detail — read the original file for that). Gains a `critical_metric_blockers` key (issue #1850, absent when there are none) naming any registered `critical: true` metric that failed its declared polarity — see "Critical-metric consumption" above. An `lvs`-kind check's detail also carries `power_connectivity_status` (issue #1965) — the source envelope's `power_connectivity.status`, or `null` when that key is absent entirely (pre-#1964 evidence) — see "`klt lvs` power/ground connectivity" above. A `drc`-kind check's detail gains a `coverage` key (issue #2002, absent when the source envelope carries no `coverage` block) quoting its `layers_in_stream_without_rules`/`rules_skipped`/`deck_scope` — see "DRC coverage is reported, not graded" above. Any kind's detail gains a `nothing_checked_reasons` key (issue #1996) when the source envelope's `coverage` block reports `nothing_checked: true` — the same condition that forces `passed: false`; absent for every envelope that makes no such statement. See "A check that checked nothing is refused, not reported" above. |
 | `provenance`  | object \| null      | The source envelope's own `provenance` block, echoed verbatim (`null` for an `error`-kind check, which carries none). |
 
 ## Exit codes and errors

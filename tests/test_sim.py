@@ -1034,6 +1034,101 @@ def test_evaluate_limits_pass_min_only():
 
 
 # --------------------------------------------------------------------------- #
+# `coverage` / `nothing_checked` (issue #1996)
+# --------------------------------------------------------------------------- #
+
+
+def test_build_coverage_empty_corner_matrix_reports_nothing_checked():
+    """A corner matrix that expanded to zero corners leaves every counter at
+    `0`, so the aggregate verdict falls through to `"pass"` -- a verdict
+    about nothing at all. The envelope now says so in a field."""
+    coverage = sim._build_coverage([{"name": "vout", "limits": {"max": 1.8}}], [])
+
+    assert coverage["corners_simulated"] == 0
+    assert coverage["nothing_checked"] is True
+    assert coverage["nothing_checked_reasons"] == ["empty_corner_matrix"]
+
+
+def test_build_coverage_unrecognized_limit_keys_report_nothing_checked():
+    """`_evaluate_limits` reads only `min`/`max`, so a typo'd bound is scored
+    as no bound at all and passes unconditionally. When *no* measurement ends
+    up with a usable bound, the run graded nothing."""
+    coverage = sim._build_coverage(
+        [{"name": "vout", "limits": {"maximum": 1.8, "minimum": 1.6}}],
+        [{"corner_id": "tt/1.800V/27C"}],
+    )
+
+    assert coverage["measurements_with_limits"] == 0
+    assert coverage["unrecognized_limit_keys"] == [
+        {"measurement": "vout", "keys": ["maximum", "minimum"]}
+    ]
+    assert coverage["nothing_checked"] is True
+    assert coverage["nothing_checked_reasons"] == ["unrecognized_limit_keys"]
+
+
+def test_build_coverage_one_typo_beside_a_real_limit_is_partial_not_vacuous():
+    """`nothing_checked` is never a synonym for *partial* coverage: a typo'd
+    bound alongside a well-formed one is still disclosed in
+    `unrecognized_limit_keys`, but the run did grade something."""
+    coverage = sim._build_coverage(
+        [
+            {"name": "vout", "limits": {"maximum": 1.8}},
+            {"name": "gain", "limits": {"min": 20.0}},
+        ],
+        [{"corner_id": "tt/1.800V/27C"}],
+    )
+
+    assert coverage["measurements_with_limits"] == 1
+    assert coverage["unrecognized_limit_keys"] == [
+        {"measurement": "vout", "keys": ["maximum"]}
+    ]
+    assert coverage["nothing_checked"] is False
+    assert coverage["nothing_checked_reasons"] == []
+
+
+def test_build_coverage_a_characterisation_sweep_is_not_flagged():
+    """Declaring no `limits` at all is a stated intent (characterise and
+    report), not a silent miss -- `measurements_with_limits` lets a reader
+    draw that distinction without the run being called vacuous."""
+    coverage = sim._build_coverage([{"name": "vout"}], [{"corner_id": "tt/1.800V/27C"}])
+
+    assert coverage["measurements_declared"] == 1
+    assert coverage["measurements_with_limits"] == 0
+    assert coverage["unrecognized_limit_keys"] == []
+    assert coverage["nothing_checked"] is False
+    assert coverage["nothing_checked_reasons"] == []
+
+
+def test_build_coverage_both_reasons_can_apply_to_one_run():
+    """More than one reason code can apply; both are reported, in the verb's
+    own declared order."""
+    coverage = sim._build_coverage([{"name": "vout", "limits": {"maximum": 1.8}}], [])
+
+    assert coverage["nothing_checked"] is True
+    assert coverage["nothing_checked_reasons"] == [
+        "empty_corner_matrix",
+        "unrecognized_limit_keys",
+    ]
+
+
+def test_build_coverage_a_real_graded_run_is_not_nothing_checked():
+    """The control: real corners, a recognised bound -- an earned verdict."""
+    coverage = sim._build_coverage(
+        [{"name": "vout", "limits": {"min": 1.6, "max": 1.8}}],
+        [{"corner_id": "tt/1.800V/27C"}, {"corner_id": "ss/1.620V/-40C"}],
+    )
+
+    assert coverage == {
+        "corners_simulated": 2,
+        "measurements_declared": 1,
+        "measurements_with_limits": 1,
+        "unrecognized_limit_keys": [],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Measurement rollup (worst-case selection, aggregate status)
 # --------------------------------------------------------------------------- #
 
@@ -5119,10 +5214,23 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "errored",
         "metrics",
         "environment",
+        # Issue #1996: the shared vacuous-verdict convention
+        # (`klayout_tools.coverage`) -- always present, purely additive.
+        "coverage",
         "provenance",
         "measurements",
         "corners",
     }
+    assert set(data["coverage"].keys()) == {
+        "corners_simulated",
+        "measurements_declared",
+        "measurements_with_limits",
+        "unrecognized_limit_keys",
+        "nothing_checked",
+        "nothing_checked_reasons",
+    }
+    assert data["coverage"]["corners_simulated"] == data["corner_count"]
+    assert isinstance(data["coverage"]["nothing_checked"], bool)
     # Issue #1849: `metrics` re-keys the corner_count/passed/failed/errored
     # rollup under its declared METRICS2.1-style names, additive alongside
     # the existing fields.

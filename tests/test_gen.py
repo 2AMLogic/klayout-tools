@@ -261,8 +261,66 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
         "navigable_regions",
         "drc_hints",
         "warnings",
+        "provenance",
     }
     assert data["device_count"] == 2
+
+
+def test_generate_report_includes_provenance_block(tmp_path, pdk_root):
+    """Issue #2035: `klt gen`'s report must carry the same shared
+    `provenance` block (klt version + KLayout engine version) every other
+    verb's report already carries, built via `build_provenance(pdk=...)`.
+    A generator request involves no rule/model deck and no single input
+    layout stream, so `deck`/`input` stay `None` -- matching `klt lvs`
+    against a pre-extracted netlist."""
+    output = tmp_path / "res.gds"
+    report = generate(
+        {
+            "generator": "resistor_strip",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    provenance = report["provenance"]
+    assert set(provenance) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
+    assert provenance["klt_version"]
+    assert provenance["klayout_version"]
+    # No rule/model deck and no single input layout stream for this verb.
+    assert provenance["deck"] is None
+    assert provenance["input"] is None
+    # `provenance.pdk` must agree with the report's own top-level `pdk`.
+    assert set(provenance["pdk"]) == {"name", "source", "version"}
+    assert provenance["pdk"]["name"] == report["pdk"]["variant"]
+    assert provenance["pdk"]["version"] == report["pdk"]["version"]
+    assert provenance["pdk"]["source"]
+
+
+def test_generate_provenance_pdk_resolves_via_env_fallback(
+    tmp_path, pdk_root, monkeypatch
+):
+    """Issue #2035, edge case: `provenance.pdk` must still resolve when the
+    PDK comes from the `$PDK`/`$PDK_ROOT` env-var fallback rather than an
+    explicit request `pdk` block -- the same fallback `generate()`'s own
+    docstring describes."""
+    monkeypatch.setenv("PDK", "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    output = tmp_path / "res_env.gds"
+    report = generate(
+        {
+            "generator": "resistor_strip",
+            "options": {"output": str(output)},
+        }
+    )
+
+    assert report["provenance"]["pdk"]["name"] == "sky130A"
+    assert report["provenance"]["pdk"]["name"] == report["pdk"]["variant"]
 
 
 def test_cli_default_format_is_text(tmp_path, pdk_root, capsys):

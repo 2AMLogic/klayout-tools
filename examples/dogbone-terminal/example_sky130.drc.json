@@ -37,6 +37,15 @@
       "67/20"
     ],
     "layers_in_stream_without_rules": [],
+    "rules_checked": [
+      "diff.enclosing.licon.1",
+      "diff.width.1",
+      "li1.enclosing.licon1.1",
+      "li1.space.1",
+      "li1.width.1",
+      "poly.enclosing.licon.1",
+      "poly.width.1"
+    ],
     "rules_skipped": [
       "capm.enclosing.via3.1",
       "capm.separation.via3.1",
@@ -108,6 +117,8 @@
       "via2",
       "via3",
       "via4"
-    ]
+    ],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
   }
 }

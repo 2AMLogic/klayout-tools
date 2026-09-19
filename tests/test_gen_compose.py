@@ -1979,6 +1979,63 @@ def test_compose_row_places_two_real_blocks(tmp_path, pdk_root):
     assert offsets_seen == expected
 
 
+def test_compose_report_includes_provenance_block(tmp_path, pdk_root):
+    """Issue #2035: `klt gen-compose`'s report must carry the same shared
+    `provenance` block (klt version + KLayout engine version) every other
+    verb's report already carries, built via `build_provenance(pdk=...)`.
+    A compose request involves no rule/model deck and no single input
+    layout stream (it composes parameters plus block sub-reports, not a
+    layout file), so `deck`/`input` stay `None` -- matching `klt lvs`
+    against a pre-extracted netlist."""
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1", num=2)
+
+    output = tmp_path / "composed_provenance.gds"
+    report = compose(
+        {
+            "schema": gen_compose.REQUEST_SCHEMA,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": r1}],
+            "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+            "options": {"cell_name": "composed_provenance_0", "output": str(output)},
+        }
+    )
+
+    provenance = report["provenance"]
+    assert set(provenance) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
+    assert provenance["klt_version"]
+    assert provenance["klayout_version"]
+    # No rule/model deck and no single input layout stream for this verb.
+    assert provenance["deck"] is None
+    assert provenance["input"] is None
+    # `provenance.pdk` must agree with the report's own top-level `pdk`.
+    assert set(provenance["pdk"]) == {"name", "source", "version"}
+    assert provenance["pdk"]["name"] == report["pdk"]["variant"]
+    assert provenance["pdk"]["version"] == report["pdk"]["version"]
+    assert provenance["pdk"]["source"]
+
+    # A compose report is itself reusable as a `blocks[].generator_report`
+    # input to a further compose call -- the new key must not break that.
+    nested = compose(
+        {
+            "schema": gen_compose.REQUEST_SCHEMA,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": report}],
+            "placement": {"strategy": "row", "order": ["b1"], "spacing_um": 1.0},
+            "options": {
+                "cell_name": "composed_provenance_1",
+                "output": str(tmp_path / "composed_provenance_1.gds"),
+            },
+        }
+    )
+    assert nested["provenance"]["pdk"]["name"] == "sky130A"
+
+
 def test_compose_output_is_byte_reproducible(tmp_path, pdk_root):
     """Two `compose()` runs with identical blocks/placement/inputs must
     produce byte-identical GDS streams (#320), matching `klt gen`'s
@@ -14484,3 +14541,283 @@ def test_compose_rejects_higher_plane_ring_escape_when_pad_lands_inside_ring_tra
 
     assert report["unrouted_nets"] == ["N1"]
     assert "closed guard/collector ring" in report["nets"][0]["legs"][0]["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2072: a via-drop ladder's intermediate landing pads must clear each
+# landing layer's own minimum-area DRC rule, not just the fixed
+# `_VIA_LANDING_SIZE_UM` (0.42um, 0.1764um^2) square -- reproduced against a
+# real `klt gen-compose` output (a `res_array` li1 pin routed to a `bond_pad`
+# `top_metal` (met5) pin, forcing the ladder through met3/met4 as isolated
+# intermediate hops) per the issue's own repro recipe.
+# --------------------------------------------------------------------------- #
+
+
+def test_landing_pad_side_um_for_layer_floors_to_the_deck_area_rule(pdk_root):
+    # met1/met2's own area rules (0.083/0.0676um^2) are already below
+    # `_VIA_LANDING_SIZE_UM`'s own 0.1764um^2 -- the pre-#2072 fixed pad
+    # stays unchanged there. met3/met4 (0.240um^2 each) and met5 (4.0um^2)
+    # all exceed it, so the resolved side must grow to clear them.
+    from klayout_tools.gen_compose_routing import _landing_pad_side_um_for_layer
+
+    variant = "sky130A"
+    assert _landing_pad_side_um_for_layer(variant, (68, 20)) == pytest.approx(0.42)
+    assert _landing_pad_side_um_for_layer(variant, (69, 20)) == pytest.approx(0.42)
+    # met3.area.1 / met4.area.1: 0.240um^2 -> side sqrt(0.240) ~= 0.4899um.
+    import math
+
+    met3_side = _landing_pad_side_um_for_layer(variant, (70, 20))
+    assert met3_side == pytest.approx(math.sqrt(0.240))
+    assert met3_side > 0.42
+    met4_side = _landing_pad_side_um_for_layer(variant, (71, 20))
+    assert met4_side == pytest.approx(math.sqrt(0.240))
+    # met5.area.1: 4.0um^2 -> side 2.0um.
+    met5_side = _landing_pad_side_um_for_layer(variant, (72, 20))
+    assert met5_side == pytest.approx(2.0)
+
+
+def test_landing_pad_side_um_for_layer_ignores_holes_area_rule(pdk_root):
+    # met1.holes_area.1 (0.14um^2, `derived_layer` set, checks an interior
+    # void of the merged region -- never satisfiable by drawing a bigger
+    # *solid* square) must not be picked up as if it were met1.area.1
+    # (0.083um^2) -- the plain, non-derived area rule is the only one that
+    # legitimately floors a solid pad's own side.
+    from klayout_tools.gen_compose_routing import _min_area_um2_for_layer
+
+    result = _min_area_um2_for_layer("sky130A", (68, 20))
+    assert result is not None
+    threshold_um2, rule_id = result
+    assert rule_id == "met1.area.1"
+    assert threshold_um2 == pytest.approx(0.083)
+
+
+def test_compose_bond_pad_via_ladder_landing_pads_clear_deck_area_floors(
+    tmp_path, pdk_root
+):
+    # Issue #2072's own repro: a `res_array` li1 pin routed on `"metal"`
+    # (li1) to a `bond_pad`'s `top_metal` (met5) pin forces the via-drop
+    # ladder through li1->met1->met2->met3->met4->met5 (sky130's curated
+    # deck's own metals[]/vias[] stack, `_resolve_via_drop_layer`). Nothing
+    # else the composition draws lands on met3/met4 at that point -- the
+    # ladder's own intermediate landing pads there are genuinely isolated,
+    # so a fixed 0.42um pad reproduces `met3.area.1`/`met4.area.1`
+    # (0.1764um^2 < 0.240um^2 each) on real `klt gen-compose` +
+    # `klt drc --deck sky130` output before the fix.
+    res0 = _gen_block(tmp_path, pdk_root, "res_array", "res0")
+    bond0 = _gen_block(tmp_path, pdk_root, "bond_pad", "bond0")
+
+    output = tmp_path / "bond_via_ladder.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "res0", "generator_report": res0},
+                {"id": "bond0", "generator_report": bond0},
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["res0", "bond0"],
+                "origins_um": {
+                    "res0": {"x": 0.0, "y": 0.0},
+                    "bond0": {"x": 60.0, "y": 0.0},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "PADNET",
+                    "pins": [
+                        {"block": "res0", "port": "R3_B"},
+                        {"block": "bond0", "port": "PAD"},
+                    ],
+                }
+            ],
+            "routing": {"layer_role": "metal", "width_um": 0.17},
+            "options": {"cell_name": "bond_via_ladder", "output": str(output)},
+        }
+    )
+
+    assert report["unrouted_nets"] == []
+    assert report["nets"][0]["routed"] is True
+
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    top = layout.cell("bond_via_ladder")
+    dbu = layout.dbu
+
+    # met3 (70/20) and met4 (71/20) each carry exactly the ladder's own
+    # isolated intermediate landing pad at this net's via-drop point --
+    # confirm its drawn area alone already clears each layer's own
+    # met3.area.1/met4.area.1 threshold (0.240um^2), not merely a merged
+    # union with something else.
+    for layer_num, min_area_um2 in ((70, 0.240), (71, 0.240)):
+        region = kdb.Region(top.shapes(layout.layer(layer_num, 20)))
+        region.merge()
+        polygons = list(region.each())
+        assert polygons, f"expected drawn geometry on {layer_num}/20"
+        for polygon in polygons:
+            assert polygon.area() * (dbu**2) >= min_area_um2 - 1e-9
+
+    # `klt drc --deck sky130` no longer reports any of the met1-met5
+    # minimum-area rules the issue's own repro table names (met4.area.1 is
+    # the deck's own additional level beyond the issue's original table,
+    # found by this same repro). `met4.enclosing.via4.1` is a *distinct*,
+    # not-yet-fixed root cause (the landing pad's own enclosure of an
+    # upsized via4 cut, a different rule *kind* than area -- issue #2072's
+    # PR files it as a separate follow-up) and is deliberately not asserted
+    # clean here.
+    drc_report = run_drc(str(output), "sky130")
+    area_rule_ids = {
+        "met1.area.1",
+        "met2.area.1",
+        "met3.area.1",
+        "met4.area.1",
+        "met5.area.1",
+    }
+    violated_area_rules = area_rule_ids & set(drc_report["rule_counts"])
+    assert not violated_area_rules, drc_report["violations"]
+
+
+# --------------------------------------------------------------------------- #
+# blocks[].source_path / blocks[].source_digest -- input provenance (#2065)
+# --------------------------------------------------------------------------- #
+
+
+def _write_boxed_gds(path, cell_name, boxes_um, order=None):
+    """Write `cell_name` holding one li1 (67/20) rectangle per entry of
+    `boxes_um` (each `(x0, y0, x1, y1)` in um), inserted in `order`.
+
+    `order` exists to produce two on-disk streams that hold *the same*
+    geometry written in a different element order -- the byte-different,
+    geometrically-identical case `source_digest` (#2065) has to see through,
+    and which a raw-byte hash cannot.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li1 = layout.layer(67, 20)
+    cell = layout.create_cell(cell_name)
+    for index in order if order is not None else range(len(boxes_um)):
+        x0, y0, x1, y1 = boxes_um[index]
+        cell.shapes(li1).insert(
+            kdb.Box(
+                int(round(x0 / layout.dbu)),
+                int(round(y0 / layout.dbu)),
+                int(round(x1 / layout.dbu)),
+                int(round(y1 / layout.dbu)),
+            )
+        )
+    layout.write(str(path))
+    return str(path)
+
+
+def _compose_one_cell_block(tmp_path, pdk_root, gds, cell_name, tag):
+    """Compose the single library cell `cell_name` out of `gds`, and return
+    the response's one `blocks[]` entry."""
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "u1", "cell": {"gds_path": gds, "cell_name": cell_name}}],
+            "placement": {"strategy": "row", "order": ["u1"], "spacing_um": 1.0},
+            "options": {
+                "cell_name": f"{tag}_0",
+                "output": str(tmp_path / f"{tag}.gds"),
+            },
+        }
+    )
+    return report["blocks"][0]
+
+
+def test_compose_blocks_report_source_path_and_digest_for_both_block_kinds(
+    tmp_path, pdk_root
+):
+    # #2065: a compose.json has to say what it was built *from*. Both block
+    # kinds -- a `generator_report` block (a klt verb's own output) and a
+    # `cell` block (a pre-existing library cell) -- resolve a stream path, so
+    # both report it plus a digest of that stream's geometry.
+    generated = _gen_block(tmp_path, pdk_root, "mos_array", "tail_0", rows=1, cols=2)
+    lib = _write_boxed_gds(tmp_path / "lib.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "gen", "generator_report": generated},
+                {"id": "lib", "cell": {"gds_path": lib, "cell_name": "lib_inv"}},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["gen", "lib"],
+                "spacing_um": 1.0,
+            },
+            "options": {
+                "cell_name": "prov_top_0",
+                "output": str(tmp_path / "prov_top.gds"),
+            },
+        }
+    )
+
+    by_id = {block["id"]: block for block in report["blocks"]}
+    assert by_id["gen"]["source_path"] == generated["gds_path"]
+    assert by_id["lib"]["source_path"] == lib
+    for block in report["blocks"]:
+        assert block["source_digest"].startswith("sha256:")
+        assert len(block["source_digest"]) == len("sha256:") + 64
+    # Two genuinely different inputs, so two different digests.
+    assert by_id["gen"]["source_digest"] != by_id["lib"]["source_digest"]
+
+
+def test_compose_source_digest_is_stable_across_a_byte_different_rewrite(
+    tmp_path, pdk_root
+):
+    # The whole point of #2065: an input re-run that emits geometrically
+    # identical output still writes different *bytes* (BGNLIB/BGNSTR
+    # timestamps, plus whatever order the writer happened to emit elements
+    # in). A raw-byte hash calls that drift; `source_digest` must not.
+    boxes = [(0.0, 0.0, 2.0, 1.2), (3.0, 0.0, 5.0, 1.2)]
+    first = _write_boxed_gds(tmp_path / "a.gds", "lib_inv", boxes, order=[0, 1])
+    second = _write_boxed_gds(tmp_path / "b.gds", "lib_inv", boxes, order=[1, 0])
+
+    from klayout_tools._provenance import sha256_file
+
+    assert sha256_file(first) != sha256_file(second), (
+        "fixture is not exercising the case: the two streams are byte-identical"
+    )
+
+    first_block = _compose_one_cell_block(tmp_path, pdk_root, first, "lib_inv", "one")
+    second_block = _compose_one_cell_block(tmp_path, pdk_root, second, "lib_inv", "two")
+
+    assert first_block["source_path"] != second_block["source_path"]
+    assert first_block["source_digest"] == second_block["source_digest"]
+
+
+def test_compose_source_digest_differs_when_the_input_geometry_differs(
+    tmp_path, pdk_root
+):
+    # The other half of the contract: equality has to actually mean something.
+    # One rectangle 0.1um wider is real drift and must show up as a different
+    # digest.
+    first = _write_boxed_gds(tmp_path / "a.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+    second = _write_boxed_gds(tmp_path / "b.gds", "lib_inv", [(0.0, 0.0, 2.1, 1.2)])
+
+    first_block = _compose_one_cell_block(tmp_path, pdk_root, first, "lib_inv", "one")
+    second_block = _compose_one_cell_block(tmp_path, pdk_root, second, "lib_inv", "two")
+
+    assert first_block["source_digest"] != second_block["source_digest"]
+
+
+def test_compose_source_digest_is_null_when_it_cannot_be_computed(
+    tmp_path, pdk_root, monkeypatch
+):
+    # Never fabricated (the `_provenance` convention): a stream that cannot be
+    # digested reports `null` rather than some placeholder a consumer would
+    # compare against.
+    lib = _write_boxed_gds(tmp_path / "lib.gds", "lib_inv", [(0.0, 0.0, 2.0, 1.2)])
+    monkeypatch.setattr(gen_compose, "layout_geometry_digest", lambda path: None)
+
+    block = _compose_one_cell_block(tmp_path, pdk_root, lib, "lib_inv", "nodigest")
+
+    assert block["source_path"] == lib
+    assert block["source_digest"] is None

@@ -108,6 +108,40 @@ DRC_CLEAN_NO_COVERAGE_ENVELOPE = {
     key: value for key, value in DRC_CLEAN_ENVELOPE.items() if key != "coverage"
 }
 
+#: Issue #1996: the vacuous case -- a PDK-native deck whose whole rule set
+#: was gated behind a `--deck-var` this run never set. The deck completed and
+#: wrote a well-formed, *empty* report, so `status` is `"clean"` and
+#: `violation_count` is `0`, exactly as for a real clean run; only
+#: `coverage.nothing_checked` distinguishes the two.
+DRC_CLEAN_NOTHING_CHECKED_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": {
+        "deck_layers": [],
+        "layers_checked": [],
+        "rules_checked": [],
+        "layers_in_stream_without_rules": [],
+        "rules_skipped": [],
+        "voltage_domain_warnings": [],
+        "deck_scope": [],
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["deck_reported_no_rules"],
+    },
+}
+
+#: Issue #1996's control: the same envelope shape, from a deck that actually
+#: ran its rules. Carries the convention's keys with `nothing_checked: false`
+#: -- a *positive* statement of coverage, which must grade exactly like a
+#: pre-convention envelope that makes no statement at all.
+DRC_CLEAN_SOMETHING_CHECKED_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": {
+        **DRC_CLEAN_ENVELOPE["coverage"],
+        "rules_checked": ["poly.width.1", "poly.space.1"],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    },
+}
+
 LVS_MATCH_ENVELOPE = {
     "schema_version": 1,
     "engine": "klayout",
@@ -348,6 +382,23 @@ SIM_FAIL_ENVELOPE = {
     "failed": 1,
 }
 
+#: Issue #1996: a `klt sim` request whose PVT corner matrix expanded to zero
+#: corners. Every counter is `0` and the aggregate verdict falls through to
+#: `"pass"` -- a verdict about nothing at all.
+SIM_EMPTY_CORNER_MATRIX_ENVELOPE = {
+    **SIM_PASS_ENVELOPE,
+    "corner_count": 0,
+    "passed": 0,
+    "coverage": {
+        "corners_simulated": 0,
+        "measurements_declared": 0,
+        "measurements_with_limits": 0,
+        "unrecognized_limit_keys": [],
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["empty_corner_matrix"],
+    },
+}
+
 #: `klt yield` (issue #816, Phase 1a of epic #710) JSON report shape, per
 #: docs/cli/yield.md's "JSON schema (the contract)" section -- hand-built
 #: here exactly like every other kind's fixture (no dependency on the
@@ -479,6 +530,37 @@ PEX_PASS_ENVELOPE = {
 }
 
 PEX_FAIL_ENVELOPE = {**PEX_PASS_ENVELOPE, "status": "fail", "passed": 2, "failed": 1}
+
+#: Issue #1996: a `klt pex` run that produced no `delta[]` row at all, so no
+#: schematic-vs-extracted comparison was ever performed. `status` is `"pass"`
+#: because no row failed -- vacuously.
+PEX_NOTHING_CHECKED_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "corner_count": 0,
+    "delta": [],
+    "passed": 0,
+    "coverage": {
+        "testbenches": 1,
+        "delta_rows": 0,
+        "corners_compared": 0,
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["no_delta_rows"],
+    },
+}
+
+#: Issue #1996's edge case: a comparison that really ran and found every row
+#: within tolerance. One `delta[]` row per compared `(corner, measurement)`
+#: pair, so this is *not* a vacuous pass and must never be graded as one.
+PEX_PASS_REAL_COMPARISON_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "coverage": {
+        "testbenches": 1,
+        "delta_rows": 1,
+        "corners_compared": 1,
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    },
+}
 
 #: Issue #1983: a `klt pex` run whose extracted side had every device body
 #: on a real, named net -- the clean case, stated positively.
@@ -1554,6 +1636,274 @@ def test_cli_manifest_text_omits_body_bias_for_legacy_evidence(tmp_path, capsys)
     out = capsys.readouterr().out
     assert "cite:" in out
     assert "body bias:" not in out
+
+
+# --------------------------------------------------------------------------- #
+# Vacuous-verdict refusal (issue #1996): `coverage.nothing_checked`
+# --------------------------------------------------------------------------- #
+
+
+def test_drc_nothing_checked_envelope_never_counts_as_a_passing_check(tmp_path):
+    """The gap #1996 closes: a deck gated behind an unset `--deck-var`
+    reports `status: "clean"` and `violation_count: 0` -- byte-identical to a
+    real clean run at the top level. It must not aggregate as a pass."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    # The envelope's own verdict is quoted unchanged -- `klt signoff` reports
+    # what the verb said, and then declines to count it.
+    assert check["status"] == "clean"
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["deck_reported_no_rules"]
+    assert result["status"] == "fail"
+
+
+def test_sim_empty_corner_matrix_never_counts_as_a_passing_check(tmp_path):
+    path = _write(tmp_path, "sim.json", SIM_EMPTY_CORNER_MATRIX_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["empty_corner_matrix"]
+
+
+def test_pex_empty_delta_never_counts_as_a_passing_check(tmp_path):
+    path = _write(tmp_path, "pex.json", PEX_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["no_delta_rows"]
+
+
+def test_real_comparison_with_zero_differences_still_passes(tmp_path):
+    """Issue #1996's edge case, on the consumer side: a `pex` run that
+    compared every row and found each within tolerance carries the same
+    `coverage` block shape, saying `nothing_checked: false`. It must grade
+    exactly as it did before the convention existed."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_REAL_COMPARISON_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    # The key is present only for a refusal -- an explicit
+    # `nothing_checked: false` is a *positive* coverage statement, and grades
+    # exactly like an envelope that makes no statement at all.
+    assert "nothing_checked_reasons" not in check["detail"]
+    assert result["status"] == "pass"
+
+
+def test_coverage_gaps_alone_are_not_nothing_checked(tmp_path):
+    """`nothing_checked` is the *total* case, never a synonym for partial
+    coverage: a deck that skipped two rules and left two drawn layers
+    unchecked still checked something, and still passes (the #2002
+    report-not-enforce behaviour, unchanged)."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "nothing_checked_reasons" not in check["detail"]
+
+
+def test_pre_convention_envelope_makes_no_coverage_statement(tmp_path):
+    """Back-compat: evidence committed before the convention existed carries
+    no `nothing_checked` key, which reads as "makes no statement" -- never as
+    a gap, and never as a guarantee of full coverage."""
+    legacy_drc = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+    legacy_pex = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    # Graded separately: the two fixtures carry deliberately different
+    # provenance, which would trip the (unrelated) consistency refusal.
+    for path in (legacy_drc, legacy_pex):
+        result = build_signoff([path])
+
+        assert result["status"] == "pass"
+        assert result["checks"][0]["passed"] is True
+        assert "nothing_checked_reasons" not in result["checks"][0]["detail"]
+
+
+def test_tier_report_refuses_a_nothing_checked_item_3_citation(tmp_path):
+    """The load-bearing case: a claim cannot cite an empty DRC report to
+    satisfy item 3. The item renders `unmet` with its own reason code --
+    distinct from `check_failed` (the deck found nothing wrong because it
+    looked at nothing, not because the layout is clean)."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "nothing_checked"
+    assert item_3["citation"] is None
+
+
+def test_tier_report_refuses_a_nothing_checked_item_7_citation(tmp_path):
+    path = _write(tmp_path, "pex.json", PEX_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "nothing_checked"
+    assert item_7["citation"] is None
+
+
+def test_tier_report_still_meets_item_7_for_a_real_comparison(tmp_path):
+    """The control for the test above: the same item, the same kind, a
+    `coverage` block present -- and a citation that stands, because the run
+    actually compared something."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_REAL_COMPARISON_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["reason"] is None
+    assert item_7["citation"]["kind"] == "pex"
+
+
+def test_wrong_kind_still_wins_over_nothing_checked(tmp_path):
+    """Issue #826's invariant: an empty DRC report cited for item 7 must say
+    "cite a different artifact" (`wrong_kind`), not "re-run this one"
+    (`nothing_checked`) -- the reason names the actionable problem."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "wrong_kind"
+
+
+def test_check_failed_still_wins_over_nothing_checked(tmp_path):
+    """A run that both failed *and* covered nothing is reported as the
+    failure it is -- `nothing_checked` is only ever reached by an envelope
+    whose own verdict passed."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {
+            **DRC_CLEAN_NOTHING_CHECKED_ENVELOPE,
+            "status": "violations",
+            "violation_count": 1,
+        },
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["reason"] == "check_failed"
+
+
+def test_command_backed_evidence_is_refused_for_nothing_checked(monkeypatch):
+    """Both evidence bindings behave identically -- the coverage statement is
+    read off the envelope the command printed, exactly as off a file."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0] if args else [],
+            returncode=0,
+            stdout=json.dumps(DRC_CLEAN_NOTHING_CHECKED_ENVELOPE),
+            stderr="",
+        ),
+    )
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"command": ["klt", "drc", "design.gds", "sky130"]}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "nothing_checked"
+
+
+def test_unknown_reason_code_from_a_newer_klt_still_refuses(tmp_path):
+    """Forward-compat: a reason code this build does not know is carried
+    through verbatim and still refuses -- an older reader must not silently
+    accept a newer producer's vacuous report."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {
+            **DRC_CLEAN_ENVELOPE,
+            "coverage": {
+                "nothing_checked": True,
+                "nothing_checked_reasons": ["some_future_reason"],
+            },
+        },
+    )
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["some_future_reason"]
+
+
+def test_malformed_nothing_checked_block_is_normalised_not_crashed(tmp_path):
+    """A hand-edited block that sets the flag without a usable reasons list
+    still refuses, and degrades to an empty list rather than raising."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {**DRC_CLEAN_ENVELOPE, "coverage": {"nothing_checked": True}},
+    )
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == []
+
+
+def test_truthy_but_non_boolean_nothing_checked_is_not_a_refusal(tmp_path):
+    """Only a literal `true` counts -- a hand-rolled generic envelope with a
+    truthy-but-wrong value must not be mistaken for the boolean the
+    convention specifies."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {**DRC_CLEAN_ENVELOPE, "coverage": {"nothing_checked": "yes"}},
+    )
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["passed"] is True
+
+
+def test_cli_text_names_the_nothing_checked_reasons(tmp_path, capsys):
+    """A `FAIL` beside a `status=clean` reads as a bare contradiction unless
+    the line says why -- the same fix #1978 applied for `power_connectivity`."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    main(["signoff", path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if line.startswith("[FAIL]"))
+    assert "status=clean" in line
+    assert "(nothing checked: deck_reported_no_rules)" in line
+
+
+def test_cli_manifest_text_names_a_refused_citation(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "reason: nothing_checked" in out
 
 
 def test_cli_fleet_text_flags_blocks_whose_deck_left_gaps(tmp_path, capsys):

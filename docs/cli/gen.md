@@ -1611,7 +1611,14 @@ family/variant split the resolver doesn't have. The response's
     "snapped_to_grid": false,
     "notes": []
   },
-  "warnings": []
+  "warnings": [],
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.29.8",
+    "pdk": { "name": "sky130A", "source": "volare", "version": "open_pdks 0fe599b" },
+    "deck": null,
+    "input": null
+  }
 }
 ```
 
@@ -1630,6 +1637,7 @@ family/variant split the resolver doesn't have. The response's
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
 | `drc_hints` | object | DRC-relevant metadata the generator itself already knows — see below. Advisory only; `klt drc` remains the actual authority on rule compliance. |
 | `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. |
+| `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A generator request involves no rule/model deck and no single input layout stream (the request is parameters, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `ports[]` entries
 

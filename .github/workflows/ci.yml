@@ -57,6 +57,18 @@ jobs:
         # baselined function whose complexity has increased since that file
         # was recorded. A baselined function that improves (or disappears)
         # never fails this step.
+        #
+        # complexity-baseline.json is a snapshot, not a moving target: a PR
+        # that only reduces complexity in files nobody else is touching can
+        # pass locally against a checkout that is already stale by the time
+        # it merges, because *other* PRs with their own complexity-affecting
+        # diffs merged first (#2055 -- the baseline landed already stale for
+        # exactly this reason, four functions deep, and had grown to eight by
+        # the time it was fixed). If you are about to merge a baseline
+        # re-snapshot (`--update-baseline`) and other PRs are in flight,
+        # re-run the checker against a *fresh* `origin/main` immediately
+        # before merging rather than trusting a snapshot taken earlier in the
+        # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
 
   native:
