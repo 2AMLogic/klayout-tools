@@ -230,6 +230,14 @@ def _print_text(result: dict) -> None:
             and check["detail"].get("power_connectivity_status") == "mismatch"
         ):
             line += " (power_connectivity: mismatch)"
+        # Issue #1996: same problem, same fix -- a check whose envelope
+        # reports `coverage.nothing_checked` is `FAIL`ed by `_build_check`
+        # while its own `status` still reads `clean`/`pass`, which without
+        # this reads as a bare contradiction. Name the reasons on the line.
+        reasons = check["detail"].get("nothing_checked_reasons")
+        if reasons is not None:
+            joined = ", ".join(reasons) if reasons else "unspecified"
+            line += f" (nothing checked: {joined})"
         print(line)
 
 

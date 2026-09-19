@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/docs/schemas/batch-job-spec.schema.json",
+  "title": "2am EDA batch-fleet job spec (job.json)",
+  "description": "The `job.json` document `klt sim`'s `batch` backend writes to s3://<bucket>/<jobs-prefix>/<job-id>/job.json, built by src/klayout_tools/sim_batch.py's `_build_batch_job_spec`. This is 2AMLogic/2am's own shell-command contract (infra/aws/batch-fleet.md's \"The seam: what a consumer-repo wrapper does\", parsed by infra/aws/batch-fleet-harness.sh) -- NOT a serialization of klayout_tools.remote_transport.JobDescription, which is SSH/SCP-typed and unrelated. Everything is optional except `cmd`; the harness runs it as `cd \"$WORKDIR\" && bash -c \"$JOB_CMD\"` with EDA_JOB_DIR/EDA_INPUT_DIR/EDA_OUTPUT_DIR/EDA_JOB_CONCURRENCY/EDA_PHYSICAL_CORES and a resolved PDK_ROOT in the environment, and collects whatever lands in $EDA_OUTPUT_DIR. This schema documents the document klayout-tools *produces*; 2am owns the consuming side, so an additive field 2am adds later is not a breaking change here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cmd"],
+  "properties": {
+    "tool": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Informational only -- the harness echoes it into status.json and never inspects it. Always \"ngspice\" for a `klt sim` job (sim_batch.BATCH_JOB_TOOL)."
+    },
+    "cmd": {
+      "type": "string",
+      "minLength": 1,
+      "description": "REQUIRED. The shell command the harness runs under `bash -c` in the job directory. For `klt sim` this is always a `klt sim \"$EDA_INPUT_DIR/request.json\" --backend local-parallel --format json` invocation whose stdout is redirected to \"$EDA_OUTPUT_DIR/report.json\" -- the redirect is load-bearing, not cosmetic: the harness merges its own log lines and the job command's into one harness.log, so stdout is not a clean channel back to the submitter (only outputs/** and status.json are). When options.keep_artifacts is set, `--outdir \"$EDA_OUTPUT_DIR/artifacts\"` is appended so per-corner logs/rawfiles land inside the collected tree too."
+    },
+    "pdk_variant": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Exported as PDK_VARIANT on the job instance. Taken verbatim from the request's own `models.pdk` (e.g. \"sky130A\"); omitted when the request names no PDK."
+    },
+    "pdk_root": {
+      "type": "string",
+      "description": "Exported as PDK_ROOT -- layer 1 of the batch image's own PDK resolution order, and 2am's documented FSx hook (an access-controlled NDA'd PDK arrives as a different pdk_root, not a code change). Taken from the request's `models.pdk_root`; omitted when the request names none, in which case the job instance resolves its own baked PDK."
+    },
+    "cores_per_job": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Divides the instance's *physical* core count to derive $EDA_JOB_CONCURRENCY. Set to remote_launcher.ASSUMED_THREADS_PER_CORNER -- the same per-corner sizing assumption `remote_launcher.select_instance_type` sizes a `remote` instance from -- so both backends agree about how many corners fit at once on a given box."
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Per-job wall-clock cap, clamped *down* (never up) by the instance watchdog. Derived as the fully-serial worst case (`options.timeout_s` * corner count) plus startup slack -- see sim_batch._default_batch_job_timeout_s. A real run finishes far inside it; it exists so a wedged job is killed rather than billing until the watchdog fires."
+    }
+  }
+}

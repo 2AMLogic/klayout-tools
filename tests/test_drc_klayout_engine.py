@@ -75,6 +75,31 @@ _EMPTY_RDB = """<?xml version="1.0" encoding="utf-8"?>
 </report-database>
 """
 
+# A *genuinely* clean run (issue #1996): the deck reached every rule's own
+# `output(...)` call, so KLayout declared one `<category>` per rule, and none
+# of them produced an item. Structurally distinct from `_EMPTY_RDB` above --
+# same zero violations, but this report can say what it looked at.
+_CLEAN_WITH_CATEGORIES_RDB = """<?xml version="1.0" encoding="utf-8"?>
+<report-database>
+ <description>stub</description>
+ <categories>
+  <category>
+   <name>W.1</name>
+   <description>min width</description>
+  </category>
+  <category>
+   <name>S.1</name>
+   <description>min space</description>
+  </category>
+ </categories>
+ <cells>
+  <cell><name>TOP</name></cell>
+ </cells>
+ <items>
+ </items>
+</report-database>
+"""
+
 # One `edge-pair:` violation (a width/space-style check) under a quoted
 # category name (`'W.1'`) -- both forms (quoted/unquoted) are verified
 # against real `klayout -b -r ...` output, see `_strip_rdb_quotes`'s
@@ -221,15 +246,79 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
     assert report["coverage"] == {
         "deck_layers": [],
         "layers_checked": [],
+        # `_EMPTY_RDB` declares no `<category>` at all -- the deck never
+        # reached an `output(...)` call, so this "clean" verdict was
+        # measured over nothing (issue #1996).
+        "rules_checked": [],
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
         "deck_scope": [],
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["deck_reported_no_rules"],
     }
     assert report["provenance"]["deck"]["name"] == "deck.lydrc"
     assert report["provenance"]["deck"]["content_hash"].startswith("sha256:")
     assert report["provenance"]["input"]["content_hash"].startswith("sha256:")
     assert report["provenance"]["pdk"] is None
+
+
+def test_klayout_engine_all_rules_gated_off_reports_nothing_checked(
+    tmp_path, monkeypatch
+):
+    """Issue #1996: a PDK-native deck whose whole rule set is gated behind a
+    `--deck-var` this invocation never set runs to completion, writes a
+    well-formed report, and declares no rule categories at all. The verdict
+    stays `"clean"` (unchanged), but `coverage.nothing_checked` now says so,
+    so a downstream reader is not left with a pass indistinguishable from a
+    real one."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+    assert report["coverage"]["rules_checked"] == []
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["coverage"]["nothing_checked_reasons"] == ["deck_reported_no_rules"]
+
+
+def test_klayout_engine_deck_var_set_reports_rules_checked(tmp_path, monkeypatch):
+    """The same deck *with* its gating var set reaches every rule's own
+    `output(...)` call, so the report declares one category per rule even
+    though none of them found anything -- a genuinely clean run, which must
+    not be misread as "nothing checked" (issue #1996's edge case)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file, deck_vars={"feol": "true"})
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+    # Sorted, deduplicated -- the deck's own category names.
+    assert report["coverage"]["rules_checked"] == ["S.1", "W.1"]
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["nothing_checked_reasons"] == []
+
+
+def test_klayout_engine_violations_are_never_nothing_checked(tmp_path, monkeypatch):
+    """A report that found violations plainly checked something, so
+    `nothing_checked` is `False` and `rules_checked` names the rule that
+    fired -- even if that rule's category were somehow undeclared, the item's
+    own category id is unioned in (issue #1996)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EDGE_PAIR_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["status"] == "violations"
+    assert report["coverage"]["rules_checked"] == ["W.1"]
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["nothing_checked_reasons"] == []
 
 
 def test_klayout_engine_edge_pair_violation_bbox_converted_to_dbu(

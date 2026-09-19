@@ -4,6 +4,11 @@
   "generated_by": "scripts/check_complexity_baseline.py --update-baseline (ruff 0.16.0)",
   "violations": [
     {
+      "file": "scripts/derive-module-ownership.py",
+      "function": "find_related_modules",
+      "complexity": 21
+    },
+    {
       "file": "scripts/design_agent_benchmark.py",
       "function": "_build_live_agent_descriptor",
       "complexity": 11
@@ -470,13 +475,18 @@
     },
     {
       "file": "src/klayout_tools/lvs.py",
+      "function": "_apply_gate_level_port_aliases",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
       "function": "_apply_reference_device_bulk",
       "complexity": 11
     },
     {
       "file": "src/klayout_tools/lvs.py",
       "function": "_read_reference_netlist",
-      "complexity": 15
+      "complexity": 16
     },
     {
       "file": "src/klayout_tools/lvs.py",
@@ -491,7 +501,7 @@
     {
       "file": "src/klayout_tools/lvs.py",
       "function": "run_lvs",
-      "complexity": 60
+      "complexity": 61
     },
     {
       "file": "src/klayout_tools/lvs_mismatch.py",
@@ -646,7 +656,7 @@
     {
       "file": "src/klayout_tools/power.py",
       "function": "_compute_em_verdict",
-      "complexity": 19
+      "complexity": 20
     },
     {
       "file": "src/klayout_tools/power.py",
@@ -696,12 +706,12 @@
     {
       "file": "src/klayout_tools/signoff.py",
       "function": "_detail",
-      "complexity": 13
+      "complexity": 14
     },
     {
       "file": "src/klayout_tools/signoff.py",
       "function": "_grade_evidence",
-      "complexity": 15
+      "complexity": 16
     },
     {
       "file": "src/klayout_tools/sim.py",
@@ -807,6 +817,11 @@
       "file": "src/klayout_tools/yield_analysis.py",
       "function": "run_yield",
       "complexity": 11
+    },
+    {
+      "file": "tests/helpers/magic_oracle.py",
+      "function": "parse_magic_spice",
+      "complexity": 13
     },
     {
       "file": "tests/test_lvs_device_provenance.py",

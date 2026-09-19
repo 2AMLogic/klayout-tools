@@ -448,7 +448,8 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "execution backend (default: local, or the request's `backend` "
             "field); overrides the request field when given. `local`, "
-            "`local-parallel`, and `remote` (provisions an EC2 instance) "
+            "`local-parallel`, `remote` (provisions an EC2 instance), and "
+            "`batch` (submits an S3 job contract to 2am's EDA batch fleet) "
             "are implemented -- see docs/cli/sim.md."
         ),
     )

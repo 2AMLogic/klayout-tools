@@ -14,6 +14,87 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
+  ladder's intermediate landing pads against each landing layer's own
+  minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
+  (0.42um, 0.1764um²) square (issue #2072). A route reaching a deep pin
+  (e.g. a `bond_pad`'s `top_metal`/met5 port) via sky130's full
+  li1→met1→met2→met3→met4→met5 stack previously drew an isolated,
+  sub-minimum-area landing pad on met3/met4 — a guaranteed
+  `met3.area.1`/`met4.area.1` violation under `klt drc --deck sky130`
+  once issue #1989 gave the curated deck a `met*.area.1` rule at all. The
+  digital `klt place-and-route` flow (OpenROAD-authored `VIA_`-prefixed
+  via cells, a separate code path) was investigated and did **not**
+  reproduce this on any of the three checked-in corpus fixtures — see the
+  issue for the full investigation.
+- **Added**: `klt gen-compose --format json` now emits `blocks[].source_path`
+  and `blocks[].source_digest` (issue #2065), recording which stream each
+  composed block's geometry was read from and a digest of that stream's
+  contents. A composition is a snapshot of inputs that keep moving under it,
+  and the report previously described only its own output — so "does this
+  composition still match what its inputs publish today?" could not be
+  answered from the report at all. `source_digest` is a **layout-aware**
+  digest (new `_provenance.layout_geometry_digest`), not a raw-byte file hash:
+  it covers the decoded geometry (dbu, cells sorted by name, each cell's
+  shapes keyed by layer/datatype and instances keyed by the placed cell's
+  name, canonicalised and sorted), so a re-written but geometrically identical
+  input hashes identically despite new `BGNLIB`/`BGNSTR` timestamps and
+  reordered elements, while real geometry drift shows up as a different
+  digest. `null` when it cannot be computed (stream moved/unreadable) — never
+  fabricated. Purely additive — no `schema_version` bump (`klt gen-compose`
+  stays at `1`), and the composed GDS itself is untouched. The raw-byte
+  `sha256_file`/`provenance.input.content_hash` contract `klt
+  drc`/`lvs`/`extract`/`sim` rely on is unchanged.
+- **Added**: a shared `coverage.nothing_checked` /
+  `coverage.nothing_checked_reasons` convention (issue #1996), declared once in
+  `src/klayout_tools/coverage.py` and documented in
+  [`docs/json-contract.md`](docs/json-contract.md). Several verbs could report a
+  passing top-level verdict on a run that checked **nothing**, with no field a
+  reader could consult to tell that apart from an earned pass: a PDK-native DRC
+  deck whose whole rule set is gated behind a `--deck-var` the caller never set
+  (`status: "clean"`, `violation_count: 0`), a `klt sim` request whose PVT corner
+  matrix expanded to zero corners or whose every `measurements[].limits` object
+  used keys `klt sim` does not apply (only `min`/`max` are read), and a `klt pex`
+  run that produced no `delta[]` row at all. All three now say so in their own
+  `coverage` block — `klt drc` gains `coverage.rules_checked` (the complement of
+  the existing `rules_skipped`, and, for `--engine klayout`, the rule categories
+  the deck's own RDB report declares) alongside the two roll-up keys, `klt sim`
+  and `klt pex` gain a `coverage` block they previously had none of. **No
+  producing verb's `status` changes**: `test_run_drc_coverage_empty_stream`'s
+  `"clean"` verdict and every other pinned verdict are untouched, and the keys
+  are purely additive (no `schema_version` bump). `nothing_checked` is never a
+  synonym for *partial* coverage — a run that checked one rule out of eighty
+  reports `false`, and a `klt pex` comparison that ran and found every row within
+  tolerance emits one `delta[]` row per compared pair, so "nothing changed" and
+  "nothing was compared" stay structurally distinct.
+- **Changed**: `klt signoff` now **refuses** evidence whose own `coverage` block
+  reports `nothing_checked: true` (issue #1996) — unlike the report-not-enforce
+  treatment #2002 gave partial coverage gaps, because a run that measured nothing
+  contains no statement about the design for a reviewer to weigh. Such a check's
+  `passed` is `false` whatever its `status` says (with
+  `checks[].detail.nothing_checked_reasons` naming why), and a tier-report item
+  citing it renders `"unmet"` with the new `reason: "nothing_checked"` — grouped
+  with `wrong_kind`/`not_post_layout` as a "no runnable check proves this item"
+  reason, never with `check_failed`, per issue #826's invariant. Read generically
+  from the shared convention rather than hard-coded per verb, so a future verb
+  adopting it is picked up automatically. Back-compatible: an envelope with no
+  `coverage` block, one predating the convention, or one reporting
+  `nothing_checked: false` grades exactly as it did before — the refusal fires
+  only on an explicit `true`.
+- **Added**: `klt gen` and `klt gen-compose` `--format json` reports now carry
+  the shared top-level `provenance` block (issue #2035) — the same one
+  `klt drc`/`lvs`/`extract`/`sim` already emit, built by the same
+  `build_provenance()` helper. `klt_version` and `klayout_version` are the
+  point: a project that commits generated geometry plus its report as evidence
+  and re-runs the generator later could previously not tell a real geometry
+  change from a klt/KLayout upgrade — the `gen` family's report was the one
+  `klt` artefact whose producing build could not be read back off the artefact.
+  `provenance.pdk` mirrors the identity of each report's existing top-level
+  `pdk` field; `provenance.deck` and `provenance.input` are always `null` for
+  both verbs, since a generator/compose request is parameters (plus, for
+  compose, the blocks' own generator sub-reports), with no rule/model deck and
+  no single input layout stream to pin. Purely additive — no `schema_version`
+  bump on either command (both stay at `1`).
 - **Added**: `klt erc --format json` now emits `provenance.spec` as
   `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
   the stackup/vias/nets/ties spec file the run was validated against.

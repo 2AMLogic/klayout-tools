@@ -436,6 +436,51 @@ evidence, and ``docs/design-evidence-tiers.md`` item 7 now states that
 condition explicitly rather than implying a `pex` citation is
 self-validating.
 
+## Vacuous-verdict refusal (issue #1996)
+
+Several verbs can reach a passing top-level verdict on a run that checked
+**nothing**: a PDK-native DRC deck whose whole rule set is gated behind a
+``--deck-var`` the caller never set (a well-formed, empty report --
+``status: "clean"``), a `klt sim` request whose PVT corner matrix expanded
+to zero corners (``status: "pass"``, every counter ``0``), a `klt pex` run
+that produced no ``delta[]`` row to compare at all. Each of those is a
+*vacuously* true verdict, and this module used to grade them exactly like
+an earned one -- ``status == "clean"``/``"pass"`` was the whole test.
+
+Those verbs now say so in a field: the shared
+``coverage.nothing_checked``/``nothing_checked_reasons`` convention declared
+in :mod:`klayout_tools.coverage`, which this module reads through that
+module's :func:`~klayout_tools.coverage.coverage_nothing_checked` helper
+(never by reaching into the dict, so "no ``coverage`` block at all" reads
+uniformly as *makes no coverage statement* -- ``False`` -- rather than as
+either a gap or a guarantee). Evidence committed before the convention
+existed therefore grades byte-identically to before.
+
+Unlike the two surfacing phases above, this one **enforces** rather than
+merely reports, and the asymmetry is deliberate. A coverage *gap*
+(``rules_skipped``, an unbiased device body) is a partial result whose cost
+to a claim is a judgement this module cannot make; ``nothing_checked`` is
+the total case -- the cited artifact contains no statement about the design
+whatsoever, so there is nothing for a reviewer to weigh. Letting it back a
+``"met"`` item would mean an empty report is indistinguishable from a real
+one, which is precisely the gap issue #1996 exists to close. So:
+
+- :func:`_grade_evidence` renders such a citation ``"unmet"`` with
+  :data:`_REASON_NOTHING_CHECKED` -- grouped with ``wrong_kind`` /
+  ``not_post_layout`` as a "no runnable check proves this item" reason
+  (the cited check did not *fail* on its own terms; it simply measured
+  nothing), per issue #826's invariant that the two must stay
+  distinguishable.
+- :func:`build_signoff`'s envelope-aggregation mode forces that check's
+  ``passed`` to ``False`` and names the reasons in
+  ``checks[].detail.nothing_checked_reasons``, so the two entry points
+  cannot disagree about whether an empty report is evidence.
+
+:func:`_check_passed` itself is untouched -- it still answers "what does
+this envelope's own verdict say", which is what its other callers ask it --
+so the refusal is applied beside it, once per entry point, by
+:func:`_nothing_checked_reasons`.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -462,6 +507,7 @@ from pathlib import Path
 from typing import Any
 
 from ._provenance import sha256_file
+from .coverage import coverage_nothing_checked, coverage_nothing_checked_reasons
 from .design_evidence_tiers import (
     DesignEvidenceTiersError,
     doc_source_label,
@@ -652,6 +698,21 @@ _REASON_WRONG_KIND = "wrong_kind"
 #: ``wrong_kind``: the cited check did not fail on its own terms.
 _REASON_NOT_POST_LAYOUT = "not_post_layout"
 
+#: Issue #1996: the evidence resolved to a readable, recognised, *passing*
+#: envelope of a kind this item accepts -- whose own ``coverage`` block
+#: states that the run checked **nothing** (``coverage.nothing_checked`` is
+#: ``true``; see :mod:`klayout_tools.coverage` and this module's
+#: "Vacuous-verdict refusal" docstring section). A DRC deck whose whole rule
+#: set was gated behind an unset ``--deck-var``, a `klt sim` corner matrix
+#: that expanded to zero corners, a `klt pex` run with no ``delta[]`` row to
+#: compare: each reports a passing ``status`` that says nothing at all about
+#: the design. Grouped with the "no runnable check proves this item" reasons
+#: (:data:`_REASON_WRONG_KIND`, :data:`_REASON_NOT_POST_LAYOUT`) rather than
+#: with :data:`_REASON_CHECK_FAILED`, per issue #826's invariant: the cited
+#: check did not fail on its own terms, it simply measured nothing -- and the
+#: fix is to re-run it with something to check, not to fix a defect it found.
+_REASON_NOTHING_CHECKED = "nothing_checked"
+
 #: Wall-clock cap on a command-backed evidence entry's subprocess (issue
 #: #825) -- a hung `klt drc`/`klt lvs`/`klt sim` gate must not hang `klt
 #: signoff` itself. Generous (corner-matrix sims are slow) but finite; a
@@ -727,6 +788,15 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
     :func:`_critical_metric_blockers` and :func:`_detail`. This is purely
     additive: an envelope with no ``metrics`` block, or none marked
     ``critical``, behaves exactly as before.
+
+    ``passed`` (issue #1996) is likewise forced to ``False`` for an envelope
+    whose own ``coverage`` block reports ``nothing_checked: true`` -- a run
+    that checked nothing never counts as a passing check, whatever its
+    ``status`` says. The reason codes are named in that check's
+    ``detail.nothing_checked_reasons``. Also purely additive: an envelope
+    with no ``coverage`` block, or one predating the convention, makes no
+    such statement and behaves exactly as before. See this module's
+    "Vacuous-verdict refusal" docstring section.
 
     Raises :class:`SignoffError` if ``sources`` is empty, any entry cannot
     be read/parsed as JSON, is not a JSON object, or does not match a
@@ -1019,11 +1089,18 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _build_check(kind: str, envelope: dict[str, Any], source: str) -> dict[str, Any]:
     status = envelope.get("status") if kind != "error" else "error"
+    # Issue #1996: an envelope that states it checked nothing never counts as
+    # a passing check, whatever its own `status` says -- see this module's
+    # "Vacuous-verdict refusal" docstring section. Applied here rather than
+    # inside `_check_passed` (which still answers only "what does this
+    # envelope's own verdict say") so the tier-report path can render the
+    # more specific `_REASON_NOTHING_CHECKED` instead of `check_failed`.
+    vacuous = _nothing_checked_reasons(envelope) is not None
     return {
         "source": source,
         "kind": kind,
         "status": status,
-        "passed": _check_passed(kind, envelope),
+        "passed": _check_passed(kind, envelope) and not vacuous,
         "detail": _detail(kind, envelope),
         "provenance": envelope.get("provenance"),
     }
@@ -1328,6 +1405,98 @@ def _drc_coverage_disclosure(
     }
 
 
+def _nothing_checked_reasons(envelope: dict[str, Any]) -> list[str] | None:
+    """The reason codes behind ``envelope``'s own "I checked nothing"
+    statement (issue #1996) -- or ``None`` when it makes no such statement.
+
+    ``None`` (not ``[]``) for every envelope whose ``coverage`` block is
+    absent, non-object, or reports ``nothing_checked: false``, so a caller
+    can gate on the *presence* of a claim with a plain ``is None`` test and
+    never has to decide what an empty list means. That covers evidence
+    committed before the convention existed, and every kind that does not
+    emit a ``coverage`` block at all -- neither reads as a vacuous run.
+
+    Deliberately kind-agnostic, unlike :func:`_drc_coverage_disclosure` and
+    :func:`_pex_body_bias_disclosure` beside it: ``nothing_checked`` is one
+    shared convention across every verb that can reach a vacuous verdict
+    (`klt drc`, `klt sim`, `klt pex` today), so hard-coding the list here
+    would silently ignore the next verb that adopts it. Reading is delegated
+    to :mod:`klayout_tools.coverage` so the "missing block makes no
+    statement" rule is applied identically by every consumer.
+
+    A run may report more than one reason; the list is returned in the
+    producing verb's own order, verbatim -- including any code this `klt`
+    build does not itself know, so a newer producer's reason survives.
+    """
+    if not coverage_nothing_checked(envelope):
+        return None
+    return coverage_nothing_checked_reasons(envelope)
+
+
+def _nothing_checked_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    """:func:`_detail`'s ``nothing_checked_reasons`` key (issue #1996), or an
+    empty dict when ``envelope`` makes no vacuous-run claim.
+
+    A merge-in fragment rather than a mutation of the caller's dict, matching
+    how every other optional detail key beside it is decided -- and keeping
+    the "is this key present at all?" branch in one named place rather than
+    adding a fifth conditional to :func:`_detail` itself.
+    """
+    reasons = _nothing_checked_reasons(envelope)
+    if reasons is None:
+        return {}
+    return {"nothing_checked_reasons": reasons}
+
+
+def _kind_is_accepted(check_kind: str, allowed_kinds: set[str] | None) -> bool:
+    """Whether the item :func:`_grade_evidence` is grading accepts a citation
+    of ``check_kind`` at all -- ``True`` for an unrestricted item
+    (``allowed_kinds is None``, see :func:`_allowed_kinds_for`).
+
+    Both of :func:`_grade_evidence`'s kind-gated refusals consult this before
+    firing, for the same reason: a citation of a kind the item does not accept
+    must say "cite a different artifact" (``wrong_kind``, applied downstream by
+    :func:`_build_tier_item`) rather than name a defect in the artifact that
+    *was* cited -- issue #826's invariant that the two stay distinguishable.
+    """
+    return allowed_kinds is None or check_kind in allowed_kinds
+
+
+def _kind_gated_refusal(
+    check_kind: str,
+    envelope: dict[str, Any],
+    *,
+    allowed_kinds: set[str] | None,
+    require_post_layout: bool,
+) -> str | None:
+    """The reason :func:`_grade_evidence` must refuse this *passing*,
+    right-kind envelope -- or ``None`` when it has no such reason.
+
+    Both refusals resolved here apply only to a kind the item accepts (see
+    :func:`_kind_is_accepted`), so they are decided in one place rather than
+    repeating that gate per condition:
+
+    - :data:`_REASON_NOTHING_CHECKED` (issue #1996) -- the envelope's own
+      ``coverage`` block reports ``nothing_checked: true``, so its passing
+      ``status`` was measured over nothing at all.
+    - :data:`_REASON_NOT_POST_LAYOUT` -- the run is not the post-layout run
+      the item requires.
+
+    ``nothing_checked`` is checked first: an empty report is not post-layout
+    evidence either, and "this measured nothing" names the more fundamental
+    of the two problems. Both are ordered *after* :func:`_check_passed` in
+    the caller, so a run that both failed and measured nothing is reported as
+    the failure it is.
+    """
+    if not _kind_is_accepted(check_kind, allowed_kinds):
+        return None
+    if _nothing_checked_reasons(envelope) is not None:
+        return _REASON_NOTHING_CHECKED
+    if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
+        return _REASON_NOT_POST_LAYOUT
+    return None
+
+
 def _pex_body_bias_disclosure(
     kind: str, envelope: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -1534,6 +1703,12 @@ def _detail(kind: str, envelope: dict[str, Any]) -> dict[str, Any]:
     blockers = _critical_metric_blockers(envelope)
     if blockers:
         detail["critical_metric_blockers"] = blockers
+    # Issue #1996: why this envelope's own `coverage` block says the run
+    # checked nothing -- present only when it makes that claim, so every
+    # envelope predating the convention renders exactly as before. This is
+    # the reader-facing half of the `passed: False` `_build_check` applies
+    # for the same condition; see "Vacuous-verdict refusal" above.
+    detail.update(_nothing_checked_detail(envelope))
     return detail
 
 
@@ -1860,6 +2035,16 @@ def build_tier_report(
       ``provenance.input.content_hash`` does not match the manifest's
       pinned ``content_hash`` -- the check ran against a different layout
       revision than the one being claimed.
+    - ``"nothing_checked"`` (issue #1996) -- the evidence resolved to a
+      recognised, *passing* envelope whose own ``coverage`` block states that
+      the run checked nothing at all (``coverage.nothing_checked: true``,
+      the shared convention in :mod:`klayout_tools.coverage`): a DRC deck
+      gated behind an unset ``--deck-var``, a `klt sim` corner matrix that
+      expanded to zero corners, a `klt pex` run with no ``delta[]`` row.
+      Grouped with the "no runnable check proves this item" reasons -- the
+      cited check did not fail on its own terms, it simply measured nothing,
+      so the fix is to re-run it with something to check. See this module's
+      "Vacuous-verdict refusal" docstring section.
     - ``"wrong_kind"`` (issue #871, extended by issue #1152, extended by
       issue #1321, made per-block-kind by issue #1959) -- the evidence
       resolved to a recognised, *passing* envelope, but its classified kind
@@ -2215,6 +2400,15 @@ def _grade_evidence(
     ``"not_post_layout"`` (re-run this artifact against the layout), so the
     post-layout gate is skipped for a kind that is about to be rejected as
     the wrong kind anyway.
+
+    **Vacuous-verdict refusal** (issue #1996): a passing envelope whose own
+    ``coverage`` block reports ``nothing_checked: true`` renders
+    :data:`_REASON_NOTHING_CHECKED`, never ``"met"`` -- a report that
+    measured nothing is not evidence, however clean its ``status``. Gated on
+    ``allowed_kinds`` for the same ordering reason as the post-layout check
+    above, and skipped entirely for any envelope that makes no such
+    statement (including every envelope predating the convention). See this
+    module's "Vacuous-verdict refusal" docstring section.
     """
     expected_hash = spec.get("content_hash")
 
@@ -2272,12 +2466,17 @@ def _grade_evidence(
     if not _check_passed(check_kind, envelope):
         return "unmet", _REASON_CHECK_FAILED, None
 
-    if (
-        require_post_layout
-        and (allowed_kinds is None or check_kind in allowed_kinds)
-        and not _is_post_layout_evidence(check_kind, envelope)
-    ):
-        return "unmet", _REASON_NOT_POST_LAYOUT, None
+    # The two refusals that apply only to a kind this item actually accepts --
+    # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
+    # together, in that order. See `_kind_gated_refusal`.
+    kind_gated = _kind_gated_refusal(
+        check_kind,
+        envelope,
+        allowed_kinds=allowed_kinds,
+        require_post_layout=require_post_layout,
+    )
+    if kind_gated is not None:
+        return "unmet", kind_gated, None
 
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
