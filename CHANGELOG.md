@@ -27,6 +27,24 @@ not `klt --version`, if you need to detect this kind of drift. See
   to tell from the artifacts alone. Purely additive: no existing field
   changes shape or meaning, so no `schema_version` bump on either mode.
 
+- **Added** (#2170): `klt place-and-route` now rejects a `request.power`/
+  `request.floorplan` pair whose PDN strap geometry cannot physically fit
+  the floorplan's core, at request-validation time — before this, a
+  platform's own verbatim strap geometry paired with a too-small (or
+  `floorplan.method: "utilization"`-derived) core failed deep inside the
+  `"floorplan"` stage with OpenROAD's own opaque `PDN-0185` "Insufficient
+  width" error, naming neither request field. The new pre-flight check
+  derives the same per-layer minimum core dimension `pdngen`'s own
+  `Straps::checkLayerOffsetSpecification` checks (`offset_um` + the
+  strap's power/ground stripe group width) and raises `PlaceAndRouteError`
+  naming both `request.floorplan` and `request.power` instead. Checked for
+  `floorplan.method: "explicit"` always, and for `"utilization"` whenever
+  the standard-cell area can be derived from the request's own netlist and
+  resolved LEFs (falls back to OpenROAD's own `PDN-0185` otherwise, exactly
+  as before); `"def"`-method floorplans are not checked. See
+  `docs/cli/place-and-route.md`'s "Power delivery" section, "Minimum core
+  width for a PDN grid".
+
 - **Added** (#2179): `klt erc` now reports `erc_status` and `erc_coverage` —
   the **connectivity** half's own roll-up and checked-work scope, beside the
   antenna-driven `status`/`coverage`. `klt erc` answers two independent

@@ -623,6 +623,14 @@ from .place_and_route_gds_merge import (
 )
 from .place_and_route_gds_merge import _merge_def_to_gds as _merge_def_to_gds
 
+# The PDN/floorplan joint pre-flight (issue #2170): derives `pdngen`'s own
+# minimum core dimension from `request.power.straps[]` and compares it with
+# the core `request.floorplan` will produce, so a jointly-impossible pair is
+# rejected here instead of failing deep inside the "floorplan" stage with
+# PDN-0185. Same "self-contained subsystem in its own module" split as the
+# power audit below.
+from .place_and_route_pdn_fit import check_request as check_pdn_core_fit
+
 # The power-delivery audit (issue #2086): reads the DEF this run wrote and
 # reports what was actually *placed* (tapcells/endcaps/fillers, PDN
 # special-net structure), plus the loud `warnings` strings an absent or
@@ -1539,6 +1547,47 @@ def load_request(request_path: str) -> dict[str, Any]:
     )
 
 
+def _validate_pdn_core_fit(
+    *,
+    floorplan: dict[str, Any],
+    power: dict[str, Any] | None,
+    tech_lef: str | None,
+    cell_lefs: list[str],
+    netlist_path: str,
+    hdl_toplevel: str,
+) -> None:
+    """Issue #2170: raise when this request's strap geometry cannot fit the
+    core its floorplan will produce.
+
+    ``_validate_floorplan`` and ``_validate_power`` each validate their own
+    block in isolation, and both pass on a request whose strap geometry
+    cannot physically fit the floorplan's core -- the platform's own
+    verbatim straps plus a small/utilization-derived core. That pair fails
+    deep inside the "floorplan" stage with ``pdngen``'s own PDN-0185
+    "Insufficient width", which names neither request field. This is the
+    joint check; :func:`run_place_and_route` calls it only after
+    ``_resolve_lef``, because it reads the resolved tech LEF (strap-layer
+    routing direction, manufacturing grid) and cell LEF (standard-cell
+    ``SIZE``, for the utilization method's derived core size). It never
+    rejects a request OpenROAD would have accepted -- see
+    :mod:`klayout_tools.place_and_route_pdn_fit`'s own module docstring.
+
+    Kept out of :func:`run_place_and_route`'s own body so the raise-branch
+    is not one more decision point in that already-baselined function
+    (``complexity-baseline.json``).
+    """
+    message = check_pdn_core_fit(
+        floorplan=floorplan,
+        power=power,
+        tech_lef=tech_lef,
+        cell_lefs=cell_lefs,
+        netlist_path=netlist_path,
+        hdl_toplevel=hdl_toplevel,
+    )
+    if message is not None:
+        raise PlaceAndRouteError(message)
+
+
 def run_place_and_route(
     request_path: str,
     *,
@@ -1655,6 +1704,18 @@ def run_place_and_route(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
     tech_lef, cell_lef = _resolve_lef(cell_library, pdk_info, interconnect_corner)
+
+    # Issue #2170: the joint floorplan/PDN pre-flight -- see
+    # `_validate_pdn_core_fit`'s own docstring for why it lives outside this
+    # function and why it runs here, after `_resolve_lef`.
+    _validate_pdn_core_fit(
+        floorplan=floorplan,
+        power=power,
+        tech_lef=tech_lef,
+        cell_lefs=[cell_lef, *(macro["lef"] for macro in macros)],
+        netlist_path=netlist_path,
+        hdl_toplevel=hdl_toplevel,
+    )
 
     stage_index = STAGE_ORDER.index(target_stage)
     stages_to_run = STAGE_ORDER[: stage_index + 1]

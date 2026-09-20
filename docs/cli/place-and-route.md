@@ -2085,6 +2085,68 @@ above), so a caller citing a platform config can confirm its request
 actually reproduced it, rather than silently falling back to this command's
 plain defaults.
 
+### Minimum core width for a PDN grid (issue #2170)
+
+A `straps[]` entry has an **implicit minimum core dimension** —
+`offset_um` plus that strap's power/ground stripe group width (`2 *
+width_um` plus `spacing_um`, or `pdngen`'s own `pitch_um / 2 - width_um`
+default when `spacing_um` is omitted) — and nothing in `power.straps[]`'s
+own schema states it. Pairing a real platform PDN config (whose strap
+geometry is fixed) with a small or `floorplan.method: "utilization"`-derived
+core that happens to be narrower than that minimum is not individually
+invalid in either `request.floorplan` or `request.power`, so without a
+cross-check the run proceeds and fails deep inside the `"floorplan"` stage
+with OpenROAD's own `pdngen`:
+
+```
+[ERROR PDN-0185] Insufficient width (55.44 um) to add straps on layer Metal5
+in grid "grid" with total strap width 49.3 um and offset 44.8 um
+```
+
+— a message that names neither request field and arrives after
+`initialize_floorplan`/`place_macro`/`make_tracks` have already run.
+
+`klt place-and-route` now derives the same minimum `pdngen`'s own
+`Straps::checkLayerOffsetSpecification` will check (verified against
+`The-OpenROAD-Project/OpenROAD`'s `src/pdn/src/straps.cpp`) and rejects the
+request up front, naming both fields:
+
+```
+request.power.straps[2] (layer Metal5) needs at least 94.08 um of core
+height: offset_um 44.8 + 49.28 um for the power/ground stripe pair (2 x
+width_um 4.48 + a 40.32 um spacing, pdngen's own pitch_um/2 - width_um
+default). request.floorplan gives a core height of only 55.44 um (derived)
+-- floorplan.method "utilization", ... pdngen would otherwise reject the
+grid mid-'floorplan' stage with PDN-0185 "Insufficient width", naming
+neither request field.
+```
+
+(`Metal5` is declared `HORIZONTAL` in the tech LEF, so `pdngen` measures it
+against the core's height, not its width — a `VERTICAL` layer's straps are
+measured against the core width instead; an undeclared layer direction
+falls back to the larger of the two, which can only under-report a
+problem, never invent one.)
+
+**Scope: `floorplan.method: "explicit"` always; `"utilization"` only when
+the core can be estimated; `"def"` never.** `"explicit"` states
+`core_area_um` directly, so the check is exact. `"utilization"` has no core
+size in Python — OpenROAD derives it internally inside
+`initialize_floorplan` from the standard-cell area of the netlist being
+placed — so this command re-derives that same formula (`core_area =
+design_area / utilization_pct`, `core_width = sqrt(core_area /
+aspect_ratio)`) from `request.netlist`'s own instantiated masters and their
+resolved LEF `SIZE`s, and only checks when every instantiated master's size
+is known (an unparseable netlist, an unresolvable toplevel, or any
+unsized master skips the check entirely rather than guessing — the run then
+still reaches OpenROAD's own `PDN-0185` exactly as it did before this
+check existed). `"def"` is never checked: that core comes from an existing
+DEF's own rows, which this pre-flight does not read. Every comparison here
+is made against an *upper bound* of the core `pdngen` will actually see, so
+a request OpenROAD would have accepted is never rejected by this check.
+`followpins` straps (a row rail) are exempt — they follow the standard-cell
+rows rather than sitting at `offset_um` from the core edge, and `pdngen`'s
+own `FollowPins` check reflects that.
+
 **Response `power` field: configured vs. placed.** `pdn`/`global_connect`/
 `power_net`/`ground_net`/`tapcell_master`/`endcap_master` name what this run
 was *configured* with. `filler_masters` is `[]` unless `stage_reached` is
