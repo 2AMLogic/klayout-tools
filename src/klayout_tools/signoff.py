@@ -740,6 +740,7 @@ from pathlib import Path
 from typing import Any, TypedDict, Union, cast, get_args, get_origin, get_type_hints
 
 from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
+from .build_identity import version_report
 from .coverage import (
     coverage_nothing_checked,
     coverage_nothing_checked_reasons,
@@ -749,6 +750,7 @@ from .coverage import (
     coverage_validation_error,
 )
 from .design_evidence_tiers import (
+    DEFAULT_DOC_PATH,
     DesignEvidenceTiersError,
     doc_source_label,
     parse_tier_doc,
@@ -773,6 +775,21 @@ SCHEMA_VERSION = 1
 #: from :data:`SCHEMA_VERSION` (the envelope-aggregation mode's shape)
 #: because the two modes' top-level fields are unrelated; bumping one must
 #: never imply the other changed.
+#:
+#: Still ``1`` after issue #2176 (``build``, ``items[].graded_by_build``, the
+#: ``ungradeable_by_build`` reason), deliberately: both fields are *new*
+#: keys, and a new ``reason`` value is a value set growing within an
+#: unchanged shape -- both explicitly additive under
+#: ``docs/json-contract.md`` ("adding new fields does not" bump; "an
+#: additive change can introduce a new enum-like value"). The grading change
+#: that rides with them refuses a citation this build has no rules for,
+#: which is a *correction* of a verdict that was wrong, not a redefinition
+#: of what ``status``/``reason`` mean -- the same shape as issue #1987's
+#: (item 3 stopped accepting `klt extract` citations) and issue #2044's
+#: (items 5/6/8 gained kind restrictions) grading corrections, neither of
+#: which bumped this constant. Contrast
+#: :data:`FLEET_REPORT_SCHEMA_VERSION` below, which bumped for issue #2178
+#: because an already-shipped field's *meaning* changed there.
 TIER_REPORT_SCHEMA_VERSION = 1
 
 #: Schema version for :func:`build_fleet_report`'s own JSON shape -- distinct
@@ -996,6 +1013,134 @@ def _is_structurally_ungradeable_item(item_id: int) -> bool:
     )
 
 
+@cache
+def _t1_item_ids_of(doc_path: str) -> frozenset[int] | None:
+    """The T1 checklist item ids of the ``design-evidence-tiers.md`` at
+    ``doc_path``, or ``None`` when that doc cannot be read or parsed.
+
+    Cached per path: the doc a *build* ships with is immutable for the life
+    of the process (this is never used to read a caller-supplied doc --
+    :func:`build_tier_report` already parses that one itself), so re-reading
+    it once per block of a fleet roll-up would buy nothing.
+    """
+    try:
+        doc = parse_tier_doc(doc_path)
+    except DesignEvidenceTiersError:
+        return None
+    return frozenset(
+        item["id"] for item in doc["t1_items"] if isinstance(item["id"], int)
+    )
+
+
+def _build_t1_item_ids() -> frozenset[int] | None:
+    """The T1 item ids **this build** was written against -- the item list of
+    the ``design-evidence-tiers.md`` copy that ships with this install
+    (:data:`~.design_evidence_tiers.DEFAULT_DOC_PATH`: the packaged copy for
+    a wheel, the source checkout's ``docs/`` otherwise).
+
+    Deliberately *not*
+    :func:`~.design_evidence_tiers.default_doc_path`: that one honours
+    ``$KLT_TIERS_DOC``, and the override is exactly what this has to be
+    measured against. ``None`` when the shipped doc cannot be read or parsed
+    at all -- see :func:`_is_graded_by_build` for how that is handled.
+    """
+    return _t1_item_ids_of(str(DEFAULT_DOC_PATH))
+
+
+def _is_graded_by_build(item_id: int, build_item_ids: frozenset[int] | None) -> bool:
+    """Does this build have grading rules for T1 item ``item_id`` (issue
+    #2176)?
+
+    ``--tiers-doc``/``$KLT_TIERS_DOC`` deliberately decouples the parsed item
+    list from the grading logic compiled into the running build (that is what
+    the override is *for*), so a doc newer than the build can hand
+    :func:`build_tier_report` an item id this build has never heard of. Such
+    an item parses fine and renders a row that looks like every other row,
+    but nothing in this build knows its accepted envelope kinds, its evidence
+    shape, or its pass conditions.
+
+    An item is graded by this build when either:
+
+    1. a grading table names it (:data:`_ITEM_ALLOWED_KINDS`,
+       :data:`_ITEMS_GRADED_AS_POWER_DELIVERY`) -- an explicit, per-id rule;
+       or
+    2. this build's **own** shipped doc lists it
+       (:func:`_build_t1_item_ids`) -- the four items with no `klt` verb
+       behind them (1, 2, 9 and 10 today, see
+       :func:`_is_structurally_ungradeable_item`) have no table entry by
+       design, and "any recognised, passing envelope satisfies it" is a
+       documented rule for them, not an absence of one.
+
+    Both halves are derived, never hard-coded: the day the shipped doc gains
+    an item, this build knows it; the day a grading table gains an id, this
+    build grades it. ``build_item_ids is None`` (the shipped doc is
+    unreadable in this install) reports **every** item as graded, because
+    divergence cannot be *proven* -- a report must never invent a refusal it
+    cannot substantiate, and behaviour then matches every release before this
+    check existed.
+
+    This compares item **ids** only, not the doc's prose. A doc that
+    renumbers or rewords an item this build does know (so id 3 no longer
+    means "DRC clean") is a content-drift question, answered by pinning the
+    doc's content in the report -- deliberately a separate mechanism.
+    """
+    if item_id in _ITEM_ALLOWED_KINDS or item_id in _ITEMS_GRADED_AS_POWER_DELIVERY:
+        return True
+    if build_item_ids is None:
+        return True
+    return item_id in build_item_ids
+
+
+#: The :func:`~.build_identity.version_report` fields echoed into a tier /
+#: fleet report's ``build`` block (issue #2176), in order. ``klt version``'s
+#: own ``schema_version`` is dropped (the report carries its own, and a
+#: nested one would read as this block's version rather than that command's),
+#: and so are its two KLayout-engine fields: the engine this `klt signoff`
+#: process happens to resolve says nothing about what its grading rules can
+#: check, and every cited envelope already carries the engine *its own* run
+#: used in its ``provenance`` block.
+_BUILD_IDENTITY_FIELDS = (
+    "version",
+    "package_version",
+    "git_commit",
+    "git_tag",
+    "dirty",
+    "is_release",
+)
+
+
+@cache
+def _build_identity_fields() -> tuple[tuple[str, Any], ...]:
+    """:data:`_BUILD_IDENTITY_FIELDS`, resolved once per process.
+
+    Cached because a source/editable install resolves its identity by
+    shelling out to ``git`` (:func:`~.build_identity._checkout_identity`),
+    and :func:`build_fleet_report` renders one tier report per block: without
+    this, a 20-block roll-up would run that probe 20 times to answer a
+    question whose answer cannot change while the process lives. Immutable
+    (a tuple of pairs) so the cached value can never be mutated through one
+    report's ``build`` block; :func:`_build_identity` mints a fresh dict per
+    report from it.
+    """
+    report = version_report()
+    return tuple((field, report[field]) for field in _BUILD_IDENTITY_FIELDS)
+
+
+def _build_identity() -> dict[str, Any]:
+    """The running build's identity, for a report that outlives the
+    invocation that produced it (issue #2176).
+
+    A committed tier report is read later, by someone who was not at the
+    terminal and cannot see which `klt` rendered it -- so "which build
+    graded this, and therefore what could it check" has to be *in* the
+    artifact. Reuses :func:`~.build_identity.version_report`, the same
+    payload `klt version --format json` prints, rather than re-deriving
+    version/commit detection here; see :data:`_BUILD_IDENTITY_FIELDS` for
+    the fields it drops and why.
+    """
+    return dict(_build_identity_fields())
+
+
 #: Provenance sub-fields compared for consistency across every input
 #: envelope that carries them -- see _provenance_consistency()'s docstring
 #: for what each check means and why a mismatch is refused rather than
@@ -1076,6 +1221,31 @@ _REASON_COMMAND_FAILED = "command_failed"
 #: about a schematic-vs-extracted-netlist delta) -- so it must never render
 #: `"met"` by borrowing an unrelated check's pass.
 _REASON_WRONG_KIND = "wrong_kind"
+
+#: Issue #2176: the manifest cited evidence for a T1 item **this build has
+#: no grading rules for at all** -- an item id that appears in the doc the
+#: report was built from (``--tiers-doc``/``$KLT_TIERS_DOC``) but not in
+#: this build's own bundled copy of it, and that no grading table names
+#: either (see :func:`_is_graded_by_build`). The caller is asking a question
+#: this build cannot answer: it knows none of that item's accepted envelope
+#: kinds, none of its evidence shape, none of its pass conditions.
+#:
+#: Grouped with the other "no runnable check exists for this item" reasons,
+#: for the sharpest form of the reason :data:`_REASON_WRONG_KIND` is: no
+#: check was even attempted. Deliberately distinct from ``wrong_kind``
+#: ("cite a different artifact -- this build knows which") and from
+#: :data:`_REASON_NO_EVIDENCE` ("nothing was cited"): here the citation may
+#: be perfectly good and the *build* is what is missing, so the actionable
+#: fix is to upgrade `klt` (or grade against the doc this one ships), not to
+#: touch the manifest. Without it, such a citation fell through to the
+#: unrestricted ``allowed_kinds is None`` path and could render ``"met"`` --
+#: a pass produced by rules that do not exist in the running build, and
+#: indistinguishable in the report from a correctly-graded row.
+#:
+#: Note that the evidence is *not* resolved before this refusal: an
+#: ungradeable item's command-backed entry is never executed, since this
+#: build could not interpret what came back anyway.
+_REASON_UNGRADEABLE_BY_BUILD = "ungradeable_by_build"
 
 #: Issue #1959: the evidence resolved to a readable, recognised, *passing*
 #: envelope **of a kind this item accepts**, but that run is not the
@@ -3268,6 +3438,17 @@ def build_tier_report(
             "t1_met_count": 3,
             "source_doc": "docs/design-evidence-tiers.md",
             "source_doc_content_hash": "sha256:...",
+            # Which build graded this (issue #2176) -- `klt version`'s own
+            # identity payload, so a committed report names the `klt` that
+            # produced it.
+            "build": {
+                "version": "0.4.2+g0123456789ab",
+                "package_version": "0.4.2",
+                "git_commit": "0123456789ab...",
+                "git_tag": None,
+                "dirty": False,
+                "is_release": False,
+            },
             "items": [
                 {
                     "tier": "T1",
@@ -3278,6 +3459,9 @@ def build_tier_report(
                     "notes": [],
                     "status": "met",
                     "reason": None,
+                    # Does this build have grading rules for this item at
+                    # all (issue #2176)? Always True for the shipped doc.
+                    "graded_by_build": True,
                     "citation": {
                         "file": "drc.json",
                         "command": None,
@@ -3408,6 +3592,25 @@ def build_tier_report(
     consumed only by :func:`build_signoff`'s envelope-aggregation mode
     today.
 
+    **Every item says whether this build could grade it** (issue #2176):
+    the item list comes from the parsed doc, the grading rules come from the
+    running build, and ``tiers_doc``/``$KLT_TIERS_DOC`` exists precisely to
+    let those two be different versions. So each T1 item carries
+    ``graded_by_build`` (:func:`_is_graded_by_build`) -- ``True`` when a
+    grading table names its id, or when this build's **own** shipped doc
+    lists it; ``False`` for an item only the caller's doc knows about, whose
+    accepted kinds, evidence shape and pass conditions are all absent from
+    this build. A ``False`` item that the manifest nonetheless cites
+    evidence for renders ``"unmet"`` with
+    ``reason: "ungradeable_by_build"`` rather than falling through to the
+    unrestricted ``allowed_kinds is None`` path, where any passing envelope
+    would have produced a ``"met"`` from rules that do not exist here. With
+    the shipped doc (no override, or an override that is the same item list)
+    every item is ``True`` and nothing else changes. ``build`` names the
+    grading build itself, in `klt version --format json`'s own shape, so a
+    committed report still says what it could and could not check long after
+    the terminal that produced it is gone.
+
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an
     item was skipped or actually failed:
@@ -3494,6 +3697,12 @@ def build_tier_report(
       of the item is unproven: ``power_connectivity.status`` is not
       ``"match"`` (with a PDN citation), or the reference netlist did not
       carry the supply nets (without one).
+    - ``"ungradeable_by_build"`` (issue #2176) -- the manifest cited
+      evidence for an item this build has no grading rules for at all
+      (``graded_by_build: False``, see above). Not a statement about the
+      cited artifact, which is never even resolved: the *build* is what is
+      missing, so the fix is a newer `klt` (or grading against the doc this
+      one ships), not a different citation.
     - ``"tier_not_supported"`` -- a T2-T4 ladder row (see below): this
       repository has no mechanism to run a T2+ check at all.
 
@@ -3562,11 +3771,16 @@ def build_tier_report(
     partitions: tuple[str, ...] = (
         ("analog", "digital") if kind == "mixed-signal" else (kind,)
     )
+    # Issue #2176: the item ids *this build* was written against, so an item
+    # the parsed doc lists but this build has no rules for is reported as
+    # such instead of silently falling through to unrestricted grading.
+    build_item_ids = _build_t1_item_ids()
 
     items: list[dict[str, Any]] = []
     met_count = 0
     total = 0
     for t1_item in doc["t1_items"]:
+        graded_by_build = _is_graded_by_build(t1_item["id"], build_item_ids)
         for partition in partitions:
             if t1_item["id"] in _ITEMS_GRADED_AS_POWER_DELIVERY:
                 # Item 11 (issue #2025) is the one T1 item no single
@@ -3582,6 +3796,7 @@ def build_tier_report(
                     partition=partition if kind == "mixed-signal" else None,
                     partition_kind=partition,
                     evidence=evidence,
+                    graded_by_build=graded_by_build,
                 )
             else:
                 entry = _build_tier_item(
@@ -3596,6 +3811,7 @@ def build_tier_report(
                     require_post_layout=(
                         t1_item["id"] in _ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE
                     ),
+                    graded_by_build=graded_by_build,
                 )
             total += 1
             if entry["status"] == "met":
@@ -3630,6 +3846,7 @@ def build_tier_report(
         "t1_met_count": met_count,
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
+        "build": _build_identity(),
         "items": items,
     }
 
@@ -4518,6 +4735,7 @@ def _build_power_delivery_item(
     partition: str | None,
     partition_kind: str,
     evidence: dict[str, Any],
+    graded_by_build: bool = True,
 ) -> dict[str, Any]:
     """Render T1 item 11's report entry (issue #2025) -- the compound
     counterpart of :func:`_build_tier_item`, which grades every other item.
@@ -4528,6 +4746,14 @@ def _build_power_delivery_item(
     the whole item :data:`_REASON_INVALID_EVIDENCE` rather than being
     silently dropped from the cited set), and that grading is delegated to
     :func:`_grade_power_delivery`.
+
+    ``graded_by_build`` (issue #2176) is reported and honoured exactly as in
+    :func:`_build_tier_item`. In practice it is always ``True`` here --
+    reaching this function at all means the item id is a member of
+    :data:`_ITEMS_GRADED_AS_POWER_DELIVERY`, which is one of the two tables
+    :func:`_is_graded_by_build` derives its answer from -- but it is
+    threaded through rather than hardcoded so the field has exactly one
+    source of truth for every rendered item.
     """
     citation = None
     failure_detail: dict[str, Any] = {}
@@ -4535,7 +4761,9 @@ def _build_power_delivery_item(
     reason: str | None = _REASON_NO_EVIDENCE
 
     raw_entry = _lookup_evidence(evidence, item_id, partition)
-    if raw_entry is not None:
+    if raw_entry is not None and not graded_by_build:
+        reason = _REASON_UNGRADEABLE_BY_BUILD
+    elif raw_entry is not None:
         specs = _normalize_evidence_parts(raw_entry)
         if specs is None:
             reason = _REASON_INVALID_EVIDENCE
@@ -4553,6 +4781,7 @@ def _build_power_delivery_item(
         "notes": notes,
         "status": status,
         "reason": reason,
+        "graded_by_build": graded_by_build,
         "citation": citation,
         **({"detail": failure_detail} if failure_detail else {}),
     }
@@ -4569,6 +4798,7 @@ def _build_tier_item(
     evidence: dict[str, Any],
     allowed_kinds: set[str] | None = None,
     require_post_layout: bool = False,
+    graded_by_build: bool = True,
 ) -> dict[str, Any]:
     """Grade one T1 checklist item against ``evidence`` -- see
     :func:`build_tier_report`'s docstring for the full met/unmet rule and
@@ -4609,6 +4839,19 @@ def _build_tier_item(
     no T1 item names `klt power`'s IR-drop/EM evidence (see this module's
     "`klt power` (IR-drop/EM) evidence ingestion" docstring section), so a
     passing ``"power"`` citation never satisfies any tier-report item.
+
+    ``graded_by_build`` (issue #2176, resolved by
+    :func:`_is_graded_by_build`) is echoed onto the rendered entry, and,
+    when ``False``, **refuses** a cited item outright: ``"unmet"`` with
+    :data:`_REASON_UNGRADEABLE_BY_BUILD` and no citation, decided before the
+    evidence is resolved at all (so a command-backed entry is never run for
+    an item this build could not interpret the answer to). An *uncited*
+    ungradeable item is untouched -- still ``"unmet"``/
+    :data:`_REASON_NO_EVIDENCE`, now carrying ``graded_by_build: False`` so
+    the row no longer implies this build checked it. The refusal is
+    deliberately ahead of the ``allowed_kinds`` gate rather than folded into
+    it: ``allowed_kinds`` answers "which artifact does this item accept",
+    which is a question a build with no rules for the item cannot even pose.
     """
     citation = None
     failure_detail: dict[str, Any] = {}
@@ -4616,7 +4859,9 @@ def _build_tier_item(
     reason: str | None = _REASON_NO_EVIDENCE
 
     raw_entry = _lookup_evidence(evidence, item_id, partition)
-    if raw_entry is not None:
+    if raw_entry is not None and not graded_by_build:
+        reason = _REASON_UNGRADEABLE_BY_BUILD
+    elif raw_entry is not None:
         spec = _normalize_evidence_entry(raw_entry)
         if spec is None:
             reason = _REASON_INVALID_EVIDENCE
@@ -4651,6 +4896,7 @@ def _build_tier_item(
         "notes": notes,
         "status": status,
         "reason": reason,
+        "graded_by_build": graded_by_build,
         "citation": citation,
         **({"detail": failure_detail} if failure_detail else {}),
     }
@@ -4701,6 +4947,16 @@ def build_fleet_report(
             "not_t1_count": 2,
             "source_doc": "docs/design-evidence-tiers.md",
             "source_doc_content_hash": "sha256:...",
+            # Which build graded the fleet (issue #2176) -- the same block
+            # `build_tier_report` reports, in `klt version`'s own shape.
+            "build": {
+                "version": "0.4.2+g0123456789ab",
+                "package_version": "0.4.2",
+                "git_commit": "0123456789ab...",
+                "git_tag": None,
+                "dirty": False,
+                "is_release": False,
+            },
             "blocks": [
                 {
                     "block": "sky130-bandgap",
@@ -4798,6 +5054,19 @@ def build_fleet_report(
     from whichever run it was pulled from, is what actually travels with
     that row.
 
+    ``build`` (issue #2176) is the same build-identity block
+    :func:`build_tier_report` reports, for the same reason: a roll-up
+    committed beside a fleet manifest is read later by someone who cannot
+    see which `klt` produced it. It is reported once for the whole roll-up
+    rather than per block -- one process grades every block. Per-item
+    ``graded_by_build`` lives in each block's own tier report; here an item
+    this build cannot grade surfaces as an ``ungraded_items`` row (and, when
+    it is the only gap left, as the ``blocking_item`` fallback), because an
+    item no grading table names is by construction structurally ungradeable
+    too (:func:`_is_structurally_ungradeable_item`) -- with
+    ``reason: "ungradeable_by_build"`` naming the *build*, not the manifest,
+    as what is missing.
+
     Raises :class:`SignoffError` if ``fleet`` is not a JSON object, its
     ``blocks`` field is missing, not a JSON array, or empty; if any
     ``blocks[]`` entry is neither a string nor a JSON object, or a
@@ -4874,6 +5143,7 @@ def build_fleet_report(
         # within one call (see this function's docstring), so the first row
         # names the shared value for the whole roll-up.
         "source_doc_content_hash": blocks[0]["source_doc_content_hash"],
+        "build": _build_identity(),
         "blocks": blocks,
     }
 

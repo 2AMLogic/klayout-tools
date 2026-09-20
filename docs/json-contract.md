@@ -280,6 +280,25 @@ content. It is a verb-local field, not a `build_provenance()` parameter —
 the same choice `klt lvs` made for its own second input
 (`environment.reference_sha256`).
 
+`klt signoff` emits **no** `provenance` block of its own — it resolves no
+PDK, applies no deck, and reads no single input stream; the evidence it
+aggregates carries its own. Its two doc-parsing modes (`--manifest`,
+`--fleet`) do, since issue #2176, carry the half of that block they *can*
+answer, under a separate top-level `build` key: `{version, package_version,
+git_commit, git_tag, dirty, is_release}`, the same identity `klt version
+--format json` reports and the same `build_identity` source
+`provenance.klt_version` is resolved from. A tier report is committed and
+read back later, and "which build graded this" bounds what the verdict could
+have checked at all — those modes grade a doc-derived item list against
+rules compiled into the running build, and `--tiers-doc`/`$KLT_TIERS_DOC`
+lets the two be different versions (each T1 item's `graded_by_build` says
+whether this build had rules for it; a cited item that it did not renders
+`unmet`/`ungradeable_by_build` rather than borrowing a pass). Both fields
+are additive — new keys, and a new value in the existing `reason` enum —
+and earned no `schema_version` bump on either mode. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "An overridden doc can outrun the
+build" and "Which build graded this".
+
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
 waveform trace has neither), so `pdk`/`deck`/`klayout_version` are always
