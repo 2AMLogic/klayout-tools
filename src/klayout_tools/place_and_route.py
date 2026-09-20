@@ -521,6 +521,22 @@ echoes exactly what was applied (``power.straps[].spacing_um``,
 caller's ``connects[]`` tuned (see :func:`_pdn_connect_spec`/
 :func:`_pdn_connects_applied`).
 
+``preset`` (issue #2123) closes the gap those two fields left open from the
+other side. Being *able* to express a platform's PDN config is not the same
+as not having to transcribe it: the working blocks callers arrived at were
+produced by copying ORFS's own ``pdn_grid_strategy_*.cfg``/``pdn.tcl`` field
+for field, which is exactly the kind of thing that half-works silently.
+``request.power.preset`` names one of :data:`_PDN_PRESETS`' per-platform
+recipes (this repo's own cited transcription of those same configs) instead,
+and :func:`_resolve_pdn_preset` expands it into the identical
+``straps``/``connects`` an explicit request would carry -- validated by the
+same checks, emitted as the same Tcl, echoed in the same response fields,
+plus an additive ``power.preset`` naming which recipe was used. ``preset``
+and explicit ``straps``/``connects`` are **mutually exclusive** (not merged
+per-field): a per-field override would recreate the "cites a platform config
+but silently carries one hand-edited value" failure mode this field exists
+to remove.
+
 ``request.power`` omitted (the default) still emits **no**
 ``tapcell``/full-PDN ``add_global_connection``/``pdngen -- straps`` line
 anywhere -- the caller-configured PDN this section otherwise describes
@@ -1147,6 +1163,206 @@ _FILLER_CELLS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+#: Named, per-platform default PDN recipes selectable via
+#: ``request.power.preset`` (issue #2123, follow-up to #2086/#2122). Same
+#: "not derivable from the resolved PDK install itself, verified not
+#: guessed" posture as :data:`_TAPCELL_CELLS`/:data:`_FILLER_CELLS`/
+#: :data:`_ROUTING_LAYER_RANGE` above -- strap layers, widths, pitches and
+#: via-stack tuning are a *platform* PDN decision, recorded in each
+#: platform's own PDN config, not something a standard cell's LEF states.
+#:
+#: Why this table exists: before it, the only way to build a real PDN was
+#: to transcribe a platform's ``pdn_grid_strategy_*.cfg``/``pdn.tcl`` field
+#: for field into ``request.power.straps``/``.connects``. Issue #2086's
+#: measured audit (:mod:`klayout_tools.place_and_route_power_audit`) now
+#: *catches* a half-transcribed block (``power.placed.status`` becomes
+#: ``"partial"`` and names the failed checks), but catching a silent
+#: half-transcription after the fact is strictly worse than not needing the
+#: transcription at all. Each entry below is this repo's own transcription
+#: of the platform config, made once and cited, so a caller need not repeat
+#: it. The resolved ``straps``/``connects`` then run through exactly the
+#: same :func:`_validate_power` checks and are echoed in exactly the same
+#: response fields an explicit request produces -- a preset is a shorthand,
+#: never an opaque alternate code path.
+#:
+#: Values transcribed 2026-09-19 from ``The-OpenROAD-Project/
+#: OpenROAD-flow-scripts`` @ ``95ebc50a258390f4c7896e5f04db743f62279c2d``
+#: (the repo's own ``master`` head at that date):
+#:
+#: - ``"gf180mcu_7t_6M"`` -> ``flow/platforms/gf180/openROAD/pdn/
+#:   pdn_grid_strategy_7t_6M.cfg`` (``gf180mcu_fd_sc_mcu7t5v0``; the file
+#:   ``platforms/gf180/config.mk``'s own ``PDN_TCL ?= .../
+#:   pdn_grid_strategy_$(TRACK_OPTION)_6M.cfg`` selects for
+#:   ``TRACK_OPTION = 7t``), ``standard cell grid`` section verbatim::
+#:
+#:       add_pdn_stripe  -grid {block} -layer {Metal1} -width {0.600}
+#:           -pitch {3.92} -offset {0} -followpins
+#:       add_pdn_stripe  -grid {block} -layer {Metal4} -width {4.480}
+#:           -spacing {0.56} -pitch {44.8} -offset {22.4}
+#:       add_pdn_stripe  -grid {block} -layer {Metal5} -width {4.480}
+#:           -pitch {89.6} -offset {44.8}
+#:       add_pdn_connect -grid {block} -layers {Metal1 Metal4}
+#:           -max_columns {5} -ongrid {Metal2 Metal3 Metal4}
+#:           -split_cuts {Metal3 0.128}
+#:       add_pdn_connect -grid {block} -layers {Metal4 Metal5}
+#:
+#:   (line-wrapped here only to fit this file's 88-column limit; the config
+#:   itself writes each call on one line)
+#:
+#: - ``"gf180mcu_9t_6M"`` -> the sibling ``pdn_grid_strategy_9t_6M.cfg``
+#:   (``gf180mcu_fd_sc_mcu9t5v0``, the platform's own ``TRACK_OPTION ?= 9t``
+#:   default). Byte-for-byte identical to the ``7t`` config above except its
+#:   ``Metal1`` row rail, which is the taller row's own
+#:   ``-width {0.900} -pitch {5.040}`` instead of ``{0.600}``/``{3.92}``.
+#: - ``"sky130hd"`` -> ``flow/platforms/sky130hd/pdn.tcl``
+#:   (``sky130_fd_sc_hd``), ``standard cell grid`` section verbatim::
+#:
+#:       add_pdn_stripe -grid {grid} -layer {met1} -width {0.48}
+#:           -pitch {5.44} -offset {0} -followpins
+#:       add_pdn_stripe -grid {grid} -layer {met4} -width {1.600}
+#:           -pitch {27.140} -offset {13.570}
+#:       add_pdn_stripe -grid {grid} -layer {met5} -width {1.600}
+#:           -pitch {27.200} -offset {13.600}
+#:       add_pdn_connect -grid {grid} -layers {met1 met4}
+#:       add_pdn_connect -grid {grid} -layers {met4 met5}
+#:
+#:   Both of that file's ``add_pdn_connect`` lines carry no via-stack flags
+#:   at all, so this entry's ``connects`` is deliberately empty rather than
+#:   listing two all-``None`` entries: an unnamed pair already emits exactly
+#:   the plain ``add_pdn_connect -grid {grid} -layers {lower upper}`` call
+#:   the config itself has (see :func:`_pdn_connect_spec`), and the response
+#:   still echoes one ``power.connects[]`` entry per consecutive pair
+#:   regardless (:func:`_pdn_connects_applied`).
+#:
+#: Deliberately **not** carried over from those configs, because this
+#: module's PDN path does not emit the corresponding Tcl for *any* request,
+#: preset or explicit:
+#:
+#: - the ``global connections``/``voltage domains`` sections -- this module
+#:   builds those from :data:`_POWER_PIN_PATTERNS` plus the caller's own
+#:   ``power_net``/``ground_net`` (so a preset leaves both fields alone, and
+#:   they keep their ``"VDD"``/``"VSS"`` defaults -- the same net names all
+#:   three configs use);
+#: - ``define_pdn_grid``'s own ``-pins {Metal5}``/``-pins {met5}`` -- see
+#:   :func:`_row_rail_lines`' own docstring for why promoting PG nets into
+#:   the top-level DEF ``PINS``/Verilog port list is deliberately avoided
+#:   here;
+#: - ``pdn.tcl``'s ``macro grids`` section (``define_pdn_grid -macro``),
+#:   which is this module's already-documented v1 exclusion (see the module
+#:   docstring's own "Scope deliberately excluded" note).
+#:
+#: Each entry's ``cell_library`` is the standard-cell library the recipe was
+#: written for; a preset naming a different library than
+#: ``request.pdk.cell_library`` is rejected by
+#: :func:`_resolve_pdn_preset` rather than handed to ``pdngen``, where a
+#: ``Metal4`` strap on a sky130 stack would surface as an obscure engine
+#: error (or, worse, an empty grid the audit then grades ``"partial"``).
+_PDN_PRESETS: dict[str, dict[str, Any]] = {
+    "gf180mcu_7t_6M": {
+        "cell_library": "gf180mcu_fd_sc_mcu7t5v0",
+        "source": (
+            "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
+            "flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_7t_6M.cfg"
+        ),
+        "straps": (
+            {
+                "layer": "Metal1",
+                "width_um": 0.600,
+                "pitch_um": 3.92,
+                "offset_um": 0.0,
+                "followpins": True,
+            },
+            {
+                "layer": "Metal4",
+                "width_um": 4.480,
+                "pitch_um": 44.8,
+                "offset_um": 22.4,
+                "spacing_um": 0.56,
+            },
+            {
+                "layer": "Metal5",
+                "width_um": 4.480,
+                "pitch_um": 89.6,
+                "offset_um": 44.8,
+            },
+        ),
+        "connects": (
+            {
+                "layers": ["Metal1", "Metal4"],
+                "max_columns": 5,
+                "ongrid": ["Metal2", "Metal3", "Metal4"],
+                "split_cuts": {"layer": "Metal3", "width_um": 0.128},
+            },
+        ),
+    },
+    "gf180mcu_9t_6M": {
+        "cell_library": "gf180mcu_fd_sc_mcu9t5v0",
+        "source": (
+            "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
+            "flow/platforms/gf180/openROAD/pdn/pdn_grid_strategy_9t_6M.cfg"
+        ),
+        "straps": (
+            {
+                "layer": "Metal1",
+                "width_um": 0.900,
+                "pitch_um": 5.040,
+                "offset_um": 0.0,
+                "followpins": True,
+            },
+            {
+                "layer": "Metal4",
+                "width_um": 4.480,
+                "pitch_um": 44.8,
+                "offset_um": 22.4,
+                "spacing_um": 0.56,
+            },
+            {
+                "layer": "Metal5",
+                "width_um": 4.480,
+                "pitch_um": 89.6,
+                "offset_um": 44.8,
+            },
+        ),
+        "connects": (
+            {
+                "layers": ["Metal1", "Metal4"],
+                "max_columns": 5,
+                "ongrid": ["Metal2", "Metal3", "Metal4"],
+                "split_cuts": {"layer": "Metal3", "width_um": 0.128},
+            },
+        ),
+    },
+    "sky130hd": {
+        "cell_library": "sky130_fd_sc_hd",
+        "source": (
+            "OpenROAD-flow-scripts@95ebc50a258390f4c7896e5f04db743f62279c2d:"
+            "flow/platforms/sky130hd/pdn.tcl"
+        ),
+        "straps": (
+            {
+                "layer": "met1",
+                "width_um": 0.48,
+                "pitch_um": 5.44,
+                "offset_um": 0.0,
+                "followpins": True,
+            },
+            {
+                "layer": "met4",
+                "width_um": 1.600,
+                "pitch_um": 27.140,
+                "offset_um": 13.570,
+            },
+            {
+                "layer": "met5",
+                "width_um": 1.600,
+                "pitch_um": 27.200,
+                "offset_um": 13.600,
+            },
+        ),
+        "connects": (),
+    },
+}
+
 #: Per-cell-library ``klt extract --deck`` name (issue #948, Epic #700
 #: Phase 3) -- used only by the optional ``request.post_route_spef`` path
 #: (see :func:`_post_route_spef_metrics`) to resolve which curated
@@ -1412,7 +1628,7 @@ def run_place_and_route(
     floorplan = _validate_floorplan(request["floorplan"])
     io_spec = _validate_io(request.get("io"))
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
-    power = _validate_power(request.get("power"))
+    power = _validate_power(request.get("power"), cell_library)
     (
         clock_port,
         clock_period_ns,
@@ -1807,6 +2023,15 @@ def run_place_and_route(
     # per consecutive strap pair (built via :func:`_pdn_connects_applied`),
     # whether or not the caller supplied `power.connects[]` tuning for it.
     #
+    # `preset` (issue #2123) echoes the `request.power.preset` name this
+    # run's `straps`/`connects` were resolved from (`None` for a
+    # hand-supplied block, and for a `request.power`-less run). Because
+    # `straps`/`connects` are echoed identically either way -- a preset
+    # resolves into the *same* validated values an explicit request
+    # produces, before any Tcl is emitted (:func:`_resolve_pdn_preset`) --
+    # this field is what tells a reader *which* of the two a given response
+    # describes, keeping a preset auditable rather than opaque.
+    #
     # `row_rail` (issue #1442): reports the separate, `request.power`-
     # independent fallback :func:`_row_rail_lines` may have emitted at the
     # start of the `"route"` stage -- see that function's own and
@@ -1844,6 +2069,7 @@ def run_place_and_route(
         }
     if power is None:
         power_info: dict[str, Any] = {
+            "preset": None,
             "pdn": False,
             "global_connect": False,
             "power_net": None,
@@ -1858,6 +2084,7 @@ def run_place_and_route(
     else:
         tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
         power_info = {
+            "preset": power["preset"],
             "pdn": True,
             "global_connect": True,
             "power_net": power["power_net"],
@@ -2141,14 +2368,100 @@ def _validate_io(io_spec: Any) -> dict[str, str] | None:
     return {"layer_h": layer_h, "layer_v": layer_v}
 
 
-def _validate_power(power: Any) -> dict[str, Any] | None:
+def _resolve_pdn_preset(
+    power: dict[str, Any], cell_library: str | None
+) -> tuple[str | None, Any, Any]:
+    """Resolve ``request.power.preset`` (issue #2123) into the raw
+    ``straps``/``connects`` values :func:`_validate_power` then validates
+    exactly as if the caller had written them out by hand.
+
+    Returns ``(preset_name, straps, connects)``. With no ``preset`` key the
+    caller's own ``straps``/``connects`` are passed straight through and
+    ``preset_name`` is ``None`` -- byte-for-byte the behaviour from before
+    this field existed.
+
+    **``preset`` and explicit ``straps``/``connects`` are mutually
+    exclusive**, not merged per-field. That decision is deliberate and is
+    this issue's own open question resolved: a per-field override would
+    reintroduce exactly the failure mode presets exist to remove -- a
+    request that looks like it cites a platform config but silently carries
+    one hand-edited field, "half-working silently" (issue #2086). Mutual
+    exclusion makes the two modes distinguishable at a glance and makes any
+    deviation from the cited config an explicit, whole-recipe choice. A
+    caller wanting a tweaked variant copies the preset's straps out of the
+    documented table (``docs/cli/place-and-route.md``, "Power delivery")
+    and supplies them explicitly -- the response's own
+    ``power.preset: null`` then records that this run is *not* the
+    platform recipe.
+
+    The preset's own ``cell_library`` must match ``request.pdk.cell_library``
+    (when known): a ``gf180mcu_*`` recipe's ``Metal4``/``Metal5`` straps on a
+    sky130 stack would otherwise reach ``pdngen`` as an obscure engine error
+    or, worse, draw nothing at all and grade ``"partial"`` under issue
+    #2086's audit.
+    """
+    preset_name = power.get("preset")
+    if preset_name is None:
+        return None, power.get("straps"), power.get("connects")
+    if not (isinstance(preset_name, str) and preset_name):
+        raise PlaceAndRouteError(
+            "request.power.preset must be a non-empty string when given"
+        )
+    if preset_name not in _PDN_PRESETS:
+        raise PlaceAndRouteError(
+            f"unknown request.power.preset '{preset_name}' "
+            f"(supported: {', '.join(sorted(_PDN_PRESETS))})"
+        )
+    conflicting = sorted({"straps", "connects"} & set(power))
+    if conflicting:
+        raise PlaceAndRouteError(
+            f"request.power.preset '{preset_name}' and explicit "
+            f"request.power.{'/'.join(conflicting)} are mutually exclusive "
+            "-- supply one or the other, not both"
+        )
+    preset = _PDN_PRESETS[preset_name]
+    if cell_library not in (None, preset["cell_library"]):
+        raise PlaceAndRouteError(
+            f"request.power.preset '{preset_name}' is a "
+            f"'{preset['cell_library']}' recipe ({preset['source']}), but "
+            f"request.pdk.cell_library is '{cell_library}' -- a preset may "
+            "only be used with the standard-cell library it was transcribed "
+            "for"
+        )
+    return (
+        preset_name,
+        [dict(strap) for strap in preset["straps"]],
+        [
+            {
+                **connect,
+                "layers": list(connect["layers"]),
+                "ongrid": (list(connect["ongrid"]) if connect.get("ongrid") else None),
+                "split_cuts": (
+                    dict(connect["split_cuts"]) if connect.get("split_cuts") else None
+                ),
+            }
+            for connect in preset["connects"]
+        ],
+    )
+
+
+def _validate_power(
+    power: Any, cell_library: str | None = None
+) -> dict[str, Any] | None:
     """Validate the optional ``request.power`` block (issue #1091) -- power
     delivery net names and PDN strap geometry, driving ``tapcell``/
     ``add_global_connection``/``global_connect``/``pdngen``/
     ``filler_placement`` -- see this module's own docstring "Power delivery"
     section. ``None`` (the default, field omitted) preserves this module's
     original v1 behavior byte-for-byte: no power-delivery Tcl is ever
-    emitted, unchanged from before this field existed."""
+    emitted, unchanged from before this field existed.
+
+    ``cell_library`` (issue #2123) is ``request.pdk.cell_library``, used
+    only to reject a ``preset`` transcribed for a different standard-cell
+    library -- see :func:`_resolve_pdn_preset`. ``None`` (the default)
+    skips that cross-check, for callers validating a power block in
+    isolation.
+    """
     if power is None:
         return None
     if not isinstance(power, dict):
@@ -2169,7 +2482,7 @@ def _validate_power(power: Any) -> dict[str, Any] | None:
             "request.power.power_net and request.power.ground_net must differ"
         )
 
-    straps = power.get("straps")
+    preset_name, straps, connects = _resolve_pdn_preset(power, cell_library)
     if not isinstance(straps, list) or not straps:
         raise PlaceAndRouteError(
             "request.power.straps is required and must be a non-empty list"
@@ -2264,7 +2577,6 @@ def _validate_power(power: Any) -> dict[str, Any] | None:
     # one of `straps[]`'s own consecutive pairs, in that pair's own order --
     # this rejects a typo'd/nonexistent layer pair at validation time rather
     # than silently emitting a call this module never intended.
-    connects = power.get("connects")
     validated_connects: list[dict[str, Any]] = []
     if connects is not None:
         if not isinstance(connects, list):
@@ -2364,6 +2676,7 @@ def _validate_power(power: Any) -> dict[str, Any] | None:
             )
 
     return {
+        "preset": preset_name,
         "power_net": power_net,
         "ground_net": ground_net,
         "straps": validated_straps,
