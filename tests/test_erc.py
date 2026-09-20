@@ -1373,6 +1373,267 @@ def test_missing_tie_does_not_flag_properly_connected_tap(tmp_path):
     assert findings == []
 
 
+# --- ties[]: well/tap connectivity scoping (issue #2169) --------------------
+
+
+def _routed_tie_layout(*, vdd_tap: bool = True, vss_tap: bool = True):
+    """A miniature *routed* two-gate layout -- the shape issue #2169's
+    reproduction collapses on, reduced to the smallest geometry that still
+    reproduces it.
+
+    Two CMOS-style gate nets (``A``/``B``) each run one ``li1`` strap from
+    the p-well band, through the gap where their poly gate sits, up into
+    the n-well band -- the ordinary "PMOS drain to NMOS drain" output net
+    every standard cell draws. Each strap carries a *contact* inside each
+    well, exactly like the real source/drain contacts that make a
+    single-layer ``tap_layer`` over-broad. Genuine well taps (a contact
+    plus a ``tap_implant`` marker, i.e. the ``Comp ∩ Nplus`` boolean the
+    issue says no single layer can express) sit on the ``VDD``/``VSS``
+    rails.
+
+    Layer numbers (arbitrary, matching this file's convention): poly=1/0,
+    licon=2/0, li1=3/0, li1 label=3/5, nwell=10/0, contact=11/0,
+    tap_implant=12/0, pwell=13/0. 98/0 and 99/0 are deliberately left empty
+    for the "no well geometry" / "no tap geometry" cases.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    poly = layout.layer(1, 0)
+    licon = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    label = layout.layer(3, 5)
+    nwell = layout.layer(10, 0)
+    contact = layout.layer(11, 0)
+    tap_implant = layout.layer(12, 0)
+    pwell = layout.layer(13, 0)
+
+    # Two blanket well bands spanning the whole row, with a routing gap in
+    # between -- the "blanket well region spanning whole standard-cell
+    # rows" the issue names.
+    top.shapes(nwell).insert(kdb.Box.new(_um(0), _um(8), _um(20), _um(12)))
+    top.shapes(pwell).insert(kdb.Box.new(_um(0), _um(0), _um(20), _um(4)))
+
+    # Supply rails, each inside its own well band.
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(10), _um(20), _um(11)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(1), _um(10.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(1), _um(20), _um(2)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(1), _um(1.5))))
+
+    if vdd_tap:
+        top.shapes(contact).insert(kdb.Box.new(_um(2), _um(10.2), _um(2.6), _um(10.8)))
+        top.shapes(tap_implant).insert(
+            kdb.Box.new(_um(1.8), _um(10), _um(2.8), _um(11))
+        )
+    if vss_tap:
+        top.shapes(contact).insert(kdb.Box.new(_um(2), _um(1.2), _um(2.6), _um(1.8)))
+        top.shapes(tap_implant).insert(kdb.Box.new(_um(1.8), _um(1), _um(2.8), _um(2)))
+
+    for x, name in ((7.0, "A"), (13.0, "B")):
+        top.shapes(poly).insert(
+            kdb.Box.new(_um(x - 2), _um(4.5), _um(x + 0.3), _um(5.5))
+        )
+        top.shapes(li1).insert(kdb.Box.new(_um(x), _um(2.5), _um(x + 0.6), _um(9.5)))
+        top.shapes(licon).insert(
+            kdb.Box.new(_um(x + 0.05), _um(4.7), _um(x + 0.25), _um(4.9))
+        )
+        # Source/drain contacts inside each well -- picked up by any
+        # single-layer `tap_layer` naming the contact/diffusion layer.
+        top.shapes(contact).insert(
+            kdb.Box.new(_um(x + 0.1), _um(8.5), _um(x + 0.5), _um(8.9))
+        )
+        top.shapes(contact).insert(
+            kdb.Box.new(_um(x + 0.1), _um(3.0), _um(x + 0.5), _um(3.4))
+        )
+        top.shapes(label).insert(kdb.Text(name, kdb.Trans(_um(x + 0.3), _um(6.0))))
+    return layout, top
+
+
+def _routed_tie_spec(ties=None):
+    return {
+        "stackup": [
+            {"name": "poly", "layer": "1/0", "role": "gate"},
+            {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
+        ],
+        "vias": [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}],
+        "nets": [
+            {"name": "VDD", "kind": "supply"},
+            {"name": "VSS", "kind": "supply"},
+            {"name": "A", "kind": "signal"},
+            {"name": "B", "kind": "signal"},
+        ],
+        "ties": ties or [],
+    }
+
+
+def _routed_tie_entries(
+    *,
+    nwell_layer: str = "10/0",
+    pwell_layer: str = "13/0",
+    tap_layer: str = "11/0",
+    tap_requires=None,
+):
+    entries = []
+    for name, well_layer, net in (
+        ("nwell_tie", nwell_layer, "VDD"),
+        ("pwell_tie", pwell_layer, "VSS"),
+    ):
+        entry = {
+            "name": name,
+            "well_layer": well_layer,
+            "tap_layer": tap_layer,
+            "connect_to": "li1",
+            "net": net,
+        }
+        if tap_requires is not None:
+            entry["tap_requires"] = tap_requires
+        entries.append(entry)
+    return entries
+
+
+def _run_routed_tie(tmp_path, stem, ties=None, *, vdd_tap=True, vss_tap=True):
+    layout, _top = _routed_tie_layout(vdd_tap=vdd_tap, vss_tap=vss_tap)
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+# Case (a) of issue #2169's four-case table: `ties` omitted -> clean.
+def test_ties_omitted_is_the_clean_baseline(tmp_path):
+    report = _run_routed_tie(tmp_path, "case_a")
+
+    assert report["gate_count"] == 2
+    assert report["erc_findings"] == []
+    assert report["status"] == "clean"
+
+
+# Case (b): a real well plus a `tap_layer` with no geometry -> honest
+# `erc.missing_tie` findings, no short, gates untouched.
+def test_ties_well_with_no_tap_geometry_reports_honest_missing_tie(tmp_path):
+    report = _run_routed_tie(tmp_path, "case_b", _routed_tie_entries(tap_layer="99/0"))
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 2
+    assert {f["net"] for f in missing} == {"VDD", "VSS"}
+    assert all("no" in f["description"] for f in missing)
+    assert not any(f["rule"] == "erc.supply_short" for f in report["erc_findings"])
+    assert report["gate_count"] == 2
+
+
+# Case (c): a tap layer but no well geometry -> nothing to check, clean.
+def test_ties_tap_without_well_geometry_is_clean(tmp_path):
+    report = _run_routed_tie(
+        tmp_path,
+        "case_c",
+        _routed_tie_entries(nwell_layer="98/0", pwell_layer="98/0"),
+    )
+
+    assert report["gate_count"] == 2
+    assert report["erc_findings"] == []
+    assert report["status"] == "clean"
+
+
+# Case (d) -- the one that used to break: a real well plus a real tap must
+# not collapse the design into one island, must not invent a supply short,
+# and must not shrink `gates[]`.
+def test_ties_real_well_and_tap_does_not_collapse_the_design(tmp_path):
+    report = _run_routed_tie(tmp_path, "case_d", _routed_tie_entries())
+
+    assert report["gate_count"] == 2
+    assert not any(f["rule"] == "erc.supply_short" for f in report["erc_findings"])
+    assert not any(
+        f["rule"] == "erc.multiply_driven_net" for f in report["erc_findings"]
+    )
+    assert not any(f["rule"] == "erc.missing_tie" for f in report["erc_findings"])
+    assert report["status"] == "clean"
+
+
+def test_ties_never_alter_gates_or_net_findings(tmp_path):
+    """A `ties[]` declaration -- even a pathological one whose `tap_layer`
+    names the routing layer itself -- can never change `gates[]` or the
+    `nets[]`-driven findings: the tie check runs on its own isolated
+    connectivity graph (issue #2169 acceptance criterion 3)."""
+    baseline = _run_routed_tie(tmp_path, "iso_a")
+    real = _run_routed_tie(tmp_path, "iso_d", _routed_tie_entries())
+    pathological = _run_routed_tie(
+        tmp_path, "iso_x", _routed_tie_entries(tap_layer="3/0")
+    )
+
+    for report in (real, pathological):
+        assert report["gates"] == baseline["gates"]
+        assert report["gate_count"] == baseline["gate_count"]
+        assert [
+            f for f in report["erc_findings"] if f["rule"] != "erc.missing_tie"
+        ] == baseline["erc_findings"]
+
+
+def test_tap_requires_narrows_the_tap_to_a_boolean_layer(tmp_path):
+    """`tap_requires` expresses the `Comp ∩ Nplus`-style boolean a real PDK
+    tap is drawn as -- the derived tap keeps only contacts that also carry
+    the tap implant, so the signal-net source/drain contacts inside the
+    same well are not mistaken for taps."""
+    report = _run_routed_tie(
+        tmp_path, "requires", _routed_tie_entries(tap_requires=["12/0"])
+    )
+
+    assert report["erc_findings"] == []
+    assert report["gate_count"] == 2
+
+
+def test_tap_requires_reports_missing_tie_when_the_real_tap_is_absent(tmp_path):
+    """With the derived tap, a well whose only contacts belong to signal
+    nets is honestly reported as untied -- the single-layer `tap_layer`
+    would have seen those source/drain contacts as taps."""
+    report = _run_routed_tie(
+        tmp_path,
+        "requires_missing",
+        _routed_tie_entries(tap_requires=["12/0"]),
+        vdd_tap=False,
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["net"] == "VDD"
+    assert "no 'nwell_tie' tap contact drawn" in missing[0]["description"]
+
+
+def test_missing_tie_reported_when_only_untied_contacts_sit_in_the_well(tmp_path):
+    """Without `tap_requires`, an over-broad `tap_layer` still finds the
+    signal contacts inside the well -- but none of them reaches the
+    declared net, so the well is reported as not tied rather than silently
+    passing through a blanket well conductor."""
+    report = _run_routed_tie(tmp_path, "untied", _routed_tie_entries(), vdd_tap=False)
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["net"] == "VDD"
+    assert "not connected to declared net 'VDD'" in missing[0]["description"]
+
+
+def test_multiple_taps_in_one_well_pass_when_any_reaches_the_declared_net(tmp_path):
+    """A well holding several taps is tied as soon as *one* of them reaches
+    the declared net -- the check must not depend on which tap it happens
+    to look at first."""
+    layout, top = _routed_tie_layout()
+    # A second genuine VDD tap further along the same n-well.
+    top.shapes(layout.layer(11, 0)).insert(
+        kdb.Box.new(_um(17), _um(10.2), _um(17.6), _um(10.8))
+    )
+    top.shapes(layout.layer(12, 0)).insert(
+        kdb.Box.new(_um(16.8), _um(10), _um(17.8), _um(11))
+    )
+    gds = tmp_path / "two_taps.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two_taps.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=_routed_tie_entries()))
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert not any(f["rule"] == "erc.missing_tie" for f in report["erc_findings"])
+
+
 # --- nets/ties: spec validation -----------------------------------------------
 
 
@@ -1434,6 +1695,58 @@ def test_ties_requires_connect_to_naming_a_stackup_entry(tmp_path):
         },
     )
     with pytest.raises(ErcError, match="connect_to must name a 'stackup' entry"):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_rejects_non_array_tap_requires(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_requires": "12/0",
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match="tap_requires must be an array"):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_rejects_malformed_tap_requires_layer(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_requires": ["nope"],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match=r"tap_requires\[0\]"):
         run_erc(str(gds), str(spec))
 
 

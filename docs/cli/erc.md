@@ -226,6 +226,17 @@ use) — matching `klt power`'s own convention.
     shapes is checked independently.
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
+  - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
+    `[]`, issue #2169) — further layers intersected into the tap, so the
+    tap this check looks for is the **boolean** a real PDK draws rather
+    than one raw layer: `{"tap_layer": "22/0", "tap_requires": ["32/0"]}`
+    is `Comp ∩ Nplus`. Without it, no single-layer value can name a real
+    tap — an implant layer alone is not a conductor, and a
+    diffusion/contact layer alone also matches every source/drain contact
+    in the same well (see "Well/tap connectivity" below for why that
+    matters). Same "second plain layer field, intersected at use time"
+    shape as `stackup[0].active_layer`, generalised to a list; omitted ->
+    `tap_layer` alone, unchanged.
   - `connect_to` (string, required) — the `stackup` role name the tap is
     wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
   - `net` (string, required) — the net name (matched the same way as
@@ -238,12 +249,59 @@ Connectivity is traced with `klayout.db.LayoutToNetlist`, used purely for
 wire/via connectivity — no device recognition is registered, unlike `klt
 extract`'s deck-based extraction. This is the same API `extract.py`'s own
 metal/via connectivity graph and `klt power`'s resistive-network extraction
-already use, scoped down to only the layers this spec declares (`stackup`,
-`vias`, and — issue #861 — each `ties[]` entry's `well_layer`/`tap_layer`).
-This is the "LVS's shared net extraction" issue #861's own description
-names as the connectivity model Phase 1a builds and Phase 1c reuses: the
-`erc_findings` checks below run against this exact same unified graph, not
-a second extraction pass.
+already use, scoped down to only the layers this spec declares (`stackup`
+and `vias`).
+
+`gates[]`, every antenna ratio derived from it, and the `nets[]`-driven
+findings (`erc.unconnected_net` / `erc.multiply_driven_net` /
+`erc.supply_short`) all come from that one graph. Since issue #2169 the
+`ties[]` declarations are **not** part of it — see "Well/tap connectivity"
+below.
+
+### Well/tap connectivity (`ties[]`, issue #2169)
+
+A `ties[]` entry is evaluated in its own second extraction: the same
+`stackup`/`vias` graph, plus one extra conductor per tie — that tie's
+**tap sites**, i.e. `tap_layer` intersected with every `tap_requires`
+layer and then clipped to the well itself (a tap is by definition inside
+the well it taps), wired up to the tie's `connect_to` role.
+
+Two properties follow, both deliberate:
+
+- **A declared well is never itself a conductor.** It contributes only
+  *where its taps are*, never across its plan-view extent, and two taps in
+  the same well are not shorted to each other through it. Before #2169 the
+  whole `well_layer` region was registered and self-connected, so a
+  blanket well — one polygon spanning whole standard-cell rows — conducted
+  to every shape that merely overlapped it in plan view. On a routed
+  design that collapsed the layout into one or two electrical islands: a
+  false `erc.supply_short` between VDD and VSS (via any ordinary CMOS
+  output net with a contact in both wells), and a `gates[]` list collapsed
+  to a single entry.
+- **A `ties[]` declaration cannot affect anything but `erc.missing_tie`.**
+  Because the primary graph above never sees the tie layers, `gates[]`,
+  the antenna verdicts, and the `nets[]` findings are bit-identical
+  whether `ties[]` is omitted, declared correctly, or declared with an
+  over-broad `tap_layer`. A tie mis-declaration can therefore make the
+  missing-tie answer wrong, but it can no longer silently invalidate the
+  antenna half of the same report. `tests/test_erc.py` asserts this
+  directly (`test_ties_never_alter_gates_or_net_findings`), together with
+  the four-case table from issue #2169.
+
+The cost of the isolation is one extra connectivity extraction, incurred
+**only** when `ties[]` is non-empty; a spec without ties runs exactly one
+extraction, as before.
+
+**Still not modelled**: there is no device recognition and no layer
+adjacency (z) rule here, so `tap_requires` is the only way to say "this
+tap is a real tap". Express it — a single-layer `tap_layer` naming a
+diffusion or contact layer will match every source/drain contact inside
+the well, and those contacts are real conductors, so `erc.missing_tie`
+will report the well as tied whenever any of them happens to reach the
+declared supply. And a block sitting in a native substrate with no *drawn*
+well/tub layer cannot declare a substrate tie at all: `well_layer`
+requires drawn geometry, so only the drawn-well half of such a design is
+graded.
 
 For every net the extraction discovers whose geometry includes the declared
 gate-role layer (`stackup[0]`):
@@ -300,11 +358,14 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   declared names collided.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer`), a tap must
-  be drawn inside it (`tap_layer`) *and* that tap must be electrically
-  connected — via this same connectivity graph, since the tap is wired to
-  `connect_to`'s `stackup` region during registration — to the declared
-  `net`. Both failure modes (no tap drawn at all, or a tap present but
-  wired to the wrong net) are reported under this one rule id.
+  be drawn inside it (`tap_layer`, narrowed by `tap_requires`) *and* at
+  least one such tap must be electrically connected — via the tie
+  connectivity graph, where the tap is wired to `connect_to`'s `stackup`
+  region during registration — to the declared `net`. Both failure modes
+  (no tap drawn at all, or taps present but none reaching the declared
+  net) are reported under this one rule id. A well holding several taps
+  passes as soon as *one* of them reaches the net; see "Well/tap
+  connectivity" above for what this check does and does not model.
 
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 

@@ -28,6 +28,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   rewrite now runs exactly once, matching `spice_safe_net_name()`'s reported
   spelling. Other net-name cases (#696, #1162, #2145) are unaffected.
 
+- **Fixed** (#2169): `klt erc`'s `ties[]` no longer collapses a routed
+  design into one electrical island. A declared `well_layer` used to be
+  registered and self-connected as a conductor, so a blanket well spanning
+  whole standard-cell rows conducted to *every* shape overlapping it in
+  plan view — producing a false `erc.supply_short` between VDD and VSS (via
+  any ordinary CMOS output net contacted in both wells) and collapsing
+  `gates[]` to a single entry, which silently invalidated every antenna
+  ratio in the same report. A tie now contributes only its **tap sites**
+  (the tap layer clipped to the well), so a well conducts only where its
+  taps actually sit. `ties[]` is additionally extracted in its own
+  connectivity graph, so `gates[]`, the antenna verdicts, and the `nets[]`
+  findings are now identical whether `ties[]` is omitted, declared
+  correctly, or declared with an over-broad `tap_layer` — a tie
+  mis-declaration can no longer reach anything but `erc.missing_tie`. A
+  well holding several taps now passes as soon as *one* of them reaches the
+  declared net (previously only the first tap found was probed, which was
+  only ever correct because the blanket well merged them all).
+
+- **Added** (#2169): `klt erc`'s `ties[]` entries accept an optional
+  `tap_requires` array of `"<layer>/<datatype>"` layers, intersected into
+  `tap_layer` to derive the real tap — `{"tap_layer": "22/0",
+  "tap_requires": ["32/0"]}` is `Comp ∩ Nplus`. Without it no single-layer
+  value can name a real PDK tap: an implant alone is not a conductor, and a
+  diffusion/contact layer alone also matches every source/drain contact in
+  the same well. Same optional, opt-in shape as `stackup[0].active_layer`;
+  omitted leaves `tap_layer` alone, unchanged. No `schema_version` bump —
+  additive spec key, no change to the emitted field set.
+
 - **Fixed** (#2110): `klt drc --engine curated` now applies the shared
   coverage rollup. Partial runs report `clean_partial`, zero-work runs report
   `not_checked`, and violations retain precedence. Rules skipped for absent
