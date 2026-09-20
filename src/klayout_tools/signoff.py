@@ -4085,6 +4085,36 @@ def _pdn_branch_reason(
     return None
 
 
+def _resolve_erc_supply_spec(
+    erc: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Validate the ERC half of item 11's cited set (critical metrics, then
+    supply-spec completeness and continuity) and return the resolved supply
+    spec, split out of :func:`_grade_power_delivery` to keep its own
+    complexity under the repo's ratchet (issue #2094).
+
+    Returns ``(supply_spec, reason, detail)``: on success, ``supply_spec`` is
+    the resolved spec and ``reason``/``detail`` are ``None``/``{}``; on
+    failure, ``supply_spec`` is ``None`` and ``reason``/``detail`` are the
+    values :func:`_grade_power_delivery` should return directly (with status
+    ``"unmet"`` and no citation).
+    """
+    erc_metric_detail = _critical_metric_detail(erc["envelope"])
+    if erc_metric_detail:
+        return None, _REASON_CHECK_FAILED, erc_metric_detail
+
+    supply_spec = _erc_supply_spec(erc)
+    if supply_spec is None or not supply_spec["supply_nets"]:
+        return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
+    if supply_spec["tie_count"] == 0:
+        return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
+
+    if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
+        return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
+
+    return supply_spec, None, {}
+
+
 def _grade_power_delivery(
     specs: list[dict[str, Any]], *, partition_kind: str
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
@@ -4165,18 +4195,9 @@ def _grade_power_delivery(
             _critical_metric_detail(lvs["envelope"]),
         )
 
-    erc_metric_detail = _critical_metric_detail(erc["envelope"])
-    if erc_metric_detail:
-        return "unmet", _REASON_CHECK_FAILED, None, erc_metric_detail
-
-    supply_spec = _erc_supply_spec(erc)
-    if supply_spec is None or not supply_spec["supply_nets"]:
-        return "unmet", _REASON_SUPPLY_SPEC_INCOMPLETE, None, {}
-    if supply_spec["tie_count"] == 0:
-        return "unmet", _REASON_SUPPLY_SPEC_INCOMPLETE, None, {}
-
-    if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
-        return "unmet", _REASON_SUPPLY_NOT_CONTINUOUS, None, {}
+    supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
+    if supply_spec is None:
+        return "unmet", reason, None, detail
 
     par = by_kind.get("place-and-route")
     if par is not None:
