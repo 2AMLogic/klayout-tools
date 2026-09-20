@@ -36,7 +36,9 @@ Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
 purely for wire/via connectivity (no device recognition registered) --
 exactly the same API ``extract.py``'s own metal/via connectivity graph and
 ``power.py``'s ``run_power`` already use, scoped down to only the
-caller-declared gate + stackup (+ tie) layers. This is the "LVS's shared
+caller-declared gate + stackup layers (plus, in a *separate* graph used
+only for the tie check, each declared tie's derived tap sites -- see
+:func:`_extract_connectivity`). This is the "LVS's shared
 net extraction" 1c's own issue description names as the connectivity model
 1a builds and 1c reuses -- ``LayoutToNetlist`` is the same engine
 ``extract.py``'s device-aware netlist extraction and ``klt lvs``'s
@@ -73,11 +75,16 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   ``"kind": "supply"``, a **supply short** (``erc.supply_short``) instead.
 - **Missing substrate/well tie** (``erc.missing_tie``): driven by the new
   optional ``ties`` spec section (each entry names a well/tub layer, a tap
-  layer, the ``stackup`` role the tap connects up to, and the supply net
+  layer -- optionally narrowed to a boolean by ``tap_requires``, issue
+  #2169 -- the ``stackup`` role the tap connects up to, and the supply net
   it must reach). Every physically distinct well/tub shape must contain at
-  least one tap that is electrically connected (via this module's own
-  connectivity graph) to the declared net; a missing tap, or a tap wired
-  to the wrong net entirely, is reported.
+  least one tap that is electrically connected (via the tie connectivity
+  graph, see :func:`_extract_connectivity`) to the declared net; a missing
+  tap, or taps none of which reach the declared net, is reported. The
+  declared well is *not* a conductor in that graph -- it contributes only
+  where its taps sit -- and the graph is extracted separately from the one
+  ``gates[]`` is built on, so no ``ties`` declaration can reach the antenna
+  half of the same report (issue #2169).
 
 See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 """
@@ -105,7 +112,12 @@ from .coverage import build_check_coverage, coverage_rollup, rollup_status, work
 #: issue and docs/json-contract.md's "Shared `provenance` block"), and the
 #: optional `stackup[0].active_layer` spec field (issue #1979 -- true
 #: `poly ∩ diff` gate-area computation, opt-in, legacy raw-poly-area
-#: behaviour preserved when omitted).
+#: behaviour preserved when omitted). Issue #2169 adds one more optional
+#: spec key (`ties[].tap_requires`) and *fixes* the tie connectivity model
+#: (a declared well no longer conducts across its plan-view extent, and
+#: ties no longer share a graph with `gates[]`) -- a bug fix to what the
+#: documented fields mean, not a change to the field set itself, so again
+#: no bump: no consumer-visible field was added, removed, or retyped.
 SCHEMA_VERSION = 1
 
 
@@ -377,6 +389,31 @@ def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]
     return entries
 
 
+def _parse_tap_requires(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[int, int]]:
+    """``ties[].tap_requires`` (optional, issue #2169): the extra layers
+    intersected into this tie's ``tap_layer`` to derive the real tap --
+    ``{"tap_layer": "22/0", "tap_requires": ["32/0"]}`` is ``Comp ∩
+    Nplus``. Omitted/``null`` -> ``[]`` (``tap_layer`` alone, the
+    pre-#2169 behaviour). Split out of :func:`_validate_ties` to keep that
+    function under the repo's C901 complexity ratchet."""
+    raw = entry.get("tap_requires", [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].tap_requires must be an array "
+            "of '<layer>/<datatype>' strings"
+        )
+    return [
+        _parse_layer_datatype(
+            str(value), spec_path, f"ties[{index}].tap_requires[{j}]", ErcError
+        )
+        for j, value in enumerate(raw)
+    ]
+
+
 def _validate_ties(
     spec: dict[str, Any], spec_path: str, stackup_names: list[str]
 ) -> list[dict[str, Any]]:
@@ -385,7 +422,17 @@ def _validate_ties(
     well/tub layer and the tap (contact) layer expected inside it, the
     ``stackup`` role the tap must be wired up to, and the supply net that
     tap must ultimately reach. Omitted or empty -> no missing-tie findings
-    are computed."""
+    are computed.
+
+    ``tap_requires`` (optional array of ``"<layer>/<datatype>"``, issue
+    #2169) intersects further layers into the tap, so the spec can express
+    the *boolean* a real PDK tap is drawn as -- ``Comp ∩ Nplus`` inside an
+    n-well, ``Comp ∩ Pplus`` inside a p-well -- rather than a single layer
+    that is either an implant (not a conductor) or a diffusion/cut shared
+    with every source/drain in the same well. Same "second plain layer
+    field, intersected at use time" shape as ``stackup[0].active_layer``
+    (issue #1979), generalised to a list; omitted -> ``tap_layer`` alone,
+    unchanged."""
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -413,6 +460,8 @@ def _validate_ties(
             str(entry["tap_layer"]), spec_path, f"ties[{i}].tap_layer", ErcError
         )
 
+        tap_requires = _parse_tap_requires(entry, spec_path, i)
+
         connect_to = str(entry["connect_to"])
         if connect_to not in stackup_names:
             raise ErcError(
@@ -429,6 +478,7 @@ def _validate_ties(
                 "name": name,
                 "well_layer": well_layer,
                 "tap_layer": tap_layer,
+                "tap_requires": tap_requires,
                 "connect_to": connect_to,
                 "net": net,
             }
@@ -704,18 +754,25 @@ def _tie_findings(
     ``ties`` spec section.
 
     For every physically distinct well/tub shape (each merged polygon of a
-    tie's ``well_layer``), a tap (``tap_layer``) must be drawn inside it
-    *and* that tap must be electrically connected (via this module's own
-    connectivity graph -- the tap is wired to ``connect_to``'s ``stackup``
-    region during registration, see ``run_erc``) to the declared ``net``.
-    Both failure modes are reported under the same rule id: no tap drawn in
-    the well at all, or a tap present but wired to a different net (or no
-    net at all).
+    tie's ``well_layer``), a tap (the derived ``tap_layer`` ∩
+    ``tap_requires`` region, clipped to the well itself) must be drawn
+    inside it *and* at least one such tap must be electrically connected --
+    via the tie connectivity graph, where the tap is wired to
+    ``connect_to``'s ``stackup`` region during registration, see
+    :func:`_extract_connectivity` -- to the declared ``net``. Both failure
+    modes are reported under the same rule id: no tap drawn in the well at
+    all, or taps present but none of them wired to the declared net.
 
-    Locating the tap's own net uses ``LayoutToNetlist.probe_net`` at a
-    point known to have tap geometry (mirroring ``extract.py``'s
-    ``_probe_abstract_pin_net``) rather than a per-well scan over every
-    extracted net, which stays cheap even for a layout with many wells.
+    Which taps reach the declared net is answered once per tie, by asking
+    the graph for the declared net's *own* polygons on the tap layer
+    (``LayoutToNetlist.polygons_of_net``) and then intersecting that set
+    against each well shape (issue #2169). This replaces the previous
+    single ``probe_net`` of whichever tap happened to come first: with the
+    well no longer acting as a blanket conductor merging every tap in it
+    into one net (see :func:`_extract_connectivity`), taps in the same well
+    are genuinely independent, so a well with one untied and one correctly
+    tied tap must still pass -- and it stays a single region operation per
+    well rather than a probe per tap.
     """
     if not tie_layers:
         return []
@@ -726,9 +783,10 @@ def _tie_findings(
 
     findings: list[dict[str, Any]] = []
     for tie in tie_layers:
-        matched_cluster_ids = {
-            net.cluster_id for net in _match_net_clusters(circuit, tie["net"])
-        }
+        tied_taps = kdb.Region()
+        for net in _match_net_clusters(circuit, tie["net"]):
+            tied_taps += l2n.polygons_of_net(net, tie["tap_index"])
+        tied_taps = tied_taps.merged()
 
         for well_poly in tie["well_region"].merged().each():
             poly_region = kdb.Region(well_poly)
@@ -748,11 +806,7 @@ def _tie_findings(
                 )
                 continue
 
-            probe_point = next(iter(tap_here.merged().each())).bbox().center()
-            owner_net = l2n.probe_net(tie["tap_region"], probe_point)
-            owner_cluster_id = owner_net.cluster_id if owner_net is not None else None
-
-            if owner_cluster_id is None or owner_cluster_id not in matched_cluster_ids:
+            if tied_taps.interacting(poly_region).is_empty():
                 findings.append(
                     _finding(
                         "erc.missing_tie",
@@ -766,6 +820,97 @@ def _tie_findings(
                     )
                 )
     return findings
+
+
+def _extract_connectivity(
+    layout: Any,
+    top_cell: Any,
+    stackup: list[dict[str, Any]],
+    vias: list[dict[str, Any]],
+    ties: list[dict[str, Any]],
+) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
+    """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
+    over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
+    non-empty, each tie's derived *tap* conductor.
+
+    Returns ``(l2n, circuit, layer_index, tie_layers)``.
+
+    **A declared well is never a conductor here (issue #2169).** The
+    previous model registered the whole ``well_layer`` region, self-
+    connected it (``l2n.connect(well_region)``) and connected it to the tap
+    layer, which made a blanket well -- one plan-view polygon spanning
+    whole standard-cell rows -- conduct to *every* shape that merely
+    overlapped it, not only to the shapes actually tied to it. On a routed
+    design that collapsed the entire layout into one or two electrical
+    islands: a false ``erc.supply_short`` between VDD and VSS, and a
+    ``gates[]`` list collapsed to a single entry (which silently invalidated
+    every antenna ratio in the same report).
+
+    Instead, a tie contributes exactly one conductor: its **tap sites** --
+    ``tap_layer`` intersected with every ``tap_requires`` layer (the
+    ``Comp ∩ Nplus``-style boolean a real PDK tap is drawn as) and then
+    clipped to the well itself, since a tap is by definition inside the
+    well it taps. Those sites are wired up to ``connect_to``'s ``stackup``
+    region exactly as before, so a tap still reaches (or fails to reach)
+    the declared supply net through real routing. The well contributes only
+    *where the taps are*, never across its own extent, and taps in the same
+    well are not shorted to each other through it.
+    """
+    # Imported lazily, matching `load_layout`'s lazy `klayout.db` import.
+    import klayout.db as kdb
+
+    l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
+
+    layer_index: dict[str, int] = {}
+    regions: dict[str, Any] = {}
+    for entry in stackup:
+        conductor_region = _region(layout, top_cell, entry["layer"])
+        regions[entry["name"]] = conductor_region
+        layer_index[entry["name"]] = l2n.register(conductor_region, entry["name"])
+        l2n.connect(conductor_region)
+        if entry["label_layer"] is not None:
+            label_texts = _texts(layout, top_cell, entry["label_layer"])
+            l2n.register(label_texts, f"{entry['name']}_label")
+            l2n.connect(conductor_region, label_texts)
+
+    for via in vias:
+        via_region = _region(layout, top_cell, via["layer"])
+        l2n.register(via_region, via["name"])
+        l2n.connect(via_region)
+        role_a, role_b = via["between"]
+        l2n.connect(regions[role_a], via_region)
+        l2n.connect(via_region, regions[role_b])
+
+    tie_layers: list[dict[str, Any]] = []
+    for tie in ties:
+        well_region = _region(layout, top_cell, tie["well_layer"]).merged()
+        tap_region = _region(layout, top_cell, tie["tap_layer"])
+        for required in tie["tap_requires"]:
+            tap_region = tap_region & _region(layout, top_cell, required)
+        tap_sites = (tap_region & well_region).merged()
+        tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
+        l2n.connect(tap_sites)
+        l2n.connect(tap_sites, regions[tie["connect_to"]])
+        tie_layers.append(
+            {
+                **tie,
+                "well_region": well_region,
+                "tap_region": tap_sites,
+                "tap_index": tap_index,
+            }
+        )
+
+    try:
+        l2n.extract_netlist()
+    except Exception as exc:  # KLayout raises a bare RuntimeError on internal failure
+        raise ErcError(f"connectivity extraction failed: {exc}") from exc
+
+    circuit = l2n.netlist().circuit_by_name(top_cell.name)
+    if circuit is None:
+        raise ErcError(
+            f"no circuit named '{top_cell.name}' in the extracted connectivity graph"
+        )
+    return l2n, circuit, layer_index, tie_layers
 
 
 def run_erc(
@@ -803,8 +948,14 @@ def run_erc(
     - ``ties`` (optional array, default ``[]``, issue #861): substrate/well
       tie declarations -- ``{"name" (optional, defaults to "tie<index>"),
       "well_layer": "<layer>/<datatype>", "tap_layer": "<layer>/<datatype>",
+      "tap_requires": ["<layer>/<datatype>", ...] (optional, issue #2169),
       "connect_to": "<stackup role>", "net"}``. Drives the
       ``erc.missing_tie`` finding; omitted entirely -> none are computed.
+      ``tap_requires`` intersects further layers into the tap so the spec
+      can name the boolean a real PDK tap is drawn as (``Comp ∩ Nplus``).
+      Ties are extracted in their own connectivity graph
+      (:func:`_extract_connectivity`), so they affect ``erc.missing_tie``
+      and nothing else.
 
     ``top`` selects the top cell to analyse when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
@@ -852,66 +1003,18 @@ def run_erc(
     top_cell = top_cells[0]
     dbu = layout.dbu
 
-    # Imported lazily, matching `load_layout`'s own lazy `klayout.db` import.
-    import klayout.db as kdb
-
-    l2n = kdb.LayoutToNetlist(top_cell.name, dbu)
-
-    layer_index: dict[str, int] = {}
-    regions: dict[str, Any] = {}
-    for entry in stackup:
-        conductor_region = _region(layout, top_cell, entry["layer"])
-        regions[entry["name"]] = conductor_region
-        layer_index[entry["name"]] = l2n.register(conductor_region, entry["name"])
-        l2n.connect(conductor_region)
-        if entry["label_layer"] is not None:
-            label_texts = _texts(layout, top_cell, entry["label_layer"])
-            l2n.register(label_texts, f"{entry['name']}_label")
-            l2n.connect(conductor_region, label_texts)
-
-    via_layer_index: dict[str, int] = {}
-    for via in vias:
-        via_region = _region(layout, top_cell, via["layer"])
-        via_layer_index[via["name"]] = l2n.register(via_region, via["name"])
-        l2n.connect(via_region)
-        role_a, role_b = via["between"]
-        l2n.connect(regions[role_a], via_region)
-        l2n.connect(via_region, regions[role_b])
-
-    # ERC tie declarations (issue #861): register each tie's well/tap
-    # layers and wire the tap up to its declared `connect_to` stackup
-    # region *before* `extract_netlist()` runs, so the single unified
-    # connectivity graph below already reflects whether a well's tap
-    # actually reaches the declared net -- see `_tie_findings`.
-    tie_layers: list[dict[str, Any]] = []
-    for tie in ties:
-        well_region = _region(layout, top_cell, tie["well_layer"])
-        tap_region = _region(layout, top_cell, tie["tap_layer"])
-        l2n.register(well_region, f"{tie['name']}__well")
-        l2n.register(tap_region, f"{tie['name']}__tap")
-        l2n.connect(well_region)
-        l2n.connect(tap_region)
-        l2n.connect(well_region, tap_region)
-        l2n.connect(tap_region, regions[tie["connect_to"]])
-        tie_layers.append(
-            {
-                **tie,
-                "well_region": well_region,
-                "tap_region": tap_region,
-            }
-        )
-
-    try:
-        l2n.extract_netlist()
-    except Exception as exc:  # KLayout raises a bare RuntimeError on internal failure
-        raise ErcError(f"connectivity extraction failed: {exc}") from exc
-
-    netlist = l2n.netlist()
-    circuit = netlist.circuit_by_name(top_cell.name)
-    if circuit is None:
-        raise ErcError(
-            f"no circuit named '{top_cell.name}' in the extracted connectivity graph"
-        )
+    # Two graphs, deliberately (issue #2169). The *primary* graph carries
+    # only what the caller declared as real routing -- `stackup` + `vias` --
+    # and is the sole source of `gates[]`, the antenna-ratio model, and the
+    # `nets[]`-driven findings. The `ties[]` declarations are extracted
+    # separately below, so a mis-declared well/tap layer can no longer
+    # silently collapse `gates[]` (and with it every antenna ratio in the
+    # same report) or invent an `erc.supply_short` between two rails that
+    # are not actually shorted: with `ties` omitted or declared, these
+    # outputs are identical by construction, not merely by convention.
+    l2n, circuit, layer_index, _ = _extract_connectivity(
+        layout, top_cell, stackup, vias, []
+    )
 
     gate_role = stackup[0]["name"]
     gate_layer_index = layer_index[gate_role]
@@ -1076,7 +1179,19 @@ def run_erc(
         _floating_gate_findings(list(zip(gates, gate_regions, strict=True)), gate_role)
     )
     erc_findings.extend(_net_connectivity_findings(circuit, nets_decl))
-    erc_findings.extend(_tie_findings(l2n, circuit, tie_layers))
+
+    # The tie graph (issue #2169): a second extraction, built only when the
+    # spec actually declares `ties[]`, that adds each tie's derived tap
+    # conductor on top of the same stackup/vias. Kept separate from the
+    # primary graph above so the `erc.missing_tie` answer can depend on tap
+    # geometry without any `ties[]` declaration -- correct, over-broad, or
+    # outright wrong -- being able to reach `gates[]`, the antenna ratios,
+    # or the `nets[]` findings already computed.
+    if ties:
+        tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
+            layout, top_cell, stackup, vias, ties
+        )
+        erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
     erc_findings.sort(
         key=lambda f: (
             f["rule"],
