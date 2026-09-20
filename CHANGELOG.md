@@ -135,6 +135,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   not a redefinition of what an already-shipped field means (which is what
   bumped `--fleet` to `2` in #2178).
 
+- **Fixed** (#2171, `klt power`, two independent correctness bugs, both hit
+  on the first real chip-level PDN run): a `power_nets` entry now matches a
+  net by a **label it carries**, not only by the full comma-joined name
+  KLayout assigns from *all* of a net's labels — so `"VDD_CORE"` resolves a
+  bus that landed on a pad cell's own `DVDD` plate (net `DVDD,VDD_CORE`)
+  instead of matching nothing and blaming the layer/datatype numbers. The
+  object form `{"name": ..., "match": "exact"}` restores whole-name
+  matching; both the per-net warning and the "none of the requested
+  `power_nets` matched" error now list the net names actually present. And
+  a **non-rectangular** merged polygon (an L/T/comb-shaped bus, a PDN ring)
+  is now decomposed into rectangles and modelled per sub-segment, instead
+  of becoming one resistor sized by its *bounding box* — an approximation
+  that was silently non-conservative, understating resistance/droop about
+  nine-fold on an L whose arms are 20 µm wide inside a 100 × 100 µm
+  bounding box, while overstating the per-edge EM limit. A polygon with no
+  exact decomposition (non-Manhattan, or over the `MAX_DECOMPOSITION_CELLS`
+  cap) makes its island **unsolved** — new additive
+  `networks[].islands[].unsolved_reason` field, empty `nodes`/`edges` —
+  rather than approximated. Rectangular rails (every `klt par` per-row
+  standard-cell rail, and both `gcd` corpus fixtures) take the unchanged
+  single-edge path and report byte-identical networks.
+
 - **Added** (#2179): `klt erc` now reports `erc_status` and `erc_coverage` —
   the **connectivity** half's own roll-up and checked-work scope, beside the
   antenna-driven `status`/`coverage`. `klt erc` answers two independent

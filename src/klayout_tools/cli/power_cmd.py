@@ -46,9 +46,14 @@ def _print_text(report: dict) -> None:
         print()
         print(f"net {net_entry['net']}: {net_entry['island_count']} island(s)")
         for island in net_entry["islands"]:
+            # `unsolved_reason` (issue #2171) is non-null when an island's
+            # geometry could not be modelled exactly -- it is reported
+            # instead of a bounding-box approximation, never alongside one.
+            unsolved = island.get("unsolved_reason")
             print(
                 f"  {island['island_id']}: nodes={island['node_count']} "
                 f"edges={island['edge_count']}"
+                + (f"  UNSOLVED: {unsolved}" if unsolved else "")
             )
 
     _print_ir_drop(report)

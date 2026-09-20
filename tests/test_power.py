@@ -252,27 +252,40 @@ def test_run_power_every_net_unmatched_raises(tmp_path):
         run_power(str(gds), str(spec))
 
 
-# --- run_power: non-rectangular polygon fallback ---------------------------
+# --- run_power: matching a net by a label it carries (issue #2171) ---------
 
 
-def test_run_power_non_rectangular_segment_is_bbox_approximated_with_warning(tmp_path):
-    gds = tmp_path / "lshape.gds"
+def _multi_label_fixture(path) -> None:
+    """One met1 rail carrying **two** labels -- a chip-level `VDD_CORE` bus
+    landing on a pad cell's own `DVDD` plate, the shape issue #2171 reports.
+
+    KLayout names such a net after *all* its labels, comma-joined
+    (`expanded_name()` == `"DVDD,VDD_CORE"`), so an exact-name spec entry
+    asking for `VDD_CORE` used to match nothing.
+    """
     layout = kdb.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
     met1 = layout.layer(1, 0)
     met1_label = layout.layer(1, 5)
-    # Two touching boxes whose union is L-shaped (not a box).
-    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(5), _um(2)))
-    top.shapes(met1).insert(kdb.Box.new(_um(3), _um(2), _um(5), _um(5)))
-    top.shapes(met1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(1), _um(1))))
-    layout.write(str(gds))
 
-    spec = tmp_path / "lshape.power.json"
-    spec.write_text(
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(10), _um(1)))
+    top.shapes(met1_label).insert(kdb.Text("VDD_CORE", kdb.Trans(_um(2), _um(0.5))))
+    top.shapes(met1_label).insert(kdb.Text("DVDD", kdb.Trans(_um(8), _um(0.5))))
+
+    # A second, single-labelled net so the "names actually present" list has
+    # more than one entry to report.
+    top.shapes(met1).insert(kdb.Box.new(_um(20), _um(0), _um(30), _um(1)))
+    top.shapes(met1_label).insert(kdb.Text("VSS", kdb.Trans(_um(25), _um(0.5))))
+
+    layout.write(str(path))
+
+
+def _label_spec(path, *, power_nets) -> None:
+    path.write_text(
         json.dumps(
             {
-                "power_nets": ["VPWR"],
+                "power_nets": list(power_nets),
                 "stackup": [
                     {
                         "name": "met1",
@@ -285,11 +298,293 @@ def test_run_power_non_rectangular_segment_is_bbox_approximated_with_warning(tmp
         )
     )
 
+
+def test_run_power_matches_a_net_by_a_label_it_carries(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(spec, power_nets=("VDD_CORE",))
+
+    report = run_power(str(gds), str(spec))
+
+    assert report["warnings"] == []
+    assert report["island_count"] == 1
+    vdd = next(entry for entry in report["networks"] if entry["net"] == "VDD_CORE")
+    assert vdd["island_count"] == 1
+    # The key stays the caller's own name, not KLayout's comma-joined one.
+    assert report["power_nets"] == ["VDD_CORE"]
+
+
+def test_run_power_matches_the_other_label_of_the_same_net_too(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(spec, power_nets=("DVDD",))
+
     report = run_power(str(gds), str(spec))
     assert report["island_count"] == 1
-    assert any(
-        "non-rectangular" in w and "bounding box" in w for w in report["warnings"]
+
+
+def test_run_power_full_comma_joined_name_still_matches(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(spec, power_nets=("DVDD,VDD_CORE",))
+
+    report = run_power(str(gds), str(spec))
+    assert report["island_count"] == 1
+
+
+def test_run_power_exact_match_mode_rejects_a_bare_label(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(
+        spec,
+        power_nets=(
+            {"name": "VDD_CORE", "match": "exact"},
+            {"name": "VSS", "match": "exact"},
+        ),
     )
+
+    report = run_power(str(gds), str(spec))
+    vdd = next(entry for entry in report["networks"] if entry["net"] == "VDD_CORE")
+    assert vdd["island_count"] == 0
+    vss = next(entry for entry in report["networks"] if entry["net"] == "VSS")
+    assert vss["island_count"] == 1
+    assert any(
+        "VDD_CORE" in w and "matches no labelled net" in w for w in report["warnings"]
+    )
+
+
+def test_run_power_rejects_an_unknown_match_mode(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(spec, power_nets=({"name": "VDD_CORE", "match": "regex"},))
+
+    with pytest.raises(PowerError, match="'match' must be one of"):
+        run_power(str(gds), str(spec))
+
+
+def test_run_power_rejects_a_power_net_object_without_a_name(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(spec, power_nets=({"match": "exact"},))
+
+    with pytest.raises(PowerError, match="must be a non-empty string or an object"):
+        run_power(str(gds), str(spec))
+
+
+def test_run_power_unmatched_net_warning_lists_the_net_names_present(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(spec, power_nets=("VDD_CORE", "NOPE"))
+
+    report = run_power(str(gds), str(spec))
+    warning = next(w for w in report["warnings"] if "NOPE" in w)
+    assert "nets actually present" in warning
+    assert "DVDD,VDD_CORE" in warning
+    assert "VSS" in warning
+
+
+def test_run_power_every_net_unmatched_error_lists_the_net_names_present(tmp_path):
+    gds = tmp_path / "pads.gds"
+    spec = tmp_path / "pads.power.json"
+    _multi_label_fixture(gds)
+    _label_spec(spec, power_nets=("NOPE1", "NOPE2"))
+
+    with pytest.raises(PowerError) as excinfo:
+        run_power(str(gds), str(spec))
+    message = str(excinfo.value)
+    assert "none of the requested" in message
+    assert "nets actually present" in message
+    assert "DVDD,VDD_CORE" in message
+    assert "VSS" in message
+
+
+# --- run_power: non-rectangular polygon decomposition (issue #2171) --------
+
+
+def _l_bus_fixture(path) -> None:
+    """One `VPWR` net drawn as an L, the normal shape of a real PDN ring:
+
+    - a horizontal arm x:[0,100] y:[0,20] um, and
+    - a vertical arm x:[0,20] y:[20,100] um
+
+    merging into a single L-shaped polygon whose bounding box (100x100 um)
+    is five times wider than either arm is drawn. At 0.1 ohm/sq the bounding
+    box is **one** square (0.1 ohm) while the real L is ~9 squares.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(1, 0)
+    met1_label = layout.layer(1, 5)
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(20)))
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(20), _um(20), _um(100)))
+    top.shapes(met1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(50), _um(10))))
+    layout.write(str(path))
+
+
+def _l_bus_spec(path, *, pads=None, current_model=None) -> None:
+    payload = {
+        "power_nets": ["VPWR"],
+        "stackup": [
+            {
+                "name": "met1",
+                "layer": "1/0",
+                "label_layer": "1/5",
+                "sheet_resistance_ohm_per_sq": 0.1,
+            }
+        ],
+    }
+    if pads is not None:
+        payload["pads"] = pads
+    if current_model is not None:
+        payload["current_model"] = current_model
+    path.write_text(json.dumps(payload))
+
+
+def _total_series_resistance(island, frm, to) -> float:
+    """Sum the resistances along the unique path between two nodes of a
+    tree-shaped island (the L bus below has no loops)."""
+    adjacency: dict[str, list[tuple[str, float]]] = {}
+    for edge in island["edges"]:
+        adjacency.setdefault(edge["from"], []).append(
+            (edge["to"], edge["resistance_ohm"])
+        )
+        adjacency.setdefault(edge["to"], []).append(
+            (edge["from"], edge["resistance_ohm"])
+        )
+    stack = [(frm, None, 0.0)]
+    while stack:
+        node, parent, total = stack.pop()
+        if node == to:
+            return total
+        for neighbour, resistance in adjacency.get(node, []):
+            if neighbour != parent:
+                stack.append((neighbour, node, total + resistance))
+    raise AssertionError(f"no path from {frm} to {to}")
+
+
+def test_run_power_l_shaped_segment_is_decomposed_not_bbox_approximated(tmp_path):
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    assert report["island_count"] == 1
+    island = report["networks"][0]["islands"][0]
+    assert island["unsolved_reason"] is None
+
+    # The bounding-box model produced exactly one edge for the whole L; the
+    # decomposition produces one per sub-segment.
+    assert island["edge_count"] > 1
+
+    nodes_by_xy = {(n["x_um"], n["y_um"]): n["id"] for n in island["nodes"]}
+    far_x = nodes_by_xy[(100.0, 10.0)]  # open end of the horizontal arm
+    far_y = nodes_by_xy[(10.0, 100.0)]  # open end of the vertical arm
+    # 9 squares * 0.1 ohm/sq along the real L, not the 1 square (0.1 ohm)
+    # its 100x100 um bounding box would have claimed.
+    assert _total_series_resistance(island, far_x, far_y) == pytest.approx(0.9)
+
+    # The pre-#2171 "approximated by its bounding box" warning is gone: the
+    # segment is modelled, not approximated.
+    assert not any("approximated by its bounding box" in w for w in report["warnings"])
+    assert any("non-rectangular" in w and "decomposed" in w for w in report["warnings"])
+
+
+def test_run_power_l_shaped_bus_droop_reflects_the_real_arm_widths(tmp_path):
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(
+        spec,
+        pads=[
+            {"name": "P0", "net": "VPWR", "x_um": 100.0, "y_um": 10.0, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [
+                {"name": "u0", "x_um": 10.0, "y_um": 100.0, "current_a": 0.1}
+            ],
+        },
+    )
+
+    report = run_power(str(gds), str(spec))
+    # 0.1 A through 0.9 ohm = 90 mV; the bounding-box model reported 10 mV
+    # for the same geometry -- understating droop nine-fold.
+    assert report["worst_case_droop_mv"] == pytest.approx(90.0)
+
+
+def test_run_power_declares_an_island_unsolved_over_the_decomposition_cap(
+    tmp_path, monkeypatch
+):
+    import klayout_tools.power as power_module
+
+    monkeypatch.setattr(power_module, "MAX_DECOMPOSITION_CELLS", 1)
+
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    island = report["networks"][0]["islands"][0]
+    assert island["nodes"] == []
+    assert island["edges"] == []
+    assert island["unsolved_reason"] is not None
+    assert "mesh cell" in island["unsolved_reason"]
+    assert any("unsolved" in w for w in report["warnings"])
+
+
+def test_run_power_declares_a_non_manhattan_segment_unsolved(tmp_path):
+    gds = tmp_path / "diagonal.gds"
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(1, 0)
+    met1_label = layout.layer(1, 5)
+    top.shapes(met1).insert(
+        kdb.Polygon(
+            [
+                kdb.Point(_um(0), _um(0)),
+                kdb.Point(_um(100), _um(0)),
+                kdb.Point(_um(100), _um(100)),
+            ]
+        )
+    )
+    top.shapes(met1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(80), _um(10))))
+    layout.write(str(gds))
+
+    spec = tmp_path / "diagonal.power.json"
+    _l_bus_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    island = report["networks"][0]["islands"][0]
+    assert island["unsolved_reason"] is not None
+    assert "axis-aligned" in island["unsolved_reason"]
+    assert island["edges"] == []
+
+
+def test_run_power_rectangular_segments_keep_the_single_edge_model(tmp_path):
+    """The decomposition is scoped to non-rectangular polygons: a plain
+    box rail is still one edge between two endpoint nodes."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    assert report["node_count"] == 8
+    assert report["edge_count"] == 5
+    for net_entry in report["networks"]:
+        for island in net_entry["islands"]:
+            assert island["unsolved_reason"] is None
 
 
 # --- run_power: top-cell selection ------------------------------------------

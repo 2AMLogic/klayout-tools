@@ -63,14 +63,33 @@ path to a pad and cannot be solved for droop without saying so).
 Resistor-network model (MVP, stated plainly):
 
 - Each layer's net geometry, read via ``LayoutToNetlist.polygons_of_net``
-  and merged into maximal polygons, becomes **one metal edge per merged
-  polygon** between two endpoint nodes at the polygon's bounding-box ends
-  along its longer axis -- ``resistance_ohm = sheet_resistance_ohm_per_sq *
-  length / width``. Every merged polygon in this module's own real-fixture
-  validation (``tests/corpus/place_and_route/gcd.gds.gz``, a genuine ``klt
-  par`` output) is an axis-aligned box, matching this model exactly; a
-  non-rectangular polygon is still accepted, approximated by its bounding
-  box, with a ``warnings`` entry -- never a silent misrepresentation.
+  and merged into maximal polygons, becomes **one metal edge per
+  rectangular merged polygon** between two endpoint nodes at the polygon's
+  ends along its longer axis -- ``resistance_ohm =
+  sheet_resistance_ohm_per_sq * length / width``. Every merged polygon in
+  this module's own real-fixture validation
+  (``tests/corpus/place_and_route/gcd.gds.gz``, a genuine ``klt par``
+  output) is an axis-aligned box, matching this model exactly.
+- A **non-rectangular** merged polygon -- the normal shape of a real PDN
+  ring or an L/T/comb-shaped bus -- is *decomposed*, not approximated
+  (issue #2171). It is cut into the grid of rectangles formed by extending
+  every one of its own vertex coordinates across it, and each rectangle
+  becomes its own resistor: a centre node, a shared port node on every
+  boundary it has with a neighbouring rectangle, and a terminal port node
+  at each free end of its longer axis, with
+  ``sheet_resistance_ohm_per_sq * (half the cell's extent along the flow
+  direction) / (its conducting width)`` per centre-to-port edge. The
+  previous behaviour -- one resistor sized by the polygon's *bounding box*
+  -- was silently **non-conservative** on any such shape: an L whose arms
+  are 20 um wide inside a 100x100 um bounding box was modelled as a single
+  square of metal, understating resistance (and droop) roughly nine-fold
+  while overstating the per-edge EM limit.
+- A merged polygon that cannot be decomposed exactly -- not axis-aligned
+  (45-degree geometry), or so many-vertexed that its grid would exceed
+  :data:`MAX_DECOMPOSITION_CELLS` -- makes its island **unsolved**: the
+  island is reported with an ``unsolved_reason`` and no nodes/edges at all,
+  plus a ``warnings`` entry. Refusing is honest; approximating would move
+  the IR/EM verdict in the unsafe direction.
 - Each via layer's net geometry becomes **one via edge** per merged via
   polygon, connecting the *nearest* existing node (by straight-line
   distance) on each of the two metal layers the via spec declares it
@@ -103,6 +122,18 @@ if TYPE_CHECKING:
 #: docs/json-contract.md's additive-envelope design).
 SCHEMA_VERSION = 1
 
+#: The most mesh cells one non-rectangular merged polygon may be decomposed
+#: into (issue #2171). A polygon's rectangular decomposition is the grid
+#: formed by extending every vertex coordinate across it, so a pathological
+#: segment (thousands of vertices -- fill-like or stair-stepped geometry)
+#: could otherwise explode into a network no consumer can read and no solve
+#: can finish. Over the cap the island is reported with an
+#: ``unsolved_reason`` instead, never with a bounding-box approximation:
+#: refusing is honest, approximating understates resistance and overstates
+#: EM headroom. Deliberately module-level so an operator (or a test) can
+#: raise it without a spec change.
+MAX_DECOMPOSITION_CELLS = 4096
+
 
 class PowerError(Exception):
     """Raised when ``klt power`` cannot run: a bad layout/spec file, a
@@ -114,20 +145,58 @@ class PowerError(Exception):
     """
 
 
-def _validate_power_nets(spec: dict[str, Any], spec_path: str) -> list[str]:
+#: The ``power_nets`` match modes (issue #2171). ``"label"`` -- the default,
+#: and the only one that works on a real pad-connected PDN -- matches a net
+#: that *carries* the requested label among the comma-joined label set
+#: KLayout names it after; ``"exact"`` is the pre-#2171 behaviour, matching
+#: only a net whose whole ``expanded_name()`` is the requested string. See
+#: :func:`_matched_nets` and ``docs/cli/power.md``'s "Matching a power net".
+_MATCH_MODES = ("label", "exact")
+
+
+def _parse_power_net_entry(entry: Any, index: int, spec_path: str) -> tuple[str, str]:
+    """One ``power_nets`` entry -> ``(name, match_mode)``.
+
+    A bare string is the common form (``"VDD_CORE"``, matched by label); the
+    object form ``{"name": ..., "match": "exact"|"label"}`` exists so a spec
+    can opt back into whole-name matching when two nets in the same layout
+    deliberately share a label.
+    """
+    if isinstance(entry, dict):
+        name = str(entry.get("name", "")).strip()
+        match = str(entry.get("match", _MATCH_MODES[0]))
+    elif isinstance(entry, str):
+        name, match = entry.strip(), _MATCH_MODES[0]
+    else:
+        name, match = "", _MATCH_MODES[0]
+    if not name:
+        raise PowerError(
+            f"spec '{spec_path}': power_nets[{index}] must be a non-empty string or "
+            "an object with a non-empty 'name' (and an optional 'match' mode)"
+        )
+    if match not in _MATCH_MODES:
+        raise PowerError(
+            f"spec '{spec_path}': power_nets[{index}] 'match' must be one of "
+            f"{', '.join(repr(mode) for mode in _MATCH_MODES)} (got {match!r})"
+        )
+    return name, match
+
+
+def _validate_power_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, str]]:
+    """The spec's ``power_nets`` as ``[{"name", "match"}]``, deduplicated by
+    name in first-seen order (the order ``networks`` is reported in)."""
     raw = spec.get("power_nets")
     if not isinstance(raw, list) or not raw:
         raise PowerError(f"spec '{spec_path}' must have a non-empty 'power_nets' array")
-    names: list[str] = []
-    for entry in raw:
-        name = str(entry).strip()
-        if not name:
-            raise PowerError(
-                f"spec '{spec_path}': 'power_nets' entries must be non-empty strings"
-            )
-        if name not in names:
-            names.append(name)
-    return names
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(raw):
+        name, match = _parse_power_net_entry(entry, index, spec_path)
+        if name in seen:
+            continue
+        seen.add(name)
+        entries.append({"name": name, "match": match})
+    return entries
 
 
 def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]:
@@ -567,6 +636,258 @@ def _nearest_endpoint(
     return best_id
 
 
+def _polygon_cut_coordinates(polygon: kdb.Polygon) -> tuple[list[int], list[int]]:
+    """The sorted, deduplicated x/y coordinates of every vertex of a merged
+    polygon (hull **and** holes) -- the cut lines of the rectangular grid
+    :func:`_decompose_manhattan_polygon` carves it into."""
+    xs: set[int] = set()
+    ys: set[int] = set()
+    for point in polygon.each_point_hull():
+        xs.add(point.x)
+        ys.add(point.y)
+    for hole in range(polygon.holes()):
+        for point in polygon.each_point_hole(hole):
+            xs.add(point.x)
+            ys.add(point.y)
+    return sorted(xs), sorted(ys)
+
+
+def _decomposition_grid(
+    polygon: kdb.Polygon, max_cells: int
+) -> tuple[list[int] | None, list[int] | None, str | None]:
+    """``(xs, ys, None)`` for a polygon worth decomposing, or ``(None, None,
+    reason)`` when it is degenerate or would need more mesh cells than
+    ``max_cells``."""
+    xs, ys = _polygon_cut_coordinates(polygon)
+    if len(xs) < 2 or len(ys) < 2:
+        return None, None, "it has no positive-area extent"
+    cells = (len(xs) - 1) * (len(ys) - 1)
+    if cells > max_cells:
+        return (
+            None,
+            None,
+            (
+                f"decomposing it needs up to {cells} mesh cells, over this build's "
+                f"{max_cells}-mesh-cell cap (MAX_DECOMPOSITION_CELLS)"
+            ),
+        )
+    return xs, ys, None
+
+
+def _decompose_manhattan_polygon(
+    polygon: kdb.Polygon, max_cells: int
+) -> tuple[list[tuple[int, int, kdb.Box]] | None, str | None]:
+    """Cut one merged, axis-aligned polygon into the grid of rectangles
+    formed by extending every vertex's x and y coordinate across it (issue
+    #2171).
+
+    Returns ``(cells, None)`` -- each cell a ``(column, row, box)`` triple
+    keyed to that grid, so two cells sharing a boundary always share the
+    *whole* side -- or ``(None, reason)`` when the polygon cannot be
+    decomposed exactly (not Manhattan, degenerate, or over the cell cap).
+    A caller must never fall back to the bounding box on a ``reason``: that
+    is the non-conservative approximation this function exists to replace.
+    """
+    import klayout.db as kdb
+
+    xs, ys, reason = _decomposition_grid(polygon, max_cells)
+    if xs is None or ys is None:
+        return None, reason
+    columns = {x: index for index, x in enumerate(xs)}
+    poly_region = kdb.Region(polygon)
+    cells: list[tuple[int, int, kdb.Box]] = []
+    for row in range(len(ys) - 1):
+        band = kdb.Region(kdb.Box(xs[0], ys[row], xs[-1], ys[row + 1])) & poly_region
+        for part in band.merged().each():
+            if not part.is_box():
+                return None, (
+                    "it is not axis-aligned (Manhattan), so it has no exact "
+                    "decomposition into rectangles"
+                )
+            box = part.bbox()
+            left, right = columns.get(box.left), columns.get(box.right)
+            if left is None or right is None:
+                return None, "its rectangles do not land on its own vertex grid"
+            for column in range(left, right):
+                cells.append(
+                    (
+                        column,
+                        row,
+                        kdb.Box(xs[column], ys[row], xs[column + 1], ys[row + 1]),
+                    )
+                )
+    if not cells:
+        return None, "it has no positive-area extent"
+    return cells, None
+
+
+def _cell_sides(
+    column: int,
+    row: int,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    horizontal_major: bool,
+) -> tuple[
+    tuple[tuple[int, int], tuple[str, int, int], float, float, float, float, bool], ...
+]:
+    """The four sides of one mesh cell as ``(neighbour_key, port_key, port_x,
+    port_y, half_length_um, cross_um, is_major_axis_end)`` tuples.
+
+    ``port_key`` is deliberately shared by the two cells on either side of a
+    boundary, so they meet at **one** node; ``half_length_um`` is the
+    centre-to-side travel along the flow direction and ``cross_um`` the
+    conducting width across it.
+    """
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    half_w, half_h = (x1 - x0) / 2, (y1 - y0) / 2
+    width_um, height_um = x1 - x0, y1 - y0
+    return (
+        (
+            (column - 1, row),
+            ("v", column, row),
+            x0,
+            cy,
+            half_w,
+            height_um,
+            horizontal_major,
+        ),
+        (
+            (column + 1, row),
+            ("v", column + 1, row),
+            x1,
+            cy,
+            half_w,
+            height_um,
+            horizontal_major,
+        ),
+        (
+            (column, row - 1),
+            ("h", column, row),
+            cx,
+            y0,
+            half_h,
+            width_um,
+            not horizontal_major,
+        ),
+        (
+            (column, row + 1),
+            ("h", column, row + 1),
+            cx,
+            y1,
+            half_h,
+            width_um,
+            not horizontal_major,
+        ),
+    )
+
+
+def _model_box_polygon(
+    box: kdb.Box,
+    entry: dict[str, Any],
+    dbu: float,
+    add_node: Any,
+    add_edge: Any,
+) -> list[tuple[str, float, float]]:
+    """A rectangular merged polygon: one edge between two endpoint nodes at
+    the box's ends along its longer axis -- the model this module has always
+    used, and the one every ``klt par`` standard-cell rail matches exactly."""
+    x0, y0 = box.left * dbu, box.bottom * dbu
+    x1, y1 = box.right * dbu, box.top * dbu
+    width_um, height_um = x1 - x0, y1 - y0
+    if width_um <= 0 or height_um <= 0:
+        return []
+
+    if width_um >= height_um:
+        y_mid = (y0 + y1) / 2
+        a_x, a_y, b_x, b_y = x0, y_mid, x1, y_mid
+        length_um, cross_um = width_um, height_um
+    else:
+        x_mid = (x0 + x1) / 2
+        a_x, a_y, b_x, b_y = x_mid, y0, x_mid, y1
+        length_um, cross_um = height_um, width_um
+
+    n_a = add_node(entry["name"], a_x, a_y)
+    n_b = add_node(entry["name"], b_x, b_y)
+    # A metal role's EM limit is per-width (like a real PDK's own
+    # `DCCURRENTDENSITY`, mA/um at that layer's fixed thickness), so it
+    # scales by this specific merged rail's own cross-width -- a narrow rail
+    # has a lower absolute current limit than a wide one on the same layer,
+    # exactly as electromigration physics says it should.
+    current_limit_a = entry["current_limit_a_per_um"]
+    if current_limit_a is not None:
+        current_limit_a = current_limit_a * cross_um
+    add_edge(
+        "metal",
+        entry["name"],
+        n_a,
+        n_b,
+        entry["sheet_resistance_ohm_per_sq"] * length_um / cross_um,
+        current_limit_a,
+        entry["current_limit_source"],
+    )
+    return [(n_a, a_x, a_y), (n_b, b_x, b_y)]
+
+
+def _model_mesh_polygon(
+    cells: list[tuple[int, int, kdb.Box]],
+    entry: dict[str, Any],
+    dbu: float,
+    add_node: Any,
+    add_edge: Any,
+) -> list[tuple[str, float, float]]:
+    """A decomposed non-rectangular merged polygon: a finite-difference
+    resistor mesh over its rectangles (issue #2171).
+
+    Each cell gets a centre node; each boundary it shares with a neighbour
+    gets a port node **shared** by both cells, and each free end of the
+    cell's own longer axis gets a terminal port node so the arm's true
+    extremity is still represented (that is where a pad or a load actually
+    attaches). Every centre-to-port edge is ``sheet_resistance * (half the
+    cell's extent along the flow direction) / (its conducting width across
+    it)``, so an L's two arms contribute their own lengths at their own
+    widths instead of one resistor sized by a bounding box far wider than
+    either arm is drawn.
+    """
+    occupied = {(column, row) for column, row, _ in cells}
+    ports: dict[tuple[str, int, int], str] = {}
+    endpoints: list[tuple[str, float, float]] = []
+    sheet_r = entry["sheet_resistance_ohm_per_sq"]
+    limit_per_um = entry["current_limit_a_per_um"]
+
+    for column, row, box in cells:
+        x0, y0 = box.left * dbu, box.bottom * dbu
+        x1, y1 = box.right * dbu, box.top * dbu
+        if x1 - x0 <= 0 or y1 - y0 <= 0:
+            continue
+        centre = add_node(entry["name"], (x0 + x1) / 2, (y0 + y1) / 2)
+        endpoints.append((centre, (x0 + x1) / 2, (y0 + y1) / 2))
+        sides = _cell_sides(column, row, x0, y0, x1, y1, (x1 - x0) >= (y1 - y0))
+        for neighbour, port_key, px, py, half_um, cross_um, is_end in sides:
+            if neighbour in occupied:
+                port = ports.get(port_key)
+                if port is None:
+                    port = add_node(entry["name"], px, py)
+                    ports[port_key] = port
+                    endpoints.append((port, px, py))
+            elif is_end:
+                port = add_node(entry["name"], px, py)
+                endpoints.append((port, px, py))
+            else:
+                continue
+            add_edge(
+                "metal",
+                entry["name"],
+                centre,
+                port,
+                sheet_r * half_um / cross_um,
+                None if limit_per_um is None else limit_per_um * cross_um,
+                entry["current_limit_source"],
+            )
+    return endpoints
+
+
 def _build_island_network(
     l2n: kdb.LayoutToNetlist,
     net: kdb.Net,
@@ -578,11 +899,16 @@ def _build_island_network(
     net_name: str,
     island_id: str,
     warnings: list[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     """Build one electrically-connected island's node/edge lists -- see this
-    module's docstring for the resistor-network model. Returns ``(nodes,
-    edges)``, both empty when ``net`` has no geometry on any declared
-    ``stackup`` layer (the caller decides whether that is worth a warning)."""
+    module's docstring for the resistor-network model.
+
+    Returns ``(nodes, edges, unsolved_reason)``. ``nodes``/``edges`` are both
+    empty when ``net`` has no geometry on any declared ``stackup`` layer (the
+    caller decides whether that is worth a warning). ``unsolved_reason`` is a
+    string -- with empty ``nodes``/``edges`` -- when some segment's geometry
+    cannot be modelled exactly (issue #2171): the island is declared
+    unsolved rather than approximated in the non-conservative direction."""
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     rails_by_layer: dict[str, list[dict[str, Any]]] = {
@@ -633,61 +959,38 @@ def _build_island_network(
             }
         )
 
+    decomposed = {"segments": 0, "cells": 0}
     for entry in stackup:
         region = l2n.polygons_of_net(net, layer_index[entry["name"]]).merged()
         for polygon in region.each():
-            box = polygon.bbox()
-            x0, y0, x1, y1 = (
-                box.left * dbu,
-                box.bottom * dbu,
-                box.right * dbu,
-                box.top * dbu,
-            )
-            width_um = x1 - x0
-            height_um = y1 - y0
-            if width_um <= 0 or height_um <= 0:
-                continue
-
-            if width_um >= height_um:
-                y_mid = (y0 + y1) / 2
-                a_x, a_y, b_x, b_y = x0, y_mid, x1, y_mid
-                length_um, cross_um = width_um, height_um
-            else:
-                x_mid = (x0 + x1) / 2
-                a_x, a_y, b_x, b_y = x_mid, y0, x_mid, y1
-                length_um, cross_um = height_um, width_um
-
-            n_a = add_node(entry["name"], a_x, a_y)
-            n_b = add_node(entry["name"], b_x, b_y)
-            resistance_ohm = entry["sheet_resistance_ohm_per_sq"] * length_um / cross_um
-            # A metal role's EM limit is per-width (like a real PDK's own
-            # `DCCURRENTDENSITY`, mA/um at that layer's fixed thickness), so
-            # it scales by this specific merged rail's own cross-width --
-            # a narrow rail has a lower absolute current limit than a wide
-            # one on the same layer, exactly as electromigration physics
-            # says it should.
-            current_limit_a = entry["current_limit_a_per_um"]
-            if current_limit_a is not None:
-                current_limit_a = current_limit_a * cross_um
-            add_edge(
-                "metal",
-                entry["name"],
-                n_a,
-                n_b,
-                resistance_ohm,
-                current_limit_a,
-                entry["current_limit_source"],
-            )
-            rails_by_layer[entry["name"]].append(
-                {"endpoints": [(n_a, a_x, a_y), (n_b, b_x, b_y)]}
-            )
-
-            if not polygon.is_box():
-                warnings.append(
-                    f"power net {net_name!r} island {island_id!r}: a "
-                    f"non-rectangular {entry['name']} segment was approximated "
-                    "by its bounding box"
+            if polygon.is_box():
+                endpoints = _model_box_polygon(
+                    polygon.bbox(), entry, dbu, add_node, add_edge
                 )
+            else:
+                cells, reason = _decompose_manhattan_polygon(
+                    polygon, MAX_DECOMPOSITION_CELLS
+                )
+                if cells is None:
+                    return (
+                        [],
+                        [],
+                        f"a non-rectangular {entry['name']} segment could not be "
+                        f"decomposed into rectangles -- {reason}",
+                    )
+                decomposed["segments"] += 1
+                decomposed["cells"] += len(cells)
+                endpoints = _model_mesh_polygon(cells, entry, dbu, add_node, add_edge)
+            if endpoints:
+                rails_by_layer[entry["name"]].append({"endpoints": endpoints})
+
+    if decomposed["segments"]:
+        warnings.append(
+            f"power net {net_name!r} island {island_id!r}: "
+            f"{decomposed['segments']} non-rectangular segment(s) decomposed "
+            f"into {decomposed['cells']} rectangular sub-segment(s) -- "
+            "resistance is modelled per sub-segment, not from a bounding box"
+        )
 
     for via in vias:
         region = l2n.polygons_of_net(net, via_layer_index[via["name"]]).merged()
@@ -716,7 +1019,7 @@ def _build_island_network(
                 via["current_limit_source"],
             )
 
-    return nodes, edges
+    return nodes, edges, None
 
 
 def _nearest_node(
@@ -1260,6 +1563,128 @@ def _em_overall_status(
     return rollup_status(coverage_rollup({"coverage": coverage}), success="pass")
 
 
+def _net_labels(expanded_name: str) -> list[str]:
+    """The individual labels behind one KLayout net name.
+
+    ``LayoutToNetlist`` names a net after **every** text label attached to
+    it, comma-joined -- a chip-level ``VDD_CORE`` bus landing on a pad
+    cell's own ``DVDD`` plate is named ``"DVDD,VDD_CORE"`` (issue #2171).
+    """
+    return [label.strip() for label in expanded_name.split(",") if label.strip()]
+
+
+def _matched_nets(circuit: Any, entry: dict[str, str]) -> list[Any]:
+    """Every extracted net one ``power_nets`` entry selects, ordered by
+    cluster id so a given layout+spec always numbers islands the same way.
+
+    ``match: "exact"`` compares the whole comma-joined ``expanded_name()``;
+    the default ``match: "label"`` *additionally* matches any net carrying
+    the requested name as one of its labels, which is what makes a spec
+    written against design net names work on a pad-connected PDN.
+    """
+    name = entry["name"]
+    by_label = entry["match"] == "label"
+    matched = []
+    for candidate in circuit.each_net():
+        if candidate.cluster_id == 0:
+            continue
+        expanded = candidate.expanded_name()
+        if expanded == name or (by_label and name in _net_labels(expanded)):
+            matched.append(candidate)
+    return sorted(matched, key=lambda candidate: candidate.cluster_id)
+
+
+def _describe_observed_nets(circuit: Any, limit: int = 20) -> str:
+    """The net names this layout actually carries, for a zero-match
+    diagnostic (issue #2171: the old message pointed at the layer/datatype
+    numbers even when the layers were right and only the *name* was off)."""
+    observed = sorted(
+        {
+            candidate.expanded_name()
+            for candidate in circuit.each_net()
+            if candidate.cluster_id != 0 and candidate.name
+        }
+    )
+    if not observed:
+        return (
+            "no net in this layout carries any label at all on the declared "
+            "'stackup' 'label_layer' text layers"
+        )
+    shown = ", ".join(repr(name) for name in observed[:limit])
+    if len(observed) > limit:
+        shown += f", ... (+{len(observed) - limit} more)"
+    return f"nets actually present: {shown}"
+
+
+def _build_net_islands(
+    l2n: kdb.LayoutToNetlist,
+    matched: list[Any],
+    stackup: list[dict[str, Any]],
+    vias: list[dict[str, Any]],
+    layer_index: dict[str, int],
+    via_layer_index: dict[str, int],
+    dbu: float,
+    net_name: str,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """One ``networks[].islands`` list: every matched net cluster turned
+    into its own node/edge network, or reported with an
+    ``unsolved_reason`` when its geometry cannot be modelled exactly (issue
+    #2171 -- never silently approximated in the non-conservative
+    direction)."""
+    islands: list[dict[str, Any]] = []
+    for island_index, net in enumerate(matched):
+        island_id = f"{net_name}#{island_index}"
+        nodes, edges, unsolved_reason = _build_island_network(
+            l2n,
+            net,
+            stackup,
+            vias,
+            layer_index,
+            via_layer_index,
+            dbu,
+            net_name,
+            island_id,
+            warnings,
+        )
+        if unsolved_reason is not None:
+            warnings.append(
+                f"power net {net_name!r} island {island_id!r} is unsolved: "
+                f"{unsolved_reason} -- no resistor model was emitted for it, "
+                "rather than approximating it by a bounding box (which would "
+                "understate resistance and overstate EM headroom)"
+            )
+            islands.append(
+                {
+                    "island_id": island_id,
+                    "node_count": 0,
+                    "edge_count": 0,
+                    "unsolved_reason": unsolved_reason,
+                    "nodes": [],
+                    "edges": [],
+                }
+            )
+            continue
+        if not nodes:
+            warnings.append(
+                f"power net {net_name!r} island {island_id!r} (net id "
+                f"{net.cluster_id}) has a matching label but no geometry on "
+                "the declared 'stackup' layers -- skipped"
+            )
+            continue
+        islands.append(
+            {
+                "island_id": island_id,
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "unsolved_reason": None,
+                "nodes": nodes,
+                "edges": edges,
+            }
+        )
+    return islands
+
+
 def run_power(
     file: str,
     spec_path: str,
@@ -1272,8 +1697,12 @@ def run_power(
     ``file`` is a routed GDSII/OASIS layout (e.g. a ``klt par`` output);
     ``spec_path`` is a JSON file with:
 
-    - ``power_nets`` (required, non-empty array of strings): net names to
-      extract, e.g. ``["VPWR", "VGND"]``.
+    - ``power_nets`` (required, non-empty array): net names to extract, e.g.
+      ``["VPWR", "VGND"]``. An entry is either a bare string -- matched
+      against the labels the layout's own nets carry, so ``"VDD_CORE"``
+      still matches a pad-connected net KLayout named ``"DVDD,VDD_CORE"``
+      (issue #2171) -- or ``{"name": ..., "match": "label"|"exact"}``,
+      where ``"exact"`` restricts matching to the whole comma-joined name.
     - ``stackup`` (required, non-empty array): each entry declares one
       metal role -- ``{"name", "layer": "<layer>/<datatype>",
       "label_layer": "<layer>/<datatype>" (optional),
@@ -1312,7 +1741,8 @@ def run_power(
     to at least one island).
     """
     spec = _load_spec_json(spec_path, PowerError)
-    power_nets = _validate_power_nets(spec, spec_path)
+    power_net_entries = _validate_power_nets(spec, spec_path)
+    power_nets = [entry["name"] for entry in power_net_entries]
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
@@ -1371,21 +1801,17 @@ def run_power(
     networks: list[dict[str, Any]] = []
     total_islands = 0
 
-    for net_name in power_nets:
-        matched = sorted(
-            (
-                candidate
-                for candidate in circuit.each_net()
-                if candidate.cluster_id != 0 and candidate.expanded_name() == net_name
-            ),
-            key=lambda candidate: candidate.cluster_id,
-        )
+    for net_entry in power_net_entries:
+        net_name = net_entry["name"]
+        matched = _matched_nets(circuit, net_entry)
         if not matched:
             warnings.append(
                 f"power net {net_name!r} matches no labelled net in this layout -- "
-                "check 'power_nets' against the layout's own pin/label text, and "
-                "that at least one 'stackup' entry's 'label_layer' actually "
-                "carries it"
+                f"{_describe_observed_nets(circuit)}; check 'power_nets' against "
+                "the layout's own pin/label text (a 'power_nets' entry matches a "
+                "net that *carries* that label, so 'VDD_CORE' matches a net named "
+                "'DVDD,VDD_CORE'), and that at least one 'stackup' entry's "
+                "'label_layer' actually carries it"
             )
             networks.append(
                 {
@@ -1398,38 +1824,17 @@ def run_power(
             )
             continue
 
-        islands: list[dict[str, Any]] = []
-        for island_index, net in enumerate(matched):
-            island_id = f"{net_name}#{island_index}"
-            nodes, edges = _build_island_network(
-                l2n,
-                net,
-                stackup,
-                vias,
-                layer_index,
-                via_layer_index,
-                dbu,
-                net_name,
-                island_id,
-                warnings,
-            )
-            if not nodes:
-                warnings.append(
-                    f"power net {net_name!r} island {island_id!r} (net id "
-                    f"{net.cluster_id}) has a matching label but no geometry on "
-                    "the declared 'stackup' layers -- skipped"
-                )
-                continue
-            islands.append(
-                {
-                    "island_id": island_id,
-                    "node_count": len(nodes),
-                    "edge_count": len(edges),
-                    "nodes": nodes,
-                    "edges": edges,
-                }
-            )
-
+        islands = _build_net_islands(
+            l2n,
+            matched,
+            stackup,
+            vias,
+            layer_index,
+            via_layer_index,
+            dbu,
+            net_name,
+            warnings,
+        )
         total_islands += len(islands)
         networks.append(
             {
@@ -1444,9 +1849,10 @@ def run_power(
     if total_islands == 0:
         raise PowerError(
             "none of the requested 'power_nets' matched any geometry in "
-            f"'{file}' against this spec's 'stackup' -- see the per-net "
-            "explanation this run would have reported in 'warnings', or check "
-            "the layer/datatype numbers against the layout's own resolved PDK "
+            f"'{file}' against this spec's 'stackup' -- "
+            f"{_describe_observed_nets(circuit)}; see the per-net explanation "
+            "this run would have reported in 'warnings', and check the "
+            "layer/datatype numbers against the layout's own resolved PDK "
             "layer map"
         )
 

@@ -135,9 +135,21 @@ The spec file is a JSON object:
 }
 ```
 
-- `power_nets` (required, non-empty array of strings) — net names to
-  extract, e.g. `["VPWR", "VGND"]`. Duplicate entries are silently
-  deduplicated (first-seen order).
+- `power_nets` (required, non-empty array) — the nets to extract, e.g.
+  `["VPWR", "VGND"]`. Duplicate names are silently deduplicated (first-seen
+  order). Each entry is either:
+  - a **bare string** — matched against the labels the layout's own nets
+    carry, *not* only against a net's full name (see "Matching a power net"
+    below), or
+  - an **object** `{"name": "<net>", "match": "label" | "exact"}` —
+    `"label"` is the default and identical to the bare-string form;
+    `"exact"` restricts matching to a net whose whole (comma-joined) name
+    is exactly `name`.
+
+  The `name` is the key everything downstream uses: `pads[].net`,
+  `current_model`'s `supply_net`/`ground_net`, the response's own
+  `power_nets[]` and `networks[].net`. It is always the string you asked
+  for, never KLayout's internal name for whatever net matched.
 - `stackup` (required, non-empty array) — each entry declares one metal
   role:
   - `name` (string, required) — the role's own name, referenced by `vias[]`
@@ -251,6 +263,43 @@ does** — in which case the command fails (a request with zero resolved
 geometry is almost certainly a layer-number/net-name mismatch, not a
 legitimately empty result).
 
+### Matching a power net
+
+`klt power` names a net from the text labels attached to its geometry, via
+`LayoutToNetlist`. A net carrying **more than one** label is named after
+*all* of them, comma-joined — a chip-level `VDD_CORE` bus that lands on a
+pad cell's own `DVDD` bond-pad plate (the entire point of a PDN) becomes the
+single net `DVDD,VDD_CORE`.
+
+So matching is by **label carried**, not by full name:
+
+| `power_nets` entry | Matches net `VPWR` | Matches net `DVDD,VDD_CORE` |
+| --- | --- | --- |
+| `"VDD_CORE"` | no | **yes** (carries that label) |
+| `"DVDD"` | no | **yes** (carries that label) |
+| `"DVDD,VDD_CORE"` | no | yes (whole name) |
+| `{"name": "VDD_CORE", "match": "exact"}` | no | **no** (whole name differs) |
+| `"VPWR"` | yes | no |
+
+A single-labelled net behaves exactly as it always has: `"VPWR"` matches the
+net named `VPWR` and nothing else. Reach for `"match": "exact"` only when
+two genuinely different nets in the same layout deliberately share a label
+and you need to address one of them by its full name.
+
+**A zero-match diagnostic names the nets that *are* there.** Both the
+per-net `warnings` entry and the "none of the requested `power_nets`
+matched" error list the net names the run actually saw (up to 20, then
+`... (+N more)`), so a name mismatch reads as a name mismatch instead of
+sending you to re-check layer/datatype numbers that were right all along:
+
+```text
+power net 'VDD_CORE' matches no labelled net in this layout -- nets actually
+present: 'DVDD,VDD_CORE', 'VSS'; check 'power_nets' against the layout's own
+pin/label text (a 'power_nets' entry matches a net that *carries* that label,
+so 'VDD_CORE' matches a net named 'DVDD,VDD_CORE'), and that at least one
+'stackup' entry's 'label_layer' actually carries it
+```
+
 ## Resistor-network model (MVP, stated plainly)
 
 Connectivity is traced with `klayout.db.LayoutToNetlist`, used purely for
@@ -260,15 +309,16 @@ metal/via connectivity graph uses, scoped down to only the layers this
 spec declares.
 
 - Each metal role's net geometry (`LayoutToNetlist.polygons_of_net`,
-  merged into maximal polygons) becomes **one metal edge per merged
-  polygon**, between two endpoint nodes placed at the polygon's
-  bounding-box ends along its longer axis:
+  merged into maximal polygons) becomes **one metal edge per *rectangular*
+  merged polygon**, between two endpoint nodes placed at the polygon's ends
+  along its longer axis:
   `resistance_ohm = sheet_resistance_ohm_per_sq * length_um / width_um`.
   Every merged polygon in this command's own real-fixture validation (the
   `gcd` corpus fixture below, a genuine `klt place-and-route` output) is an
-  axis-aligned box, matching this model exactly. A non-rectangular polygon
-  is still accepted — approximated by its bounding box — with a
-  `warnings` entry, never a silent misrepresentation.
+  axis-aligned box, matching this model exactly.
+- A **non-rectangular** merged polygon — the normal shape of a real PDN
+  ring, or of any L/T/comb-shaped bus — is **decomposed, not
+  approximated**. See "Non-rectangular segments" below.
 - Each via role's net geometry becomes **one via edge per merged via
   polygon**, connecting the node *nearest* (straight-line distance) the
   via's center on each of the two metal roles it bridges — not a true
@@ -279,6 +329,61 @@ Node/edge ids (`n0`, `n1`, ... / `e0`, `e1`, ...) are scoped **per island**,
 not globally unique across the whole response — a later per-island IR-drop
 solve consumes one island at a time, so this is the natural granularity;
 re-derive a globally unique key as `(net, island_id, id)` if you need one.
+
+### Non-rectangular segments: decomposed, or declared unsolved
+
+A merged polygon that is not a rectangle is cut into the grid of rectangles
+formed by extending every one of its own vertex coordinates across it, and
+**each rectangle becomes its own resistor**:
+
+- a **centre node** per rectangle,
+- a **port node on every boundary it shares** with a neighbouring rectangle
+  (one node, shared by both — that is what ties the sub-segments together),
+- a **terminal port node at each free end of its longer axis**, so the arm's
+  real extremity is still where a pad or a load attaches, and
+- one edge per centre-to-port pair, at
+  `sheet_resistance_ohm_per_sq * (half the rectangle's extent along the flow
+  direction) / (its conducting width across that direction)`.
+
+Each arm therefore contributes its own length at its own drawn width. A
+`warnings` entry records that it happened and how many sub-segments came out
+of it:
+
+```text
+power net 'VDD_CORE' island 'VDD_CORE#0': 1 non-rectangular segment(s)
+decomposed into 3 rectangular sub-segment(s) -- resistance is modelled per
+sub-segment, not from a bounding box
+```
+
+**Why this is not a bounding box.** Before this, such a polygon became one
+resistor sized by its bounding box. For an L-shaped bus with 20 µm arms
+inside a 100 × 100 µm bounding box that is **one** square of metal
+(`100/100`) instead of the ~9 squares the metal is actually drawn as —
+understating resistance and droop roughly nine-fold, and overstating the
+per-edge EM limit (which scales with the same cross-width). The error was
+one-directional and always toward "looks fine", which is the worst
+direction for a signoff verdict, and it was silent apart from a `warnings`
+line. Manhattan per-row rails — what the command was originally validated
+against — are unaffected: they are already rectangles and take the
+single-edge path above, byte-identical to before.
+
+**When a polygon cannot be decomposed exactly**, the island it belongs to is
+reported as **unsolved** rather than approximated: `islands[].unsolved_reason`
+is a non-null string, `nodes`/`edges` are empty, `node_count`/`edge_count`
+are `0`, and a `warnings` entry says so. Two cases reach this:
+
+- the polygon is **not axis-aligned** (45° geometry has no exact
+  decomposition into rectangles), or
+- its grid would exceed the build's `MAX_DECOMPOSITION_CELLS` cap
+  (`klayout_tools/power.py`, 4096 today) — a pathological, thousands-of-
+  vertices segment would otherwise explode into a network no consumer can
+  read.
+
+An unsolved island still counts toward `island_count` (the geometry is real;
+only its resistor model is missing), contributes no nodes for a pad or an
+instance to attach to, and contributes no edges for the EM verdict to check.
+Refusing is deliberate: an IR/EM verdict that is *absent* is recoverable,
+one that is quietly optimistic is not.
 
 ## Static IR-drop solve (how the numbers are produced)
 
@@ -480,6 +585,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
           "island_id": "VPWR#0",
           "node_count": 2,
           "edge_count": 1,
+          "unsolved_reason": null,
           "nodes": [
             {"id": "n0", "layer": "met1", "x_um": 0.0, "y_um": 0.5},
             {"id": "n1", "layer": "met1", "x_um": 10.0, "y_um": 0.5}
@@ -599,7 +705,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
     ]
   },
   "warnings": [
-    "power net 'VGND' matches no labelled net in this layout -- check 'power_nets' against the layout's own pin/label text, and that at least one 'stackup' entry's 'label_layer' actually carries it"
+    "power net 'VGND' matches no labelled net in this layout -- nets actually present: 'VPWR'; check 'power_nets' against the layout's own pin/label text (a 'power_nets' entry matches a net that *carries* that label, so 'VDD_CORE' matches a net named 'DVDD,VDD_CORE'), and that at least one 'stackup' entry's 'label_layer' actually carries it"
   ]
 }
 ```
@@ -616,14 +722,15 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `networks[].node_count`/`edge_count` | integer | Totals across every island of this net.                                                           |
 | `networks[].islands` | array\<object\>    | One entry per electrically distinct cluster (see "Why a named net is usually several islands" above). |
 | `islands[].island_id` | string            | `"<net>#<index>"`, stable within one run, in ascending internal net-id order (not guaranteed stable across `klt` versions/KLayout builds). |
-| `islands[].node_count`/`edge_count` | integer | This island's own totals.                                                                         |
+| `islands[].node_count`/`edge_count` | integer | This island's own totals (both `0` when `unsolved_reason` is set).                                 |
+| `islands[].unsolved_reason` | string \| null | `null` on a modelled island. A non-null string means this island's geometry could not be modelled exactly (not axis-aligned, or over the decomposition cap) and **no** resistor network was emitted for it — see "Non-rectangular segments" above. Never accompanied by an approximate network. |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "layer", "x_um", "y_um"}` — `id` is scoped to this island (see "Resistor-network model" above). |
 | `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "current_limit_a", "current_limit_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. |
 | `node_count`/`edge_count`/`island_count` | integer | Totals across every requested net.                                                    |
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
 | `em_verdict`         | object \| null     | The per-net EM current-density verdict, or `null` when the spec declared neither `pads` nor `current_model` (the same condition under which `ir_drop_map` is `null`) — see below. |
-| `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry, a non-rectangular segment approximated by its bounding box, a via with no matching rail on one side, a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
+| `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via with no matching rail on one side, a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
 
 ### `ir_drop_map` (Phase 1b)
 
@@ -861,11 +968,17 @@ criterion 4):**
   physically connect, nothing more. A net that also draws current through
   a transistor body tie or a well tap is not modelled differently; this
   command only sees drawn metal/via shapes.
-- **Rectangular-rail MVP.** Every merged polygon is turned into exactly one
-  resistor edge via its bounding box's longer-axis length/width — an
-  L-shaped or otherwise non-rectangular rail is approximated, not exactly
-  decomposed into a chain of sub-rectangles. Flagged in `warnings`, never
-  silent. See "Resistor-network model" above.
+- **A rectangle is one resistor; a non-rectangle is a mesh, never a
+  bounding box.** A rectangular merged polygon becomes exactly one resistor
+  edge from its longer-axis length/width. A non-rectangular one (an L/T/
+  comb-shaped bus, a PDN ring) is decomposed into rectangles and modelled
+  per sub-segment; one that cannot be decomposed exactly (non-Manhattan, or
+  over the cell cap) makes its island `unsolved_reason`-flagged with no
+  network at all. Either way the bounding box is never used as a stand-in —
+  it understated resistance and overstated EM headroom. The mesh is still a
+  finite-difference approximation of a 2-D current distribution (current
+  is routed centre-to-boundary per cell), and it is biased *toward* higher
+  resistance, not lower. See "Non-rectangular segments" above.
 - **Via taps snap to the nearest existing rail node, not a true
   T-junction.** A via landing partway along a long rail is wired to
   whichever of that rail's two *endpoints* is closer, not to a new node
