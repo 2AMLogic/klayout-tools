@@ -14,6 +14,25 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2182): `klt signoff --manifest`'s staleness gate no longer
+  conflates two distinct situations under one `reason: "stale_evidence"`.
+  A manifest entry that pins `content_hash` now renders the new
+  `"unverifiable_provenance"` when the resolved evidence carries **no**
+  input hash at all — a `functional-verification` envelope (no
+  `provenance` block by design) or an unprovenanced `"generic"` envelope —
+  reserving `"stale_evidence"` for a genuinely *mismatched*, non-`null`
+  hash (the check ran, and provably ran against a different revision).
+  The two call for opposite remedies: re-run the same producer for a
+  genuine mismatch, versus re-produce the evidence with a producer that
+  records provenance (or unpin `content_hash`) when nothing was ever
+  recorded to compare against. Applies to both the single-artifact path
+  (`_grade_evidence`) and T1 item 11's compound citation
+  (`_resolve_power_delivery_parts`); a `klt yield` entry is unaffected, it
+  always gets a computed fallback hash via its samples document. Every
+  item still renders `"unmet"` either way — diagnosis-only change, never a
+  new path to `"met"`. Purely additive: no existing field changes shape or
+  meaning, so no `schema_version` bump.
+
 - **Added** (#2175): `klt signoff --manifest`'s tier report, and `--fleet`'s
   roll-up (both at the top level and per `blocks[]` row), now carry
   `source_doc_content_hash` — the `sha256:`-prefixed SHA-256 of the resolved
