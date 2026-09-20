@@ -319,7 +319,7 @@ def test_sim_real_producer_measurement_coverage(
     [
         ("empty", "zero", "not_checked", False),
         ("pass", "full", "pass", True),
-        ("partial", "partial", "pass", True),
+        ("partial", "partial", "pass_partial", False),
         ("error", "zero", "error", False),
         ("fail", "full", "fail", False),
     ],
@@ -377,7 +377,7 @@ def test_pex_real_extraction_and_comparison_rollup(
     assert report["status"] == status
     _assert_signoff(tmp_path, report, passed=passed, item=7)
     assert main(["pex", gds, *requests, "--deck", "sky130", "--format", "json"]) == (
-        0 if passed else 3 if status == "fail" else 4
+        0 if passed or status == "pass_partial" else 3 if status == "fail" else 4
     )
     assert json.loads(capsys.readouterr().out)["status"] == status
 
