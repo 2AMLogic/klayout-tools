@@ -179,9 +179,10 @@ would if it populated ``provenance.input.content_hash`` itself (see
 caller-visible caveat (see ``docs/cli/signoff.md``): an unprovenanced
 generic citation can never satisfy a ``content_hash``-pinned evidence entry
 (its ``actual_hash`` is always ``None``, so a pinned ``expected_hash`` never
-matches -- the same "stale, not a false pass" rule every other kind already
-gets, see :data:`_REASON_STALE_EVIDENCE`), and its freshness is otherwise
-un-checked, same as it would be with no evidence at all.
+matches -- renders :data:`_REASON_UNVERIFIABLE_PROVENANCE`, not
+:data:`_REASON_STALE_EVIDENCE`, since nothing was ever recorded to compare
+against -- issue #2182), and its freshness is otherwise un-checked, same as
+it would be with no evidence at all.
 
 **Item 8 only, not a global unlock.** Naively adding ``"generic"`` to
 :func:`_classify`'s recognised set, with no further change, would let a
@@ -292,8 +293,8 @@ item 7's restriction per-block-kind:
   passing test and no failures (skips are allowed). It carries no shared
   ``provenance`` block at all (that verb's verdict depends on no PDK and no
   deck), so a ``content_hash``-pinned citation of one always renders
-  ``"stale_evidence"``, the same documented caveat an unprovenanced
-  ``"generic"`` envelope already has.
+  ``"unmet"``/:data:`_REASON_UNVERIFIABLE_PROVENANCE` (issue #2182), the same
+  documented caveat an unprovenanced ``"generic"`` envelope already has.
 
 **Item 7's artifact, settled against the doc's own text.** The Digital
 column of item 7 asks for "the functional test suite re-run against the
@@ -1030,6 +1031,25 @@ _REASON_UNRECOGNIZED_ENVELOPE = "unrecognized_envelope"
 _REASON_CHECK_ERRORED = "check_errored"
 _REASON_CHECK_FAILED = "check_failed"
 _REASON_STALE_EVIDENCE = "stale_evidence"
+
+#: Issue #2182: a manifest entry pins ``content_hash``, but the resolved
+#: envelope carries **no input hash at all** -- ``resolution["content_hash"]
+#: is None`` -- rather than one that mismatches the pin. Two ways this
+#: happens today: a `klt functional-verification` envelope, which carries no
+#: `provenance` block by design (see :data:`_REASON_STALE_EVIDENCE`'s own
+#: docstring reference above and ``docs/cli/signoff.md``); or a `"generic"`
+#: envelope (issue #1152) with no `provenance` block at all. Deliberately
+#: distinct from :data:`_REASON_STALE_EVIDENCE`, which is reserved for a
+#: genuinely *mismatched*, non-``None`` hash (the evidence ran, and provably
+#: ran against a different revision than the one pinned -- the remedy is
+#: "re-run the check"): here nothing was ever recorded to compare against,
+#: so the remedy is different -- "re-produce this evidence with a producer
+#: that records provenance" (or unpin `content_hash` for this entry), not
+#: "re-run the same producer again". A `klt yield` envelope is unaffected by
+#: this distinction: :func:`_yield_samples_content_hash` always supplies a
+#: computed fallback hash when its samples file exists, so its
+#: ``resolution["content_hash"]`` is never ``None`` for that reason alone.
+_REASON_UNVERIFIABLE_PROVENANCE = "unverifiable_provenance"
 _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
 #: Issue #825 (Phase 1 of epic #706): a command-backed evidence entry's
 #: subprocess itself did not complete usably -- it could not be launched, it
@@ -3420,6 +3440,14 @@ def build_tier_report(
       ``provenance.input.content_hash`` does not match the manifest's
       pinned ``content_hash`` -- the check ran against a different layout
       revision than the one being claimed.
+    - ``"unverifiable_provenance"`` (issue #2182) -- the check passed, and
+      the manifest pins a ``content_hash``, but the resolved envelope
+      carries no input hash at all -- a ``functional-verification`` envelope
+      (no ``provenance`` block by design) or an unprovenanced ``"generic"``
+      envelope. Distinct from ``"stale_evidence"``: no revision was ever
+      recorded to compare against, so the remedy is to re-produce the
+      evidence with a producer that records provenance, not to re-run the
+      same one again.
     - ``"nothing_checked"`` (issue #1996) -- the evidence resolved to a
       recognised, *passing* envelope whose own ``coverage`` block states that
       the run checked nothing at all (``coverage.nothing_checked: true``,
@@ -3834,9 +3862,12 @@ def _grade_evidence(
     (no generic-specific hashing), and when absent, ``actual_hash`` is
     simply ``None`` -- a manifest that pins ``content_hash`` for a generic
     entry with no matching provenance always renders that item
-    ``"stale_evidence"``, per this function's own mismatch check below; a
-    manifest that pins no ``content_hash`` at all is unaffected (no
-    staleness claim was ever made).
+    ``"unmet"``/:data:`_REASON_UNVERIFIABLE_PROVENANCE`, per this function's
+    own mismatch check below -- distinct from a genuine, non-``None`` hash
+    mismatch, which still renders :data:`_REASON_STALE_EVIDENCE` (issue
+    #2182: the two situations call for opposite remedies, see that
+    constant's own docstring); a manifest that pins no ``content_hash`` at
+    all is unaffected (no staleness claim was ever made).
 
     **Post-layout requirement** (issue #1959): ``require_post_layout`` is
     set for the items in :data:`_ITEMS_REQUIRING_POST_LAYOUT_EVIDENCE` (item
@@ -3894,6 +3925,8 @@ def _grade_evidence(
 
     expected_hash = spec.get("content_hash")
     if expected_hash is not None and resolution["content_hash"] != expected_hash:
+        if resolution["content_hash"] is None:
+            return "unmet", _REASON_UNVERIFIABLE_PROVENANCE, None, {}
         return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
     return "met", None, _citation(resolution), {}
@@ -4252,9 +4285,11 @@ def _resolve_power_delivery_parts(
     an ``error`` envelope is ``check_errored``, a kind outside
     :data:`_POWER_DELIVERY_KINDS` is ``wrong_kind`` (it proves nothing about
     power delivery), and a part whose own pinned ``content_hash`` no longer
-    matches is ``stale_evidence``. The item-specific rules
-    (:func:`_grade_power_delivery`) apply only to a set that survives all of
-    these.
+    matches is ``stale_evidence`` when the resolved envelope carries a
+    different, non-``None`` hash, or :data:`_REASON_UNVERIFIABLE_PROVENANCE`
+    when it carries no input hash at all (issue #2182 -- see that constant's
+    docstring). The item-specific rules (:func:`_grade_power_delivery`) apply
+    only to a set that survives all of these.
 
     A later part of the same kind replaces an earlier one -- citing two ERC
     runs for one item is a manifest authoring mistake, not a shape this
@@ -4273,6 +4308,8 @@ def _resolve_power_delivery_parts(
             return None, _REASON_WRONG_KIND
         expected_hash = spec.get("content_hash")
         if expected_hash is not None and resolution["content_hash"] != expected_hash:
+            if resolution["content_hash"] is None:
+                return None, _REASON_UNVERIFIABLE_PROVENANCE
             return None, _REASON_STALE_EVIDENCE
         by_kind[kind] = resolution
     return by_kind, None
@@ -4386,10 +4423,12 @@ def _grade_power_delivery(
 
     Every part is resolved through :func:`_resolve_evidence` -- the same
     read/run/classify/hash path every other item uses -- so a part that is
-    unreadable, unrecognised, an ``error`` envelope, or stale against its own
-    pinned ``content_hash`` renders that part's own ordinary reason
+    unreadable, unrecognised, an ``error`` envelope, or stale (or
+    unverifiable, issue #2182) against its own pinned ``content_hash``
+    renders that part's own ordinary reason
     (``unreadable_evidence``/``unrecognized_envelope``/``check_errored``/
-    ``stale_evidence``), never a power-delivery-specific one. Item-specific
+    ``stale_evidence``/``unverifiable_provenance``), never a
+    power-delivery-specific one. Item-specific
     reasons (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that

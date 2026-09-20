@@ -4836,7 +4836,8 @@ def test_no_backing_generic_evidence_for_item_8_renders_unmet_never_assumed_met(
 def test_unprovenanced_generic_evidence_cannot_satisfy_a_pinned_content_hash(tmp_path):
     """A generic envelope with no `provenance` block (the documented
     caveat) can never match a manifest's pinned `content_hash` -- it renders
-    "unmet"/"stale_evidence" rather than a false pass."""
+    "unmet"/"unverifiable_provenance" (issue #2182), not "stale_evidence",
+    since no input hash was ever recorded to compare against."""
     generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
 
     result = build_tier_report(
@@ -4847,8 +4848,31 @@ def test_unprovenanced_generic_evidence_cannot_satisfy_a_pinned_content_hash(tmp
 
     item_8 = next(item for item in result["items"] if item["id"] == 8)
     assert item_8["status"] == "unmet"
-    assert item_8["reason"] == "stale_evidence"
+    assert item_8["reason"] == "unverifiable_provenance"
     assert item_8["citation"] is None
+
+
+def test_unprovenanced_functional_verification_cannot_satisfy_pinned_content_hash(
+    tmp_path,
+):
+    """`klt functional-verification` carries no shared `provenance` block at
+    all (by design -- its verdict depends on no PDK and no rule deck), so a
+    manifest that pins `content_hash` on one always renders
+    "unmet"/"unverifiable_provenance" (issue #2182) -- distinct from
+    "stale_evidence", which requires a genuinely mismatched, non-null hash."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"5": {"file": fv_path, "content_hash": "sha256:expected"}},
+        )
+    )
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "unverifiable_provenance"
+    assert item_5["citation"] is None
 
 
 # --------------------------------------------------------------------------- #
@@ -7480,6 +7504,31 @@ def test_item_11_parts_honour_their_own_pinned_content_hash(tmp_path):
     item = _item_11(result)
     assert item["status"] == "unmet"
     assert item["reason"] == "stale_evidence"
+
+
+def test_item_11_unprovenanced_part_with_pinned_hash_renders_unverifiable_provenance(
+    tmp_path,
+):
+    """A part of item 11's compound citation with no `provenance` block at
+    all cannot satisfy a pinned `content_hash` -- it renders
+    "unmet"/"unverifiable_provenance" (issue #2182), distinct from the
+    genuinely stale, non-null mismatched hash
+    `test_item_11_parts_honour_their_own_pinned_content_hash` covers."""
+    erc_no_provenance = {
+        key: value for key, value in ERC_CLEAN_ENVELOPE.items() if key != "provenance"
+    }
+    erc_path = _erc_evidence(tmp_path, erc_no_provenance, prefix="np-erc")
+    lvs_path = _write(tmp_path, "np-lvs.json", LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE)
+    pinned = [
+        {"file": erc_path, "content_hash": "sha256:expected"},
+        lvs_path,
+    ]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": pinned}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
 
 
 def test_item_11_accepts_a_command_backed_part(tmp_path, monkeypatch):

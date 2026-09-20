@@ -974,11 +974,13 @@ This verb carries **no shared `provenance` block at all** (its verdict
 depends on no PDK and no rule deck — see
 [`../json-contract.md`](../json-contract.md)), so a citation of one has
 `content_hash: null`. A manifest that pins an expected `content_hash` on a
-`functional-verification` entry therefore always renders `stale_evidence` —
-the same documented caveat an unprovenanced `generic` envelope already
-carries, and the same "stale, not a false pass" rule every other kind gets.
-Pin no `content_hash` on such an entry unless and until that verb grows a
-`provenance` block.
+`functional-verification` entry therefore always renders
+`unverifiable_provenance` — the same documented caveat an unprovenanced
+`generic` envelope already carries. This is deliberately distinct from
+`stale_evidence`: no input hash was ever recorded to compare against, so the
+remedy is to re-produce the evidence with a producer that records
+provenance, not to re-run this verb again. Pin no `content_hash` on such an
+entry unless and until that verb grows a `provenance` block.
 
 **Item 5 stayed unrestricted through this phase.** It widened what `klt
 signoff` *recognises*; it did not tighten what item 5 *accepts*. Issue #2044
@@ -1080,8 +1082,9 @@ misclassify it as a native kind instead:
   freshness simply cannot be verified: `--manifest`'s `content_hash`
   staleness pin cannot match against a hash that was never given (a pinned
   `content_hash` against an unprovenanced generic entry always renders that
-  item `"unmet"`/`"stale_evidence"`, never a false pass — the same rule
-  every other kind gets for a genuine hash mismatch), and envelope-
+  item `"unmet"`/`"unverifiable_provenance"`, never a false pass —
+  distinct from `"stale_evidence"`, which is reserved for a genuine hash
+  *mismatch* against a hash the evidence did carry), and envelope-
   aggregation mode's provenance-consistency check simply excludes it, the
   same way it already excludes an `error`-kind check or an unprovenanced
   `klt yield` report. A manifest entry with no pinned `content_hash` at all
@@ -1436,6 +1439,7 @@ actually ran and failed):
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
 | `"stale_evidence"`        | no  | The check passed, but its `provenance.input.content_hash` did not match the manifest's pinned `content_hash` — it ran against a different layout revision than the one being claimed. |
+| `"unverifiable_provenance"` | no  | The check passed, and the manifest pins a `content_hash`, but the resolved envelope carries no input hash at all (`null`) — a `functional-verification` envelope (no `provenance` block by design) or an unprovenanced `generic` envelope. Distinct from `"stale_evidence"`: no revision was ever recorded to compare against, so the remedy is to re-produce the evidence with a producer that records provenance, not to re-run the same one again. |
 | `"wrong_kind"`            | yes | The evidence resolved to a recognised, *passing* envelope, but its classified kind is not one this item accepts — item 3 requires `"drc"` and item 4 requires `"lvs"` (issue #1987: a `klt extract` report, which cannot fail, no longer satisfies either), item 5 requires `"sim"` for an analog partition and `"sta"`/`"functional-verification"`/`"sim"` for a digital one, item 6 requires `"yield"`, and item 8 requires `"generic"` (issue #2044 — see "Items 5, 6 and 8 are kind-restricted too" above), item 7 requires `"pex"` for an analog partition and `"pex"` or `"functional-verification"` for a digital one (see "Item 7 is kind-restricted, per block kind" above), every item other than item 8 rejects a `"generic"` citation (see "Generic evidence (opt-in, non-`klt`-native)" above), every item other than item 11 rejects an `"erc"` or `"place-and-route"` citation (see "Item 11 is compound" above), and **every** item rejects a `"power"` citation. For item 11 this also covers a cited *set* that is missing the `erc` or `lvs` artifact it names. The cited check did not fail on its own terms; it simply does not prove what this item requires. |
 | `"no_pdn"`                | no  | **Item 11 only** (issue #2025). The cited `klt place-and-route` response says no power grid was built at all: `power.pdn` is not `true`, or no `power.tapcell_master` was placed. Re-run P&R with a `request.power` block. |
 | `"supply_spec_incomplete"` | yes | **Item 11 only** (issue #2025). The cited `klt erc` run's own spec document does not ask the question this item grades: it could not be read, declares no `"kind": "supply"` net, declares no `ties[]` (so `erc.missing_tie` was never computed — an uncomputed check is not a clean one), or its stackup does not cover every strap layer the P&R response reports. Widen the spec and re-run `klt erc`. |
@@ -2033,9 +2037,9 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
 `provenance` block — a deliberate omission the doc above calls out as a
 documented caveat, not an error: nothing pins this citation to a specific
 input revision, so a manifest that also pins an expected `content_hash` for
-item 8 would never match it (rendering `"unmet"`/`"stale_evidence"` instead
-of a false pass). Adding a `provenance.input.content_hash` block to the
-envelope closes that gap exactly like any native kind's.
+item 8 would never match it (rendering `"unmet"`/`"unverifiable_provenance"`
+instead of a false pass). Adding a `provenance.input.content_hash` block to
+the envelope closes that gap exactly like any native kind's.
 
 Citing the *same* generic envelope for item 3 ("DRC clean") — a `klt`-verb
 item, not the verb-less item 8 — is refused, even though the envelope's own
