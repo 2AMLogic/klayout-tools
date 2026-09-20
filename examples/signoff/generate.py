@@ -20,8 +20,10 @@ What gets written:
   see this directory's README.md ("Why synthetic").
 - `lvs.request.json` -- the `klt lvs` request binding that pair.
 - `drc.json` / `lvs.json` -- the **real** `klt drc`/`klt lvs --format json`
-  envelopes for the above, captured verbatim. These are the evidence
-  `manifest.json` cites; they are not hand-edited.
+  envelopes for the above, captured as emitted except for the two
+  host-identity provenance fields listed under "Normalized fields" below.
+  These are the evidence `manifest.json` cites; no verdict-bearing field,
+  content hash, or coverage entry in them is ever hand-written.
 - `manifest.json` -- the block manifest itself, citing T1 items 3 (DRC) and
   4 (LVS) and nothing else, so the report comes back with a visible mix of
   `MET` and `UNMET`/`no_evidence` items.
@@ -31,10 +33,25 @@ What gets written:
 Item 3's evidence entry pins `content_hash` to whatever
 `drc.json`'s own `provenance.input.content_hash` says, so the manifest
 demonstrates the staleness gate and stays self-consistent across
-regeneration. Item 4's does not: `klt lvs` populates no
-`provenance.input` block at all (its two netlist inputs are hashed into
-`environment.layout_sha256`/`reference_sha256` instead), so a pinned hash
-there could only ever render `unmet`.
+regeneration. Item 4's deliberately does not -- it stays a bare path string,
+which is the *other* evidence-entry form a block author needs to see. It is
+no longer that item 4 *cannot* pin one: `klt lvs` populates
+`provenance.input` since issue #1969, carrying issue #2027's `role`
+discriminator (`"netlist"` here). What that hash pins, in this example's
+pre-extracted `request.layout.netlist` shape, is `layout.spice` -- the
+layout-side *netlist*, not `block.gds` -- so pinning it would assert a
+different staleness claim from item 3's, against a different artifact. See
+this directory's README.md ("Reading the manifest").
+
+**Normalized fields.** Two `provenance` fields describe the machine and
+checkout that *regenerated* this fixture rather than the block being signed
+off, so :func:`_normalize_volatile_provenance` sets both to `null` before
+the envelope is written (see :data:`_NORMALIZED_PROVENANCE_PATHS` for the
+full rationale). Nothing else is touched: the assertion in
+:func:`_capture_envelope` re-serializes the captured stdout and fails the
+run unless it reproduces the CLI's bytes exactly, so "everything but these
+two fields is what `klt` actually emitted" is checked, not merely asserted
+here.
 
 **No PDK required.** `klt drc --deck sky130` uses the built-in rule deck and
 `klt lvs` compares two netlists in-process, so this whole example
@@ -45,9 +62,13 @@ Run from the repo root:
 
     uv run python3 examples/signoff/generate.py
 
-Regeneration is byte-identical for a fixed `klt`/KLayout build. The captured
-envelopes embed `provenance.klt_version` and `provenance.klayout_version`,
-so a version bump legitimately changes them -- the graded verdicts do not.
+Regeneration is byte-identical from any checkout of a given `klt`/KLayout
+build -- `scripts/check-signoff-example.sh` (wired into CI) regenerates and
+fails on any diff, so these fixtures cannot silently drift away from the
+verbs that produce them again. The captured envelopes still embed
+`provenance.klayout_version`, which `uv.lock` pins, so a KLayout bump
+legitimately changes them and is regenerated in the same PR -- the graded
+verdicts do not change.
 """
 
 import json
@@ -103,6 +124,41 @@ _LVS_REQUEST = {
     "reference": {"netlist": "schematic.spice", "top": _TOP},
 }
 
+#: `provenance` paths set to `null` in the committed envelopes (issue #2028).
+#:
+#: Every other field in these fixtures is a property of the *block* -- the
+#: deck and input content hashes, the coverage rollup, the verdicts. These two
+#: are properties of whichever checkout happened to run `generate.py`, so
+#: committing whatever the regenerating machine produced would bake a
+#: checkout-local artifact into a worked example and make a round-trip check
+#: impossible to keep green:
+#:
+#: - `provenance.klt_version` carries the running build's identity suffix
+#:   (issue #2090): `0.5.0` on a clean tagged-release checkout, but
+#:   `0.5.0+g<sha>` or `0.5.0+g<sha>.dirty` otherwise. It is not even stable
+#:   *within one regeneration run* -- `drc.json` is captured first, and
+#:   rewriting it dirties the working tree, so `lvs.json` (captured second)
+#:   would record a `.dirty` suffix its sibling does not.
+#: - `provenance.deck.released` is a lookup of the deck's content hash in
+#:   this build's generated release-history table
+#:   (`klayout_tools.decks.history.is_deck_hash_released`). It answers
+#:   "does a *released* klayout-tools ship this exact deck", which flips as
+#:   decks are edited between releases and flips back when the next release
+#:   regenerates the table -- for the same fixture bytes.
+#:
+#: `null` rather than a substituted value, because `null` is what the JSON
+#: contract already reserves for "no answer recorded here" -- see
+#: `docs/json-contract.md` and `is_deck_hash_released`'s tri-state, whose
+#: `None` leg consumers are already required to treat as "cannot confirm",
+#: never as a claim. Writing `released: true` from a checkout where it is
+#: false would be a fabricated release claim; writing the dev checkout's
+#: `false` (or its `.dirty` build string) would publish a fact about this
+#: machine rather than about the block.
+_NORMALIZED_PROVENANCE_PATHS: tuple[tuple[str, ...], ...] = (
+    ("provenance", "klt_version"),
+    ("provenance", "deck", "released"),
+)
+
 
 def build_layout() -> kdb.Layout:
     """The block's layout: DRC-clean sky130 geometry, drawn by hand.
@@ -155,11 +211,64 @@ def _write_json(name: str, doc: object) -> None:
     print(f"wrote {path}")
 
 
-def _capture_envelope(name: str, argv: list[str], *, ok_returncode: int = 0) -> dict:
-    """Run `klt <argv>` from the repo root and commit its stdout verbatim.
+class NormalizationError(Exception):
+    """A committed envelope could not be normalized as
+    :data:`_NORMALIZED_PROVENANCE_PATHS` describes -- raised instead of
+    silently writing an un-normalized (or differently-shaped) fixture."""
 
-    The captured envelope is the *evidence*, so it is never reshaped here --
-    a hand-edited envelope would defeat the entire point of `klt signoff`.
+
+def _normalize_volatile_provenance(doc: dict) -> list[str]:
+    """Set every :data:`_NORMALIZED_PROVENANCE_PATHS` entry in ``doc`` to
+    ``None`` in place, returning the dotted names actually normalized.
+
+    A path whose *parent block* is ``None`` is skipped, not an error: `klt
+    lvs` compares two netlists against no rule deck at all, so its
+    `provenance.deck` is legitimately ``null`` and there is no `released`
+    flag under it to normalize.
+
+    A path whose parent block *is* present but does not carry the field
+    raises :class:`NormalizationError`. That is the case worth failing on:
+    it means the envelope contract moved (a renamed or dropped field) and
+    this normalization silently stopped covering the value it exists to
+    cover -- the exact way a fixture starts encoding the regenerating
+    machine again without anyone noticing.
+    """
+    normalized: list[str] = []
+    for path in _NORMALIZED_PROVENANCE_PATHS:
+        dotted = ".".join(path)
+        node: object = doc
+        for key in path[:-1]:
+            if node is None:
+                break
+            if not isinstance(node, dict) or key not in node:
+                raise NormalizationError(
+                    f"cannot normalize {dotted}: no '{key}' block in the "
+                    f"captured envelope -- has the provenance contract changed?"
+                )
+            node = node[key]
+        if node is None:
+            continue
+        if not isinstance(node, dict) or path[-1] not in node:
+            raise NormalizationError(
+                f"cannot normalize {dotted}: the block is present but carries "
+                f"no '{path[-1]}' field -- has the provenance contract changed?"
+            )
+        node[path[-1]] = None
+        normalized.append(dotted)
+    return normalized
+
+
+def _capture_envelope(name: str, argv: list[str], *, ok_returncode: int = 0) -> dict:
+    """Run `klt <argv>` from the repo root and commit its stdout, normalized
+    only in :data:`_NORMALIZED_PROVENANCE_PATHS`.
+
+    The captured envelope is the *evidence*, so nothing else is reshaped
+    here -- a hand-edited envelope would defeat the entire point of `klt
+    signoff`. That is enforced rather than promised: the parsed document is
+    re-serialized with the CLI's own `json.dump(..., indent=2)` settings
+    (`cli/output.py`) and compared against the captured bytes *before*
+    normalization, so the only difference between this file and the verb's
+    real stdout is the handful of `null`s put there deliberately.
     """
     result = subprocess.run(
         [sys.executable, "-m", "klayout_tools.cli", *argv],
@@ -176,8 +285,27 @@ def _capture_envelope(name: str, argv: list[str], *, ok_returncode: int = 0) -> 
     text = result.stdout
     if not text.endswith("\n"):
         text += "\n"
-    _write_text(name, text)
-    return json.loads(text)
+    doc = json.loads(text)
+    if _render(doc) != text:
+        raise SystemExit(
+            f"klt {' '.join(argv)} stdout does not round-trip through "
+            "json.dumps(..., indent=2) -- the CLI's serialization changed, so "
+            "writing the re-serialized document would reshape the captured "
+            "evidence beyond the normalized provenance fields"
+        )
+    try:
+        normalized = _normalize_volatile_provenance(doc)
+    except NormalizationError as exc:
+        raise SystemExit(f"{name}: {exc}") from exc
+    _write_text(name, _render(doc))
+    if normalized:
+        print(f"  normalized to null: {', '.join(normalized)}")
+    return doc
+
+
+def _render(doc: object) -> str:
+    """``doc`` serialized exactly the way `klt --format json` writes it."""
+    return json.dumps(doc, indent=2) + "\n"
 
 
 def _write_gds(name: str) -> None:
