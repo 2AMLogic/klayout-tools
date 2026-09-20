@@ -182,7 +182,13 @@ def test_external_drc_categories_are_unknown_not_execution(tmp_path, monkeypatch
     [
         (None, False, False, "zero", "not_checked", 4),
         ("sky130", False, False, "full", "clean", 0),
-        ("sky130", True, False, "partial", "clean", 0),
+        # #1997's "met3-5-only" partial-coverage scenario, migrated onto the
+        # common rollup rule (#2109/#2115): every graded level (li1/met1/
+        # met2) passes clean, but met3-5 have no sky130 antenna-ratio limit
+        # -- `coverage.skipped` is nonempty, so the common rollup rule's
+        # `partial` row applies. `status` must not read as the unconditional
+        # `"clean"` this same fixture reported before #2115.
+        ("sky130", True, False, "partial", "clean_partial", 0),
         ("sky130", True, True, "partial", "violations", 3),
     ],
 )
@@ -262,6 +268,54 @@ def test_power_real_current_and_declared_limit(
     assert json.loads(capsys.readouterr().out)["status"] == status
 
 
+def test_power_partial_requested_net_coverage_real_producer(tmp_path, capsys):
+    """Issue #2116: a real, fully-solved two-island design where only one
+    metal role declares an EM limit -- island A's lone met1 edge and island
+    B's met1 edge are checked, but island B's met2/via edges are skipped for
+    `missing_current_limit`, never guessed at. Both islands have a pad and a
+    drawn current (no `unavailable_branch_current` skip in play here), so
+    this is squarely the "some requested net/edge has no edge with both
+    resistance and current [checked]" partial-coverage gap this issue names
+    -- distinct from `test_power_real_current_and_declared_limit`'s zero/
+    full/fail single-edge cases above."""
+    gds, spec = tmp_path / "power.gds", tmp_path / "power.partial.json"
+    power_fixtures._basic_fixture(gds)
+    power_fixtures._em_spec(
+        spec,
+        power_nets=("VPWR",),
+        pads=[
+            {"net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8},
+            {"net": "VPWR", "x_um": 0.0, "y_um": 5.5, "voltage_v": 1.8},
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [
+                {"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3},
+                {"x_um": 10.0, "y_um": 5.5, "current_a": 1e-3},
+            ],
+        },
+        met1_current_limit_a_per_um=0.01,
+    )
+
+    report = power.run_power(str(gds), str(spec))
+    _assert_contract(report, "partial")
+    assert report["status"] == "pass_partial"
+    assert report["em_verdict"]["fail_count"] == 0
+    assert len(report["coverage"]["checked"]) == 2
+    assert len(report["coverage"]["skipped"]) == 2
+    assert {r["reason"] for r in report["coverage"]["skipped"]} == {
+        "missing_current_limit"
+    }
+    vpwr = next(n for n in report["em_verdict"]["nets"] if n["net"] == "VPWR")
+    assert vpwr["status"] == "pass"  # per-net status is unaffected by this issue
+
+    # A nonempty skip list alongside a clean check is never an unconditional
+    # pass (#1988's operator rule) -- `klt signoff` still refuses it.
+    _assert_signoff(tmp_path, report, passed=False)
+    assert main(["power", str(gds), str(spec), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "pass_partial"
+
+
 @pytest.mark.parametrize(
     "measurements,state,status,code",
     [
@@ -270,12 +324,23 @@ def test_power_real_current_and_declared_limit(
         ([{"name": "vout"}], "full", "pass", 0),
         ([{"name": "vout", "limits": {"max": 2.0}}], "full", "pass", 0),
         (
+            # Issue #2109's common rollup rule (issue #2117 applies it to
+            # `sim`): a typo'd `limits` key (`"maximum"`) beside a recognised
+            # one (`"max"`) on the *same* measurement still lets the run
+            # check something real -- `coverage_state` is `"partial"`, never
+            # `"zero"` -- but that checked work is never enough to earn the
+            # unconditional `"pass"` `klt signoff` reads as a complete
+            # result. Before #2117, this row's `status` was silently `"pass"`
+            # -- the exact bug the issue title names.
             [{"name": "vout", "limits": {"max": 2.0, "maximum": 2.0}}],
             "partial",
-            "pass",
+            "pass_partial",
             0,
         ),
         (
+            # Failure precedence (issue #2109) holds even alongside a skipped
+            # bound: a real limit violation is reported as the violation, not
+            # masked by -- or confused with -- the coverage gap.
             [{"name": "vout", "limits": {"max": 0.5, "maximum": 2.0}}],
             "partial",
             "fail",
@@ -302,7 +367,16 @@ def test_sim_real_producer_measurement_coverage(
     report = sim.run_sim(str(request))
     _assert_contract(report, state)
     assert report["status"] == status
-    _assert_signoff(tmp_path, report, passed=status == "pass", item=1)
+    result = _assert_signoff(tmp_path, report, passed=status == "pass", item=1)
+    if status == "pass_partial":
+        # `klt signoff` never reads a real, self-reported `pass_partial`
+        # verdict as fully qualifying evidence -- it is named
+        # `partial_coverage`, not the unconditional `pass` word, on the same
+        # `coverage_qualification` path #2109 gave every other adapter.
+        assert result["checks"][0]["detail"]["coverage_qualification"] == {
+            "reason": "partial_coverage",
+            "skipped": report["coverage"]["skipped"],
+        }
     assert main(["sim", str(request), "--format", "json"]) == code
     assert json.loads(capsys.readouterr().out)["status"] == status
 
@@ -312,7 +386,7 @@ def test_sim_real_producer_measurement_coverage(
     [
         ("empty", "zero", "not_checked", False),
         ("pass", "full", "pass", True),
-        ("partial", "partial", "pass", True),
+        ("partial", "partial", "pass_partial", False),
         ("error", "zero", "error", False),
         ("fail", "full", "fail", False),
     ],
@@ -370,7 +444,7 @@ def test_pex_real_extraction_and_comparison_rollup(
     assert report["status"] == status
     _assert_signoff(tmp_path, report, passed=passed, item=7)
     assert main(["pex", gds, *requests, "--deck", "sky130", "--format", "json"]) == (
-        0 if passed else 3 if status == "fail" else 4
+        0 if passed or status == "pass_partial" else 3 if status == "fail" else 4
     )
     assert json.loads(capsys.readouterr().out)["status"] == status
 

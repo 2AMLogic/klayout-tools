@@ -14,36 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
-- **Fixed** (#2110): `klt drc --engine curated` derives its `status` and exit
-  code from the common rollup table
-  ([`docs/coverage-contract.md`](docs/coverage-contract.md)) instead of a
-  per-verb status mapping, and can now report `status: "clean_partial"` (exit
-  `0`) — every rule that ran passed, and a rule that *could* have found
-  something did not run. A nonempty skipped-request list can no longer
-  coexist with this verb's unconditional `clean`, and `klt signoff` reports
-  such a citation as `partial_coverage` rather than counting it as a passing
-  check or mislabelling it `check_failed`. This also settles the
-  classification Phase 1 left open: a rule skipped because an input layer is
-  absent is now `coverage.inapplicable` with reason `no_applicable_geometry`
-  when running it could not have reported a violation (every primitive in the
-  curated engine returns nothing for an empty input region, so the check is a
-  provable no-op), and stays `coverage.skipped` with reason
-  `absent_input_layer` when it could have — today exactly `check="antenna"`,
-  whose primitive faults a zero-area protection region. Recording all of them
-  as skipped requests, as Phase 1 did, would have made an ordinary sky130 run
-  on a small block partial (7 of 57 rules checked on
-  `examples/design-pipeline/06-layout.gds`). Because no shipped deck authors
-  an `antenna` rule, every `sky130`/`gf180mcu`/`sg13g2`/`sg13cmos5l` run
-  keeps its existing `clean`/`violations`/`not_checked` verdict and exit code;
-  what changes for them is that their skipped rules are now disclosed as
-  inapplicable work, so a clean run states *complete applicable* coverage
-  instead of reading as partial. `coverage.rules_skipped` still lists both
-  categories, unchanged, and no `schema_version` bumps (the `status` value is
-  an additive enum member under the pre-1.0 policy). `klt eval`'s DRC gate
-  mirrors the same table: a partial run is `status: "fail"` with the exit code
-  `klt drc` itself would return. See
-  [`docs/cli/drc.md`](docs/cli/drc.md)'s "`coverage.skipped` vs.
-  `coverage.inapplicable`".
+- **Fixed** (#2110): `klt drc --engine curated` now applies the shared
+  coverage rollup. Partial runs report `clean_partial`, zero-work runs report
+  `not_checked`, and violations retain precedence. Rules skipped for absent
+  layers are classified as `inapplicable` when empty input cannot produce a
+  violation, or as `skipped` when it can (currently antenna protection-layer
+  checks). Signoff does not count partial evidence as a passing check.
+
+- **Fixed**: `klt sim`'s top-level `status` now applies the common
+  partial-success rollup rule (issue #2109) instead of a bespoke
+  "no failure means pass" check (issue #2117). Previously, a `limits` object
+  whose keys `klt sim` never applies (only `min`/`max` are read — a typo'd
+  `"maximum"`/`"minimum"` scored as no bound at all) silently reported the
+  unconditional `status: "pass"` whenever it sat beside another measurement's
+  own applied, satisfied bound — the exact false-pass this issue closes. The
+  run's own `coverage.skipped` already disclosed the gap (issue #1996); this
+  fix routes it through `coverage_rollup()`/`rollup_status()` so successful
+  checks alongside a nonempty skip list now report the new
+  `status: "pass_partial"` value (exit `0`, same token issue #1997 already
+  shipped for `klt power`/`klt erc`) rather than `"pass"`. An empty corner
+  matrix or a `limits` object using only unrecognized keys still reports
+  `status: "not_checked"` (exit `4`) exactly as before; a real limit
+  violation or corner error still outranks any coverage gap. `klt signoff`
+  already read `"pass_partial"` as non-qualifying partial evidence for
+  `sim`-kind checks (issue #2109), so no consumer-side change was needed.
 - **Fixed**: `klt extract` no longer writes a net name containing `.` into a
   node-reference position of its SPICE output (issue #2145). A net can arrive
   carrying an instance path joined with a dot — `XBIAS.vb1` — either from

@@ -1171,6 +1171,242 @@ def test_build_coverage_a_real_graded_run_is_not_nothing_checked():
 
 
 # --------------------------------------------------------------------------- #
+# `run_sim`'s top-level `status`: the common coverage rollup rule (#2109)
+# applied to `_build_coverage`'s output -- see `docs/coverage-contract.md`'s
+# "The common rollup rule" and this module's own row in its producer/
+# compatibility table. Real corner/measurement engine behaviour is faked via
+# `_stub_subprocess_run` -- these are the fake-engine coverage-contract
+# regressions the issue asks for; `tests/test_checked_work_integration.py`'s
+# `test_sim_real_producer_measurement_coverage` is the equivalent
+# real-producer/consumer-through-signoff table for the same rows, and
+# `tests/test_signoff.py`'s `test_real_sim_gate_reproduces_the_canarys_
+# corner_sim_pass` is the real-ngspice-engine control.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_sim_zero_corners_via_exclude_is_not_checked_never_pass(
+    tmp_path, monkeypatch
+):
+    """An empty corner matrix runs nothing -- the common rollup rule must
+    report `not_checked` (exit 4), never fall through to an unconditional
+    `pass` just because no corner had the chance to fail."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "limits": {"max": 1.8},
+                }
+            ],
+            # No process/supply axis declared -- the one implicit default
+            # corner's temperature is 27C (see `_expand_corners`'s
+            # docstring), so excluding it leaves zero corners.
+            "exclude": [{"temperature_c": 27}],
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert report["corner_count"] == 0
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["coverage"]["nothing_checked_reasons"] == ["empty_corner_matrix"]
+    assert report["status"] == "not_checked"
+
+
+def test_run_sim_wholly_unrecognized_limits_is_not_checked_never_pass(
+    tmp_path, monkeypatch
+):
+    """Every `limits` key the request declares is a typo (`_evaluate_limits`
+    only reads `min`/`max`) -- not one bound was ever applied, so the run
+    must report `not_checked`, never the unconditional `pass` a naive
+    "no failing measurement" check would report."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "limits": {"maximum": 1.8, "minimum": 1.6},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="vout                =  1.70000e+00\n")
+
+    report = sim.run_sim(str(request))
+
+    assert report["coverage"]["unrecognized_limit_keys"] == [
+        {"measurement": "vout", "keys": ["maximum", "minimum"]}
+    ]
+    assert report["coverage"]["checked"] == []
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["status"] == "not_checked"
+
+
+def test_run_sim_typo_beside_a_real_limit_is_pass_partial_never_unconditional_pass(
+    tmp_path, monkeypatch
+):
+    """The exact bug this issue closes: a typo'd `limits` key on one
+    measurement must not silently disappear into an unconditional `pass`
+    just because a *different* measurement's own bound was applied and
+    satisfied. The common rollup rule reports `pass_partial` -- real,
+    exit-0 evidence that is not the unconditional success."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "limits": {"maximum": 1.8},
+                },
+                {
+                    "name": "gain",
+                    "spice": ".meas tran gain FIND v(gain) AT=1u",
+                    "limits": {"min": 20.0},
+                },
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "vout                =  1.70000e+00\ngain                =  2.10000e+01\n"
+        ),
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["skipped"] == [
+        {
+            "id": 'limit:[0,"default/novdd/27C","vout","maximum"]',
+            "reason": "unrecognized_limit_key",
+        }
+    ]
+    assert report["status"] == "pass_partial"
+
+
+def test_run_sim_complete_valid_bounds_is_pass_never_partial_control(
+    tmp_path, monkeypatch
+):
+    """The control: every declared bound is `min`/`max` and gets applied --
+    complete, positively-established coverage earns the unconditional
+    `pass`, not `pass_partial`."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "limits": {"min": 1.6, "max": 1.8},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text="vout                =  1.70000e+00\n")
+
+    report = sim.run_sim(str(request))
+
+    assert report["coverage"]["skipped"] == []
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["status"] == "pass"
+
+
+def test_run_sim_real_violation_outranks_partial_coverage(tmp_path, monkeypatch):
+    """Failure precedence (issue #2109): a run with both a real limit
+    violation and an unrelated skipped (typo'd) bound reports the
+    violation -- never `pass_partial`, and never masked by the coverage
+    gap either."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "limits": {"max": 1.5},  # 1.7 > 1.5 -- violates
+                },
+                {
+                    "name": "gain",
+                    "spice": ".meas tran gain FIND v(gain) AT=1u",
+                    "limits": {"minimum": 20.0},  # typo'd -- skipped
+                },
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "vout                =  1.70000e+00\ngain                =  2.10000e+01\n"
+        ),
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["coverage"]["skipped"]
+    assert report["status"] == "fail"
+
+
+def test_cli_exit_code_pass_partial_is_zero_not_pass(tmp_path, monkeypatch, capsys):
+    """`pass_partial` is a real, non-failing result (issue #2109): the CLI
+    exit code stays `0`, exactly like an unconditional `pass`, while the
+    reported JSON `status` still names the gap."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "limits": {"maximum": 1.8},
+                },
+                {
+                    "name": "gain",
+                    "spice": ".meas tran gain FIND v(gain) AT=1u",
+                    "limits": {"min": 20.0},
+                },
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "vout                =  1.70000e+00\ngain                =  2.10000e+01\n"
+        ),
+    )
+
+    exit_code = main(["sim", str(request), "--format", "json"])
+
+    assert exit_code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "pass_partial"
+
+
+# --------------------------------------------------------------------------- #
 # Measurement rollup (worst-case selection, aggregate status)
 # --------------------------------------------------------------------------- #
 

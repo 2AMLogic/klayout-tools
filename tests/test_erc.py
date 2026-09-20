@@ -664,6 +664,77 @@ def test_status_reflects_erc_findings_even_with_no_antenna_check(tmp_path):
     assert report["status"] == "violations"
 
 
+def test_status_not_checked_when_no_pdk_is_given(tmp_path):
+    """AC: the zero-check control (issue #2115/#2109). With no `--pdk`,
+    every level's `verdict` is `"unchecked"` and the antenna scope's
+    `coverage.nothing_checked` is known-`True` -- the common rollup rule's
+    `zero` row, reported as `status: "not_checked"` (exit 4), matching this
+    command's pre-#2115 behaviour for the same input. Uses a fully-strapped
+    single-gate fixture so no `erc.floating_gate` finding intervenes and the
+    zero-coverage row is what actually decides `status` here."""
+    gds = tmp_path / "unchecked.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    _antenna_fixture(gds, li1_um2=0.2, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec))
+    assert report["erc_finding_count"] == 0
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["status"] == "not_checked"
+
+
+def test_status_clean_partial_when_met3_5_ungraded_but_all_graded_levels_pass(
+    tmp_path,
+):
+    """AC: the partial-coverage control, migrating #1997's `pass_partial`
+    scenario onto the common contract (issue #2109/#2115). A full-stack
+    spec declaring met3-5 (roles sky130's antenna-ratio table has no limit
+    entries for) alongside a clean li1/met1/met2 result must not report the
+    unconditional `"clean"` -- `coverage.skipped` is nonempty (met3-5, each
+    `missing_antenna_limit`), so the common rollup rule's `partial` row
+    applies: `status: "clean_partial"`, still exit 0 (a real, successful
+    run, just not this verb's unconditional success)."""
+    gds = tmp_path / "full_stack_pass.gds"
+    spec = tmp_path / "full_stack.erc.json"
+    _full_stack_spec(spec)
+    _antenna_fixture(gds, li1_um2=1.0, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    assert report["erc_finding_count"] == 0
+    assert not any(
+        level["verdict"] == "violate"
+        for gate in report["gates"]
+        for level in gate["levels"]
+    )
+    skipped_ids = {entry["id"] for entry in report["coverage"]["skipped"]}
+    assert len(skipped_ids) == 3  # met3, met4, met5
+    assert all(
+        entry["reason"] == "missing_antenna_limit"
+        for entry in report["coverage"]["skipped"]
+    )
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["status"] == "clean_partial"
+
+
+def test_status_violations_wins_over_partial_met3_5_coverage(tmp_path):
+    """AC: the real-violation control (issue #2109/#2115) -- a genuine
+    antenna-ratio violation on a graded level (li1) still reports
+    `status: "violations"` even though met3-5 are simultaneously skipped
+    (`coverage.skipped` nonempty): the common rollup rule decides `failed`
+    before it ever consults coverage, so a coverage gap can never mask or
+    be masked by a real defect. Companion to
+    `test_antenna_verdict_violate_wins_over_partial_met3_5_coverage`, which
+    checks the same fixture's per-gate `antenna_verdict`."""
+    gds = tmp_path / "full_stack_violate.gds"
+    spec = tmp_path / "full_stack.erc.json"
+    _full_stack_spec(spec)
+    _antenna_fixture(gds, li1_um2=80.0, met1_um2=1.0, met2_um2=1.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+    assert report["coverage"]["skipped"]  # met3-5 still ungraded
+    assert report["status"] == "violations"
+
+
 def test_provenance_pdk_populated_only_when_pdk_given(tmp_path):
     spec = tmp_path / "basic.erc.json"
     _basic_spec(spec)
@@ -1518,6 +1589,34 @@ def test_cli_json_contract_includes_remedy_field(tmp_path, capsys):
     assert li1_level["verdict"] == "violate"
     assert li1_level["remedy"]["type"] == "layer_jumping"
     assert li1_level["remedy"]["target_layer"] == "met1"
+
+
+def test_cli_exit_code_zero_for_clean_partial_status(tmp_path, capsys):
+    """AC (issue #2109/#2115): `status: "clean_partial"` exits `0`, matching
+    the common rollup rule's exit code for a partial-but-successful run --
+    not `3` (findings) and not `4` (no verdict reached)."""
+    gds = tmp_path / "full_stack_pass.gds"
+    spec = tmp_path / "full_stack.erc.json"
+    _full_stack_spec(spec)
+    _antenna_fixture(gds, li1_um2=1.0, met1_um2=1.0, met2_um2=1.0)
+
+    assert (
+        main(["erc", str(gds), str(spec), "--pdk", "sky130", "--format", "json"]) == 0
+    )
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "clean_partial"
+
+
+def test_cli_exit_code_four_for_not_checked_status(tmp_path, capsys):
+    """AC (issue #2109/#2115): the zero-check control's exit code, `4`."""
+    gds = tmp_path / "unchecked.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    _antenna_fixture(gds, li1_um2=0.2, met1_um2=1.0, met2_um2=1.0)
+
+    assert main(["erc", str(gds), str(spec), "--format", "json"]) == 4
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "not_checked"
 
 
 def test_cli_unknown_pdk_exits_one_with_clean_message(tmp_path, capsys):
