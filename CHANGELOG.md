@@ -37,6 +37,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   connectivity scope — every one written before this change — grades exactly
   as before); item 11's own grading never read `status` and is unaffected.
 
+- **Fixed** (#2178, `schema_version` 1 → **2** for `klt signoff --fleet`'s
+  report only): the fleet roll-up's `blocks[].blocking_item` no longer
+  reports a **structurally ungradeable** T1 item — 1 (Design sources), 2
+  (Layout), 9 (Testbenches shipped), 10 (Repo hygiene), the four with no
+  `klt` verb behind them — as *the* blocker while a gradeable item is also
+  unmet. `docs/cli/signoff.md` tells manifest authors the honest default for
+  those four is to leave them uncited, so they render
+  `unmet`/`no_evidence` by construction; reducing on "first unmet item in
+  render order" therefore reported every honestly-authored block as "blocked
+  on item 1", hiding its real gaps. The blocker is now the first unmet item
+  with a check behind it, falling back to an ungradeable one only when
+  nothing gradeable is unmet (a block whose only gaps are those four still
+  names one of them, never `null`). **Added**: `blocks[].ungraded_items`,
+  every unmet ungradeable item in `blocking_item`'s own
+  `{id, title, partition, reason}` shape, so demoting them never hides them;
+  the text rendering shows them on one line beside the blocker. Grading is
+  unchanged — those four are still `unmet` when uncited, and `tier: "T1"`
+  still requires every T1 item, them included, to be `"met"`. The
+  `schema_version` bump is because an already-shipped field's *meaning*
+  changed, per `docs/json-contract.md`; `--manifest` and
+  envelope-aggregation mode are untouched.
+
 - **Fixed** (#2150): `klt extract --parasitics`'s `parasitics.nets[].terminals[]
   .leg_net`/`.hub_net` now stays byte-identical to the written `.spice`
   file's own node spelling for a star/ladder leg or hub net synthesized from

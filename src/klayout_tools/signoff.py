@@ -778,7 +778,19 @@ TIER_REPORT_SCHEMA_VERSION = 1
 #: from both :data:`SCHEMA_VERSION` and :data:`TIER_REPORT_SCHEMA_VERSION`
 #: for the same reason: the three modes' top-level fields are unrelated, so
 #: bumping one must never imply either of the others changed.
-FLEET_REPORT_SCHEMA_VERSION = 1
+#:
+#: ``2`` (issue #2178): ``blocks[].blocking_item`` no longer means "the first
+#: unmet T1 item in render order". It now skips the structurally-ungradeable
+#: items 1, 2, 9 and 10 whenever a gradeable T1 item is also unmet (see
+#: :func:`_blocking_t1_item`), so the same fleet manifest that reported
+#: ``blocking_item.id == 1`` under version ``1`` reports a different item
+#: under ``2``. Adding the new ``blocks[].ungraded_items`` field alongside it
+#: would have been purely additive on its own, but redefining what an
+#: already-shipped field's unchanged type *means* is a breaking change under
+#: ``docs/json-contract.md``'s "value sets within an unchanged shape" rule
+#: (the `klt precheck` ``layer_whitelist[].shapes`` precedent, issue #452),
+#: so this bumps rather than landing silently.
+FLEET_REPORT_SCHEMA_VERSION = 2
 
 #: Block kinds recognised by ``docs/design-evidence-tiers.md``'s "Block
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
@@ -948,6 +960,40 @@ _OPT_IN_KIND_ITEMS: dict[str, frozenset[int]] = {
 #: the same machinery every other item uses), and the item is ``"met"`` only
 #: when the cited set jointly proves every condition the item names.
 _ITEMS_GRADED_AS_POWER_DELIVERY: frozenset[int] = frozenset({11})
+
+
+def _is_structurally_ungradeable_item(item_id: int) -> bool:
+    """Is this T1 item one of the ones with **no `klt` verb behind it at
+    all** -- a claim about what a repository *contains* rather than about a
+    check that can be run (issue #2178)?
+
+    Today that is exactly items 1 (Design sources), 2 (Layout), 9
+    (Testbenches shipped) and 10 (Repo hygiene) -- the four
+    ``docs/design-evidence-tiers.md`` documents as naming no tool, and the
+    four ``docs/cli/signoff.md``'s "Items 1, 2, 9, and 10" section tells a
+    manifest author to leave **uncited** by default, since any passing
+    envelope satisfies them regardless of topical relevance.
+
+    **Derived, never hard-coded.** An item is structurally ungradeable
+    exactly when no grading table names it: it carries no
+    :data:`_ITEM_ALLOWED_KINDS` restriction (items 3-8 do) and is not graded
+    by the compound power-delivery path (:data:`_ITEMS_GRADED_AS_POWER_DELIVERY`
+    -- item 11). So the day one of those four gains a verb and an entry in
+    either table, it stops being ungradeable here with no second list to
+    remember to update -- the same anti-drift discipline
+    :mod:`.design_evidence_tiers` applies to the item list itself.
+
+    Consumed only by the fleet roll-up's reduction
+    (:func:`_blocking_t1_item`, :func:`_ungraded_t1_items`). It changes no
+    item's grading: an ungradeable item is graded exactly as before, and a
+    block's ``tier`` still requires every T1 item -- these four included --
+    to be ``"met"``.
+    """
+    return (
+        item_id not in _ITEM_ALLOWED_KINDS
+        and item_id not in _ITEMS_GRADED_AS_POWER_DELIVERY
+    )
+
 
 #: Provenance sub-fields compared for consistency across every input
 #: envelope that carries them -- see _provenance_consistency()'s docstring
@@ -4594,7 +4640,7 @@ def build_fleet_report(
     Returns (JSON out)::
 
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "block_count": 3,
             "t1_count": 1,
             "not_t1_count": 2,
@@ -4608,6 +4654,7 @@ def build_fleet_report(
                     "t1_item_count": 11,
                     "t1_met_count": 11,
                     "blocking_item": None,
+                    "ungraded_items": [],
                     "drc_coverage": [
                         {
                             "item": 3,
@@ -4631,22 +4678,45 @@ def build_fleet_report(
                         "partition": None,
                         "reason": "no_evidence",
                     },
+                    "ungraded_items": [
+                        {
+                            "id": 1,
+                            "title": "Design sources",
+                            "partition": None,
+                            "reason": "no_evidence",
+                        },
+                        ...
+                    ],
                     "drc_coverage": [],
                 },
                 ...
             ],
         }
 
-    ``blocking_item`` is the *first* rendered T1 item (in the same order
-    :func:`build_tier_report` renders items -- item id, then partition for a
-    mixed-signal block) whose ``status`` is not ``"met"``, or ``None`` when
-    ``tier == "T1"``. It is deliberately a single item, not the full unmet
-    list: the roll-up's job is "what is the next thing to fix", not a
-    re-rendering of the per-block report (open that block's own
-    ``--manifest`` report for the full item-by-item detail). No evidence is
-    read or graded here beyond what :func:`build_tier_report` already did --
-    this function only reduces its output, so a block's roll-up row and its
-    full tier report can never disagree about *why* it isn't T1 yet.
+    ``blocking_item`` is the one T1 item this roll-up names as the block's
+    blocker, or ``None`` when ``tier == "T1"``. It is the first rendered
+    unmet T1 item (in the same order :func:`build_tier_report` renders items
+    -- item id, then partition for a mixed-signal block) that has a check
+    behind it; only when *no* such item is unmet does it fall back to the
+    first unmet **structurally ungradeable** item (items 1, 2, 9 and 10 --
+    see :func:`_is_structurally_ungradeable_item` and
+    :func:`_blocking_t1_item` for the full rule and why, issue #2178). It is
+    deliberately a single item, not the full unmet list: the roll-up's job is
+    "what is the next thing to fix", not a re-rendering of the per-block
+    report (open that block's own ``--manifest`` report for the full
+    item-by-item detail).
+
+    ``ungraded_items`` is every unmet structurally-ungradeable T1 item, in
+    render order and in ``blocking_item``'s own shape
+    (:func:`_ungraded_t1_items`) -- the rows ``blocking_item`` steps over, so
+    that demoting them never silently hides them. ``[]`` for a block that
+    cites all four, and for a block at ``tier: "T1"``.
+
+    No evidence is read or graded here beyond what :func:`build_tier_report`
+    already did -- this function only reduces its output, so a block's
+    roll-up row and its full tier report can never disagree about *why* it
+    isn't T1 yet, and every T1 item (the ungradeable four included) still has
+    to be ``"met"`` for ``tier == "T1"``.
 
     ``drc_coverage`` (issue #2002) is the same kind of reduction over that
     per-block report's ``drc``-kind citations: what deck coverage each
@@ -4700,7 +4770,7 @@ def build_fleet_report(
             )
 
         tier_report = build_tier_report(manifest, tiers_doc=tiers_doc)
-        blocking_item = _first_unmet_t1_item(tier_report["items"])
+        blocking_item = _blocking_t1_item(tier_report["items"])
         if tier_report["tier"] == "T1":
             t1_count += 1
 
@@ -4713,6 +4783,7 @@ def build_fleet_report(
                 "t1_item_count": tier_report["t1_item_count"],
                 "t1_met_count": tier_report["t1_met_count"],
                 "blocking_item": blocking_item,
+                "ungraded_items": _ungraded_t1_items(tier_report["items"]),
                 "drc_coverage": _drc_coverage_rows(tier_report["items"]),
             }
         )
@@ -4763,7 +4834,7 @@ def _drc_coverage_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     Reduces the per-block tier report this roll-up already computed; it reads
     no evidence of its own, so a block's roll-up row and its full tier report
     can never disagree about what the deck covered -- the same discipline
-    :func:`_first_unmet_t1_item` follows.
+    :func:`_blocking_t1_item` follows.
     """
     rows: list[dict[str, Any]] = []
     for item in items:
@@ -4781,19 +4852,90 @@ def _drc_coverage_rows(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-def _first_unmet_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Return a trimmed view of the first rendered T1 item in ``items``
-    (:func:`build_tier_report`'s own item order) whose ``status`` is not
-    ``"met"``, or ``None`` if every T1 item is met. T2-T4 ladder rows are
-    never candidates -- they are always ``"unmet"`` by design (this
-    toolkit's closed loop targets T1) and are not what gates the ``tier ==
-    "T1"`` verdict this roll-up reports against."""
+def _blocking_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return a trimmed view of the T1 item in ``items`` this roll-up reports
+    as the block's blocker, or ``None`` if every T1 item is met.
+
+    The candidate order is :func:`build_tier_report`'s own item order (item
+    id, then partition), with one rule layered on top (issue #2178): a
+    **structurally ungradeable** item (:func:`_is_structurally_ungradeable_item`
+    -- items 1, 2, 9 and 10 today) is only reported as *the* blocker when no
+    gradeable T1 item is unmet. Concretely:
+
+    1. the first unmet T1 item that has a check behind it, if any;
+    2. otherwise the first unmet structurally-ungradeable T1 item;
+    3. otherwise ``None`` (every T1 item is met).
+
+    Rule 1 is the whole point. ``docs/cli/signoff.md``'s "Items 1, 2, 9, and
+    10" section tells a manifest author that the honest default for those
+    four is to leave them **uncited**, since no `klt` verb can check their
+    topical relevance -- which means every honestly-authored manifest renders
+    item 1 ``unmet``/``no_evidence`` *by construction*. Reducing on "first
+    unmet in render order" therefore answered "blocked on item 1" for every
+    such block, hiding whatever its real gaps were. Skipping those four keeps
+    the answer to "what is the next thing to fix" a thing that can actually
+    be fixed by running something.
+
+    Rule 2 keeps the degenerate case honest rather than silently clean: a
+    block whose *only* unmet items are the ungradeable four is still not T1,
+    so it must still name a blocker -- one of those four -- never ``None``.
+    The full set skipped by rule 1 is reported alongside as the roll-up row's
+    ``ungraded_items`` (:func:`_ungraded_t1_items`), so nothing is dropped.
+
+    T2-T4 ladder rows are never candidates -- they are always ``"unmet"`` by
+    design (this toolkit's closed loop targets T1) and are not what gates the
+    ``tier == "T1"`` verdict this roll-up reports against.
+
+    This stays a pure reduction of ``items``: no evidence is re-read and no
+    item's ``status``/``reason`` is recomputed, so the row and the block's own
+    tier report can never disagree about *why* an item is unmet -- only about
+    which unmet item is worth naming first.
+    """
+    ungradeable_fallback: dict[str, Any] | None = None
     for item in items:
-        if item["tier"] == "T1" and item["status"] != "met":
-            return {
-                "id": item["id"],
-                "title": item["title"],
-                "partition": item["partition"],
-                "reason": item["reason"],
-            }
-    return None
+        if item["tier"] != "T1" or item["status"] == "met":
+            continue
+        if _is_structurally_ungradeable_item(item["id"]):
+            if ungradeable_fallback is None:
+                ungradeable_fallback = _blocking_item_view(item)
+            continue
+        return _blocking_item_view(item)
+    return ungradeable_fallback
+
+
+def _ungraded_t1_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every unmet, **structurally ungradeable** T1 item in ``items``
+    (:func:`_is_structurally_ungradeable_item`), in render order -- exactly
+    the rows :func:`_blocking_t1_item`'s rule 1 steps over, trimmed to the
+    same ``{"id", "title", "partition", "reason"}`` shape ``blocking_item``
+    uses (issue #2178).
+
+    Reported so that skipping those items in the blocker reduction *demotes*
+    them rather than hides them: a reader still sees that this block claims
+    items 1/2/9/10 with nothing cited behind them, but is no longer told that
+    is the one thing standing between it and T1 when a real, runnable gap
+    exists elsewhere. Empty for a block that cites all four (met items are
+    never listed) and for a block at ``tier: "T1"``.
+
+    Like :func:`_drc_coverage_rows`, this reduces the per-block tier report
+    this roll-up already computed and reads no evidence of its own.
+    """
+    return [
+        _blocking_item_view(item)
+        for item in items
+        if item["tier"] == "T1"
+        and item["status"] != "met"
+        and _is_structurally_ungradeable_item(item["id"])
+    ]
+
+
+def _blocking_item_view(item: dict[str, Any]) -> dict[str, Any]:
+    """The trimmed, roll-up-sized view of one rendered tier-report item --
+    shared by ``blocking_item`` and every ``ungraded_items`` row so the two
+    fields can never drift into different shapes."""
+    return {
+        "id": item["id"],
+        "title": item["title"],
+        "partition": item["partition"],
+        "reason": item["reason"],
+    }

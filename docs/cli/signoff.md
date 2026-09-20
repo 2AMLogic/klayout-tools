@@ -748,6 +748,18 @@ make visible (see "Proving a skipped check is caught, not silently passed"
 below). `examples/signoff/` follows that default: it cites items 3 and 4
 only, and leaves the rest visibly `UNMET`.
 
+**Taking that advice does not cost you the fleet roll-up's answer** (issue
+#2178). Because these four render `unmet` by construction for any manifest
+that follows the paragraph above, `klt signoff --fleet`'s `blocking_item`
+deliberately steps over them and names the first unmet item that actually
+has a check behind it — reporting the four separately as that row's
+`ungraded_items`, and falling back to naming one of them only when there is
+no gradeable gap left. See ["The blocker is a gradeable item, not the first
+unmet one"](#the-blocker-is-a-gradeable-item-not-the-first-unmet-one-issue-2178).
+Nothing about how the four are *graded* changes: they are still `unmet` when
+uncited, and a block still reaches `tier: "T1"` only once every T1 item —
+these four included — is `"met"`.
+
 ### Where the tier doc comes from
 
 Both doc-parsing modes (`--manifest` and `--fleet`) resolve
@@ -1477,11 +1489,48 @@ verification", bound to `klt pex` in #871) is named as the `blocking_item`
 exactly like any other unmet item — and resolves to `tier: "T1"` once real
 `klt yield`/`klt pex` evidence backs it, the same as every other T1 item.
 
+### The blocker is a gradeable item, not the first unmet one (issue #2178)
+
+**`blocking_item` skips items 1, 2, 9 and 10 whenever any other T1 item is
+also unmet.** Those four have no `klt` verb behind them, and this page's
+["Items 1, 2, 9, and 10"](#items-1-2-9-and-10-klt-signoff-cannot-check-topical-relevance)
+section tells a manifest author that the honest default is to leave them
+**uncited** — which renders four `UNMET`/`no_evidence` rows at positions 1,
+2, 9 and 10 *by construction*, for every honestly-authored manifest.
+Reducing on "first unmet item in render order" therefore answered "blocked on
+item 1: Design sources" for every such block, whatever its real gaps were:
+the one field the fleet view exists to surface was wrong the same way for the
+whole fleet at once, and the only ways to avoid it were to cite a topically
+unrelated envelope for those items (dishonest) or to cite 2/9/10 but not 1
+(gaming the reduction).
+
+The selection rule is therefore:
+
+1. the first rendered unmet T1 item **that has a check behind it** — items
+   3-8 and 11, the ones named in a `_ITEM_ALLOWED_KINDS`-style binding to a
+   `klt` verb — if any;
+2. otherwise the first unmet **structurally ungradeable** item (1, 2, 9, 10);
+3. otherwise `null`, i.e. `tier: "T1"`.
+
+Rule 2 matters as much as rule 1: a block whose *only* gaps are those four is
+still not T1, so the roll-up still names one of them rather than reporting
+`null` and implying it is clean. And every skipped item is reported beside
+the blocker as [`ungraded_items`](#blocks-entries) — demoted, never dropped.
+
+Nothing here re-grades anything. The four items are still graded exactly as
+before (an uncited one is still `unmet`, a cited-and-passing one still
+`met`), a block's `tier` still requires **every** T1 item including those
+four to be `"met"`, and each reported row is copied verbatim from that
+block's own tier report. Only *which* unmet item gets named first changed —
+which is why this bumped the fleet report's `schema_version` to `2` (see
+[`../json-contract.md`](../json-contract.md)'s rule on redefining what an
+already-shipped field means).
+
 ### Fleet-report JSON schema
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "block_count": 3,
   "t1_count": 1,
   "not_t1_count": 2,
@@ -1495,6 +1544,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
       "t1_item_count": 11,
       "t1_met_count": 11,
       "blocking_item": null,
+      "ungraded_items": [],
       "drc_coverage": [
         {
           "item": 3,
@@ -1518,6 +1568,20 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
         "partition": null,
         "reason": "no_evidence"
       },
+      "ungraded_items": [
+        {
+          "id": 1,
+          "title": "Design sources",
+          "partition": null,
+          "reason": "no_evidence"
+        },
+        {
+          "id": 2,
+          "title": "Layout",
+          "partition": null,
+          "reason": "no_evidence"
+        }
+      ],
       "drc_coverage": []
     }
   ]
@@ -1526,7 +1590,7 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 
 | Field           | Type              | Description                                                                          |
 | --------------- | ------------------ | ---------------------------------------------------------------------------------------- |
-| `schema_version`| integer             | Version of this report's own JSON shape (starts at `1`, independent of the other two modes' `schema_version`s). |
+| `schema_version`| integer             | Version of this report's own JSON shape (`2` since issue #2178 redefined which unmet item `blocking_item` names; independent of the other two modes' `schema_version`s). |
 | `block_count`   | integer             | Number of `blocks[]` entries graded.                                                     |
 | `t1_count`      | integer             | Number of those blocks with `tier: "T1"`.                                                |
 | `not_t1_count`  | integer             | `block_count - t1_count`.                                                                 |
@@ -1543,23 +1607,30 @@ exactly like any other unmet item — and resolves to `tier: "T1"` once real
 | `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
 | `t1_item_count` | integer              | This block's rendered T1 item count (11, or 22 for `mixed-signal`).                      |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
-| `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the first unmet T1 item — see below.                 |
+| `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker — the first unmet *gradeable* one, falling back to an ungradeable one only when nothing gradeable is unmet (issue #2178). See below. |
+| `ungraded_items`| array\<object\>      | Every unmet **structurally ungradeable** T1 item (1, 2, 9, 10 — the ones with no `klt` verb behind them), in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issue #2178). These are exactly the rows `blocking_item` steps over: demoted so an honestly-uncited item 1 never masks a real gap, listed so that demotion never silently hides them. `[]` for a block that cites all four, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — those four items still have to be `"met"` for `tier: "T1"`. |
 | `drc_coverage`  | array\<object\>      | What this block's DRC evidence reported it did *not* check (issue #2002): one entry per `"met"` `drc`-kind citation whose envelope carries a `coverage` block, shaped `{"item", "partition", "layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`. `[]` when no such citation exists — an unmet item 3, a pre-`coverage` envelope, or a block whose evidence is not DRC — so `[]` means "nothing reported", never "no gaps". Reduced from this block's own tier report, never re-graded; it changes no block's `tier`. |
 
-#### `blocking_item` fields
+#### `blocking_item` / `ungraded_items[]` fields
+
+Both fields use the same trimmed, roll-up-sized view of a rendered
+tier-report item:
 
 | Field       | Type              | Description                                                                          |
 | ----------- | ------------------ | ---------------------------------------------------------------------------------------- |
-| `id`        | integer              | The blocking T1 checklist item's number (1-11).                                          |
+| `id`        | integer              | The T1 checklist item's number (1-11).                                                   |
 | `title`     | string               | The item's title.                                                                        |
 | `partition` | string \| null       | `"analog"`/`"digital"` for a `mixed-signal` block's per-partition item, else `null`.      |
 | `reason`    | string               | Why this item is unmet — one of the `reason` values documented under "Tier-verdict report" above. |
 
-`blocking_item` names the *first* rendered T1 item (in the same order the
-tier-verdict report renders items — item id, then partition for a
-mixed-signal block) that is not `"met"` — the single next thing to fix, not
-a re-rendering of the whole item list. Open that block's own `--manifest`
-report for the full item-by-item detail.
+`blocking_item` names **one** unmet T1 item — the single next thing to fix,
+not a re-rendering of the whole item list. Candidates are taken in the same
+order the tier-verdict report renders items (item id, then partition for a
+mixed-signal block), and a structurally ungradeable item (1, 2, 9, 10) wins
+only when no gradeable item is unmet — see ["The blocker is a gradeable
+item, not the first unmet one"](#the-blocker-is-a-gradeable-item-not-the-first-unmet-one-issue-2178)
+above for the full rule and why. Open that block's own `--manifest` report
+for the full item-by-item detail.
 
 ## Envelope-aggregation JSON schema (the contract)
 
