@@ -454,7 +454,7 @@ signoff evidence.
 
 | Situation | Effect |
 | --------- | ------ |
-| The producer applied the rollup and reported its partial token (`"clean_partial"`, `"pass_partial"`, …) | The check does not pass, and the tier item renders `unmet` with `reason: "partial_coverage"` — **not** `check_failed`. The cited run found no defect; it skipped requested work. |
+| The producer applied the rollup and reported its partial token (`"clean_partial"`, `"pass_partial"`, …) | The check does not pass, and the tier item renders `unmet` with `reason: "partial_coverage"` rather than `check_failed` — *unless* the same envelope also carries a failing registered `critical: true` metric, which outranks the partial token and reports `check_failed` instead (issue #2152, see "Real failures still win" below). Absent such a blocker, the cited run found no defect; it skipped requested work. |
 | The producer has not yet adopted the rollup, so its status is still the unconditional success word on a run whose `coverage` says `partial` | The verdict is unchanged (item 3 still grades on `status` alone, per [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 3), and `checks[].detail.coverage_qualification` / `citation.coverage_qualification` name the skipped requested work, so the gap is stated in the report rather than left to be discovered by re-opening the envelope. |
 
 ```
@@ -466,10 +466,20 @@ $ klt signoff --manifest manifest.json --format json \
 }
 ```
 
-**Real failures still win.** A run that found a defect reports its failure
-token, never the partial one — the rollup decides `failed` before it consults
-coverage at all — so `check_failed` and `partial_coverage` are disjoint at the
-producer, not merely ordered here.
+**Real failures still win — by two mechanisms, only one of which is
+structural** (issue #2152). *Producer-side*, by construction: a run that
+found a defect reports its failure token, never the partial one — the rollup
+decides `failed` before it consults coverage at all — so those two *status
+tokens* are disjoint at the producer, and reading which one was reported is
+enough. *Signoff-side*, by an explicit ordering here: a check also fails on a
+registered `critical: true` metric whose value failed its declared polarity
+("Critical-metric consumption" above), regardless of what `status` says, so a
+partial token and a critical-metric blocker **can** co-occur on one envelope.
+That case is decided in `klt signoff`, not at the producer — the blocker is a
+real, mechanically-detected defect, not a coverage gap, so it is checked
+*before* the status token is read and the item renders `reason:
+"check_failed"` (with the offending metrics named in
+`detail.critical_metric_blockers`), not `partial_coverage`.
 
 **Partial is not refused outright, unlike `nothing_checked`.** A partial run
 *did* check something; discarding it would throw away a real result rather
