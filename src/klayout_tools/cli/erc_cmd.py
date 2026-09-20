@@ -18,6 +18,14 @@ Exit codes (see ``docs/cli/erc.md`` for the full table):
     4 - no relevant checks (not_checked)
 (2 is reserved for argparse usage errors, as with every other ``klt``
 subcommand.)
+
+The exit code answers the *antenna* question, because ``status`` does (see
+``_EXIT_CODE_BY_STATUS`` below). On a PDK with no antenna-ratio table --
+every PDK but sky130 today, and any run that omits ``--pdk`` -- that answer
+is permanently ``4``, however clean the design is. A caller that wants only
+the connectivity/structural read reads the payload's own ``erc_status``
+(issue #2179) instead of the exit code; it is ``"clean"``/``"violations"``
+regardless of whether an antenna table exists.
 """
 
 import argparse
@@ -79,6 +87,7 @@ def _print_text(report: dict) -> None:
                 print(f"    remedy: {remedy['type']}{suffix}")
 
     print()
+    print(f"erc_status: {report['erc_status']}")
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"

@@ -726,6 +726,15 @@ numbered and compound evidence while preserving actual failure precedence.
 The full [compatibility mapping and public-path inventory](coverage-contract.md)
 also records which per-path adapters remain outstanding.
 
+**One envelope may carry more than one scope** (issue #2179). `klt erc`
+reports an antenna scope at `coverage` and a connectivity scope at
+`erc_coverage`, each with its own roll-up (`status` and `erc_status`
+respectively) — it performs two independent bodies of checked work, and only
+the antenna one needs a PDK limit table. The refusal above is a question
+about the *artifact*, so a consumer reads every scope an envelope declares
+before calling it empty; the exit code still follows the top-level `status`
+alone. See [`cli/erc.md`](cli/erc.md)'s "Two verdicts".
+
 ### The common rollup rule (#2109)
 
 One decision table maps a producer's own outcome plus its coverage state onto

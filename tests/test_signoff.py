@@ -1124,6 +1124,76 @@ ERC_ANTENNA_VIOLATION_ENVELOPE = {
     ],
 }
 
+#: Issue #2179: the same clean run, on a PDK `klt erc` has no antenna-ratio
+#: table for (every PDK but sky130 today, and every `--pdk`-less run). The
+#: antenna scope graded nothing -- and never could, for any layout -- so the
+#: common rollup rule reports `status: "not_checked"`; the connectivity
+#: scope ran completely and reports `erc_status: "clean"` beside it.
+ERC_TABLELESS_PDK_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "pdk": None,
+    "status": "not_checked",
+    "erc_status": "clean",
+    "coverage": {
+        "scope": "antenna",
+        "schema_version": 1,
+        "known": True,
+        "checked": [],
+        "skipped": [{"id": 'antenna:["gate0","li1"]', "reason": "missing_antenna_pdk"}],
+        "inapplicable": [
+            {"id": 'antenna:["gate0","poly"]', "reason": "gate_reference_level"}
+        ],
+        "unknown": [],
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["missing_antenna_pdk"],
+    },
+    "erc_coverage": {
+        "scope": "connectivity",
+        "schema_version": 1,
+        "known": True,
+        "checked": [
+            'erc.floating_gate:["gate0"]',
+            'erc.missing_tie:["nwell_tie"]',
+            'erc.net_connectivity:["VGND"]',
+            'erc.net_connectivity:["VPWR"]',
+        ],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    },
+}
+
+#: Issue #2179's failing counterpart: the same table-less run whose
+#: connectivity rules did find something.
+ERC_TABLELESS_PDK_VIOLATION_ENVELOPE = {
+    **ERC_TABLELESS_PDK_ENVELOPE,
+    "erc_status": "violations",
+    "erc_findings": [
+        {
+            "rule": "erc.supply_short",
+            "description": "declared nets 'VPWR' and 'VGND' are the same net",
+            "net": "VGND",
+            "other_net": "VPWR",
+            "gate_id": None,
+            "layer": None,
+            "bbox": None,
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: Issue #2179's back-compatibility control: an envelope that reports the
+#: same permanently-ungradable antenna scope but predates the connectivity
+#: one, so it states no connectivity verdict at all. It must keep grading
+#: exactly as it did before #2179 -- refused, not passed.
+ERC_TABLELESS_PDK_PRE_2179_ENVELOPE = {
+    key: value
+    for key, value in ERC_TABLELESS_PDK_ENVELOPE.items()
+    if key not in ("erc_status", "erc_coverage")
+}
+
 #: Issue #2025: a declared supply that resolved to more than one island --
 #: the rail is split into pieces that never touch.
 ERC_SPLIT_SUPPLY_ENVELOPE = {
@@ -7237,6 +7307,91 @@ def test_erc_envelope_is_graded_in_envelope_aggregation_mode(tmp_path):
     violations = build_signoff([violations_path])
     assert violations["checks"][0]["passed"] is False
     assert violations["status"] == "fail"
+
+
+def test_erc_on_a_pdk_without_an_antenna_table_passes_on_connectivity(tmp_path):
+    """AC (issue #2179): `klt erc` ships an antenna-ratio table for sky130
+    only, so on every other PDK `status` is `"not_checked"` for every
+    layout, no matter how clean the design is. Aggregation mode must be able
+    to read the connectivity verdict that *was* reached -- otherwise the
+    only thing `klt erc` can report on such a PDK could never back a
+    citation. It passes on `erc_status`, and only on `erc_status`."""
+    clean = build_signoff([_erc_evidence(tmp_path, ERC_TABLELESS_PDK_ENVELOPE)])
+
+    check = clean["checks"][0]
+    assert check["kind"] == "erc"
+    assert check["status"] == "not_checked"  # the antenna answer, unchanged
+    assert check["passed"] is True
+    assert check["detail"]["erc_status"] == "clean"
+    assert clean["status"] == "pass"
+
+
+def test_erc_tableless_pdk_still_fails_on_a_connectivity_finding(tmp_path):
+    """The widening in #2179 is keyed on the connectivity verdict itself, so
+    a table-less run whose connectivity rules *did* fire still fails."""
+    result = build_signoff(
+        [
+            _erc_evidence(
+                tmp_path, ERC_TABLELESS_PDK_VIOLATION_ENVELOPE, prefix="violations"
+            )
+        ]
+    )
+
+    assert result["checks"][0]["passed"] is False
+    assert result["status"] == "fail"
+
+
+def test_erc_envelope_without_a_connectivity_scope_is_still_refused(tmp_path):
+    """Back-compatibility (issue #2179): an envelope that states no
+    connectivity verdict -- every `klt erc` report written before the field
+    existed -- grades exactly as it did before. Absence of the scope is
+    absence of evidence, never a pass."""
+    result = build_signoff(
+        [_erc_evidence(tmp_path, ERC_TABLELESS_PDK_PRE_2179_ENVELOPE, prefix="old")]
+    )
+
+    check = result["checks"][0]
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["missing_antenna_pdk"]
+
+
+def test_erc_antenna_violation_is_not_rescued_by_a_clean_connectivity_scope(tmp_path):
+    """`erc_status` widens a *no-verdict* antenna answer, never a failing
+    one: a run that graded its antenna levels and found a violation reports
+    `status: "violations"` and still fails, clean connectivity or not."""
+    envelope = {
+        **ERC_ANTENNA_VIOLATION_ENVELOPE,
+        "erc_status": "clean",
+        "erc_coverage": ERC_TABLELESS_PDK_ENVELOPE["erc_coverage"],
+    }
+
+    result = build_signoff([_erc_evidence(tmp_path, envelope, prefix="antenna")])
+
+    assert result["checks"][0]["passed"] is False
+
+
+def test_item_11_is_unaffected_by_a_tableless_antenna_scope(tmp_path):
+    """Item 11 never graded the ERC envelope's own `status` (it reads the
+    supply-continuity rules directly), so it already worked on a PDK with no
+    antenna table -- and still does, both before and after #2179."""
+    for envelope in (
+        ERC_TABLELESS_PDK_PRE_2179_ENVELOPE,
+        ERC_TABLELESS_PDK_ENVELOPE,
+    ):
+        result = build_tier_report(
+            _manifest(
+                kind="digital",
+                evidence={
+                    "11": _power_delivery_evidence(
+                        tmp_path,
+                        kind="digital",
+                        erc_envelope=envelope,
+                        prefix=f"pd{envelope.get('erc_status')}",
+                    )
+                },
+            )
+        )
+        assert _item_11(result)["status"] == "met"
 
 
 def test_erc_detail_breaks_findings_down_by_rule(tmp_path):

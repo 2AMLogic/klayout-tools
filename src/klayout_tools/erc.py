@@ -118,6 +118,10 @@ from .coverage import build_check_coverage, coverage_rollup, rollup_status, work
 #: ties no longer share a graph with `gates[]`) -- a bug fix to what the
 #: documented fields mean, not a change to the field set itself, so again
 #: no bump: no consumer-visible field was added, removed, or retyped.
+#: Issue #2179 adds `erc_status`/`erc_coverage` -- the connectivity half's
+#: own roll-up and checked-work scope, beside the antenna-driven `status`/
+#: `coverage` -- again additively: both new keys are pure additions, and no
+#: existing field's value changes for any input (see `run_erc`).
 SCHEMA_VERSION = 1
 
 
@@ -147,6 +151,70 @@ def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str,
         **build_check_coverage(
             checked=checked, skipped=skipped, inapplicable=inapplicable
         ),
+    }
+
+
+def _connectivity_coverage(
+    gates: list[dict[str, Any]],
+    nets_decl: list[dict[str, Any]],
+    ties: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """The *second* checked-work scope this envelope carries (issue #2179):
+    the connectivity/geometry rules behind ``erc_findings``.
+
+    ``klt erc`` answers two independent questions in one envelope, and only
+    one of them needs a PDK. The antenna half (:func:`_antenna_coverage`,
+    ``scope: "antenna"``) grades nothing at all on a PDK whose antenna-ratio
+    limits ``_ANTENNA_LIMITS_BY_PDK`` does not carry -- the degenerate case
+    where *no* level can ever be graded, for every layout on that PDK. The
+    connectivity half runs, and runs completely, with no ``--pdk``
+    whatsoever, so it gets its own scope rather than being folded into the
+    antenna one: a reader must be able to see "the connectivity rules ran
+    and passed" without an antenna table existing, and equally must not be
+    able to read a graded connectivity check as if it graded an antenna
+    level.
+
+    One identity per *subject actually checked*, matching the antenna
+    scope's own "grade against real work, not a declaration count"
+    discipline:
+
+    - ``erc.floating_gate`` -- one per discovered gate. Always non-empty:
+      ``run_erc`` raises before this point when no net carries gate-role
+      geometry, and every gate has at least one level above the gate role
+      (``stackup`` requires >= 2 entries), so the rule really is evaluated
+      for each one.
+    - ``erc.net_connectivity`` -- one per declared ``nets[]`` entry (the
+      ``erc.unconnected_net``/``erc.multiply_driven_net``/
+      ``erc.supply_short`` rules all key off the same declaration).
+    - ``erc.missing_tie`` -- one per declared ``ties[]`` entry.
+
+    A spec that declares no ``nets``/``ties`` asked for none of that work,
+    so those rules are recorded as **inapplicable**, never skipped: a skip
+    is requested work that did not run (and would make the scope partial),
+    while an undeclared rule is work this invocation never asked for. That
+    distinction is what lets a consumer tell "no supply was declared, so
+    ``erc.supply_short`` was never computed" apart from "supplies were
+    declared and came back clean" -- reading the envelope alone, without
+    re-opening the spec document.
+    """
+    checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
+    inapplicable: list[dict[str, str]] = []
+
+    checked.extend(work_id("erc.net_connectivity", decl["name"]) for decl in nets_decl)
+    if not nets_decl:
+        inapplicable.append(
+            {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
+        )
+
+    checked.extend(work_id("erc.missing_tie", tie["name"]) for tie in ties)
+    if not ties:
+        inapplicable.append(
+            {"id": work_id("erc.missing_tie"), "reason": "no_ties_declared"}
+        )
+
+    return {
+        "scope": "connectivity",
+        **build_check_coverage(checked=checked, inapplicable=inapplicable),
     }
 
 
@@ -980,6 +1048,14 @@ def run_erc(
     same ``sha256:``-prefixed way ``provenance.input.content_hash`` pins the
     layout, so a committed report can be re-verified against *both* inputs
     its verdict depends on.
+
+    Also returned (issue #2179): ``erc_status``/``erc_coverage`` -- the
+    connectivity half's own roll-up, graded on ``erc_findings`` and the
+    ``nets[]``/``ties[]`` work actually declared, so "the connectivity rules
+    ran and passed" stays readable on a PDK with no antenna-ratio table at
+    all, where ``status`` is necessarily ``"not_checked"``. See
+    :func:`_connectivity_coverage`.
+
     Raises :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
     unresolvable layout/top cell, or a layout in which no net carries any
     geometry on the declared gate role at all.
@@ -1236,6 +1312,35 @@ def run_erc(
     )
     status = rollup_status(rollup, success="clean", failure="violations")
 
+    # `erc_status`/`erc_coverage` (issue #2179) -- the connectivity half's own
+    # roll-up, beside the antenna-driven `status` rather than folded into it.
+    #
+    # `status` above is a roll-up of *both* questions, and its coverage input
+    # is antenna-only, so on a PDK with no antenna-ratio table (every PDK but
+    # sky130 today, or `--pdk` omitted entirely) it is `"not_checked"`/exit 4
+    # no matter what the connectivity rules found: a run whose connectivity
+    # rules all passed is then indistinguishable, by `status` and by exit
+    # code, from a run that checked nothing at all. That is the right answer
+    # *for the antenna question* -- so it is left exactly as it was -- but it
+    # leaves the connectivity verdict, the only thing `klt erc` can report on
+    # such a PDK, readable only by hand-rolling this same roll-up off
+    # `erc_finding_count`. Every caller that wants the structural supply read
+    # as a CI gate reimplemented it; this field is that roll-up, computed
+    # once, here.
+    #
+    # Deliberately *not* a copy of `status` minus the coverage input: it is
+    # graded on `erc_findings` alone, so an antenna violation on an unrelated
+    # signal net never turns the connectivity read red (the same separation
+    # `docs/design-evidence-tiers.md` item 11 already relies on -- "those are
+    # the rules this item grades, not the report's overall `status`"). The
+    # converse holds too: `status` still goes `"violations"` for a
+    # connectivity finding, so nothing here weakens the combined verdict.
+    erc_coverage = _connectivity_coverage(gates, nets_decl, ties)
+    erc_rollup = coverage_rollup(
+        {"coverage": erc_coverage}, failed=bool(erc_finding_count)
+    )
+    erc_status = rollup_status(erc_rollup, success="clean", failure="violations")
+
     # `provenance.pdk` (issue #1968): `--pdk` here selects a built-in
     # antenna-ratio limit table baked into this module (see
     # `_ANTENNA_LIMITS_BY_PDK`), not an installed PDK directory resolved via
@@ -1279,7 +1384,9 @@ def run_erc(
         "gates": gates,
         "erc_findings": erc_findings,
         "erc_finding_count": erc_finding_count,
+        "erc_status": erc_status,
         "status": status,
         "coverage": coverage,
+        "erc_coverage": erc_coverage,
         "provenance": provenance,
     }

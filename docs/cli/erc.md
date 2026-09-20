@@ -70,16 +70,23 @@ guidance" below.
 without either field this command's output could not be graded by `klt
 signoff`. See "JSON schema" below.
 
-**Issue #1979 (this document's current state) additively delivers the
-optional `stackup[0].active_layer` spec field**: true `poly ∩ diff`
-gate-area computation, correctly excluding tie-cell/decap/filler-cell poly
-resistors (no gate oxide) from `gates[]` and the antenna-ratio denominator.
-See "Gate area: `poly ∩ diff` vs. raw poly area" below.
+**Issue #1979 additively delivers the optional `stackup[0].active_layer`
+spec field**: true `poly ∩ diff` gate-area computation, correctly excluding
+tie-cell/decap/filler-cell poly resistors (no gate oxide) from `gates[]` and
+the antenna-ratio denominator. See "Gate area: `poly ∩ diff` vs. raw poly
+area" below.
+
+**Issue #2179 (this document's current state) additively delivers
+`erc_status` and `erc_coverage`**: the connectivity half's own verdict and
+checked-work scope, beside the antenna-driven `status`/`coverage`. This
+command answers two independent questions in one envelope, and only one of
+them needs a PDK — see "Two verdicts: `status` (antenna) vs. `erc_status`
+(connectivity)" below.
 
 Per [`docs/json-contract.md`](../json-contract.md)'s additive-envelope
-design, none of 1b's, 1c's, Phase 3's, #1968's, or #1979's fields needed a
-**`schema_version` bump**: every field 1a's own version of this document
-promised is still exactly as documented, unchanged.
+design, none of 1b's, 1c's, Phase 3's, #1968's, #1979's, or #2179's fields
+needed a **`schema_version` bump**: every field 1a's own version of this
+document promised is still exactly as documented, unchanged.
 
 ## "Per gate" means "per gate net", not "per drawn poly finger"
 
@@ -498,6 +505,53 @@ violation fix guidance` section for a golden case of each remedy type
 cascading-violation `diode_insertion` case where no neighbour has margin
 anywhere in the stack).
 
+## Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)
+
+`klt erc` answers **two independent questions** in one envelope, and since
+issue #2179 each carries its own roll-up:
+
+| Field | Question it answers | Needs a PDK antenna table? |
+| ----- | ------------------- | -------------------------- |
+| `status` | Both signals together: did every *graded* antenna level pass **and** are there no `erc_findings`? | Yes — it is `not_checked` when no level could be graded |
+| `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.floating_gate`, `erc.missing_tie` | No |
+
+The distinction is not academic. `--pdk` resolves against a limit table
+**this command carries for sky130 only** (see "Sky130 antenna-ratio limits"
+above); any other PDK name is an exit-1 error, so a non-sky130 design is run
+with `--pdk` omitted. Every level then comes back `verdict: "unchecked"`,
+the antenna scope's checked work is known-zero, and the
+[common rollup rule](../coverage-contract.md) correctly refuses to call that
+a pass: `status: "not_checked"`, exit `4` — **for every layout on that PDK,
+no matter what the design does**.
+
+That is the right answer for the antenna question. It says nothing about the
+connectivity rules, which are purely geometric/connectivity, need no `--pdk`
+whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
+
+- **`erc_status: "clean"`** — every connectivity rule that ran passed
+  (`erc_finding_count == 0`).
+- **`erc_status: "violations"`** — at least one `erc_findings` entry.
+  Antenna violations never appear here; they are `status`'s business.
+- `"not_checked"`/`"clean_partial"` are reachable tokens of the shared
+  rollup vocabulary, listed for completeness: today `erc_coverage` always
+  grades at least one gate (a run with no gate net at all is exit 1), so a
+  successful run reports one of the two above.
+
+**Which one to gate on.** Gate a connectivity/structural-supply CI check on
+`erc_status`; gate an antenna check on `status`. Do not derive either from
+the exit code on a PDK without a limit table — the exit code follows
+`status`, so it is permanently `4` there. And do not re-derive the
+connectivity verdict from `erc_finding_count` by hand: `erc_status` is that
+roll-up, computed once, so every caller reads the same rule.
+
+[`docs/design-evidence-tiers.md`](../design-evidence-tiers.md)'s item 11
+(power delivery, structural) grades exactly the `erc_findings` supply rules
+— "those are the rules this item grades, not the report's overall `status`"
+— and so is unaffected by a missing antenna table, before or after #2179.
+`klt signoff`'s **envelope-aggregation** mode, which does grade an `erc`
+citation on the envelope's own verdict, reads `erc_status` when `status` is
+`not_checked`: see [`docs/cli/signoff.md`](signoff.md).
+
 ## JSON schema (the contract)
 
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for
@@ -573,6 +627,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
     }
   ],
   "erc_finding_count": 1,
+  "erc_status": "violations",
   "status": "violations",
   "provenance": {
     "klt_version": "0.4.2",
@@ -667,18 +722,34 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
 | `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
+| `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"`/`"clean_partial"` are reachable tokens a reader must accept, but a successful run reports one of the two above today. |
+| `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 
 ## Checked-work coverage
 
 The [common v1 coverage contract](../coverage-contract.md) is additive to
-this command's existing envelope.
+this command's existing envelope. This command reports **two** scopes,
+because it performs two independent bodies of checked work (issue #2179):
 
 `coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
 actually compared against a limit. Missing PDK or level limits are skipped;
-the gate reference level is inapplicable. Structural connectivity findings
-remain independent.
+the gate reference level is inapplicable.
+
+`erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
+which need no `--pdk` at all. One checked ID per subject actually checked:
+per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
+(`erc.net_connectivity` — the `erc.unconnected_net`/
+`erc.multiply_driven_net`/`erc.supply_short` rules all key off the same
+declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
+that declares no `nets`/`ties` asked for none of that work, so those rules
+are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`),
+never skipped — an undeclared rule must not make this scope partial, and the
+distinction is what lets a consumer tell "no supply was declared, so
+`erc.supply_short` was never computed" from "the declared supplies came back
+clean" off the envelope alone. The gate scope is never empty: a run in which
+no net carries gate-role geometry is exit 1, not a zero-coverage report.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as
@@ -692,7 +763,14 @@ is a real, successful result — it is simply not this command's unconditional
 success token, and `klt signoff` grades it accordingly (see
 [coverage-contract.md](../coverage-contract.md)'s "Signoff qualification").
 Existing per-gate `pass_partial` (`gates[].antenna_verdict`, #1997) verdicts
-are retained unchanged; this section is about the top-level `status` only.
+are retained unchanged; this paragraph is about the top-level `status` only.
+
+`erc_status` is derived the same way, from `erc_coverage` and
+`erc_finding_count` alone — an antenna violation is not a `failed` input to
+it (#2179). Because the two scopes are rolled up separately, a run on a PDK
+with no antenna-ratio table reports `status: "not_checked"` (nothing was
+graded, and nothing could be) alongside a real `erc_status: "clean"` /
+`"violations"`, instead of collapsing both answers into one unusable one.
 
 Completed refusal/failure reports remain on stdout; actual invocation errors
 retain exit 1 and the stderr error envelope.
@@ -712,6 +790,16 @@ future release may add a new one above `4` — and the exit code is only a
 shortcut derived from the payload's own `status` field, which is
 authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
 "Exit codes" section.
+
+**The exit code answers the *antenna* question**, because `status` does. On
+a PDK with no antenna-ratio table — every PDK but sky130 today, and any run
+that omits `--pdk` — it is therefore `4` for every layout, however clean the
+design is. That is not a signal that the run failed or that nothing was
+checked: the connectivity rules ran, and their verdict is `erc_status` in
+the payload. A caller that wants only the structural/connectivity read gates
+on `erc_status` and ignores the exit code (see "Two verdicts" above); it
+must *not* special-case exit `4` as success, which would also swallow a
+genuine zero-coverage run.
 
 ## Cross-checked against klayout's own built-in antenna engine
 
@@ -751,8 +839,11 @@ ingestion harness exists is a natural follow-on.
   top-level `status` and shared `provenance` block ("JSON schema" above).
 - [#1979](https://github.com/2AMLogic/klayout-tools/issues/1979) — the
   optional `stackup[0].active_layer` `poly ∩ diff` gate-area fix ("Gate
-  area: `poly ∩ diff` vs. raw poly area" above), shipped in this document's
-  current form.
+  area: `poly ∩ diff` vs. raw poly area" above).
+- [#2179](https://github.com/2AMLogic/klayout-tools/issues/2179) — the
+  connectivity roll-up `erc_status` and its `erc_coverage` scope ("Two
+  verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above),
+  shipped in this document's current form.
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet
   implemented (see "Cross-checked against klayout's own built-in antenna

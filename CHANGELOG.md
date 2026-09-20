@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2179): `klt erc` now reports `erc_status` and `erc_coverage` —
+  the **connectivity** half's own roll-up and checked-work scope, beside the
+  antenna-driven `status`/`coverage`. `klt erc` answers two independent
+  questions in one envelope and only one of them needs a PDK: `--pdk`
+  resolves against an antenna-ratio limit table this command carries for
+  sky130 only, so on every other PDK (and every `--pdk`-less run) *no*
+  antenna level can be graded for *any* layout, and the common rollup rule
+  correctly reports `status: "not_checked"`/exit 4 regardless of what the
+  design does. The `erc_findings` rules (`erc.unconnected_net`,
+  `erc.multiply_driven_net`, `erc.supply_short`, `erc.floating_gate`,
+  `erc.missing_tie`) are purely connectivity/geometry, run to completion
+  with no `--pdk` at all, and are now readable as their own
+  `clean`/`violations` verdict rather than only by re-deriving the roll-up
+  from `erc_finding_count` per caller. `erc_coverage` (`scope:
+  "connectivity"`) names the gates/declared nets/declared ties actually
+  checked, recording an undeclared rule as *inapplicable* rather than
+  skipped. Both fields are additive: `status`, its exit-code mapping, and
+  every other field are byte-identical for every input. `klt signoff`'s
+  envelope-aggregation mode reads `erc_status` when `status` is
+  `not_checked` (an antenna *violation* still fails, and an envelope with no
+  connectivity scope — every one written before this change — grades exactly
+  as before); item 11's own grading never read `status` and is unaffected.
+
 - **Fixed** (#2150): `klt extract --parasitics`'s `parasitics.nets[].terminals[]
   .leg_net`/`.hub_net` now stays byte-identical to the written `.spice`
   file's own node spelling for a star/ladder leg or hub net synthesized from
