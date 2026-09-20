@@ -265,6 +265,49 @@ findings (`erc.unconnected_net` / `erc.multiply_driven_net` /
 `ties[]` declarations are **not** part of it — see "Well/tap connectivity"
 below.
 
+### Known false-positive: diffusion/well continuity is not modeled (issue #2180)
+
+**`erc.unconnected_net` can be a false positive for any declared net whose
+real electrical continuity in silicon depends on diffusion/well material,
+not just the declared `stackup`/`vias` conductors.** The graph above has no
+well/substrate conductor in it at all — a well or tub region is never a
+node in this graph, only `ties[]`'s own separate extraction ever looks at
+one, and that extraction answers a narrower question ("is a tap present
+and does it reach the declared net?", see "Well/tap connectivity" above)
+than "does this well electrically merge two islands the primary graph sees
+as disconnected?". It never does the latter, before or after #2169's fix.
+
+The concrete failure shape: a guard-ring or n-well tap band strapped to a
+device row's supply rail **through the well body itself** — not through a
+metal jumper between the two tap sites — is genuinely one electrical node
+in the fabricated part, but with no well conductor in the primary graph,
+`klt erc` sees only the metal/via geometry each tap band happens to carry
+and reports the net as two or more disconnected islands. A documented real
+case: a guard-ring/n-well-tap-strapped supply net resolved to **3** separate
+`erc.unconnected_net` islands under `klt erc`, on a layout whose independent
+LVS run reported the identical net as **one**, zero-mismatch electrical
+node. **Do not treat a multi-island `erc.unconnected_net` finding as a
+confirmed design defect by itself** — cross-check against a real,
+device-aware LVS run before acting on it (see also `docs/design-evidence-
+tiers.md`'s item 11).
+
+**That cross-check is not automatically an independent confirmation,
+either.** At least one widely used open-foundry LVS deck's connectivity
+setup ends with a name-joining rule (e.g. `connect_implicit('*')`): two
+physically disjoint supply islands that merely share a net *label* still
+extract, compare, and report a clean match, even though nothing in the
+drawn geometry actually ties them together. An LVS run built on a deck like
+that does not independently verify this specific property — check what the
+LVS deck's own connectivity setup actually does before trusting its "match"
+verdict as proof that a `klt erc` multi-island finding is a false positive
+rather than a real one.
+
+This is a documented modeling limitation, not a commitment to a fix
+timeline: expressing "this well/tap geometry conducts, scoped only to its
+declared taps" as a general net-merging conductor (reusing `ties[]`'s
+`well_layer`/`tap_requires` declaration shape) is a larger, separate
+follow-on — see #2180 for the option this section defers.
+
 ### Well/tap connectivity (`ties[]`, issue #2169)
 
 A `ties[]` entry is evaluated in its own second extraction: the same
@@ -844,6 +887,10 @@ ingestion harness exists is a natural follow-on.
   connectivity roll-up `erc_status` and its `erc_coverage` scope ("Two
   verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above),
   shipped in this document's current form.
+- [#2180](https://github.com/2AMLogic/klayout-tools/issues/2180) — the
+  documented diffusion/well-continuity false-positive risk for
+  `erc.unconnected_net` ("Known false-positive: diffusion/well continuity
+  is not modeled" above).
 - [#520](https://github.com/2AMLogic/klayout-tools/issues/520) — the Tiny
   Tapeout corpus epic named as this feature's cross-check corpus; not yet
   implemented (see "Cross-checked against klayout's own built-in antenna

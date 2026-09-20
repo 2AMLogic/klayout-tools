@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Documented** (#2180): `klt erc`'s "Connectivity model" section in
+  [`docs/cli/erc.md`](docs/cli/erc.md) now states a false-positive risk that
+  was previously undocumented: `erc.unconnected_net` can fire on a declared
+  supply net whose real continuity in silicon runs through diffusion/well
+  material the stackup/vias graph never models — e.g. a guard-ring or n-well
+  tap band strapped to a device row's supply through the well body itself,
+  not through a metal jumper. `ties[]` (issue #2169) does not close this gap:
+  it only ever answers "is a tap present and does it reach the declared
+  net", never "does this well merge two islands the primary graph sees as
+  disconnected". [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md)'s
+  item 11 (power delivery, structural) carries the corresponding caveat, plus
+  a warning that an LVS cross-check is not automatically independent
+  verification either — a deck whose connectivity setup ends with a
+  name-joining rule (e.g. `connect_implicit('*')`) reports a clean "match"
+  for two disjoint islands that merely share a net label. Documentation-only
+  change: no code in `src/klayout_tools/erc.py` changed, no `schema_version`
+  bump.
+
 - **Fixed** (#2182): `klt signoff --manifest`'s staleness gate no longer
   conflates two distinct situations under one `reason: "stale_evidence"`.
   A manifest entry that pins `content_hash` now renders the new
