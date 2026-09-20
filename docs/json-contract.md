@@ -410,15 +410,22 @@ geometry change from a klt/KLayout upgrade. See
   gate reads `provenance.input.content_hash` generically across every check
   kind and cannot see an LVS-only field, so every `content_hash`-pinned "LVS
   clean" citation graded `stale_evidence`. `environment.layout_sha256` is
-  unchanged (still a bare hex digest, no `sha256:` prefix). `input` is still
-  `null` for a verb with no single input artifact to pin this way.
+  unchanged (still a bare hex digest, no `sha256:` prefix). `sim` (since
+  issue #2039) is populated the same way, duplicating
+  `environment.netlist_sha256`'s digest of the netlist under test under
+  `role: "netlist"` — `klt sim` was deliberately left `null` here by #2027
+  (populating it before the `role` discriminator existed would have
+  compared a netlist digest against a layout digest and refused every
+  otherwise-consistent `drc` + `sim` bundle); #2039 closes that gap now that
+  roles scope the comparison. `input` is still `null` for a verb with no
+  single input artifact to pin this way.
   - `role` (issue #2027) — **which kind of artifact `content_hash` covers**.
     One of:
 
     | `role` | Meaning | Verbs |
     |---|---|---|
     | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `lef-abstract`, `lvs` (`layout.file` shape), `sta` (`def` request) |
-    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request) |
+    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request), `sim` (issue #2039) |
     | `"source"` | HDL source | `synthesize`, `equiv` |
 
     The field exists because the hash alone is kind-blind, and one verb can
@@ -438,10 +445,24 @@ geometry change from a klt/KLayout upgrade. See
     committed before #2027 carries no `role`; read it as `"layout"`, the
     field's only documented meaning at the time (`klt signoff` does exactly
     that, so archived evidence keeps participating in the layout-side
-    comparison rather than being exempted from it). `klt wave`'s block is
-    built by the `klt-wave` binary rather than by this module and does not
-    carry `role`; the same "read it as `layout`" rule would misdescribe a
-    waveform trace, which is why no cross-report comparison consumes it.
+    comparison rather than being exempted from it).
+
+    **`klt wave build`/`klt wave query` are a deliberate, permanent
+    exception (issue #2039).** Their `input` block is built by the native
+    `klt-wave` Rust binary (`native/wave/src/build.rs`), not by this
+    module's `_input_block`, and stays `{content_hash}` with no `role` key —
+    this was decided in #2039 rather than left silently unaddressed. Neither
+    existing `role` value is honest for what either verb hashes (`build`
+    hashes a waveform trace, `query` a built store — neither a `layout` nor
+    a `netlist`), so closing the gap would mean extending `INPUT_ROLES` with
+    a new value (e.g. `trace`/`store`) and threading it through the Rust
+    binary's `InputProvenance` struct plus both `wave-*-response.schema.json`
+    schemas — real cost for a discriminator neither verb's envelope
+    currently needs: `klt signoff` recognizes no `wave` check kind, so the
+    role-scoped cross-check never sees either block regardless. If a future
+    `klt signoff` check kind for waveform evidence is ever added, that is
+    the trigger to revisit this decision, add the vocabulary, and update
+    this note — not a reason to add it speculatively today.
 
 Fields that can't be resolved are `null` per the envelope convention — never
 silently fabricated. The block is built once in

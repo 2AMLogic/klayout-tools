@@ -123,6 +123,13 @@ The binary's own `klt.wave_build.response/1` JSON: `trace`, `store`,
 Schema: [`docs/schemas/wave-build-request.schema.json`](../schemas/wave-build-request.schema.json) /
 [`wave-build-response.schema.json`](../schemas/wave-build-response.schema.json).
 
+`provenance.input` is `{content_hash}` only — no `role` key. This is a
+deliberate, permanent divergence from the shared Python `build_provenance`
+helper's `{content_hash, role}` shape, decided in issue #2039: see
+[`docs/json-contract.md`](../json-contract.md)'s `provenance.input.role`
+section for the stated reason (no existing role value honestly describes a
+waveform trace, and no `klt signoff` check kind consumes this block today).
+
 ### Exit codes
 
 | Code | Meaning |
@@ -238,6 +245,10 @@ each carrying that op's own `op`/`signal`(s) echoed plus its data fields
 `predicate`. `status` is `"ok"` when every declared predicate is
 satisfied (or none was declared), `"unsatisfied"` when at least one
 failed.
+
+`provenance.input` is role-less here too, for the same reason as `klt wave
+build` above — see that section's note and
+[`docs/json-contract.md`](../json-contract.md).
 
 ### Exit codes
 

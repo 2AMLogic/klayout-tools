@@ -421,6 +421,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   that `klt sim` (and any other netlist-only verb) *can* now populate
   `provenance.input` for the `--manifest` staleness pin without poisoning the
   cross-check; wiring that up is separate work.
+- **Fixed**: `klt sim` now populates `provenance.input` (issue #2039), the
+  follow-up #2027 explicitly deferred. It carries `role: "netlist"` and the
+  same `sha256:`-prefixed digest `environment.netlist_sha256` already hashes
+  for the netlist under test — deliberate duplication, matching the
+  precedent issue #1969 established for `klt lvs`'s own layout-side hash.
+  Before this fix, `klt sim` left `provenance.input` `null`, so a T1 item-5
+  citation in `klt signoff --manifest` pinning an expected `content_hash`
+  against a `klt sim` report always graded `stale_evidence` — a pinned hash
+  can never match `None`, whether or not the netlist actually moved. The
+  `netlist` role keeps a `drc` + `sim` bundle out of the layout-role
+  comparison, so a bundle describing one design still aggregates to `pass`
+  rather than `refused`. Purely additive — no `schema_version` bump (`klt
+  sim` stays at `3`). Separately, `klt wave build`/`klt wave query`'s
+  role-less `provenance.input` (built by the native `klt-wave` Rust binary,
+  not this module) was evaluated for the same treatment and kept as a
+  deliberate, permanent exception rather than closed: neither existing
+  `role` value honestly describes what either verb hashes (a waveform trace
+  or a built store), and no `klt signoff` check kind consumes either block
+  today — see `docs/json-contract.md`'s `provenance.input.role` section for
+  the full rationale.
 - **Added / Changed**: the T1 (bronze) evidence checklist in
   [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) gains
   **item 11, "Power delivery (structural)"** (issue #2025, operator ruling

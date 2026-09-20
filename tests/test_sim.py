@@ -2297,9 +2297,16 @@ def test_run_sim_stubbed_provenance_pins_model_library(tmp_path, monkeypatch):
     assert prov["pdk"] is None
     assert prov["deck"]["name"] == "corner.lib"
     assert prov["deck"]["content_hash"].startswith("sha256:")
-    # Issue #331 added `provenance.input`, but `sim` wasn't in scope for it --
-    # stays null here.
-    assert prov["input"] is None
+    # Issue #331 added `provenance.input`, but `sim` wasn't in scope for it
+    # then. Issue #2039 closes that gap: `klt sim` now pins the netlist it
+    # simulated under `role: "netlist"`, matching `sha256_file`'s digest of
+    # the same file `environment.netlist_sha256` already hashes.
+    assert prov["input"]["role"] == "netlist"
+    assert prov["input"]["content_hash"].startswith("sha256:")
+    assert (
+        prov["input"]["content_hash"]
+        == f"sha256:{report['environment']['netlist_sha256']}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -5546,7 +5553,11 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
     # deck or PDK is resolved.
     assert prov["pdk"] is None
     assert prov["deck"] is None
-    assert prov["input"] is None
+    # Issue #2039: `input` is always populated once a netlist resolved --
+    # every `klt sim` run has one, unlike `deck`/`pdk` which depend on a
+    # process axis being declared.
+    assert prov["input"]["role"] == "netlist"
+    assert prov["input"]["content_hash"].startswith("sha256:")
 
 
 def test_cli_default_format_is_text(tmp_path, monkeypatch, capsys):
