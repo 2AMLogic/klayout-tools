@@ -367,7 +367,18 @@ written to every block.
       **outside** this item — see "Power/IR-drop + EM evidence" below. This
       item is the *structural* question ("is the supply connected to what it
       powers"), not the *analysis* question ("how far does it droop, and
-      does any segment exceed its EM limit").
+      does any segment exceed its EM limit"). **Caveat (issue #2180)**:
+      `erc.unconnected_net` can be a false positive for a declared supply
+      whose real continuity in silicon runs through diffusion/well material
+      outside the declared `stackup` — see `docs/cli/erc.md`'s "Known
+      false-positive: diffusion/well continuity is not modeled" section. A
+      grader who sees a multi-island `erc.unconnected_net` finding on a
+      guard-ring/well-tap-strapped supply should not treat it as a confirmed
+      power-delivery defect on its own — cross-check against an
+      independent, device-aware LVS run first (and confirm that LVS deck's
+      own connectivity setup does not join nets by label alone, e.g. via a
+      bare `connect_implicit('*')` rule, before trusting a "match" verdict
+      as that independent check).
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 
