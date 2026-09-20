@@ -1084,6 +1084,13 @@ whole epic:
 Exit `3` matches [`klt sim`](sim.md#exit-codes)'s "ran successfully, a limit
 was missed" precedent rather than inventing a new number.
 
+**Gate on the payload's own verdict, not the exit code.** These codes are
+additive — a future release may add a new one above `3` — and the exit code
+is only a shortcut derived from the payload's own fields, which are
+authoritative. See
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "Exit codes"
+section.
+
 ## See also
 
 - [`docs/cli/sim.md`](sim.md#monte-carlo-sampling) — the Monte Carlo request

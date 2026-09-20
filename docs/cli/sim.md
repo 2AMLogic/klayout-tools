@@ -1816,6 +1816,12 @@ closest analogue (a clean run with findings) and adds `4` for the outcome
 `drc` doesn't have — a broken/incomplete run that isn't a usage error. `0`/`1`/`2`
 mean the same thing as every other `klt` verb.
 
+**Gate on `status`, not the exit code.** These codes are additive — a
+future release may add a new one above `4` — and the exit code is only a
+shortcut derived from the payload's own `status` field, which is
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 On error (exit `1`), a concise message is written to **stderr** and nothing is
 written to stdout — no Python traceback, ever.
 

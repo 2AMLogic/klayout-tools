@@ -646,6 +646,12 @@ retain exit 1 and the stderr error envelope.
 | `3` | Antenna or connectivity violations. |
 | `4` | No actual antenna checks; `status: "not_checked"`. |
 
+**Gate on `status`, not the exit code.** These codes are additive — a
+future release may add a new one above `4` — and the exit code is only a
+shortcut derived from the payload's own `status` field, which is
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 ## Cross-checked against klayout's own built-in antenna engine
 
 `klayout.db.LayoutToNetlist.antenna_check` is klayout's own, independently

@@ -2050,6 +2050,13 @@ matched_groups:
 | `2` | Usage error — missing `<request.json>` argument, or a bad `--format` value (from argparse). |
 | `3` | **Partial success** — every block placed, but `unrouted_nets[]` is non-empty (a net could not be routed). The full success payload above is still on stdout, mirroring `klt drc`'s own `3` for "ran clean but found violations" (spike section 2, "Proposed exit codes"). |
 
+**Gate on the payload (e.g. `unrouted_nets[]`), not the exit code.** These
+codes are additive — a future release may add a new one above `3` — and the
+exit code is only a shortcut derived from the payload's own fields, which
+are authoritative. See
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "Exit codes"
+section.
+
 On error, a concise message is written to **stderr** and nothing is written
 to stdout (and no GDS/OASIS file is written). No Python traceback is
 printed.

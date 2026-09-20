@@ -1657,6 +1657,14 @@ Fleet roll-up mode (`--fleet`):
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `not_t1_count > 0` — ran successfully, but at least one block's tier is not `"T1"`. |
 
+**Gate on `status`/`tier`/`not_t1_count`, not the exit code, in every mode
+above.** These codes are additive — a future release may add a new one
+above the current highest in any mode — and the exit code is only a
+shortcut derived from the payload's own verdict field, which is
+authoritative. See
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "Exit codes"
+section.
+
 On error, a concise message is written to **stderr** and nothing is written
 to stdout. No Python traceback is printed.
 

@@ -1044,6 +1044,11 @@ analogous cap on the full-wave solve's axial mesh.
 | `1`       | Failed to run: layout/spec file not found or unreadable, a `stackup` entry matched no shapes, ambiguous top cell (pass `--top`), the `klt_mom_native` extension is not installed, or a solver-level failure (e.g. a singular potential-coefficient matrix, the panel-count guard above, a `compute_inductance: true`/full-wave conductor that does not satisfy the shared bar-shape scope, a missing `conductivity_S_per_m`, a non-positive `frequencies_hz` entry, the filament-count/segment-count guards above, or (see "Port-related error paths" above) a `ports` array with other than exactly two entries, a port position outside the modeled bar span, non-ascending port positions, `ports` set without `frequencies_hz`, or `ports` set on other than exactly two conductors); also `--touchstone` passed to a report with no S-parameters, differing per-port `reference_impedance_ohm` (see "Exporting Touchstone (`.s2p`)" above), or a `--touchstone` path that could not be written. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                        |
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## See also
 
 - [`docs/design/em-field-sim-spike.md`](../design/em-field-sim-spike.md) —

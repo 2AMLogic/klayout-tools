@@ -394,6 +394,12 @@ where it, too, cannot reach a verdict (`options.combine_devices` exhausting
 its retry budget — issue #1370, see [`docs/cli/lvs.md`](lvs.md)'s "Exit
 codes"); the numeric value is deliberately shared across both verbs.
 
+**Gate on `status`, not the exit code.** These codes are additive — a
+future release may add a new one above `4` — and the exit code is only a
+shortcut derived from the payload's own `status` field, which is
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 On error (exit `1`), a concise message is written to **stderr** and
 nothing is written to stdout. No Python traceback is ever emitted.
 

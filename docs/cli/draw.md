@@ -212,6 +212,11 @@ this one.
 | `1`  | Application error: invalid/missing `--params`, a malformed shape/label, an [unrecognised key](#unrecognised-keys), empty `shapes`, a nonexistent output directory, or a write failure. Documented error envelope on stderr. |
 | `2`  | Usage error (bad `--format` value) — from argparse. |
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## Example: a DRC negative fixture
 
 Draw a poly bar 0.1 µm wide — narrower than sky130's `poly.width.1` minimum of

@@ -164,7 +164,12 @@ successfully but the underlying report shows violations/mismatches" — the
 rendered envelopes' own pass/fail verdicts are *content* this command
 reports, not a verdict this command's own exit code re-derives. A CI step
 that must fail the build on a DRC violation should gate on `klt drc`'s own
-exit code (`3`) earlier in the pipeline, not on `klt report`'s.
+`status` field earlier in the pipeline (see
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "gate on
+`status`, not the exit code" guidance), not on `klt report`'s exit code.
+
+Per that same additive contract, `klt report`'s own exit code may still
+gain a code above `2` in a future release.
 
 On error, a concise message is written to **stderr** and nothing is written
 to stdout. No Python traceback is printed.

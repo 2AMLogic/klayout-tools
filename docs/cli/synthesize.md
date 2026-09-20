@@ -1341,6 +1341,13 @@ synthesis had no structural pass/fail concept of its own to report: issue
 above `2` for outcomes that are neither success nor tool failure — `0`/`1`/`2`
 keep their shared meaning.
 
+**Gate on `status`/`structural.has_critical`, not the exit code.** These
+codes are additive — a future release may add a new one above `3` — and the
+exit code is only a shortcut derived from the payload's own fields, which
+are authoritative. See
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "Exit codes"
+section.
+
 ## Worked example
 
 The GCD RTL used in the Yosys survey's own worked example, synthesized

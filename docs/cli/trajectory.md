@@ -215,6 +215,11 @@ Like `klt report`, there is no additional exit code for "rendered but the
 run regressed" — a trajectory's milestones are content this command reports,
 not a verdict it re-derives an exit code around.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 On error, a concise message is written to **stderr** and nothing to stdout.
 No Python traceback is printed. Under `--format json` the error is the
 documented JSON error envelope (see [`../json-contract.md`](../json-contract.md)):

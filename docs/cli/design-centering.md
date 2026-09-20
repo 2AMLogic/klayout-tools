@@ -256,6 +256,11 @@ Mirrors `klt yield-sensitivity`'s own trichotomy: there is no `3`/`4`, since
 a re-centering proposal makes no pass/fail claim to miss and there is no
 evaluator invocation to time out or error on.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## Scope and limitations
 
 - **Pelgrom-scaling heuristic, not a rigorous re-optimization.** See "What is
