@@ -299,6 +299,18 @@ and earned no `schema_version` bump on either mode. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "An overridden doc can outrun the
 build" and "Which build graded this".
 
+`klt erc` since issue #2183 also carries a second verb-local key,
+`provenance.devices`: one entry per `devices[]` spec declaration (`{name,
+body_layer, on, body_area_um2}`), `[]` when none were declared. A
+`devices[]` entry subtracts a drawn device body's region from a declared
+conductor role before connectivity is registered — it changes which nets
+exist, and so which findings are reachable — and `body_area_um2` reports
+the area each declaration *actually* removed, so a declaration that
+matched no geometry is distinguishable from one that bit. Same rationale
+as `provenance.spec` above: a report whose verdict depends on a
+transformation of its input has to say what the transformation did. See
+[`docs/cli/erc.md`](cli/erc.md)'s "Device bodies are not wires".
+
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
 waveform trace has neither), so `pdk`/`deck`/`klayout_version` are always
