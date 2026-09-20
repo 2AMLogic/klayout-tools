@@ -607,9 +607,10 @@ applies it in two places, neither of which re-derives it:
   run that found a defect reports its *failure* token, because
   :func:`~klayout_tools.coverage.coverage_rollup` decides ``failed`` before
   it consults coverage at all.
-- Until a verb's Phase 2 adapter lands (#2110/#2111/#2115/#2116/#2117/#2118),
-  its status can still be the unconditional success word on a run whose
-  common coverage says ``partial``. That verdict is unchanged here -- item
+- Until a verb's Phase 2 adapter lands (#2110/#2111/#2116/#2117/#2118 --
+  ``erc``'s own adapter, #2115, now reports ``"clean_partial"``), its status
+  can still be the unconditional success word on a run whose common
+  coverage says ``partial``. That verdict is unchanged here -- item
   3's grading rule is ``docs/design-evidence-tiers.md``'s to set, and it
   deliberately leaves the weighing of a coverage gap to the claimant -- but
   :func:`_partial_coverage_disclosure` now states the gap on both the

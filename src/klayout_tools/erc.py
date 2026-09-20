@@ -91,7 +91,7 @@ from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
 from ._provenance import _content_hash, build_provenance
-from .coverage import build_check_coverage, work_id
+from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
 #: (#861), Phase 3 (#908), issue #1968, and issue #1979 all add fields/
@@ -1102,13 +1102,24 @@ def run_erc(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
     coverage = _antenna_coverage(gates, pdk)
-    status = (
-        "violations"
-        if erc_finding_count or any_antenna_violation
-        else "not_checked"
-        if coverage["nothing_checked"]
-        else "clean"
+
+    # The common rollup rule (issue #2109, this adapter's own #2115) decides
+    # `status` from `coverage` plus the two violation signals above, rather
+    # than re-deriving zero/full/partial locally the way this module did
+    # before #2115: `any finding/violation` still wins outright (`"failed"`
+    # outranks coverage), known zero graded antenna levels is
+    # `"not_checked"`/exit 4 exactly as before, and -- new here -- a clean
+    # run that nonetheless skipped requested antenna work (e.g. a full sky130
+    # stack whose met3-5 roles have no limit in
+    # `_SKY130_ANTENNA_RATIO_MAX_EGAR`) now reports `"clean_partial"` rather
+    # than the unconditional `"clean"` it used to: a partial result must
+    # never be indistinguishable from a fully-graded one. Per-gate
+    # `antenna_verdict` (`"pass_partial"`, #1997) is unchanged -- this only
+    # changes the top-level roll-up across every gate.
+    rollup = coverage_rollup(
+        {"coverage": coverage}, failed=bool(erc_finding_count or any_antenna_violation)
     )
+    status = rollup_status(rollup, success="clean", failure="violations")
 
     # `provenance.pdk` (issue #1968): `--pdk` here selects a built-in
     # antenna-ratio limit table baked into this module (see
