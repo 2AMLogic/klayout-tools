@@ -689,6 +689,7 @@ neither is a findings-list/key-metrics report in its sense).
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -1245,13 +1246,25 @@ def build_signoff(sources: list[str]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(f"nonstandard numeric constant {token!r} is not permitted")
+
+
+def _finite_json_float(token: str) -> float:
+    value = float(token)
+    if not math.isfinite(value):
+        raise ValueError(f"numeric literal {token!r} is not finite")
+    return value
+
+
 def _read_json_source(source: str, description: str) -> Any:
     """Read and JSON-decode one JSON source: ``source == "-"`` reads stdin,
     otherwise ``source`` is a file path. Raises :class:`SignoffError` on any
-    read/parse failure -- never lets a malformed input silently become an
-    incomplete verdict. ``description`` (e.g. ``"envelope"``, ``"manifest"``)
-    only affects error-message wording, so each caller's failures still read
-    naturally.
+    read/parse failure, including nonstandard numeric constants and literals
+    that overflow to infinity -- never lets invalid JSON evidence become a
+    passing verdict or leak nonfinite values into output. ``description``
+    (e.g. ``"envelope"``, ``"manifest"``) only affects error-message wording,
+    so each caller's failures still read naturally.
 
     Deliberately mirrors ``report.py``'s ``_read_envelope`` (same
     read/parse/error-message contract) rather than importing it: the two
@@ -1263,8 +1276,12 @@ def _read_json_source(source: str, description: str) -> Any:
     """
     if source == "-":
         try:
-            return json.load(sys.stdin)
-        except json.JSONDecodeError as exc:
+            return json.load(
+                sys.stdin,
+                parse_constant=_reject_json_constant,
+                parse_float=_finite_json_float,
+            )
+        except ValueError as exc:
             raise SignoffError(f"stdin {description} is not valid JSON: {exc}") from exc
 
     if not os.path.exists(source):
@@ -1274,12 +1291,16 @@ def _read_json_source(source: str, description: str) -> Any:
 
     try:
         with open(source, encoding="utf-8") as handle:
-            return json.load(handle)
+            return json.load(
+                handle,
+                parse_constant=_reject_json_constant,
+                parse_float=_finite_json_float,
+            )
     except (OSError, UnicodeDecodeError) as exc:
         raise SignoffError(
             f"could not read {description} file '{source}': {exc}"
         ) from exc
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
         raise SignoffError(
             f"{description} file '{source}' is not valid JSON: {exc}"
         ) from exc
@@ -1858,9 +1879,11 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     on from #247's metric-namespace registry and #1847/#1848/#1849's
     per-verb adoption of it).
 
-    Returns a list of blocker entries -- ``{"metric": <name>, "value":
-    <number>, "higher_is_better": <bool | None>}`` -- one per critical
-    metric whose value fails its own declared ``higher_is_better`` polarity.
+    Returns one entry per critical metric whose value violates its domain
+    or quality polarity. Entries retain ``metric``, ``value``, and
+    ``higher_is_better``; invalid values add ``domain`` and ``reason``.
+    Nonfinite floats are represented as strings in diagnostics, though JSON
+    input readers reject them before grading.
     An empty list means no critical metric blocked this envelope (including
     the common case of no ``metrics`` block at all, or a ``metrics`` block
     with no critical entries).
@@ -1874,8 +1897,8 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
     Polarity is applied per the metric's own declared
     :attr:`~klayout_tools.metrics.MetricDef.higher_is_better`:
 
-    - ``False`` (smaller is better, e.g. an error/failure count): a nonzero
-      value blocks.
+    - ``False`` (smaller is better): a positive value blocks. For declared
+      nonnegative error counts this is exactly the nonzero case.
     - ``True`` (larger is better): a zero-or-lower value blocks.
     - ``None`` (no declared polarity): every ``critical: true`` metric
       registered as of this issue declares a polarity, so this case is not
@@ -1884,11 +1907,11 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
       metric shares today, rather than silently ignoring a future
       polarity-less critical metric.
 
-    An unregistered/unknown metric name, or a non-numeric value, is silently
-    ignored (not raised) -- a caller-provided ``metrics`` block is read-only
-    external data, not something this module validates on the aggregating
-    side (that is each verb's own responsibility when it builds its
-    ``metrics`` block in the first place).
+    Unknown and noncritical metrics do not gate signoff. A known critical
+    metric outside its declared domain always blocks, with its ``domain``
+    and a stable ``reason`` code in the blocker. Valid signed measurements
+    retain their quality polarity; only declared count domains reject
+    negatives independently of that polarity.
     """
     metrics_block = envelope.get("metrics")
     if not isinstance(metrics_block, dict):
@@ -1901,7 +1924,17 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
         metric_def = get_metric(name)
         if not metric_def.critical:
             continue
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        invalid_reason = metric_def.invalid_value_reason(value)
+        if invalid_reason is not None:
+            blockers.append(
+                {
+                    "metric": name,
+                    "value": repr(value) if invalid_reason == "non_finite" else value,
+                    "higher_is_better": metric_def.higher_is_better,
+                    "domain": metric_def.domain,
+                    "reason": invalid_reason,
+                }
+            )
             continue
 
         if metric_def.higher_is_better is False:
@@ -1920,6 +1953,11 @@ def _critical_metric_blockers(envelope: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return blockers
+
+
+def _critical_metric_detail(envelope: dict[str, Any]) -> dict[str, Any]:
+    blockers = _critical_metric_blockers(envelope)
+    return {"critical_metric_blockers": blockers} if blockers else {}
 
 
 def _build_check(kind: str, envelope: _EvidenceEnvelope, source: str) -> dict[str, Any]:
@@ -2692,9 +2730,7 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
         error = envelope.get("error") or {}
         detail = {"command": error.get("command"), "message": error.get("message")}
 
-    blockers = _critical_metric_blockers(envelope)
-    if blockers:
-        detail["critical_metric_blockers"] = blockers
+    detail.update(_critical_metric_detail(envelope))
     # Issue #1996: why this envelope's own `coverage` block says the run
     # checked nothing -- present only when it makes that claim, so every
     # envelope predating the convention renders exactly as before. This is
@@ -3528,9 +3564,12 @@ def _grade_evidence(
     *,
     require_post_layout: bool = False,
     allowed_kinds: set[str] | None = None,
-) -> tuple[str, str | None, dict[str, Any] | None]:
+) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade one resolved evidence ``spec`` (:func:`_normalize_evidence_entry`)
-    and return ``(status, reason, citation)``.
+    and return ``(status, reason, citation, failure_detail)``.
+
+    ``failure_detail`` names any critical metrics that invalidated evidence;
+    the citation remains absent for every unmet item.
 
     ``status`` is ``"met"`` or ``"unmet"``. ``reason`` is ``None`` when
     ``status == "met"``, otherwise one of the ``_REASON_*`` constants
@@ -3609,7 +3648,7 @@ def _grade_evidence(
     """
     resolution, reason = _resolve_evidence(spec)
     if resolution is None:
-        return "unmet", reason, None
+        return "unmet", reason, None, {}
 
     check_kind = resolution["kind"]
     envelope = resolution["envelope"]
@@ -3617,10 +3656,15 @@ def _grade_evidence(
     checked = cast(_EvidenceEnvelope, envelope)
 
     if check_kind == "error":
-        return "unmet", _REASON_CHECK_ERRORED, None
+        return "unmet", _REASON_CHECK_ERRORED, None, {}
 
     if not _check_passed(check_kind, checked):
-        return "unmet", _non_passing_reason(check_kind, envelope), None
+        return (
+            "unmet",
+            _non_passing_reason(check_kind, envelope),
+            None,
+            _critical_metric_detail(envelope),
+        )
 
     # The two refusals that apply only to a kind this item actually accepts --
     # `nothing_checked` (issue #1996) and `not_post_layout` -- resolved
@@ -3632,13 +3676,13 @@ def _grade_evidence(
         require_post_layout=require_post_layout,
     )
     if kind_gated is not None:
-        return "unmet", kind_gated, None
+        return "unmet", kind_gated, None, {}
 
     expected_hash = spec.get("content_hash")
     if expected_hash is not None and resolution["content_hash"] != expected_hash:
-        return "unmet", _REASON_STALE_EVIDENCE, None
+        return "unmet", _REASON_STALE_EVIDENCE, None, {}
 
-    return "met", None, _citation(resolution)
+    return "met", None, _citation(resolution), {}
 
 
 def _resolve_evidence(
@@ -3684,8 +3728,12 @@ def _resolve_evidence(
         exit_status = completed.returncode
 
         try:
-            envelope = json.loads(completed.stdout)
-        except json.JSONDecodeError:
+            envelope = json.loads(
+                completed.stdout,
+                parse_constant=_reject_json_constant,
+                parse_float=_finite_json_float,
+            )
+        except ValueError:
             if exit_status == 0:
                 return None, _REASON_UNREADABLE_EVIDENCE
             return None, _REASON_COMMAND_FAILED
@@ -4053,12 +4101,43 @@ def _pdn_branch_reason(
     return None
 
 
+def _resolve_erc_supply_spec(
+    erc: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
+    """Validate the ERC half of item 11's cited set (critical metrics, then
+    supply-spec completeness and continuity) and return the resolved supply
+    spec, split out of :func:`_grade_power_delivery` to keep its own
+    complexity under the repo's ratchet (issue #2094).
+
+    Returns ``(supply_spec, reason, detail)``: on success, ``supply_spec`` is
+    the resolved spec and ``reason``/``detail`` are ``None``/``{}``; on
+    failure, ``supply_spec`` is ``None`` and ``reason``/``detail`` are the
+    values :func:`_grade_power_delivery` should return directly (with status
+    ``"unmet"`` and no citation).
+    """
+    erc_metric_detail = _critical_metric_detail(erc["envelope"])
+    if erc_metric_detail:
+        return None, _REASON_CHECK_FAILED, erc_metric_detail
+
+    supply_spec = _erc_supply_spec(erc)
+    if supply_spec is None or not supply_spec["supply_nets"]:
+        return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
+    if supply_spec["tie_count"] == 0:
+        return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
+
+    if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
+        return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
+
+    return supply_spec, None, {}
+
+
 def _grade_power_delivery(
     specs: list[dict[str, Any]], *, partition_kind: str
-) -> tuple[str, str | None, dict[str, Any] | None]:
+) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
     """Grade T1 item 11 ("Power delivery (structural)", issue #2025) against
     the **set** of evidence entries cited for it, and return ``(status,
-    reason, citation)`` in the same shape :func:`_grade_evidence` returns.
+    reason, citation, failure_detail)`` in the same shape :func:`_grade_evidence`
+    returns.
 
     Unlike every other T1 item, no single artifact proves this one. The
     cited set must contain:
@@ -4101,10 +4180,20 @@ def _grade_power_delivery(
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
+
+    The declared-critical-metric gate (issue #2094) applies to **both** the
+    LVS and ERC parts, independent of everything else this function checks.
+    The LVS part gets it for free through :func:`_check_passed`. The ERC
+    part does not go through :func:`_check_passed` at all -- it deliberately
+    tolerates unrelated ERC findings (antenna/signal violations on nets this
+    item does not care about, see :func:`_check_passed`'s ``"erc"`` note) --
+    so its critical metrics are checked directly, via
+    :func:`_critical_metric_detail`, without making those unrelated findings
+    newly fatal.
     """
     by_kind, reason = _resolve_power_delivery_parts(specs)
     if by_kind is None:
-        return "unmet", reason, None
+        return "unmet", reason, None, {}
 
     erc = by_kind.get("erc")
     lvs = by_kind.get("lvs")
@@ -4112,19 +4201,19 @@ def _grade_power_delivery(
         # The cited set does not contain the artifacts this item names at
         # all -- "cite a different artifact", which is exactly what
         # `wrong_kind` means everywhere else in this module.
-        return "unmet", _REASON_WRONG_KIND, None
+        return "unmet", _REASON_WRONG_KIND, None, {}
 
     if not _check_passed("lvs", lvs["envelope"]):
-        return "unmet", _REASON_CHECK_FAILED, None
+        return (
+            "unmet",
+            _REASON_CHECK_FAILED,
+            None,
+            _critical_metric_detail(lvs["envelope"]),
+        )
 
-    supply_spec = _erc_supply_spec(erc)
-    if supply_spec is None or not supply_spec["supply_nets"]:
-        return "unmet", _REASON_SUPPLY_SPEC_INCOMPLETE, None
-    if supply_spec["tie_count"] == 0:
-        return "unmet", _REASON_SUPPLY_SPEC_INCOMPLETE, None
-
-    if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
-        return "unmet", _REASON_SUPPLY_NOT_CONTINUOUS, None
+    supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
+    if supply_spec is None:
+        return "unmet", reason, None, detail
 
     par = by_kind.get("place-and-route")
     if par is not None:
@@ -4134,7 +4223,7 @@ def _grade_power_delivery(
     else:
         reason = _REASON_LVS_SUPPLY_UNPROVEN
     if reason is not None:
-        return "unmet", reason, None
+        return "unmet", reason, None, {}
 
     # The compound citation keeps the single-citation contract every existing
     # consumer reads (`file`/`command`/`kind`/`check_status`/`content_hash`/
@@ -4163,7 +4252,7 @@ def _grade_power_delivery(
             lvs["envelope"].get("power_connectivity") or {}
         ).get("status"),
     }
-    return "met", None, citation
+    return "met", None, citation, {}
 
 
 def _build_power_delivery_item(
@@ -4188,6 +4277,7 @@ def _build_power_delivery_item(
     :func:`_grade_power_delivery`.
     """
     citation = None
+    failure_detail: dict[str, Any] = {}
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
 
@@ -4197,7 +4287,7 @@ def _build_power_delivery_item(
         if specs is None:
             reason = _REASON_INVALID_EVIDENCE
         else:
-            status, reason, citation = _grade_power_delivery(
+            status, reason, citation, failure_detail = _grade_power_delivery(
                 specs, partition_kind=partition_kind
             )
 
@@ -4211,6 +4301,7 @@ def _build_power_delivery_item(
         "status": status,
         "reason": reason,
         "citation": citation,
+        **({"detail": failure_detail} if failure_detail else {}),
     }
 
 
@@ -4267,6 +4358,7 @@ def _build_tier_item(
     passing ``"power"`` citation never satisfies any tier-report item.
     """
     citation = None
+    failure_detail: dict[str, Any] = {}
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
 
@@ -4276,7 +4368,7 @@ def _build_tier_item(
         if spec is None:
             reason = _REASON_INVALID_EVIDENCE
         else:
-            status, reason, citation = _grade_evidence(
+            status, reason, citation, failure_detail = _grade_evidence(
                 spec,
                 require_post_layout=require_post_layout,
                 allowed_kinds=allowed_kinds,
@@ -4307,6 +4399,7 @@ def _build_tier_item(
         "status": status,
         "reason": reason,
         "citation": citation,
+        **({"detail": failure_detail} if failure_detail else {}),
     }
 
 

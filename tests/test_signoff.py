@@ -6909,6 +6909,59 @@ def test_item_11_unmet_when_the_cited_lvs_report_itself_fails(tmp_path):
     assert item["reason"] == "check_failed"
 
 
+@pytest.mark.parametrize("value", [-1, True, "bad"], ids=["negative", "true", "string"])
+def test_item_11_unmet_when_the_cited_erc_report_has_a_malformed_critical_metric(
+    tmp_path, value
+):
+    """Issue #2094: the ERC part of a compound item-11 citation deliberately
+    bypasses `_check_passed` (`test_item_11_is_not_blocked_by_a_non_supply_erc_finding`
+    above) so an unrelated antenna/signal finding never blocks a power-delivery
+    claim -- but that must not also let a malformed *critical* metric on the
+    same envelope slip through unblocked, the way the LVS part's
+    `_check_passed`-derived gate already prevents it from
+    (`test_item_11_unmet_when_the_cited_lvs_report_itself_fails` above)."""
+    erc_envelope = {**ERC_CLEAN_ENVELOPE, "metrics": {"drc__error__count": value}}
+
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", erc_envelope=erc_envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+    assert item["citation"] is None
+    assert (
+        item["detail"]["critical_metric_blockers"][0]["metric"] == "drc__error__count"
+    )
+
+
+def test_item_11_met_when_the_cited_erc_report_has_a_zero_critical_metric(tmp_path):
+    """The passing control for the malformed-metric test above: a critical
+    metric present with its zero (non-blocking) value must not itself start
+    blocking a citation that was otherwise going to pass."""
+    erc_envelope = {**ERC_CLEAN_ENVELOPE, "metrics": {"drc__error__count": 0}}
+
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", erc_envelope=erc_envelope
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["status"] == "met"
+
+
 def test_item_11_unmet_with_no_evidence_at_all(tmp_path):
     result = build_tier_report(_manifest(kind="digital"))
 

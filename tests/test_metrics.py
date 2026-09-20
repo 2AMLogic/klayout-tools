@@ -157,3 +157,30 @@ def test_aggregate_raises_on_empty_values():
 def test_aggregate_raises_on_unknown_metric():
     with pytest.raises(MetricNamespaceError):
         aggregate("not__a__real__metric", [1, 2, 3])
+
+
+@pytest.mark.parametrize("domain", ["finite_number", "nonnegative_integer"])
+def test_register_preserves_declared_domain(monkeypatch, domain):
+    monkeypatch.setattr(metrics_module, "REGISTRY", dict(REGISTRY))
+    metric_def = register(
+        "test__domain__value", aggregator="min", higher_is_better=True, domain=domain
+    )
+    assert metric_def.domain == domain
+
+
+def test_register_rejects_unknown_domain():
+    with pytest.raises(MetricNamespaceError, match="unknown domain"):
+        register(
+            "test__invalid__domain",
+            aggregator="min",
+            higher_is_better=True,
+            domain="anything",
+        )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["drc__error__count", "sim__corner__failed_count", "sim__corner__errored_count"],
+)
+def test_critical_error_counts_declare_integer_domain(name):
+    assert get_metric(name).domain == "nonnegative_integer"
