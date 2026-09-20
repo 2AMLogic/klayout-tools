@@ -62,7 +62,8 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
   item skeleton from, instead of the copy this install ships. Only
   meaningful with `--manifest`/`--fleet`; passing it in envelope-aggregation
   mode is an error (that mode never reads the doc). See "Where the tier doc
-  comes from" below.
+  comes from" below, and "An overridden doc can outrun the build" for what
+  the report says when the doc lists an item this build has no rules for.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -790,6 +791,87 @@ understands, the command emits the usual error envelope (`schema_version`,
 `error.command: "signoff"`, `error.message`) and exits `1` — a tier report is
 never rendered from a partially-understood doc.
 
+### An overridden doc can outrun the build: `graded_by_build`
+
+The item list comes from the parsed doc; the grading rules come from the
+running build. With the shipped doc those are the same version by
+construction — that is the whole point of never duplicating the item list in
+code. **`--tiers-doc`/`$KLT_TIERS_DOC` deliberately breaks that coupling**
+(it exists so a caller can point the parse at a different copy), so the two
+can be at different versions, and a released `klt` whose bundled doc is older
+than the doc it is handed will parse an item it has no rules for at all:
+not its accepted envelope kinds, not its evidence shape, not its pass
+conditions (issue #2176).
+
+Every T1 item therefore reports `graded_by_build` (see the
+[schema](#items-entries) below):
+
+| `graded_by_build` | When | Effect on grading |
+| --- | --- | --- |
+| `true` | A grading rule names the item's id, **or** this build's own shipped doc lists it — every item of `docs/design-evidence-tiers.md`, including 1, 2, 9 and 10, whose documented rule is "any recognised, passing envelope satisfies this" | None. Graded exactly as documented above. |
+| `false` | Only the overriding doc knows this item id | An *uncited* item renders `unmet`/`no_evidence` as before, now visibly unchecked rather than indistinguishable from a graded row. A *cited* item renders `unmet`/`ungradeable_by_build` — never the unrestricted fall-through, under which any passing envelope would have produced a `met` from rules that do not exist here. |
+
+A `false` row is refused *before* its evidence is resolved, so a
+command-backed entry for such an item is never executed: this build could
+not interpret the answer. The fix for one is a newer `klt` (or grading
+against the doc this one ships) — not a different citation, which is why it
+is its own `reason` rather than a shade of `wrong_kind`.
+
+A released build handed a doc from `main` that has grown an item 12, with a
+manifest that cites it:
+
+```
+$ klt signoff --manifest manifest.json --tiers-doc vendored/design-evidence-tiers.md
+block: my-bandgap  kind: analog
+tier: none
+T1: 1/12 items met
+
+[MET  ] T1 #3 DRC clean
+        cite: drc.json (kind=drc, status=clean, content_hash=sha256:..., exit_status=0)
+...
+[UNMET] T1 #12 Formal equivalence
+        not graded by this build (no rules for item #12 in klt 0.4.2; it is in vendored/design-evidence-tiers.md, not this build's own doc)
+        reason: ungradeable_by_build
+
+source: vendored/design-evidence-tiers.md (content_hash=sha256:...)
+build: klt 0.4.2
+```
+
+Both halves are derived, never hard-coded: the day the shipped doc gains an
+item this build knows it, and the day a grading rule gains an id this build
+grades it. A build that cannot read its **own** shipped doc at all (an
+install with neither the packaged copy nor a source checkout) cannot *prove*
+divergence, so it claims none — every item reports `graded_by_build: true`
+and behaviour matches every release before this check existed.
+
+This compares item **ids** only. A doc that renumbers or rewords an item
+this build does know — so that id 3 no longer means "DRC clean" — is a
+content-drift question, not an item-list one, and it has its own answer:
+`source_doc_content_hash` (issue #2175) pins *what the checklist said*, and
+`build` (below) names the build that read it. The three are complementary —
+which doc, what it said, and which of its rules this build could apply.
+
+The reverse direction — a doc with *fewer* items than this build grades — is
+unchanged: the report renders the parsed doc's skeleton, so an item the doc
+does not list is simply not a row. `build` is what lets a later reader spot
+it, by naming the build whose extra rules went unused.
+
+### Which build graded this: `build`
+
+A tier report is meant to outlive the invocation that produced it: it gets
+committed beside the manifest and read later, by someone who was not at the
+terminal and cannot see which `klt` rendered it. Both doc-parsing modes
+therefore carry a `build` block — `klt version --format json`'s own identity
+payload (`version`, `package_version`, `git_commit`, `git_tag`, `dirty`,
+`is_release`), reused rather than re-derived, and printed as a `build: klt
+<version>` line in the text rendering (issue #2176).
+
+It carries neither `klt version`'s own `schema_version` (the report has one)
+nor its two KLayout-engine fields: the engine this `klt signoff` process
+happens to resolve says nothing about what its grading rules can check, and
+each cited envelope already records the engine *its own* run used in its
+`provenance` block.
+
 ### Item 7 is kind-restricted, per block kind
 
 T1 items 1, 2, 9 and 10 accept *any* recognised, *native*
@@ -1327,6 +1409,14 @@ required.
   "t1_met_count": 1,
   "source_doc": "docs/design-evidence-tiers.md",
   "source_doc_content_hash": "sha256:...",
+  "build": {
+    "version": "0.4.2+g0123456789ab",
+    "package_version": "0.4.2",
+    "git_commit": "0123456789abcdef0123456789abcdef01234567",
+    "git_tag": null,
+    "dirty": false,
+    "is_release": false
+  },
   "items": [
     {
       "tier": "T1",
@@ -1337,6 +1427,7 @@ required.
       "notes": [],
       "status": "met",
       "reason": null,
+      "graded_by_build": true,
       "citation": {
         "file": "drc.json",
         "command": null,
@@ -1360,6 +1451,7 @@ required.
       "notes": [],
       "status": "unmet",
       "reason": "no_evidence",
+      "graded_by_build": true,
       "citation": null
     },
     {
@@ -1387,6 +1479,7 @@ required.
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
+| `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release"}`, exactly as `klt version --format json` reports them — see "Which build graded this" above for the two groups of fields it deliberately omits. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `items`         | array\<object\>      | One entry per T1 checklist item (per partition, for `mixed-signal`), then one entry per T2-T4 ladder row. |
 
 #### `items[]` entries
@@ -1401,6 +1494,7 @@ required.
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
+| `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
 | `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, and `body_bias` for a `pex` citation whose envelope reports one (issue #1983), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
@@ -1435,6 +1529,7 @@ actually ran and failed):
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
+| `"ungradeable_by_build"`  | yes | **(issue #2176)** The manifest cited evidence for an item this build has no grading rules for at all (`graded_by_build: false` — an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc lists). Not a statement about the cited artifact, which is never even resolved: the *build* is the gap, so the fix is a newer `klt` (or grading against the doc this one ships), not a different citation. Without it, such a citation fell through to the unrestricted grading path and could render `met` from rules that do not exist in the running build. See "An overridden doc can outrun the build" above. |
 | `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
 | `"check_errored"`         | no  | The evidence resolved to a `klt` `error` envelope — the underlying command itself failed to run to completion. |
 | `"check_failed"`          | no  | The evidence resolved to a recognised, non-error envelope, but that check's own verdict did not pass (e.g. DRC violations, an LVS mismatch, a failed sim corner). |
@@ -1542,6 +1637,14 @@ already-shipped field means).
   "not_t1_count": 2,
   "source_doc": "docs/design-evidence-tiers.md",
   "source_doc_content_hash": "sha256:...",
+  "build": {
+    "version": "0.4.2+g0123456789ab",
+    "package_version": "0.4.2",
+    "git_commit": "0123456789abcdef0123456789abcdef01234567",
+    "git_tag": null,
+    "dirty": false,
+    "is_release": false
+  },
   "blocks": [
     {
       "block": "sky130-bandgap",
@@ -1605,6 +1708,7 @@ already-shipped field means).
 | `not_t1_count`  | integer             | `block_count - t1_count`.                                                                 |
 | `source_doc`    | string               | As in tier-report mode: `"docs/design-evidence-tiers.md"`, or the `--tiers-doc`/`$KLT_TIERS_DOC` override path. |
 | `source_doc_content_hash` | string \| null | As in tier-report mode (issue #2175): the resolved doc's `sha256:`-prefixed content hash. Since `tiers_doc` is forwarded verbatim to every per-block grading call, this is the shared value every `blocks[]` row's own copy also carries within one roll-up — the direct answer to "were these N verdicts taken against the same checklist". |
+| `build`         | object               | As in tier-report mode (issue #2176): which build graded the fleet. Reported once for the whole roll-up rather than per block — one process grades every block. Per-item `graded_by_build` lives in each block's own `--manifest` report; here an item this build cannot grade surfaces like any other item with no check behind it (it is `ungraded_items`-eligible, and `blocking_item` names it with `reason: "ungradeable_by_build"` when it is the only gap). |
 | `blocks`        | array\<object\>      | One entry per fleet manifest `blocks[]` entry, in order.                                 |
 
 #### `blocks[]` entries
@@ -1833,6 +1937,7 @@ T1: 1/11 items met
         reason: tier_not_supported
 
 source: docs/design-evidence-tiers.md (content_hash=sha256:...)
+build: klt 0.4.2+g0123456789ab
 ```
 
 (`UNMET`/`MET` render in red/green respectively in a real terminal, and each
@@ -2147,6 +2252,7 @@ fleet: 1/4 blocks at T1 (3 not yet)
         blocking: #1 Design sources (reason: no_evidence)
 
 source: docs/design-evidence-tiers.md (content_hash=sha256:...)
+build: klt 0.4.2+g0123456789ab
 ```
 
 One query names every canary's tier and, for the three not yet at T1,
@@ -2197,6 +2303,7 @@ fleet: 2/4 blocks at T1 (2 not yet)
         blocking: #1 Design sources (reason: no_evidence)
 
 source: docs/design-evidence-tiers.md (content_hash=sha256:...)
+build: klt 0.4.2+g0123456789ab
 ```
 
 Had item 7 been the gap instead, the roll-up would name it the same way —

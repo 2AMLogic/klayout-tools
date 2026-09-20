@@ -82,6 +82,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   `docs/cli/place-and-route.md`'s "Power delivery" section, "Minimum core
   width for a PDN grid".
 
+- **Fixed** (#2176, additive — **no** `schema_version` bump on either mode,
+  see below): `klt signoff --manifest`/`--fleet` no longer grade a cited T1
+  item that the running build has no rules for as if they had. The item list
+  is parsed from `design-evidence-tiers.md` and the grading rules are
+  compiled into the build; `--tiers-doc`/`$KLT_TIERS_DOC` deliberately lets
+  those two be at different versions, so a released `klt` handed a newer copy
+  of the doc would parse an item it knows nothing about — not its accepted
+  envelope kinds, not its evidence shape, not its pass conditions — and grade
+  a citation for it through the unrestricted fall-through, rendering a `met`
+  row indistinguishable from a correctly-graded one. **Added**:
+  `items[].graded_by_build` on every T1 item (`true` when a grading rule
+  names its id *or* this build's own shipped doc lists it — so every item of
+  the shipped doc, items 1/2/9/10 included), and a top-level `build` block
+  (`klt version --format json`'s own `{version, package_version, git_commit,
+  git_tag, dirty, is_release}`) on both the tier report and the fleet
+  roll-up, so a committed report still names the build that produced it. A
+  cited `graded_by_build: false` item now renders
+  `unmet`/`ungradeable_by_build` — a new `reason` value — refused *before*
+  its evidence is resolved, so a command-backed entry for such an item is
+  never run. Uncited ones keep rendering `unmet`/`no_evidence`. Nothing
+  changes for the shipped doc: every item is `graded_by_build: true` and
+  every verdict is byte-identical apart from the two new fields. A build
+  that cannot read its *own* doc claims no divergence (every item `true`),
+  since an unprovable refusal is worse than none. No `schema_version` bump:
+  both fields are new keys and the new `reason` is a value set growing
+  within an unchanged shape — both additive per
+  [`docs/json-contract.md`](docs/json-contract.md) — and the grading change
+  is a correction of a wrong verdict, like #1987's and #2044's before it,
+  not a redefinition of what an already-shipped field means (which is what
+  bumped `--fleet` to `2` in #2178).
+
 - **Added** (#2179): `klt erc` now reports `erc_status` and `erc_coverage` —
   the **connectivity** half's own roll-up and checked-work scope, beside the
   antenna-driven `status`/`coverage`. `klt erc` answers two independent

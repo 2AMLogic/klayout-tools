@@ -39,6 +39,14 @@ from klayout_tools.signoff import (
     build_tier_report,
 )
 
+# Since issue #2176 a tier/fleet report carries the running build's identity
+# (`build`), which a source install resolves by shelling out to `git`. The
+# command-backed evidence tests below stub the shared `subprocess.run` module
+# object, which would otherwise swallow those probes (and record them as if
+# `klt signoff` had run them) -- the same collision `klt drc`/`klt lvs`'s own
+# suites already solve with this fixture. See tests/conftest.py.
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 #: Repo root, resolved once -- used by the real-subprocess gate-binding
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
@@ -5857,6 +5865,280 @@ def test_cli_envelope_aggregation_is_unaffected_by_a_missing_tier_doc(
     out = json.loads(capsys.readouterr().out)
     assert exit_code == 0
     assert out["status"] == "pass"
+
+
+# --------------------------------------------------------------------------- #
+# A doc newer than the build: `graded_by_build` / `ungradeable_by_build`
+# (issue #2176)
+# --------------------------------------------------------------------------- #
+
+#: The item id used below for "an item this build has never heard of". Far
+#: above the shipped checklist's own length on purpose: the point is an id
+#: no grading table names and this build's own doc does not list, and using
+#: `max(ids) + 1` would quietly stop testing that the day the doc grows.
+_FUTURE_ITEM_ID = 97
+
+#: A tier doc a *newer* release might ship: one item this build does grade
+#: (3, "DRC clean") and one it has never heard of. Exactly the state
+#: `--tiers-doc`/`$KLT_TIERS_DOC` produces when a block repo vendors the doc
+#: from main while running a released `klt` (issue #2176).
+_FUTURE_TIERS_DOC = f"""\
+# Design-evidence tiers
+
+## The ladder
+
+| Tier | Claim | Demonstrated by |
+|---|---|---|
+| **T1 — sim-validated** | Designed and simulation-validated | Open-source evidence |
+| **T2 — signoff-validated** | Validated on commercial tools | T1, plus commercial |
+| **T3 — silicon-validated** | Fabricated and measured | T2, plus a tapeout |
+| **T4 — production-validated** | Proven in silicon | An external project |
+
+## T1 checklist — what "sim-validated" requires
+
+3. **DRC clean** — latest `klt drc` JSON report: `status: clean`.
+{_FUTURE_ITEM_ID}. **Formal equivalence** — an item this doc gained after the
+   running build shipped.
+
+## Verification rules
+
+- **Staleness is failure.**
+"""
+
+
+def _write_future_tiers_doc(tmp_path) -> str:
+    path = tmp_path / "future-tiers.md"
+    path.write_text(_FUTURE_TIERS_DOC, encoding="utf-8")
+    return str(path)
+
+
+def _item(result: dict, item_id: int) -> dict:
+    return next(item for item in result["items"] if item["id"] == item_id)
+
+
+def test_every_shipped_doc_item_is_graded_by_this_build():
+    """AC: the shipped doc's item list and this build's grading rules agree,
+    so nothing in a default report is flagged (issue #2176)."""
+    result = build_tier_report(_manifest())
+
+    t1_items = [item for item in result["items"] if item["tier"] == "T1"]
+    assert t1_items, "expected the shipped doc to render T1 items"
+    assert all(item["graded_by_build"] is True for item in t1_items)
+    # Including items 1, 2, 9 and 10, which carry no grading *table* entry:
+    # "any recognised, passing envelope satisfies them" is this build's
+    # documented rule for them, not an absence of one.
+    assert _item(result, 1)["graded_by_build"] is True
+
+
+def test_uncited_item_beyond_this_builds_doc_is_reported_ungraded(tmp_path):
+    """AC: an item only the overriding doc knows about still renders (the
+    doc's full skeleton is the point), but no longer looks checked."""
+    result = build_tier_report(_manifest(), tiers_doc=_write_future_tiers_doc(tmp_path))
+
+    future = _item(result, _FUTURE_ITEM_ID)
+    assert future["graded_by_build"] is False
+    # Unchanged verdict for an uncited item -- only the new field is added.
+    assert future["status"] == "unmet"
+    assert future["reason"] == "no_evidence"
+    # The item this build *does* grade is untouched by its neighbour.
+    assert _item(result, 3)["graded_by_build"] is True
+
+
+def test_cited_item_beyond_this_builds_doc_is_refused_not_graded(tmp_path):
+    """The regression this issue is about: a citation for an item with no
+    grading rules in this build must not borrow a pass from the unrestricted
+    fall-through (issue #2176)."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={str(_FUTURE_ITEM_ID): drc_path}),
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )
+
+    future = _item(result, _FUTURE_ITEM_ID)
+    assert future["graded_by_build"] is False
+    assert future["status"] == "unmet"
+    assert future["reason"] == "ungradeable_by_build"
+    assert future["citation"] is None
+    assert result["tier"] is None
+
+
+def test_pre_fix_behaviour_would_have_rendered_that_citation_met(tmp_path, monkeypatch):
+    """Pin the bug itself: with the coverage check forced open (what every
+    build before issue #2176 did), the *same* citation renders `met` --
+    graded by rules that do not exist for that item."""
+    monkeypatch.setattr(
+        signoff_module, "_is_graded_by_build", lambda item_id, build_item_ids: True
+    )
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={str(_FUTURE_ITEM_ID): drc_path}),
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )
+
+    future = _item(result, _FUTURE_ITEM_ID)
+    assert future["status"] == "met"
+    assert future["citation"]["kind"] == "drc"
+
+
+def test_ungradeable_items_command_evidence_is_never_run(tmp_path, monkeypatch):
+    """An ungradeable item is refused before its evidence is resolved: this
+    build could not interpret what came back, so running the caller's gate
+    would burn a subprocess to no purpose (issue #2176)."""
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return fake_completed(returncode=0, stdout=json.dumps(DRC_CLEAN_ENVELOPE))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={str(_FUTURE_ITEM_ID): {"command": ["klt", "drc", "design.gds"]}}
+        ),
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )
+
+    assert calls == []
+    assert _item(result, _FUTURE_ITEM_ID)["reason"] == "ungradeable_by_build"
+
+
+def test_an_item_this_build_grades_is_unaffected_by_the_override(tmp_path):
+    """AC: items whose ids the build *does* recognise are graded exactly as
+    before, override or not."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": drc_path}),
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )
+
+    item_3 = _item(result, 3)
+    assert item_3["graded_by_build"] is True
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    assert item_3["citation"]["kind"] == "drc"
+
+
+def test_a_doc_older_than_the_build_still_renders_only_its_own_items(tmp_path):
+    """The other direction (a doc with *fewer* items than this build grades):
+    unchanged in scope by issue #2176 -- the report is the doc's skeleton, so
+    the missing items simply are not rows. What is new is that `build` now
+    names the build whose extra rules went unused."""
+    result = build_tier_report(_manifest(), tiers_doc=_write_tiers_doc(tmp_path))
+
+    assert result["t1_item_count"] == 3
+    assert [item["id"] for item in result["items"] if item["tier"] == "T1"] == [1, 2, 3]
+    assert all(
+        item["graded_by_build"] is True
+        for item in result["items"]
+        if item["tier"] == "T1"
+    )
+    assert result["build"]["version"]
+
+
+def test_an_unresolvable_shipped_doc_never_invents_a_refusal(tmp_path, monkeypatch):
+    """A build that cannot read its *own* doc cannot prove divergence, so it
+    claims none -- every item reports as graded and behaviour matches every
+    release before this check existed (issue #2176)."""
+    monkeypatch.setattr(
+        signoff_module, "DEFAULT_DOC_PATH", tmp_path / "no-such-shipped-doc.md"
+    )
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={str(_FUTURE_ITEM_ID): drc_path}),
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )
+
+    future = _item(result, _FUTURE_ITEM_ID)
+    assert future["graded_by_build"] is True
+    assert future["status"] == "met"
+
+
+def test_tier_report_build_block_matches_klt_version(capsys):
+    """AC: the report's build-identity block is `klt version`'s own payload,
+    not a second implementation of version/commit detection."""
+    signoff_module._build_identity_fields.cache_clear()
+    result = build_tier_report(_manifest())
+
+    assert main(["version", "--format", "json"]) == 0
+    version_json = json.loads(capsys.readouterr().out)
+
+    assert result["build"] == {
+        field: version_json[field]
+        for field in (
+            "version",
+            "package_version",
+            "git_commit",
+            "git_tag",
+            "dirty",
+            "is_release",
+        )
+    }
+    # `klt version`'s own schema_version and the KLayout-engine fields are
+    # deliberately not echoed -- see signoff._BUILD_IDENTITY_FIELDS.
+    assert "schema_version" not in result["build"]
+    assert "klayout_version" not in result["build"]
+
+
+def test_fleet_report_carries_the_same_build_block_and_inherits_the_refusal(
+    tmp_path,
+):
+    """AC: `--fleet` inherits both halves for free -- it calls
+    `build_tier_report` once per block."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_fleet_report(
+        {
+            "blocks": [
+                {
+                    "block": "b1",
+                    "kind": "analog",
+                    "evidence": {"3": drc_path, str(_FUTURE_ITEM_ID): drc_path},
+                }
+            ]
+        },
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )
+
+    assert result["build"] == build_tier_report(_manifest())["build"]
+    block = result["blocks"][0]
+    assert block["tier"] is None
+    assert block["t1_met_count"] == 1
+    # The ungradeable item is what is left blocking the block, named by the
+    # reason that says the build -- not the manifest -- is the gap.
+    assert block["blocking_item"]["id"] == _FUTURE_ITEM_ID
+    assert block["blocking_item"]["reason"] == "ungradeable_by_build"
+
+
+def test_cli_text_output_names_the_build_and_the_ungradeable_rows(tmp_path, capsys):
+    """The refusal and the grading build are both visible in the terminal-first
+    rendering, not only in the JSON (issue #2176)."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={str(_FUTURE_ITEM_ID): drc_path}),
+    )
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--tiers-doc",
+            _write_future_tiers_doc(tmp_path),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 3
+    assert "not graded by this build" in out
+    assert f"reason: {signoff_module._REASON_UNGRADEABLE_BY_BUILD}" in out
+    assert f"build: klt {build_tier_report(_manifest())['build']['version']}" in out
 
 
 # --------------------------------------------------------------------------- #

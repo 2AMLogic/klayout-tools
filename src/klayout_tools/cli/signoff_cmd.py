@@ -304,6 +304,18 @@ def _print_tier_report_text(result: dict) -> None:
             f"[{color}{marker}{_RESET}] {item['tier']} #{item_id}{partition} "
             f"{item['title']}"
         )
+        # Issue #2176: a row this build has no grading rules for at all --
+        # an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc
+        # lists. Shown for every such row, met/unmet and cited/uncited
+        # alike, because the whole failure this prevents is a row that
+        # *looks* exactly like a graded one. Absent for every item of the
+        # shipped doc, which renders exactly as before.
+        if item.get("graded_by_build") is False:
+            print(
+                f"        {_RED}not graded by this build{_RESET} "
+                f"(no rules for item #{item_id} in klt {result['build']['version']}"
+                f"; it is in {result['source_doc']}, not this build's own doc)"
+            )
         citation = item["citation"]
         if citation:
             # Command-backed evidence (issue #825) has no static file --
@@ -375,6 +387,10 @@ def _print_tier_report_text(result: dict) -> None:
         f"source: {result['source_doc']} "
         f"(content_hash={result['source_doc_content_hash']})"
     )
+    # Issue #2176: which build rendered this. A committed tier report is
+    # read later by someone who was not at the terminal, and "what could
+    # this verdict actually check" is not reconstructable without it.
+    print(f"build: klt {result['build']['version']}")
 
 
 def _print_fleet_report_text(result: dict) -> None:
@@ -435,3 +451,4 @@ def _print_fleet_report_text(result: dict) -> None:
         f"source: {result['source_doc']} "
         f"(content_hash={result['source_doc_content_hash']})"
     )
+    print(f"build: klt {result['build']['version']}")
