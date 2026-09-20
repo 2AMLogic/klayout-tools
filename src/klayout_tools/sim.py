@@ -77,7 +77,7 @@ from . import env_provenance
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
 from ._paths import _load_request_json, _resolve_relative, validate_request_shape
-from ._provenance import build_provenance, sha256_file
+from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
 from ._text import line_containing as _line_containing
 from .coverage import (
     REASON_EMPTY_CORNER_MATRIX,
@@ -1357,6 +1357,8 @@ def run_sim(
             deck_name=(os.path.basename(models_lib) if models_lib else None),
             deck_path=models_lib,
             pdk=provenance_pdk,
+            input_path=netlist_path,
+            input_role=INPUT_ROLE_NETLIST,
         ),
         "measurements": measurements_rollup,
         "corners": corners,

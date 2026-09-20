@@ -379,7 +379,16 @@ SIM_PASS_ENVELOPE = {
         "klayout_version": "0.30.10",
         "pdk": {"name": "sky130A", "source": "volare", "version": "20240101"},
         "deck": {"name": "sky130.lib.spice", "content_hash": "sha256:models"},
-        "input": None,
+        # Issue #2039: `klt sim` now populates `provenance.input` too,
+        # pinning the netlist it simulated under `role: "netlist"` -- the
+        # same treatment issue #1969 gave `klt lvs`, so `klt signoff
+        # --manifest`'s generic `provenance.input.content_hash` staleness
+        # gate can grade a pinned "sim passed" citation instead of finding
+        # `actual_hash: None` and always rendering `stale_evidence`. The
+        # `netlist` role keeps this out of the `layout`-role comparison a
+        # `drc`/`lvs` sibling in the same bundle contributes to -- see the
+        # "`provenance.input.role`" test section below.
+        "input": {"content_hash": "sha256:netlistA", "role": "netlist"},
     },
     "measurements": [],
     "corners": [],
@@ -3015,23 +3024,23 @@ def test_pre_1969_lvs_envelope_is_excluded_not_a_forced_mismatch(tmp_path, shape
     assert lvs_check["provenance"].get("input") is None
 
 
-def test_sim_does_not_participate_in_the_input_hash_cross_check(tmp_path):
-    """Issue #1987's scope note, pinned as behaviour: `klt sim` deliberately
-    leaves `provenance.input` `None` (it simulates a netlist against a model
-    library -- there is no input *layout* stream to pin), so it never
-    contributes a value to the `input.content_hash` comparison.
+def test_sim_netlist_role_hash_does_not_collide_with_layout_role(tmp_path):
+    """Issue #2039: `klt sim` now populates `provenance.input` under
+    `role: "netlist"` (the same treatment issue #1969 gave `klt lvs`), but a
+    `drc` + `lvs` + `sim` bundle describing one design must still aggregate
+    to `pass`, not `refused` -- a netlist hash is no longer compared against
+    a layout hash now that roles scope the cross-check (issue #2027).
 
-    This was the reason `klt sim` did *not* get `klt lvs`'s issue-#1969
-    treatment: a netlist digest was not comparable with the layout digests
-    `drc`/`extract`/`lvs`/`pex` contribute, so populating the shared field
-    with one would have turned every legitimate layout-plus-simulation
-    manifest into a permanent `provenance_consistency` refusal. Issue #2027
-    removes that obstacle -- `provenance.input.role` now says which kind of
-    artifact a hash covers, and hashes are compared only within a role -- but
-    wiring `klt sim` itself up is separate work; until then its `input` stays
-    `None` and this test pins that.
+    Before #2039, `klt sim` deliberately left `provenance.input` `None`
+    (issue #1987's scope note): with no role discriminator, comparing a
+    netlist digest against `drc`/`lvs`'s layout digest would have refused
+    every legitimate layout-plus-simulation manifest. #2027 removed that
+    obstacle for `lvs`; this is the matching fix for `sim`.
     """
-    assert SIM_PASS_ENVELOPE["provenance"]["input"] is None
+    assert SIM_PASS_ENVELOPE["provenance"]["input"] == {
+        "content_hash": "sha256:netlistA",
+        "role": "netlist",
+    }
 
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
@@ -3042,6 +3051,32 @@ def test_sim_does_not_participate_in_the_input_hash_cross_check(tmp_path):
     assert result["provenance_consistency"]["ok"] is True
     assert result["provenance_consistency"]["mismatches"] == []
     assert result["status"] == "pass"
+
+
+def test_two_sim_reports_with_different_netlist_hashes_are_refused(tmp_path):
+    """The other half of #2039's role-scoped fix: two `sim`-kind checks that
+    both populate `role: "netlist"` and disagree are a genuine stale
+    pairing, and must still be refused -- role-grouping narrows *which*
+    values are compared, it does not disable the comparison."""
+    other_netlist_sim = {
+        **SIM_PASS_ENVELOPE,
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:netlistB", "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    other_path = _write(tmp_path, "sim-other.json", other_netlist_sim)
+
+    result = build_signoff([sim_path, other_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    assert mismatches[0]["role"] == "netlist"
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[sim_path] == "sha256:netlistA"
+    assert values[other_path] == "sha256:netlistB"
 
 
 # --------------------------------------------------------------------------- #
@@ -3193,6 +3228,75 @@ def test_disagreement_in_two_roles_yields_one_mismatch_per_role(tmp_path):
         "input.content_hash",
     ]
     assert [entry["role"] for entry in mismatches] == ["layout", "netlist"]
+
+
+def test_sim_and_pre_extracted_lvs_are_compared_and_refused_when_netlists_differ(
+    tmp_path,
+):
+    """Issue #2039's Judge review: `klt lvs`'s pre-extracted (`layout.netlist`)
+    request shape is a `netlist`-role report, exactly like `klt sim` -- both
+    land in the same role bucket `_check_input_hashes` groups by. Pairing a
+    `sim` report with a pre-extracted `lvs` report of a *different* netlist
+    (the realistic shape `examples/signoff/` generates) is genuine staleness,
+    not a false alarm, and must render `refused` -- the strictness this repo
+    intends for that pairing (see `docs/cli/sim.md` and
+    `docs/json-contract.md`'s `role` section).
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    # Precondition: the two `netlist`-role digests really do disagree, so
+    # this test is about the cross-check and not about fixtures that happen
+    # to already agree.
+    assert (
+        LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"]["input"]["content_hash"]
+        != SIM_PASS_ENVELOPE["provenance"]["input"]["content_hash"]
+    )
+
+    result = build_signoff([drc_path, lvs_path, sim_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    assert mismatches[0]["role"] == "netlist"
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[lvs_path] == "sha256:layoutAspice"
+    assert values[sim_path] == "sha256:netlistA"
+
+
+def test_sim_and_pre_extracted_lvs_pass_when_they_pin_the_same_netlist(tmp_path):
+    """The paired passing case for the test above: a post-layout `sim` run of
+    the *same* netlist a pre-extracted `lvs` run verified must still
+    aggregate to `pass` -- the gate compares digests, not report kinds, so
+    two `netlist`-role citations naming the identical file are exactly the
+    binding issue #2039 wants (a schematic-level `sim`, which will never
+    share the extracted netlist's hash, is the case the refusal above
+    protects against).
+    """
+    same_netlist_sim = {
+        **SIM_PASS_ENVELOPE,
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": (
+                    LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"]["input"][
+                        "content_hash"
+                    ]
+                ),
+                "role": "netlist",
+            },
+        },
+    }
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", same_netlist_sim)
+
+    result = build_signoff([drc_path, lvs_path, sim_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
 
 
 def test_role_less_envelope_is_read_as_a_layout_hash(tmp_path):
@@ -3955,6 +4059,48 @@ def test_lvs_stale_pinned_content_hash_renders_unmet(tmp_path):
     assert item_4["status"] == "unmet"
     assert item_4["reason"] == "stale_evidence"
     assert item_4["citation"] is None
+
+
+def test_sim_matching_pinned_content_hash_renders_met(tmp_path):
+    """Issue #2039: a T1 item-5 citation pinning an expected `content_hash`
+    against a `klt sim` report grades `met` when the hash matches.
+
+    Before #2039 this was unreachable the same way it was for `klt lvs`
+    before #1969: `klt sim`'s `provenance.input` was always `null`, so
+    `_grade_evidence` found `actual_hash: None` and no pinned hash could
+    ever match -- every pinned "sim passed" citation graded
+    `stale_evidence` regardless of whether the netlist had actually moved.
+    """
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={"5": {"file": sim_path, "content_hash": "sha256:netlistA"}})
+    )
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["reason"] is None
+    assert item_5["citation"]["kind"] == "sim"
+    assert item_5["citation"]["content_hash"] == "sha256:netlistA"
+
+
+def test_sim_stale_pinned_content_hash_renders_unmet(tmp_path):
+    """The other half of #2039: populating the hash must not turn the
+    staleness gate into a rubber stamp. A pinned hash that does *not* match
+    the report's own still grades `stale_evidence` -- no false pass is
+    introduced."""
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"5": {"file": sim_path, "content_hash": "sha256:stale-revision"}}
+        )
+    )
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "stale_evidence"
+    assert item_5["citation"] is None
 
 
 # --------------------------------------------------------------------------- #
