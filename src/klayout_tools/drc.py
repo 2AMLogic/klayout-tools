@@ -55,6 +55,8 @@ from .coverage import (
     REASON_ALL_RULES_SKIPPED,
     REASON_DECK_HAS_NO_RULES,
     build_check_coverage,
+    coverage_rollup,
+    rollup_status,
     work_id,
 )
 from .decks import (
@@ -199,6 +201,150 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
+#: The curated engine's ``coverage.skipped[].reason`` (issue #1996): a layer
+#: this rule reads is absent from the stream, and running the rule anyway
+#: could still have reported a violation from the geometry that *is* drawn.
+#: Requested work that was not checked -- see :func:`_classify_skipped_rules`.
+SKIP_REASON_ABSENT_INPUT_LAYER = "absent_input_layer"
+
+#: The curated engine's ``coverage.inapplicable[].reason`` (issue #2110): a
+#: layer this rule reads is absent, and with it absent the rule constrains
+#: nothing in this stream -- running it is a provable no-op, not an
+#: unperformed check. Outside this invocation's applicable assessment rather
+#: than a skipped request; see :func:`_classify_skipped_rules`.
+INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY = "no_applicable_geometry"
+
+
+def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
+    """The ``(layer, datatype)`` pairs whose absence makes ``rule`` provably
+    incapable of reporting a violation (issue #2110).
+
+    Every check kind this engine dispatches measures *drawn* geometry, and
+    every one of them reports nothing when the geometry it measures is empty:
+
+    - ``width``/``space``/``notch``/``isolated`` run a ``Region.*_check``
+      over one region -- no shapes, no edge pairs.
+    - ``area`` runs ``Region.with_area(..., inverse=True)``, which returns
+      the violating polygons of an empty region: none (``_run_area_check``).
+    - ``density`` tiles the checked region's own ``bbox()``, which is empty,
+      so it tiles no window at all (``_run_density_check``).
+    - ``separation``/``enclosing``/``enclosed``/``overlap`` measure facing
+      edge pairs between two regions, and issue #318's extra "escaped the
+      enclosing region" term is computed with ``Region.interacting`` -- all
+      of which are empty when *either* region is (``_run_check``). A curated
+      enclosure rule constrains a drawn pair; with one side of the pair never
+      drawn, this stream contains no instance of what it constrains.
+
+    ``antenna`` is the documented exception, and the reason this function
+    exists rather than a blanket "an absent input layer is inapplicable"
+    rule: ``_run_antenna_check`` treats a nonempty antenna region whose
+    protection region has **zero** area as an undefined ratio and reports it
+    as a violation. So an absent ``other_layer`` there does not make the rule
+    vacuous -- it hides exactly the finding the rule exists to make, which is
+    a skipped request (:data:`SKIP_REASON_ABSENT_INPUT_LAYER`).
+
+    The checked region's own source layers are ``rule.layer``, or -- for a
+    ``derived_layer`` rule -- the layers the derivation actually reads:
+    ``base`` always, plus ``intersect_with`` for the two modes that *scope*
+    the region by intersecting it (``"sized_intersection"``,
+    ``"overlapping"``). ``"not_interacting"`` and ``"holes"`` derive from
+    ``base`` alone and are never skipped for an absent marker in the first
+    place (see :class:`~klayout_tools.decks.DerivedLayer`).
+
+    A new check kind must decide its own entry here deliberately: the
+    fallthrough treats ``other_layer`` as vacuity-forcing, matching every
+    two-layer primitive above, so a kind that can fault on an *empty*
+    counterpart -- as ``antenna`` does -- has to exclude itself the way
+    :data:`_ANTENNA_CHECKS` is excluded below, or it will report a real gap
+    as inapplicable.
+    """
+    if rule.derived_layer is not None:
+        layers = {rule.derived_layer.base}
+        if rule.derived_layer.intersect_with is not None and (
+            rule.derived_layer.mode in ("sized_intersection", "overlapping")
+        ):
+            layers.add(rule.derived_layer.intersect_with)
+    else:
+        layers = {rule.layer}
+    if rule.other_layer is not None and rule.check not in _ANTENNA_CHECKS:
+        layers.add(rule.other_layer)
+    return layers
+
+
+def _classify_skipped_rules(
+    deck: list[DrcRule], rules_skipped: list[str], layout: Any
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Split ``rules_skipped`` into common-coverage *skipped* and
+    *inapplicable* records (issue #2110).
+
+    ``docs/coverage-contract.md``'s migration contract hands this adapter one
+    open classification question: is a curated rule whose input layer is not
+    drawn a *requested* check that did not run, or work this invocation never
+    made applicable? Phase 1 recorded every one of them as a skipped request.
+    Under the Phase 2 rollup that would make essentially every real run
+    partial -- 7 of 57 sky130 rules run on
+    ``examples/design-pipeline/06-layout.gds``, 15 of 57 on a `sky130_fd_sc_hd`
+    standard cell -- and a verb whose successful runs are *all* partial has
+    stopped distinguishing anything.
+
+    The answer this adapter settles on is decided per rule, and decided by
+    the engine's own behaviour rather than by preference:
+
+    - Running the rule with the absent layer empty **could not have reported
+      a violation** (:func:`_vacuity_layers`): the rule constrains nothing in
+      this stream, so there is no check of it for the invocation to have
+      asked for. ``inapplicable``, reason
+      :data:`INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY`. Per the common
+      contract, inapplicable work never makes an otherwise complete run
+      partial -- which is what lets ``klt drc`` still report an earned,
+      unconditional ``clean`` for a small block that simply does not draw
+      most of a broad PDK deck's layers.
+    - Running it **could** have reported one -- today exactly
+      ``check="antenna"`` with its protection layer absent, where
+      ``_run_antenna_check`` faults a zero-area protection region -- so the
+      skip hides a finding the deck asked for. ``skipped``, reason
+      :data:`SKIP_REASON_ABSENT_INPUT_LAYER`, which makes the run
+      :data:`~klayout_tools.coverage.RESULT_PARTIAL` and therefore *not* an
+      unconditional success.
+
+    Nothing is moved between the two categories to reach a nicer rollup row:
+    the line is "would this check have been able to fail?", it is auditable
+    against each primitive in this module, and a check kind that can fault on
+    an empty input has to be excluded from :func:`_vacuity_layers`
+    explicitly.
+
+    Absence is probed with ``Layout.find_layer`` -- the same question the
+    per-rule skip decision in :func:`run_drc` itself asked -- so the two can
+    never disagree about which layers this stream has.
+
+    The verb-specific ``coverage.rules_skipped`` field keeps listing **both**
+    categories, unchanged: it is the pre-contract spelling of "did not run",
+    and this classification is additive to it.
+
+    Returns ``(skipped, inapplicable)``, each a list of ``{"id", "reason"}``
+    records sorted by rule id.
+    """
+    skipped_ids = set(rules_skipped)
+    skipped: list[dict[str, str]] = []
+    inapplicable: list[dict[str, str]] = []
+    for rule in deck:
+        if rule.id not in skipped_ids:
+            continue
+        vacuous = any(
+            layout.find_layer(*layer) is None for layer in _vacuity_layers(rule)
+        )
+        if vacuous:
+            inapplicable.append(
+                {"id": rule.id, "reason": INAPPLICABLE_REASON_NO_APPLICABLE_GEOMETRY}
+            )
+        else:
+            skipped.append({"id": rule.id, "reason": SKIP_REASON_ABSENT_INPUT_LAYER})
+    return (
+        sorted(skipped, key=lambda record: record["id"]),
+        sorted(inapplicable, key=lambda record: record["id"]),
+    )
+
+
 def _curated_nothing_checked_reasons(
     deck: list[DrcRule], rules_checked: list[str]
 ) -> list[str]:
@@ -240,7 +386,7 @@ def run_drc(
             "file": <path as provided>,
             "deck": <deck name>,
             "dbu_um": <database unit in micrometres, float>,
-            "status": "clean" | "violations",
+            "status": "clean" | "clean_partial" | "violations" | "not_checked",
             "violation_count": <int>,
             "rule_counts": {<rule id>: <int>, ...},
             "metrics": {"drc__error__count": <int>},
@@ -339,13 +485,32 @@ def run_drc(
     emitted by every verb that can reach a vacuous verdict. Here they are
     ``True`` / ``["all_rules_skipped"]`` exactly when ``rules_checked`` is
     empty while the deck declares rules (the degenerate empty-stream case:
-    every rule's layer is absent, so a ``"clean"`` verdict was measured over
+    every rule's layer is absent, so a verdict would have been measured over
     nothing at all), or ``["deck_has_no_rules"]`` for a deck that declares
-    none. **This does not change the ``status`` field**, which stays
-    ``"clean"`` for that case exactly as before -- it only makes the
-    emptiness legible to a reader, which is what lets `klt signoff` refuse
-    to count such a report as evidence (see ``signoff.py``'s "Vacuous-
-    verdict refusal" docstring section).
+    none. That case reports ``status: "not_checked"`` (exit 4, issue #2108):
+    it reaches no verdict rather than a vacuous ``"clean"``, which is what
+    lets `klt signoff` refuse to count such a report as evidence (see
+    ``signoff.py``'s "Vacuous-verdict refusal" docstring section).
+
+    ``status`` itself comes from the common rollup table (issue #2110,
+    :func:`~klayout_tools.coverage.coverage_rollup` /
+    :func:`~klayout_tools.coverage.rollup_status`), not from a mapping
+    private to this module, so this path cannot disagree with any other
+    audited verb about when a result may be called an unconditional success:
+    violations win first (``"violations"``, exit 3), then known zero checked
+    work (``"not_checked"``, exit 4), then a nonempty list of skipped
+    *requested* rules (``"clean_partial"``, exit 0 -- a real result that is
+    not this verb's unconditional success), and otherwise ``"clean"``.
+    :func:`drc_exit_code` derives the matching exit status from the same
+    table.
+
+    The ``skipped``/``inapplicable`` split behind that ``"clean_partial"``
+    row is :func:`_classify_skipped_rules`'s, and it is the reason an
+    ordinary run over a small block still earns an unconditional ``"clean"``:
+    a rule skipped for an absent input layer is *inapplicable* work when
+    running it could not have reported a violation anyway, and a skipped
+    *request* only when it could have. ``coverage.rules_skipped`` above keeps
+    listing both, unchanged.
 
     ``coverage.voltage_domain_warnings`` (issue #552) is a second, narrower
     trust gap ``layers_in_stream_without_rules`` alone does not surface:
@@ -946,6 +1111,14 @@ def run_drc(
                 {"marker": _fmt(marker), "description": description}
             )
 
+    # Issue #2110: the two common-coverage categories this engine's single
+    # "a layer it reads is absent" skip splits into -- see
+    # `_classify_skipped_rules` for why an empty assessment domain is
+    # inapplicable work rather than a skipped request, and why anything else
+    # stays a disclosed skip.
+    skipped_records, inapplicable_records = _classify_skipped_rules(
+        deck, rules_skipped, layout
+    )
     coverage = {
         "deck_layers": [_fmt(t) for t in sorted(deck_layer_tuples)],
         "layers_checked": [_fmt(t) for t in sorted(layers_checked)],
@@ -961,28 +1134,27 @@ def run_drc(
         # that emptiness from `rules_skipped` vs. the deck's own rule count.
         **build_check_coverage(
             checked=sorted(rules_checked),
-            skipped=[
-                {"id": rule, "reason": "absent_input_layer"}
-                for rule in sorted(rules_skipped)
-            ],
+            skipped=skipped_records,
+            inapplicable=inapplicable_records,
             nothing_checked_reasons=_curated_nothing_checked_reasons(
                 deck, rules_checked
             ),
         ),
     }
 
+    # Issue #2110: the verdict is the common decision table's, never a local
+    # re-derivation of it -- violations are `failed` (exit 3, decided before
+    # coverage is consulted at all), known zero checked work is `not_checked`
+    # (exit 4), and successful checks alongside a nonempty skipped-request
+    # list are `clean_partial` (exit 0, a real result that is *not* this
+    # verb's unconditional success). See `docs/coverage-contract.md`.
+    rollup = coverage_rollup({"coverage": coverage}, failed=bool(violations))
     return {
         "schema_version": 2,
         "file": path,
         "deck": deck_name,
         "dbu_um": layout.dbu,
-        "status": (
-            "violations"
-            if violations
-            else "not_checked"
-            if coverage["nothing_checked"]
-            else "clean"
-        ),
+        "status": rollup_status(rollup, success="clean", failure="violations"),
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
@@ -996,6 +1168,26 @@ def run_drc(
             include_klayout_version_mismatch=True,
         ),
     }
+
+
+def drc_exit_code(report: dict[str, Any]) -> int:
+    """The exit code the common rollup rule assigns ``report`` (issue #2110).
+
+    One derivation for both engines and for every consumer that mirrors
+    ``klt drc``'s own exit status (`klt eval`'s gate, today), so the
+    ``violations`` -> ``3`` / ``not_checked``|``coverage_unknown`` -> ``4`` /
+    ``clean``|``clean_partial`` -> ``0`` split cannot drift between them:
+    the producer's own failure determination (``status == "violations"``,
+    which :func:`~klayout_tools.coverage.coverage_rollup` decides *before*
+    coverage) is fed back in, and the table supplies the rest.
+
+    ``report`` must be a finished DRC report, not a ``--check``/``--rerun``
+    verification result -- those keep their own ``match``/``drifted`` 0/3
+    contract (see :func:`check_drc_report`).
+    """
+    return coverage_rollup(
+        report, failed=report.get("status") == "violations"
+    ).exit_code
 
 
 def _deck_path_for_report(committed: dict[str, Any]) -> str | None:

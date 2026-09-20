@@ -4,11 +4,20 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand — see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/drc.md`` for the full table):
-    0 - ran clean, no violations (or, under --check, the report still holds)
+    0 - ran clean, no violations (or, under --check, the report still holds).
+        Also ``status: "clean_partial"`` — every check that ran passed and
+        some requested rule did not (issue #2110): a real result, but not
+        this verb's unconditional success.
     1 - failed to run (bad file, unknown deck, engine error) — returned by
         ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - ran successfully, violations found (or, under --check, drifted)
+    4 - reached no usable verdict: ``status: "not_checked"`` (known zero
+        checked work) or ``"coverage_unknown"`` (unmeasurable execution)
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
+
+Every one of those codes below ``1`` is assigned by the common rollup table in
+:mod:`klayout_tools.coverage`, via :func:`~klayout_tools.drc.drc_exit_code` —
+never by a status comparison in this module (see ``docs/coverage-contract.md``).
 
 ``--engine`` (issue #565) selects between the default curated engine
 (``run_drc``, klt's own pip-only ``Region``-primitive deck) and the opt-in
@@ -49,6 +58,7 @@ from ..drc import (
     REQUEST_SCHEMA,
     DrcError,
     check_drc_report,
+    drc_exit_code,
     load_request_arg,
     rerun_drc_report,
     run_drc,
@@ -91,9 +101,12 @@ def run(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_text)
 
-    if report["status"] == "violations":
-        return EXIT_VIOLATIONS
-    return EXIT_CLEAN if report["status"] == "clean" else 4
+    # Issue #2110: the common rollup table decides this, not a local
+    # status->code mapping -- `clean_partial` is a real, exit-0 result that
+    # is not this verb's unconditional success, and adding it to a local
+    # `status == "clean"` test is exactly the per-verb divergence
+    # `docs/coverage-contract.md` exists to prevent.
+    return drc_exit_code(report)
 
 
 def _run_check(args: argparse.Namespace) -> int:
@@ -252,6 +265,33 @@ def _parse_deck_vars(raw: list[str] | None) -> dict[str, str]:
     return deck_vars
 
 
+def _print_coverage_gaps(coverage: dict) -> None:
+    """The text form's "here is what was not looked at" lines.
+
+    Two different gaps, both of which a bare ``status:`` line would hide:
+
+    - **Skipped requested rules** (issue #2110): the common block's
+      ``skipped`` list -- rules the deck asked for that did not run and could
+      have found something. This is exactly what makes a run
+      ``clean_partial``, so the text form names the rules rather than letting
+      a partial run read as an unqualified pass. Rules with nothing
+      applicable to check land in ``inapplicable`` instead and are
+      deliberately *not* printed here: they are not a gap (see
+      ``docs/cli/drc.md``).
+    - **Unchecked stream layers** (issue #189): geometry drawn on layers no
+      active rule references at all.
+    """
+    skipped_requested = coverage.get("skipped") or []
+    if skipped_requested:
+        print(f"skipped requested rules: {len(skipped_requested)}")
+        for record in skipped_requested:
+            print(f"  {record['id']}: {record['reason']}")
+
+    unchecked_layers = coverage["layers_in_stream_without_rules"]
+    if unchecked_layers:
+        print(f"unchecked layers in stream: {len(unchecked_layers)}")
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"deck: {report['deck']}")
@@ -272,10 +312,7 @@ def _print_text(report: dict) -> None:
         for line in deck_errors["error_lines"]:
             print(f"  {line}")
     print(f"violations: {report['violation_count']}")
-
-    unchecked_layers = report["coverage"]["layers_in_stream_without_rules"]
-    if unchecked_layers:
-        print(f"unchecked layers in stream: {len(unchecked_layers)}")
+    _print_coverage_gaps(report["coverage"])
 
     rule_counts = report["rule_counts"]
     if rule_counts:

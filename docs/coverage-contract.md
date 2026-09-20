@@ -183,13 +183,20 @@ Each of the six Phase 2 adapter issues (#2110, #2111, #2115, #2116, #2117,
    of work as `checked`, `skipped` (a *requested* check that did not run),
    `inapplicable` (outside this invocation's assessment) or `unknown`. Do
    not move work between those categories to reach a nicer row — but do
-   settle the classification deliberately, because it decides the row. The
-   open one today is curated DRC's `absent_input_layer`: Phase 1 records a
-   rule whose input layer is not drawn as a `skipped` request, which makes
-   an ordinary sky130 run on a small block `partial` (7 of 57 rules checked
-   on `examples/design-pipeline/06-layout.gds`). #2110 owns deciding whether
-   that is a requested-but-unchecked rule or work the invocation never made
-   applicable; this rule applies whichever answer it reaches.
+   settle the classification deliberately, because it decides the row.
+   Curated DRC's `absent_input_layer` was the open one, and #2110 settled
+   it: a skipped rule is `inapplicable` when running it with the absent
+   layer empty *could not have reported a violation* (every primitive in
+   `drc.py` returns nothing for an empty input region, so the check is a
+   provable no-op — a rule that constrains a drawn pair has no instance to
+   constrain), and a `skipped` request when it could have (today exactly
+   `check="antenna"`, whose primitive faults a zero-area protection
+   region). Phase 1 had recorded all of them as skipped requests, which
+   would have made an ordinary sky130 run on a small block partial (7 of 57
+   rules checked on `examples/design-pipeline/06-layout.gds`) and a bare
+   standard cell partial for declining to check the via rules of a cell that
+   draws no vias. See [cli/drc.md](cli/drc.md)'s "`coverage.skipped` vs.
+   `coverage.inapplicable`".
 2. Derive the verdict with `coverage_rollup(envelope, failed=…, errored=…)`,
    passing the path's own existing failure/error determination. Do not
    re-derive precedence locally.
@@ -209,7 +216,7 @@ to this document first.
 
 | Public path | Checked work and exclusions | Phase 1 result and CLI |
 | --- | --- | --- |
-| `drc --engine curated` | Executed rule IDs; absent input layers produce `absent_input_layer` skips. Deck scope and uncovered stream layers remain in legacy fields. | Violations retain `violations`/3; known zero becomes `not_checked`/4; otherwise `clean`/0. Empty-deck and all-skipped reason codes remain. |
+| `drc --engine curated` | Executed rule IDs. An absent input layer is an `absent_input_layer` skip only when running the rule could still have reported a violation; otherwise it is `no_applicable_geometry` inapplicable work (#2110). Deck scope and uncovered stream layers remain in legacy fields, and `rules_skipped` keeps listing both categories. | Violations retain `violations`/3; known zero becomes `not_checked`/4; a nonempty skipped-request list becomes `clean_partial`/0; otherwise `clean`/0. Empty-deck and all-skipped reason codes remain. |
 | `drc --engine klayout` | RDB categories are declarations, not proof of execution. `rule_categories` retains them; `rules_checked` and common `checked` contain only rule IDs with actual findings. The rest is `unmeasured_rule_execution`, so `known=false`. | Findings retain `violations`/3; otherwise `coverage_unknown`/4. **DRC envelope v2** versions the corrected `rules_checked` meaning for this engine. Neither an empty RDB nor a nonempty category list proves clean execution. There is no instrumentation interface claiming known full coverage in this release. |
 | `erc` antenna | One ID per actual gate/non-gate level compared to a limit. Missing PDK/limit are skips. The gate reference level is inapplicable. `scope="antenna"`; connectivity findings remain independently authoritative. | Any antenna/connectivity finding retains `violations`/3; zero graded antenna levels becomes `not_checked`/4; otherwise `clean`/0. A per-gate `pass_partial` remains disclosed; Phase 2 owns the overall partial policy. |
 | `power` EM | Net/island/edge IDs with both solved current and declared limit. Missing limit/current are skips. Without a requested solve the EM work is inapplicable. `scope="electromigration"`. | Additive top-level `status` mirrors `em_verdict.status`, or `not_checked` without a solve. `fail` exits 3, `not_checked` exits 4; existing `pass` and `pass_partial` exit 0. Network/IR data remain available on refusal. Existing signoff rules continue to reject `pass_partial`. |

@@ -689,7 +689,12 @@ gap is never dissolved by a clean status.
 Successful checks alongside a nonempty list of skipped *requested* work are
 `partial`: a real, exit-0 result that is **not** the verb's unconditional
 success token. Adapters report `f"{success}_partial"` (`clean_partial`,
-`pass_partial`) for it. Only `full` asserts positively established complete
+`pass_partial`) for it. Curated DRC is the first adopted adapter (#2110):
+`klt drc --engine curated` derives its `status` and exit code from this
+table, reports `clean_partial` for the partial row, and classifies a rule
+skipped for an absent input layer as `inapplicable` when running it could
+not have reported a violation — see
+[the contract](coverage-contract.md)'s producer mapping. Only `full` asserts positively established complete
 applicable coverage; missing common coverage (`legacy`) keeps grading by the
 verb-specific rules that always governed it and is never counted as proof of
 completeness. Optional Verilator code-coverage percentages are `legacy` and

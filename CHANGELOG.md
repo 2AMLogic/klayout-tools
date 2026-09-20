@@ -14,6 +14,36 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2110): `klt drc --engine curated` derives its `status` and exit
+  code from the common rollup table
+  ([`docs/coverage-contract.md`](docs/coverage-contract.md)) instead of a
+  per-verb status mapping, and can now report `status: "clean_partial"` (exit
+  `0`) — every rule that ran passed, and a rule that *could* have found
+  something did not run. A nonempty skipped-request list can no longer
+  coexist with this verb's unconditional `clean`, and `klt signoff` reports
+  such a citation as `partial_coverage` rather than counting it as a passing
+  check or mislabelling it `check_failed`. This also settles the
+  classification Phase 1 left open: a rule skipped because an input layer is
+  absent is now `coverage.inapplicable` with reason `no_applicable_geometry`
+  when running it could not have reported a violation (every primitive in the
+  curated engine returns nothing for an empty input region, so the check is a
+  provable no-op), and stays `coverage.skipped` with reason
+  `absent_input_layer` when it could have — today exactly `check="antenna"`,
+  whose primitive faults a zero-area protection region. Recording all of them
+  as skipped requests, as Phase 1 did, would have made an ordinary sky130 run
+  on a small block partial (7 of 57 rules checked on
+  `examples/design-pipeline/06-layout.gds`). Because no shipped deck authors
+  an `antenna` rule, every `sky130`/`gf180mcu`/`sg13g2`/`sg13cmos5l` run
+  keeps its existing `clean`/`violations`/`not_checked` verdict and exit code;
+  what changes for them is that their skipped rules are now disclosed as
+  inapplicable work, so a clean run states *complete applicable* coverage
+  instead of reading as partial. `coverage.rules_skipped` still lists both
+  categories, unchanged, and no `schema_version` bumps (the `status` value is
+  an additive enum member under the pre-1.0 policy). `klt eval`'s DRC gate
+  mirrors the same table: a partial run is `status: "fail"` with the exit code
+  `klt drc` itself would return. See
+  [`docs/cli/drc.md`](docs/cli/drc.md)'s "`coverage.skipped` vs.
+  `coverage.inapplicable`".
 - **Fixed**: `klt extract` no longer writes a net name containing `.` into a
   node-reference position of its SPICE output (issue #2145). A net can arrive
   carrying an instance path joined with a dot — `XBIAS.vb1` — either from
