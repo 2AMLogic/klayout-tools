@@ -83,6 +83,8 @@ from .coverage import (
     REASON_EMPTY_CORNER_MATRIX,
     REASON_UNRECOGNIZED_LIMIT_KEYS,
     build_check_coverage,
+    coverage_rollup,
+    rollup_status,
     work_id,
 )
 from .metrics import is_registered
@@ -1224,19 +1226,31 @@ def run_sim(
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
     errored = sum(1 for c in corners if c["status"] == "error")
-    if errored:
-        status = "error"
-    elif failed:
-        status = "fail"
-    elif any(m["status"] == "fail" for m in measurements_rollup):
-        # Only reachable via a declared Monte Carlo sigma window: every other
-        # rollup `fail` is inherited from a corner that already failed above.
-        # A `mean +/- k*sigma` window outside the limits is a real design
-        # failure even when every individual sample passed, so it makes the
-        # run `fail` (exit 3) rather than being reported and ignored.
-        status = "fail"
-    else:
-        status = "not_checked" if coverage["nothing_checked"] else "pass"
+    # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
+    # design failure even when every individual sample passed -- it is only
+    # reachable via a declared sigma window, since every other rollup `fail`
+    # is already inherited from a corner that failed above -- so it feeds
+    # the same `failed` precedence input as a failed corner, rather than
+    # being reported and ignored.
+    measurement_rollup_failed = any(m["status"] == "fail" for m in measurements_rollup)
+    # Issue #2109: the common rollup rule is the single decision table for
+    # real failures/errors, zero/partial/unknown/malformed coverage and full
+    # success -- see `docs/coverage-contract.md`'s "The common rollup rule"
+    # and this module's own coverage-adapter row in its producer/
+    # compatibility table. `failed`/`errored` are this run's own outcome,
+    # decided before coverage is consulted at all; coverage is read from the
+    # `coverage` block this function already built. `rollup_status` reports
+    # `"pass_partial"` (the token #1997 already shipped for `klt power`) for
+    # successful checks alongside a nonempty skip list -- e.g. an
+    # unrecognised `limits` key beside a recognised one, or a corner with no
+    # requested measurements -- rather than the unconditional `"pass"` a
+    # nonempty skip list must never be reported as.
+    rollup = coverage_rollup(
+        {"coverage": coverage},
+        failed=bool(failed) or measurement_rollup_failed,
+        errored=bool(errored),
+    )
+    status = rollup_status(rollup, success="pass", failure="fail", errored="error")
 
     environment: dict[str, Any] = {
         "engine": engine,
@@ -1327,11 +1341,17 @@ def run_sim(
             _CORNER_ERRORED_COUNT_METRIC_NAME: errored,
         },
         "environment": environment,
-        # Issue #1996: what this verdict was actually graded over -- always
-        # present, purely additive. `nothing_checked` is the load-bearing
-        # field: an empty corner matrix, or a `limits` object whose keys
-        # `klt sim` never applied, both produce `status: "pass"` from a run
-        # that checked nothing. See `_build_coverage`.
+        # Issue #1996/#2109: what this verdict was actually graded over --
+        # always present, purely additive. `nothing_checked` is the
+        # load-bearing field: an empty corner matrix, or a `limits` object
+        # whose keys `klt sim` never applied, both leave `checked` empty, and
+        # the common rollup rule above reports `status: "not_checked"`
+        # (exit 4) rather than an unconditional pass for a run that checked
+        # nothing. A nonempty `skipped` list beside real checked work (one
+        # unrecognised `limits` key alongside a recognised one, say) instead
+        # reports `status: "pass_partial"` -- real, exit-0 evidence that is
+        # not the unconditional success. See `_build_coverage` and
+        # `docs/coverage-contract.md`.
         "coverage": coverage,
         "provenance": build_provenance(
             deck_name=(os.path.basename(models_lib) if models_lib else None),

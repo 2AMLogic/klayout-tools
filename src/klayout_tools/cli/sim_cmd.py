@@ -4,12 +4,17 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/sim.md`` for the full table):
-    0 - every corner passed
+    0 - every corner passed -- ``status`` is ``"pass"``, or ``"pass_partial"``
+        (issue #2109's common rollup rule) when every executed check passed
+        but requested work was skipped (an unrecognized ``limits`` key, an
+        unavailable measurement, an empty corner matrix, ...)
     1 - failed to run at all (bad request, unresolvable netlist/model
         library, unsupported engine, unknown backend) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
     3 - ran successfully, at least one measurement failed a limit
-    4 - at least one corner errored -- the sweep is incomplete/untrustworthy
+    4 - at least one corner errored, or zero measurements/bounds were
+        actually checked (``status: "not_checked"``) -- the sweep is
+        incomplete/untrustworthy
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 
 Exit codes 3/4 extend drc's precedent (0/1/2/3) rather than reusing 2, per
