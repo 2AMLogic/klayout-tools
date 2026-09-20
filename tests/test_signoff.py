@@ -3178,6 +3178,75 @@ def test_disagreement_in_two_roles_yields_one_mismatch_per_role(tmp_path):
     assert [entry["role"] for entry in mismatches] == ["layout", "netlist"]
 
 
+def test_sim_and_pre_extracted_lvs_are_compared_and_refused_when_netlists_differ(
+    tmp_path,
+):
+    """Issue #2039's Judge review: `klt lvs`'s pre-extracted (`layout.netlist`)
+    request shape is a `netlist`-role report, exactly like `klt sim` -- both
+    land in the same role bucket `_check_input_hashes` groups by. Pairing a
+    `sim` report with a pre-extracted `lvs` report of a *different* netlist
+    (the realistic shape `examples/signoff/` generates) is genuine staleness,
+    not a false alarm, and must render `refused` -- the strictness this repo
+    intends for that pairing (see `docs/cli/sim.md` and
+    `docs/json-contract.md`'s `role` section).
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    # Precondition: the two `netlist`-role digests really do disagree, so
+    # this test is about the cross-check and not about fixtures that happen
+    # to already agree.
+    assert (
+        LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"]["input"]["content_hash"]
+        != SIM_PASS_ENVELOPE["provenance"]["input"]["content_hash"]
+    )
+
+    result = build_signoff([drc_path, lvs_path, sim_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    assert mismatches[0]["role"] == "netlist"
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[lvs_path] == "sha256:layoutAspice"
+    assert values[sim_path] == "sha256:netlistA"
+
+
+def test_sim_and_pre_extracted_lvs_pass_when_they_pin_the_same_netlist(tmp_path):
+    """The paired passing case for the test above: a post-layout `sim` run of
+    the *same* netlist a pre-extracted `lvs` run verified must still
+    aggregate to `pass` -- the gate compares digests, not report kinds, so
+    two `netlist`-role citations naming the identical file are exactly the
+    binding issue #2039 wants (a schematic-level `sim`, which will never
+    share the extracted netlist's hash, is the case the refusal above
+    protects against).
+    """
+    same_netlist_sim = {
+        **SIM_PASS_ENVELOPE,
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": (
+                    LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"]["input"][
+                        "content_hash"
+                    ]
+                ),
+                "role": "netlist",
+            },
+        },
+    }
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", same_netlist_sim)
+
+    result = build_signoff([drc_path, lvs_path, sim_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
 def test_role_less_envelope_is_read_as_a_layout_hash(tmp_path):
     """Back-compat: evidence committed before `role` existed carries only
     `{content_hash}`. `"the input layout stream the run was made against"`

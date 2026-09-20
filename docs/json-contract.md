@@ -447,6 +447,17 @@ geometry change from a klt/KLayout upgrade. See
     that, so archived evidence keeps participating in the layout-side
     comparison rather than being exempted from it).
 
+    **`sim` shares the `netlist` bucket with three other verbs (issue
+    #2039).** `klt lvs`'s pre-extracted (`layout.netlist`) shape,
+    `place-and-route`, `sta`'s `verilog` request, and `sim` are all
+    `netlist`-role, so a bundle citing `sim` alongside any one of the other
+    three is compared and refused unless they pin the same netlist file.
+    This is deliberate: a post-layout `sim` run of the exact netlist `lvs`
+    verified should bind to that digest. A schematic-level `sim` — which
+    will not share an extracted netlist's hash — should not be bundled with
+    a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a later design
+    stage; see `docs/cli/sim.md`.
+
     **`klt wave build`/`klt wave query` are a deliberate, permanent
     exception (issue #2039).** Their `input` block is built by the native
     `klt-wave` Rust binary (`native/wave/src/build.rs`), not by this

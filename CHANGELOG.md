@@ -432,9 +432,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   can never match `None`, whether or not the netlist actually moved. The
   `netlist` role keeps a `drc` + `sim` bundle out of the layout-role
   comparison, so a bundle describing one design still aggregates to `pass`
-  rather than `refused`. Purely additive — no `schema_version` bump (`klt
-  sim` stays at `3`). Separately, `klt wave build`/`klt wave query`'s
-  role-less `provenance.input` (built by the native `klt-wave` Rust binary,
+  rather than `refused`. This is a user-visible `pass` → `refused` change for
+  a bundle pairing `sim` with another `netlist`-role report — `klt lvs`'s
+  pre-extracted (`layout.netlist`) shape, `place-and-route`, or `sta`'s
+  `verilog` request — unless they pin the same netlist file: deliberate, as a
+  post-layout `sim` of the netlist `lvs` verified should bind to that digest,
+  while a schematic-level `sim` should not be bundled with a citation of a
+  later design stage. See `docs/cli/sim.md` and `docs/json-contract.md`'s
+  `provenance.input.role` section. Purely additive — no `schema_version`
+  bump (`klt sim` stays at `3`). Separately, `klt wave build`/`klt wave
+  query`'s role-less `provenance.input` (built by the native `klt-wave` Rust binary,
   not this module) was evaluated for the same treatment and kept as a
   deliberate, permanent exception rather than closed: neither existing
   `role` value honestly describes what either verb hashes (a waveform trace
