@@ -603,10 +603,13 @@ applies it in two places, neither of which re-derives it:
   success token; what :func:`_non_passing_reason` adds is that the item says
   :data:`_REASON_PARTIAL_COVERAGE` instead of :data:`_REASON_CHECK_FAILED`,
   so a reader is sent to the skipped work rather than to a violation that
-  does not exist. Failure precedence is structural, not an ordering here: a
-  run that found a defect reports its *failure* token, because
+  does not exist. Producer-side failure precedence is structural: a run that
+  found a defect reports its *failure* token, because
   :func:`~klayout_tools.coverage.coverage_rollup` decides ``failed`` before
-  it consults coverage at all.
+  it consults coverage at all. Signoff-side failure precedence is not, and
+  is ordered explicitly (issue #2152): a :func:`_critical_metric_blockers`
+  hit (#1850) is decided in this module, can co-occur with a partial token
+  on one envelope, and outranks it.
 - Until a verb's Phase 2 adapter lands (#2110/#2111/#2116/#2117/#2118 --
   ``erc``'s own adapter, #2115, now reports ``"clean_partial"``), its status
   can still be the unconditional success word on a run whose common
@@ -2409,12 +2412,25 @@ def _non_passing_reason(kind: str, envelope: dict[str, Any]) -> str:
     evidence: :data:`_REASON_PARTIAL_COVERAGE` or
     :data:`_REASON_CHECK_FAILED` (issue #2109).
 
-    Real failures keep precedence by construction, not by ordering here: a
-    run that found a defect reports its *failure* token, never the partial
-    one (:func:`~klayout_tools.coverage.coverage_rollup` decides ``failed``
-    before it ever consults coverage), so the two cases are disjoint at the
-    producer and this function only has to read which one was reported.
+    Real failures keep precedence over the partial token, by two different
+    mechanisms -- only one of which is structural (issue #2152):
+
+    - *Producer-side*, by construction: a run that found a defect reports
+      its *failure* token, never the partial one
+      (:func:`~klayout_tools.coverage.coverage_rollup` decides ``failed``
+      before it ever consults coverage), so those two tokens are disjoint
+      at the producer and reading which one was reported is enough.
+    - *Signoff-side*, by the ordering below: :func:`_check_passed` fails an
+      envelope off :func:`_critical_metric_blockers` (issue #1850)
+      regardless of what its ``status`` says, so a partial token and a
+      failing registered ``critical: true`` metric can and do co-occur on
+      one envelope. That case is decided **here**, not at the producer --
+      the blocker is a real, mechanically-detected defect, so it must not
+      be reported as a mere coverage gap, and the check for it therefore
+      runs *before* the status token is read.
     """
+    if _critical_metric_blockers(envelope):
+        return _REASON_CHECK_FAILED
     if _reports_partial_status(kind, envelope):
         return _REASON_PARTIAL_COVERAGE
     return _REASON_CHECK_FAILED
