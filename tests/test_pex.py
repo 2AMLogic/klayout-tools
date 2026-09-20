@@ -47,6 +47,7 @@ from klayout_tools.pex import (
     _prepare_extracted_request,
     _rewrite_dut_include,
     _row_status,
+    _status_from_coverage,
     _subckt_interfaces,
     _unextracted_delta_rows,
     run_pex,
@@ -489,6 +490,34 @@ def test_build_coverage_errored_rows_are_unavailable_comparisons():
     assert coverage["delta_rows"] == 1
     assert coverage["nothing_checked"] is True
     assert coverage["nothing_checked_reasons"] == ["unavailable_comparison"]
+
+
+def test_status_from_coverage_uses_common_rollup_for_partial_and_zero():
+    """A skipped requested comparison is reportable but never an unconditional
+    pass; known zero comparisons remain refused as not checked."""
+    partial = _build_coverage(
+        testbenches_summary=[
+            {"request": "empty.json", "corner_count": 0, "measurement_names": []}
+        ],
+        delta=[
+            {
+                "spec_row": "vout",
+                "corner_id": "tt/1.800V/27C",
+                "status": "pass",
+            }
+        ],
+        corner_count=1,
+    )
+    assert _status_from_coverage(partial, failed=False, errored=False) == "pass_partial"
+
+    zero = _build_coverage(testbenches_summary=[], delta=[], corner_count=0)
+    assert _status_from_coverage(zero, failed=False, errored=False) == "not_checked"
+
+
+def test_status_from_coverage_preserves_failure_and_error_precedence():
+    coverage = _build_coverage(testbenches_summary=[], delta=[], corner_count=0)
+    assert _status_from_coverage(coverage, failed=True, errored=False) == "fail"
+    assert _status_from_coverage(coverage, failed=True, errored=True) == "error"
 
 
 # --------------------------------------------------------------------------- #

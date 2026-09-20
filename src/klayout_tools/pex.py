@@ -141,7 +141,13 @@ from typing import Any
 
 from . import env_provenance
 from ._paths import _fold_spice_continuations, _resolve_relative
-from .coverage import REASON_NO_DELTA_ROWS, build_check_coverage, work_id
+from .coverage import (
+    REASON_NO_DELTA_ROWS,
+    build_check_coverage,
+    coverage_rollup,
+    rollup_status,
+    work_id,
+)
 from .extract import ExtractError, run_extract
 from .sim import SimError, load_request, run_sim
 
@@ -900,6 +906,14 @@ def _build_coverage(
     }
 
 
+def _status_from_coverage(
+    coverage: dict[str, Any], *, failed: bool, errored: bool
+) -> str:
+    """Map PEX findings and comparison coverage through the shared rule."""
+    rollup = coverage_rollup({"coverage": coverage}, failed=failed, errored=errored)
+    return rollup_status(rollup, success="pass", failure="fail", errored="error")
+
+
 def _prepare_extracted_request(
     *,
     testbench_path: str,
@@ -1422,12 +1436,10 @@ def run_pex(
     passed = sum(1 for row in delta if row["status"] == "pass")
     failed = sum(1 for row in delta if row["status"] == "fail")
     errored = sum(1 for row in delta if row["status"] == "error")
-    if errored:
-        status = "error"
-    elif failed:
-        status = "fail"
-    else:
-        status = "not_checked" if coverage["nothing_checked"] else "pass"
+    # Issue #2109: use the shared coverage decision table so a partial
+    # comparison can never be reported as an unconditional pass, while real
+    # failures and errors retain precedence over coverage qualification.
+    status = _status_from_coverage(coverage, failed=bool(failed), errored=bool(errored))
 
     parasitics = extract_report.get("parasitics") or {}
     result: dict[str, Any] = {
