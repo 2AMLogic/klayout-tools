@@ -1323,6 +1323,7 @@ required.
   "t1_item_count": 11,
   "t1_met_count": 1,
   "source_doc": "docs/design-evidence-tiers.md",
+  "source_doc_content_hash": "sha256:...",
   "items": [
     {
       "tier": "T1",
@@ -1382,6 +1383,7 @@ required.
 | `t1_item_count` | integer              | Number of rendered T1 items (11 for `analog`/`digital`, 22 for `mixed-signal`). Eleven since issue #2025 added item 11 ("Power delivery (structural)"); the value is the parsed checklist's own length, never a literal in code. |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
+| `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
 | `items`         | array\<object\>      | One entry per T1 checklist item (per partition, for `mixed-signal`), then one entry per T2-T4 ladder row. |
 
 #### `items[]` entries
@@ -1535,6 +1537,7 @@ already-shipped field means).
   "t1_count": 1,
   "not_t1_count": 2,
   "source_doc": "docs/design-evidence-tiers.md",
+  "source_doc_content_hash": "sha256:...",
   "blocks": [
     {
       "block": "sky130-bandgap",
@@ -1543,6 +1546,7 @@ already-shipped field means).
       "tier": "T1",
       "t1_item_count": 11,
       "t1_met_count": 11,
+      "source_doc_content_hash": "sha256:...",
       "blocking_item": null,
       "ungraded_items": [],
       "drc_coverage": [
@@ -1562,6 +1566,7 @@ already-shipped field means).
       "tier": null,
       "t1_item_count": 11,
       "t1_met_count": 3,
+      "source_doc_content_hash": "sha256:...",
       "blocking_item": {
         "id": 4,
         "title": "LVS clean",
@@ -1595,6 +1600,7 @@ already-shipped field means).
 | `t1_count`      | integer             | Number of those blocks with `tier: "T1"`.                                                |
 | `not_t1_count`  | integer             | `block_count - t1_count`.                                                                 |
 | `source_doc`    | string               | As in tier-report mode: `"docs/design-evidence-tiers.md"`, or the `--tiers-doc`/`$KLT_TIERS_DOC` override path. |
+| `source_doc_content_hash` | string \| null | As in tier-report mode (issue #2175): the resolved doc's `sha256:`-prefixed content hash. Since `tiers_doc` is forwarded verbatim to every per-block grading call, this is the shared value every `blocks[]` row's own copy also carries within one roll-up — the direct answer to "were these N verdicts taken against the same checklist". |
 | `blocks`        | array\<object\>      | One entry per fleet manifest `blocks[]` entry, in order.                                 |
 
 #### `blocks[]` entries
@@ -1607,6 +1613,7 @@ already-shipped field means).
 | `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
 | `t1_item_count` | integer              | This block's rendered T1 item count (11, or 22 for `mixed-signal`).                      |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
+| `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker — the first unmet *gradeable* one, falling back to an ungradeable one only when nothing gradeable is unmet (issue #2178). See below. |
 | `ungraded_items`| array\<object\>      | Every unmet **structurally ungradeable** T1 item (1, 2, 9, 10 — the ones with no `klt` verb behind them), in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issue #2178). These are exactly the rows `blocking_item` steps over: demoted so an honestly-uncited item 1 never masks a real gap, listed so that demotion never silently hides them. `[]` for a block that cites all four, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — those four items still have to be `"met"` for `tier: "T1"`. |
 | `drc_coverage`  | array\<object\>      | What this block's DRC evidence reported it did *not* check (issue #2002): one entry per `"met"` `drc`-kind citation whose envelope carries a `coverage` block, shaped `{"item", "partition", "layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`. `[]` when no such citation exists — an unmet item 3, a pre-`coverage` envelope, or a block whose evidence is not DRC — so `[]` means "nothing reported", never "no gaps". Reduced from this block's own tier report, never re-graded; it changes no block's `tier`. |
@@ -1821,7 +1828,7 @@ T1: 1/11 items met
 [UNMET] T4 #- T4 — production-validated
         reason: tier_not_supported
 
-source: docs/design-evidence-tiers.md
+source: docs/design-evidence-tiers.md (content_hash=sha256:...)
 ```
 
 (`UNMET`/`MET` render in red/green respectively in a real terminal, and each
@@ -2135,7 +2142,7 @@ fleet: 1/4 blocks at T1 (3 not yet)
 [not-T1] sky130-ota-5t (analog)  T1: 0/11 items met
         blocking: #1 Design sources (reason: no_evidence)
 
-source: docs/design-evidence-tiers.md
+source: docs/design-evidence-tiers.md (content_hash=sha256:...)
 ```
 
 One query names every canary's tier and, for the three not yet at T1,
@@ -2185,7 +2192,7 @@ fleet: 2/4 blocks at T1 (2 not yet)
 [not-T1] sky130-ota-5t (analog)  T1: 0/11 items met
         blocking: #1 Design sources (reason: no_evidence)
 
-source: docs/design-evidence-tiers.md
+source: docs/design-evidence-tiers.md (content_hash=sha256:...)
 ```
 
 Had item 7 been the gap instead, the roll-up would name it the same way —

@@ -3890,6 +3890,41 @@ def test_analog_manifest_renders_eleven_t1_items_plus_three_ladder_rows():
     assert all(item["status"] == "unmet" for item in result["items"])
 
 
+def test_tier_report_pins_the_governing_doc_by_content_hash(tmp_path):
+    # Issue #2175: `source_doc` alone names *which* file was parsed, not
+    # *what it said* -- `source_doc_content_hash` closes that gap. It must
+    # actually reflect the resolved doc's bytes (changes when they change),
+    # not merely be present.
+    result = build_tier_report(_manifest())
+    content_hash = result["source_doc_content_hash"]
+    assert content_hash is not None
+    assert content_hash.startswith("sha256:")
+
+    from klayout_tools.design_evidence_tiers import default_doc_path
+
+    digest = hashlib.sha256(default_doc_path().read_bytes()).hexdigest()
+    assert content_hash == f"sha256:{digest}"
+
+    # An explicit `--tiers-doc` override is hashed too, and a different doc
+    # yields a different hash -- this is not a hardcoded/cached value.
+    vendored = tmp_path / "vendored.md"
+    vendored.write_text(
+        "## The ladder\n\n"
+        "| Tier | Claim | Demonstrated by |\n"
+        "| --- | --- | --- |\n"
+        "| **T1 — sim-validated** | claim | evidence |\n\n"
+        "## T1 checklist\n\n"
+        "1. **Only item** -- body text.\n"
+    )
+    overridden = build_tier_report(_manifest(), tiers_doc=str(vendored))
+    override_hash = overridden["source_doc_content_hash"]
+    assert override_hash is not None
+    assert override_hash != content_hash
+    assert override_hash == (
+        f"sha256:{hashlib.sha256(vendored.read_bytes()).hexdigest()}"
+    )
+
+
 def test_digital_manifest_uses_the_digital_column():
     result = build_tier_report(_manifest(kind="digital"))
 
@@ -5876,6 +5911,28 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
         "partition": None,
         "reason": "no_evidence",
     }
+
+
+def test_fleet_report_pins_the_governing_doc_by_content_hash_per_row_and_top_level(
+    tmp_path,
+):
+    # Issue #2175: the roll-up's own top-level `source_doc_content_hash` is
+    # the direct "were these N verdicts taken against the same checklist"
+    # answer -- and, since `tiers_doc` is forwarded verbatim to every
+    # per-block grading call, every row's own copy must agree with it (and
+    # with what a standalone `build_tier_report()` call on the same doc
+    # would produce -- never independently recomputed).
+    block_a = _fleet_block_manifest("canary-a")
+    block_b = _fleet_block_manifest("canary-b")
+
+    result = build_fleet_report({"blocks": [block_a, block_b]})
+    expected = build_tier_report(block_a)["source_doc_content_hash"]
+
+    assert expected is not None
+    assert expected.startswith("sha256:")
+    assert result["source_doc_content_hash"] == expected
+    for row in result["blocks"]:
+        assert row["source_doc_content_hash"] == expected
 
 
 def test_fleet_report_never_reparses_evidence_itself(tmp_path):

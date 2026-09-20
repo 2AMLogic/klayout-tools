@@ -50,6 +50,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ._provenance import sha256_file
+
 __all__ = [
     "CANONICAL_DOC_LABEL",
     "DEFAULT_DOC_PATH",
@@ -204,6 +206,7 @@ def parse_tier_doc(path: str | Path | None = None) -> dict[str, Any]:
                 },
                 ...  # items 1-11, in doc order
             ],
+            "content_hash": "sha256:...",
         }
 
     Exactly one of ``text`` / ``columns`` is populated per item: ``columns``
@@ -213,6 +216,19 @@ def parse_tier_doc(path: str | Path | None = None) -> dict[str, Any]:
     ``notes`` holds any additional bullet under an item that names neither
     kind (item 5's spec-ratification caveat, and item 11's shared `klt erc`
     supply-spec clause).
+
+    ``content_hash`` (issue #2175) is the ``sha256:<hex>`` digest of the
+    resolved doc's raw bytes on disk -- computed via the same
+    :func:`~klayout_tools._provenance.sha256_file` helper every ``klt``
+    envelope's own ``provenance.input.content_hash`` uses, so a consumer that
+    pins one against the other compares like with like. It names *which*
+    checklist a tier verdict was graded against, distinctly from
+    ``source_doc`` (which only names *where* the doc came from, not what it
+    said) -- see :func:`klayout_tools.signoff.build_tier_report`'s
+    ``source_doc_content_hash`` field. ``None`` only in the pathological case
+    where the doc was readable as text (so parsing above already succeeded)
+    but ``sha256_file`` cannot re-read it as bytes (e.g. it was deleted or
+    made unreadable between the two reads).
 
     Raises :class:`DesignEvidenceTiersError` if the file cannot be read, or
     if either the ladder table or the T1 item list is empty/malformed --
@@ -244,7 +260,10 @@ def parse_tier_doc(path: str | Path | None = None) -> dict[str, Any]:
     ladder = _parse_ladder(lines, doc_path)
     t1_items = _parse_t1_items(lines, doc_path)
 
-    return {"ladder": ladder, "t1_items": t1_items}
+    digest = sha256_file(str(doc_path))
+    content_hash = f"sha256:{digest}" if digest is not None else None
+
+    return {"ladder": ladder, "t1_items": t1_items, "content_hash": content_hash}
 
 
 # --------------------------------------------------------------------------- #

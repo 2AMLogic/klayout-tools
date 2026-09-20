@@ -371,7 +371,10 @@ def _print_tier_report_text(result: dict) -> None:
             print(f"        {_RED}reason: {item['reason']}{_RESET}")
 
     print()
-    print(f"source: {result['source_doc']}")
+    print(
+        f"source: {result['source_doc']} "
+        f"(content_hash={result['source_doc_content_hash']})"
+    )
 
 
 def _print_fleet_report_text(result: dict) -> None:
@@ -428,4 +431,7 @@ def _print_fleet_report_text(result: dict) -> None:
             )
 
     print()
-    print(f"source: {result['source_doc']}")
+    print(
+        f"source: {result['source_doc']} "
+        f"(content_hash={result['source_doc_content_hash']})"
+    )
