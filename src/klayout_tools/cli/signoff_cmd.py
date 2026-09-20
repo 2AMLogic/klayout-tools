@@ -398,6 +398,20 @@ def _print_fleet_report_text(result: dict) -> None:
                 f"{blocking_item['title']} (reason: {blocking_item['reason']})"
                 f"{_RESET}"
             )
+        # Issue #2178: the unmet T1 items with no `klt` verb behind them
+        # (1, 2, 9, 10) -- the rows `blocking_item` deliberately steps over
+        # so an honestly-uncited item 1 never masks a real, runnable gap.
+        # Demoted to one summary line rather than dropped: they are still
+        # part of why this block is not T1, they are just not something a
+        # reader can go and *run*. The JSON carries them in full.
+        ungraded_items = block.get("ungraded_items") or []
+        if ungraded_items:
+            ids = ", ".join(
+                f"#{item['id']}"
+                + (f" [{item['partition']}]" if item["partition"] else "")
+                for item in ungraded_items
+            )
+            print(f"        ungraded (no klt verb, uncited): {ids}")
         # Issue #2002: what each block's DRC evidence said it did *not*
         # check, beside its tier. Printed only for a row that actually
         # reported a gap -- the roll-up's job is "what is worth looking at",

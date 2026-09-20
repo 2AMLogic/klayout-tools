@@ -1798,9 +1798,11 @@ def test_fleet_rollup_reports_each_blocks_drc_coverage(tmp_path):
         }
     ]
     # Unchanged verdict: item 3 is met, the block is simply not T1 yet for
-    # the usual reason (items 1-2 have no evidence), never because of a gap.
+    # the usual reason (nothing else is cited), never because of a gap. The
+    # blocker is item 4 -- the next *gradeable* unmet item, since items 1/2
+    # are honestly uncited and no longer win the reduction (issue #2178).
     assert block["t1_met_count"] == 1
-    assert block["blocking_item"]["id"] == 1
+    assert block["blocking_item"]["id"] == 4
 
 
 def test_fleet_rollup_mixes_pre_and_post_coverage_evidence(tmp_path):
@@ -5824,12 +5826,15 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
     partial_evidence = {k: v for k, v in full_evidence.items() if k != "4"}
     block_b = _fleet_block_manifest("canary-b", evidence=partial_evidence)
 
-    # canary-c: nothing met -> blocked on item 1 (the first T1 item).
+    # canary-c: nothing met -> blocked on item 3, the first T1 item with a
+    # check behind it. Items 1 and 2 are unmet too, but they are
+    # structurally ungradeable (issue #2178) and are reported as
+    # `ungraded_items` rather than as *the* blocker.
     block_c = _fleet_block_manifest("canary-c", evidence={})
 
     result = build_fleet_report({"blocks": [block_a, block_b, block_c]})
 
-    assert result["schema_version"] == 1
+    assert result["schema_version"] == 2
     assert result["block_count"] == 3
     assert result["t1_count"] == 1
     assert result["not_t1_count"] == 2
@@ -5840,6 +5845,8 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
     assert by_name["canary-a"]["tier"] == "T1"
     assert by_name["canary-a"]["t1_met_count"] == 11
     assert by_name["canary-a"]["blocking_item"] is None
+    # Every item is cited, so nothing is left ungraded either.
+    assert by_name["canary-a"]["ungraded_items"] == []
 
     assert by_name["canary-b"]["tier"] is None
     assert by_name["canary-b"]["blocking_item"] == {
@@ -5848,30 +5855,228 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
         "partition": None,
         "reason": "no_evidence",
     }
+    assert by_name["canary-b"]["ungraded_items"] == []
 
+    # The degenerate "no evidence at all" block still names a blocker (it is
+    # not T1, so it must) -- item 3, the first one a reader can actually go
+    # and run, with the four ungradeable claims listed beside it.
     assert by_name["canary-c"]["tier"] is None
-    assert by_name["canary-c"]["blocking_item"]["id"] == 1
-    assert by_name["canary-c"]["blocking_item"]["title"] == "Design sources"
+    assert by_name["canary-c"]["blocking_item"]["id"] == 3
+    assert by_name["canary-c"]["blocking_item"]["title"] == "DRC clean"
     assert by_name["canary-c"]["blocking_item"]["reason"] == "no_evidence"
+    assert [item["id"] for item in by_name["canary-c"]["ungraded_items"]] == [
+        1,
+        2,
+        9,
+        10,
+    ]
+    assert by_name["canary-c"]["ungraded_items"][0] == {
+        "id": 1,
+        "title": "Design sources",
+        "partition": None,
+        "reason": "no_evidence",
+    }
 
 
 def test_fleet_report_never_reparses_evidence_itself(tmp_path):
-    # The roll-up's blocking_item must be exactly the first unmet T1 item
-    # build_tier_report() already computed -- no independent re-grading.
+    # The roll-up's blocking_item must be a verbatim copy of an item
+    # build_tier_report() already graded -- no independent re-grading. The
+    # issue #2178 rule changes *which* unmet item is named, never what any
+    # item's status/reason is.
     drc_path = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
     manifest = _fleet_block_manifest("canary-a", evidence={"3": drc_path})
 
     tier_result = build_tier_report(manifest)
     fleet_result = build_fleet_report({"blocks": [manifest]})
 
-    first_unmet = next(
+    blocking_item = fleet_result["blocks"][0]["blocking_item"]
+    # Item 3's DRC evidence has violations, so it is the first unmet T1 item
+    # with a check behind it -- and the roll-up reports that check's own
+    # failure verdict, not a re-derived one.
+    graded = next(
         item
         for item in tier_result["items"]
-        if item["tier"] == "T1" and item["status"] != "met"
+        if item["tier"] == "T1" and item["id"] == blocking_item["id"]
     )
-    blocking_item = fleet_result["blocks"][0]["blocking_item"]
-    assert blocking_item["id"] == first_unmet["id"]
-    assert blocking_item["reason"] == first_unmet["reason"]
+    assert blocking_item["id"] == 3
+    assert graded["status"] == "unmet"
+    assert blocking_item == {
+        key: graded[key] for key in ("id", "title", "partition", "reason")
+    }
+    assert blocking_item["reason"] == "check_failed"
+
+    # Same discipline for the demoted rows: verbatim copies of the tier
+    # report's own grading of items 1, 2, 9 and 10.
+    ungraded = fleet_result["blocks"][0]["ungraded_items"]
+    assert [item["id"] for item in ungraded] == [1, 2, 9, 10]
+    for row in ungraded:
+        source = next(
+            item
+            for item in tier_result["items"]
+            if item["tier"] == "T1" and item["id"] == row["id"]
+        )
+        assert source["status"] == "unmet"
+        assert row == {
+            key: source[key] for key in ("id", "title", "partition", "reason")
+        }
+
+
+# --------------------------------------------------------------------------- #
+# The blocker reduction skips structurally-ungradeable items -- issue #2178.
+#
+# docs/cli/signoff.md tells a manifest author that items 1, 2, 9 and 10 have
+# no `klt` verb behind them, that the tool cannot check their topical
+# relevance, and that "the safest default is to leave them uncited". Taking
+# that advice renders four UNMET/no_evidence rows at positions 1, 2, 9 and 10
+# by construction -- so reducing on "first unmet item in render order"
+# reported *every* honestly-authored block as "blocked on item 1: Design
+# sources", whatever its real gaps were. These tests pin the rule that
+# replaced it: a gradeable unmet item always wins, the ungradeable four are
+# reported beside it rather than dropped, and a block whose only gaps *are*
+# those four still names one of them (it is not T1, so it must name
+# something).
+# --------------------------------------------------------------------------- #
+
+
+def test_fleet_blocking_item_skips_the_honestly_uncited_ungradeable_items(tmp_path):
+    """The issue's own repro: a block citing items 3, 4 and 8, leaving
+    1/2/9/10 uncited per the docs' advice, with items 5/6/7/11 as its real
+    gaps. The roll-up must report the first *real* gap, not item 1."""
+    full_evidence = _full_t1_evidence(tmp_path)
+    evidence = {item_id: full_evidence[item_id] for item_id in ("3", "4", "8")}
+    block = _fleet_block_manifest("analog-canary", evidence=evidence)
+
+    row = build_fleet_report({"blocks": [block]})["blocks"][0]
+
+    assert row["tier"] is None
+    assert row["blocking_item"] == {
+        "id": 5,
+        "title": "Full corner verification vs a ratified spec",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+    # ...and the four uncited claims are still visible, just demoted.
+    assert [item["id"] for item in row["ungraded_items"]] == [1, 2, 9, 10]
+    assert {item["reason"] for item in row["ungraded_items"]} == {"no_evidence"}
+
+
+def test_fleet_blocking_item_advances_through_the_real_gaps(tmp_path):
+    """Binding each genuine gap in turn advances the blocker through the
+    gradeable items only -- item 1 never reappears while a runnable gap
+    remains."""
+    full_evidence = _full_t1_evidence(tmp_path)
+    evidence = {item_id: full_evidence[item_id] for item_id in ("3", "4", "8")}
+
+    def _blocker(current: dict) -> dict:
+        block = _fleet_block_manifest("analog-canary", evidence=current)
+        return build_fleet_report({"blocks": [block]})["blocks"][0]["blocking_item"]
+
+    assert _blocker(evidence)["id"] == 5
+    evidence["5"] = full_evidence["5"]
+    assert _blocker(evidence)["id"] == 6
+    evidence["6"] = full_evidence["6"]
+    assert _blocker(evidence)["id"] == 7
+    evidence["7"] = full_evidence["7"]
+    assert _blocker(evidence)["id"] == 11
+
+
+def test_fleet_blocking_item_falls_back_to_an_ungradeable_item_when_alone(tmp_path):
+    """Edge case: every gradeable item is met and only the ungradeable four
+    are uncited. The block is still not T1, so the roll-up must still name a
+    blocker -- one of those four -- never `None`."""
+    full_evidence = _full_t1_evidence(tmp_path)
+    evidence = {
+        item_id: value
+        for item_id, value in full_evidence.items()
+        if item_id not in ("1", "2", "9", "10")
+    }
+    block = _fleet_block_manifest("analog-canary", evidence=evidence)
+
+    row = build_fleet_report({"blocks": [block]})["blocks"][0]
+
+    assert row["tier"] is None
+    assert row["t1_met_count"] == 7
+    assert row["blocking_item"] == {
+        "id": 1,
+        "title": "Design sources",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+    assert [item["id"] for item in row["ungraded_items"]] == [1, 2, 9, 10]
+
+
+def test_fleet_ungraded_items_is_empty_when_the_four_are_cited(tmp_path):
+    """`ungraded_items` lists *unmet* ungradeable items only. A block that
+    cites all four (which `klt signoff` accepts, topical relevance and all --
+    see the docs' own warning) has nothing to demote."""
+    full_evidence = _full_t1_evidence(tmp_path)
+    evidence = {
+        item_id: value
+        for item_id, value in full_evidence.items()
+        if item_id not in ("5", "6", "7")
+    }
+    block = _fleet_block_manifest("analog-canary", evidence=evidence)
+
+    row = build_fleet_report({"blocks": [block]})["blocks"][0]
+
+    assert row["ungraded_items"] == []
+    assert row["blocking_item"]["id"] == 5
+
+
+def test_fleet_ungraded_items_carry_their_partition_for_a_mixed_signal_block():
+    """A mixed-signal block renders every T1 item once per partition, so the
+    demoted rows must say *which* partition each belongs to -- the same way
+    `blocking_item` and `drc_coverage` do."""
+    block = _fleet_block_manifest("ms-canary", kind="mixed-signal")
+
+    row = build_fleet_report({"blocks": [block]})["blocks"][0]
+
+    assert [(item["id"], item["partition"]) for item in row["ungraded_items"]] == [
+        (1, "analog"),
+        (1, "digital"),
+        (2, "analog"),
+        (2, "digital"),
+        (9, "analog"),
+        (9, "digital"),
+        (10, "analog"),
+        (10, "digital"),
+    ]
+    assert row["blocking_item"]["id"] == 3
+
+
+def test_fleet_ungraded_items_never_change_a_block_tier(tmp_path):
+    """The reduction is a reduction: demoting items 1/2/9/10 out of
+    `blocking_item` must not make a block with those claims uncited look
+    T1-clean."""
+    full_evidence = _full_t1_evidence(tmp_path)
+    evidence = {
+        item_id: value
+        for item_id, value in full_evidence.items()
+        if item_id not in ("1", "2", "9", "10")
+    }
+    tier_report = build_tier_report(_manifest(block="canary", evidence=evidence))
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("canary", evidence=evidence)]}
+    )["blocks"][0]
+
+    assert tier_report["tier"] is None
+    assert row["tier"] is None
+    assert row["t1_met_count"] == tier_report["t1_met_count"]
+    assert row["t1_item_count"] == tier_report["t1_item_count"]
+
+
+def test_cli_fleet_text_format_shows_demoted_ungraded_items(tmp_path, capsys):
+    """The terminal rendering demotes the ungradeable four to one summary
+    line beside the blocker, rather than dropping them from the text view
+    that most readers actually look at."""
+    fleet_path = _fleet_write(tmp_path, [_fleet_block_manifest("canary-a")])
+
+    exit_code = main(["signoff", "--fleet", fleet_path])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "blocking: #3" in out
+    assert "ungraded (no klt verb, uncited): #1, #2, #9, #10" in out
 
 
 # --------------------------------------------------------------------------- #
@@ -6694,7 +6899,9 @@ def test_fleet_rollup_blocking_item_reflects_the_new_digital_kinds(tmp_path):
     )
 
     block = result["blocks"][0]
-    assert block["blocking_item"]["id"] == 1
+    # Items 5 and 7 are met, so the blocker is the first *gradeable* unmet
+    # item -- item 3, not the honestly-uncited item 1 (issue #2178).
+    assert block["blocking_item"]["id"] == 3
     assert block["blocking_item"]["reason"] == "no_evidence"
 
 
