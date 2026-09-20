@@ -204,16 +204,41 @@ def test_erc_antenna_actual_levels(
     _assert_contract(report, state)
     assert report["status"] == status
     if state == "zero":
-        # ERC is first-class only after #2057: old readers reject its shape;
-        # a reader that recognizes it must still reject this actual zero run.
+        # ERC is first-class only after #2057: old readers reject its shape.
+        # A reader that recognizes it sees an *antenna* scope that graded
+        # nothing -- and, since #2179, a *connectivity* scope that graded
+        # everything it was asked to. This run is the permanent steady state
+        # on a PDK with no antenna-ratio table, so aggregation mode grades it
+        # on the verdict that was actually reached (`erc_status`), while
+        # `status`/the exit code keep answering the antenna question
+        # unchanged (asserted above and below).
         evidence = tmp_path / "erc-evidence.json"
         evidence.write_text(json.dumps(report))
+        assert report["erc_status"] == "clean"
+        assert coverage_state({"coverage": report["erc_coverage"]}) == "full"
         try:
             plain = build_signoff([str(evidence)])
         except SignoffError as exc:
             assert "unrecognized shape" in str(exc)
         else:
-            assert plain["checks"][0]["passed"] is False
+            assert plain["checks"][0]["status"] == "not_checked"
+            assert plain["checks"][0]["passed"] is True
+        # The refusal is keyed on that second scope, not waived: the same
+        # report without it -- every `klt erc` envelope written before #2179
+        # -- is still refused as a zero-coverage run.
+        pre_2179 = {
+            key: value
+            for key, value in report.items()
+            if key not in ("erc_status", "erc_coverage")
+        }
+        old_evidence = tmp_path / "erc-evidence-pre-2179.json"
+        old_evidence.write_text(json.dumps(pre_2179))
+        try:
+            old = build_signoff([str(old_evidence)])
+        except SignoffError as exc:
+            assert "unrecognized shape" in str(exc)
+        else:
+            assert old["checks"][0]["passed"] is False
         tier = build_tier_report(
             {"block": "coverage", "kind": "analog", "evidence": {"1": str(evidence)}}
         )

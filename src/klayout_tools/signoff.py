@@ -627,6 +627,44 @@ than qualify it. What no path here does is read it as complete --
 and :func:`~klayout_tools.coverage.coverage_qualification_reason` (not an
 unconditional success) are separate questions for exactly that reason.
 
+## `klt erc`'s second coverage scope (issue #2179)
+
+A `klt erc` envelope answers two independent questions -- an antenna-ratio
+one that needs a PDK limit table, and a connectivity/geometry one that needs
+none -- and since #2179 it carries a checked-work scope for each:
+``coverage`` (antenna) and ``erc_coverage`` (connectivity), with
+``erc_status`` as the latter's own roll-up (``docs/cli/erc.md``).
+
+That matters here because `klt erc` ships an antenna-ratio table for sky130
+only. On any other PDK -- or any run that omits ``--pdk`` -- *every* antenna
+level is ungraded for *every* layout, so the antenna scope is known-zero,
+``status`` is ``"not_checked"``, and both gates above fire: the vacuous-
+verdict refusal on the ``coverage`` block, and :func:`_check_passed`
+declining a non-``"clean"`` status. The result was that a connectivity-clean
+run and a run that checked nothing at all were indistinguishable to this
+module, so the structural supply read `klt erc` *can* produce on such a PDK
+could never back a citation.
+
+Two narrow widenings, both keyed on the connectivity scope actually being
+present and having reached a verdict of its own
+(:func:`_erc_connectivity_state`), so an envelope predating #2179 grades
+byte-identically to before:
+
+- :func:`_erc_passed` lets ``status == "not_checked"`` pass when
+  ``erc_status == "clean"``. An antenna *violation* still reports
+  ``"violations"`` and still fails; nothing here weakens the antenna claim,
+  it only stops a permanently-unanswerable antenna question from voiding a
+  separately-answered connectivity one.
+- :func:`_coverage_refusal` reads both scopes when deciding whether the
+  artifact states anything at all, and is applied at *both* entry points
+  (:func:`_build_check`, :func:`_kind_gated_refusal`) so aggregation mode
+  and numbered-citation grading cannot disagree about it.
+
+T1 item 11 is untouched by all of this: it never graded the ERC envelope's
+``status`` in the first place (:func:`_grade_power_delivery` reads the
+supply rules directly, see :func:`_erc_supply_findings`), which is why it
+already worked on a table-less PDK.
+
 ## Typed, runtime-validated evidence ingestion (issue #2033)
 
 ``CLAUDE.md`` says "JSON is the contract", but every producer/consumer
@@ -1513,6 +1551,12 @@ class _ErcEnvelope(_ErcRequired, total=False):
     spec: Any
     stackup: Any
     erc_findings: list[Any]
+    # The connectivity half's own roll-up and checked-work scope (issue
+    # #2179), optional because every `klt erc` envelope written before it
+    # carries neither -- and an envelope that does not state a connectivity
+    # verdict must keep grading exactly as it did (see `_coverage_refusal`).
+    erc_status: str
+    erc_coverage: dict[str, Any]
     metrics: dict[str, Any]
     provenance: dict[str, Any] | None
 
@@ -1971,7 +2015,7 @@ def _build_check(kind: str, envelope: _EvidenceEnvelope, source: str) -> dict[st
     # inside `_check_passed` (which still answers only "what does this
     # envelope's own verdict say") so the tier-report path can render the
     # more specific `_REASON_NOTHING_CHECKED` instead of `check_failed`.
-    coverage_refusal = coverage_refusal_reason(envelope)
+    coverage_refusal = _coverage_refusal(kind, envelope)
     return {
         "source": source,
         "kind": kind,
@@ -2146,6 +2190,102 @@ def _functional_verification_passed(envelope: _FunctionalVerificationEnvelope) -
     return all(counts[f"{status}_count"] == count for status, count in observed.items())
 
 
+def _erc_connectivity_state(envelope: dict[str, Any]) -> str | None:
+    """The `klt erc` connectivity scope's own rollup row (issue #2179), or
+    ``None`` when this envelope states no connectivity verdict at all.
+
+    ``None`` for every envelope written before #2179 -- and for any that
+    carries ``erc_status`` without the ``erc_coverage`` block backing it,
+    or whose block is malformed/zero/unknown. That is the same "absence of
+    the field is absence of evidence" rule
+    :mod:`klayout_tools.coverage` applies everywhere else: an old `klt erc`
+    report must keep grading byte-identically, so a *missing* connectivity
+    scope can never be the thing that turns a refusal into a pass.
+
+    The block is read through :func:`~klayout_tools.coverage.coverage_state`
+    exactly as a top-level ``coverage`` block is, by handing it over as one
+    -- so the second scope is validated by the same code as the first, and
+    an unreadable one degrades to ``None`` rather than to a guess.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return None
+    state = coverage_state({"coverage": block})
+    return state if state not in ("legacy", "malformed", "zero", "unknown") else None
+
+
+def _erc_passed(envelope: dict[str, Any]) -> bool:
+    """:func:`_check_passed`'s ``"erc"`` branch (issue #2025/#2179).
+
+    ``status == "clean"`` is the verdict this kind has always been graded
+    on, and it is unchanged: it means both of the envelope's independent
+    violation signals came back clean *and* at least one antenna level was
+    actually graded.
+
+    The second clause exists because that verdict is **structurally
+    unreachable** on a PDK whose antenna-ratio limits `klt erc` does not
+    carry -- every PDK but sky130 today, and every run that omits ``--pdk``
+    (``docs/cli/erc.md``, "Sky130 antenna-ratio limits"). There, *every*
+    level comes back ``"unchecked"`` for *every* layout, so the common
+    rollup rule correctly refuses to call the antenna question a pass and
+    ``status`` is ``"not_checked"`` no matter what the design does. Grading
+    that as a plain failure would mean the connectivity rules
+    (``erc.unconnected_net``/``erc.supply_short``/
+    ``erc.multiply_driven_net``/``erc.floating_gate``/``erc.missing_tie``)
+    -- which need no PDK at all, and are the only thing `klt erc` can
+    report on such a PDK -- could never back a citation, however clean.
+
+    So a ``"not_checked"`` envelope passes on its *connectivity* roll-up
+    alone, and only when that roll-up is a real, positively-stated one:
+    ``erc_status == "clean"`` **and** an ``erc_coverage`` block that reached
+    a verdict of its own (:func:`_erc_connectivity_state`). What this is
+    deliberately not: a way for an antenna *violation* to pass (that is
+    ``status == "violations"``, which matches neither clause), and not a
+    way for a pre-#2179 envelope to start passing (it states no
+    connectivity verdict, so the second clause cannot fire).
+    """
+    status = envelope.get("status")
+    if status == "clean":
+        return True
+    if status != "not_checked":
+        return False
+    return (
+        envelope.get("erc_status") == "clean"
+        and _erc_connectivity_state(envelope) is not None
+    )
+
+
+def _coverage_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
+    """Why ``envelope`` reached no usable verdict at all, or ``None``.
+
+    :func:`~klayout_tools.coverage.coverage_refusal_reason` applied to the
+    envelope's own top-level ``coverage`` block -- the vacuous-verdict gate
+    (issue #1996, see this module's "Vacuous-verdict refusal" section) --
+    with one kind-specific widening.
+
+    A `klt erc` envelope carries **two** coverage scopes (issue #2179): the
+    antenna one at ``coverage`` and the connectivity one at
+    ``erc_coverage``. The gate's question is "does this artifact contain any
+    statement about the design at all", and a run whose connectivity rules
+    all executed plainly does -- even when its antenna scope checked
+    nothing, which is the permanent steady state on a PDK with no
+    antenna-ratio table. Refusing it on the antenna scope alone would make
+    the widened :func:`_erc_passed` unreachable through both entry points
+    (:func:`_build_check` and :func:`_kind_gated_refusal` both AND this in),
+    so the two are decided together here rather than drifting apart.
+
+    Applied through both entry points on purpose: envelope-aggregation mode
+    and numbered-citation grading must never disagree about whether an
+    artifact is empty. Every other kind is unaffected -- their envelopes
+    carry no second scope, so this is exactly
+    :func:`~klayout_tools.coverage.coverage_refusal_reason`.
+    """
+    refusal = coverage_refusal_reason(envelope)
+    if refusal is None or kind != "erc":
+        return refusal
+    return None if _erc_connectivity_state(envelope) is not None else refusal
+
+
 def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     """Whether this one check counts as passing.
 
@@ -2246,11 +2386,14 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       Whether the run was SDF-annotated is *not* a
       pass/fail input here (an unannotated regression is a perfectly valid
       pre-layout check); it only gates item 7, in :func:`_grade_evidence`.
-    - ``erc`` (issue #2025) passes on ``status == "clean"`` -- the roll-up
-      of both violation signals a `klt erc` envelope carries (zero
+    - ``erc`` (issue #2025/#2179) passes on ``status == "clean"`` -- the
+      roll-up of both violation signals a `klt erc` envelope carries (zero
       ``erc_findings`` **and** no ``levels[].verdict == "violate"``, per
       ``docs/cli/erc.md``: "This is what `klt signoff` reads as this
-      command's pass/fail verdict"). Note that T1 item 11 deliberately does
+      command's pass/fail verdict") -- or, when that roll-up could not be
+      reached at all because the run's PDK has no antenna-ratio table, on
+      the connectivity half's own ``erc_status``; see :func:`_erc_passed`.
+      Note that T1 item 11 deliberately does
       **not** grade an ERC citation on this verdict -- it grades the
       specific supply-continuity rules the item names, so an antenna
       violation on some unrelated signal net does not block a power-delivery
@@ -2294,7 +2437,7 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
     elif kind == "functional-verification":
         passed = _functional_verification_passed(envelope)
     elif kind == "erc":
-        passed = envelope.get("status") == "clean"
+        passed = _erc_passed(envelope)
     elif kind == "place-and-route":
         passed = envelope.get("status") == "ok"
     elif kind == "generic":
@@ -2516,7 +2659,7 @@ def _kind_gated_refusal(
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
         return None
-    refusal = coverage_refusal_reason(envelope)
+    refusal = _coverage_refusal(check_kind, envelope)
     if refusal is not None:
         return refusal
     if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
@@ -2755,6 +2898,15 @@ def _erc_detail(envelope: dict[str, Any]) -> dict[str, Any]:
         "gate_role": envelope.get("gate_role"),
         "gate_count": envelope.get("gate_count"),
         "erc_finding_count": envelope.get("erc_finding_count"),
+        # The connectivity half's own roll-up (issue #2179), beside the
+        # antenna-driven `status` this check's `checks[].status` already
+        # reports. Surfaced rather than merely consulted because it is what
+        # makes an otherwise contradictory-looking entry legible: a check
+        # with `status: "not_checked"` and `passed: true` is a run on a PDK
+        # with no antenna-ratio table whose connectivity rules all passed
+        # (:func:`_erc_passed`), and this field is the evidence for that.
+        # `None` for a pre-#2179 envelope, which states no such verdict.
+        "erc_status": envelope.get("erc_status"),
         # Per-rule breakdown, so "which of the five ERC rules fired" is
         # readable without re-opening the envelope -- the same reason `klt
         # drc`'s own `rule_counts` exists. Item 11 grades only three of these

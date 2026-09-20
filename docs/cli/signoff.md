@@ -1156,6 +1156,25 @@ finding, or the tie-cell false positives issue #1994 tracks therefore do not
 block a power-delivery claim they say nothing about. Envelope-aggregation
 mode (`klt signoff erc.json ...`) still grades an `erc` check on `status`.
 
+**Envelope-aggregation mode falls back to `erc_status` when the antenna
+question could not be asked** (issue #2179). `klt erc` carries an
+antenna-ratio limit table for sky130 only, so on any other PDK — and on any
+run that omits `--pdk` — no antenna level can be graded for *any* layout and
+`status` is permanently `not_checked` ([`docs/cli/erc.md`](erc.md)'s "Two
+verdicts"). Aggregation mode therefore also passes an `erc` check whose
+`status` is `not_checked` when the envelope's *connectivity* roll-up
+(`erc_status`) is `"clean"` and its `erc_coverage` block reached a verdict
+of its own; the same connectivity scope is what keeps the
+[vacuous-verdict refusal](../coverage-contract.md) from rejecting such a run
+as an empty report. Three things this deliberately does **not** do: it does
+not pass an antenna *violation* (that reports `status: "violations"` and
+still fails), it does not pass a run whose connectivity rules found anything
+(`erc_status: "violations"`), and it does not change how an `erc` envelope
+written before #2179 grades — one that states no connectivity verdict is
+refused exactly as it was. `checks[].status` still reports the envelope's
+own `not_checked`, and `checks[].detail.erc_status` names the verdict the
+pass actually rests on.
+
 **`klt signoff` reads the ERC spec document off disk.** `klt erc`'s envelope
 echoes its spec's *path* (`spec`) but not its content — not the declared
 nets, not their `kind`, not the stackup, not the ties. Without reading it,

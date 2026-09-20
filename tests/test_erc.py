@@ -735,6 +735,204 @@ def test_status_violations_wins_over_partial_met3_5_coverage(tmp_path):
     assert report["status"] == "violations"
 
 
+# --- run_erc: connectivity roll-up `erc_status` (issue #2179) ---------------
+#
+# `klt erc` answers two independent questions in one envelope. The antenna
+# one needs a PDK limit table and `_ANTENNA_LIMITS_BY_PDK` has sky130 only,
+# so on every other PDK (and every `--pdk`-less run) it is permanently
+# ungradable -- `status: "not_checked"`, exit 4, for every layout. The
+# connectivity one needs no PDK at all. These tests pin the second verdict's
+# own field, and pin that adding it changed nothing about the first.
+
+
+def _strapped_supply_layout():
+    """A layout whose single gate is genuinely strapped up to a labelled
+    ``li1`` rail -- ``_nets_fixture_layout``'s shape plus the ``licon`` via
+    that actually connects the two roles, so no `erc.floating_gate` finding
+    intervenes and the connectivity verdict under test is decided by the
+    declared ``nets``/``ties`` alone. Returns the layer indices the tests
+    below add their own geometry on.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    poly = layout.layer(1, 0)
+    licon = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    label = layout.layer(3, 5)
+    nwell = layout.layer(10, 0)
+    tap = layout.layer(11, 0)
+    top.shapes(poly).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+    top.shapes(licon).insert(kdb.Box.new(_um(0.2), _um(0.2), _um(0.4), _um(0.4)))
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(5), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(2.5), _um(0.5))))
+    return layout, top, li1, label, nwell, tap
+
+
+def _strapped_supply_spec(nets=None, ties=None):
+    spec = _nets_spec(nets=nets, ties=ties)
+    spec["vias"] = [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}]
+    return spec
+
+
+def test_erc_status_clean_while_antenna_status_is_not_checked(tmp_path):
+    """AC (issue #2179), the headline case: no `--pdk`, a declared net that
+    resolves to exactly one island, no findings. The antenna half correctly
+    reports `not_checked` (nothing was graded, and nothing ever could be) --
+    and the connectivity half, which ran completely, reports `"clean"`
+    without the caller re-deriving it from `erc_finding_count`."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+
+    gds = tmp_path / "conn_clean.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "conn_clean.erc.json"
+    _write_spec(spec, _strapped_supply_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["erc_finding_count"] == 0
+    assert report["status"] == "not_checked"  # the antenna answer, unchanged
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["erc_status"] == "clean"
+    assert report["erc_coverage"]["scope"] == "connectivity"
+    assert report["erc_coverage"]["nothing_checked"] is False
+
+
+def test_erc_status_violations_without_any_pdk(tmp_path):
+    """AC (issue #2179), the violating counterpart: the same table-less run
+    with a genuine `erc.unconnected_net` reads `"violations"` on the new
+    field, so "clean" and "not clean" are distinguishable there even though
+    `status` cannot tell them apart from each other's antenna half."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+    # A second, disjoint island carrying the same declared supply name.
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+
+    gds = tmp_path / "conn_violate.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "conn_violate.erc.json"
+    _write_spec(spec, _strapped_supply_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.unconnected_net"]
+    assert report["erc_status"] == "violations"
+    assert report["status"] == "violations"
+
+
+def test_erc_status_ignores_an_antenna_violation(tmp_path):
+    """The separation runs both ways: an antenna violation on a net with
+    perfectly good connectivity turns `status` red but leaves `erc_status`
+    `"clean"` -- the same split `docs/design-evidence-tiers.md` item 11
+    already relies on ("those are the rules this item grades, not the
+    report's overall `status`")."""
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    gds = tmp_path / "li1_violate.gds"
+    _antenna_fixture(gds, li1_um2=80.0)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert report["erc_finding_count"] == 0
+    assert report["status"] == "violations"
+    assert report["erc_status"] == "clean"
+
+
+def test_erc_status_reports_a_connectivity_finding_on_a_graded_pdk(tmp_path):
+    """And a connectivity finding is still a connectivity finding when the
+    antenna half *was* graded -- `erc_status` is not a "no PDK" fallback,
+    it is the connectivity verdict in every run."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert any(f["rule"] == "erc.floating_gate" for f in report["erc_findings"])
+    assert report["erc_status"] == "violations"
+
+
+def test_erc_coverage_names_the_gates_nets_and_ties_actually_checked(tmp_path):
+    """The connectivity scope grades real work: one checked identity per
+    discovered gate, per declared net, and per declared tie."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+    # A well with a tap inside it, sitting under the labelled li1 rail, so
+    # the tap really does reach the declared "VDD" net.
+    top.shapes(nwell).insert(kdb.Box.new(_um(3), _um(0), _um(4), _um(1)))
+    top.shapes(tap).insert(kdb.Box.new(_um(3.2), _um(0.2), _um(3.8), _um(0.8)))
+
+    gds = tmp_path / "coverage.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "coverage.erc.json"
+    _write_spec(
+        spec,
+        _strapped_supply_spec(
+            nets=[{"name": "VDD", "kind": "supply"}],
+            ties=[
+                {
+                    "name": "nwell_tie",
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    checked = set(report["erc_coverage"]["checked"])
+
+    assert 'erc.floating_gate:["gate0"]' in checked
+    assert 'erc.net_connectivity:["VDD"]' in checked
+    assert 'erc.missing_tie:["nwell_tie"]' in checked
+    assert report["erc_coverage"]["inapplicable"] == []
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_status"] == "clean"
+
+
+def test_erc_coverage_records_undeclared_rules_as_inapplicable(tmp_path):
+    """A spec that declares no `nets`/`ties` never asked for those rules, so
+    they are *inapplicable*, not skipped -- an undeclared rule must not make
+    the connectivity scope partial, and a reader must be able to tell "no
+    supply was declared, so `erc.supply_short` was never computed" from "the
+    declared supplies came back clean" off the envelope alone."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec))
+    reasons = {r["reason"] for r in report["erc_coverage"]["inapplicable"]}
+
+    assert reasons == {"no_nets_declared", "no_ties_declared"}
+    assert report["erc_coverage"]["skipped"] == []
+
+
+def test_erc_status_does_not_change_the_antenna_status_on_sky130(tmp_path):
+    """AC2 (issue #2179): the antenna `status` and its three reachable
+    tokens are untouched on a PDK that does have a table."""
+    basic = tmp_path / "basic.erc.json"
+    _basic_spec(basic)
+    full = tmp_path / "full_stack.erc.json"
+    _full_stack_spec(full)
+
+    clean_gds = tmp_path / "clean.gds"
+    _antenna_fixture(clean_gds, li1_um2=0.2, met1_um2=1.0, met2_um2=1.0)
+    partial_gds = tmp_path / "partial.gds"
+    _antenna_fixture(partial_gds, li1_um2=1.0, met1_um2=1.0, met2_um2=1.0)
+    violate_gds = tmp_path / "violate.gds"
+    _antenna_fixture(violate_gds, li1_um2=80.0)
+
+    assert run_erc(str(clean_gds), str(basic), pdk="sky130")["status"] == "clean"
+    assert (
+        run_erc(str(partial_gds), str(full), pdk="sky130")["status"] == "clean_partial"
+    )
+    assert run_erc(str(violate_gds), str(basic), pdk="sky130")["status"] == "violations"
+    assert run_erc(str(clean_gds), str(basic))["status"] == "not_checked"
+
+
 def test_provenance_pdk_populated_only_when_pdk_given(tmp_path):
     spec = tmp_path / "basic.erc.json"
     _basic_spec(spec)
@@ -1815,6 +2013,7 @@ def test_cli_json_contract(tmp_path, capsys):
 
     assert set(data.keys()) == {
         "coverage",
+        "erc_coverage",
         "schema_version",
         "file",
         "spec",
@@ -1824,6 +2023,7 @@ def test_cli_json_contract(tmp_path, capsys):
         "gates",
         "erc_findings",
         "erc_finding_count",
+        "erc_status",
         "status",
         "provenance",
     }
@@ -1930,6 +2130,33 @@ def test_cli_exit_code_four_for_not_checked_status(tmp_path, capsys):
     assert main(["erc", str(gds), str(spec), "--format", "json"]) == 4
     data = json.loads(capsys.readouterr().out)
     assert data["status"] == "not_checked"
+
+
+def test_cli_exit_code_is_still_four_for_a_connectivity_clean_run(tmp_path, capsys):
+    """AC2 (issue #2179): the exit code is the *antenna* answer, and adding
+    `erc_status` did not move it. A run with no antenna table still exits
+    `4`; a caller that only wants the connectivity read reads `erc_status`
+    off the payload rather than special-casing the exit code."""
+    gds = tmp_path / "unchecked.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_spec(spec)
+    _antenna_fixture(gds, li1_um2=0.2, met1_um2=1.0, met2_um2=1.0)
+
+    assert main(["erc", str(gds), str(spec), "--format", "json"]) == 4
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "not_checked"
+    assert data["erc_status"] == "clean"
+
+
+def test_cli_text_output_prints_the_connectivity_verdict(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    assert main(["erc", str(gds), str(spec)]) == 3
+    out = capsys.readouterr().out
+    assert "erc_status: violations" in out
 
 
 def test_cli_unknown_pdk_exits_one_with_clean_message(tmp_path, capsys):
