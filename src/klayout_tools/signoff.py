@@ -3184,7 +3184,21 @@ def build_tier_report(
     (``$KLT_TIERS_DOC``, then the copy bundled inside the installed package,
     then the source checkout's ``docs/`` -- issue #1050). ``source_doc`` in
     the result names the override when one is used, and the canonical
-    ``docs/design-evidence-tiers.md`` otherwise.
+    ``docs/design-evidence-tiers.md`` otherwise. ``source_doc`` names *which*
+    doc was read, not *what it said* -- two reports naming the same
+    ``source_doc`` may still have been graded against a checklist that grew
+    or reworded an item between the two runs (issue #2025 added item 11 to
+    the doc without either report's ``source_doc`` changing). ``result
+    ["source_doc_content_hash"]`` (issue #2175) closes that gap: the
+    ``sha256:<hex>`` digest of the resolved doc's own bytes
+    (:func:`~.design_evidence_tiers.parse_tier_doc`'s ``content_hash``,
+    ``None`` only in the pathological case it documents), pinned exactly the
+    way a ``content_hash``-carrying evidence entry already pins its own
+    input -- so two committed reports can be diffed to tell whether a changed
+    verdict came from changed evidence or a changed rulebook, and a caller
+    can compare it against the checklist it currently ships to catch a stale
+    read, entirely as its own policy (this function only emits the hash, it
+    never fails a report for a mismatch).
 
     ``manifest`` (JSON in)::
 
@@ -3233,6 +3247,7 @@ def build_tier_report(
             "t1_item_count": 11,
             "t1_met_count": 3,
             "source_doc": "docs/design-evidence-tiers.md",
+            "source_doc_content_hash": "sha256:...",
             "items": [
                 {
                     "tier": "T1",
@@ -3586,6 +3601,7 @@ def build_tier_report(
         "t1_item_count": total,
         "t1_met_count": met_count,
         "source_doc": doc_source_label(tiers_doc),
+        "source_doc_content_hash": doc["content_hash"],
         "items": items,
     }
 
@@ -4645,6 +4661,7 @@ def build_fleet_report(
             "t1_count": 1,
             "not_t1_count": 2,
             "source_doc": "docs/design-evidence-tiers.md",
+            "source_doc_content_hash": "sha256:...",
             "blocks": [
                 {
                     "block": "sky130-bandgap",
@@ -4653,6 +4670,7 @@ def build_fleet_report(
                     "tier": "T1",
                     "t1_item_count": 11,
                     "t1_met_count": 11,
+                    "source_doc_content_hash": "sha256:...",
                     "blocking_item": None,
                     "ungraded_items": [],
                     "drc_coverage": [
@@ -4672,6 +4690,7 @@ def build_fleet_report(
                     "tier": None,
                     "t1_item_count": 11,
                     "t1_met_count": 3,
+                    "source_doc_content_hash": "sha256:...",
                     "blocking_item": {
                         "id": 4,
                         "title": "LVS clean",
@@ -4724,6 +4743,21 @@ def build_fleet_report(
     at T1" answer also shows what each of those "clean" verdicts was measured
     inside -- see :func:`_drc_coverage_rows`. It changes no block's tier: a
     block with rule-free drawn layers rolls up exactly as it did before.
+
+    ``source_doc_content_hash`` (issue #2175), at both the top level and on
+    each ``blocks[]`` row, is :func:`build_tier_report`'s own field of the
+    same name, echoed straight from that block's ``tier_report`` -- never
+    recomputed here. Within one call every row's copy is the same value,
+    because ``tiers_doc`` is forwarded verbatim to every per-block
+    :func:`build_tier_report` call above; the top-level field is that one
+    shared value, and is the direct answer to "were these N verdicts taken
+    against the same checklist" -- issue #2175's own framing for why a fleet
+    roll-up needs this at all. The per-row copy exists for a consumer that
+    reduces a *committed history* of
+    these roll-ups (e.g. one per CI run, over time) down to per-block rows
+    from different runs -- there the row-level hash, not the top-level one
+    from whichever run it was pulled from, is what actually travels with
+    that row.
 
     Raises :class:`SignoffError` if ``fleet`` is not a JSON object, its
     ``blocks`` field is missing, not a JSON array, or empty; if any
@@ -4782,6 +4816,7 @@ def build_fleet_report(
                 "tier": tier_report["tier"],
                 "t1_item_count": tier_report["t1_item_count"],
                 "t1_met_count": tier_report["t1_met_count"],
+                "source_doc_content_hash": tier_report["source_doc_content_hash"],
                 "blocking_item": blocking_item,
                 "ungraded_items": _ungraded_t1_items(tier_report["items"]),
                 "drc_coverage": _drc_coverage_rows(tier_report["items"]),
@@ -4794,6 +4829,12 @@ def build_fleet_report(
         "t1_count": t1_count,
         "not_t1_count": len(blocks) - t1_count,
         "source_doc": doc_source_label(tiers_doc),
+        # `blocks` is never empty here: `raw_blocks` was already required to
+        # be non-empty above, and the loop above appends exactly one row (or
+        # raises) per `raw_blocks` entry. Every row's hash is identical
+        # within one call (see this function's docstring), so the first row
+        # names the shared value for the whole roll-up.
+        "source_doc_content_hash": blocks[0]["source_doc_content_hash"],
         "blocks": blocks,
     }
 

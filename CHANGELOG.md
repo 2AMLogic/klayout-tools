@@ -14,6 +14,19 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2175): `klt signoff --manifest`'s tier report, and `--fleet`'s
+  roll-up (both at the top level and per `blocks[]` row), now carry
+  `source_doc_content_hash` — the `sha256:`-prefixed SHA-256 of the resolved
+  `docs/design-evidence-tiers.md` (or `--tiers-doc`/`$KLT_TIERS_DOC`
+  override)'s own bytes, hashed via the same `sha256_file` helper every
+  `klt` envelope's `provenance.input.content_hash` already uses. Previously
+  `source_doc` named only *which* doc a report was graded against, not
+  *what it said* — two committed reports naming the same `source_doc` could
+  have been graded against a checklist that grew or reworded an item in
+  between (as the doc did on 2026-09-17, issue #2025's item 11), with no way
+  to tell from the artifacts alone. Purely additive: no existing field
+  changes shape or meaning, so no `schema_version` bump on either mode.
+
 - **Added** (#2179): `klt erc` now reports `erc_status` and `erc_coverage` —
   the **connectivity** half's own roll-up and checked-work scope, beside the
   antenna-driven `status`/`coverage`. `klt erc` answers two independent

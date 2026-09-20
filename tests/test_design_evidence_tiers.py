@@ -82,6 +82,33 @@ def test_real_doc_parses_without_error():
     assert [item["id"] for item in doc["t1_items"]] == list(range(1, 12))
 
 
+def test_real_doc_content_hash_is_the_resolved_files_own_sha256():
+    import hashlib
+
+    doc = parse_tier_doc()
+
+    assert doc["content_hash"] is not None
+    assert doc["content_hash"].startswith("sha256:")
+    digest = hashlib.sha256(default_doc_path().read_bytes()).hexdigest()
+    assert doc["content_hash"] == f"sha256:{digest}"
+
+
+def test_content_hash_changes_when_the_doc_does(tmp_path):
+    # Issue #2175: `content_hash` must actually pin the doc's bytes, not
+    # merely be present -- editing the doc must move it.
+    path = _write_doc(tmp_path, _MINIMAL_DOC)
+    before = parse_tier_doc(path)["content_hash"]
+
+    Path(path).write_text(
+        _MINIMAL_DOC + "\nAn extra trailing line.\n", encoding="utf-8"
+    )
+    after = parse_tier_doc(path)["content_hash"]
+
+    assert before is not None
+    assert after is not None
+    assert before != after
+
+
 def test_real_doc_ladder_rows_have_claim_and_demonstrated_by():
     doc = parse_tier_doc()
 
