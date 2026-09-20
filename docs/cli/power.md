@@ -407,7 +407,15 @@ are known analytically, with no layout involved.
   same network). This is the same approximation via taps already use — see
   "Scope and limitations". A pad or instance on a net with no extracted
   geometry at all is a `warnings` entry, not a failure, and the pad reports
-  `island_id: null`.
+  `island_id: null`. A pad or instance that geometrically sits on an
+  **unsolved** island (a non-rectangular segment declared unsolved rather
+  than approximated — see above) is scoped to that island rather than
+  falling through to the nearest-node search: an unsolved island has no
+  nodes by construction, so it can never be the "nearest" one, and would
+  otherwise silently reattach to a different, electrically unrelated island
+  of the same net. The pad reports the unsolved island's own `island_id`
+  with `node_id: null`; an instance's current is added to
+  `unsolved_current_a` instead — both are named in `warnings`.
 - **Conservation is reported, not assumed.** Each island's
   `pad_current_a` is what its pads together deliver, computed from the
   solved voltages; for a solved island it equals the negated sum of that

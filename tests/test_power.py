@@ -587,6 +587,159 @@ def test_run_power_rectangular_segments_keep_the_single_edge_model(tmp_path):
             assert island["unsolved_reason"] is None
 
 
+def _stepped_ledge_fixture(path) -> None:
+    """One `VPWR` net: a horizontal bar `x:[0,100] y:[0,5]` with a small
+    ledge raised on its right half, `x:[50,100] y:[5,7]`, merging into one
+    Manhattan polygon. The ledge's own vertices (`x=50`) become a *global*
+    cut line across the whole merged polygon, so the bar's `row0` decomposes
+    into two cells split at `x=50` -- and the ledge's own cell, `(col1,
+    row1) = x:[50,100] y:[5,7]` (50 um wide, 2 um tall) is wider than it is
+    tall, even though its only neighbour is *below* it (a vertical
+    connection). A per-cell width-vs-height test misreads this as
+    horizontal-flowing, which drops its true free end (the ledge's top,
+    `(75, 7)`) and fabricates two spurious port nodes on its left/right
+    walls (`(50, 6)` and `(100, 6)`) instead (issue #2190)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(1, 0)
+    met1_label = layout.layer(1, 5)
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(5)))
+    top.shapes(met1).insert(kdb.Box.new(_um(50), _um(5), _um(100), _um(7)))
+    top.shapes(met1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(10), _um(2.5))))
+    layout.write(str(path))
+
+
+def test_run_power_mesh_terminal_end_uses_neighbour_flow_not_cell_aspect(tmp_path):
+    gds = tmp_path / "ledge.gds"
+    spec = tmp_path / "ledge.power.json"
+    _stepped_ledge_fixture(gds)
+    _l_bus_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    island = report["networks"][0]["islands"][0]
+    assert island["unsolved_reason"] is None
+
+    node_xy = {(n["x_um"], n["y_um"]) for n in island["nodes"]}
+    # The ledge's true free end -- its top, the far side from where it joins
+    # the main bar -- must get a terminal node.
+    assert (75.0, 7.0) in node_xy
+    # Its left/right walls are not flow ends (its only neighbour is below,
+    # not beside it) and must not fabricate terminal nodes.
+    assert (50.0, 6.0) not in node_xy
+    assert (100.0, 6.0) not in node_xy
+
+
+# --- run_power: unsolved-island attachment scoping (issue #2190) -----------
+
+
+def _l_bus_with_separate_island_fixture(path) -> None:
+    """The same `VPWR` L-bus as :func:`_l_bus_fixture`, plus a second,
+    electrically disconnected `VPWR` rail far away (`x:[500,510]
+    y:[0,1]`) -- so this net has two islands: one that can be forced
+    unsolved (the L, via a small `MAX_DECOMPOSITION_CELLS`) and one that
+    always solves normally."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(1, 0)
+    met1_label = layout.layer(1, 5)
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(100), _um(20)))
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(20), _um(20), _um(100)))
+    top.shapes(met1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(50), _um(10))))
+    top.shapes(met1).insert(kdb.Box.new(_um(500), _um(0), _um(510), _um(1)))
+    top.shapes(met1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(505), _um(0.5))))
+    layout.write(str(path))
+
+
+def test_run_power_current_on_an_unsolved_island_is_not_misattached(
+    tmp_path, monkeypatch
+):
+    import klayout_tools.power as power_module
+
+    monkeypatch.setattr(power_module, "MAX_DECOMPOSITION_CELLS", 1)
+
+    gds = tmp_path / "lshape_plus.gds"
+    spec = tmp_path / "lshape_plus.power.json"
+    _l_bus_with_separate_island_fixture(gds)
+    _l_bus_spec(
+        spec,
+        pads=[
+            {"name": "P0", "net": "VPWR", "x_um": 505.0, "y_um": 0.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"name": "u0", "x_um": 10.0, "y_um": 10.0, "current_a": 0.1}],
+        },
+    )
+
+    report = run_power(str(gds), str(spec))
+    islands = report["networks"][0]["islands"]
+    unsolved = next(i for i in islands if i["unsolved_reason"] is not None)
+    solved = next(i for i in islands if i["unsolved_reason"] is None)
+
+    ir_drop_map = report["ir_drop_map"]
+    # `u0`'s 0.1 A sits squarely on the unsolved L -- it must be counted as
+    # unsolved, never silently reattached to the far, electrically unrelated
+    # solved island.
+    assert ir_drop_map["unsolved_current_a"] == pytest.approx(0.1)
+    solved_net = next(
+        island
+        for island in ir_drop_map["nets"][0]["islands"]
+        if island["island_id"] == solved["island_id"]
+    )
+    assert solved_net["current_a"] == pytest.approx(0.0)
+    assert solved_net["instance_count"] == 0
+    assert any(
+        "u0" in w and unsolved["island_id"] in w and "unsolved_current_a" in w
+        for w in report["warnings"]
+    )
+
+
+def test_run_power_pad_on_an_unsolved_island_is_not_attached_elsewhere(
+    tmp_path, monkeypatch
+):
+    import klayout_tools.power as power_module
+
+    monkeypatch.setattr(power_module, "MAX_DECOMPOSITION_CELLS", 1)
+
+    gds = tmp_path / "lshape_plus.gds"
+    spec = tmp_path / "lshape_plus.power.json"
+    _l_bus_with_separate_island_fixture(gds)
+    _l_bus_spec(
+        spec,
+        pads=[
+            {
+                "name": "Pbad",
+                "net": "VPWR",
+                "x_um": 10.0,
+                "y_um": 10.0,
+                "voltage_v": 1.8,
+            }
+        ],
+    )
+
+    report = run_power(str(gds), str(spec))
+    islands = report["networks"][0]["islands"]
+    unsolved = next(i for i in islands if i["unsolved_reason"] is not None)
+    solved = next(i for i in islands if i["unsolved_reason"] is None)
+
+    ir_drop_map = report["ir_drop_map"]
+    pad_report = next(p for p in ir_drop_map["pads"] if p["name"] == "Pbad")
+    # The pad geometrically sits on the unsolved island -- it must be
+    # reported as belonging there (with no node to attach to), never
+    # silently attached to the far, electrically unrelated solved island.
+    assert pad_report["island_id"] == unsolved["island_id"]
+    assert pad_report["node_id"] is None
+    solved_net = next(
+        island
+        for island in ir_drop_map["nets"][0]["islands"]
+        if island["island_id"] == solved["island_id"]
+    )
+    assert solved_net["pad_count"] == 0
+    assert any("Pbad" in w and "unsolved" in w for w in report["warnings"])
+
+
 # --- run_power: top-cell selection ------------------------------------------
 
 

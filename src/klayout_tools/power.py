@@ -830,6 +830,35 @@ def _model_box_polygon(
     return [(n_a, a_x, a_y), (n_b, b_x, b_y)]
 
 
+def _flow_is_horizontal(
+    column: int,
+    row: int,
+    occupied: set[tuple[int, int]],
+    fallback: bool,
+) -> bool:
+    """Whether one decomposition cell's conductive flow runs along the
+    horizontal axis -- decided from which of its neighbouring grid cells are
+    actually part of the polygon, not the cell's own width-vs-height aspect
+    ratio (issue #2190).
+
+    A cell whose vertex-grid cuts happen to make it narrower along the arm's
+    real flow direction than across it -- any bar with a stub/tee, or
+    non-square cuts from the vertex grid -- disagreed with its own box
+    aspect ratio under the old per-cell test, so the arm's true physical end
+    got no terminal node while a perpendicular side of an interior cell
+    spuriously got one instead. Neighbour occupancy is unambiguous for any
+    cell that continues in only one direction; only an isolated single-cell
+    island or a true junction (occupied on both axes) is ambiguous, and
+    falls back to the box-aspect heuristic."""
+    has_h_neighbour = (column - 1, row) in occupied or (column + 1, row) in occupied
+    has_v_neighbour = (column, row - 1) in occupied or (column, row + 1) in occupied
+    if has_h_neighbour and not has_v_neighbour:
+        return True
+    if has_v_neighbour and not has_h_neighbour:
+        return False
+    return fallback
+
+
 def _model_mesh_polygon(
     cells: list[tuple[int, int, kdb.Box]],
     entry: dict[str, Any],
@@ -863,7 +892,10 @@ def _model_mesh_polygon(
             continue
         centre = add_node(entry["name"], (x0 + x1) / 2, (y0 + y1) / 2)
         endpoints.append((centre, (x0 + x1) / 2, (y0 + y1) / 2))
-        sides = _cell_sides(column, row, x0, y0, x1, y1, (x1 - x0) >= (y1 - y0))
+        horizontal_major = _flow_is_horizontal(
+            column, row, occupied, (x1 - x0) >= (y1 - y0)
+        )
+        sides = _cell_sides(column, row, x0, y0, x1, y1, horizontal_major)
         for neighbour, port_key, px, py, half_um, cross_um, is_end in sides:
             if neighbour in occupied:
                 port = ports.get(port_key)
@@ -1045,10 +1077,143 @@ def _nearest_node(
     return best
 
 
+#: Tolerance, in um, for the unsolved-island containment test in
+#: ``_unsolved_island_at`` -- a pad/instance coordinate that lands exactly on
+#: an island extent's boundary (as a spec author's rounded coordinate often
+#: does) must still be recognised as belonging to it.
+_UNSOLVED_EXTENT_EPSILON_UM = 1e-6
+
+
+def _unsolved_island_at(
+    by_net: dict[str, dict[str, Any]],
+    net_extents: dict[str, dict[str, tuple[float, float, float, float]]],
+    net_name: str,
+    x_um: float,
+    y_um: float,
+) -> tuple[str, str] | None:
+    """``(island_id, unsolved_reason)`` when ``(x_um, y_um)`` falls within
+    an *unsolved* island's own drawn extent on this net -- checked before
+    the nearest-node search so a pad/instance that geometrically sits on an
+    island with no resistor model (issue #2171's refuse path) is recognised
+    as belonging there, rather than silently snapping to the nearest node on
+    a different, electrically unrelated island of the same net (issue
+    #2190)."""
+    extents = net_extents.get(net_name, {})
+    for island in by_net.get(net_name, {}).get("islands", []):
+        if island["unsolved_reason"] is None:
+            continue
+        extent = extents.get(island["island_id"])
+        if extent is None:
+            continue
+        x0, y0, x1, y1 = extent
+        if (
+            x0 - _UNSOLVED_EXTENT_EPSILON_UM <= x_um <= x1 + _UNSOLVED_EXTENT_EPSILON_UM
+            and y0 - _UNSOLVED_EXTENT_EPSILON_UM
+            <= y_um
+            <= y1 + _UNSOLVED_EXTENT_EPSILON_UM
+        ):
+            return island["island_id"], island["unsolved_reason"]
+    return None
+
+
+def _attach_pad(
+    pad: dict[str, Any],
+    by_net: dict[str, dict[str, Any]],
+    net_extents: dict[str, dict[str, tuple[float, float, float, float]]],
+    nodes_by_net: dict[str, list[tuple[int, dict[str, Any]]]],
+    pad_voltages: dict[tuple[str, int], dict[str, float]],
+    pad_counts: dict[tuple[str, int], int],
+    warnings: list[str],
+) -> dict[str, Any]:
+    """One ``ir_drop_map.pads[]`` entry: where ``pad`` actually landed, and
+    (as a side effect) its voltage boundary condition recorded against the
+    right island -- unless it geometrically sits on an *unsolved* island
+    (issue #2190), in which case it is reported but not attached anywhere."""
+    report = dict(pad)
+    unsolved = _unsolved_island_at(
+        by_net, net_extents, pad["net"], pad["x_um"], pad["y_um"]
+    )
+    if unsolved is not None:
+        island_id, reason = unsolved
+        report["island_id"] = island_id
+        report["node_id"] = None
+        warnings.append(
+            f"pad {pad['name']!r} on net {pad['net']!r} sits on unsolved "
+            f"island {island_id!r} ({reason}) -- no voltage boundary "
+            "condition applied there"
+        )
+        return report
+    target = _nearest_node(nodes_by_net.get(pad["net"], []), pad["x_um"], pad["y_um"])
+    if target is None:
+        report["island_id"] = None
+        report["node_id"] = None
+        warnings.append(
+            f"pad {pad['name']!r} on net {pad['net']!r} has no extracted "
+            "geometry on that net to attach to -- skipped"
+        )
+        return report
+    island_index, node = target
+    key = (pad["net"], island_index)
+    island_id = by_net[pad["net"]]["islands"][island_index]["island_id"]
+    report["island_id"] = island_id
+    report["node_id"] = node["id"]
+    existing = pad_voltages.setdefault(key, {})
+    existing[node["id"]] = pad["voltage_v"]
+    pad_counts[key] = pad_counts.get(key, 0) + 1
+    return report
+
+
+def _inject_current(
+    net_name: str,
+    instance: dict[str, Any],
+    current_a: float,
+    by_net: dict[str, dict[str, Any]],
+    net_extents: dict[str, dict[str, tuple[float, float, float, float]]],
+    nodes_by_net: dict[str, list[tuple[int, dict[str, Any]]]],
+    injections: dict[tuple[str, int], dict[str, float]],
+    instance_counts: dict[tuple[str, int], int],
+    warnings: list[str],
+) -> float:
+    """Attach ``instance``'s ``current_a`` injection to ``net_name`` and
+    return the portion of it that could not be attached because it
+    geometrically sits on an *unsolved* island (issue #2190) -- ``0.0``
+    normally, added by the caller into ``unsolved_current_a`` rather than
+    silently reattached to a different, electrically unrelated island."""
+    unsolved = _unsolved_island_at(
+        by_net, net_extents, net_name, instance["x_um"], instance["y_um"]
+    )
+    if unsolved is not None:
+        island_id, reason = unsolved
+        warnings.append(
+            f"current_model instance {instance['name']!r} sits on net "
+            f"{net_name!r} island {island_id!r}, which is unsolved "
+            f"({reason}) -- its {abs(current_a) * 1e3:g} mA is counted "
+            "in unsolved_current_a, not attached to any other island's node"
+        )
+        return abs(current_a)
+    target = _nearest_node(
+        nodes_by_net.get(net_name, []), instance["x_um"], instance["y_um"]
+    )
+    if target is None:
+        warnings.append(
+            f"current_model instance {instance['name']!r} has no extracted "
+            f"{net_name!r} geometry to attach to -- its {abs(current_a) * 1e3:g} "
+            "mA is not modelled on that net"
+        )
+        return 0.0
+    island_index, node = target
+    key = (net_name, island_index)
+    bucket = injections.setdefault(key, {})
+    bucket[node["id"]] = bucket.get(node["id"], 0.0) + current_a
+    instance_counts[key] = instance_counts.get(key, 0) + 1
+    return 0.0
+
+
 def _solve_ir_drop(
     networks: list[dict[str, Any]],
     pads: list[dict[str, Any]],
     instances: list[dict[str, Any]] | None,
+    net_extents: dict[str, dict[str, tuple[float, float, float, float]]],
     warnings: list[str],
 ) -> dict[str, Any]:
     """Solve every extracted island for its DC operating point and build the
@@ -1068,62 +1233,46 @@ def _solve_ir_drop(
     injections: dict[tuple[str, int], dict[str, float]] = {}
     pad_counts: dict[tuple[str, int], int] = {}
     instance_counts: dict[tuple[str, int], int] = {}
-    pad_reports: list[dict[str, Any]] = []
+    unsolved_current_a = 0.0
 
-    def _attach(
-        net_name: str, x_um: float, y_um: float
-    ) -> tuple[int, dict[str, Any]] | None:
-        return _nearest_node(nodes_by_net.get(net_name, []), x_um, y_um)
-
-    for pad in pads:
-        target = _attach(pad["net"], pad["x_um"], pad["y_um"])
-        report = dict(pad)
-        if target is None:
-            report["island_id"] = None
-            report["node_id"] = None
-            pad_reports.append(report)
-            warnings.append(
-                f"pad {pad['name']!r} on net {pad['net']!r} has no extracted "
-                "geometry on that net to attach to -- skipped"
-            )
-            continue
-        island_index, node = target
-        key = (pad["net"], island_index)
-        island_id = by_net[pad["net"]]["islands"][island_index]["island_id"]
-        report["island_id"] = island_id
-        report["node_id"] = node["id"]
-        pad_reports.append(report)
-        existing = pad_voltages.setdefault(key, {})
-        existing[node["id"]] = pad["voltage_v"]
-        pad_counts[key] = pad_counts.get(key, 0) + 1
-
-    def _inject(net_name: str, instance: dict[str, Any], current_a: float) -> None:
-        target = _attach(net_name, instance["x_um"], instance["y_um"])
-        if target is None:
-            warnings.append(
-                f"current_model instance {instance['name']!r} has no extracted "
-                f"{net_name!r} geometry to attach to -- its {abs(current_a) * 1e3:g} "
-                "mA is not modelled on that net"
-            )
-            return
-        island_index, node = target
-        key = (net_name, island_index)
-        bucket = injections.setdefault(key, {})
-        bucket[node["id"]] = bucket.get(node["id"], 0.0) + current_a
-        instance_counts[key] = instance_counts.get(key, 0) + 1
+    pad_reports = [
+        _attach_pad(
+            pad, by_net, net_extents, nodes_by_net, pad_voltages, pad_counts, warnings
+        )
+        for pad in pads
+    ]
 
     for instance in instances or []:
         # An instance *draws* current off its supply net (a negative
         # injection) and *returns* the same current to its ground net (a
         # positive injection) -- the sign convention `ir_solver` documents.
-        _inject(instance["supply_net"], instance, -instance["current_a"])
+        unsolved_current_a += _inject_current(
+            instance["supply_net"],
+            instance,
+            -instance["current_a"],
+            by_net,
+            net_extents,
+            nodes_by_net,
+            injections,
+            instance_counts,
+            warnings,
+        )
         if instance["ground_net"] is not None:
-            _inject(instance["ground_net"], instance, instance["current_a"])
+            unsolved_current_a += _inject_current(
+                instance["ground_net"],
+                instance,
+                instance["current_a"],
+                by_net,
+                net_extents,
+                nodes_by_net,
+                injections,
+                instance_counts,
+                warnings,
+            )
 
     net_reports: list[dict[str, Any]] = []
     overall_worst: dict[str, Any] | None = None
     overall_worst_droop = 0.0
-    unsolved_current_a = 0.0
     solved_node_total = 0
     unsolved_node_total = 0
     quiet_no_pad_islands: list[str] = []
@@ -1616,6 +1765,35 @@ def _describe_observed_nets(circuit: Any, limit: int = 20) -> str:
     return f"nets actually present: {shown}"
 
 
+def _net_extent_um(
+    l2n: kdb.LayoutToNetlist,
+    net: Any,
+    stackup: list[dict[str, Any]],
+    layer_index: dict[str, int],
+    dbu: float,
+) -> tuple[float, float, float, float] | None:
+    """``(x0, y0, x1, y1)`` -- the bounding box, in um, of this net cluster's
+    own drawn geometry across every declared ``stackup`` layer, or ``None``
+    when it has none.
+
+    Computed independently of whether the island's resistor network could be
+    built, so a pad or a ``current_model`` instance that geometrically lands
+    on an *unsolved* island (issue #2190) can be recognised as belonging to
+    it -- an unsolved island has zero nodes by construction, so it would
+    otherwise never be found by the nearest-node search and the pad/instance
+    would silently reattach to a different, electrically unrelated island of
+    the same net."""
+    total = None
+    for entry in stackup:
+        box = l2n.polygons_of_net(net, layer_index[entry["name"]]).bbox()
+        if box.empty():
+            continue
+        total = box if total is None else total + box
+    if total is None:
+        return None
+    return (total.left * dbu, total.bottom * dbu, total.right * dbu, total.top * dbu)
+
+
 def _build_net_islands(
     l2n: kdb.LayoutToNetlist,
     matched: list[Any],
@@ -1626,15 +1804,19 @@ def _build_net_islands(
     dbu: float,
     net_name: str,
     warnings: list[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, tuple[float, float, float, float]]]:
     """One ``networks[].islands`` list: every matched net cluster turned
     into its own node/edge network, or reported with an
     ``unsolved_reason`` when its geometry cannot be modelled exactly (issue
     #2171 -- never silently approximated in the non-conservative
-    direction)."""
+    direction). Also returns each appended island's own geometric extent
+    (``island_id`` -> bbox, um), used by ``_solve_ir_drop`` to scope pad/
+    instance attachment to the physically correct island (issue #2190)."""
     islands: list[dict[str, Any]] = []
+    extents: dict[str, tuple[float, float, float, float]] = {}
     for island_index, net in enumerate(matched):
         island_id = f"{net_name}#{island_index}"
+        extent = _net_extent_um(l2n, net, stackup, layer_index, dbu)
         nodes, edges, unsolved_reason = _build_island_network(
             l2n,
             net,
@@ -1664,6 +1846,8 @@ def _build_net_islands(
                     "edges": [],
                 }
             )
+            if extent is not None:
+                extents[island_id] = extent
             continue
         if not nodes:
             warnings.append(
@@ -1682,7 +1866,9 @@ def _build_net_islands(
                 "edges": edges,
             }
         )
-    return islands
+        if extent is not None:
+            extents[island_id] = extent
+    return islands, extents
 
 
 def run_power(
@@ -1799,6 +1985,7 @@ def run_power(
 
     warnings: list[str] = []
     networks: list[dict[str, Any]] = []
+    net_extents: dict[str, dict[str, tuple[float, float, float, float]]] = {}
     total_islands = 0
 
     for net_entry in power_net_entries:
@@ -1824,7 +2011,7 @@ def run_power(
             )
             continue
 
-        islands = _build_net_islands(
+        islands, extents = _build_net_islands(
             l2n,
             matched,
             stackup,
@@ -1835,6 +2022,7 @@ def run_power(
             net_name,
             warnings,
         )
+        net_extents[net_name] = extents
         total_islands += len(islands)
         networks.append(
             {
@@ -1859,7 +2047,7 @@ def run_power(
     ir_drop_map = None
     worst_case_droop_mv = None
     if pads or instances is not None:
-        ir_drop_map = _solve_ir_drop(networks, pads, instances, warnings)
+        ir_drop_map = _solve_ir_drop(networks, pads, instances, net_extents, warnings)
         worst_case = ir_drop_map["worst_case"]
         worst_case_droop_mv = worst_case["droop_mv"] if worst_case else None
 

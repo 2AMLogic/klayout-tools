@@ -155,7 +155,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   `networks[].islands[].unsolved_reason` field, empty `nodes`/`edges` —
   rather than approximated. Rectangular rails (every `klt par` per-row
   standard-cell rail, and both `gcd` corpus fixtures) take the unchanged
-  single-edge path and report byte-identical networks.
+  single-edge path and report byte-identical networks. A pad or
+  `current_model` instance that geometrically sits on an unsolved island no
+  longer silently reattaches to the nearest node on a different,
+  electrically unrelated island of the same net (an unsolved island has no
+  nodes by construction, so it could never be "nearest" on its own): it is
+  now scoped to the unsolved island it actually sits on, with a pad
+  reporting that island's `island_id`/`node_id: null` and an instance's
+  current counted into `unsolved_current_a`, both named in `warnings`. And
+  the non-rectangular mesh's terminal-end test now derives a cell's flow
+  direction from which of its neighbouring grid cells are actually part of
+  the polygon, not the cell's own width-vs-height aspect ratio — a cell
+  whose vertex-grid cuts happen to make it narrower along the flow than
+  across it (any bar with a stub/tee, or non-square cuts) previously dropped
+  its real terminal node and fabricated one on a perpendicular wall instead.
 
 - **Added** (#2179): `klt erc` now reports `erc_status` and `erc_coverage` —
   the **connectivity** half's own roll-up and checked-work scope, beside the
