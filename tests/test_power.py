@@ -1847,6 +1847,100 @@ def test_em_verdict_not_checked_without_any_declared_limit(tmp_path):
         assert net_entry["status"] == "not_checked"
 
 
+def test_em_overall_status_matches_the_common_coverage_rollup(tmp_path):
+    """Issue #2116: `em_verdict["status"]`/`report["status"]` are not an
+    independently-maintained rule -- they are exactly
+    `rollup_status(coverage_rollup({"coverage": report["coverage"]},
+    failed=...))`, the same #2109 decision table every other coverage-
+    adopting `klt` verb applies. Walks all four reachable rows: zero checked
+    edges, partial requested-net coverage, a fully-checked success, and an
+    actual EM failure."""
+    from klayout_tools.coverage import coverage_rollup, rollup_status
+
+    def _expect(report: dict) -> None:
+        em = report["em_verdict"]
+        failed = bool(em and em["fail_count"])
+        expected = rollup_status(
+            coverage_rollup({"coverage": report["coverage"]}, failed=failed),
+            success="pass",
+        )
+        assert report["status"] == expected
+        if em is not None:
+            assert em["status"] == expected
+
+    # Zero: a solve ran, but no stackup/via role declared any limit at all.
+    zero_report = _pad_and_load_report(tmp_path)
+    assert zero_report["status"] == "not_checked"
+    _expect(zero_report)
+
+    # Partial: one edge checked clean, several others never checked at all.
+    gds = tmp_path / "partial.gds"
+    partial_spec = tmp_path / "em.status.partial.power.json"
+    _basic_fixture(gds)
+    _em_spec(
+        partial_spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3}],
+        },
+        met1_current_limit_a_per_um=0.01,
+    )
+    partial_report = run_power(str(gds), str(partial_spec))
+    assert partial_report["status"] == "pass_partial"
+    _expect(partial_report)
+
+    # Full: both VPWR islands solved, every declared metal/via role has a
+    # limit, so every extracted edge on the requested net is checked.
+    full_gds = tmp_path / "full.gds"
+    full_spec = tmp_path / "em.status.full.power.json"
+    _basic_fixture(full_gds)
+    _em_spec(
+        full_spec,
+        power_nets=("VPWR",),
+        pads=[
+            {"net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8},
+            {"net": "VPWR", "x_um": 0.0, "y_um": 5.5, "voltage_v": 1.8},
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [
+                {"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3},
+                {"x_um": 10.0, "y_um": 5.5, "current_a": 1e-3},
+            ],
+        },
+        met1_current_limit_a_per_um=0.01,
+        met2_current_limit_a_per_um=0.01,
+        via_current_limit_a=0.01,
+    )
+    full_report = run_power(str(full_gds), str(full_spec))
+    assert full_report["status"] == "pass"
+    assert full_report["em_verdict"]["unchecked_edge_count"] == 0
+    _expect(full_report)
+
+    # Fail: the same golden-fail rail as `test_em_verdict_golden_fail_over_
+    # the_limit` above -- a real EM violation always wins over coverage.
+    fail_gds = tmp_path / "fail.gds"
+    fail_spec = tmp_path / "em.status.fail.power.json"
+    _basic_fixture(fail_gds)
+    _em_spec(
+        fail_spec,
+        pads=[
+            {"name": "vdd", "net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [{"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3}],
+        },
+        met1_current_limit_a_per_um=5e-4,
+    )
+    fail_report = run_power(str(fail_gds), str(fail_spec))
+    assert fail_report["status"] == "fail"
+    _expect(fail_report)
+
+
 # --- EM current-density verdict: CLI ----------------------------------------
 
 

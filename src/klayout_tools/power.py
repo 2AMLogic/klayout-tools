@@ -89,7 +89,7 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
-from .coverage import build_check_coverage, work_id
+from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
 
 if TYPE_CHECKING:
@@ -1063,7 +1063,9 @@ def _em_coverage(
 
 
 def _compute_em_verdict(
-    networks: list[dict[str, Any]], ir_drop_map: dict[str, Any] | None
+    networks: list[dict[str, Any]],
+    ir_drop_map: dict[str, Any] | None,
+    coverage: dict[str, Any],
 ) -> dict[str, Any] | None:
     """The per-net EM (electromigration) current-density verdict (issue
     #846, Phase 1c): compare every solved edge's branch current
@@ -1088,18 +1090,24 @@ def _compute_em_verdict(
     failed, or ``"not_checked"`` if the net had no edge with both a
     declared limit and a solved current (e.g. every edge on that net's
     stackup/via roles declared no ``current_limit_a_per_um``/
-    ``current_limit_a`` at all).
+    ``current_limit_a`` at all). Per-net status is deliberately unaffected
+    by this function's *overall* rollup below -- a net's own coverage is
+    already fully expressed by its own ``checked_edge_count``/
+    ``unchecked_edge_count`` pair, and #2109's common table is a
+    whole-design decision, not a per-net one.
 
-    The *overall* rollup's own ``status`` (issue #1997) additionally
-    distinguishes a genuinely complete check from a partial one:
-    ``"pass_partial"`` when at least one edge anywhere in the design was
-    checked and none failed, but ``unchecked_edge_count`` is still nonzero
-    (some other edge had no declared limit, no solved current, or both) --
-    plain ``"pass"`` is reserved for a design where every edge that exists
-    was actually compared against a limit. Per-net ``status`` above is
-    unaffected -- it stays ``"pass"``/``"fail"``/``"not_checked"``, since a
-    net's own coverage is already fully expressed by its own
-    ``checked_edge_count``/``unchecked_edge_count`` pair.
+    The *overall* ``status`` (issue #1997, migrated onto the common
+    ``coverage_rollup()``/``rollup_status()`` decision table by issue #2116)
+    is derived from ``coverage`` -- the same versioned ``checked``/
+    ``skipped``/``inapplicable`` edge identities :func:`_em_coverage` already
+    tracks -- plus this function's own ``fail_count``, exactly the same rule
+    every other coverage-adopting `klt` verb applies (``docs/coverage-
+    contract.md``'s migration contract): a checked edge over its limit is
+    ``"fail"`` regardless of coverage; with no failure, a nonempty edge skip
+    list is ``"pass_partial"`` (never an unconditional ``"pass"``); known
+    zero checked edges is ``"not_checked"``; and only a design where every
+    edge that exists was actually compared against a limit is plain
+    ``"pass"``.
     """
     if ir_drop_map is None:
         return None
@@ -1202,20 +1210,25 @@ def _compute_em_verdict(
         ):
             overall_worst = net_worst
 
-    # Overall rollup `status` (issue #1997) -- `"pass_partial"` reports that
-    # at least one edge was checked and none failed, but some other edge in
-    # the design was never checked at all (`overall_unchecked > 0`: no
-    # declared limit, no solved current, or both) -- so a plain `"pass"` is
-    # reserved for a design where every edge that exists was actually
-    # compared against a limit.
-    if overall_checked == 0:
-        status = "not_checked"
-    elif overall_fail:
-        status = "fail"
-    elif overall_unchecked:
-        status = "pass_partial"
-    else:
-        status = "pass"
+    # Overall rollup `status` (issue #1997, migrated onto the common
+    # decision table by issue #2116): `coverage` already tracks every
+    # extracted edge's `checked`/`skipped`/`inapplicable` identity
+    # (`_em_coverage`, one-for-one with `overall_checked`/`overall_unchecked`
+    # above), so `coverage_rollup()` reads the same eight-row table every
+    # other coverage-adopting `klt` verb applies rather than re-deriving an
+    # equivalent rule locally -- see `docs/coverage-contract.md`'s migration
+    # contract. `failed=` is this function's own executed-check outcome
+    # (`overall_fail > 0`, decided *before* coverage is consulted, so a real
+    # EM violation is never masked by a coverage gap): `"fail"`/exit 3.
+    # With no failure: known zero checked edges is `"not_checked"`/exit 4;
+    # a nonempty edge skip list alongside successful checks is
+    # `"pass_partial"`/exit 0 -- never an unconditional `"pass"` (the
+    # operator's #1988 rule); and only a design where every edge that
+    # exists was actually compared against a limit reaches plain `"pass"`.
+    status = rollup_status(
+        coverage_rollup({"coverage": coverage}, failed=bool(overall_fail)),
+        success="pass",
+    )
 
     return {
         "status": status,
@@ -1225,6 +1238,26 @@ def _compute_em_verdict(
         "worst_case": overall_worst,
         "nets": net_reports,
     }
+
+
+def _em_overall_status(
+    em_verdict: dict[str, Any] | None, coverage: dict[str, Any]
+) -> str:
+    """The report's top-level ``status`` (issue #2116): ``em_verdict``'s own
+    common-rollup-derived status when a solve ran at all, or the same
+    rollup applied directly to ``coverage`` when it did not.
+
+    No solve at all (no ``pads``/``current_model``) leaves ``em_verdict``
+    ``None`` -- every extracted edge's EM check is `inapplicable` (see
+    ``_em_coverage``), which the common table classifies as known zero
+    checked work (``coverage_rollup()``'s ``RESULT_ZERO`` row), reporting
+    the fixed ``"not_checked"`` token -- matching the standalone
+    ``"not_checked"`` this branch always reported before the shared rollup
+    existed.
+    """
+    if em_verdict is not None:
+        return em_verdict["status"]
+    return rollup_status(coverage_rollup({"coverage": coverage}), success="pass")
 
 
 def run_power(
@@ -1424,17 +1457,26 @@ def run_power(
         worst_case = ir_drop_map["worst_case"]
         worst_case_droop_mv = worst_case["droop_mv"] if worst_case else None
 
+    # Issues #2108/#2109/#2116: the versioned checked-work coverage block,
+    # built ahead of `em_verdict` because its edge-level classification
+    # (`checked`/`skipped`/`inapplicable`) is what the common
+    # `coverage_rollup()` table below reads to decide *both* `em_verdict`'s
+    # own overall status and, when there was no solve at all, the top-level
+    # `status` fallback -- see `_em_coverage`'s docstring.
+    coverage = _em_coverage(networks, ir_drop_map)
+
     # Issue #846, Phase 1c: the per-net EM current-density verdict, built
     # from this same `ir_drop_map`'s per-segment currents (`None` when there
     # was no solve at all -- see `_compute_em_verdict`'s own docstring).
-    em_verdict = _compute_em_verdict(networks, ir_drop_map)
-    coverage = _em_coverage(networks, ir_drop_map)
+    em_verdict = _compute_em_verdict(networks, ir_drop_map, coverage)
     if em_verdict and em_verdict["fail_count"]:
         warnings.append(
             f"{em_verdict['fail_count']} of {em_verdict['checked_edge_count']} "
             "EM-checked edge(s) exceed their declared current-density limit "
             "-- see em_verdict for the cited limit each failed against"
         )
+
+    status = _em_overall_status(em_verdict, coverage)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -1448,7 +1490,7 @@ def run_power(
         "ir_drop_map": ir_drop_map,
         "worst_case_droop_mv": worst_case_droop_mv,
         "em_verdict": em_verdict,
-        "status": em_verdict["status"] if em_verdict else "not_checked",
+        "status": status,
         "coverage": coverage,
         "warnings": warnings,
     }

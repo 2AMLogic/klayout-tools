@@ -435,16 +435,24 @@ IR-drop solve already produced are checked against those limits, per net.
   solved current** — e.g. a net whose whole stackup declared no EM limits
   at all.
 - **The overall `em_verdict.status` rolls up the same underlying data, but
-  adds a fourth value the per-net `status` does not need** (issue #1997):
-  `"fail"` if any edge anywhere failed; else `"pass_partial"` if at least
-  one edge was checked and none failed, but `unchecked_edge_count` is still
-  nonzero (some other edge in the design was never checked at all); else
-  `"pass"` only when every edge that exists was actually checked
-  (`unchecked_edge_count == 0`); else `"not_checked"` if nothing was ever
-  checked. `"pass_partial"` exists because "at least one edge checked and
-  clean" is a much weaker claim at the whole-design level than at a single
-  net's — a design can have every net partially covered and still roll up
-  to a misleadingly plain `"pass"` without it.
+  adds a fourth value the per-net `status` does not need** (issue #1997,
+  migrated onto the shared [common rollup rule](../coverage-contract.md)
+  by issue #2116): `"fail"` if any edge anywhere failed (decided before
+  coverage is even consulted, so a real violation is never masked by a
+  coverage gap); else `"pass_partial"` if at least one edge was checked and
+  none failed, but `unchecked_edge_count` is still nonzero (some other edge
+  in the design was never checked at all — the common table's `partial`
+  row, never an unconditional pass); else `"pass"` only when every edge
+  that exists was actually checked (`unchecked_edge_count == 0`, the
+  table's `full` row); else `"not_checked"` if nothing was ever checked
+  (known zero checked work, the table's `zero` row). `"pass_partial"`
+  exists because "at least one edge checked and clean" is a much weaker
+  claim at the whole-design level than at a single net's — a design can
+  have every net partially covered and still roll up to a misleadingly
+  plain `"pass"` without it. This is exactly `rollup_status(coverage_rollup
+  ({"coverage": coverage}, failed=...), success="pass")` from
+  `klayout_tools.coverage` — the same decision table every other coverage-
+  adopting `klt` verb applies, not a `power`-specific rule.
 - **`em_verdict` is `null` when there was no IR-drop solve at all** (the
   spec declared neither `pads` nor `current_model`) — there are no branch
   currents to compare, the same condition under which `ir_drop_map` itself
@@ -907,15 +915,24 @@ criterion 4):**
 ## Checked-work coverage
 
 The [common v1 coverage contract](../coverage-contract.md) is additive to
-this command's existing envelope.
+this command's existing envelope, and `status`/`em_verdict.status` are
+derived from it through the [common rollup rule](../coverage-contract.md#the-common-rollup-rule-version-2109)
+(`coverage_rollup()`/`rollup_status()` in `klayout_tools.coverage`, issue
+#2109; adopted for this path by issue #2116) — the same eight-row decision
+table every other coverage-adopting `klt` verb applies, not a `power`-
+specific rule.
 
 `coverage.scope` is `electromigration`. Checked IDs name net/island/edge
 currents compared to declared limits. Missing limits or unavailable branch
-currents are skipped. Without a requested current solve, EM work is
-inapplicable and the result is `not_checked`, exit 4; network extraction
-remains available in the report. The additive top-level `status` mirrors
-`em_verdict.status` when present: `fail` exits 3, `not_checked` exits 4,
-and existing `pass`/`pass_partial` exit 0. The existing signoff refusal for
+currents are skipped (`missing_current_limit`/`unavailable_branch_current`).
+Without a requested current solve, EM work is `inapplicable`
+(`no_current_solve_requested`) and the result is `not_checked`, exit 4;
+network extraction remains available in the report. A nonempty skipped-edge
+list can never coexist with an unconditional `pass` (#1988's operator rule):
+successful checks alongside skipped edges elsewhere in the design report
+`pass_partial`, exit 0, instead. The additive top-level `status` mirrors
+`em_verdict.status` when present: `fail` exits 3, `not_checked` exits 4, and
+`pass`/`pass_partial` exit 0. The existing signoff refusal for
 `pass_partial` is unchanged.
 
 Completed refusal/failure reports remain on stdout; actual invocation errors
