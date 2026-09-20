@@ -195,6 +195,54 @@ def test_power_real_current_and_declared_limit(
     assert json.loads(capsys.readouterr().out)["status"] == status
 
 
+def test_power_partial_requested_net_coverage_real_producer(tmp_path, capsys):
+    """Issue #2116: a real, fully-solved two-island design where only one
+    metal role declares an EM limit -- island A's lone met1 edge and island
+    B's met1 edge are checked, but island B's met2/via edges are skipped for
+    `missing_current_limit`, never guessed at. Both islands have a pad and a
+    drawn current (no `unavailable_branch_current` skip in play here), so
+    this is squarely the "some requested net/edge has no edge with both
+    resistance and current [checked]" partial-coverage gap this issue names
+    -- distinct from `test_power_real_current_and_declared_limit`'s zero/
+    full/fail single-edge cases above."""
+    gds, spec = tmp_path / "power.gds", tmp_path / "power.partial.json"
+    power_fixtures._basic_fixture(gds)
+    power_fixtures._em_spec(
+        spec,
+        power_nets=("VPWR",),
+        pads=[
+            {"net": "VPWR", "x_um": 0.0, "y_um": 0.5, "voltage_v": 1.8},
+            {"net": "VPWR", "x_um": 0.0, "y_um": 5.5, "voltage_v": 1.8},
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [
+                {"x_um": 10.0, "y_um": 0.5, "current_a": 1e-3},
+                {"x_um": 10.0, "y_um": 5.5, "current_a": 1e-3},
+            ],
+        },
+        met1_current_limit_a_per_um=0.01,
+    )
+
+    report = power.run_power(str(gds), str(spec))
+    _assert_contract(report, "partial")
+    assert report["status"] == "pass_partial"
+    assert report["em_verdict"]["fail_count"] == 0
+    assert len(report["coverage"]["checked"]) == 2
+    assert len(report["coverage"]["skipped"]) == 2
+    assert {r["reason"] for r in report["coverage"]["skipped"]} == {
+        "missing_current_limit"
+    }
+    vpwr = next(n for n in report["em_verdict"]["nets"] if n["net"] == "VPWR")
+    assert vpwr["status"] == "pass"  # per-net status is unaffected by this issue
+
+    # A nonempty skip list alongside a clean check is never an unconditional
+    # pass (#1988's operator rule) -- `klt signoff` still refuses it.
+    _assert_signoff(tmp_path, report, passed=False)
+    assert main(["power", str(gds), str(spec), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "pass_partial"
+
+
 @pytest.mark.parametrize(
     "measurements,state,status,code",
     [
