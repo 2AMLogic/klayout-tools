@@ -1702,6 +1702,111 @@ def test_power_preset_resolution_does_not_mutate_the_shipped_table():
 
 
 # --------------------------------------------------------------------------- #
+# Joint floorplan/power pre-flight (issue #2170): `_validate_floorplan` and
+# `_validate_power` each validate their own block in isolation and can both
+# pass on a request that is *jointly* impossible -- a platform's own
+# verbatim PDN strap geometry has an implicit minimum core dimension
+# (`offset_um` + the strap's power/ground group width), and a small (or
+# `"utilization"`-derived) floorplan can be below it. Nothing in the
+# request is individually wrong, so without this check the run proceeds
+# and fails deep inside the "floorplan" stage with OpenROAD's own opaque
+# `PDN-0185` "Insufficient width" error, which names neither
+# `request.floorplan` nor `request.power`. See
+# `klayout_tools.place_and_route_pdn_fit` for the `pdngen`-derived
+# arithmetic this check reuses (verified against
+# `The-OpenROAD-Project/OpenROAD`'s own `src/pdn/src/straps.cpp`).
+#
+# Scoped to `floorplan.method: "explicit"` here (and to `"utilization"`
+# when the request's own netlist/cell LEFs let the core be estimated --
+# see `place_and_route_pdn_fit.core_extent_um`'s own docstring): the core
+# box is either stated directly or re-derivable from data already on disk,
+# so this can reject before OpenROAD is invoked without ever risking a
+# false positive on a request OpenROAD would have accepted.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_rejects_power_straps_too_wide_for_explicit_floorplan_core(
+    tmp_path, monkeypatch
+):
+    """End to end: a `met5` strap shaped like sky130hd's own real PDN grid
+    (`offset_um` 13.6 + a 15.2 um strap group = a 28.8 um minimum core)
+    against an `explicit` floorplan whose 10 um core is far too small --
+    rejected before OpenROAD is invoked (the `subprocess.run` stub below
+    asserts this by raising if called at all), naming both
+    `request.floorplan` and `request.power`."""
+
+    def fail_if_called(cmd, **kwargs):
+        raise AssertionError(f"OpenROAD must not be invoked: {cmd}")
+
+    monkeypatch.setattr(place_and_route.subprocess, "run", fail_if_called)
+
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        floorplan={
+            "method": "explicit",
+            "die_area_um": [0, 0, 20, 20],
+            "core_area_um": [5, 5, 15, 15],
+            "site": "unithd",
+        },
+        power={
+            "straps": [
+                {
+                    "layer": "met5",
+                    "width_um": 1.6,
+                    "pitch_um": 27.2,
+                    "offset_um": 13.6,
+                },
+            ]
+        },
+    )
+
+    with pytest.raises(PlaceAndRouteError) as excinfo:
+        run_place_and_route(request_path)
+    message = str(excinfo.value)
+    assert "request.power.straps[0]" in message
+    assert "request.floorplan" in message
+    assert "met5" in message
+    assert "28.8" in message
+    assert "PDN-0185" in message
+
+
+def test_run_accepts_power_straps_that_fit_the_explicit_floorplan_core(
+    tmp_path, monkeypatch
+):
+    """The no-false-positive half: the same strap shape against a floorplan
+    core that is genuinely large enough must not be rejected -- the full
+    stubbed run reaches a normal `"ok"`/`"route"` report, proving the joint
+    check let it through rather than merely not-yet-being-exercised."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        floorplan={
+            "method": "explicit",
+            "die_area_um": [0, 0, 120, 120],
+            "core_area_um": [10, 10, 110, 110],
+            "site": "unithd",
+        },
+        power={
+            "straps": [
+                {
+                    "layer": "met5",
+                    "width_um": 1.6,
+                    "pitch_um": 27.2,
+                    "offset_um": 13.6,
+                },
+            ]
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+
+
+# --------------------------------------------------------------------------- #
 # Macro-pin routability cross-check (issue #464): a LEF pin with no `PORT`
 # geometry at all (e.g. a device gate pin on bare poly `klt lef-abstract`
 # emitted with `geometry_source: "none"`) that is actually wired into the
