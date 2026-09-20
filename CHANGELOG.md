@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt sim`'s top-level `status` now applies the common
+  partial-success rollup rule (issue #2109) instead of a bespoke
+  "no failure means pass" check (issue #2117). Previously, a `limits` object
+  whose keys `klt sim` never applies (only `min`/`max` are read — a typo'd
+  `"maximum"`/`"minimum"` scored as no bound at all) silently reported the
+  unconditional `status: "pass"` whenever it sat beside another measurement's
+  own applied, satisfied bound — the exact false-pass this issue closes. The
+  run's own `coverage.skipped` already disclosed the gap (issue #1996); this
+  fix routes it through `coverage_rollup()`/`rollup_status()` so successful
+  checks alongside a nonempty skip list now report the new
+  `status: "pass_partial"` value (exit `0`, same token issue #1997 already
+  shipped for `klt power`/`klt erc`) rather than `"pass"`. An empty corner
+  matrix or a `limits` object using only unrecognized keys still reports
+  `status: "not_checked"` (exit `4`) exactly as before; a real limit
+  violation or corner error still outranks any coverage gap. `klt signoff`
+  already read `"pass_partial"` as non-qualifying partial evidence for
+  `sim`-kind checks (issue #2109), so no consumer-side change was needed.
 - **Fixed**: `klt extract` no longer writes a net name containing `.` into a
   node-reference position of its SPICE output (issue #2145). A net can arrive
   carrying an instance path joined with a dot — `XBIAS.vb1` — either from

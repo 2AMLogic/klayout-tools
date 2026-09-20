@@ -257,12 +257,23 @@ def test_power_partial_requested_net_coverage_real_producer(tmp_path, capsys):
         ([{"name": "vout"}], "full", "pass", 0),
         ([{"name": "vout", "limits": {"max": 2.0}}], "full", "pass", 0),
         (
+            # Issue #2109's common rollup rule (issue #2117 applies it to
+            # `sim`): a typo'd `limits` key (`"maximum"`) beside a recognised
+            # one (`"max"`) on the *same* measurement still lets the run
+            # check something real -- `coverage_state` is `"partial"`, never
+            # `"zero"` -- but that checked work is never enough to earn the
+            # unconditional `"pass"` `klt signoff` reads as a complete
+            # result. Before #2117, this row's `status` was silently `"pass"`
+            # -- the exact bug the issue title names.
             [{"name": "vout", "limits": {"max": 2.0, "maximum": 2.0}}],
             "partial",
-            "pass",
+            "pass_partial",
             0,
         ),
         (
+            # Failure precedence (issue #2109) holds even alongside a skipped
+            # bound: a real limit violation is reported as the violation, not
+            # masked by -- or confused with -- the coverage gap.
             [{"name": "vout", "limits": {"max": 0.5, "maximum": 2.0}}],
             "partial",
             "fail",
@@ -289,7 +300,16 @@ def test_sim_real_producer_measurement_coverage(
     report = sim.run_sim(str(request))
     _assert_contract(report, state)
     assert report["status"] == status
-    _assert_signoff(tmp_path, report, passed=status == "pass", item=1)
+    result = _assert_signoff(tmp_path, report, passed=status == "pass", item=1)
+    if status == "pass_partial":
+        # `klt signoff` never reads a real, self-reported `pass_partial`
+        # verdict as fully qualifying evidence -- it is named
+        # `partial_coverage`, not the unconditional `pass` word, on the same
+        # `coverage_qualification` path #2109 gave every other adapter.
+        assert result["checks"][0]["detail"]["coverage_qualification"] == {
+            "reason": "partial_coverage",
+            "skipped": report["coverage"]["skipped"],
+        }
     assert main(["sim", str(request), "--format", "json"]) == code
     assert json.loads(capsys.readouterr().out)["status"] == status
 

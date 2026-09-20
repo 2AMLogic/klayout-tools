@@ -1655,7 +1655,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | --------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | `schema_version`| integer         | Version of this command's JSON shape (`3` as of issue #1274, which extended issue #1261's `{path, scope}` path-normalization to `environment.models_lib`; per-command, per `docs/json-contract.md`).                 |
 | `netlist`       | object          | `{path, scope}` — the resolved `netlist` path, normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when it sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
-| `status`        | string          | Aggregate: `"pass"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence: `error` > `fail` > `not_checked` > `pass`.                              |
+| `status`        | string          | Aggregate: `"pass"`, `"pass_partial"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence (issue #2109's common rollup rule): `error` > `fail` > `not_checked` > `pass_partial` > `pass`. `pass_partial` is a real, exit-`0` result — every executed check passed — that also has a nonempty `coverage.skipped` (a typo'd `limits` key beside a recognised one, a corner with no requested measurements, …); it is never reported as the unconditional `pass`. See "`coverage`" below. |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. |
@@ -1729,11 +1729,22 @@ and skipped bounds remain distinguishable by identity.
 
 A deliberate no-limit characterization counts a produced measurement as
 checked and its omitted limit as inapplicable. A launched corner alone does
-not count. With no failure/error, zero actual checks yields
-`status: "not_checked"` and exit 4. Real corner errors and failed bounds
-(including Monte Carlo sigma windows) retain precedence and their existing
-exit codes. `klt signoff` refuses zero/unknown/malformed common coverage;
-Phase 2 owns any new generic partial-success policy.
+not count. With no failure/error, `klt sim` derives the top-level `status`
+from [the common rollup rule](../coverage-contract.md#the-common-rollup-rule-version-2109)
+(`coverage_rollup()`/`rollup_status()`, issue #2109) applied to this
+`coverage` block: zero actual checks yields `status: "not_checked"` and
+exit 4; successful checks alongside a nonempty `skipped` list — an
+unrecognized `limits` key beside a recognised one on the same
+measurement, an empty corner matrix, a corner with no requested
+measurements, an unavailable measurement value, or a `null` bound — yields
+`status: "pass_partial"` and exit 0, never the unconditional `pass`; only
+known, nonempty checked work with nothing skipped earns `status: "pass"`.
+Real corner errors and failed bounds (including Monte Carlo sigma windows)
+retain precedence over coverage and their existing exit codes. `klt signoff`
+refuses zero/unknown/malformed common coverage and never reads a
+`pass_partial` run as fully qualifying evidence (`partial_coverage`); see
+[`coverage-contract.md`](../coverage-contract.md)'s "Signoff qualification"
+section.
 
 ### Semantics and guarantees
 
@@ -1785,7 +1796,7 @@ the full reasoning):
 
 | Code | Meaning                                                                    |
 | ---- | ---------------------------------------------------------------------------- |
-| `0`  | Checked at least one measurement/bound and no corner or rollup failed.                                                         |
+| `0`  | Checked at least one measurement/bound and no corner or rollup failed. Aggregate `status` is `"pass"` (nothing requested was skipped) or `"pass_partial"` (issue #2109 — every executed check passed, but `coverage.skipped` is nonempty).                                                         |
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
