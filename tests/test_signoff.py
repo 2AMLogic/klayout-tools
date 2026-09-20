@@ -2362,6 +2362,58 @@ def test_a_real_failure_still_outranks_a_partial_coverage_report(tmp_path):
     assert item_3["reason"] == "check_failed"
 
 
+def test_a_critical_metric_blocker_outranks_a_partial_status_token(tmp_path):
+    """The *signoff-side* half of failure precedence (issue #2152). The
+    producer-side half above is structural -- the rollup never emits the
+    partial token for a run that found a defect -- but
+    `_critical_metric_blockers` (#1850) fails an envelope off the metric
+    registry regardless of what its `status` says, so a partial token and a
+    failing registered `critical: true` metric *can* co-occur. When they do,
+    the reason must name the real, mechanically-detected defect rather than
+    sending the reader after the skipped work."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {**DRC_PARTIAL_STATUS_ENVELOPE, "metrics": {"drc__error__count": 5}},
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    aggregate = build_signoff([path])
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "check_failed"
+    assert item_3["citation"] is None
+    check = aggregate["checks"][0]
+    assert check["status"] == "clean_partial"  # the partial token is unchanged
+    assert check["passed"] is False
+    assert check["detail"]["critical_metric_blockers"] == [
+        {"metric": "drc__error__count", "value": 5, "higher_is_better": False}
+    ]
+
+
+def test_a_partial_status_token_without_a_blocker_still_reports_partial(tmp_path):
+    """The control for the test above: the same partial-token envelope with
+    its critical metric at the passing value carries no blocker, so the
+    reason is still `partial_coverage`. The reordering only fires when a
+    critical metric actually blocks."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {**DRC_PARTIAL_STATUS_ENVELOPE, "metrics": {"drc__error__count": 0}},
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    aggregate = build_signoff([path])
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "partial_coverage"
+    check = aggregate["checks"][0]
+    assert check["passed"] is False
+    assert "critical_metric_blockers" not in check["detail"]
+
+
 def test_a_met_item_discloses_the_requested_work_its_evidence_skipped(tmp_path):
     """The pre-adapter case. `klt drc` still reports the unconditional
     `"clean"` on a partial run until #2110 lands, and item 3's verdict is
