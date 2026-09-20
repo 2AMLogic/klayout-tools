@@ -115,7 +115,13 @@ def test_external_drc_categories_are_unknown_not_execution(tmp_path, monkeypatch
     [
         (None, False, False, "zero", "not_checked", 4),
         ("sky130", False, False, "full", "clean", 0),
-        ("sky130", True, False, "partial", "clean", 0),
+        # #1997's "met3-5-only" partial-coverage scenario, migrated onto the
+        # common rollup rule (#2109/#2115): every graded level (li1/met1/
+        # met2) passes clean, but met3-5 have no sky130 antenna-ratio limit
+        # -- `coverage.skipped` is nonempty, so the common rollup rule's
+        # `partial` row applies. `status` must not read as the unconditional
+        # `"clean"` this same fixture reported before #2115.
+        ("sky130", True, False, "partial", "clean_partial", 0),
         ("sky130", True, True, "partial", "violations", 3),
     ],
 )

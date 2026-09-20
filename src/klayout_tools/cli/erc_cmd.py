@@ -5,7 +5,11 @@ Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
 Exit codes (see ``docs/cli/erc.md`` for the full table):
-    0 - at least one antenna level graded, no antenna/connectivity finding
+    0 - "clean" (at least one antenna level graded, no antenna/connectivity
+        finding) or "clean_partial" (the common rollup rule, issue #2109 --
+        every executed check passed, but some requested antenna work was
+        skipped, e.g. a full sky130 stack whose met3-5 roles have no
+        antenna-ratio limit)
     1 - failed to run (bad file/spec, malformed stackup/via declaration,
         unknown --pdk, ambiguous top cell, or no net carries any gate-role
         geometry at all) -- returned by ``emit_error`` as
@@ -21,6 +25,19 @@ import argparse
 from ..erc import ErcError, run_erc
 from .output import emit_error, emit_success
 
+#: `status` -> exit code (issue #2115, applying the common rollup rule's
+#: exit codes, #2109). `"clean_partial"` reports the same exit `0` as
+#: `"clean"`: a partial result is a real, successful run, just not this
+#: verb's *unconditional* success -- `klt signoff` is where that
+#: distinction actually gates a citation (`docs/coverage-contract.md`'s
+#: "Signoff qualification").
+_EXIT_CODE_BY_STATUS = {
+    "clean": 0,
+    "clean_partial": 0,
+    "violations": 3,
+    "not_checked": 4,
+}
+
 
 def run(args: argparse.Namespace) -> int:
     try:
@@ -29,7 +46,7 @@ def run(args: argparse.Namespace) -> int:
         return emit_error("erc", str(exc), args.format)
 
     emit_success(report, args.format, _print_text)
-    return {"clean": 0, "violations": 3, "not_checked": 4}[report["status"]]
+    return _EXIT_CODE_BY_STATUS[report["status"]]
 
 
 def _print_text(report: dict) -> None:
