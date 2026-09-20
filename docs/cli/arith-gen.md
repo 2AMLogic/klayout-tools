@@ -154,6 +154,11 @@ There is no exit code 3: this command has no pass/fail verdict of its own.
 Proving the emitted Verilog correct is [`klt equiv`](equiv.md)'s job — via
 the request file this command writes.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## Worked example: generate, then prove
 
 ```console

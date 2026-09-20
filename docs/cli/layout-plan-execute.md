@@ -334,6 +334,13 @@ execution's terminal step *is* a composition:
 | `2` | Reserved for a future CLI subcommand's own argparse usage-error layer — this phase adds none. |
 | `3` | Partial success — `partial_success(response)` is `True`: every group placed, but `unrouted_nets[]` and/or `unmapped_netlist_nets[]` is non-empty. `exit_code_for(response)` returns this. |
 
+**Gate on the payload (e.g. `unrouted_nets[]`/`unmapped_netlist_nets[]`),
+not the exit code.** These codes are additive — a future release may add a
+new one above `3` — and the exit code is only a shortcut derived from the
+payload's own fields, which are authoritative. See
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "Exit codes"
+section.
+
 ## Scope decisions (this increment)
 
 The acceptance criteria this phase shipped against left several choices to

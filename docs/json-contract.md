@@ -742,6 +742,37 @@ exits `3` when the deck ran successfully but found violations (a successful
 run, so the documented success payload is still on stdout). Extensions never
 redefine `0`/`1`/`2`.
 
+**The exit-code contract is additive, and a consumer must treat it that way.**
+A command may ship a new code above `2` in a later release for an outcome
+that previously did not exist — e.g. `klt lvs` adding exit `4`
+(`status: "inconclusive"`) alongside its original `0`/`1`/`2`/`3` (issue
+#1370). A script that allowlists a fixed set of "acceptable" codes (e.g.
+`returncode not in (0, 3)`) treats every new code as a crash, because the
+allowlist itself is not additive even though the codes it is checking
+against are. This broke a real downstream pipeline mid-run when `4` shipped
+(issue #2172) — the fix is architectural, not a one-time allowlist update:
+
+- **There is a stable "a report was emitted" class.** Any exit code `3`
+  and above means the command ran to completion and its documented JSON
+  payload (with a `status` field or equivalent verdict) is on stdout — the
+  new code is a *new verdict*, not a new failure mode. Only exit `1` means
+  no report was written (`2` is a usage error from argparse — see the
+  carve-out below — and also writes no report). A consumer that wants to
+  keep working across new codes should branch on "`1`: no report, handle as
+  a failure" vs. "anything else: a report was written, parse it" instead of
+  enumerating every code it currently knows about.
+- **`status` is the verdict of record; the exit code is a shortcut.** Every
+  command's JSON payload carries a `status` (or equivalently-named verdict)
+  field that is the authoritative outcome — the exit code is a
+  process-level convenience for shell scripting (`if klt lvs ...; then`),
+  derived from the same `status`, not an independent signal. A consumer
+  that gates CI/pipeline behavior on outcome should read `status` from the
+  parsed JSON, not maintain its own exit-code allowlist; `status`'s
+  possible values are documented per-verb and grow the same way exit codes
+  do (a new named value, never a redefinition of an existing one), so
+  reading it directly does not need updating each time a verb adds an
+  outcome.
+
 **Carve-out:** exit code `2` and its accompanying stderr output are argparse's
 own behavior, produced before any subcommand's `run()` executes. They are
 deliberately out of scope for the shared `output.py` helper — argparse always

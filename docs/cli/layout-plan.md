@@ -298,6 +298,11 @@ handler runs). Phase B adds no subcommand, so there is no argparse layer to
 own that boundary; `2` instead covers "the request document is malformed",
 which is the same class of caller mistake one contract layer up.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## See also
 
 - [`docs/design/netlist-driven-layout-spike.md`](../design/netlist-driven-layout-spike.md)

@@ -127,6 +127,11 @@ every other key.
 stage has no "ran but found problems" outcome of its own beyond "did a
 mapped netlist come out that this run trusts".
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## Building the `klt-techmap` binary
 
 `klt techmap` requires a compiled `klt-techmap` binary on disk (release

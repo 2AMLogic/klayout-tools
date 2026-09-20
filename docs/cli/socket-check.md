@@ -284,6 +284,12 @@ units), `klt socket-check` reports positions/bounding boxes in
 | `2`  | Usage error (missing argument, bad `--format` value) -- from argparse. |
 | `3`  | Ran successfully, at least one check failed.                 |
 
+**Gate on `status`, not the exit code.** These codes are additive — a
+future release may add a new one above `3` — and the exit code is only a
+shortcut derived from the payload's own `status` field, which is
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 On error (exit `1`), a concise message is written to **stderr** and nothing
 is written to stdout. No Python traceback is printed.
 

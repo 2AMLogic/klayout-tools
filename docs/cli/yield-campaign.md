@@ -184,7 +184,11 @@ an empty set is likewise an error.
 | `3` | The campaign ran; at least one measurement's yield claim was not met at the stated confidence. |
 
 Exit codes mirror `klt yield`'s own — see
-[`docs/cli/yield.md`'s "Exit codes"](yield.md#exit-codes).
+[`docs/cli/yield.md`'s "Exit codes"](yield.md#exit-codes) — including that
+they are additive and a consumer should gate on the payload's own verdict,
+not the exit code; see
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "Exit codes"
+section.
 
 ## Building the native extension
 

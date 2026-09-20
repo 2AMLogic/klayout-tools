@@ -308,6 +308,12 @@ doing so would let it "improve" a broken harness by making it crash less
 informatively, or conversely discard a valid low-scoring candidate as a tooling
 failure.
 
+**Gate on `valid`, not the exit code.** These codes are additive — a
+future release may add a new one above `3` — and the exit code is only a
+shortcut derived from the payload's own `valid`/`status` fields, which are
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 On error (exit `1`), a concise message is written to **stderr** and nothing
 is written to stdout. No Python traceback is printed.
 

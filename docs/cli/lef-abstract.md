@@ -215,6 +215,11 @@ view rather than a hole-aware multi-`RECT` decomposition).
 pass/fail concept of its own — a pin resolving to synthesized (rather than
 drawn) geometry is reported in `warnings`, never treated as a failure.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## Round-tripping through `klt place-and-route`
 
 The emitted LEF is designed to be handed straight to

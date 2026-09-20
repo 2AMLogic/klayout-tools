@@ -2399,6 +2399,11 @@ eval`'s descriptor with an explicit threshold, the same mechanism
 `docs/cli/eval.md`'s own example already uses for `layout-metrics`'s
 `cell_count`.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ### Diagnosed engine errors: `DRT-0305` (constant-tie nets)
 
 One OpenROAD error is translated rather than echoed. If the netlist handed

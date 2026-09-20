@@ -896,6 +896,12 @@ command shares.
 | `3` | The search ran but the target could not be met (`status: "fail"`) -- infeasible within the given width bounds, or outside the stated tolerance. A successful run; the documented success payload is still on stdout. |
 | `4` | The ngspice evaluator itself errored (`status: "error"`) -- launch failure, timeout, or no usable operating-point data. |
 
+**Gate on `status`, not the exit code.** These codes are additive -- a
+future release may add a new one above `4` -- and the exit code is only a
+shortcut derived from the payload's own `status` field, which is
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 ## Worked example
 
 [`examples/size/`](../../examples/size/) -- a tiny synthetic

@@ -2777,6 +2777,27 @@ every previously-shipped `klt lvs` invocation keeps its original `0`/`3`
 behaviour. `klt equiv`'s own version of this outcome is documented in
 [`docs/cli/equiv.md`](equiv.md)'s "Timeout and the inconclusive verdict".
 
+**The `0`→`4` table above is additive, and a caller must treat it that way**
+(issue #2172): `4` was added in a later release than `0`/`1`/`2`/`3`, and a
+future release may add a `5` the same way. A downstream consumer that
+allowlists a fixed set of codes (e.g. `returncode not in (0, 3)`) breaks the
+moment a new one ships — `4` did exactly that to a real pipeline, which read
+it as a crash and aborted mid-run with no report saved. Two rules keep a
+caller stable across future codes:
+
+- **`3` and above is the "a report was emitted" class.** `3` and `4` both
+  mean the run completed and the documented JSON payload — with `status`
+  set to `"mismatch"` or `"inconclusive"` respectively — is on stdout.
+  Only `1` means no report was written (`2` is argparse's usage-error code
+  and also writes no report). Branch on "`1`: no report" vs. "anything
+  else: parse the report," not on an enumerated list of codes.
+- **Gate on `status`, not the exit code.** `status` (`"match"` /
+  `"mismatch"` / `"inconclusive"`) in the JSON payload is the verdict of
+  record; the exit code is a convenience shortcut derived from it for shell
+  scripting. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+  "Exit codes" section for the shared additive-contract statement every
+  `klt` verb follows.
+
 **The exit code reflects the *signal* verdict only — `power_connectivity`
 never changes it** (issue #1952). A run whose signal compare matched but
 whose power/ground check found a defect exits `0` with `status: "match"` and

@@ -291,6 +291,11 @@ documented `docs/json-contract.md` error shape.
 Unlike `klt yield`, there is no `3`: a sensitivity ranking makes no
 pass/fail claim to miss.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 ## Scope and limitations
 
 - **Correlation/regression, not Sobol.** See "What is computed" above —

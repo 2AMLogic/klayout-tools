@@ -1550,7 +1550,11 @@ log with a mysterious path error:
 ```
 
 See [`docs/json-contract.md`](../json-contract.md) for the envelope shared
-across all `klt` commands.
+across all `klt` commands. **Gate on the payload's own verdict, not the
+exit code** — these codes are additive (a future release may add a new one
+above `5`), and the exit code is only a shortcut derived from the payload's
+own fields, which are authoritative; see that document's "Exit codes"
+section.
 
 ## Worked example
 

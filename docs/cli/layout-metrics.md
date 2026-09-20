@@ -281,6 +281,11 @@ an error — it exits `0` with `status: "no_artifacts"` or a report missing
 the relevant optional fields, matching the graceful-degradation contract
 `klayout-tools.org`'s loader (#59) expects.
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 On error, a concise message is written to **stderr** and nothing is written
 to stdout. No Python traceback is printed.
 

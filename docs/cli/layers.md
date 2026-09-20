@@ -196,6 +196,11 @@ layer  datatype  name  shapes  annotation  flattened_shapes  bbox_um            
 | `1`       | The file is missing, unreadable, not a recognisable layout, `--top` names a cell absent from the stream, or `--include-text` is given without `--flattened`. |
 | `2`       | Usage error (missing argument, bad `--format` value) — from argparse.|
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 On error, a concise message is written to **stderr** and nothing is written to
 stdout. No Python traceback is printed.
 

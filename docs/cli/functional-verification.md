@@ -860,6 +860,12 @@ of the batch is still trustworthy": either the build+run pipeline produced a
 `--mutations` extends this table additively — see "Mutation testing:
 `--mutations`" → "Exit codes" above.
 
+**Gate on `status`, not the exit code.** These codes are additive — a
+future release may add a new one above `3` — and the exit code is only a
+shortcut derived from the payload's own `status` field, which is
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 ## Composing into `klt eval`
 
 `status: "pass"` → exit `0` → `valid: true`; `status: "fail"` → exit `3` →

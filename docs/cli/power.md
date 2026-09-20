@@ -948,6 +948,12 @@ retain exit 1 and the stderr error envelope.
 | `3` | An EM limit was exceeded. |
 | `4` | No actual electromigration checks; `status: "not_checked"`. |
 
+**Gate on `status`, not the exit code.** These codes are additive — a
+future release may add a new one above `4` — and the exit code is only a
+shortcut derived from the payload's own `status` field, which is
+authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
+"Exit codes" section.
+
 ## See also
 
 - [#712](https://github.com/2AMLogic/klayout-tools/issues/712) — the parent

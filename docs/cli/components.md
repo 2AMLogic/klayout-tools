@@ -164,6 +164,11 @@ exit codes).
 | `1`  | Failed to run -- bad layout file, malformed `--conductors`/`--vias`/`--label-layers`, an unknown conductor name referenced by a via or by a `--label-layers` entry's `conductor` field, unknown `--top` cell, or malformed `--region`. |
 | `2`  | Usage error (missing argument, bad `--format` value) -- from argparse.                                        |
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 On error (exit `1`), a concise message is written to **stderr** and nothing is
 written to stdout. No Python traceback is printed.
 

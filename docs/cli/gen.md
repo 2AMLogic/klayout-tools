@@ -1929,6 +1929,11 @@ No third "partial success" code is defined at phase 1, unlike `klt drc`'s
 "Proposed exit codes" section, which flags this as an open question for a
 future phase if a generator family ever needs one).
 
+Per [`docs/json-contract.md`](../json-contract.md#exit-codes)'s additive
+contract, a future release may still add a code above `2`; a consumer
+should gate on the payload's own fields rather than assume the codes above
+are exhaustive forever.
+
 On error, a concise message is written to **stderr** and nothing is written
 to stdout (and no GDS/OASIS file is written). No Python traceback is printed.
 

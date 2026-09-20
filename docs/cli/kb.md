@@ -262,6 +262,13 @@ accordingly.
 | `2` | Usage error (missing required argument, bad `--format` value, no subcommand) — from argparse. |
 | `3` | `validate` only: ran successfully but found one or more invalid entries. The full report (including which entries failed and why) is still written to stdout, per the documented success shape above — this is a validation *finding*, not a tool failure. |
 
+**Gate on the payload's own verdict, not the exit code.** These codes are
+additive — a future release may add a new one above `3` — and the exit code
+is only a shortcut derived from the payload's own fields, which are
+authoritative. See
+[`docs/json-contract.md`](../json-contract.md#exit-codes)'s "Exit codes"
+section.
+
 On the `1`-path error, a concise message is written to **stderr** and nothing
 is written to stdout — no Python traceback:
 
