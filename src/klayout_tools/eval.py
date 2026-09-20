@@ -115,7 +115,7 @@ import sys
 from collections.abc import Callable
 from typing import Any
 
-from .drc import DrcError, run_drc
+from .drc import DrcError, drc_exit_code, run_drc
 from .functional_verification import (
     FunctionalVerificationError,
     run_functional_verification,
@@ -356,8 +356,21 @@ _INVOKE_FNS: dict[str, Callable[[dict[str, Any], str], dict[str, Any]]] = {
 
 
 def _status_drc(report: dict[str, Any]) -> tuple[str, int, Any]:
+    """`klt drc`'s four outcomes (issue #2110), mirroring `drc_cmd.py`'s own
+    exit status exactly rather than re-deriving a 0/3 split locally.
+
+    An `eval` gate asks "may this candidate proceed?", so only the verb's
+    *unconditional* success clears it: `"clean"` passes, and `"violations"`,
+    `"not_checked"` and `"clean_partial"` all gate as `fail`. Their
+    `exit_code` values stay the ones `klt drc` itself would have returned for
+    the same report (3, 4 and 0 respectively, per the common rollup table in
+    `docs/coverage-contract.md`) -- `exit_code` is documented as exactly that
+    (`docs/cli/eval.md`), and quoting `3` for a run that skipped requested
+    work would tell a human debugging a `valid: false` run that the layout
+    has a violation it does not have.
+    """
     status = "pass" if report["status"] == "clean" else "fail"
-    return status, (0 if status == "pass" else 3), report.get("violation_count")
+    return status, drc_exit_code(report), report.get("violation_count")
 
 
 def _status_lvs(report: dict[str, Any]) -> tuple[str, int, Any]:

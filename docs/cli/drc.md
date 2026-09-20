@@ -1325,7 +1325,7 @@ On a run with findings:
 | `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
 | `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
-| `status`          | `"clean"` \| `"violations"` \| `"not_checked"` \| `"coverage_unknown"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
+| `status`          | `"clean"` \| `"clean_partial"` \| `"violations"` \| `"not_checked"` \| `"coverage_unknown"` | Derived by the common rollup table in [`../coverage-contract.md`](../coverage-contract.md), never by a per-verb mapping (issue #2110). `"clean_partial"` is the curated engine's partial row: every rule that ran passed, and a rule the deck asked for did not run (exit `0`, but **not** this verb's unconditional success — see "`coverage.skipped` vs. `coverage.inapplicable`" below). Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
@@ -1378,8 +1378,9 @@ verb-specific fields below. New DRC reports use envelope `schema_version: 2`
 because external `rules_checked` now denotes proven checks, not declared
 categories. Known zero curated work becomes `not_checked` (exit 4);
 unknown external execution becomes `coverage_unknown` (exit 4). Actual
-violations take precedence. Partial curated work retains its existing
-`clean`/`violations` semantics pending the Phase 2 policy.
+violations take precedence. Partial curated work is `clean_partial` (exit 0,
+issue #2110) — see "`coverage.skipped` vs. `coverage.inapplicable`" below
+for which skipped rules make a run partial and which do not.
 
 | Field                             | Type            | Description                                                                 |
 | ---------------------------------- | --------------- | ----------------------------------------------------------------------------- |
@@ -1400,6 +1401,47 @@ input stream's own layer table (reusing the same per-layer enumeration
 layer present in the stream's layer table with zero shapes still counts as
 "in the stream" for this purpose, matching `Layout.find_layer(...)`'s own
 semantics.
+
+#### `coverage.skipped` vs. `coverage.inapplicable`
+
+Issue #2110 (Phase 2 of #1988) settles which of the curated engine's skipped
+rules are a *coverage gap* and which are simply not applicable to the stream
+it was given. Both stay listed in the verb-specific `rules_skipped` field —
+the classification is additive to it, not a replacement — and both are
+absent-input-layer skips as far as the engine's own per-rule loop is
+concerned. The common block splits them by a single, auditable question:
+
+> **had the rule run with that layer empty, could it have reported a
+> violation?**
+
+| Answer | Common field | `reason` | Effect on the rollup |
+| --- | --- | --- | --- |
+| No — the check is a provable no-op | `inapplicable` | `no_applicable_geometry` | None. Inapplicable work never makes an otherwise complete run partial, so a small block that draws four of a PDK deck's seventeen layers still earns an unconditional `clean`. |
+| Yes — the skip hides a possible finding | `skipped` | `absent_input_layer` | The run is `clean_partial` (exit 0) and is **not** an unconditional success; `klt signoff` refuses to count it as a passing check and reports `partial_coverage`. |
+
+Every check kind this engine dispatches measures drawn geometry and reports
+nothing when the geometry it measures is empty: `width`/`space`/`notch`/
+`isolated` find no edge pair, `area`'s `Region.with_area(..., inverse=True)`
+returns no polygon, `density` tiles an empty bounding box, and the two-layer
+kinds (`separation`/`enclosing`/`enclosed`/`overlap`) — including issue
+#318's "escaped the enclosing region" term, computed with
+`Region.interacting` — are empty whenever *either* region is. A curated
+enclosure rule constrains a drawn pair; with one side of that pair never
+drawn, the stream contains no instance of what the rule constrains.
+
+`antenna` is the documented exception, and the reason the split is per check
+kind rather than a blanket "an absent layer is inapplicable" rule: the
+antenna primitive treats a nonempty antenna region whose protection region
+has *zero* area as an undefined (infinite) ratio and reports it as a
+violation. Skipping such a rule therefore converts a finding into a clean
+verdict, which is exactly the false pass this epic exists to close — so it
+is reported as a skipped request, and the run is `clean_partial`.
+
+No shipped deck authors an `antenna` rule today (see "`area`/`density`/
+`antenna`" above), so in practice every `--engine curated` skip against
+`sky130`/`gf180mcu`/`sg13g2`/`sg13cmos5l` is inapplicable and their runs are
+`clean`/`violations` exactly as before. That is the point: the adapter does
+not manufacture a partial verdict for work no invocation ever asked for.
 
 #### `coverage.nothing_checked`
 
@@ -1724,11 +1766,15 @@ methodology, the measured results, and the declared shared surface.
 ## Exit codes
 
 Known zero or unknown execution returns the completed report on stdout with
-exit `4`; real violations retain exit `3`.
+exit `4`; real violations retain exit `3`. Every code below `1` is assigned
+by the common rollup table in
+[`../coverage-contract.md`](../coverage-contract.md) (issue #2110), so
+`klt drc`, `klt eval`'s DRC gate and `klt signoff` cannot disagree about
+what a given report's outcome is.
 
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
-| `0`  | At least one curated rule ran, with no violations. Under `--check`: the committed report still holds (`status: "match"`). |
+| `0`  | At least one curated rule ran, with no violations — `status: "clean"`, or `"clean_partial"` when a rule that could have found something did not run (issue #2110; a real result, but not an unconditional pass — see "`coverage.skipped` vs. `coverage.inapplicable`"). Under `--check`: the committed report still holds (`status: "match"`). |
 | `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`). Under `--check`: a missing/unparseable committed report. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Ran successfully, violations found. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |

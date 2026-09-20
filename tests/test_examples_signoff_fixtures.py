@@ -208,14 +208,17 @@ def test_committed_drc_envelope_carries_the_current_coverage_rollup():
     assert coverage["known"] is True
     assert coverage["checked"] == coverage["rules_checked"]
     assert coverage["nothing_checked"] is False
-    # Every skipped entry carries its reason, the whole point of the rollup:
-    # a bare id cannot distinguish "no such layer in the stream" from "the
-    # rule was never evaluated".
-    assert coverage["skipped"], "expected skipped rules for this partial-coverage run"
-    for entry in coverage["skipped"]:
+    # Absent-layer rules whose empty geometry cannot produce a violation are
+    # now inapplicable, rather than skipped requests. The top-level legacy
+    # `rules_skipped` disclosure still lists them all.
+    assert coverage["skipped"] == []
+    assert coverage["inapplicable"], "expected inapplicable absent-layer rules"
+    for entry in coverage["inapplicable"]:
         assert set(entry) == {"id", "reason"}
-        assert entry["reason"]
-    assert [entry["id"] for entry in coverage["skipped"]] == coverage["rules_skipped"]
+        assert entry["reason"] == "no_applicable_geometry"
+    assert [entry["id"] for entry in coverage["inapplicable"]] == (
+        coverage["rules_skipped"]
+    )
 
 
 def test_committed_lvs_envelope_carries_the_current_check_blocks():

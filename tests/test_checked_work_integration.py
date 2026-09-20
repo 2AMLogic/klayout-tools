@@ -90,6 +90,73 @@ def test_curated_drc_executes_real_rule_and_refuses_zero(
 
 
 @pytest.mark.parametrize(
+    "protection,violating,state,status,exit_code",
+    [
+        (True, False, "full", "clean", 0),
+        (False, False, "partial", "clean_partial", 0),
+        (False, True, "partial", "violations", 3),
+    ],
+)
+def test_curated_drc_partial_rule_coverage(
+    tmp_path, monkeypatch, capsys, protection, violating, state, status, exit_code
+):
+    """Issue #2110: the curated engine's partial row, end to end.
+
+    A deck of two rules over the same layer -- an ordinary width rule and an
+    antenna ratio rule. With the antenna rule's protection layer absent, that
+    rule is skipped, and skipping it is a real gap rather than inapplicable
+    work: `_run_antenna_check` faults a zero-area protection region, so the
+    skip hides a finding the deck asked for. The run is `clean_partial` (exit
+    0, a real result) and `klt signoff` does not count it as a passing check.
+    The first row is the complete-success control; the third pins failure
+    precedence -- a defect is reported as the defect, not as the gap.
+    """
+    deck = [
+        DrcRule(
+            id="test.width",
+            description="synthetic 0.2 um width",
+            check="width",
+            layer=(1, 0),
+            threshold_dbu=200,
+        ),
+        DrcRule(
+            id="test.antenna",
+            description="synthetic antenna ratio",
+            check="antenna",
+            layer=(1, 0),
+            other_layer=(2, 0),
+            threshold_dbu=0,
+            antenna_ratio_max=2.0,
+        ),
+    ]
+    monkeypatch.setattr(drc, "get_deck", lambda _: deck)
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(
+        kdb.Box(0, 0, 100 if violating else 500, 1000)
+    )
+    if protection:
+        top.shapes(layout.layer(2, 0)).insert(kdb.Box(2000, 0, 3000, 1000))
+    gds = tmp_path / "drc.gds"
+    layout.write(str(gds))
+
+    report = drc.run_drc(str(gds), "sky130")
+
+    _assert_contract(report, state)
+    assert report["status"] == status
+    assert report["coverage"]["checked"] == (
+        ["test.antenna", "test.width"] if protection else ["test.width"]
+    )
+    assert report["coverage"]["skipped"] == (
+        [] if protection else [{"id": "test.antenna", "reason": "absent_input_layer"}]
+    )
+    _assert_signoff(tmp_path, report, passed=status == "clean", item=3)
+    assert main(["drc", str(gds), "--deck", "sky130", "--format", "json"]) == exit_code
+    assert json.loads(capsys.readouterr().out)["status"] == status
+
+
+@pytest.mark.parametrize(
     "rdb",
     [
         klayout_fixtures._EMPTY_RDB,

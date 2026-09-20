@@ -14,6 +14,13 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2110): `klt drc --engine curated` now applies the shared
+  coverage rollup. Partial runs report `clean_partial`, zero-work runs report
+  `not_checked`, and violations retain precedence. Rules skipped for absent
+  layers are classified as `inapplicable` when empty input cannot produce a
+  violation, or as `skipped` when it can (currently antenna protection-layer
+  checks). Signoff does not count partial evidence as a passing check.
+
 - **Fixed**: `klt sim`'s top-level `status` now applies the common
   partial-success rollup rule (issue #2109) instead of a bespoke
   "no failure means pass" check (issue #2117). Previously, a `limits` object

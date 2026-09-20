@@ -22,7 +22,13 @@ from klayout_tools.decks import (
     get_extraction_deck,
     get_unmodeled_voltage_markers,
 )
-from klayout_tools.drc import DrcError, check_drc_report, rerun_drc_report, run_drc
+from klayout_tools.drc import (
+    DrcError,
+    check_drc_report,
+    drc_exit_code,
+    rerun_drc_report,
+    run_drc,
+)
 
 # poly.width.1 (sky130 deck): minimum poly width is 150 dbu (0.15 um).
 _POLY_WIDTH_THRESHOLD_DBU = 150
@@ -6904,3 +6910,333 @@ def test_check_mode_still_takes_a_json_report_not_a_request(tmp_path, capsys):
 
     assert main(["drc", "--check", str(report_path), "--format", "json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
+# Common coverage rollup, curated engine (issue #2110, Phase 2 of epic #1988)
+#
+# The adapter that puts `--engine curated`'s verdict on the shared decision
+# table in `klayout_tools/coverage.py` (`docs/coverage-contract.md`) instead
+# of a local status mapping, and settles the classification that contract
+# left to this issue: an absent input layer is *inapplicable* work when
+# running the rule could not have reported anything anyway, and a *skipped
+# request* when it could have.
+#
+# The four rows this path can reach are exercised end to end -- zero,
+# partial, full, and a real violation -- plus the producer -> `klt signoff`
+# hand-off for the partial one.
+# --------------------------------------------------------------------------- #
+
+
+def _antenna_partial_deck(monkeypatch):
+    """A two-rule synthetic deck that can reach `partial`: one width rule on
+    50/0, plus an antenna rule accumulating 50/0 against a protection layer
+    60/0.
+
+    The antenna rule is the one check kind whose skip is *not* vacuous: with
+    50/0 drawn and 60/0 absent, `_run_antenna_check` would have reported an
+    undefined (infinite) ratio as a violation, so declining to run it hides a
+    finding rather than declining an inapplicable check.
+    """
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="met.width.1",
+                description="synthetic: minimum width",
+                layer=(50, 0),
+                check="width",
+                threshold_dbu=100,
+            ),
+            DrcRule(
+                id="met.antenna.1",
+                description="synthetic: gate-to-metal antenna ratio",
+                layer=(50, 0),
+                other_layer=(60, 0),
+                check="antenna",
+                threshold_dbu=0,
+                antenna_ratio_max=2.0,
+            ),
+        ],
+    )
+
+
+def _antenna_layout(tmp_path, name, *, protection: bool, width_dbu: int = 400):
+    """A layout drawing the antenna layer 50/0, and 60/0 only if asked."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(50, 0)).insert(kdb.Box(0, 0, width_dbu, 400))
+    if protection:
+        # Large enough that the ratio stays under `antenna_ratio_max`.
+        top.shapes(layout.layer(60, 0)).insert(kdb.Box(1000, 0, 1400, 400))
+    path = tmp_path / name
+    layout.write(str(path))
+    return path
+
+
+def test_run_drc_full_coverage_is_an_unconditional_clean(tmp_path):
+    """Control: every rule that applies to the drawn geometry ran, so the
+    rollup row is `full` -- an earned, *unconditional* `clean` at exit 0.
+
+    The sky130 deck's other 50 rules are inapplicable here rather than
+    skipped (this stream draws none of the layers they constrain), and
+    inapplicable work never makes an otherwise complete run partial. Before
+    #2110 they were all recorded as skipped *requests*, which is what would
+    have made this -- and every other ordinary run -- `partial`.
+    """
+    from klayout_tools.coverage import (
+        coverage_qualification_reason,
+        coverage_rollup,
+        coverage_state,
+    )
+
+    report = run_drc("examples/design-pipeline/06-layout.gds", "sky130")
+
+    assert report["status"] == "clean"
+    assert drc_exit_code(report) == 0
+    assert coverage_state(report) == "full"
+    assert report["coverage"]["skipped"] == []
+    assert report["coverage"]["inapplicable"]  # the rules with nothing to check
+    assert all(
+        record["reason"] == "no_applicable_geometry"
+        for record in report["coverage"]["inapplicable"]
+    )
+    rollup = coverage_rollup(report)
+    assert (rollup.unconditional, rollup.complete) == (True, True)
+    assert coverage_qualification_reason(report) is None
+
+
+@pytest.mark.parametrize("corpus_file", SKY130_CORPUS_FILES, ids=lambda p: p.name)
+def test_run_drc_corpus_cell_coverage_is_complete_not_partial(corpus_file):
+    """The same control over the real sky130 standard-cell corpus: a cell
+    that draws no vias is not "partially checked" for declining to check the
+    via rules -- there is no via for them to constrain."""
+    from klayout_tools.coverage import coverage_state
+
+    report = run_drc(str(corpus_file), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["coverage"]["skipped"] == []
+    assert coverage_state(report) == "full"
+
+
+def test_run_drc_partial_coverage_reports_clean_partial(tmp_path, monkeypatch):
+    """Reproduction: a stream that runs one rule while a rule that *could*
+    have faulted its geometry goes unrun is `clean_partial`, not `clean`.
+
+    Exit 0 either way -- a partial result is a real, reportable outcome --
+    but it is not this verb's unconditional success, and the skipped rule is
+    named in the common `coverage.skipped` list rather than being visible
+    only as a legacy `rules_skipped` entry a reader has to interpret.
+    """
+    from klayout_tools.coverage import (
+        coverage_qualification_reason,
+        coverage_refusal_reason,
+        coverage_rollup,
+        coverage_state,
+    )
+
+    _antenna_partial_deck(monkeypatch)
+    path = _antenna_layout(tmp_path, "antenna_partial.gds", protection=False)
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "clean_partial"
+    assert report["violation_count"] == 0
+    assert drc_exit_code(report) == 0
+    assert coverage_state(report) == "partial"
+    assert report["coverage"]["checked"] == ["met.width.1"]
+    assert report["coverage"]["skipped"] == [
+        {"id": "met.antenna.1", "reason": "absent_input_layer"}
+    ]
+    assert report["coverage"]["inapplicable"] == []
+    assert report["coverage"]["nothing_checked"] is False
+    rollup = coverage_rollup(report)
+    assert rollup.successful is True  # a real result
+    assert rollup.reached_verdict is True  # it does say something
+    assert rollup.unconditional is False  # but not unconditionally
+    assert rollup.complete is False
+    # The hard refusal is unchanged by Phase 2; the qualification gate is what
+    # this row trips.
+    assert coverage_refusal_reason(report) is None
+    assert coverage_qualification_reason(report) == "partial_coverage"
+
+
+def test_run_drc_partial_skip_hides_a_finding_the_rule_would_have_made(
+    tmp_path, monkeypatch
+):
+    """Why that skip is a *requested* check and not inapplicable work: draw
+    the protection layer with a small enough area and the very same rule
+    reports a violation. The empty-protection-layer case is the engine's own
+    "undefined ratio" violation, so skipping it silently converts a finding
+    into a clean verdict -- exactly the false pass #1988 exists to close.
+    """
+    _antenna_partial_deck(monkeypatch)
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(50, 0)).insert(kdb.Box(0, 0, 400, 400))
+    # 160_000 dbu^2 of antenna against 1_600 dbu^2 of protection: ratio 100.
+    top.shapes(layout.layer(60, 0)).insert(kdb.Box(1000, 0, 1040, 40))
+    path = tmp_path / "antenna_finding.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["met.antenna.1"] == 1
+    assert report["coverage"]["skipped"] == []
+
+
+def test_run_drc_violations_outrank_a_coverage_gap(tmp_path, monkeypatch):
+    """Failure precedence: the rollup decides `failed` before it consults
+    coverage, so a run that both found a defect and skipped requested work
+    reports the defect (exit 3) rather than the gap."""
+    from klayout_tools.coverage import coverage_rollup, coverage_state
+
+    _antenna_partial_deck(monkeypatch)
+    # 40 dbu wide < the 100 dbu `met.width.1` threshold, and 60/0 absent, so
+    # `met.antenna.1` is skipped at the same time.
+    path = _antenna_layout(
+        tmp_path, "antenna_violation.gds", protection=False, width_dbu=40
+    )
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["met.width.1"] >= 1
+    assert drc_exit_code(report) == 3
+    # The gap is still disclosed -- it is simply not what the verdict is
+    # about.
+    assert coverage_state(report) == "partial"
+    assert report["coverage"]["skipped"] == [
+        {"id": "met.antenna.1", "reason": "absent_input_layer"}
+    ]
+    rollup = coverage_rollup(report, failed=True)
+    assert rollup.result == "failed"
+    assert rollup.reason == "check_failed"
+
+
+def test_run_drc_zero_coverage_still_refuses_with_exit_4(tmp_path):
+    """The zero row is unchanged by this adapter (#2108 shipped it): an
+    empty/mismapped stream reaches no verdict at all, and reclassifying
+    vacuous skips as inapplicable must not turn that into a success."""
+    from klayout_tools.coverage import coverage_refusal_reason, coverage_rollup
+
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    path = tmp_path / "empty.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "not_checked"
+    assert drc_exit_code(report) == 4
+    assert report["coverage"]["checked"] == []
+    assert report["coverage"]["skipped"] == []
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["coverage"]["nothing_checked_reasons"] == ["all_rules_skipped"]
+    rollup = coverage_rollup(report)
+    assert (rollup.result, rollup.reason) == ("zero", "nothing_checked")
+    assert rollup.reached_verdict is False
+    assert coverage_refusal_reason(report) == "nothing_checked"
+
+
+def test_drc_cli_partial_run_exits_zero_and_says_so(tmp_path, monkeypatch, capsys):
+    """CLI parity: the partial row keeps exit 0, and both output formats say
+    which requested rules did not run -- the text form must not render a
+    partial run as an unqualified `clean`."""
+    _antenna_partial_deck(monkeypatch)
+    path = _antenna_layout(tmp_path, "antenna_partial_cli.gds", protection=False)
+    capsys.readouterr()
+
+    assert main(["drc", str(path), "--deck", "synthetic", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "clean_partial"
+    assert payload["coverage"]["skipped"] == [
+        {"id": "met.antenna.1", "reason": "absent_input_layer"}
+    ]
+
+    assert main(["drc", str(path), "--deck", "synthetic", "--format", "text"]) == 0
+    text = capsys.readouterr().out
+    assert "status: clean_partial" in text
+    assert "skipped requested rules: 1" in text
+    assert "met.antenna.1: absent_input_layer" in text
+
+
+def test_drc_cli_clean_run_reports_no_skipped_rules(tmp_path, monkeypatch, capsys):
+    """The complete-success control for the CLI: exit 0, the unconditional
+    token, and no skipped-rule disclosure at all."""
+    _antenna_partial_deck(monkeypatch)
+    path = _antenna_layout(tmp_path, "antenna_clean_cli.gds", protection=True)
+    capsys.readouterr()
+
+    assert main(["drc", str(path), "--deck", "synthetic", "--format", "text"]) == 0
+    text = capsys.readouterr().out
+    assert "status: clean" in text
+    assert "clean_partial" not in text
+    assert "skipped requested rules" not in text
+
+
+def test_signoff_refuses_a_real_partial_drc_report_as_partial(tmp_path, monkeypatch):
+    """Producer -> consumer, with a report this engine actually produced
+    rather than a hand-built envelope: `klt signoff` does not count a
+    `clean_partial` run as a passing check, and names `partial_coverage`
+    (not `check_failed`) -- the cited run found no defect, it skipped
+    requested work.
+    """
+    from klayout_tools.signoff import build_signoff
+
+    _antenna_partial_deck(monkeypatch)
+    path = _antenna_layout(tmp_path, "antenna_signoff.gds", protection=False)
+    report_path = tmp_path / "drc.json"
+    _write_report(report_path, run_drc(str(path), "synthetic"))
+
+    result = build_signoff([str(report_path)])
+
+    check = result["checks"][0]
+    assert check["status"] == "clean_partial"
+    assert check["passed"] is False
+    assert check["detail"]["coverage_state"] == "partial"
+    assert check["detail"]["coverage_qualification"] == {
+        "reason": "partial_coverage",
+        "skipped": [{"id": "met.antenna.1", "reason": "absent_input_layer"}],
+    }
+    assert result["status"] == "fail"
+
+
+def test_signoff_counts_a_real_full_coverage_drc_report(tmp_path, monkeypatch):
+    """The complete-success control for the consumer: the same deck over a
+    stream that leaves nothing applicable unchecked is a passing check with
+    no qualification attached."""
+    from klayout_tools.signoff import build_signoff
+
+    _antenna_partial_deck(monkeypatch)
+    path = _antenna_layout(tmp_path, "antenna_signoff_clean.gds", protection=True)
+    report_path = tmp_path / "drc.json"
+    _write_report(report_path, run_drc(str(path), "synthetic"))
+
+    result = build_signoff([str(report_path)])
+
+    check = result["checks"][0]
+    assert check["status"] == "clean"
+    assert check["passed"] is True
+    assert check["detail"]["coverage_state"] == "full"
+    assert "coverage_qualification" not in check["detail"]
+
+
+def test_eval_gate_does_not_pass_a_partial_drc_run(tmp_path, monkeypatch):
+    """`klt eval`'s gate mirrors `klt drc`'s own exit status (0 for a partial
+    run) while still refusing to call it a pass: an optimizer must not be
+    told a candidate cleared DRC on a run that skipped requested work."""
+    from klayout_tools.eval import _status_drc
+
+    _antenna_partial_deck(monkeypatch)
+    path = _antenna_layout(tmp_path, "antenna_eval.gds", protection=False)
+
+    status, exit_code, count = _status_drc(run_drc(str(path), "synthetic"))
+
+    assert (status, exit_code, count) == ("fail", 0, 0)
