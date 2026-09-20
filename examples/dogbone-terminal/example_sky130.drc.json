@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "examples/dogbone-terminal/example_sky130.gds",
   "deck": "sky130",
   "dbu_um": 0.001,
@@ -37,6 +37,15 @@
       "67/20"
     ],
     "layers_in_stream_without_rules": [],
+    "rules_checked": [
+      "diff.enclosing.licon.1",
+      "diff.width.1",
+      "li1.enclosing.licon1.1",
+      "li1.space.1",
+      "li1.width.1",
+      "poly.enclosing.licon.1",
+      "poly.width.1"
+    ],
     "rules_skipped": [
       "capm.enclosing.via3.1",
       "capm.separation.via3.1",
@@ -50,27 +59,32 @@
       "met1.area.1",
       "met1.enclosing.mcon.1",
       "met1.enclosing.via.1",
+      "met1.holes_area.1",
       "met1.space.1",
       "met1.width.1",
       "met2.area.1",
       "met2.enclosing.via.1",
       "met2.enclosing.via2.1",
+      "met2.holes_area.1",
       "met2.space.1",
       "met2.width.1",
       "met3.area.1",
       "met3.enclosing.capm.1",
       "met3.enclosing.via2.1",
       "met3.enclosing.via3.1",
+      "met3.holes_area.1",
       "met3.space.1",
       "met3.width.1",
       "met4.area.1",
       "met4.enclosing.capm2.1",
       "met4.enclosing.via3.1",
       "met4.enclosing.via4.1",
+      "met4.holes_area.1",
       "met4.space.1",
       "met4.width.1",
       "met5.area.1",
       "met5.enclosing.via4.1",
+      "met5.holes_area.1",
       "met5.space.1",
       "met5.width.1",
       "nwell.space.1",
@@ -103,6 +117,223 @@
       "via2",
       "via3",
       "via4"
-    ]
+    ],
+    "schema_version": 1,
+    "known": true,
+    "checked": [
+      "diff.enclosing.licon.1",
+      "diff.width.1",
+      "li1.enclosing.licon1.1",
+      "li1.space.1",
+      "li1.width.1",
+      "poly.enclosing.licon.1",
+      "poly.width.1"
+    ],
+    "skipped": [
+      {
+        "id": "capm.enclosing.via3.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "capm.separation.via3.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "capm.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "capm.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "capm2.enclosing.via4.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "capm2.separation.via4.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "capm2.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "capm2.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "mcon.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met1.area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met1.enclosing.mcon.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met1.enclosing.via.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met1.holes_area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met1.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met1.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met2.area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met2.enclosing.via.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met2.enclosing.via2.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met2.holes_area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met2.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met2.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met3.area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met3.enclosing.capm.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met3.enclosing.via2.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met3.enclosing.via3.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met3.holes_area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met3.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met3.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met4.area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met4.enclosing.capm2.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met4.enclosing.via3.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met4.enclosing.via4.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met4.holes_area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met4.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met4.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met5.area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met5.enclosing.via4.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met5.holes_area.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met5.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "met5.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "nwell.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "nwell.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via2.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via2.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via3.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via3.width.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via4.space.1",
+        "reason": "absent_input_layer"
+      },
+      {
+        "id": "via4.width.1",
+        "reason": "absent_input_layer"
+      }
+    ],
+    "inapplicable": [],
+    "unknown": [],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
   }
 }

@@ -29,7 +29,7 @@ from typing import Any
 import klayout.db as kdb
 import pytest
 
-from klayout_tools import pdk
+from klayout_tools import extract_abstract, pdk
 from klayout_tools.cli import main
 from klayout_tools.decks import (
     DiodeDevice,
@@ -50,11 +50,12 @@ from klayout_tools.extract import (
     _promote_orphan_named_nets,
     _purge_preserving_named_nets,
     _region,
+    _rewrite_dotted_net_names,
     def_net_instance_pins,
     run_extract,
 )
 from klayout_tools.extract_abstract import _abstract_pin_net_score
-from klayout_tools.extract_parasitics import _n_squares
+from klayout_tools.extract_parasitics import _n_squares, spice_safe_net_name
 from klayout_tools.gen_compose import _write_composed_gds
 from klayout_tools.pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
@@ -67,6 +68,18 @@ from klayout_tools.pdk_models import (
 CORPUS_DIR = Path(__file__).parent / "corpus"
 SKY130_CORPUS_FILES = sorted((CORPUS_DIR / "sky130").glob("*.gds"))
 GF180MCU_CORPUS_FILES = sorted((CORPUS_DIR / "gf180mcu").glob("*.gds"))
+
+# Every macro-scale acceptance test below reads
+# `corpus/place_and_route/gcd.gds.gz` -- the fixture routed **without**
+# `request.power` -- and that is deliberate, not a stale reference (issue
+# #2079). Issue #2079 added a power-complete sibling,
+# `corpus/place_and_route/gcd-pdn.gds.gz`, rather than regenerating this one,
+# precisely so the measured counts pinned here (parasitics totals, the 492
+# recovered DEF net names, the declared-pin SPEF port set) keep describing
+# the artifact they were measured against. Nothing this file asserts is about
+# power delivery, so there is nothing here the gridded fixture would test
+# better; use `gcd-pdn.gds.gz` when what is under test *is* the power grid
+# (see `tests/corpus/README.md`).
 
 #: Real `ngspice` invocations (sky130 vendor-deck simulations) are slow and
 #: host-load-sensitive -- the same wall-clock cost is fine in CI's dedicated,
@@ -9748,6 +9761,184 @@ def test_abstract_cells_in_cell_label_resolves_disjoint_fragment_to_routed_net(
     assert tokens[1] == "ROUTED", x_line
 
 
+def _make_tie_constant_leaf_cell(layout: kdb.Layout, name: str) -> kdb.Cell:
+    """A ``sky130_fd_sc_hd__conb_1``-shaped constant generator: an ``OUT``
+    li1 pad tied to the cell's own ``VPWR`` rail through a plain poly strip,
+    with no diffusion anywhere (issue #1994).
+
+    This is the real cell's topology, reduced to the layers that matter. In
+    ``sky130_fd_sc_hd__conb_1`` the ``HI`` li1 pad and the ``VPWR`` li1 rail
+    stub are contacted to opposite ends of one ``poly.drawing`` box, and the
+    rail is mcon'd up to the cell's own labelled ``met1`` rail -- so the
+    cell-local connectivity walk
+    :func:`~klayout_tools.extract_abstract._local_pin_candidate_points`
+    performs *before* abstraction erases poly reaches the supply rail from
+    the signal pin's label.
+    """
+    cell = layout.create_cell(name)
+
+    def draw(layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    # The constant-generating tie: one poly strip, contacted to the OUT pad
+    # at one end and to the VPWR rail stub at the other. No diff.drawing at
+    # all -- exactly like the real conb_1.
+    draw(66, 20, kdb.Box(1000, 900, 3000, 1100))  # poly.drawing
+    draw(66, 44, kdb.Box(1100, 900, 1300, 1100))  # licon1 (OUT side)
+    draw(66, 44, kdb.Box(2700, 900, 2900, 1100))  # licon1 (rail side)
+
+    draw(67, 20, kdb.Box(1000, 700, 1400, 1300))  # li1 OUT pad
+    label(67, 5, "OUT", 1200, 1000)
+
+    # The cell's own supply rail: li1 stub -> mcon -> met1 rail, labelled
+    # on met1 (a *different* label layer from the signal pin's -- the real
+    # sky130 convention, and the reason a same-layer-only check would miss
+    # the crossing).
+    draw(67, 20, kdb.Box(2600, 700, 3000, 1300))  # li1 rail stub
+    draw(67, 44, kdb.Box(2700, 900, 2900, 1100))  # mcon
+    draw(68, 20, kdb.Box(2400, 600, 3200, 1400))  # met1 rail
+    label(68, 5, "VPWR", 2800, 1000)
+    return cell
+
+
+def test_abstract_cells_unused_tie_output_does_not_bind_to_named_supply(tmp_path):
+    """Issue #1994: an abstracted tie cell's *unused* output must not bind
+    to the design's named supply net just because the cell ties them
+    together internally.
+
+    ``sky130_fd_sc_hd__conb_1`` generates its constants by tying ``HI`` to
+    ``VPWR`` (and ``LO`` to ``VGND``) through a poly strip, so
+    :func:`~klayout_tools.extract_abstract._local_pin_candidate_points`'s
+    pre-erasure connectivity walk used to hand the signal pin a candidate
+    access point sitting on the cell's own power rail. Once the layout
+    carries a real power grid that rail is a *named* net, and
+    :func:`~klayout_tools.extract_abstract._abstract_pin_net_score`'s "a
+    named net beats an unnamed one" rule then preferred it over the pin's
+    own (correctly unnamed, because genuinely unrouted) island -- turning a
+    clean `klt lvs` match into a pile of false errors on cells that were
+    working exactly as intended, and doing so *only* once a missing PDN was
+    fixed.
+    """
+    layout = kdb.Layout()
+    leaf = _make_tie_constant_leaf_cell(layout, "TIE_CONST")
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+
+    # The power grid: a top-level met1 strap over the cell's own rail,
+    # named by a top-level label. This is the geometry whose *absence* used
+    # to mask the bug -- with no PDN there is no named candidate to lose to.
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2400, 600, 6000, 1400))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("VPWR", kdb.Trans(5000, 1000)))
+    # `OUT` receives no external routing whatsoever.
+
+    path = _write_gds(layout, tmp_path / "tie_const.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "tie_const.spice"),
+        abstract_cell_patterns=("TIE_CONST",),
+    )
+
+    (entry,) = report["abstracted_cells"]
+    assert entry["cell"] == "TIE_CONST"
+    assert entry["pin_count"] == 2  # OUT, VPWR
+    assert entry["resolution_source"] == "in_cell_labels"
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    tokens = x_line.split()
+    # Pins are wired in sorted name order: OUT, then VPWR.
+    assert tokens[2] == "VPWR", x_line
+    assert tokens[1] != "VPWR", (
+        "the unused tie output must keep its own unrouted island, not snap "
+        f"onto the named supply rail: {x_line}"
+    )
+
+    # ...and the "two declared pins on one net" self-check must therefore
+    # stay quiet: before the fix it fired with `OUT, VPWR -> net 'VPWR'`.
+    assert not [w for w in report["warnings"] if "separately declared pins" in w], (
+        report["warnings"]
+    )
+
+
+def test_abstract_cells_tie_output_still_binds_when_really_routed(tmp_path):
+    """Issue #1994's edge case: suppressing the *internal* tie path must not
+    stop a tie cell's output from binding to the supply rail when the design
+    genuinely routes it there.
+
+    Same cell as
+    :func:`test_abstract_cells_unused_tie_output_does_not_bind_to_named_supply`,
+    but the parent lands real mcon+met1 routing on the ``OUT`` pad and
+    carries it into the power strap -- so ``OUT`` and ``VPWR`` are one net in
+    the *drawn, post-erasure* layout rather than only through the black
+    box's severed interior, and the binding is correct.
+    """
+    layout = kdb.Layout()
+    leaf = _make_tie_constant_leaf_cell(layout, "TIE_CONST")
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(2400, 600, 6000, 1400))
+    top.shapes(layout.layer(68, 5)).insert(kdb.Text("VPWR", kdb.Trans(5000, 1000)))
+    # Parent-drawn routing from the OUT pad into the strap: mcon up to met1,
+    # then a met1 wire abutting the strap.
+    top.shapes(layout.layer(67, 44)).insert(kdb.Box(1100, 900, 1300, 1100))
+    top.shapes(layout.layer(68, 20)).insert(kdb.Box(1000, 800, 2500, 1200))
+
+    path = _write_gds(layout, tmp_path / "tie_const_routed.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "tie_const_routed.spice"),
+        abstract_cell_patterns=("TIE_CONST",),
+    )
+
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    tokens = x_line.split()
+    assert tokens[1] == "VPWR", x_line
+    assert tokens[2] == "VPWR", x_line
+
+
+def test_local_pin_candidate_points_stops_at_a_second_declared_pin():
+    """Issue #1994 at the unit level: every extra candidate
+    :func:`~klayout_tools.extract_abstract._local_pin_candidate_points`
+    derives for a pin must lie on a fragment carrying that pin's *own*
+    label once the cell-local walk has reached a second declared pin.
+
+    Asserted directly on the candidate points rather than only through a
+    full extraction, because the geometric claim ("the derived point sits on
+    the supply rail, 1400 dbu away from the pin's own pad") is the actual
+    root cause and is otherwise only visible as a downstream net name.
+    """
+    layout = kdb.Layout()
+    leaf = _make_tie_constant_leaf_cell(layout, "TIE_CONST")
+    deck = get_extraction_deck("sky130")
+
+    candidates = extract_abstract._local_pin_candidate_points(layout, leaf, deck)
+
+    out_pad = kdb.Box(1000, 700, 1400, 1300)
+    rail = kdb.Box(2600, 700, 3000, 1300)
+    assert candidates["OUT"], candidates
+    for point, role in candidates["OUT"]:
+        assert out_pad.contains(point), f"{point.to_s()} escaped the OUT pad"
+        assert not rail.contains(point), f"{point.to_s()} landed on the supply rail"
+        # Issue #2142: each derived candidate carries the `deck.metals` level
+        # it was discovered on, so it is probed against that conductor rather
+        # than against a single cell-wide role.
+        assert role == "metal0", (point.to_s(), role)
+    # The supply pin's own candidates are untouched -- its met1 label sits on
+    # the rail, which is where its candidates belong.
+    assert candidates["VPWR"]
+
+
 def test_abstract_cells_local_candidate_does_not_bind_to_unrelated_instance(
     tmp_path,
 ):
@@ -10169,6 +10360,219 @@ def test_abstract_cells_warns_when_one_instance_ties_two_declared_pins(tmp_path)
     spice = Path(report["netlist_path"]).read_text()
     (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
     assert x_line.split()[1:3] == ["TIED", "TIED"], x_line
+
+
+def _make_multi_layer_pin_macro_layout(extra_pin: bool = False) -> kdb.Layout:
+    """Issue #2142's reproduction layout: one macro whose declared pins are
+    each labelled on **two** conductors, over a parent-level power strap.
+
+    ``MACRO`` declares three (or, with ``extra_pin``, four) electrically
+    independent ports. Each port draws:
+
+    - an ``li1`` pad inside the macro carrying an ``li1.pin`` label -- the
+      pad the macro's own (erased-on-abstraction) interior would drive, so
+      once the cell is black-boxed it is an isolated, **unnamed** island;
+    - a ``met2`` stub carrying a ``met2.pin`` label with the same string --
+      the port the parent actually routes to.
+
+    ``TOP`` routes each ``met2`` stub out to its own distinct, separately
+    labelled net (``NA``/``NB``/``NC``[/``ND``]), and draws one wide
+    ``met1`` power strap (``VPWR``) that runs *underneath* every ``met2``
+    stub without touching any of them -- ordinary, legal geometry: met1 and
+    met2 only connect through a ``via``, and none is drawn here.
+
+    Flat, that extracts as four (five) clean nets. Abstracted, it used to
+    collapse: ``_resolve_abstract_cell_pins`` kept one cell-wide probe-layer
+    role per pin (the first-seen label layer, ``li1``), so each pin's
+    ``met2`` label point was probed against ``li1``, missed, and fell
+    through ``_probe_single_abstract_pin_point``'s bottom-up cross-layer
+    fallback onto the first conductor with *any* geometry at that
+    coordinate -- the ``VPWR`` strap. ``_abstract_pin_net_score`` then
+    (correctly, on its own terms) preferred that named net over the pin's
+    own unnamed island, so **every** pin bound to ``VPWR`` at once:
+    ``XMACRO_0 VPWR VPWR VPWR MACRO``, with the macro's three separately
+    declared pins merged onto one net that is not one of its ports at all.
+    """
+    layout = kdb.Layout()
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(cell, layer, datatype, text, x, y):
+        cell.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    names = ["PA", "PB", "PC"] + (["PD"] if extra_pin else [])
+    macro = layout.create_cell("MACRO")
+    for index, name in enumerate(names):
+        x = 1000 + index * 3000
+        draw(macro, 67, 20, kdb.Box(x, 0, x + 800, 800))  # li1 pad
+        label(macro, 67, 5, name, x + 400, 400)  # li1.pin
+        draw(macro, 69, 20, kdb.Box(x, 3000, x + 800, 3800))  # met2 port
+        label(macro, 69, 5, name, x + 400, 3400)  # met2.pin
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(macro.cell_index(), kdb.Trans(0, 0)))
+    # Parent-level met1 power strap running under every met2 port. No via is
+    # drawn, so this touches none of them electrically.
+    draw(top, 68, 20, kdb.Box(0, 3000, 3000 + len(names) * 3000, 3800))
+    label(top, 68, 5, "VPWR", 2000 + len(names) * 3000, 3400)
+    # Parent-level met2 routing: one distinct named net per port.
+    for index, name in enumerate(["NA", "NB", "NC", "ND"][: len(names)]):
+        x = 1000 + index * 3000
+        draw(top, 69, 20, kdb.Box(x, 3000, x + 800, 6000 + index * 800))
+        label(top, 69, 5, name, x + 400, 5500 + index * 400)
+    return layout
+
+
+@pytest.mark.parametrize("extra_pin", [False, True])
+def test_abstract_cells_multi_layer_pin_labels_do_not_collapse(tmp_path, extra_pin):
+    """Issue #2142: ``--abstract-cells`` must not bind several of one
+    macro's own separately declared pins onto a single synthesized net, and
+    must never absorb a top-level net that is not one of that macro's pins.
+
+    Drives :func:`_make_multi_layer_pin_macro_layout` -- a macro whose ports
+    are each labelled on both ``li1`` and ``met2``, over a parent ``met1``
+    power strap. Every pin must resolve to its **own** routed ``met2`` net,
+    the strap must stay out of the instance's pin list entirely, and the
+    ``#1366`` two-pins-one-net self-check must stay quiet.
+
+    ``extra_pin`` re-runs the same assertions with one more declared port,
+    mirroring the reporter's own ablation: completing the macro's pin list
+    changed nothing about the composite net before the fix, and must
+    likewise change nothing about the correct answer after it.
+    """
+    names = ["PA", "PB", "PC"] + (["PD"] if extra_pin else [])
+    expected = ["NA", "NB", "NC", "ND"][: len(names)]
+
+    layout = _make_multi_layer_pin_macro_layout(extra_pin=extra_pin)
+    path = _write_gds(layout, tmp_path / "multi_layer_pin.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "multi_layer_pin.spice"),
+        abstract_cell_patterns=("MACRO",),
+    )
+
+    assert report["status"] == "extracted"
+    (entry,) = report["abstracted_cells"]
+    assert entry["pin_count"] == len(names)
+    assert entry["resolution_source"] == "in_cell_labels"
+
+    spice = Path(report["netlist_path"]).read_text()
+    assert f".SUBCKT MACRO {' '.join(names)}" in spice
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    bound = x_line.split()[1:-1]
+
+    # Each pin on its own routed net -- not all three/four on the strap.
+    assert bound == expected, x_line
+    # The strap is a top-level net that is not one of the macro's ports: it
+    # must not be absorbed into the black box's connections at all.
+    assert "VPWR" not in bound, x_line
+    # ...and no two declared pins share a net.
+    assert len(set(bound)) == len(bound), x_line
+
+    assert not any(
+        "separately declared pins onto the same net" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
+
+
+def test_abstract_cells_pin_never_falls_back_onto_a_parent_well_ring(tmp_path):
+    """Issue #2142: a pin whose access point lands on no *signal* conductor
+    must not be rescued by whatever body-identity field layer happens to
+    cover that coordinate.
+
+    A parent-level ``nwell`` guard ring (or substrate ``tap`` ring) is one
+    electrically continuous shape spanning the macro's whole footprint, so
+    probing it answers with the same design-wide net at every coordinate.
+    Used as a fallback, it binds *every* pin that misses its own conductor
+    onto that one net at once -- the same "several declared pins collapsed
+    onto one foreign net" shape this issue reports, reached through a second
+    route. ``probe_layers`` ordering (PR #622's review fix, guarded by
+    :func:`test_abstract_cells_lef_fallback_prefers_metal_over_parent_nwell`)
+    only demoted well/tap below the metals; it did not stop them answering
+    when no metal is there at all.
+
+    Both pins here declare a LEF ``PORT`` over drawn-conductor-free space
+    inside a parent well ring, so before the fix both bound to the ring's
+    ``VNWSTRAP`` net. They must now come back unconnected, with the existing
+    per-instance "no conductor found" warning naming each one.
+    """
+    layout = kdb.Layout()
+    leaf = layout.create_cell("LEF_WELL_PROBE")
+
+    def draw(cell, layer, datatype, box):
+        cell.shapes(layout.layer(layer, datatype)).insert(box)
+
+    # Real drawn geometry, but nowhere near either declared PORT below.
+    draw(leaf, 65, 20, kdb.Box(0, 0, 2000, 1000))
+    draw(leaf, 66, 20, kdb.Box(800, -200, 1200, 1200))
+
+    top = layout.create_cell("TOP")
+    top.insert(kdb.CellInstArray(leaf.cell_index(), kdb.Trans(0, 0)))
+    # A parent-level nwell ring covering the whole macro footprint, named by
+    # its own top-level label.
+    draw(top, 64, 20, kdb.Box(-2000, -2000, 8000, 6000))
+    top.shapes(layout.layer(64, 5)).insert(kdb.Text("VNWSTRAP", kdb.Trans(7000, 5000)))
+
+    path = _write_gds(layout, tmp_path / "lef_well_probe.gds")
+    lef_path = tmp_path / "lef_well_probe.lef"
+    lef_path.write_text(
+        "VERSION 5.7 ;\n"
+        "MACRO LEF_WELL_PROBE\n"
+        "  ORIGIN 0.000 0.000 ;\n"
+        "  SIZE 6.000 BY 4.000 ;\n"
+        "  PIN A\n"
+        "    DIRECTION INPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 3.000 2.000 3.400 2.400 ;\n"
+        "    END\n"
+        "  END A\n"
+        "  PIN Y\n"
+        "    DIRECTION OUTPUT ;\n"
+        "    PORT\n"
+        "      LAYER li1 ;\n"
+        "        RECT 4.000 3.000 4.400 3.400 ;\n"
+        "    END\n"
+        "  END Y\n"
+        "END LEF_WELL_PROBE\n"
+    )
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "lef_well_probe.spice"),
+        abstract_cell_patterns=("LEF_WELL_PROBE",),
+        abstract_cell_lef_paths=(str(lef_path),),
+    )
+
+    assert report["status"] == "extracted"
+    spice = Path(report["netlist_path"]).read_text()
+    (x_line,) = [line for line in spice.splitlines() if line.startswith("X")]
+    # Before the fix both pins probed the covering nwell and silently bound
+    # to the ring's own net, merging two declared pins onto one foreign net.
+    assert "VNWSTRAP" not in x_line, x_line
+    bound = x_line.split()[1:-1]
+    assert len(set(bound)) == len(bound), x_line
+
+    missed = [
+        warning
+        for warning in report["warnings"]
+        if "no conductor found at its resolved access point" in warning
+    ]
+    assert len(missed) == 2, report["warnings"]
+    assert any("pin 'A'" in warning for warning in missed), missed
+    assert any("pin 'Y'" in warning for warning in missed), missed
+
+    # And the self-check never fires -- the two pins are on separate,
+    # freshly created nets rather than merged onto the ring.
+    assert not any(
+        "separately declared pins onto the same net" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
 
 
 def _make_global_net_port_layout() -> kdb.Layout:
@@ -12835,6 +13239,17 @@ def test_parasitics_coupling_matches_magic_ext2spice(tmp_path):
     """
     import subprocess
 
+    from helpers.magic_oracle import find_magic_tech
+
+    tech_path = find_magic_tech("sky130")
+    if tech_path is None:
+        pytest.skip(
+            "no magic technology file for sky130 -- run scripts/fetch-magic-"
+            "tech.sh, install an open_pdks PDK, or set KLT_MAGIC_TECH_SKY130 "
+            "(see docs/design/magic-oracle.md); magic's undocumented default "
+            "tech is not guaranteed to support GDS input (issue #2045)"
+        )
+
     layout_path = _write_gds(_make_overlap_layout(), tmp_path / "overlap.gds")
     report = run_extract(
         layout_path, "sky130", output=str(tmp_path / "overlap.spice"), parasitics=True
@@ -12856,7 +13271,16 @@ def test_parasitics_coupling_matches_magic_ext2spice(tmp_path):
         "quit -noprompt\n"
     )
     completed = subprocess.run(
-        ["magic", "-dnull", "-noconsole", str(magic_script)],
+        [
+            "magic",
+            "-dnull",
+            "-noconsole",
+            "-rcfile",
+            os.devnull,
+            "-T",
+            tech_path,
+            str(magic_script),
+        ],
         capture_output=True,
         text=True,
         timeout=120,
@@ -13113,6 +13537,236 @@ def test_anonymous_net_json_spelling_matches_written_netlist_node_token(tmp_path
     # *second* backslash from `NetlistSpiceWriter`'s own escaping).
     for leg_net in leg_nets:
         assert not leg_net.startswith("\\\\")
+
+
+# --------------------------------------------------------------------------- #
+# Hierarchical (dot-joined) net names (issue #2145)
+# --------------------------------------------------------------------------- #
+
+
+def _spice_node_tokens(netlist_text: str) -> set[str]:
+    """Every whitespace-delimited token on a non-comment, non-dot-command
+    line of a written SPICE netlist -- the superset of "places a node
+    reference can appear" the issue #1162 escaping tests already use."""
+    tokens: set[str] = set()
+    for line in netlist_text.splitlines():
+        if line.startswith((".", "*")):
+            continue
+        tokens.update(line.split())
+    return tokens
+
+
+def test_hierarchical_dotted_net_name_is_rewritten_to_spice_safe_form(tmp_path):
+    """Regression (issue #2145): a net whose name carries an instance path
+    joined with `.` -- what `klt place-and-route`'s DEF net names and a
+    hierarchy-qualified drawn label both produce -- used to be written
+    verbatim (`XBIAS.vb1`) into the `.SUBCKT` pin list and onto every device
+    card. `.` is ngspice's *own* hierarchy separator, so that token parses as
+    a path expression (instance `XBIAS` -> node `vb1`) rather than as the
+    flat node it names: the node is unaddressable by its written name in
+    `v()`/`.meas`/`.ic`, which is exactly the set of internal nodes a
+    `--parasitics` post-layout run wants to probe.
+
+    Asserts the issue's own repro shape: no node-reference position in the
+    written netlist contains a literal `.`, while the two lexical classes
+    that legitimately do -- SPICE dot-commands and numeric literals -- are
+    untouched."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="XTAP.vsub"), tmp_path / "dotted.gds"
+    )
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "dotted.spice"), parasitics=True
+    )
+
+    # The layout's dotted label reaches `nets[]` in the `_`-joined spelling.
+    net_names = {n["name"] for n in report["nets"]}
+    assert "XTAP_vsub" in net_names
+    assert "XTAP.vsub" not in net_names
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+
+    # No node-reference token anywhere carries a dot (the issue's own
+    # `grep` reproduction, expressed structurally).
+    dotted_nodes = sorted(t for t in _spice_node_tokens(netlist_text) if "." in t)
+    # Numeric literals (`L=0.4U`, `3.99e-16`) share these lines -- they are
+    # legal and must survive, so only *non-numeric* dotted tokens are a bug.
+    assert [t for t in dotted_nodes if not re.search(r"\d\.\d", t)] == []
+
+    # Dot-commands are untouched: the extraction still writes a well-formed
+    # `.SUBCKT`/`.ENDS` pair and (with --parasitics) a `.GLOBAL` card.
+    assert ".SUBCKT TOP " in netlist_text
+    assert ".ENDS TOP" in netlist_text
+    assert "\n.GLOBAL " in netlist_text
+    # ... and so are numeric literals with a decimal point.
+    assert re.search(r"\bL=0\.\d+U\b", netlist_text), netlist_text
+
+    # The `.SUBCKT` pin list -- the exact line the issue greps -- carries the
+    # rewritten spelling as a whole port token.
+    subckt_line = next(
+        line for line in netlist_text.splitlines() if line.startswith(".SUBCKT ")
+    )
+    assert "XTAP_vsub" in subckt_line.split()
+
+    # Structural, not silent: the rename is disclosed in `warnings[]`.
+    assert any(
+        "XTAP.vsub -> XTAP_vsub" in w and "hierarchy separator" in w
+        for w in report["warnings"]
+    ), report["warnings"]
+
+
+def test_hierarchical_dotted_net_json_spelling_matches_written_netlist_node_token(
+    tmp_path,
+):
+    """Issue #2145, the cross-artifact half: the rewritten spelling is
+    byte-identical everywhere this net is reported -- `nets[].name`,
+    `devices[].nets[...]`,
+    `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`, the `--spef`
+    output, and the written netlist's own node tokens -- so a caller can
+    still join a simulated node name back to the report by exact match.
+    Mirrors `test_anonymous_net_json_spelling_matches_written_netlist_node_token`
+    (issue #1162) and `test_merged_net_label_spelling_matches_written_netlist`
+    (issue #696) for the third rewrite."""
+    path = _write_gds(
+        _make_inverter_layout(substrate_tap_label="XTAP.vsub"), tmp_path / "dotted.gds"
+    )
+    spef_path = tmp_path / "dotted.spef"
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "dotted.spice"),
+        parasitics=True,
+        spef_output=str(spef_path),
+    )
+
+    safe_name = "XTAP_vsub"
+    netlist_text = Path(report["netlist_path"]).read_text()
+    node_tokens = _spice_node_tokens(netlist_text)
+
+    assert safe_name in {n["name"] for n in report["nets"]}
+
+    # `devices[].nets[...]`: the NMOS body sits on this substrate tie.
+    nfet = next(d for d in report["devices"] if d["class"] == "nfet")
+    assert nfet["nets"]["b"] == safe_name
+
+    # `parasitics.nets[]` -- `net`, `hub_net`, and every `terminals[].leg_net`
+    # are each a real node token of the written netlist.
+    para_entry = next(n for n in report["parasitics"]["nets"] if n["net"] == safe_name)
+    assert para_entry["hub_net"] in node_tokens
+    assert para_entry["terminals"]
+    for terminal in para_entry["terminals"]:
+        assert "." not in terminal["leg_net"]
+        assert terminal["leg_net"] in node_tokens
+
+    # The `--spef` output names the same net.
+    spef_text = spef_path.read_text()
+    assert f"*D_NET {safe_name} " in spef_text
+    assert "XTAP.vsub" not in spef_text
+
+
+def test_hierarchical_dotted_net_composes_with_the_merged_label_rewrite(tmp_path):
+    """Issue #2145 composes with issue #696 rather than replacing it: a net
+    that is *both* label-merged and hierarchy-qualified (`XBIAS.vb1` drawn on
+    the same pad as `Y`, joined by KLayout as `XBIAS.vb1,Y`) is reported --
+    and written into the `.SUBCKT` pin list -- as `XBIAS_vb1|Y`, with both
+    rewrites applied and `merged_net_labels[].labels` split on the rewritten
+    spelling."""
+    path = _write_gds(
+        _make_inverter_layout(extra_y_label="XBIAS.vb1"), tmp_path / "both.gds"
+    )
+    report = run_extract(path, "sky130", output=str(tmp_path / "both.spice"))
+
+    assert report["merged_net_labels"] == [
+        {"net": "XBIAS_vb1|Y", "labels": ["XBIAS_vb1", "Y"]}
+    ]
+    assert "XBIAS_vb1|Y" in {n["name"] for n in report["nets"]}
+
+    netlist_text = Path(report["netlist_path"]).read_text()
+    subckt_line = next(
+        line for line in netlist_text.splitlines() if line.startswith(".SUBCKT ")
+    )
+    assert "XBIAS_vb1|Y" in subckt_line.split()
+
+    pfet = next(d for d in report["devices"] if d["class"] == "pfet")
+    assert "XBIAS_vb1|Y" in pfet["nets"].values()
+
+    assert any(
+        "XBIAS.vb1|Y -> XBIAS_vb1|Y" in w and "hierarchy separator" in w
+        for w in report["warnings"]
+    ), report["warnings"]
+
+
+def test_hierarchical_dotted_net_rewrite_is_a_noop_without_a_dotted_name(tmp_path):
+    """Issue #2145 must not perturb the overwhelmingly common case: the same
+    fixture with an ordinary second label extracts exactly as before -- no
+    rename, no `warnings[]` entry, `|`-joined name unchanged."""
+    path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "plain.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
+
+    assert report["merged_net_labels"] == [{"net": "Y|Y2", "labels": ["Y", "Y2"]}]
+    assert not any("hierarchy separator" in w for w in report["warnings"])
+
+
+def test_rewrite_dotted_net_names_disambiguates_collisions():
+    """Issue #2145's collision criterion: no `.` -> `_` rewrite that leaves
+    dot-free names alone can be injective (the dot-free namespace is already
+    occupied), so two distinct originals can land on one spelling. The pass
+    resolves that per-circuit: the first claimant keeps the unsuffixed name,
+    later ones get the smallest free `_<n>` suffix, and every net in the
+    circuit still has a distinct name."""
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    # `a_b` is already taken by a dot-free net; `a.b_c` and `a_b.c` also both
+    # want `a_b_c`.
+    for name in ("a_b", "a.b", "a.b_c", "a_b.c", "plain"):
+        circuit.create_net(name)
+
+    renamed = _rewrite_dotted_net_names(netlist)
+
+    names = [net.expanded_name() for net in circuit.each_net()]
+    assert len(names) == len(set(names)), names
+    assert not any("." in name for name in names)
+    # The pre-existing dot-free names are untouched.
+    assert "a_b" in names
+    assert "plain" in names
+    # Only the dotted nets were renamed, reported as (circuit, before, after).
+    assert [(before, after) for _circuit, before, after in renamed] == [
+        ("a.b", "a_b_1"),
+        ("a.b_c", "a_b_c"),
+        ("a_b.c", "a_b_c_1"),
+    ]
+
+
+def test_rewrite_dotted_net_names_also_renames_promoted_pins():
+    """A pin promoted off a dotted net (`make_top_level_pins()` names a pin
+    after its net) is renamed alongside it, so the netlist's leading
+    `* pin ...` comment cannot disagree with the `.SUBCKT` line below it."""
+    netlist = kdb.Netlist()
+    circuit = kdb.Circuit()
+    circuit.name = "TOP"
+    netlist.add(circuit)
+    net = circuit.create_net("XBIAS.vb1")
+    pin = circuit.create_pin("XBIAS.vb1")
+    circuit.connect_pin(pin.id(), net)
+
+    _rewrite_dotted_net_names(netlist)
+
+    assert net.expanded_name() == "XBIAS_vb1"
+    assert [p.name() for p in circuit.each_pin()] == ["XBIAS_vb1"]
+
+
+def test_spice_safe_net_name_rewrites_the_ngspice_hierarchy_separator():
+    """Issue #2145 at the shared rewrite point: `.` becomes `_`, composes
+    with the pre-existing `,` -> `|` (issue #696) and leading-`$` (issue
+    #1162) rules, is idempotent, and is a no-op for a name with no dot."""
+    assert spice_safe_net_name("XBIAS.vb1") == "XBIAS_vb1"
+    assert spice_safe_net_name("XS1.nh,XS1.nt") == "XS1_nh|XS1_nt"
+    assert spice_safe_net_name("$2.x") == "\\$2_x"
+    # Idempotent -- re-applying it to its own output changes nothing.
+    assert spice_safe_net_name(spice_safe_net_name("XBIAS.vb1")) == "XBIAS_vb1"
+    # Untouched: the overwhelmingly common dot-free name.
+    assert spice_safe_net_name("VPWR") == "VPWR"
 
 
 def test_parasitics_star_topology_puts_resistance_in_series_between_terminals(

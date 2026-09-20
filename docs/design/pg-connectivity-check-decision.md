@@ -107,7 +107,9 @@ reference form, and nowhere else:
 - **Which pins are power/ground** — `_gate_level_power_pin_names()` already
   derives this for #1622's power-only pruning, structurally, from the
   resolved standard-cell library's own `.subckt` pin orders minus the
-  reference's signal-pin universe. No hardcoded per-PDK table
+  reference's signal-pin universe (refined by #2076 to also require that
+  every instantiated master declare a pin before admitting it — see
+  `docs/cli/lvs.md` → "How the power-pin universe is derived"). No hardcoded per-PDK table
   (sky130's `VPWR`/`VGND`/`VPB`/`VNB` vs. gf180mcu's `VDD`/`VSS`/`VNW`/`VPW`),
   no cell-name glob.
 - **What each instance's power pins are actually connected to** — the layout
@@ -293,6 +295,19 @@ Recorded here so they are design boundaries, not surprises:
   `"unchecked"` with a reason, never a false `"match"`. This mirrors
   `_is_power_only_circuit`'s own missing-evidence discipline: the safe
   default on absent evidence is to say nothing, loudly.
+- **A design whose instantiated masters share one declared-pin shape cannot
+  corroborate its own power-pin universe** (#2076). The derivation admits a
+  pin only when every library cell the reference instantiates declares it and
+  none carries it — a cross-master corroboration, which corroborates nothing
+  when the instantiated masters are all the same shape. That is not the same
+  as "there is one master": several drive-strength variants of one logical
+  cell (`mylib__inv_1`/`mylib__inv_2`, both `A VGND VNB VPB VPWR Y`) are two
+  masters by name but declare the identical shape, so `len(masters) > 1` is
+  not by itself proof of corroboration. Such a run still checks (its universe
+  is right whenever the instantiated masters' signal pins are all connected)
+  but reports `power_connectivity.power_pins_derivation.corroborated: false`
+  with a reason naming the master(s) involved, so the weaker evidence is
+  visible rather than implied.
 - **Well-tie *geometry*** (is a tap actually drawn inside each well?) remains
   `klt erc`'s `erc.missing_tie` check (#861). This check verifies that a
   cell's well-tie *pin* reaches the right net; it does not look at drawn

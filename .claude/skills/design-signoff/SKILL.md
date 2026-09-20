@@ -136,11 +136,30 @@ With the kind resolved:
    blocked this way names the offending metric(s) in
    `detail.critical_metric_blockers`; cite that list alongside `status`
    rather than treating a passing `status` as sufficient on its own.
-3. **Carry coverage caveats into the verdict.** Deck coverage metadata
+3. **Carry coverage caveats into the verdict.** For item 3 the DRC deck's
+   own coverage metadata no longer has to be re-derived by hand: since issue
+   #2002 `klt signoff` reports it on the citation itself
+   (`citation.coverage.layers_in_stream_without_rules` / `.rules_skipped` /
+   `.deck_scope`; `checks[].detail.coverage` in envelope-aggregation mode),
+   quote those fields verbatim. It is still *reported*, not graded — item 3
+   grades `met` on `status: "clean"` alone, so a non-empty gap left out of
+   the claim is your caveat to name, not something the tool caught. Deck
+   coverage metadata
    (rule-free layers, skipped rules), warning-level LVS mismatches,
    MC legs not combined with process corners, known false negatives
    documented in repo READMEs — each becomes a named caveat on that item,
    and an uncombined or undisclosed caveat downgrades PRESENT → PARTIAL.
+   **Item 7 has its own version of this (issue #1983).** A `klt pex`
+   citation carries `citation.body_bias` (`checks[].detail.body_bias` in
+   envelope-aggregation mode): `status: "unbiased"` means the extracted
+   netlist those post-layout numbers came from had device bodies with no DC
+   bias path, which per `docs/cli/extract.md` makes the resimulation
+   physically wrong, not merely imprecise. It is reported, not graded —
+   item 7 still grades `met` on `status: "pass"` alone — so an `"unbiased"`
+   citation is a mandatory named caveat on item 7, and quoting it is the
+   claim's job. `checks[].detail.body_verification_status` is the upstream
+   `klt lvs` counterpart for item 4; treat `"unchecked"` as unverified, not
+   as clean.
 4. **Spec ratification gates item 5.** If the spec table is draft, every
    sim verdict is provisional; say so at the top of the report.
 5. **Completeness before quality.** A spec row with no testbench anywhere

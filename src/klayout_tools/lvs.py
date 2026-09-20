@@ -121,13 +121,15 @@ import fnmatch
 import json
 import os
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _load_request_json, _resolve_relative
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import (
+    INPUT_ROLE_LAYOUT,
+    INPUT_ROLE_NETLIST,
     _content_hash,
     _klayout_version,
     _klt_version,
@@ -157,6 +159,7 @@ from .extract import (
 from .lvs_mismatch import (
     _apply_tolerance_snaps,
     _body_net_warnings,
+    _body_unverified_counts,
     _build_mismatches,
     _build_net_correspondence,
     _collect_tolerance_snaps,
@@ -164,6 +167,7 @@ from .lvs_mismatch import (
     _mismatch,
     _parse_parameter_tolerance,
     _sort_key,
+    _SupplyPinUniverse,
     _terminal_names,
     _tolerance_disclosure,
 )
@@ -174,6 +178,7 @@ from .lvs_netgen import (
     _resolve_netgen_setup,
     _run_netgen_lvs,
 )
+from .lvs_supply import parse_supply_nets, supply_fragmentation_findings
 from .netlist_capacitor_recovery import (
     custom_device_classes_for_deck,
     make_capacitor_class_recovery_reader,
@@ -182,6 +187,7 @@ from .netlist_capacitor_recovery import (
 from .pdk import PdkNotFoundError, find_pdk
 from .verilog_netlist import (
     VerilogNetlistError,
+    collect_gate_level_port_aliases,
     convert_gate_level_verilog,
     parse_subckt_pin_orders,
 )
@@ -288,6 +294,16 @@ CATEGORY_COMBINE_DEVICES_PER_CIRCUIT_UNMATCHED = "combine_devices_per_circuit.un
 #: before comparing against a `reference.form: "gate-level-verilog"`
 #: reference -- see `_prune_power_only_layout_circuits`.
 CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
+#: Issue #2021: a `reference.form: "gate-level-verilog"` reference declared a
+#: port whose only Verilog-level connection was a plain `assign <port> =
+#: ...;` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`, two port names
+#: for one electrical node) -- `convert_gate_level_verilog` never resolves a
+#: module's own declared port list the way it resolves an instance
+#: connection, so that pin reads back as its own isolated, disconnected net.
+#: The alias pin's net was joined onto its canonical target's net (`Circuit
+#: .connect_pin`) before comparing, so it is not reported as
+#: `pin.unmatched`/`net.unmatched` -- see `_apply_gate_level_port_aliases`.
+CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED = "topology.reference_port_alias_joined"
 
 #: Issue #1952: ``power_connectivity.status`` values. Deliberately a
 #: *separate* verdict from the report's top-level ``status``, which stays
@@ -299,6 +315,27 @@ CATEGORY_TOPOLOGY_POWER_ONLY_PRUNED = "topology.power_only_pruned"
 POWER_STATUS_MATCH = "match"
 POWER_STATUS_MISMATCH = "mismatch"
 POWER_STATUS_UNCHECKED = "unchecked"
+
+#: Issue #1983: ``body_verification.status`` values -- the machine-checkable
+#: counterpart of the ``device.body_unverified`` ``mismatches[]`` warning
+#: (issue #281). Deliberately a *separate* verdict from the report's top-level
+#: ``status``, exactly as :data:`POWER_STATUS_MATCH` and friends are: a
+#: ``"unverified"`` body is a coverage statement about how the layout's MOS
+#: bodies were resolved, not a compare failure, so it never changes ``status``
+#: (that non-blocking behaviour is unchanged from before this block existed).
+#: See :func:`_body_verification_report`.
+#:
+#: - ``"verified"``: inline extraction ran and every MOS body terminal in the
+#:   layout's top circuit resolved to a real, drawn/labelled net.
+#: - ``"unverified"``: at least one MOS body terminal was compared against a
+#:   deck-synthesized net instead (the ``device.body_unverified`` condition).
+#: - ``"unchecked"``: this run could not answer the question at all -- the
+#:   pre-extracted ``layout.netlist`` request form, which carries no deck and
+#:   therefore no way to tell a drawn tie from a synthesized one. Never means
+#:   "verified": the reason says which case it is.
+BODY_STATUS_VERIFIED = "verified"
+BODY_STATUS_UNVERIFIED = "unverified"
+BODY_STATUS_UNCHECKED = "unchecked"
 
 #: ``power_connectivity.findings[].rule``: one standard-cell power/ground pin
 #: name reaches more than one distinct net across the design's instances --
@@ -325,6 +362,16 @@ RULE_POWER_UNEXPECTED_PIN_NET = "power.unexpected_pin_net"
 #: different in kind: not "connected to the wrong rail" but "connected to
 #: nothing".
 RULE_POWER_UNCONNECTED_PIN = "power.unconnected_pin"
+
+#: ``power_connectivity.power_pins_derivation.rule`` (issue #2076): the one
+#: rule :func:`_gate_level_power_pin_evidence` applies -- a pin name is
+#: admitted to the power/ground universe only when **every** library cell the
+#: reference instantiates declares it and **no** reference circuit carries it.
+#: Stated in the report as a stable identifier so a record reader can tell
+#: which derivation a ``power_pins`` list came from without reading this
+#: module; a future rule would be a new value here, never a silent change of
+#: meaning for this one.
+POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER = "declared-by-every-instantiated-master"
 
 #: How many individual instances each ``power_connectivity.findings[].nets[]``
 #: group names before truncating (``instances_truncated: true``). A real
@@ -595,6 +642,19 @@ def run_lvs(request: str) -> dict[str, Any]:
     a real schematic one -- never emitted for the pre-extracted
     ``layout.netlist`` form, and never affecting ``status``.
 
+    ``body_verification`` (issue #1983) is that same disclosure in
+    machine-checkable form: a top-level block, always present, whose
+    ``status`` is ``"verified"``/``"unverified"``/``"unchecked"``
+    (:data:`BODY_STATUS_VERIFIED` and friends) -- see
+    :func:`_body_verification_report`. Both renderings come from one
+    determination, so they cannot disagree. ``status`` is unchanged by it:
+    a layout with unverified bodies still matches when the compare matches.
+    The block exists because a ``mismatches[]`` warning is not gradeable --
+    a downstream consumer (``klt signoff``, a committed evidence record)
+    had to string-match a category inside an array of ordinary compare
+    findings to ask the question, so in practice nothing asked, and a
+    record carrying the warning was indistinguishable from a clean one.
+
     ``request.reference.device_bulk`` (issue #506) is the reconciliation
     counterpart of that disclosure: it normalises a named reference device
     class up to the layout side's terminal list before comparing (see
@@ -821,6 +881,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         power_connectivity_expected_nets,
         power_connectivity_echo,
     ) = _parse_power_connectivity(options)
+    supply_nets = parse_supply_nets(options)
     # Issue #1085: opt-in, per-side structural flatten -- see
     # `_flatten_netlist_safely`'s docstring for the full rationale (`klt
     # extract` is always flat, so a hierarchical reference/pre-extracted
@@ -841,6 +902,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         layout_echo,
         layout_hash_source,
         extracted_netlist_path,
+        layout_net_label_positions,
     ) = _resolve_layout(
         layout_spec,
         request_dir,
@@ -848,12 +910,38 @@ def run_lvs(request: str) -> dict[str, Any]:
         combine_devices_enabled,
         deck_options,
     )
+    # Inspect original scoped nets before any transform can discard a power
+    # island or flatten independent child definitions into a shared scope.
+    supply_findings = supply_fragmentation_findings(
+        _select_circuit(layout_netlist, layout_spec.get("top"), "layout"),
+        supply_nets,
+        layout_net_label_positions,
+    )
+
+    # Issue #2027: which *kind* of artifact `layout_hash_source` is, for
+    # `provenance.input.role`. `_resolve_layout` returns the original
+    # GDS/OASIS stream for the `layout.file` (inline extraction) shape and
+    # the caller-supplied SPICE file for the pre-extracted `layout.netlist`
+    # shape -- byte-identical to what `klt drc` hashes in the first case, a
+    # netlist in the second. `klt signoff`'s provenance cross-check compares
+    # `input.content_hash` only within one role, so declaring this is what
+    # stops a pre-extracted LVS report from "disagreeing" with the DRC
+    # report of the very same design. `_resolve_layout` has already rejected
+    # a spec with both keys (or neither), so this mirrors its own branch.
+    layout_input_role = (
+        INPUT_ROLE_NETLIST if "netlist" in layout_spec else INPUT_ROLE_LAYOUT
+    )
 
     flatten_warnings: list[dict[str, Any]] = []
     # Issue #1622: disclosure for `_prune_power_only_layout_circuits`, filled
     # in once `reference_netlist` is available below (only ever nonempty for
     # `reference.form: "gate-level-verilog"`).
     power_only_pruning_warnings: list[dict[str, Any]] = []
+    # Issue #2021: disclosure for `_apply_gate_level_port_aliases`, filled in
+    # once `reference_netlist` is available below (only ever nonempty for
+    # `reference.form: "gate-level-verilog"`, and then only when the
+    # reference declares an `assign`-aliased port).
+    gate_level_port_alias_warnings: list[dict[str, Any]] = []
     # Issue #1552: `options.combine_devices_per_circuit`'s per-macro combine
     # choices must run *before* either side's optional structural flatten
     # (`options.flatten_layout`/`options.flatten_reference`, issue #1085)
@@ -996,6 +1084,20 @@ def run_lvs(request: str) -> dict[str, Any]:
     # value onto -- consumed by `_apply_reference_placeholder_values` below,
     # empty for every other reference form.
     reference_placeholder_classes: dict[str, str] = {}
+    # Issue #2021: populated by `_read_reference_netlist` only for
+    # `form="gate-level-verilog"` -- `{<module name>: {<port>: <canonical
+    # net>}}` for every declared port whose only Verilog-level connection is
+    # a plain `assign` alias. Consumed by `_apply_gate_level_port_aliases`
+    # right below, before anything else reads `reference_netlist`.
+    reference_gate_level_port_aliases: dict[str, dict[str, str]] = {}
+    # Issue #2136: the library-derived power-pin universe plus the layout
+    # nets those pins land on, used below to mark a `net_correspondence[]`
+    # entry that pairs a layout supply net with a reference net that is not
+    # itself a supply pin. Derived only in the `gate-level-verilog` branch
+    # (the one reference form whose netlist carries no power/ground pins at
+    # all), and left `None` everywhere else -- which keeps every other
+    # form's `net_correspondence[]` byte-identical to before.
+    supply_universe: _SupplyPinUniverse | None = None
     reference_netlist = _read_reference_netlist(
         reference_netlist_path,
         form=reference_form,
@@ -1006,9 +1108,30 @@ def run_lvs(request: str) -> dict[str, Any]:
         pdk_root=reference_spec.get("pdk_root"),
         pin_orders=reference_pin_orders,
         placeholder_value_classes=reference_placeholder_classes,
+        gate_level_port_aliases=reference_gate_level_port_aliases,
     )
 
     if reference_form == "gate-level-verilog":
+        # Issue #2021: joins every `assign`-aliased reference port's net onto
+        # its canonical target's net -- run first, before anything else below
+        # reads `reference_netlist`'s topology (the power connectivity report,
+        # the power-only prune, and the comparer itself all need the
+        # corrected shape).
+        gate_level_port_alias_warnings.extend(
+            _apply_gate_level_port_aliases(
+                reference_gate_level_port_aliases, reference_netlist
+            )
+        )
+        # Issue #2136: derived here, before the power-only prune below, for
+        # the same reason `_power_pin_connections` must run before it -- the
+        # prune removes exactly the filler/tap instances whose power pins are
+        # part of the evidence that the layout's rails are supply nets. Not
+        # gated on `options.power_connectivity`: this is a disclosure about
+        # what the *compare* did or did not verify, which a caller who turned
+        # the separate power-connectivity check off needs at least as much.
+        supply_universe = _supply_pin_universe(
+            layout_netlist, reference_netlist, reference_pin_orders
+        )
         # Issue #1952: the power/ground half of the compare, run *before*
         # the power-only prune below -- see `_power_pin_connections`'s
         # docstring for why that order is load-bearing (the prune removes
@@ -1362,6 +1485,10 @@ def run_lvs(request: str) -> dict[str, Any]:
     placeholder_warnings: list[dict[str, Any]] = []
     tolerance_warnings: list[dict[str, Any]] = []
     compare_parameter_warnings: list[dict[str, Any]] = []
+    # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
+    # branch below rejects any `request.hints` outright (no equivalent hook
+    # in that engine's scope), so this stays empty for every netgen run.
+    equivalent_pins_applied: dict[str, list[list[str]]] = {}
 
     if engine == "klayout":
         # Issue #506: normalise the reference side's device classes up to the
@@ -1416,7 +1543,7 @@ def run_lvs(request: str) -> dict[str, Any]:
         # circuits (issue #231). Safe unconditionally: there is no other
         # circuit either one could be confused with post-pruning.
         comparer.same_circuits(layout_circuit, reference_circuit)
-        same_nets_hints = _apply_hints(
+        same_nets_hints, equivalent_pins_applied = _apply_hints(
             comparer, request.get("hints") or {}, layout_circuit, reference_circuit
         )
 
@@ -1451,7 +1578,7 @@ def run_lvs(request: str) -> dict[str, Any]:
                 # the second pass would otherwise silently drop the caller's
                 # hints. Re-validation cannot raise here (the first call above
                 # already accepted every hint against these same circuits).
-                same_nets_hints = _apply_hints(
+                same_nets_hints, equivalent_pins_applied = _apply_hints(
                     comparer,
                     request.get("hints") or {},
                     layout_circuit,
@@ -1493,7 +1620,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             ]
         status = "match" if compare_result else "mismatch"
         engine_version = _engine_version()
-        net_correspondence = _build_net_correspondence(logger)
+        net_correspondence = _build_net_correspondence(logger, supply_universe)
         counts = {
             "nets": {
                 "layout": sum(1 for _ in layout_circuit.each_net()),
@@ -1627,23 +1754,45 @@ def run_lvs(request: str) -> dict[str, Any]:
         list(layout_deck.device_classes) if layout_deck is not None else None
     )
 
+    # Issue #1983: the machine-checkable counterpart of the
+    # `device.body_unverified` warning below, replaced with a real verdict
+    # whenever inline extraction ran. Emitted as an explicit `"unchecked"`
+    # carrying a reason rather than omitted, so "were this layout's device
+    # bodies verifiably tied?" is answerable from any `klt lvs` report on its
+    # own -- on the pre-extracted `layout.netlist` form the warning's absence
+    # means "not checked", and on an inline extraction it means "checked and
+    # clean", and nothing in the report used to tell those apart.
+    body_verification: dict[str, Any] = _body_verification_unchecked(
+        "no request.layout.deck was given (the pre-extracted "
+        "request.layout.netlist form), so nothing establishes this layout's "
+        "substrate/well-tap convention and no synthesized body net can be "
+        "told apart from a real one -- this run verified nothing about the "
+        "device bodies either way"
+    )
+
     if layout_deck is not None:
-        # Issue #281: MOS body terminals extracted onto deck-synthesized nets
-        # (never a real schematic net -- see `_body_net_warnings`) are only a
-        # structural property of the *deck* used for inline extraction, not
-        # of this particular compare run. Appended (and the list re-sorted)
+        # Issue #281: MOS body terminals extracted onto deck-synthesized or
+        # anonymous nets (never a real schematic net -- see
+        # `_body_net_warnings`) are a property of the inline extraction --
+        # which deck ran and what tie geometry this layout drew (per-device
+        # on both arms since issue #2048) -- not of this particular compare
+        # run's pairings. Appended (and the list re-sorted)
         # rather than folded into `_build_mismatches`, since these entries
         # never come from a `NetlistComparer` event and do not participate in
         # the `compare_result`/safety-net invariant above -- they are purely
         # additive, non-blocking notes.
         mismatches.extend(_body_net_warnings(layout_circuit, layout_deck))
+        # Issue #1983: same determination, rendered as the gradeable block
+        # -- see `_body_verification_report` for why one source of truth
+        # backs both renderings.
+        body_verification = _body_verification_report(layout_circuit, layout_deck)
 
     if combine_warnings:
         # Issue #466: same rationale as `_body_net_warnings` above -- these
         # never come from a `NetlistComparer` event either, so they are
         # appended (and the list re-sorted) rather than folded into
-        # `_build_mismatches`. Unlike the deck-structural body-net warnings,
-        # this fires for any request (pre-extracted `layout.netlist` and
+        # `_build_mismatches`. Unlike the inline-extraction-only body-net
+        # warnings, this fires for any request (pre-extracted `layout.netlist` and
         # `"netgen"` engine included), since `combine_devices()` runs before
         # the engine branch above.
         mismatches.extend(combine_warnings)
@@ -1717,18 +1866,16 @@ def run_lvs(request: str) -> dict[str, Any]:
         # appended here rather than folded into `_build_mismatches`.
         mismatches.extend(power_only_pruning_warnings)
 
-    if (
-        layout_deck is not None
-        or combine_warnings
-        or combine_per_circuit_warnings
-        or bulk_warnings
-        or placeholder_warnings
-        or tolerance_warnings
-        or compare_parameter_warnings
-        or flatten_warnings
-        or power_only_pruning_warnings
-    ):
-        mismatches.sort(key=_sort_key)
+    if gate_level_port_alias_warnings:
+        # Issue #2021: same rationale as the disclosures above -- joining an
+        # `assign`-aliased reference port's net onto its canonical target is
+        # a request-side transform applied before the compare (before even
+        # the power-only prune above), not a `NetlistComparer` event, so it
+        # is appended here rather than folded into `_build_mismatches`.
+        mismatches.extend(gate_level_port_alias_warnings)
+
+    mismatches.extend(supply_findings)
+    mismatches.sort(key=_sort_key)
 
     if combine_incomplete and status == "mismatch":
         # Issue #1370: `options.combine_devices` was requested, at least one
@@ -1839,7 +1986,21 @@ def run_lvs(request: str) -> dict[str, Any]:
             # unresolved so a committed report round-trips back into the
             # request document it came from.
             "power_connectivity": power_connectivity_echo,
+            "supply_nets": supply_nets,
         },
+        # Issue #1998: every `hints.equivalent_pins` grouping actually passed
+        # to `NetlistComparer.equivalent_pins()` for this run, keyed by
+        # (reference-side) subcircuit name -- unlike `hints.same_nets`,
+        # which the comparer can refuse (surfaced as a `hints.rejected`
+        # mismatch entry, see `_build_mismatches`), a swappable-pin group has
+        # no rejection outcome to report, so without this field a caller
+        # reading only the response has no way to tell whether an
+        # `equivalent_pins` hint changed the verdict at all. `null` when
+        # `request.hints.equivalent_pins` was omitted (or resolved to no
+        # groups), matching `options.compare_parameters`'
+        # always-present-but-nullable convention for an optional dict-shaped
+        # echo -- never a spuriously present empty `{}`.
+        "hints_applied": (equivalent_pins_applied if equivalent_pins_applied else None),
         "status": status,
         # Issue #1952: the power/ground half of a `reference.form:
         # "gate-level-verilog"` compare, reported as its own verdict beside
@@ -1851,6 +2012,15 @@ def run_lvs(request: str) -> dict[str, Any]:
         # See `_power_connectivity_report` and
         # `docs/design/pg-connectivity-check-decision.md`.
         "power_connectivity": power_connectivity,
+        # Issue #1983: whether this layout's MOS body terminals were resolved
+        # from real drawn/labelled geometry or from a deck-synthesized net --
+        # the gradeable form of the `device.body_unverified` warning, which
+        # was previously only discoverable by string-matching a `category`
+        # inside `mismatches[]`. Reported beside `status`, never folded into
+        # it: `status` is, and stays, exactly the comparer's own result, so a
+        # layout with unverified bodies still reports `status: "match"` when
+        # the compare matched. See `_body_verification_report`.
+        "body_verification": body_verification,
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
@@ -1891,6 +2061,15 @@ def run_lvs(request: str) -> dict[str, Any]:
             # `sha256:`-prefixed form, so the two are redundant in content
             # but not interchangeable in shape.
             input_path=layout_hash_source,
+            # Issue #2027: and say *what* that hash is of -- `"layout"` for
+            # the `layout.file` shape (the original stream, the same bytes
+            # `klt drc` hashes), `"netlist"` for the pre-extracted
+            # `layout.netlist` shape. Without this discriminator `klt
+            # signoff` compared a pre-extracted run's SPICE digest against a
+            # DRC report's layout digest and refused to aggregate a
+            # perfectly consistent pair (the repo's own `examples/signoff/`
+            # pair reproduced it).
+            input_role=layout_input_role,
             # Issue #600: echo the resolved `layout.deck_options` mapping
             # under `provenance.deck.options`, matching `klt extract`'s
             # shape exactly (`_deck_block` omits the key entirely when
@@ -2157,9 +2336,16 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
         options["power_connectivity"] = power_connectivity
     elif isinstance(power_connectivity, dict):
         options["power_connectivity"] = dict(power_connectivity)
+    # Includes []: explicitly disabling the finding must survive a replay.
+    options.update(_supply_nets_replay_options(echoed))
     if options:
         request["options"] = options
     return request
+
+
+def _supply_nets_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
+    names = echoed.get("supply_nets")
+    return {"supply_nets": list(names)} if isinstance(names, list) else {}
 
 
 #: `rerun_lvs_report`'s own exclusion set (issue #1223), layered on top of
@@ -2236,7 +2422,14 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     exclude = set(_LVS_RERUN_EXCLUDE_PATHS)
     exclude.update(
         (field,)
-        for field in ("reference_top", "options", "power_connectivity")
+        for field in (
+            "reference_top",
+            "options",
+            "power_connectivity",
+            # Issue #1983: same rule -- a report committed before the
+            # `body_verification` block existed cannot have drifted in it.
+            "body_verification",
+        )
         if field not in committed
     )
     # Issue #1952: the same "a field the committed report never carried
@@ -2245,10 +2438,9 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     # existed has an `options` block without this key, and the current
     # build's richer echo is not drift.
     committed_options = committed.get("options")
-    if not isinstance(committed_options, dict) or (
-        "power_connectivity" not in committed_options
-    ):
-        exclude.add(("options", "power_connectivity"))
+    for option in ("power_connectivity", "supply_nets"):
+        if not isinstance(committed_options, dict) or option not in committed_options:
+            exclude.add(("options", option))
     return build_rerun_result(
         report_path=report_path,
         committed=committed,
@@ -2278,9 +2470,11 @@ def _resolve_layout(
     keep_extracted: bool,
     combine_devices: bool = False,
     deck_options: Mapping[str, str] | None = None,
-) -> tuple[kdb.Netlist, str, str, str | None]:
+) -> tuple[kdb.Netlist, str, str, str | None, dict[int, list[dict[str, Any]]]]:
     """Resolve ``request.layout`` to ``(netlist, echo, hash_source_path,
-    extracted_netlist_path_or_none)``.
+    extracted_netlist_path_or_none, net_label_positions)``. Original drawn
+    labels are keyed by layout cluster for the supply-fragmentation check;
+    pre-extracted SPICE has no such label map and returns an empty mapping.
 
     Two supported shapes (spike section 2b): ``{"file", "deck", "top"}`` runs
     inline extraction (composing ``extract.py``'s core function); ``{"netlist",
@@ -2425,11 +2619,9 @@ def _resolve_layout(
             # 12th return (mom_crosscheck, #798) is `klt extract
             # --mom-net`'s own report; `klt lvs` never passes that flag (LVS
             # is topological, parasitics-free), so it is always `None` here.
-            # The 13th return (net_label_positions, #1540) feeds `klt
-            # extract`'s own `nets[].label_positions_um`; `klt lvs`'s
-            # `net_correspondence[]` disambiguates a collided-name net
-            # against the *reference* schematic's net name instead, so this
-            # per-label-position map has no use here. The 14th return
+            # The 13th return preserves original labels for supply-
+            # fragmentation findings, including a supply label joined
+            # with another alias on the same physical net. The 14th return
             # (device_instance_paths, #1666) likewise feeds `klt extract`'s
             # own `devices[].instance_path`; `klt lvs` compares by device
             # class/parameter equivalence, not by originating GDS-level
@@ -2499,7 +2691,13 @@ def _resolve_layout(
                     f"'{extracted_netlist_path}': {exc}"
                 ) from exc
 
-        return netlist, layout_spec["file"], layout_file, extracted_netlist_path
+        return (
+            netlist,
+            layout_spec["file"],
+            layout_file,
+            extracted_netlist_path,
+            _net_label_positions,
+        )
 
     layout_netlist_path = _require_path(layout_spec, "netlist", "layout", request_dir)
     # Issue #1876: recover a capacitor's real device-class name across the
@@ -2548,7 +2746,7 @@ def _resolve_layout(
             f"could not parse layout netlist '{layout_netlist_path}': {exc}"
         ) from exc
 
-    return netlist, layout_spec["netlist"], layout_netlist_path, None
+    return netlist, layout_spec["netlist"], layout_netlist_path, None, {}
 
 
 def _read_reference_netlist(
@@ -2562,6 +2760,7 @@ def _read_reference_netlist(
     pdk_root: str | None = None,
     pin_orders: dict[str, list[str]] | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
+    gate_level_port_aliases: dict[str, dict[str, str]] | None = None,
 ) -> kdb.Netlist:
     """Parse ``path`` via ``NetlistSpiceReader``, in the reference netlist's
     declared ``form`` (issue #280, extended by issue #1336).
@@ -2590,6 +2789,18 @@ def _read_reference_netlist(
     :func:`_apply_reference_placeholder_values`; every other caller can
     ignore it (``None``, the default, records nothing and leaves behaviour
     byte-identical).
+
+    ``gate_level_port_aliases`` (issue #2021) is the same kind of optional
+    *output* collector, populated only for ``form="gate-level-verilog"``:
+    :func:`~klayout_tools.verilog_netlist.collect_gate_level_port_aliases`'s
+    own ``{<module name>: {<port>: <canonical net>}}`` mapping, naming every
+    declared port whose only Verilog-level connection is a plain ``assign``
+    (e.g. a port-to-port alias, two reference port names for one electrical
+    node). ``run_lvs`` hands it to :func:`_apply_gate_level_port_aliases`,
+    which joins each alias port's net onto its canonical target's net in the
+    ``kdb.Netlist`` this function returns, *before* the comparer runs --
+    empty (the default, and the common case: most gate-level references
+    have no port aliasing at all) leaves behaviour byte-identical.
 
     ``form="gate-level-verilog"`` (issue #1336) treats ``path`` as a `klt
     place-and-route` `verilog_path` gate-level Verilog netlist instead of
@@ -2682,6 +2893,13 @@ def _read_reference_netlist(
                 f"could not convert gate-level-verilog reference netlist "
                 f"'{path}' to plain-element form: {exc}"
             ) from exc
+        if gate_level_port_aliases is not None:
+            # Issue #2021: re-parses the same `text` `convert_gate_level_
+            # verilog` just parsed successfully -- cheap (a single flat
+            # module) and pure, kept as a separate entry point so the SPICE
+            # conversion's own return type stays untouched (see
+            # `collect_gate_level_port_aliases`'s docstring).
+            gate_level_port_aliases.update(collect_gate_level_port_aliases(text))
         import tempfile
 
         with tempfile.NamedTemporaryFile(
@@ -3775,7 +3993,7 @@ def _apply_hints(
     hints: dict[str, Any],
     layout_circuit: kdb.Circuit,
     reference_circuit: kdb.Circuit,
-) -> list[tuple[str, str]]:
+) -> tuple[list[tuple[str, str]], dict[str, list[list[str]]]]:
     """Wire ``request.hints`` into the comparer, per spike section 2b.
 
     ``same_nets``: ``[[layout_net_name, reference_net_name], ...]`` -- ties a
@@ -3792,15 +4010,26 @@ def _apply_hints(
     reference netlist in this module's ``compare(layout, reference)`` call
     order -- see ``run_lvs``).
 
-    Returns the declared ``same_nets`` pairs as ``(layout_net.expanded_name(),
-    reference_net.expanded_name())`` tuples (issue #499) -- the caller passes
-    this to :func:`_build_mismatches` so it can tell, after ``compare()``
-    runs, which of these hard assertions the comparer actually confirmed
-    (``must_match=True`` is passed unconditionally above, so a hint the
-    comparer disagrees with is a real finding, not a no-op). Deliberately
-    excludes ``equivalent_pins``: it declares swappable pins, not an
-    assertion about a specific pairing, so it has no "rejected" outcome to
-    detect.
+    Returns a 2-tuple:
+
+    - The declared ``same_nets`` pairs as ``(layout_net.expanded_name(),
+      reference_net.expanded_name())`` tuples (issue #499) -- the caller
+      passes this to :func:`_build_mismatches` so it can tell, after
+      ``compare()`` runs, which of these hard assertions the comparer
+      actually confirmed (``must_match=True`` is passed unconditionally
+      above, so a hint the comparer disagrees with is a real finding, not a
+      no-op).
+    - The ``equivalent_pins`` groupings actually passed to
+      ``NetlistComparer.equivalent_pins()``, keyed by subcircuit name,
+      verbatim as given in the request (issue #1998) -- unlike
+      ``same_nets``, a swappable-pin group has no "rejected" outcome to
+      detect (it declares an equivalence the comparer either uses or has no
+      occasion to use, never one it can refuse), so this dict is the only
+      record that the hint was applied at all. A subcircuit name is only
+      added once every one of its groups has resolved without error, so a
+      request that fails validation partway through never leaves a partial
+      entry in the returned dict (the caller never sees it either, since
+      :class:`LvsError` propagates out of this function first).
     """
     same_nets_declared: list[tuple[str, str]] = []
     same_nets = hints.get("same_nets") or []
@@ -3822,6 +4051,7 @@ def _apply_hints(
         same_nets_declared.append((net_a.expanded_name(), net_b.expanded_name()))
 
     equivalent_pins = hints.get("equivalent_pins") or {}
+    equivalent_pins_applied: dict[str, list[list[str]]] = {}
     for subcircuit_name, pin_groups in equivalent_pins.items():
         reference_netlist = reference_circuit.netlist()
         target_circuit = reference_netlist.circuit_by_name(subcircuit_name)
@@ -3830,6 +4060,7 @@ def _apply_hints(
                 f"hints.equivalent_pins: circuit '{subcircuit_name}' not found "
                 "in reference netlist"
             )
+        applied_groups: list[list[str]] = []
         for group in pin_groups:
             pin_ids = []
             for pin_name in group:
@@ -3841,8 +4072,14 @@ def _apply_hints(
                     )
                 pin_ids.append(pin.id())
             comparer.equivalent_pins(target_circuit, pin_ids)
+            applied_groups.append(list(group))
+        # Only recorded once every group for this subcircuit resolved cleanly
+        # (issue #1998) -- a `pin_by_name` miss above raises before this
+        # assignment runs, so a malformed request never leaves a partial
+        # entry behind for the caller to (mis)report as fully applied.
+        equivalent_pins_applied[subcircuit_name] = applied_groups
 
-    return same_nets_declared
+    return same_nets_declared, equivalent_pins_applied
 
 
 # --------------------------------------------------------------------------- #
@@ -4532,6 +4769,14 @@ def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
     from the reference" says nothing by itself, because a reference that
     never instantiates a given master says nothing at all about that
     master's pins (see that function's docstring).
+
+    **And it is only half the guard** (issue #2076). Subtracting this set
+    excludes a signal pin that *some* instance in the design connects --
+    it cannot exclude one that the design's only carrier of that pin name
+    leaves dangling, because then the conversion emits no pin of that name
+    anywhere and this set does not contain it at all. The complementary
+    half -- requiring every instantiated master to declare a pin before
+    admitting it -- lives in :func:`_gate_level_power_pin_evidence`.
     """
     if netlist is None:
         return None
@@ -4544,16 +4789,22 @@ def _reference_signal_pin_names(netlist: Any | None) -> frozenset[str] | None:
     return frozenset(names)
 
 
-def _gate_level_power_pin_names(
+def _gate_level_power_pin_evidence(
     reference_netlist: Any | None,
     library_pin_orders: Mapping[str, list[str]] | None,
-) -> frozenset[str] | None:
-    """The set of pin names (upper-cased) that are demonstrably **power/
-    ground** pins of this PDK's standard-cell library, derived from data
-    ``run_lvs`` has already read -- or ``None`` when there is not enough
-    evidence to derive one (issue #1622).
+) -> tuple[frozenset[str] | None, list[str], bool]:
+    """``(power_pin_names, masters, corroborated)`` -- the derived
+    power/ground pin universe (issue #1622) together with the evidence it
+    rests on: the sorted names of the library cells (masters) the reference
+    instantiates, and whether that evidence is genuinely cross-corroborated
+    (issue #2076).
 
-    The derivation, and why each half of it is load-bearing:
+    ``power_pin_names`` is the set of pin names (upper-cased) that are
+    demonstrably **power/ground** pins of this PDK's standard-cell library,
+    derived from data ``run_lvs`` has already read -- or ``None`` when there
+    is not enough evidence to derive one at all.
+
+    The derivation, and why each part of it is load-bearing:
 
     * ``library_pin_orders`` is the standard-cell library's own
       ``.subckt`` data (see :func:`_resolve_gate_level_pin_orders`), i.e.
@@ -4562,14 +4813,34 @@ def _gate_level_power_pin_names(
       emits, for each cell the Verilog instantiates, only the pins that
       Verilog actually connects -- structurally never a power/ground pin.
 
-    So for a cell the reference *does* instantiate, every pin the library
-    declares but the conversion did not carry is a power/ground pin. Taking
-    that difference over exactly the cells the reference declares, and then
-    subtracting :func:`_reference_signal_pin_names` (so a signal pin that
-    happens to be left unconnected on one cell but is connected on another
-    can never leak in), gives a power-pin universe with no hardcoded
-    per-PDK name table (sky130's ``VPWR``/``VGND``/``VPB``/``VNB`` vs.
-    gf180mcu's ``VDD``/``VSS``/``VNW``/``VPW``) and no cell-name glob
+    So a pin the library declares but the conversion did not carry is a
+    *candidate* power/ground pin. Two independent conditions must both hold
+    before one is admitted, and the second is what issue #2076 added:
+
+    1. **No reference circuit carries the name.**
+       :func:`_reference_signal_pin_names` is subtracted, so a pin that any
+       instance of any cell connects is a signal pin.
+    2. **Every library cell the reference instantiates declares the name.**
+       A genuine supply is declared by every standard cell in the library's
+       logic set -- the conversion drops it on *all* of them, so it survives
+       the intersection. A signal pin is declared by only some of them.
+
+    Condition 1 alone is the pre-#2076 rule, and it does not hold when the
+    design's **only carrier of a pin name leaves that pin dangling**: CTS
+    emits clock-load cells with unconnected outputs (``sky130_fd_sc_hd__inv_1
+    clkload0 (.A(clknet));`` -- ``Y`` dangling), so if no other instantiated
+    master declares ``Y``, the conversion emits no ``Y`` pin anywhere, the
+    subtrahend is empty for it, and a signal output is admitted as a supply.
+    That inflated ``power_pins``, and -- once CTS put two clock loads on two
+    different leaf nets -- produced a spurious
+    :data:`RULE_POWER_INCONSISTENT_PIN_NET` finding on a layout whose
+    supplies were perfectly connected. Condition 2 excludes it: the
+    flip-flops declare ``Q``, the clock buffers ``X``, and neither declares
+    ``Y``, while all three declare the four supplies.
+
+    Both conditions keep the universe free of any hardcoded per-PDK name
+    table (sky130's ``VPWR``/``VGND``/``VPB``/``VNB`` vs. gf180mcu's
+    ``VDD``/``VSS``/``VNW``/``VPW``) and of any cell-name glob
     (``fill_*``/``tap*``, the superseded ``docs/cli/lvs.md`` workaround).
 
     **Restricting the candidate set to cells the reference instantiates is
@@ -4585,28 +4856,84 @@ def _gate_level_power_pin_names(
     never instantiates contributes nothing here, so its signal pins can
     never be mistaken for power pins.
 
-    Returns ``None`` when either input is missing/unusable, and an empty
-    set when nothing qualifies; :func:`_is_power_only_circuit` treats both
-    as "no evidence" and prunes nothing.
+    **Where the evidence genuinely runs out, and why it is reported rather
+    than guessed at.** Condition 2 is a cross-master corroboration, so it
+    can only corroborate when there is more than one *genuinely distinct*
+    master: a reference instantiating a single library cell -- or several
+    drive-strength variants of the same one -- that leaves one of its pins
+    dangling offers nothing that separates that pin from the cell's
+    supplies -- both are declared identically by every instantiated master
+    and carried by none. Counting *names* (``len(masters) > 1``) is not
+    enough: ``mylib__inv_1``/``mylib__inv_2`` are two masters by name but
+    declare the identical pin order, so their intersection is no more
+    informative than either alone -- a dangling ``Y`` on both survives
+    exactly as it would with only one of them instantiated. ``corroborated``
+    is therefore true only when the instantiated masters' full declared pin
+    sets are not all identical, i.e. there are at least two distinct
+    *shapes* among them (the flip-flop's ``CLK``/``D``/``Q`` vs. the
+    inverter's ``A``/``Y``, not merely two differently-named inverters).
+    ``masters`` is returned alongside the universe -- and alongside
+    ``corroborated`` -- precisely so a same-shape-only case is visible in
+    the report (``power_connectivity.power_pins_derivation``, see
+    :func:`_power_pins_derivation`) instead of being silently indistinguishable
+    from a genuinely corroborated one. Narrowing further -- e.g. demanding
+    that a supply be declared by every cell in the *whole* library -- was
+    measured against both supported PDKs and rejected: it admits only
+    ``VGND``/``VPWR`` for sky130 (9 of 437 cells omit a well tie) and only
+    ``VDD``/``VSS`` for gf180mcu, dropping the well-tie pins out of the
+    checked universe and out of :func:`_is_power_only_circuit`'s tap-cell
+    classification -- real supply-defect coverage traded away to fix a case
+    the intersection above already fixes.
+
+    ``power_pin_names`` is ``None`` when either input is missing/unusable,
+    and an empty set when nothing qualifies; :func:`_is_power_only_circuit`
+    treats both as "no evidence" and prunes nothing. ``masters`` is ``[]``
+    whenever the universe is ``None`` or the reference instantiates no cell
+    of this library at all.
     """
     if not library_pin_orders:
-        return None
+        return None, [], False
     signal_pin_names = _reference_signal_pin_names(reference_netlist)
     if signal_pin_names is None:
-        return None
+        return None, [], False
     # Case-folded once: library cell names are verbatim from the `.subckt`
     # header (lower case, in both supported libraries), while the reference
     # circuit names come back from `NetlistSpiceReader` upper-cased.
     by_upper_name = {
         str(cell).upper(): pins for cell, pins in library_pin_orders.items()
     }
-    candidates: set[str] = set()
+    masters: set[str] = set()
+    declared_per_master: list[set[str]] = []
     for circuit in reference_netlist.each_circuit():
-        pins = by_upper_name.get(str(circuit.name).upper())
-        if pins is None:
+        name = str(circuit.name).upper()
+        pins = by_upper_name.get(name)
+        if pins is None or name in masters:
             continue
-        candidates.update(pin.upper() for pin in pins if pin)
-    return frozenset(candidates - signal_pin_names)
+        masters.add(name)
+        declared_per_master.append({pin.upper() for pin in pins if pin})
+    if not declared_per_master:
+        return frozenset(), [], False
+    corroborated_pins = set.intersection(*declared_per_master)
+    # Genuine corroboration requires at least two distinct declared-pin
+    # *shapes* -- not just two master names -- see the docstring above.
+    distinct_shapes = {frozenset(pins) for pins in declared_per_master}
+    corroborated = len(distinct_shapes) > 1
+    return (
+        frozenset(corroborated_pins - signal_pin_names),
+        sorted(masters),
+        corroborated,
+    )
+
+
+def _gate_level_power_pin_names(
+    reference_netlist: Any | None,
+    library_pin_orders: Mapping[str, list[str]] | None,
+) -> frozenset[str] | None:
+    """Just the power/ground pin universe half of
+    :func:`_gate_level_power_pin_evidence` -- the form
+    :func:`_prune_power_only_layout_circuits` wants, which needs the
+    classification but has no report block to disclose the evidence in."""
+    return _gate_level_power_pin_evidence(reference_netlist, library_pin_orders)[0]
 
 
 def _is_power_only_circuit(
@@ -4644,6 +4971,274 @@ def _is_power_only_circuit(
     if not pin_names:
         return False
     return all(name in power_pin_names for name in pin_names)
+
+
+def _boundary_supply_nets(
+    circuit: Any, power_pin_names: frozenset[str]
+) -> Iterator[Any]:
+    """The **boundary-side** half of :func:`_layout_supply_net_names`'s two
+    traversals: for every pin ``circuit`` itself declares whose name is a
+    known power pin, the net that pin resolves to (issue #2136).
+
+    This is the cell-interior view -- an extracted ``..._inv_1``'s own
+    ``VPWR``/``VGND`` nets -- which :func:`_instance_supply_nets` alone
+    never reaches, because the instance-side walk only ever sees nets in a
+    *parent* circuit.
+    """
+    for pin in circuit.each_pin():
+        pin_name = pin.name()
+        if pin_name and pin_name.upper() in power_pin_names:
+            yield circuit.net_for_pin(pin.id())
+
+
+def _instance_supply_nets(
+    circuit: Any, power_pin_names: frozenset[str]
+) -> Iterator[Any]:
+    """The **instance-side** half of :func:`_layout_supply_net_names`'s two
+    traversals: for every subcircuit instance in ``circuit``, and every pin
+    its master declares whose name is a known power pin, the net ``circuit``
+    wires that pin to (issue #2136).
+
+    This is the top-level power grid (the same edge set
+    :func:`_power_pin_connections` walks for the ``power_connectivity``
+    report), and it is the only evidence available in a circuit that does
+    not itself declare a supply pin -- the case
+    :func:`_boundary_supply_nets` cannot cover.
+    """
+    for sub in circuit.each_subcircuit():
+        ref = sub.circuit_ref()
+        if ref is None:
+            continue
+        for pin in ref.each_pin():
+            pin_name = pin.name()
+            if pin_name and pin_name.upper() in power_pin_names:
+                yield sub.net_for_pin(pin.id())
+
+
+def _supply_net_spellings(net: Any) -> set[str]:
+    """Every upper-cased spelling under which ``net`` should be recognised
+    as a supply net, or an empty set for an unnamed/``None`` net.
+
+    Net names go through :func:`_name_or_none`, so a label-merged net is
+    spelled exactly as ``net_correspondence[]``/``mismatches[].net`` spell
+    it (``VPWR|VDD``); both the joined spelling and each ``|``-separated
+    alias are returned, so a correspondence entry matches whichever of the
+    two the compare-time net object reports.
+    """
+    name = _name_or_none(net)
+    if not name:
+        return set()
+    spellings = {name.upper()}
+    spellings.update(alias.upper() for alias in name.split("|") if alias)
+    return spellings
+
+
+def _layout_supply_net_names(
+    layout_netlist: Any | None, power_pin_names: frozenset[str] | None
+) -> frozenset[str] | None:
+    """Every layout net name (upper-cased) that is demonstrably carrying a
+    standard-cell **power/ground** pin, or ``None`` when there is not enough
+    evidence to derive one (issue #2136).
+
+    Structural, not name-pattern -- the same discipline
+    :func:`_is_power_only_circuit` applies, and for the same
+    PDK-independence reason (sky130's ``VPWR``/``VGND``/``VPB``/``VNB`` vs.
+    gf180mcu's ``VDD``/``VSS``/``VNW``/``VPW``): a net qualifies only
+    because something the *library* declares to be a power pin
+    (``power_pin_names``, derived by :func:`_gate_level_power_pin_names`)
+    actually lands on it. Two traversals, one helper each, both needed --
+    neither subsumes the other, which is why this is a union and not a
+    choice:
+
+    * **Boundary side** -- :func:`_boundary_supply_nets`, the cell-interior
+      view an instance-side walk never reaches.
+    * **Instance side** -- :func:`_instance_supply_nets`, the top-level
+      power grid, the only evidence in a circuit that declares no supply
+      pin of its own.
+
+    Each yielded net is recorded under every spelling
+    :func:`_supply_net_spellings` gives it (the ``|``-joined label-merged
+    form *and* each alias), so a correspondence entry matches whichever of
+    the two the compare-time net object reports.
+
+    Returns ``None`` for a falsy/``None`` ``power_pin_names`` (no derivable
+    universe) or an unusable netlist, and an empty set when nothing
+    qualifies -- callers treat both as "no evidence" and flag nothing, the
+    same missing-evidence discipline :func:`_is_power_only_circuit` follows.
+    """
+    if layout_netlist is None or not power_pin_names:
+        return None
+    each_circuit = getattr(layout_netlist, "each_circuit", None)
+    if not callable(each_circuit):
+        return None
+    names: set[str] = set()
+    for circuit in each_circuit():
+        for net in _boundary_supply_nets(circuit, power_pin_names):
+            names.update(_supply_net_spellings(net))
+        for net in _instance_supply_nets(circuit, power_pin_names):
+            names.update(_supply_net_spellings(net))
+    return frozenset(names)
+
+
+def _supply_pin_universe(
+    layout_netlist: Any | None,
+    reference_netlist: Any | None,
+    library_pin_orders: Mapping[str, list[str]] | None,
+) -> _SupplyPinUniverse | None:
+    """Bundle the two name sets :func:`_build_net_correspondence` needs to
+    tell a verified net correspondence apart from a supply-net fallback
+    (issue #2136), or ``None`` when either side yields no evidence.
+
+    ``None`` is the answer for every ``reference.form`` other than
+    ``"gate-level-verilog"`` (nothing licenses calling any pin name a power
+    pin there -- the same restriction that scopes
+    :func:`_prune_power_only_layout_circuits` and the
+    ``power_connectivity`` report), and for a ``gate-level-verilog`` run
+    whose library pin orders could not be resolved. A ``None`` universe
+    leaves ``net_correspondence[]`` byte-identical to what it was before
+    this issue.
+    """
+    power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
+    if not power_pin_names:
+        return None
+    layout_supply_nets = _layout_supply_net_names(layout_netlist, power_pin_names)
+    if not layout_supply_nets:
+        return None
+    return _SupplyPinUniverse(power_pin_names, layout_supply_nets)
+
+
+def _apply_gate_level_port_aliases(
+    port_aliases: Mapping[str, Mapping[str, str]],
+    reference_netlist: Any,
+) -> list[dict[str, Any]]:
+    """Join a reference-side port's net onto its ``assign``-alias target's
+    net, for every module a ``reference.form: "gate-level-verilog"``
+    conversion carried a port-to-port (or port-to-internal-net) alias for
+    (issue #2021, the other half of issue #1994's 77 false LVS errors).
+
+    **The gap this closes.** ``convert_gate_level_verilog`` resolves an
+    ``assign <alias> = <target>;`` statement transparently for every
+    *instance* connection (see ``verilog_netlist.py``'s own docstring), but
+    never for a module's own declared port list -- a ``.SUBCKT`` boundary
+    pin whose only Verilog-level connection was an ``assign`` is emitted as
+    its own pin, with nothing inside the body ever referencing its name
+    (every instance that would have used it was rewritten to the alias's
+    *target* instead). Reading that SPICE back with ``NetlistSpiceReader``
+    creates exactly the isolated, zero-device/zero-terminal net that
+    implies, which ``NetlistComparer`` then reports as an unmatched pin/net
+    even when the layout is completely correct -- gate-level Verilog
+    routinely carries a port-to-port alias like ``assign dbg_uart_byte[i] =
+    rx_byte[i];``, where the layout has exactly one physical net serving
+    both names.
+
+    **Fix, applied here rather than in the SPICE text.** SPICE has no
+    pin-alias primitive, and repeating one net name across two ``.SUBCKT``
+    header positions would just drop the other, distinct declared name --
+    so this runs *after* ``NetlistSpiceReader`` has built the real
+    ``kdb.Circuit``/``kdb.Net``/``kdb.Pin`` objects, using
+    ``Circuit.connect_pin()`` to move the alias port's declared pin onto its
+    canonical target's net. Deliberately not ``Circuit.join_nets()``: that
+    method merges the two nets' *pins* into one (renamed to a
+    comma-joined string), which loses the alias port's own name entirely --
+    verified directly against a real ``kdb.Netlist`` in this issue's own
+    investigation. ``connect_pin`` instead leaves both declared pins in
+    place, each still individually named, now both pointing at the same
+    net -- the exact "one net, two named pins" shape a correctly-wired
+    layout already has, so the two sides compare cleanly on both the
+    pin-name match and the net match. The alias port's now-disconnected
+    original net (zero terminals, zero pins, zero subcircuit pins once its
+    pin is moved off it) is left for :func:`_purge_emptied_nets` to remove,
+    exactly like every other emptied net this module already cleans up.
+
+    ``port_aliases`` is
+    :func:`klayout_tools.verilog_netlist.collect_gate_level_port_aliases`'s
+    own return shape, ``{<module name>: {<alias port>: <canonical net>}}``
+    -- every module ``_read_reference_netlist`` parsed with at least one
+    port-to-port/port-to-net alias, empty (the common case) for every
+    reference this fix does not apply to.
+
+    A multi-hop alias chain (``assign c = b; assign b = a;``) collapses
+    every alias port for one canonical target into a single
+    :func:`_mismatch` entry and is applied correctly regardless of
+    dict-iteration order: every alias in a group is looked up and moved
+    onto the *same*, already-resolved ``canonical_net`` object, never
+    re-resolved by name after an earlier move in the same group could have
+    changed what that name refers to.
+
+    Never raises: a module name that does not resolve to a circuit in
+    ``reference_netlist``, or an alias/canonical port name that does not
+    resolve to a net inside that circuit (should not happen in practice --
+    the mapping was derived from the exact same parse
+    ``convert_gate_level_verilog`` used to build the SPICE this netlist was
+    read from -- but this is an internal consistency hook, not a
+    caller-facing contract like ``hints.same_nets``), is silently skipped
+    rather than treated as a request error.
+
+    Returns one ``severity: "warning"``
+    :data:`CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED` entry per joined
+    canonical net (naming every alias port folded into it), so a
+    ``"match"`` reached this way stays auditable -- the same disclosure
+    discipline :func:`_apply_reference_device_bulk`/
+    :func:`_apply_reference_placeholder_values` follow for their own
+    reference-side fixups. Empty when ``port_aliases`` is empty (the common
+    case).
+    """
+    entries: list[dict[str, Any]] = []
+    any_joined = False
+    for module_name in sorted(port_aliases):
+        aliases = port_aliases[module_name]
+        if not aliases:
+            continue
+        circuit = reference_netlist.circuit_by_name(module_name)
+        if circuit is None:
+            continue
+        # Group by canonical target so a multi-hop chain joins every alias
+        # for one target in a single pass -- see the docstring above.
+        groups: dict[str, list[str]] = {}
+        for alias_name, canonical_name in sorted(aliases.items()):
+            if alias_name == canonical_name:
+                continue
+            groups.setdefault(canonical_name, []).append(alias_name)
+        for canonical_name in sorted(groups):
+            alias_names = groups[canonical_name]
+            canonical_net = circuit.net_by_name(canonical_name)
+            if canonical_net is None:
+                continue
+            joined: list[str] = []
+            for alias_name in alias_names:
+                alias_pin = circuit.pin_by_name(alias_name)
+                alias_net = circuit.net_by_name(alias_name)
+                if alias_pin is None or alias_net is None or alias_net is canonical_net:
+                    continue
+                circuit.connect_pin(alias_pin, canonical_net)
+                joined.append(alias_name)
+            if not joined:
+                continue
+            any_joined = True
+            entries.append(
+                _mismatch(
+                    CATEGORY_TOPOLOGY_REFERENCE_PORT_ALIAS_JOINED,
+                    "warning",
+                    f"reference circuit '{module_name}' declared port(s) "
+                    f"{', '.join(sorted(joined))} via a plain 'assign "
+                    f"<port> = ...;' alias (request.reference.form: "
+                    f'"gate-level-verilog") -- joined onto the same net as '
+                    f"'{canonical_name}' before comparing, matching a "
+                    f"layout with a single physical net for these names, "
+                    f"instead of reporting them as unmatched (see "
+                    f"docs/cli/lvs.md, "
+                    '"topology.reference_port_alias_joined")',
+                    "reference",
+                    circuit={"layout": None, "reference": module_name},
+                    details={
+                        "canonical_net": canonical_name,
+                        "aliased_ports": sorted(joined),
+                    },
+                )
+            )
+    if any_joined:
+        _purge_emptied_nets(reference_netlist)
+    return entries
 
 
 def _prune_power_only_layout_circuits(
@@ -5093,7 +5688,149 @@ def _power_connectivity_findings(
     return findings
 
 
-def _power_connectivity_unchecked(reason: str) -> dict[str, Any]:
+def _body_verification_unchecked(reason: str) -> dict[str, Any]:
+    """A ``body_verification`` block for a run that could not determine how
+    the layout's MOS body terminals were resolved (issue #1983), stating
+    *why* in ``reason``.
+
+    Always emitted -- including for the pre-extracted ``layout.netlist``
+    request form this determination does not apply to -- so the question
+    "did this run verify that the device bodies are tied?" is answerable
+    from any ``klt lvs`` report on its own, rather than requiring a reader
+    to know which ``layout`` request shape produced it and infer the answer
+    from the *absence* of a ``device.body_unverified`` warning. That
+    absence is exactly the ambiguity issue #1983 reported: on a
+    pre-extracted netlist it means "not checked", and on an inline
+    extraction it means "checked and clean", and nothing in the report
+    distinguished them. Same discipline as
+    :func:`_power_connectivity_unchecked`.
+    """
+    return {
+        "status": BODY_STATUS_UNCHECKED,
+        "reason": reason,
+        "device_classes": [],
+        "device_count": 0,
+        "findings": [],
+        "finding_count": 0,
+    }
+
+
+def _body_verification_report(layout_circuit: Any, deck: Any) -> dict[str, Any]:
+    """The ``body_verification`` block for an inline-extraction compare
+    (issue #1983) -- the machine-checkable form of the
+    ``device.body_unverified`` warning (issue #281).
+
+    Rendered from :func:`~klayout_tools.lvs_mismatch._body_unverified_counts`,
+    the *same* determination :func:`_body_net_warnings` renders its prose
+    ``mismatches[]`` entries from, so the warning a human reads and the field
+    a grader reads can never disagree about how many devices are affected or
+    which classes they belong to.
+
+    Why this needs to exist at all, given the warning already did: a
+    ``mismatches[]`` entry is not gradeable. Answering "were this layout's
+    device bodies verifiably tied?" from a committed ``klt lvs`` record meant
+    string-matching a ``category`` inside an array whose other entries are
+    ordinary compare findings -- so in practice nothing downstream asked, and
+    a record carrying the warning was indistinguishable from a clean one at
+    every consumer that only reads ``status`` (``klt signoff`` included). See
+    ``docs/cli/lvs.md`` -> ``body_verification``.
+
+    **This does not change ``status``.** A layout with unverified bodies
+    still reports ``status: "match"`` when the compare matched, and the
+    warning entries are still ``severity: "warning"`` with
+    ``mismatch_count`` counting them -- unchanged from before this block
+    existed. The block makes the condition *visible to a grader*; whether it
+    should also block a verdict is a separate policy question, deliberately
+    left to the consumer (see ``docs/design-evidence-tiers.md`` item 7).
+    """
+    counts = _body_unverified_counts(layout_circuit, deck)
+    if not counts:
+        return {
+            "status": BODY_STATUS_VERIFIED,
+            "reason": None,
+            "device_classes": [],
+            "device_count": 0,
+            "findings": [],
+            "finding_count": 0,
+        }
+    findings = [
+        {"class": device_class, "device_count": count}
+        for device_class, count in sorted(counts.items())
+    ]
+    return {
+        "status": BODY_STATUS_UNVERIFIED,
+        "reason": None,
+        "device_classes": sorted(counts),
+        "device_count": sum(counts.values()),
+        "findings": findings,
+        "finding_count": len(findings),
+    }
+
+
+def _power_pins_derivation(masters: list[str], corroborated: bool) -> dict[str, Any]:
+    """The ``power_connectivity.power_pins_derivation`` block (issue #2076):
+    how this run decided which pin names are power/ground, and how strong
+    the evidence behind that decision is.
+
+    ``power_pins`` is the field a consumer quotes to say what the check
+    covered, and before this block existed nothing in the report said where
+    that list came from -- a reader could not tell a genuine four-supply
+    library (``VPWR``/``VGND``/``VPB``/``VNB``) from three supplies plus a
+    misclassified signal pin without reverse-engineering the netlist.
+
+    ``corroborated`` is the honest-evidence flag, computed by
+    :func:`_gate_level_power_pin_evidence` (not re-derived here from
+    ``len(masters)``): its second condition ("every instantiated master
+    declares the pin") is a *cross-master* corroboration, so it says
+    nothing when the instantiated masters are all the same declared-pin
+    shape -- one master, or several drive-strength variants of one master,
+    are equally uninformative. A single-master reference that leaves one of
+    that cell's pins dangling offers no evidence separating that pin from
+    the cell's supplies. Rather than claim a guessed universe or refuse to
+    check designs whose single master connects everything (the
+    overwhelmingly common single-master case, where the universe is exactly
+    right), the check runs and says so here -- ``corroborated: false`` plus
+    a ``reason`` naming the limitation.
+    """
+    reason: str | None = None
+    if not masters:
+        reason = (
+            "the reference instantiates no cell of the resolved standard-cell "
+            "library, so nothing establishes which pin names are power/ground"
+        )
+    elif not corroborated:
+        if len(masters) == 1:
+            reason = (
+                "the reference instantiates a single standard-cell master "
+                f"({masters[0]}), so no second master can corroborate which of "
+                "its declared-but-unconnected pins are supplies -- a signal pin "
+                "left dangling on that master is indistinguishable here from a "
+                "power/ground pin (see docs/cli/lvs.md, "
+                '"power_pins_derivation")'
+            )
+        else:
+            reason = (
+                f"the reference instantiates {len(masters)} standard-cell "
+                f"masters ({', '.join(masters)}) that all declare an "
+                "identical pin set -- e.g. drive-strength variants of one "
+                "logical cell -- so no genuinely distinct second shape "
+                "corroborates which of their declared-but-unconnected pins "
+                "are supplies -- a signal pin left dangling on all of them "
+                "is indistinguishable here from a power/ground pin (see "
+                'docs/cli/lvs.md, "power_pins_derivation")'
+            )
+    return {
+        "rule": POWER_PINS_RULE_EVERY_INSTANTIATED_MASTER,
+        "masters": list(masters),
+        "master_count": len(masters),
+        "corroborated": corroborated,
+        "reason": reason,
+    }
+
+
+def _power_connectivity_unchecked(
+    reason: str, derivation: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """A ``power_connectivity`` block for a run that did not perform the
     check (issue #1952), stating *why* in ``reason``.
 
@@ -5103,11 +5840,19 @@ def _power_connectivity_unchecked(reason: str) -> dict[str, Any]:
     than requiring a reader to know which ``reference.form`` the run used
     and what that form's scope boundary is. Making that boundary visible in
     the evidence is the original friction issue #1952 reported.
+
+    ``derivation`` (issue #2076) is the :func:`_power_pins_derivation` block
+    when this run got far enough to derive a power-pin universe and stopped
+    for some later reason, and ``None`` when it did not (a non-gate-level
+    reference form, the ``power_connectivity: false`` opt-out, or no
+    derivable universe at all) -- never omitted, so the key's presence is
+    not itself a signal a consumer has to branch on.
     """
     return {
         "status": POWER_STATUS_UNCHECKED,
         "reason": reason,
         "power_pins": [],
+        "power_pins_derivation": derivation,
         "instance_count": 0,
         "expected_nets": None,
         "unchecked_expected_pins": [],
@@ -5169,13 +5914,24 @@ def _power_connectivity_report(
     findings -- indistinguishable, without this field, from "checked and
     found correct". ``unchecked_expected_pins`` below names exactly those
     keys, so a caller can tell the two cases apart.
+
+    **Where ``power_pins`` came from is reported, not left to be inferred
+    (issue #2076).** ``power_pins_derivation`` names the rule
+    :func:`_gate_level_power_pin_evidence` applied, the library masters the
+    reference instantiates (the evidence it applied that rule to), and
+    whether that evidence was corroborated by more than one master -- see
+    :func:`_power_pins_derivation`.
     """
-    power_pin_names = _gate_level_power_pin_names(reference_netlist, library_pin_orders)
+    power_pin_names, masters, corroborated = _gate_level_power_pin_evidence(
+        reference_netlist, library_pin_orders
+    )
+    derivation = _power_pins_derivation(masters, corroborated)
     if not power_pin_names:
         return _power_connectivity_unchecked(
             "no power/ground pin universe could be derived from the "
             "reference library's own pin-order data -- nothing establishes "
-            "which of this design's pins are power/ground pins"
+            "which of this design's pins are power/ground pins",
+            derivation,
         )
     rows = _power_pin_connections(layout_netlist, power_pin_names)
     if not rows:
@@ -5183,7 +5939,8 @@ def _power_connectivity_report(
             "no layout-side subcircuit instance declares any of the "
             "reference library's power/ground pins "
             f"({', '.join(sorted(power_pin_names))}) -- the layout netlist "
-            "carries no power connectivity to check"
+            "carries no power connectivity to check",
+            derivation,
         )
     findings = _power_connectivity_findings(rows, expected_nets)
     observed_pins = {row["pin"] for row in rows}
@@ -5191,6 +5948,7 @@ def _power_connectivity_report(
         "status": POWER_STATUS_MISMATCH if findings else POWER_STATUS_MATCH,
         "reason": None,
         "power_pins": sorted(observed_pins),
+        "power_pins_derivation": derivation,
         "instance_count": len({(row["circuit"], row["instance"]) for row in rows}),
         "expected_nets": dict(sorted(expected_nets.items())) if expected_nets else None,
         "unchecked_expected_pins": (

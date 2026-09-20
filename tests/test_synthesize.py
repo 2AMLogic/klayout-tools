@@ -55,6 +55,8 @@ from klayout_tools.cli import main
 from klayout_tools.equiv import EquivError
 from klayout_tools.synthesize import SynthesizeError, load_request, run_synthesize
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 _GCD_RTL = """\
 module gcd #(
     parameter WIDTH = 16
@@ -1697,6 +1699,9 @@ def test_run_synthesize_stubbed_engine_version_unresolvable(tmp_path, monkeypatc
                 json.dump({"modules": {"\\gcd": _GCD_MODULE_STATS}}, handle)
             with open(netlist_path, "w", encoding="utf-8") as handle:
                 handle.write("// fake netlist\n")
+            abc_log_path = _script_abc_log_path(script_path, cwd=kwargs.get("cwd"))
+            with open(abc_log_path, "w", encoding="utf-8") as handle:
+                handle.write(_ABC_STIME_LINE)
             return fake_completed(returncode=0)
         raise FileNotFoundError("no yosys")
 
@@ -3544,8 +3549,8 @@ def test_verify_equivalence_true_attaches_report_on_pass(tmp_path, monkeypatch):
     assert len(captured_request_paths) == 1
     equiv_request_path = captured_request_paths[0]
     assert os.path.isabs(equiv_request_path)
-    assert os.path.dirname(equiv_request_path) == os.path.join(
-        os.path.dirname(request_path), ".klt", "synthesize"
+    assert os.path.dirname(equiv_request_path) == os.path.dirname(
+        _abs_path(report["script_path"], tmp_path)
     )
     with open(equiv_request_path, encoding="utf-8") as handle:
         equiv_request = json.load(handle)

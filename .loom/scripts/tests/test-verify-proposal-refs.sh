@@ -97,7 +97,7 @@ trap 'rm -rf "$FIXTURE_ROOT" 2>/dev/null || true' EXIT
 # --- Build a fixture repo with a fake origin/main ref (no network: a
 # local `update-ref` pointing at HEAD stands in for a fetched remote branch).
 FIXTURE_REPO="$FIXTURE_ROOT/repo"
-mkdir -p "$FIXTURE_REPO/src" "$FIXTURE_REPO/docs" "$FIXTURE_REPO/filler"
+mkdir -p "$FIXTURE_REPO/src" "$FIXTURE_REPO/docs" "$FIXTURE_REPO/filler" "$FIXTURE_REPO/tests"
 (
     cd "$FIXTURE_REPO" || exit 1
     git init -q -b main .
@@ -105,6 +105,11 @@ mkdir -p "$FIXTURE_REPO/src" "$FIXTURE_REPO/docs" "$FIXTURE_REPO/filler"
     git config user.name "Test"
     seq 1 5 > src/foo.py            # 5 lines
     printf 'line1\nline2\n' > docs/bar.md   # 2 lines
+    # #1880's stale citations after the #1916 split: line 1118 still
+    # exists, but the claimed 2569-2581 range exceeds the 2492-line module.
+    seq 1 2492 > src/functional_verification.py
+    printf 'source\n' > src/shared.py
+    printf 'test\n' > tests/shared.py
     # Pad the tree well past the platform pipe-buffer size (~64KB on Linux)
     # so `git ls-tree -r origin/main --name-only` produces enough output to
     # actually reproduce the SIGPIPE race a `full_tree | grep -qFx "$path"`
@@ -226,6 +231,98 @@ done
 assert_eq "0" "$FLAKE_DETECTED" "8 consecutive runs against a clean multi-path body never miss"
 
 echo
+echo "=== Fixture 6: unique bare basenames, ranges and punctuation ==="
+BARE_BODY="$BODY_DIR/bare.md"
+cat > "$BARE_BODY" <<'EOF'
+See `foo.py:3`, (bar.md:1-2), and foo.py:1-5. These cite unique basenames.
+EOF
+OUT="$(run_vpr "$BARE_BODY")"
+RC=$?
+assert_eq "0" "$RC" "unique valid bare citations pass"
+assert_contains "$OUT" "checked 3 path ref(s)" "all bare citation forms are checked"
+
+BARE_STALE_BODY="$BODY_DIR/bare-stale.md"
+cat > "$BARE_STALE_BODY" <<'EOF'
+See foo.py:6 and `bar.md:1-3` for stale single-line and range citations.
+EOF
+OUT="$(run_vpr "$BARE_STALE_BODY")"
+RC=$?
+assert_eq "1" "$RC" "bare stale citations fail"
+assert_contains "$OUT" 'BAD LINE RANGE: `foo.py:6`' "stale single line is reported"
+assert_contains "$OUT" 'BAD LINE RANGE: `bar.md:1-3`' "stale range is reported"
+assert_contains "$OUT" "origin/main:src/foo.py has only 5 lines" "unique basename resolves to its tree path"
+
+echo
+echo "=== Fixture 7: #1880's original bare stale guidance ==="
+HISTORICAL_BODY="$BODY_DIR/issue-1880.md"
+cat > "$HISTORICAL_BODY" <<'EOF'
+Add a header-normalizing step like the function at functional_verification.py:1118
+before either branch at `functional_verification.py:2569-2581` is taken.
+EOF
+OUT="$(run_vpr "$HISTORICAL_BODY")"
+RC=$?
+assert_eq "1" "$RC" "#1880's out-of-bounds bare citation fails"
+assert_contains "$OUT" "1 miss(es)" "the still-in-bounds line is not falsely rejected"
+assert_contains "$OUT" 'BAD LINE RANGE: `functional_verification.py:2569-2581`' "#1880's exact stale range is identified"
+assert_contains "$OUT" "origin/main:src/functional_verification.py has only 2492 lines" "the post-split module length is reported"
+
+echo
+echo "=== Fixture 8: ambiguous and missing basenames ==="
+AMBIGUOUS_BODY="$BODY_DIR/ambiguous.md"
+cat > "$AMBIGUOUS_BODY" <<'EOF'
+See `shared.py:1` for the implementation.
+EOF
+OUT="$(run_vpr "$AMBIGUOUS_BODY")"
+RC=$?
+assert_eq "1" "$RC" "ambiguous bare basename fails"
+assert_contains "$OUT" 'AMBIGUOUS FILE: `shared.py`' "ambiguity is explicit"
+assert_contains "$OUT" "src/shared.py" "first ambiguity candidate is listed"
+assert_contains "$OUT" "tests/shared.py" "second ambiguity candidate is listed"
+
+BARE_MISSING_BODY="$BODY_DIR/bare-missing.md"
+cat > "$BARE_MISSING_BODY" <<'EOF'
+See `uncommitted.py:1` for the implementation.
+EOF
+printf 'not in origin/main\n' > "$FIXTURE_REPO/src/uncommitted.py"
+OUT="$(run_vpr "$BARE_MISSING_BODY")"
+RC=$?
+assert_eq "1" "$RC" "a basename absent from origin/main fails despite a local file"
+assert_contains "$OUT" 'MISSING FILE: `uncommitted.py`' "missing basename is explicit"
+
+echo
+echo "=== Fixture 9: qualified paths match once, prose is ignored ==="
+QUALIFIED_BODY="$BODY_DIR/qualified.md"
+cat > "$QUALIFIED_BODY" <<'EOF'
+See `src/shared.py:1` and src/shared.py:1. The path disambiguates the basename.
+EOF
+OUT="$(run_vpr "$QUALIFIED_BODY")"
+RC=$?
+assert_eq "0" "$RC" "qualified path is not checked again as an ambiguous basename"
+assert_contains "$OUT" "checked 1 path ref(s)" "qualified citation is counted once"
+
+PROSE_BODY="$BODY_DIR/prose.md"
+cat > "$PROSE_BODY" <<'EOF'
+The files foo.py and missing.py may change in v1.2.3; compare 1.2:3.
+Use e.g. examples and/or prose, 3/4, and dates like 2026/09/14.
+The service https://example.com:443/api is not a file citation.
+EOF
+OUT="$(run_vpr "$PROSE_BODY")"
+RC=$?
+assert_eq "0" "$RC" "prose, versions and URLs do not become missing basenames"
+assert_contains "$OUT" "checked 0 path ref(s)" "basenames without a line suffix are ignored"
+
+echo
+echo "=== Fixture 9b: a bare (non-//-prefixed) host:port is not a false citation ==="
+HOSTPORT_BODY="$BODY_DIR/hostport.md"
+cat > "$HOSTPORT_BODY" <<'EOF'
+The daemon listens on svc.internal.io:8443 for health checks.
+EOF
+OUT="$(run_vpr "$HOSTPORT_BODY")"
+RC=$?
+assert_eq "0" "$RC" "a bare host:port with a letter-leading TLD is not flagged as a missing citation"
+assert_contains "$OUT" "checked 0 path ref(s)" "the host:port is not counted as a checked path ref"
+
+echo
 echo "=== Usage / prerequisite errors ==="
 OUT="$("$VPR" 2>&1)"
 RC=$?
@@ -267,6 +364,15 @@ OUT="$(run_vpr "$SIBLING_BODY")"
 RC=$?
 assert_eq "1" "$RC" "a path that only exists in a sibling checkout still misses against the real workspace"
 assert_contains "$OUT" "verification/_repo_utils.py" "the sibling-only path is named as a miss"
+
+BARE_SIBLING_BODY="$BODY_DIR/bare-sibling.md"
+cat > "$BARE_SIBLING_BODY" <<'EOF'
+See `_repo_utils.py:1` for the shared helper.
+EOF
+OUT="$(run_vpr "$BARE_SIBLING_BODY")"
+RC=$?
+assert_eq "1" "$RC" "bare basename is never resolved in a sibling checkout"
+assert_contains "$OUT" 'MISSING FILE: `_repo_utils.py`' "sibling-only basename is a missing file"
 
 echo
 echo "--- Doc pins: Hermit / Architect / Champion wiring ---"

@@ -235,8 +235,9 @@ When a device name is not one of the curated devices, supply it explicitly:
   declares is resolvable, so a deck recognises the same devices on this
   reference side that it recognises for extraction (issue #1464 — see
   "Per-deck coverage" below). Adding a new PDK family's device map
-  (`_MOS_MODEL_TABLE`, `_KNOWN_PDK_FAMILIES`, `_PDK_VARIANT_FAMILY_ALIASES`
-  in `klayout_tools.pdk_models`) is covered in
+  (`_MOS_MODEL_TABLE` in `klayout_tools.pdk_models`, plus the family
+  declaration itself — `KNOWN_PDK_FAMILIES`/`PDK_VARIANT_FAMILY_ALIASES` in
+  `klayout_tools.pdk_families`) is covered in
   [`../guides/pdk-family-port-checklist.md`](../guides/pdk-family-port-checklist.md).
 - `reference.device_map` — an explicit `{ "<subckt-name>": <override> }`
   override, merged on top of the deck's map, for a device subcircuit name
@@ -609,6 +610,22 @@ comparing, disclosing what it removed as a `severity: "warning"`,
 `topology` mismatch. You do not need to exclude these cells from
 `--abstract-cells` yourself.
 
+**A reference port declared only via `assign` is joined onto its target's
+net automatically** (issue #2021) — gate-level Verilog routinely carries a
+port-to-port alias like `assign dbg_uart_byte[i] = rx_byte[i];` (e.g. a
+debug/monitor tap port for a "real" signal port), and the conversion above
+resolves an `assign` alias for every *instance* connection but never for a
+module's own declared port list, so the aliased port would otherwise read
+back as its own isolated, disconnected reference net even though the layout
+has exactly one physical net for both names. `klt lvs` joins the alias
+port's net onto its canonical target's net before comparing, disclosing
+what it joined as a `severity: "warning"`, `category:
+"topology.reference_port_alias_joined"` entry — see
+"`topology.reference_port_alias_joined`" below — rather than reporting a
+false `pin.unmatched`/`net.unmatched` mismatch. A genuinely unconnected or
+differently-wired reference port is untouched and still reports as a real
+mismatch.
+
 What that costs is real and must not be misread: **a power-net defect is
 invisible to `status`**. A standard cell whose `VGND` pin is wired to
 the power rail in the layout still reports `status: "match"`, because the
@@ -698,9 +715,10 @@ compare *against*. The check does not need one. It needs:
 
 - **which pins are power/ground** — derived from the resolved standard-cell
   library's own `.subckt` pin orders (the same structural derivation issue
-  #1622's power-only pruning already uses: the library's full pin order
-  minus the reference's signal-pin universe). No hardcoded per-PDK power-pin
-  table, no `fill_*`/`tap*` cell-name glob.
+  #1622's power-only pruning already uses). No hardcoded per-PDK power-pin
+  table, no `fill_*`/`tap*` cell-name glob. See
+  "How the power-pin universe is derived" below for the exact rule, the
+  evidence it rests on, and where it stops.
 - **what each instance's power pins are connected to** — the layout netlist
   already carries it. `klt extract --abstract-cells` resolves and probes
   *every* declared pin, power pins included; the signal-only compare simply
@@ -710,6 +728,72 @@ compare *against*. The check does not need one. It needs:
 
 > In a single-power-domain block (what `klt place-and-route` produces),
 > every instance's same-named supply pin must reach the same net.
+
+When the layout SPICE comes from `klt extract --abstract-cells`, extraction
+preserves the original instance-transformed well polygons as conductors.
+Abutted cells' well/body pins therefore retain their real continuity; actual
+well gaps, wrong well ties, and metal-supply disconnects remain detectable.
+This is resolved in the extracted connectivity, with no pin-name exception
+in LVS. Re-extract older standalone SPICE artifacts that lost well geometry:
+without their layout, LVS cannot distinguish that loss from a real defect.
+See [cell abstraction](extract.md#cell-level-black-box--pins-abstraction---abstract-cells-issue-620).
+
+### How the power-pin universe is derived (issue #2076)
+
+A pin name is admitted to the power/ground universe — the `power_pins` list,
+and the same universe issue #1622's filler/tap pruning classifies against —
+only when **both** of these hold:
+
+1. **No circuit in the reference carries that pin name.** The Verilog
+   conversion emits, per cell, only the pins the Verilog actually connects,
+   and it structurally never connects a supply — so any pin name the
+   reference does carry is a signal pin.
+2. **Every library cell the reference instantiates declares that pin name.**
+   A genuine supply is declared by every standard cell in the library's logic
+   set; a signal pin is declared by only some of them.
+
+Condition 2 is what issue #2076 added, and condition 1 alone is not enough.
+An ordinary `place-and-route` output breaks it: CTS hangs clock-load cells
+off each leaf clock net with **their outputs unconnected** —
+
+```verilog
+sky130_fd_sc_hd__inv_1 clkload0 (.A(clknet_1_0__leaf_clk));   // Y dangling
+```
+
+— so if no other instantiated cell declares a pin of the same name (the
+flip-flops output `Q`, the clock buffers `X`), nothing in the converted
+reference mentions `Y` at all, condition 1 has nothing to subtract, and a
+signal output was admitted as a supply. That inflated `power_pins`, and with
+clock loads on two different leaf nets it produced a spurious
+`power.inconsistent_pin_net` finding — a `power_connectivity.status:
+"mismatch"` naming a pin that was never a supply, on a layout whose supplies
+were perfectly connected.
+
+**Where the evidence stops, and what the report says about it.** Condition 2
+is a *cross-master* corroboration, so it corroborates nothing when the
+instantiated masters are all the same declared-pin **shape** — either a
+single standard-cell master, or several drive-strength variants of one
+logical cell (`mylib__inv_1`/`mylib__inv_2`, both `A VGND VNB VPB VPWR Y`):
+a pin any of them declares but never connects is then indistinguishable from
+their supplies, and `len(masters) > 1` is not by itself evidence otherwise —
+two identically-shaped masters corroborate exactly as little as one. The
+check still runs (the common single-master case connects every signal pin,
+and the universe is exactly right), and `power_pins_derivation.corroborated`
+is `false` with a `reason` naming the limitation (which masters, and whether
+it's a single master or several sharing one shape), rather than a guessed
+universe presented as a corroborated one.
+
+Narrowing further — requiring a supply to be declared by every cell in the
+*whole* library, not just the instantiated ones — was measured against both
+supported PDKs and rejected: 9 of sky130's 437 `sky130_fd_sc_hd` cells and 2
+of gf180mcu's 229 `gf180mcu_fd_sc_mcu7t5v0` cells omit a well-tie pin. (Six of
+sky130's nine are actually `sky130_fd_sc_hd__lpflow_lsbuf_*_isowell_tap_*`
+level-shifter buffers, not physical tap/endcap cells — but `klt synthesize`
+denylists the whole `lpflow_*` family, so none of them can reach a reference
+netlist through this flow anyway.) That rule admits only `VGND`/`VPWR` (resp.
+`VDD`/`VSS`) and drops the well ties out of both the checked universe and the
+tap-cell classification — real supply-defect coverage traded away to fix a
+case the rule above already fixes.
 
 ### The three finding rules
 
@@ -748,6 +832,13 @@ would silently exempt them.
   "status": "mismatch",
   "reason": null,
   "power_pins": ["VGND", "VNB", "VPB", "VPWR"],
+  "power_pins_derivation": {
+    "rule": "declared-by-every-instantiated-master",
+    "masters": ["SKY130_FD_SC_HD__BUF_1", "SKY130_FD_SC_HD__DFXTP_1", "SKY130_FD_SC_HD__INV_1"],
+    "master_count": 3,
+    "corroborated": true,
+    "reason": null
+  },
   "instance_count": 462,
   "expected_nets": null,
   "unchecked_expected_pins": [],
@@ -784,6 +875,7 @@ would silently exempt them.
 | `status` | `"match"` \| `"mismatch"` \| `"unchecked"` | The power/ground verdict, **independent of the report's top-level `status`** (which stays exactly `NetlistComparer.compare()`'s own signal-connectivity result). `"match"` when the check ran and found nothing; `"mismatch"` when it produced findings; `"unchecked"` when it did not run — never a clean verdict on absent evidence. |
 | `reason` | string \| `null` | Why the check did not run, for `status: "unchecked"`; `null` otherwise. One of: a `reference.form` other than `"gate-level-verilog"` (that form's reference carries its own power pins and nets, which the ordinary compare already checks); `options.power_connectivity: false`; no power-pin universe derivable from the reference library's pin-order data; or a layout netlist whose instances declare none of those pins (e.g. an `--abstract-cell-lef` that never declared PG pins). |
 | `power_pins` | array\<string\> | The power/ground pin names actually found on layout-side instances, upper-cased and sorted — what was checked, not what the library declares. `[]` when `status` is `"unchecked"`. |
+| `power_pins_derivation` | object \| `null` | Issue #2076. Where `power_pins` came from: `rule` (a stable identifier for the derivation — `"declared-by-every-instantiated-master"` today; a future rule would be a new value, never a silent change of meaning for this one), `masters` (the library cells the reference instantiates, upper-cased and sorted — the evidence the rule was applied to), `master_count`, `corroborated` (`true` only when the instantiated masters include at least two genuinely distinct declared-pin shapes — not merely more than one master *name*; two drive-strength variants of one logical cell declare the same shape and corroborate nothing), and `reason` (`null` when corroborated; otherwise what the evidence could not establish, including a same-shape-only multi-master case). Populated — never `null` — whenever `reference.form` is `"gate-level-verilog"` and `power_connectivity` was not disabled, even when the reference instantiates no cell of the resolved library at all (`masters: []`, `reason` naming that). `null` only when the check never attempted a derivation: a non-gate-level `reference.form`, or the `power_connectivity: false` opt-out. **Read `corroborated` before quoting `power_pins` as a coverage claim**: a `false` means this design gave the derivation nothing to cross-check against (see "How the power-pin universe is derived" above). |
 | `instance_count` | integer | How many distinct layout-side instances carried at least one of those pins. `0` when `status` is `"unchecked"`. |
 | `expected_nets` | object\<string, string\> \| `null` | The resolved `options.power_connectivity.expected_nets` mapping (upper-cased, key-sorted), or `null` when none was declared. |
 | `unchecked_expected_pins` | array\<string\> | Issue #1978. `expected_nets` keys that named a power/ground pin no layout-side instance was actually observed to carry — a typo, or a PDK standard cell whose tie pin has no in-cell label/LEF port at all. Such a pin matches zero rows in `_power_pin_connections` and so produces zero findings, which reads identically to "checked and found correct" unless this field is consulted; a non-empty list means at least one declared expectation was never exercised by this run. `[]` on a clean check, and always `[]` when `status` is `"unchecked"`. |
@@ -904,11 +996,12 @@ real OpenROAD-produced layout:
   exact counts shifted) and comparing the layout against it reports
   `status: "match"`, with every device accounted for on both sides
   (`counts.devices` layout = reference = matched = 4857 — no silently-
-  dropped devices at this scale). The only mismatches are the same deck-
-  structural **warnings** the hand-drawn corpus round-trip already carries:
+  dropped devices at this scale). The only mismatches are the same
+  tap-coverage **warnings** the hand-drawn corpus round-trip already carries:
   one `device.body_unverified` (the synthetic-substrate net every NMOS body
   lands on, since sky130 draws no distinct NMOS tap layer — see
-  [`docs/cli/extract.md`](extract.md), "Coverage") plus ambiguous-net and
+  [`docs/cli/extract.md`](extract.md), "Coverage"; no PMOS counterpart, since
+  sky130's `well_label` names every PMOS body here) plus ambiguous-net and
   unused-device-class `topology` warnings. None are `error` severity.
 - **Deliberately-broken variant.** Corrupting exactly one standard-cell-
   region transistor's drawn width in the reference netlist (`W=0.42U` →
@@ -1083,7 +1176,7 @@ each resolves relative paths inside the document.
 | `reference.pdk` / `reference.pdk_root` | string | Only used with `form: "gate-level-verilog"`. Forwarded verbatim to `klt pdk`'s resolver (`find_pdk(variant=reference.pdk, root=reference.pdk_root)`) exactly like `klt extract`'s own `--pdk`/`--pdk-root` flags — see `docs/cli/pdk.md`. Omit both to fall back to `$PDK_ROOT`/the ciel/volare store search. An unresolvable PDK, or a resolved variant with no `libs.ref` asset, is an application error (exit 1). |
 | `reference.device_bulk` | object\<string, string\> | Optional `{ "<device-class / model name>": "<reference net name>" }` — declares that the reference netlist's device class of that name carries an *implicit* bulk/well/collector terminal on the named net, which the layout side's same-named class declares explicitly (issue #506). `klt lvs` adds that one terminal to the reference class and ties it to the named net on every reference-side instance before `NetlistComparer.compare()` runs, so a deck's bulk-terminal device flavour can match a schematic reference that does not model the terminal at all — the reconciliation `device.class_arity` only diagnoses. The net is looked up on each circuit that instantiates the class (matched exactly, then case-insensitively) and **created** there when the reference does not model that node; to bind the added terminal to a layout-side net of a different name, compose with a `hints.same_nets` pair. Every reconciled class emits a `severity: "warning"`, `category: "device.bulk_reconciled"` disclosure entry — see "`device.bulk_reconciled`" below. Model names are matched exactly first and then case-insensitively (`NetlistSpiceReader` upper-cases `res_x` to `RES_X`). A name that resolves on neither side, a class the reference is *not* actually missing a terminal from, and a class two or more terminals apart (this hook reconciles exactly one extra terminal per class, since the entry names exactly one net) are each an application error (exit 1), not a silent no-op. `"engine": "klayout"` only. |
 | `hints.same_nets` | array\<[string, string]\> | Optional `[layout_net_name, reference_net_name]` pairs — ties a named net in the layout's top circuit to a named net in the reference's top circuit. A name that does not resolve on the stated side is an application error (exit 1), not a silent no-op. Each pair is a hard assertion (`must_match=True`): a pair the comparer refuses is reported as a `hints.rejected` entry, never silently dropped. Its purpose is to **disambiguate** a pairing the comparer would otherwise resolve arbitrarily (or not at all) — it is *not* a way to reconcile two differently-named nets, which the comparer already matches on its own without any finding, nor a way to clear a `topology` "name/identity conflict" entry. See "`hints.rejected`" below for both refusal shapes and why the name-conflict case is not one a hint can fix. |
-| `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). |
+| `hints.equivalent_pins` | object\<string, array\<[string, string]\>\> | Optional per-subcircuit swappable-pin groups, keyed by **reference**-side subcircuit name (`NetlistComparer.equivalent_pins` only accepts circuits from the netlist passed as `compare()`'s second argument, which is always the reference netlist in this command's `compare(layout, reference)` call order). A name that does not resolve on either axis (an unknown subcircuit, or an unknown pin on a subcircuit that does resolve) is an application error (exit 1), the same "typo must be visible" discipline `hints.same_nets` applies. Every grouping actually applied is disclosed back in the response's top-level `hints_applied` field (issue #1998) — see below — since, unlike `hints.same_nets`, it has no "rejected" outcome of its own to otherwise reveal that it changed anything. |
 | `options.keep_extracted` | boolean | When `layout.file` is given (inline extraction), retain the intermediate extracted netlist on disk at `<request-dir>/.klt/lvs/<top>.spice` and echo its path in `environment.extracted_netlist`, where `<request-dir>` is the request file's directory (or the current working directory for the `-`/inline-JSON forms). Default `false` (nothing is written to disk). Written *before* `options.combine_devices` runs (a genuinely intermediate, pre-combine snapshot); when `combine_devices: true` and the deck sets `ResistorDevice.fixed_offset_ohm` (issue #559), the retained netlist also predates that correction (deferred until after combining — see `options.combine_devices` below), so its `R` values are the raw, uncorrected-and-uncombined per-primitive figures, not what the compare itself uses. |
 | `options.combine_devices` | boolean \| array\<string\> | When `true`, calls `klayout.db.Netlist.combine_devices()` on **both** the layout and reference netlists before comparing — merging devices a device class recognises as combinable (e.g. parallel/series MOSFETs sharing gate/source/drain/body connectivity). This is what makes folded/multi-finger devices (a wide transistor drawn as N parallel fingers of width `W/N`) and split/interleaved matched-pair segments (common-centroid, interdigitated layout) comparable against a single lumped schematic device — without it, each finger/segment reports as its own unmatched device. Default `false` (today's per-drawn-device matching, unchanged) because unconditional merging would also collapse genuinely-distinct parallel devices (e.g. a DAC array's intentionally-separate legs) that some callers want reported individually — opt in only when the layout actually uses folded/split constructions. Applied identically for both engines. After combining, `klt lvs` purges the interior nets `combine_devices()` empties — the N-1 interior nodes of a collapsed series string, left with zero terminals and zero pins once their devices are folded — so `counts.nets.*` and `mismatches[]` reflect the post-combine, post-purge netlist rather than the raw post-combine one (otherwise those disconnected nodes would inflate `counts.nets.layout` and surface as spurious `net.unmatched` findings no caller could act on). The purge is scoped to genuinely-empty nets (no terminals, no pins, no subcircuit pins), so a genuinely-unused top-level pin's net is never dropped and `counts.pins.*` is unaffected; it runs only when combining actually ran (`false` leaves counts exactly as before). On a **partial-match device group** — N real (matching-relevant) instances plus M dummy instances that all share two of three terminals, but only the N real instances also share the third (e.g. a matched bipolar/MOS array's flanking dummies) — `klayout.db`'s own `combine_devices()` can raise an internal-consistency `RuntimeError` rather than combining just the maximal matching subset; `klt lvs` catches that specific error per netlist instead of letting it abort the run, keeps whatever it had already combined, leaves the rest of that netlist's devices individual, and records a `severity: "warning"`, `category: "device.combine_incomplete"` entry in `mismatches[]` — see "`device.combine_incomplete`" below. **Whether this error fires is not fully deterministic across otherwise-identical runs (issue #1185)** — the same layout GDS + reference netlist can combine cleanly on one invocation and hit the error on the next, because KLayout's own `combine_devices()` groups candidates using an ordering that depends on process heap addresses, not on netlist content, and that ordering is not controllable from Python. `klt lvs` retries the combine per side against independent netlist copies to cut the observed flake rate sharply (not to zero — it cannot be, per the above); the number of attempts is `options.combine_devices_max_attempts` (default `5`, see its own field-table row below); see "`device.combine_incomplete`" below for the full explanation, the retry budget, and a reported exhaustion-rate observation against a much larger netlist than this budget was originally tuned against. **Fixed-offset resistor correction (issue #559):** for a deck row that sets `ResistorDevice.fixed_offset_ohm` (see `klt extract`'s docs, "Drawn resistors" — currently only sky130's `res_high_po`), inline extraction (`layout.file` + `layout.deck`) normally applies that fixed per-instance correction to `R` at extraction time, once per drawn primitive. When `combine_devices: true`, `klt lvs` instead defers that correction and applies it once, after combining — so N series-connected drawn primitives folded into one logical device get the fixed offset exactly once (`total_L/W*sheet_rho + 1*fixed_offset_ohm`), not once per primitive (`total_L/W*sheet_rho + N*fixed_offset_ohm`), which is what KLayout's own `combine_devices()` would otherwise produce by summing each primitive's already-corrected `R`. Only the layout side is affected (the correction is a layout-deck geometric property, not a schematic one). This deferred correction also applies to the **pre-extracted `layout.netlist` shape when a `layout.deck` is supplied alongside it** (issue #585): `layout.deck` there does not trigger extraction, but it does name the deck whose `fixed_offset_ohm` `klt lvs` applies once per post-combine device, exactly as for inline extraction. For that to produce the correct result the pre-extracted SPICE must have been written with the correction *deferred* — extract it with `klt extract --defer-resistor-fixed-offset` (the CLI, issue #588) or `run_extract(..., apply_resistor_fixed_offset=False)` (the Python API, the same switch), which omits the per-primitive offset from the written `R` so this option can add it once after the series fold. Those two are the extraction-time half of this contract, reachable from a subprocess-only flow and from an importing one respectively; see `docs/cli/extract.md`'s "Deferring the fixed resistor offset". A `layout.netlist` extracted the default way already has the offset baked into each primitive; feeding that through `combine_devices: true` with a `layout.deck` would double-count it (the already-summed per-primitive offset cannot be un-summed after folding), so pair `combine_devices` with a deferred extraction, or omit `layout.deck` to leave the pre-extracted `R` values untouched. Omitting `layout.deck` entirely (the bare `{"netlist": ..., "top": ...}` shape) attempts no correction at all — the pre-extracted `R` values are used exactly as written. **Restricting which device classes are combined (issue #1370):** this field also accepts an **array of device-class name strings** (e.g. `["nfet_01v8"]`) instead of a boolean, in which case only the named classes are combined and every other class is left as drawn. That is the escape hatch for a netlist where KLayout's own `combine_devices()` trips the internal-consistency error above *deterministically* rather than intermittently — the retry budget below then has nothing to resample, so scoping the combine to the class that actually needs folding (and away from the one whose partial-match group trips the error) is the only way to get the compare the caller wanted to run at all. Names are matched case-insensitively against both netlists' registered device classes, so the SpiceReader-uppercased (`RES_HIGH_PO`) and deck-declared (`res_high_po`) spellings are interchangeable. An empty array, a non-string entry, or a bare string is a request error (exit `1`) — use `false` to disable combining. Naming a class that exists in **neither** netlist is likewise a request error rather than a silent no-op (a typo would otherwise restrict combining to nothing and surface as a full `device.unmatched` cascade that looks exactly like a real design error); a class present on only one side is accepted, since a layout-only parasitic flavour or a reference-only lumped model is legitimate. The resolved value is echoed back verbatim under `options.combine_devices` in the response — a boolean for the boolean shape, the normalised array for the array shape — so `--check --rerun` reproduces the *restricted* compare rather than an unrestricted one whose difference it would then report as drift. **Symmetric degrade and `status: "inconclusive"` (issue #1370):** when the retry budget below is exhausted on either side, `klt lvs` no longer ships the resulting lopsided state to the comparer. Both netlists are rolled back to snapshots taken *before* any combining ran, so the compare that does run is apples-to-apples (exactly the state `combine_devices: false` would have produced on both sides) rather than a partially-folded layout against a fully-folded reference — and this holds for an asymmetric failure too, where one side combined cleanly and the other did not. Because the compare the caller asked for never ran, a resulting `"mismatch"` is reported as `status: "inconclusive"` (exit `4`) instead — see "`device.combine_incomplete`" and "Exit codes" below. A `"match"` is *not* downgraded: an uncombined compare that still matched is strictly stronger evidence than a combined one, and this command never re-derives a verdict the engine did not reach. **Capacitor `C` sum-conservation check (issue #1497):** independent of the `RuntimeError` case above, KLayout's own `combine_devices()` can also return normally with a capacitor device's `C` parameter left inconsistent with its pre-combine parallel group's summed total (while the same group's `A`/`P` parameters combine correctly) — no exception, no `device.combine_incomplete` warning. `klt lvs` checks and corrects this in place after every successful combine and records a `severity: "warning"`, `category: "device.combine_parameter_corrected"` entry when it fires — see "`device.combine_parameter_corrected`" below. |
 | `options.combine_devices_max_attempts` | integer | Issue #1412. The retry budget behind `options.combine_devices`'s run-to-run nondeterminism mitigation (issue #1185, see "`device.combine_incomplete`" below): how many independent `Netlist.dup()` attempts `klt lvs` makes per side before falling back to a `device.combine_incomplete` warning and (if it fires on either side) `status: "inconclusive"`. Default `5`, unchanged from before this option existed. Must be a positive integer (`>= 1`); anything else is an application error (exit 1), not a silent fallback to the default. Ignored (but still validated) when `options.combine_devices` is falsy. Raising it trades runtime (each attempt is its own full `combine_devices()` pass over a netlist copy) for a lower observed exhaustion rate on a large/complex netlist that hits the default budget's limit more often than the default's own small-fixture derivation predicts — see "Run-to-run nondeterminism" under "`device.combine_incomplete`" below for a reported observation at that scale and why no single value can be recommended generically; lowering it trades the reverse, useful for fast iteration against a small netlist where an occasional degrade is cheap to re-run. Not echoed in the response's `options` block (a runtime guard, not a compare input, the same convention as `options.netgen_timeout_s`) and not reconstructed by `--check --rerun` for the same reason. |
@@ -1091,6 +1184,7 @@ each resolves relative paths inside the document.
 | `options.parameter_tolerance` | number | Optional relative tolerance for numeric device parameters, expressed as a **fraction** (`0.001` is 0.1%), applied to every parameter of every device class (issue #589). `"engine": "klayout"` only. Omit (or `null`) for today's exact compare — the default is unchanged and no existing verdict moves unless a caller opts in. When given, a device pair whose *every* differing parameter is within the tolerance is compared as if those values agreed, so a physically-clean design whose extracted value is a deck's 5–6-significant-figure model fit can reach `status: "match"` against a schematic reference rounded to 2–3 figures. Each absorbed difference is disclosed as a `severity: "warning"`, `category: "device.parameter_tolerated"` entry carrying both original values — see "`device.parameter_tolerated`" below, which also documents the mechanism and its limits. Must be a number in `[0, 1)`; anything else (a string, a per-parameter object, a negative value, `1.0` or above) is an application error (exit 1), not a silent fallback to the default. |
 | `options.compare_parameters` | object\<string, array\<string\>\> | Issue #1928. Scopes *which* device-class parameters take part in the compare at all: `{ "<device-class name>": [<parameter name>, ...] }`. Every numeric parameter a device class declares is compared by default (`klayout.db.NetlistComparer` reads each `DeviceClass`'s own primary-parameter set), with no request-level way to narrow that — so a single always-compared parameter neither side can state identically (e.g. a geometry-derived layout-side value a reference netlist's own device cards never carry at all) makes `status: "match"` unreachable, and `options.parameter_tolerance` cannot help: it is a *relative* tolerance and can never call a zero-vs-nonzero structural difference equal (`_relative_delta()` returns `1.0` whenever exactly one side is zero). For each named class, `klt lvs` enables exactly the listed parameters and disables every other parameter that class declares via `klayout.db.DeviceClass.enable_parameter(name, false)`, on **both** sides' own class object (`NetlistComparer` consults each device's own class, not a single shared one — the same reason `reference.device_bulk`/the `subckt-call` placeholder-value exclusion also touch both sides), before the comparer runs. `"engine": "klayout"` only — the `netgen` engine has no equivalent per-parameter compare-scoping hook, so a `netgen` request with this option set is an application error (exit 1), same boundary as `options.parameter_tolerance`/`hints`/`reference.device_bulk` above. Class names are matched case-insensitively against both netlists' registered device classes (`NetlistSpiceReader` upper-cases class names read back from SPICE while a deck-declared class keeps its own casing), and parameter names are matched case-insensitively against that class's own declared parameters. **Validation, never a silent no-op:** a device-class name present in **neither** netlist, or a parameter name not declared by that class on either side it resolves on, is a clean application error (exit 1) naming the typo and what is actually available — the same "typo must be visible" discipline `hints.same_nets` and `options.combine_devices`'s array form already apply (a silently-ignored typo here would look exactly like a device class whose every parameter happens to agree, which is far more dangerous than a typo that simply does nothing). A class named here but present on only one side is legitimate (mirrors `options.combine_devices`'s own "present on just one side is not an error" rule) and is scoped on that side alone. Every parameter this option disables is disclosed as its own `severity: "warning"`, `category: "device.parameter_excluded"` entry — see "`device.parameter_excluded`" below — so a `"match"` reached this way is never silently indistinguishable from a full parameter compare. This option does not compute or reconcile a value for the excluded parameter on either side (unlike `reference.device_bulk`'s terminal reconciliation) — it only removes that parameter from the compare; teaching one side to state the missing parameter correctly is explicitly out of scope, narrower, and not what this option does. The resolved mapping is echoed back verbatim under `options.compare_parameters` in the response (`null` when the option was omitted) and reconstructed verbatim by `--check --rerun`, the same always-present-but-nullable convention `options.combine_devices_per_circuit` already follows. |
 | `options.power_connectivity` | boolean \| object | Issue #1952. Controls the **power/ground connectivity check** that pairs with a signal-only `reference.form: "gate-level-verilog"` compare — see "Power/ground connectivity" below for what it verifies and why it can be verified at all when the reference carries no power connectivity. Three accepted shapes: omitted (the default — the cross-instance consistency check runs), `false` (opt out entirely; the intended setting for a genuinely multi-domain design, recorded in the response's `power_connectivity.reason` rather than silently producing nothing), `true` (identical to omitting it, stated explicitly so a committed request document records that the check was wanted), or `{"expected_nets": {"<PIN>": "<NET>", ...}}` (declare which net each power/ground pin name must reach, which upgrades the *relative* consistency check to an *absolute* one — see `power.unexpected_pin_net` below). Declaring a subset of pins is fine: every pin the mapping does not name still gets the consistency check. Pin and net names are matched case-insensitively (`NetlistSpiceReader` upper-cases what it reads; a netlist handed over in-process from `klt extract` does not). Honored only for `reference.form: "gate-level-verilog"` — every other form's reference is arbitrary SPICE that carries its own power pins and nets, which the ordinary compare already checks, so there is no signal-only gap for this option to fill (the response's `power_connectivity.reason` says so explicitly rather than leaving the field absent). A wrong-shaped value is a clean application error (exit 1), never a silent no-op. Echoed back verbatim under `options.power_connectivity` in the response (`null` when the option was omitted) and reconstructed verbatim by `--check --rerun`, the same always-present-but-nullable convention `options.compare_parameters` follows. |
+| `options.supply_nets` | array<string> | Exact supply names for the additive `net.supply_fragmented` finding. Defaults to `["GND", "VCC", "VDD", "VGND", "VPWR", "VSS"]`; a supplied list replaces the defaults, and `[]` disables this finding. Names are trimmed, upper-cased and deduplicated; matching is case-insensitive. Independent of `options.power_connectivity` and supported with either comparator/reference form. See "Supply fragmentation" below. |
 | `options.netgen_setup` | string | Only used with `"engine": "netgen"`. Path to a netgen LVS setup `.tcl` file — see "Engine" -> `"netgen"` above. Omit to run with netgen's own default setup. |
 | `options.netgen_timeout_s` | number | Only used with `"engine": "netgen"`. Wall-clock budget (seconds) for the `netgen` subprocess. Default `300`. |
 | `options.flatten_reference` | boolean | When `true`, calls `klayout.db.Netlist.flatten()` on the **reference** netlist in-process, right after it is read and before circuit selection (issue #1085). `klt extract` always extracts a *flat* layout-side netlist — a single top circuit, no subcircuit calls (see `klt extract`'s "flat, not hierarchical" limitation note) — so a hierarchical reference (one leaf `.subckt` plus N instance calls of it, the shape a macro built by tiling one verified leaf cell naturally takes) can never structurally match it: `NetlistComparer` compares circuit-by-circuit, and the flat layout side simply has no subcircuit-call circuit to pair against the reference's, producing an undiagnosable `topology` "circuit could not be matched to a counterpart" mismatch on both sides. Flattening the reference first collapses every subcircuit-call instance in place, so only its top-level circuit(s) remain — directly comparable against the already-flat layout side. Default `false` (today's unconditional per-circuit matching, unchanged) — a caller who genuinely wants a hierarchy-preserving compare (e.g. because both sides are hierarchical, see `tests/test_lvs.py`'s `test_net_correspondence_scopes_dedup_by_circuit`) is never silently flattened out from under them. A `reference.top` name that only existed as an interior circuit flatten would inline away no longer resolves after flattening — pass the name of whatever remains a genuine top-level circuit. Each side that is actually flattened (its circuit count changes) is disclosed as a `severity: "warning"`, `category: "topology.flattened"` entry — see "`topology.flattened`" below — so a `"match"` reached after flattening is never silently indistinguishable from one reached against the netlist's original hierarchy; a netlist that already had only its top circuit(s) (nothing to flatten) adds no such entry. |
@@ -1129,6 +1223,7 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
     "netgen_setup": null,
     "parameter_tolerance": null
   },
+  "hints_applied": null,
   "status": "match",
   "mismatch_count": 0,
   "error_count": 0,
@@ -1153,7 +1248,7 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
     "klayout_version_mismatch": false,
     "pdk": null,
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   },
   "mismatches": [],
   "net_correspondence": [
@@ -1217,9 +1312,11 @@ section this engine buckets rather than fully structures:
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
-| `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted), and `power_connectivity` (boolean \| object \| `null`, issue #1952 — the caller's own `options.power_connectivity` value verbatim, or `null` when the option was omitted; note that `null` here means the check ran under its default-on setting, *not* that it was skipped — read `power_connectivity.status` for that). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input). |
+| `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted), and `power_connectivity` (boolean \| object \| `null`, issue #1952 — the caller's own `options.power_connectivity` value verbatim, or `null` when the option was omitted; note that `null` here means the check ran under its default-on setting, *not* that it was skipped — read `power_connectivity.status` for that). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input).  Also echoes the resolved `supply_nets` list, including `[]`, so `--rerun` preserves the chosen supply-name policy. |
+| `hints_applied` | object\<string, array\<array\<string\>\>\> \| `null` | Issue #1998. Every `hints.equivalent_pins` grouping actually passed to `NetlistComparer.equivalent_pins()` for this run, keyed by the (reference-side) subcircuit name it was declared against, with each group echoed verbatim as the caller wrote it — e.g. `{"ota_5t": [["inp", "inn"]]}`. `null` when the request supplied no `hints.equivalent_pins` (including a request with only a `hints.same_nets` hint, or no `hints` at all) — the same always-present-but-nullable convention `options.compare_parameters` follows for an optional dict-shaped echo, never a spuriously present empty `{}`. This is the only visibility a report gives into an applied `equivalent_pins` hint: unlike `hints.same_nets` (a hard assertion the comparer can refuse, surfaced as a `hints.rejected` mismatch entry — see below), a swappable-pin group has no "rejected" outcome, so without this field a reader could not tell whether — or how broadly — an `equivalent_pins` hint reshaped the verdict. Does not itself change `status`, `mismatch_count`, or any other verdict field; it only discloses that the hint was applied. A request naming an unknown subcircuit or pin fails the run outright (`LvsError`, exit 1, per `hints.equivalent_pins`'s own field description above) before any report is produced, so this field is never populated with a partial or invalid entry from a failed application. |
 | `status` | `"match"` \| `"mismatch"` \| `"inconclusive"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. `"inconclusive"` (issue #1370) is the third outcome: the compare the request asked for could **not** be performed, so this run reached no verdict about the design. It has exactly one cause today — `options.combine_devices` was requested and `combine_devices()` exhausted its retry budget on at least one side, so both sides were rolled back to their uncombined state (the symmetric degrade described under `options.combine_devices`) and the resulting engine `"mismatch"` was downgraded. A `"match"` is never downgraded. This mirrors `klt equiv`'s own `"inconclusive"` vocabulary and gets its own exit code (`4`, the same value `klt equiv` uses) so an automation gate can tell "the design differs" from "the comparison could not be performed". Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). This is always the engine's own verdict, including when `options.parameter_tolerance` is in force — that option is implemented by re-running a real `compare()` on values snapped into agreement, never by re-deriving the verdict from this command's own findings (see "`device.parameter_tolerated`" below). |
 | `power_connectivity` | object | Issue #1952. The **power/ground half** of the verdict, reported beside `status` rather than folded into it — see "Power/ground connectivity" above for the full field table, what the check verifies, and the invariant it rests on. Always present, for every `reference.form`: `status` is `"match"`/`"mismatch"` when the check ran, and `"unchecked"` (with a human-readable `reason`) when it did not, so "was power connectivity verified by this run?" is answerable from any `klt lvs` report on its own. **A caller wanting full LVS on a digital block gates on both `status == "match"` and `power_connectivity.status == "match"`** — this field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`, all of which stay exactly the signal-connectivity compare's own results. |
+| `body_verification` | object | Issue #1983. Whether this layout's MOS **body terminals** were resolved from real drawn/derived tap geometry or from a deck-synthesized net — the machine-checkable form of the `device.body_unverified` warning, reported beside `status` rather than folded into it. See "The same condition, machine-checkable" below for the full field table. Always present: `status` is `"verified"`/`"unverified"` when a `layout.deck` was given, and `"unchecked"` (with a human-readable `reason`) for the pre-extracted `layout.netlist` form, so "were the device bodies verified by this run?" is answerable from any `klt lvs` report on its own rather than being inferred from the *absence* of a warning. This field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`. |
 | `mismatch_count` | integer | `len(mismatches)`. Can be nonzero even when `status` is `"match"` — a `severity: "warning"` entry (e.g. an ambiguity the comparer resolved on its own) does not change the verdict. |
 | `error_count` | integer | Issue #1132: the number of `mismatches[]` entries with `severity: "error"` — `sum(category_error_counts.values())`. `mismatch_count` alone cannot tell a caller this without re-reading every entry, since a nonzero `mismatch_count` can be entirely `severity: "warning"` (e.g. a report whose only finding is a `device.bulk_reconciled` disclosure). `0` on a `status: "match"` report exactly (a `"match"` verdict never carries an `error` entry). |
 | `category_counts` | object\<string, int\> | Per-category mismatch counts (`error` and `warning` entries combined), keys sorted for determinism — the LVS analogue of `klt drc`'s `rule_counts`. |
@@ -1227,7 +1324,7 @@ section this engine buckets rather than fully structures:
 | `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. **Scope mismatch for `"engine": "klayout"` (issue #1887):** `layout`/`reference` are scoped to the **top circuit only** (`layout_circuit.each_net()`/`pin_count()` and the reference-side equivalents — one circuit's own declared nets/pins), while `matched` is scoped to the **entire compared hierarchy** (every matched circuit, top and subcircuits alike — the same accumulators that back `net_correspondence`, see below). These are genuinely different scopes reported side by side under names that read as three comparable numbers for the same quantity, so `matched` can — and, once any subcircuit below top also matches, routinely does — numerically **exceed both** `layout` and `reference`. That is not a bug in the compare; it is a fact about what each field counts, and a caller comparing `matched` against `layout`/`reference` as if they shared a denominator will misread it. For `"engine": "netgen"`, this scope split does **not** apply: `layout`, `reference`, and `matched` are all top-circuit-scoped, and `matched` is exact on a `"match"` verdict and `0` on a `"mismatch"` verdict (a separate, netgen-only known limitation — see "Engine" -> `"netgen"` above). |
 | `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Deck-dependent, not MOS-only (issue #1130 added resistor/capacitor/bipolar/diode extraction to both registered decks) — as of 2026-08-21, sky130 reports `["nfet", "pfet", "pnp", "sky130_fd_pr__model__cap_mim", "sky130_fd_pr__model__cap_mim_m4", "resistor"]` and gf180mcu reports `["nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor", "diode_nd2ps_06v0", "diode_pd2nw_06v0"]` — re-check the installed deck's own `device_classes` rather than treating either list as a value this doc pins for future decks/versions. Present whenever a `layout.deck` is given — always for `layout.file` (inline extraction, where the deck is required), and also for the pre-extracted `layout.netlist` shape when a `layout.deck` is supplied alongside it (issue #585). `null` only when no `layout.deck` was given (the bare `{"netlist": ..., "top": ...}` shape). |
 | `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise — excluded from `klt lvs --check --rerun`'s drift diff, see "Full mode (`--rerun`)" below). |
-| `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `input` (issue #1969) is `{"content_hash": "sha256:<hex>"}` for both engines, pinning the layout side of the compare — the same file `environment.layout_sha256` hashes, in the `sha256:`-prefixed form the shared block uses (`environment.layout_sha256` itself is unchanged, still a bare hex digest). It was `null` before #1969 on the reasoning that `environment.layout_sha256`/`reference_sha256` already covered it; `klt signoff --manifest`'s staleness gate reads `provenance.input.content_hash` generically and cannot see an LVS-only field, so every `content_hash`-pinned "LVS clean" citation graded `stale_evidence`. `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `reference.form` is `"gate-level-verilog"` and `reference.pdk`/`reference.pdk_root` resolve a PDK (the same resolution the `"gate-level-verilog"` form already performs to read each standard cell's real pin order — see "Netlist form" above), else `null` — a plain SPICE-vs-SPICE (or `"subckt-call"`) reference genuinely resolves no PDK. An unresolvable `reference.pdk`/`reference.pdk_root` fails the run the same as any other application error (exit 1); `deck` pins the layout-side extraction deck by name and `sha256:` content hash whenever a `layout.deck` is given (both the `layout.file` and the pre-extracted `layout.netlist` shapes), and is `null` only when no `layout.deck` was given (matching `device_classes`). `deck.released` (issue #1193) is a non-fatal tri-state signal for whether that content hash ships in any released `klayout-tools` version — `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing). `deck.options` (issue #600) echoes the resolved `layout.deck_options` mapping — present only when non-empty, matching `klt extract`'s own `provenance.deck.options` shape exactly. `klayout_version` is populated the same way for both engines (it is this process's own `klayout` package build, used for netlist parsing/writing either way, not the comparator). `klayout_version_mismatch` (issue #1490, `true`\|`false`) flags whether that `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
+| `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `input` (issue #1969) is `{"content_hash": "sha256:<hex>", "role": ...}` for both engines, pinning the layout side of the compare. `role` (issue #2027) says *which kind* of artifact that hash covers, because this verb's two `request.layout` shapes pin different things: `"layout"` for the `layout.file` (inline-extraction) shape, whose hash is of the original GDS/OASIS stream — byte-identical to what `klt drc` hashes for the same file — and `"netlist"` for the pre-extracted `layout.netlist` shape, whose hash is of the supplied SPICE file. A consumer comparing `input.content_hash` across reports must compare only within one role; `klt signoff`'s `provenance_consistency` gate does, which is what stops a pre-extracted LVS report and a DRC report of the same design from being refused as if they described two layout revisions (see [`signoff.md`](signoff.md) and [`../json-contract.md`](../json-contract.md)). The hash itself pins the layout side of the compare — the same file `environment.layout_sha256` hashes, in the `sha256:`-prefixed form the shared block uses (`environment.layout_sha256` itself is unchanged, still a bare hex digest). It was `null` before #1969 on the reasoning that `environment.layout_sha256`/`reference_sha256` already covered it; `klt signoff --manifest`'s staleness gate reads `provenance.input.content_hash` generically and cannot see an LVS-only field, so every `content_hash`-pinned "LVS clean" citation graded `stale_evidence`. `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `reference.form` is `"gate-level-verilog"` and `reference.pdk`/`reference.pdk_root` resolve a PDK (the same resolution the `"gate-level-verilog"` form already performs to read each standard cell's real pin order — see "Netlist form" above), else `null` — a plain SPICE-vs-SPICE (or `"subckt-call"`) reference genuinely resolves no PDK. An unresolvable `reference.pdk`/`reference.pdk_root` fails the run the same as any other application error (exit 1); `deck` pins the layout-side extraction deck by name and `sha256:` content hash whenever a `layout.deck` is given (both the `layout.file` and the pre-extracted `layout.netlist` shapes), and is `null` only when no `layout.deck` was given (matching `device_classes`). `deck.released` (issue #1193) is a non-fatal tri-state signal for whether that content hash ships in any released `klayout-tools` version — `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing). `deck.options` (issue #600) echoes the resolved `layout.deck_options` mapping — present only when non-empty, matching `klt extract`'s own `provenance.deck.options` shape exactly. `klayout_version` is populated the same way for both engines (it is this process's own `klayout` package build, used for netlist parsing/writing either way, not the comparator). `klayout_version_mismatch` (issue #1490, `true`\|`false`) flags whether that `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
 | `net_correspondence` | array\<object\> | The layout↔reference net pairing `NetlistComparer` produced — see "`net_correspondence[]` entries" below. `len(net_correspondence) == counts.nets.matched` (the example above is illustrative, not exhaustive, for a 7-net compare). Always `[]` for `"engine": "netgen"` (see "Engine" -> `"netgen"` above). |
 
@@ -1240,15 +1337,15 @@ objects involved.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.placeholder_value`, `device.property`, `device.parameter_tolerated`, `device.parameter_excluded`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `topology.power_only_pruned`, `hints.rejected`. |
-| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.placeholder_value` entry (see below) is always `"warning"` for the same reason — it discloses that a `reference.form: "subckt-call"` conversion's placeholder `0` resistance/capacitance was excluded from the compare, so it never changes `status` either. Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `device.parameter_excluded` entry (see below) is always `"warning"` for the same reason — it discloses that `options.compare_parameters` removed a parameter from a device class's compare entirely, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
+| `category` | string | One of `net.unmatched`, `net.merged`, `net.split`, `net.supply_fragmented`, `device.unmatched`, `device.class`, `device.class_arity`, `device.bulk_reconciled`, `device.placeholder_value`, `device.property`, `device.parameter_tolerated`, `device.parameter_excluded`, `device.body_unverified`, `device.combine_incomplete`, `device.combine_parameter_corrected`, `pin.unmatched`, `topology`, `topology.flattened`, `topology.power_only_pruned`, `topology.reference_port_alias_joined`, `hints.rejected`. |
+| `severity` | `"error"` \| `"warning"` | `"error"` breaks equivalence; `"warning"` is informational and never changes `status`. Informational cases include an ambiguous net pairing the comparer resolved on its own (see `hints.same_nets` above), a `topology` device-class-mismatch entry for a device class with zero actual instances on the side that registered it (e.g. an all-`nfet` layout compared against an all-`nfet` reference netlist that never mentions `pfet` — `klt extract` always registers both polarities' device classes even when only one is instantiated), every `net.supply_fragmented` entry (see below), every `device.body_unverified` entry (see below), every `device.combine_incomplete` entry (see below), and the collateral `device.unmatched`/`net.unmatched` entries left over when a minimal cell's parameter defect is recovered into a `device.property` entry (see "Negative controls" above). A device-class mismatch where the class has one or more real instances still reports `"error"`. Every `hints.rejected` entry (see below) is always `"error"` — `hints.same_nets` is a hard assertion (`must_match=True`), never a suggestion, so the comparer refusing it is always a real finding. Every `device.class_arity` entry (see below) is always `"error"` — a same-named device class the comparer cannot pair on either side is never merely informational. Every `device.bulk_reconciled` entry (see below) is always `"warning"` — it discloses a request-side reconciliation applied before the compare, so it never changes `status` (a request whose only finding is this entry reports `status: "match"` with a nonzero `mismatch_count`). Every `device.placeholder_value` entry (see below) is always `"warning"` for the same reason — it discloses that a `reference.form: "subckt-call"` conversion's placeholder `0` resistance/capacitance was excluded from the compare, so it never changes `status` either. Every `device.parameter_tolerated` entry (see below) is always `"warning"` for the same reason — it discloses a numeric difference `options.parameter_tolerance` absorbed, so it never changes `status` either. Every `device.parameter_excluded` entry (see below) is always `"warning"` for the same reason — it discloses that `options.compare_parameters` removed a parameter from a device class's compare entirely, so it never changes `status` either. Every `topology.flattened` entry (see below) is likewise always `"warning"` — it discloses a request-side structural flatten `options.flatten_reference`/`options.flatten_layout` applied before the compare, so it never changes `status` either. Every `topology.power_only_pruned` entry (see below) is likewise always `"warning"` — it discloses that a power-only layout circuit (and every instance of it) was removed before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `topology.reference_port_alias_joined` entry (see below) is likewise always `"warning"` — it discloses that a reference port declared only via a plain `assign` alias (e.g. `assign dbg_uart_byte[i] = rx_byte[i];`) had its net joined onto its canonical target's net before comparing, against a `reference.form: "gate-level-verilog"` reference, so it never changes `status` either. Every `device.combine_parameter_corrected` entry (see below) is likewise always `"warning"` — it discloses that a capacitor device's `C` parameter was corrected in place after `combine_devices()` produced a value inconsistent with its pre-combine group's sum, so `status` reflects the corrected value, not the discovery of the inconsistency. |
 | `description` | string | Curated, human-readable explanation of this mismatch — never raw `NetlistComparer` log text (which is version-dependent and, per this repo's own testing, sometimes empty). |
 | `side` | `"layout"` \| `"reference"` \| `"both"` | Which netlist the offending object(s) live on. |
 | `net` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>}` when a net is involved. |
 | `device` | object \| `null` | `{"layout": <name\|null>, "reference": <name\|null>, "class": <string\|null>}` when a device is involved. |
 | `property` | object \| `null` | `{"name": <string>, "layout": <value>, "reference": <value>}` for a `device.property` mismatch, and for a `device.parameter_tolerated` disclosure (whose `reference` is always the reference netlist's *original* value, never the snapped one). `name` is `w_um`/`l_um` for the width/length parameters (matching `klt extract`'s own convention); every other declared device-class parameter is reported under its own lower-cased name. |
-| `details` | object \| `null` | Engine-specific/category-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Populated for every `"klayout"`-engine `device.class_arity` entry (see below) with `{"layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}`, and for every `device.bulk_reconciled` entry (see below) with `{"terminal": <string>, "reference_net": <string>, "reference_net_created": <bool>, "devices": <integer>, "layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}` (`reference_terminals` is the pre-reconciliation list), and for every `device.placeholder_value` entry (see below) with `{"parameter": <string>, "device_kind": "resistor"\|"capacitor", "reference_devices": <integer>, "layout_devices": <integer>, "layout_values": [<number>, ...]}` (the excluded parameter's name, the converted family, how many instances each side has, and the distinct layout-side values that were *not* compared, sorted ascending), and for every `device.parameter_tolerated` entry (see below) with `{"relative_delta": <number>, "tolerance": <number>}` (the observed `|layout - reference| / max(|layout|, |reference|)` and the effective `options.parameter_tolerance` it was accepted under), and for every `device.parameter_excluded` entry (see below) with `{"parameter": <string>, "compared_parameters": [<string>, ...]}` (the one excluded parameter's own name, and the full sorted list of parameters `options.compare_parameters` named for that class). Also populated by the `"netgen"` engine for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `null` for every other entry (including `"netgen"`-engine device-class-arity mismatches, which this issue's fix does not cover — see "`device.class_arity`" below). |
-| `circuit` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the circuit (module) involved, for a `topology` entry from an unmatched *circuit* (the circuit itself has no counterpart) or an unmatched subcircuit *instance* (the circuit **containing** the instance, not the instance's own name — see `instance`/`subcircuit` below). `null` for every other entry, matching `net`/`device`'s own "populated only on the categories that involve one" convention. Currently only the `"klayout"` engine populates this field — the `"netgen"`-engine `net.unmatched`/`device.unmatched` entries (see `details` above) do not name a circuit, since netgen's own report does not structure one out. |
+| `details` | object \| `null` | Engine-specific/category-specific data that does not map cleanly onto the fields above (issue #343) — additive, not a schema fork. Populated for every `"klayout"`-engine `device.class_arity` entry (see below) with `{"layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}`, and for every `device.bulk_reconciled` entry (see below) with `{"terminal": <string>, "reference_net": <string>, "reference_net_created": <bool>, "devices": <integer>, "layout_terminals": [<string>, ...], "reference_terminals": [<string>, ...]}` (`reference_terminals` is the pre-reconciliation list), and for every `device.placeholder_value` entry (see below) with `{"parameter": <string>, "device_kind": "resistor"\|"capacitor", "reference_devices": <integer>, "layout_devices": <integer>, "layout_values": [<number>, ...]}` (the excluded parameter's name, the converted family, how many instances each side has, and the distinct layout-side values that were *not* compared, sorted ascending), and for every `device.parameter_tolerated` entry (see below) with `{"relative_delta": <number>, "tolerance": <number>}` (the observed `|layout - reference| / max(|layout|, |reference|)` and the effective `options.parameter_tolerance` it was accepted under), and for every `device.parameter_excluded` entry (see below) with `{"parameter": <string>, "compared_parameters": [<string>, ...]}` (the one excluded parameter's own name, and the full sorted list of parameters `options.compare_parameters` named for that class). Also populated by the `"netgen"` engine for a `net.unmatched`/`device.unmatched` entry bucketing a whole side-by-side report section it does not further structure: `{"raw": <string>}`, netgen's own report text for that section verbatim. `net.supply_fragmented` uses `{"supply": <name>, "fragment_count": <integer>}`. `null` for every other entry (including `"netgen"`-engine device-class-arity mismatches, which this issue's fix does not cover — see "`device.class_arity`" below). |
+| `circuit` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the circuit (module) involved, for a `net.supply_fragmented` entry or a `topology` entry from an unmatched *circuit* (the circuit itself has no counterpart) or an unmatched subcircuit *instance* (the circuit **containing** the instance, not the instance's own name — see `instance`/`subcircuit` below). `null` for every other entry, matching `net`/`device`'s own "populated only on the categories that involve one" convention. Currently only the `"klayout"` engine populates this field — the `"netgen"`-engine `net.unmatched`/`device.unmatched` entries (see `details` above) do not name a circuit, since netgen's own report does not structure one out. |
 | `instance` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the subcircuit instance's own name (e.g. `"Xfill_1_0"`), populated only for an unmatched-subcircuit-*instance* `topology` entry. `null` for an unmatched-*circuit* entry (there is no instance — the whole circuit definition has no counterpart) and for every other category. |
 | `subcircuit` | object \| `null` | Issue #1132: `{"layout": <name\|null>, "reference": <name\|null>}` — the name of the circuit the unmatched instance refers to (its "cell type", e.g. `"sky130_fd_sc_hd__fill_1"`), populated only alongside `instance` above. `null` everywhere `instance` is `null`. |
 
@@ -1276,9 +1373,10 @@ isomorphism reimplemented downstream.
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `layout` | string | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. |
-| `reference` | string | The paired reference net's name, same convention. |
+| `layout` | string \| `null` | The layout net's name — the same helper `mismatches[].net` uses, so a net two drawn labels merged carries both aliases `\|`-joined, e.g. `"VPWR\|VDD"`, and an anonymous net's KLayout-synthesized placeholder is backslash-escaped, e.g. `"\$5"` (issue #1162), byte-identical to `klt extract`'s `nets[].name`/`merged_net_labels[].net` and the written netlist's own node spelling for that net (issue #696), not KLayout's own un-escaped, comma-joined `Net.expanded_name()`. `null` in the symmetric case to `reference` below (the comparer's `match_nets`/`match_ambiguous_nets` event carried no layout-side net object) — not observed in practice as of this writing, but not structurally ruled out either, so it is typed nullable here too. |
+| `reference` | string \| `null` | The paired reference net's name, same convention. **`null`** when the comparer's `match_nets`/`match_ambiguous_nets` event fired with no reference-side net object at all — observed today for a `reference.form: "gate-level-verilog"` run's layout-only supply pins (`VGND`/`VPWR`; see "No power/ground pins" above): the reference has nothing to pair them with, yet the comparer still logs a successful pairing for the layout side rather than a `net_mismatch`. This is a real entry with a `null` counterpart, not a missing one — see the paragraph below. |
 | `pin` | boolean | Whether this net is one of the compared circuit's declared pins (`Net.pin_count() > 0`), read from the layout side. `same_circuits` pins the layout/reference top circuits together before the compare runs, so a matched pair's declared-pin status agrees on both sides by construction. |
+| `heuristic` | boolean *(present only for a `reference.form: "gate-level-verilog"` run — see "Supply correspondences are not validated supply connectivity" below)* | `true` when this pairing puts a layout **supply** net opposite a reference net that is not itself a supply pin — a fallback the comparer had to guess at, not a correspondence it verified. `false` for every other pairing in such a run. The key is **omitted entirely** when no supply universe could be derived (every other `reference.form`, and any `gate-level-verilog` run whose `reference.library` pin orders did not resolve), so "checked, and this pairing is genuine" (`false`) stays distinguishable from "never checked" (absent). Read it with `entry.get("heuristic")`, not `entry["heuristic"]`. |
 
 Populated for every successful pairing the comparer made — both an
 unambiguous `match_nets` event and an ambiguously-resolved
@@ -1288,20 +1386,131 @@ pairing" below; a pairing can appear in both places at once, since one
 documents *that* an ambiguity was resolved and the other documents *what*
 it resolved to). Emitted whenever the comparer produced at least one net
 pairing, regardless of `status` — on a partial/failed compare, the pairs
-that *did* match are still useful for localising the ones that did not (a
-net with no counterpart at all, e.g. one side dropped a device entirely,
-simply has no entry). `device_correspondence` (the same idea for devices)
-is not yet implemented — track it separately if needed.
+that *did* match are still useful for localising the ones that did not.
+
+**A net the comparer never matched at all has no entry here** — e.g. one
+side dropped a device entirely, so the comparer reports a `net_mismatch`
+event instead of a pairing; look for it in `mismatches[]` instead. That is
+a genuinely different case from a *successful* pairing whose counterpart
+is `null` (see the `layout`/`reference` rows above): such a pairing **does**
+get an entry — the comparer logged a real `match_nets`/`match_ambiguous_nets`
+event for it — it just names no net on one side. In practice this shows up
+as `reference: null` for a `reference.form: "gate-level-verilog"` run's
+layout-only supply pins; do not read a `null` counterpart as "no entry" or
+skip it when consuming this field. `device_correspondence` (the same idea
+for devices) is not yet implemented — track it separately if needed.
 
 Sorted by `(reference, layout)`, so repeated runs against the same inputs
 produce identical, diff-clean output — the same ordering guarantee
-`mismatches[]` makes. Deduplication is scoped **per circuit** (by the
-comparer's circuit scope, not by net name alone): a hierarchical netlist
-routinely reuses a local net name — `MID`, `OUT`, `A` — across unrelated
-subcircuits, and each such net is a distinct correspondence with its own
-`pin` flag. Two entries can therefore share the same `layout`/`reference`
-name (one per circuit) — that is expected, and is what keeps
-`len(net_correspondence) == counts.nets.matched` exact across a hierarchy.
+`mismatches[]` makes; a `null` `reference` (or `layout`) sorts as the empty
+string in this ordering, so every `reference: null` entry sorts *before*
+every entry naming a reference net, not after. Deduplication is scoped
+**per circuit** (by the comparer's circuit scope, not by net name alone): a
+hierarchical netlist routinely reuses a local net name — `MID`, `OUT`, `A`
+— across unrelated subcircuits, and each such net is a distinct
+correspondence with its own `pin` flag. Two entries can therefore share the
+same `layout`/`reference` name (one per circuit) — that is expected, and is
+what keeps `len(net_correspondence) == counts.nets.matched` exact across a
+hierarchy. That invariant holds **including** every null-counterpart entry:
+the comparer's `match_nets`/`match_ambiguous_nets` callback increments
+`counts.nets.matched` on every invocation with no exemption for a missing
+net object on either side, so a `reference: null` (or `layout: null`) entry
+is counted in `counts.nets.matched` exactly like an ordinary two-sided
+pairing — no separate accounting, and no adjustment needed to keep the
+invariant exact.
+
+#### Supply correspondences are not validated supply connectivity
+
+**A `net_correspondence` entry naming a supply net is not, on its own,
+evidence that the layout's power grid is correct** (issue #2136). A
+`reference.form: "gate-level-verilog"` reference carries no power/ground
+pins at all (see "No power/ground pins" above), so the comparer never has a
+same-named candidate for the layout's `VGND`/`VPWR` and pairs it with
+whatever its graph heuristics reach first — routinely an unrelated signal
+net (a spare `oen`-style port is a common one), or with nothing at all.
+Before this was disclosed, the two readings below produced identical
+output:
+
+- "this design's power grid is fine and the two happened to line up", and
+- "this design has no power grid the reference could describe, and the
+  comparer had nothing better to guess with".
+
+The `heuristic` field separates them. For a `gate-level-verilog` run whose
+`reference.library` pin orders resolve, every entry carries it:
+
+- `heuristic: true` — the layout side is demonstrably a supply net (some
+  pin the *library* declares to be a power/ground pin lands on it) and the
+  reference side is not a supply pin. The pairing is a fallback; do not
+  read it as verified.
+- `heuristic: false` — an ordinary pairing the compare stands behind.
+
+Like every other power/ground-aware behaviour here, "is this a supply net?"
+is derived structurally from `reference.library`'s own `.subckt` pin orders
+— never a hardcoded PDK power-pin table (sky130's
+`VPWR`/`VGND`/`VPB`/`VNB` vs. gf180mcu's `VDD`/`VSS`/`VNW`/`VPW`) and never
+a `V*` name glob. A rail named after nothing in particular (`VSS_RAIL`) is
+recognised because a cell's `VGND` pin lands on it; a signal net named
+`VGND_MONITOR` is not, because none does.
+
+The key is **absent** for every other `reference.form`. Those references
+carry their own power nets and pins, which take part in the ordinary
+compare, so there is no fallback to disclose — and nothing there licenses
+calling any pin name a power pin (the same restriction that scopes the
+power-only prune and the `power_connectivity` check). It is also absent for
+a `gate-level-verilog` run whose library pin orders did not resolve: that
+run checked nothing, and says so by omission rather than by a misleading
+`false`.
+
+**`heuristic` never changes `status`.** It is a disclosure about what the
+signal compare did and did not verify, exactly like
+`power_connectivity`'s separate verdict — and `power_connectivity` (see
+below) remains the check that actually validates the layout's supply
+connectivity, keyed on the library's own declared supply pins rather than
+on the reference.
+
+#### Supply fragmentation: `net.supply_fragmented`
+
+Two or more disconnected layout nets bearing one supply name produce a
+`net.supply_fragmented` finding in `mismatches[]`, naming the supply and the
+exact `details.fragment_count`. For example, three isolated metal islands
+labelled `VPWR` produce `details: {"supply": "VPWR", "fragment_count": 3}`.
+The finding's `circuit.layout` names their circuit, `net.layout` names the
+supply, and `side` is `"layout"`.
+
+The check uses **actual distinct layout nets**, before flattening, device
+combining or power-only-cell pruning. Counts are scoped to each reachable
+circuit definition under the selected layout top: repeated instances of
+one definition are visited once, and the same local supply name in two
+different definitions is not fragmentation. A connected grid carrying many
+copies of a label is one net. For inline extraction, the check reads the
+original labels associated with each physical net, including a supply
+label joined with other aliases, and counts that net once per supply.
+It does not count repeated `net_correspondence[]` rows: that list can both
+repeat names across hierarchy scopes and collapse same-named pairings.
+
+Supply names come from `options.supply_nets`, independently of the
+gate-level power-pin check. The default exact, case-insensitive names are
+`GND`, `VCC`, `VDD`, `VGND`, `VPWR`, and `VSS`. A caller-supplied list
+replaces these defaults, for example `{"supply_nets": ["AVDD", "AVSS"]}`;
+`[]` disables this finding for a design whose domains make the naming
+convention inappropriate. Arbitrary repeated signal names are not inferred
+to be supplies. Names are echoed as a sorted, deduplicated, upper-case list
+and preserved by report replay.
+
+The severity is **`"warning"`**, and the comparator remains authoritative
+for `status`. Thus `status: "match"` can coexist with this supply-grid
+defect; it does **not** mean power delivery was verified. The warning
+appears in `category_counts`, but not `category_error_counts`. Consumers
+requiring a continuous supply grid should inspect this finding as well as
+the separate `power_connectivity` result. This check does not prove the
+absence of unlabeled supply islands or verify current capacity.
+
+Pre-extracted SPICE provides only its literal net names, not the original
+drawn-label geometry. If a writer renamed disconnected islands to unique
+names such as `VPWR$1`, that provenance cannot be reconstructed from the
+suffix: it may be an intentional user name. No suffix is stripped or
+guessed. Use inline extraction to retain original labels, or explicitly
+list a literal suffixed name when that exact name denotes a supply.
 
 #### `device.class_arity`: same device-class name, different terminal count on each side
 
@@ -1718,24 +1927,95 @@ synthetic-net behaviour) is involved there:
   (`device.class` is the deck's `nfet_class`, e.g. `"nfet"`) — a device whose
   body terminal resolved to a real, drawn- or derived-tap net (only where a
   layout actually draws one) is not counted.
-- A PMOS entry additionally fires when the layout-side deck has **no tap
-  mechanism at all** — neither a distinct drawn `tap` layer nor a derivable
-  one (`ExtractionDeck.tap`/`tap_nplus`/`tap_pplus` all `None`; gf180mcu
-  before issue #1084) — **and** the layout has one or more PMOS devices
-  (`device.class` is the deck's `pfet_class`, e.g. `"pfet"`). A deck that has
-  *either* mechanism gives PMOS bodies a real, named net unconditionally
-  (every PMOS sits inside an `nwell` by construction), so neither sky130 nor
-  (since #1084) gf180mcu emits this entry — even for a specific device whose
-  own `nwell` island happens to draw no tie, mirroring this deck-structural
-  check's existing (optimistic) treatment for sky130.
+- A PMOS entry fires when the layout has one or more PMOS devices
+  (`device.class` is the deck's `pfet_class`, e.g. `"pfet"`) whose body
+  terminal landed on an **anonymous, KLayout-synthesized net** — the `"$<n>"`
+  placeholder `Net.expanded_name()` returns for a net no label reached — or
+  on no net at all. A device whose body resolved to a real, named net from a
+  drawn `tap`/`well_label` or a derived `tap_nplus`/`tap_pplus` tie is not
+  counted.
+
+  This arm used to be **deck-structural** (issue #2048 corrected it): it
+  fired only when the deck declared no tap mechanism at all
+  (`ExtractionDeck.tap`/`tap_nplus`/`tap_pplus` all `None`; gf180mcu before
+  issue #1084), which treated *declaring* a mechanism as proof that every
+  PMOS in every layout used it. It is not — a gf180mcu layout that draws no
+  well tie still leaves each PMOS body on an anonymous net with no DC bias
+  path, and `klt extract`/`klt pex` have always reported exactly that case
+  (`unbiased_pmos_body_nets[]`, `body_bias.status: "unbiased"`; issue #555).
+  The two commands now agree on the same layout. sky130 still emits no PMOS
+  entry on an ordinary standard cell, but because its `well_label` (64/5)
+  demonstrably names every PMOS body (e.g. `VPB`), not because the deck
+  declares a mechanism.
 
 Both entries reflect real device-level extraction outcomes (per-device for
-NMOS since #490; still deck-structural for PMOS, a property of which deck
-ran extraction rather than of any individual device pairing or `hints`),
-always `severity: "warning"`, and never change `status` or break
-`mismatch_count`'s error semantics — they only make it visible, in-band,
-that this dimension of the compare was not fully verified against the
-schematic.
+NMOS since #490, for PMOS since #2048 — a property of what the layout
+actually drew, not of which deck ran extraction, nor of any individual
+device pairing or `hints`), always `severity: "warning"`, and never change
+`status` or break `mismatch_count`'s error semantics — they only make it
+visible, in-band, that this dimension of the compare was not fully verified
+against the schematic.
+
+##### The same condition, machine-checkable: `body_verification` (issue #1983)
+
+A `mismatches[]` warning is not *gradeable*. Answering "were this layout's
+device bodies verifiably tied?" from a committed report meant string-matching
+a `category` inside an array whose other entries are ordinary compare
+findings — so in practice nothing downstream asked, and a record carrying
+the warning was indistinguishable, at every consumer that reads only
+`status`, from one that did not.
+
+The top-level **`body_verification`** block (always present) states it as a
+field:
+
+```json
+"body_verification": {
+  "status": "unverified",
+  "reason": null,
+  "device_classes": ["nfet"],
+  "device_count": 2,
+  "findings": [{"class": "nfet", "device_count": 2}],
+  "finding_count": 1
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `status` | string | `"verified"` — a deck was given and every MOS body terminal in the layout's top circuit resolved to a real drawn/derived net. `"unverified"` — at least one did not (the `device.body_unverified` condition above). `"unchecked"` — no `request.layout.deck` was given (the pre-extracted `request.layout.netlist` form), so nothing establishes this layout's tap convention and this run verified nothing about the bodies either way. |
+| `reason` | string \| `null` | Why the question could not be answered, for `status: "unchecked"`; `null` otherwise. |
+| `device_classes` | array\<string\> | The deck device-class names with unverified bodies (e.g. `["nfet"]`), sorted. Empty for `"verified"`/`"unchecked"`. |
+| `device_count` | integer | Total unverified device count across those classes. `0` for `"verified"`/`"unchecked"`. |
+| `findings` | array\<object\> | One `{"class", "device_count"}` entry per affected device class, class-sorted. |
+| `finding_count` | integer | `len(findings)`. |
+
+It is rendered from the *same* determination as the `device.body_unverified`
+warnings above, so the two can never disagree.
+
+**It also agrees with `klt pex`'s `body_bias` block** (issue #2048). Both
+now apply the same per-device test to the same layout — a PMOS body on an
+anonymous, KLayout-synthesized net — so a floating well tie that shows up as
+`body_bias.status: "unbiased"` on the post-layout artifact
+([`pex.md`](pex.md)) can no longer be reported as
+`body_verification.status: "verified"` here. The two spell the same
+anonymous net differently (`klt extract`/`klt pex` report the
+backslash-escaped `\$<n>` that matches the written netlist's node spelling,
+issue #1162; `klt lvs` works from KLayout's raw in-memory `$<n>`), but they
+describe the same devices.
+
+**`"unchecked"` never means "verified".** Before this block existed, the
+*absence* of a `device.body_unverified` warning meant "checked and clean" on
+an inline extraction and "not checked at all" on a pre-extracted netlist,
+and nothing in the report told those apart.
+
+**This changes no verdict.** `status`, `mismatch_count`, `error_count` and
+the category counts are exactly what they were — a layout with unverified
+bodies still reports `status: "match"` when the compare matched, and the
+warnings are still `severity: "warning"`. `klt signoff` surfaces
+`body_verification.status` on an `lvs` check (`detail.body_verification_
+status`) but does not grade on it; see [`signoff.md`](signoff.md) and
+[`../design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 for why
+disclosure rather than hard-fail, and for the downstream consequence an
+untied body has for a post-layout `klt pex` citation.
 
 #### `device.combine_incomplete`: `options.combine_devices` could not fully combine a partial-match device group
 
@@ -2056,6 +2336,49 @@ lines, from the extracted SPICE netlist before calling `klt lvs`) —
 implemented natively here, and derived from the library rather than from a
 fixed pin-name set, instead of requiring a caller to pre-filter their
 netlist.
+
+#### `topology.reference_port_alias_joined`: a reference port declared only via `assign` was joined onto its target's net
+
+Only possible when `reference.form: "gate-level-verilog"` (issue #2021), and
+only emitted when the reference declares a port whose only Verilog-level
+connection is a plain `assign <port> = <net>;` alias — routine output of
+synthesis whenever a module port is driven directly by another net or port,
+e.g. `assign dbg_uart_byte[i] = rx_byte[i];` (a debug/monitor tap port
+carrying the same node as a "real" signal port).
+
+**The gap this closes.** The gate-level-Verilog-to-SPICE conversion resolves
+an `assign` alias transparently for every *instance* connection — a net
+used as `.PORT(<aliased net>)` reads back as its ultimate target — but never
+for a module's own declared port list. An aliased port is therefore emitted
+as its own `.SUBCKT` pin, with nothing inside the body ever referencing it
+(every instance that would have used it was rewritten to the alias's target
+instead), which reads back as an isolated, disconnected reference net even
+though the layout has exactly one physical net serving both names. Before
+this fix, that could surface as a false `pin.unmatched`/`net.unmatched`
+finding on a design that is electrically correct — the same "making the
+layout more correct makes the report worse" failure shape issue #1994
+describes, one layer up in the comparison rather than in extraction (that
+issue's own tie-cell/VPWR half of the same investigation).
+
+**The fix.** `klt lvs` joins the alias port's net onto its canonical
+target's net (following a multi-hop `assign` chain to its ultimate target,
+same as the instance-connection resolution above) before the compare runs —
+both port names stay individually declared, now pointing at the same net,
+matching a correctly-wired layout's own "one net, two named pins" shape.
+Only a port whose value comes purely from an `assign` is ever joined; a
+genuinely unconnected or differently-wired reference port is untouched and
+still reports as a real mismatch.
+
+`severity` is always `"warning"` — this is a request-side transform applied
+to the reference before the compare, not a `NetlistComparer` finding, so it
+never changes `status` on its own (a request whose only finding is this
+entry reports `status: "match"` with a nonzero `mismatch_count`). `side` is
+always `"reference"`. `circuit.reference` names the module the alias was
+declared in; `description` and `details.canonical_net`/
+`details.aliased_ports` name the target net and every alias port folded
+into it. Present for the same reason `topology.power_only_pruned` is: a
+`"match"` reached this way is never silently indistinguishable from one
+reached against the reference's original, unresolved port list.
 
 #### `combine_devices_per_circuit.unmatched`: an `options.combine_devices_per_circuit` glob matched no circuit
 

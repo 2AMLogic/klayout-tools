@@ -353,11 +353,11 @@ def test_build_then_query_modexp_canary_counts_done_handshakes(tmp_path, monkeyp
     assert build_response["clock"]["period_ns"] == 10.0
     assert build_response["reset"]["release"]["time_ns"] == 25.0
     # The Python wrapper overrides the binary's own crate version with the
-    # installed `klayout-tools` package version -- see `wave.py`'s own
+    # installed `klayout-tools` build identity -- see `wave.py`'s own
     # docstring, "provenance.klt_version override".
-    import klayout_tools
+    from klayout_tools.build_identity import build_version
 
-    assert build_response["provenance"]["klt_version"] == klayout_tools.__version__
+    assert build_response["provenance"]["klt_version"] == build_version()
 
     jsonschema.validate(build_response, _load_schema("wave-build-response.schema.json"))
 

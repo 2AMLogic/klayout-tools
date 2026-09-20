@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -448,10 +449,8 @@ def build_digital_job_description(
     three-to-four request documents at the job root:
     :data:`SYNTHESIZE_REQUEST_FILENAME`,
     :data:`PLACE_AND_ROUTE_REQUEST_FILENAME` (its ``netlist`` field points
-    at synthesis's own deterministic output path,
-    ``.klt/synthesize/<hdl_toplevel>_synth.v`` -- computed here, never read
-    back at runtime, so no ``${...}`` candidate-substitution step is needed
-    to chain synthesis's output into place-and-route's input),
+    at this job's exclusively reserved synthesis ``run_id`` directory,
+    ``.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v``),
     :data:`FUNCTIONAL_VERIFICATION_REQUEST_FILENAME` (only when
     ``candidate.verification`` is given), and
     :data:`EVAL_DESCRIPTOR_FILENAME` (composing all of the above into one
@@ -485,6 +484,9 @@ def build_digital_job_description(
         "sources": rtl_remote_names,
         "hdl_toplevel": candidate.hdl_toplevel,
         "pdk": candidate.pdk,
+        # Generated here from UUID hex, never a caller-supplied path component.
+        # Synthesis validates the identifier and refuses any directory collision.
+        "run_id": f"run-{uuid.uuid4().hex}",
     }
     if candidate.synth_engine is not None:
         synth_request["engine"] = candidate.synth_engine
@@ -498,12 +500,11 @@ def build_digital_job_description(
         )
     )
 
-    # synthesize.run_synthesize's own deterministic output path convention
-    # (<request_dir>/.klt/synthesize/<hdl_toplevel>_synth.v) -- both request
-    # files land at the job directory root, so this job-relative path is
-    # correct for place-and-route's own request without any runtime
-    # substitution step.
-    synth_netlist_relpath = f".klt/synthesize/{candidate.hdl_toplevel}_synth.v"
+    # Both requests are at the job root. Pin the exact invocation in advance;
+    # never scan for a newest run or rely on a mutable last-success alias.
+    synth_netlist_relpath = (
+        f".klt/synthesize/{synth_request['run_id']}/{candidate.hdl_toplevel}_synth.v"
+    )
 
     pr_request: dict[str, Any] = {
         "netlist": synth_netlist_relpath,
@@ -528,6 +529,12 @@ def build_digital_job_description(
     )
 
     gates: list[dict[str, Any]] = [
+        {
+            "check": "synthesize",
+            "name": "synthesize",
+            "args": {"request": SYNTHESIZE_REQUEST_FILENAME},
+            "threshold": {"metric": "status", "equals": "ok"},
+        },
         {
             "check": "place-and-route",
             "name": "place-and-route",
@@ -576,7 +583,7 @@ def build_digital_job_description(
             )
         )
         gates.insert(
-            0,
+            1,
             {
                 "check": "functional-verification",
                 "name": "functional-verification",

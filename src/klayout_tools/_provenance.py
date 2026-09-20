@@ -13,7 +13,7 @@ this module builds:
         "klayout_version": "0.29.8",
         "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
         "deck": {"name": "sky130", "content_hash": "sha256:...", "released": true},
-        "input": {"content_hash": "sha256:..."}
+        "input": {"content_hash": "sha256:...", "role": "layout"}
     }
 
 The block is purely *additive* to the shared envelope (see
@@ -28,6 +28,11 @@ and silently diverged -- between ``equiv.py`` and ``synthesize.py``; issue
 #1112), plus ``wasi_sandbox_hint_if_applicable`` (issue #1755 -- the #1368
 WASI-sandboxed-yosys detection had only been added to ``synthesize.py``,
 leaving ``equiv.py``'s independent error-formatting function without it).
+
+Alongside the raw-byte ``sha256_file`` it also owns ``layout_geometry_digest``
+(issue #2065) -- a *layout-aware* digest for reports that pin the input streams
+they were built from (``klt gen-compose``'s ``blocks[].source_digest``), where
+a raw-byte hash would report drift on every re-write of identical geometry.
 """
 
 from __future__ import annotations
@@ -93,6 +98,163 @@ def sha256_file(path: str | None) -> str | None:
     return digest.hexdigest()
 
 
+# Bumped whenever the canonical serialisation below changes shape, so a digest
+# computed by an older klt build can never be mistaken for a digest of the same
+# geometry computed by a newer one (the two would differ for reasons that have
+# nothing to do with the geometry drifting).
+_LAYOUT_GEOMETRY_DIGEST_VERSION = "klt-layout-geometry-digest/1"
+
+
+def _canonical_layer_key(info: Any) -> str:
+    """A layer's stable identity for :func:`layout_geometry_digest`.
+
+    ``layer/datatype`` for a numbered layer (what both GDS and OASIS actually
+    store), falling back to the layer *name* only for a name-only layer, which
+    has no number to key on. A layer that carries both keeps its number as the
+    identity -- GDS stores no layer names at all, so folding the name in would
+    make the same geometry hash differently depending on the container format.
+    """
+    if info.is_named():
+        return f"name:{info.name}"
+    return f"{info.layer}/{info.datatype}"
+
+
+def _canonical_properties(layout: Any, prop_id: int) -> str:
+    """User properties attached to a shape/instance, sorted, or ``""``."""
+    if not prop_id:
+        return ""
+    try:
+        props = layout.properties(prop_id)
+    except Exception:
+        return ""
+    rendered = sorted(f"{key!r}={value!r}" for key, value in props)
+    return " props=[" + ",".join(rendered) + "]"
+
+
+def _canonical_shape_token(shape: Any) -> str:
+    """One shape, rendered so that geometrically identical shapes render
+    identically.
+
+    Boxes are widened to polygons because the two are the same geometry
+    written two ways (GDS has no box record at all; OASIS does), and KLayout's
+    ``Polygon`` normalises its own point order/winding/collinear points on
+    construction -- so a rectangle written as a box and the same rectangle
+    written as a four-point boundary produce one token, not two.
+    """
+    import klayout.db as kdb
+
+    if shape.is_box():
+        return f"polygon {kdb.Polygon(shape.box).to_s()}"
+    if shape.is_polygon():
+        return f"polygon {shape.polygon.to_s()}"
+    if shape.is_path():
+        return f"path {shape.path.to_s()}"
+    if shape.is_text():
+        return f"text {shape.text.to_s()}"
+    if shape.is_edge():
+        return f"edge {shape.edge.to_s()}"
+    # Anything the accessors above do not cover (edge pairs, point-like
+    # shapes a future KLayout adds) still contributes its own rendering --
+    # unknown-but-present beats silently dropped.
+    return f"other {shape.to_s()}"
+
+
+def _canonical_instance_token(inst: Any) -> str:
+    """One child-cell instance, keyed by the *name* of the cell it places.
+
+    Deliberately not ``cell_index``: that is an index into this one layout's
+    own cell table, so it changes when a writer emits its cells in a different
+    order even though nothing about the placement moved.
+
+    A regular array's two axes are sorted rather than reported as written:
+    ``(a, na)`` and ``(b, nb)`` name the same lattice of placements in either
+    order, and writers really do disagree about which is which (KLayout writes
+    the same array with the axes swapped between GDS and OASIS).
+    """
+    token = f"inst {inst.cell.name} {inst.cplx_trans.to_s()}"
+    if inst.is_regular_array():
+        axes = sorted([(inst.a.to_s(), inst.na), (inst.b.to_s(), inst.nb)])
+        rendered = ",".join(f"{vector}x{count}" for vector, count in axes)
+        token += f" array=({rendered})"
+    return token
+
+
+def layout_geometry_digest(path: str | None) -> str | None:
+    """A ``sha256:``-prefixed digest of a GDS/OASIS stream's *decoded
+    geometry*, or ``None`` when it cannot be computed (issue #2065).
+
+    Deliberately **not** :func:`sha256_file`. A raw-byte hash answers "are
+    these two files identical", which is the wrong question for a layout
+    stream: re-writing geometrically identical output produces different bytes
+    every time (the BGNLIB/BGNSTR timestamp records carry the write time, and
+    shape/instance order within a cell follows whatever order the writer
+    happened to emit). A consumer comparing raw-byte hashes therefore sees
+    drift on every re-run and cannot tell a re-write from a real change --
+    exactly the failure mode issue #2065 was filed against. The byte-level
+    contract of :func:`sha256_file`/:func:`_content_hash` is unchanged and
+    still what ``drc``/``lvs``/``extract``/``sim`` record; this is a second,
+    layout-aware digest for callers that need equality to mean "same
+    geometry".
+
+    The digest covers, in a fixed order that no writer can perturb:
+
+    - the layout's database unit;
+    - every cell, sorted by name;
+    - within each cell, every shape (keyed by layer/datatype) and every
+      child-cell instance (keyed by the placed cell's *name*), each rendered
+      canonically and then sorted, so element order in the file is irrelevant;
+    - user properties attached to those shapes/instances.
+
+    Container metadata that says nothing about the geometry -- timestamps,
+    record order, cell-table indices, the format itself -- is never read.
+
+    Returns ``None`` (never a fabricated value, matching this module's
+    convention for everything it cannot resolve) for a falsy path, a path that
+    is not an existing file, a stream KLayout cannot read, or a missing
+    ``klayout`` engine.
+    """
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        import klayout.db as kdb
+
+        layout = kdb.Layout()
+        layout.read(path)
+
+        digest = hashlib.sha256()
+
+        def feed(line: str) -> None:
+            digest.update(line.encode("utf-8", errors="backslashreplace"))
+            digest.update(b"\n")
+
+        feed(_LAYOUT_GEOMETRY_DIGEST_VERSION)
+        feed(f"dbu {layout.dbu:.12g}")
+
+        layer_keys = [
+            (index, _canonical_layer_key(layout.get_info(index)))
+            for index in layout.layer_indexes()
+        ]
+        for cell in sorted(layout.each_cell(), key=lambda c: c.name):
+            tokens: list[str] = []
+            for index, layer_key in layer_keys:
+                for shape in cell.shapes(index).each():
+                    tokens.append(
+                        f"shape {layer_key} {_canonical_shape_token(shape)}"
+                        f"{_canonical_properties(layout, shape.prop_id)}"
+                    )
+            for inst in cell.each_inst():
+                tokens.append(
+                    f"{_canonical_instance_token(inst)}"
+                    f"{_canonical_properties(layout, inst.prop_id)}"
+                )
+            feed(f"cell {cell.name}")
+            for token in sorted(tokens):
+                feed(f"  {token}")
+    except Exception:
+        return None
+    return f"sha256:{digest.hexdigest()}"
+
+
 def _yosys_version() -> str | None:
     """Yosys's own reported version token (``yosys -V``'s output), or
     ``None`` if unresolvable -- never raises. Shared by ``equiv.py`` (SAT
@@ -146,15 +308,10 @@ def _content_hash(path: str | None) -> str | None:
     return f"sha256:{digest}" if digest is not None else None
 
 
-def _klt_version() -> str | None:
-    """``klayout_tools.__version__`` (the ``klt --version`` string), or
-    ``None`` if unresolvable."""
-    try:
-        import klayout_tools
-
-        return getattr(klayout_tools, "__version__", None)
-    except Exception:
-        return None
+def _klt_version() -> str:
+    """The same build identity as ``klt --version``, including ``+unknown``
+    when no git provenance can be recovered."""
+    return build_identity.build_version()
 
 
 def _klayout_version() -> str | None:
@@ -265,12 +422,42 @@ def _deck_block(
     return block
 
 
-def _input_block(path: str | None) -> dict[str, Any] | None:
-    """The provenance ``input`` shape ``{content_hash}``, mirroring ``deck``;
-    ``None`` when no input path was given (or it can't be hashed)."""
+#: ``provenance.input.role`` -- *what kind of artifact* ``content_hash``
+#: covers (issue #2027). The field exists because the hash alone is
+#: kind-blind: ``klt drc``/``klt extract`` hash an input layout stream, but
+#: ``klt lvs`` hashes a *SPICE netlist* for the pre-extracted
+#: ``layout.netlist`` request shape, and ``klt place-and-route`` hashes the
+#: gate-level netlist it placed. ``klt signoff``'s cross-check compares
+#: ``input.content_hash`` across checks; without a discriminator it compared
+#: a netlist digest against a layout digest and *refused* to aggregate a
+#: perfectly consistent ``drc`` + ``lvs`` pair. Consumers compare hashes
+#: only within one role.
+INPUT_ROLE_LAYOUT = "layout"
+INPUT_ROLE_NETLIST = "netlist"
+INPUT_ROLE_SOURCE = "source"
+
+#: Every recognised :data:`INPUT_ROLE_LAYOUT`-style value, as
+#: ``docs/json-contract.md`` documents them. Adding a value here is a
+#: contract change: a consumer that groups by role treats an unknown role as
+#: its own group, so a typo would silently disable the cross-check for that
+#: verb rather than fail loudly -- hence :func:`build_provenance` validates
+#: against this set instead of accepting any string.
+INPUT_ROLES = frozenset({INPUT_ROLE_LAYOUT, INPUT_ROLE_NETLIST, INPUT_ROLE_SOURCE})
+
+
+def _input_block(path: str | None, role: str) -> dict[str, Any] | None:
+    """The provenance ``input`` shape ``{content_hash, role}``, mirroring
+    ``deck``'s ``{name, content_hash, released}``; ``None`` when no input
+    path was given (or it can't be hashed).
+
+    ``role`` (issue #2027) names the *kind* of artifact hashed -- see
+    :data:`INPUT_ROLES`. It is always present when the block is, so a
+    consumer never has to infer the kind from a file extension or from which
+    verb produced the envelope.
+    """
     if path is None:
         return None
-    return {"content_hash": _content_hash(path)}
+    return {"content_hash": _content_hash(path), "role": role}
 
 
 class UnknownProvenanceDeckError(Exception):
@@ -311,6 +498,7 @@ def build_provenance(
     deck_path: str | None = None,
     pdk: dict[str, Any] | None = None,
     input_path: str | None = None,
+    input_role: str = INPUT_ROLE_LAYOUT,
     deck_options: Mapping[str, str] | None = None,
     include_klayout_version_mismatch: bool = False,
 ) -> dict[str, Any]:
@@ -320,9 +508,9 @@ def build_provenance(
     and the file whose content is hashed to pin it; pass both ``None`` when no
     deck was involved. ``pdk`` is a :func:`klayout_tools.pdk.find_pdk`-style
     dict (``variant``/``resolved_via``/``version``), or ``None`` when the run
-    resolved no PDK. ``input_path`` is the input layout stream a verb ran
+    resolved no PDK. ``input_path`` is the single input artifact a verb ran
     against; when given, its content hash is recorded as ``provenance.input``
-    (the same ``{content_hash}`` shape as ``deck``) so a stale committed
+    (``{content_hash, role}``, mirroring ``deck``) so a stale committed
     report is a one-line diff against a freshly computed hash. Pass ``None``
     (the default) only when the verb genuinely has no single input stream to
     pin. A verb that pins its input under a *verb-specific* key of its own is
@@ -336,6 +524,22 @@ def build_provenance(
     ``klt lvs`` now passes its layout-side hash source here too, and the
     per-verb duplication is the intended cost of a field generic consumers
     can actually read.
+
+    ``input_role`` (issue #2027) declares *which kind* of artifact
+    ``input_path`` is -- see :data:`INPUT_ROLES`. It defaults to
+    :data:`INPUT_ROLE_LAYOUT`, which is what the field meant before it
+    existed ("the input layout stream the run was made against"), so every
+    layout-hashing caller is unchanged. Callers that pin something else must
+    say so: ``klt lvs``'s pre-extracted ``layout.netlist`` shape hashes a
+    SPICE netlist, ``klt place-and-route`` hashes the gate-level netlist it
+    placed, and ``klt synthesize``/``klt equiv`` hash HDL sources. The field
+    exists because ``klt signoff``'s provenance cross-check compares
+    ``input.content_hash`` across every check that populates it: with no
+    discriminator it compared ``klt lvs``'s *netlist* digest against ``klt
+    drc``'s *layout* digest and refused to aggregate a consistent pair, a
+    false alarm rather than caught staleness. Raises :class:`ValueError` for
+    a role outside :data:`INPUT_ROLES` -- a silently-unknown role would
+    disable the cross-check for that verb instead of failing loudly.
     ``deck_options`` (issue #595) is echoed onto ``provenance.deck.options``
     via :func:`_deck_block` when non-empty -- see that function's docstring.
     ``klt_version``/``klayout_version`` are read at call time.
@@ -351,13 +555,18 @@ def build_provenance(
     one-line warning to stderr (:func:`_warn_klayout_version_mismatch`) so a
     caller sees the drift even without inspecting the JSON.
     """
+    if input_role not in INPUT_ROLES:
+        raise ValueError(
+            f"unknown provenance input role {input_role!r} "
+            f"(expected one of {', '.join(sorted(INPUT_ROLES))})"
+        )
     actual_klayout_version = _klayout_version()
     block: dict[str, Any] = {
         "klt_version": _klt_version(),
         "klayout_version": actual_klayout_version,
         "pdk": _pdk_block(pdk),
         "deck": _deck_block(deck_name, deck_path, deck_options),
-        "input": _input_block(input_path),
+        "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:
         # Build-time-recorded only -- deliberately *not*

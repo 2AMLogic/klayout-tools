@@ -178,12 +178,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401 -- tests patch post_route_sta.subprocess.run
 from typing import Any
 
 from ._openroad_engine import (
     _count_violations,
     _openroad_version,
+    _OpenRoadResult,
     _run_openroad,
     _timing_status,
 )
@@ -193,7 +194,13 @@ from ._paths import (
     _tcl_net_list,
     validate_request_shape,
 )
-from ._provenance import _deck_block, build_provenance, sha256_file
+from ._provenance import (
+    INPUT_ROLE_LAYOUT,
+    INPUT_ROLE_NETLIST,
+    _deck_block,
+    build_provenance,
+    sha256_file,
+)
 from .pdk import lef_files
 from .pdk_cells import resolve_liberty_for_cell_library
 
@@ -526,6 +533,12 @@ def run_sta(
         deck_path=resolution["liberty_path"],
         pdk=resolution["pdk_info"],
         input_path=input_path,
+        # Issue #2027: `input_path` is the DEF (a layout stream) when
+        # the request supplied one, and the gate-level Verilog netlist
+        # otherwise -- the two are not comparable artifacts, so the
+        # role follows the same `has_def` branch `input_path` itself
+        # does.
+        input_role=INPUT_ROLE_LAYOUT if has_def else INPUT_ROLE_NETLIST,
     )
 
     response: dict[str, Any] = {
@@ -579,6 +592,7 @@ def run_sta(
     }
 
     response["spef_annotation"] = corner_fields["spef_annotation"]
+    response["engine_log"] = corner_fields["engine_log"]
 
     return response
 
@@ -673,10 +687,11 @@ def _run_corner_session(
     _write_script(script_path, lines)
 
     completed = _run_openroad(script_path, metrics_path, error_cls=PostRouteStaError)
-    if completed.returncode != 0:
-        raise PostRouteStaError(_engine_error_message(completed))
+    with completed.diagnostics(PostRouteStaError):
+        if completed.returncode != 0:
+            raise PostRouteStaError(_engine_error_message(completed))
 
-    metrics = _read_metrics(metrics_path)
+        metrics = _read_metrics(metrics_path)
     setup_violation_count = _count_violations(
         completed.stdout, _SETUP_VIOLATIONS_BEGIN, _SETUP_VIOLATIONS_END
     )
@@ -693,6 +708,7 @@ def _run_corner_session(
     clock_skew = metrics.get("clock__skew__setup")
 
     corner_fields: dict[str, Any] = {
+        "engine_log": completed.engine_log,
         "worst_slack_ns": round(worst_slack, 5) if worst_slack is not None else None,
         "total_negative_slack_ns": round(tns, 5) if tns is not None else None,
         "worst_hold_slack_ns": (
@@ -826,6 +842,12 @@ def _run_multi_corner(
         deck_path=None,
         pdk=shared_pdk_info,
         input_path=input_path,
+        # Issue #2027: `input_path` is the DEF (a layout stream) when
+        # the request supplied one, and the gate-level Verilog netlist
+        # otherwise -- the two are not comparable artifacts, so the
+        # role follows the same `has_def` branch `input_path` itself
+        # does.
+        input_role=INPUT_ROLE_LAYOUT if has_def else INPUT_ROLE_NETLIST,
     )
 
     return {
@@ -849,7 +871,7 @@ def _run_multi_corner(
 
 
 def _spef_annotation_block(
-    completed: subprocess.CompletedProcess,
+    completed: _OpenRoadResult,
     spef_net_names: list[str] | None,
 ) -> dict[str, Any]:
     """Assemble the ``spef_annotation`` response block from one completed
@@ -1580,7 +1602,7 @@ def _spef_net_names(spef_path: str) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
-def _engine_error_message(completed: subprocess.CompletedProcess) -> str:
+def _engine_error_message(completed: _OpenRoadResult) -> str:
     """Build an actionable error message from a failed OpenROAD run.
 
     Prefers a bracketed ``[ERROR ...]`` diagnostic OpenROAD itself printed

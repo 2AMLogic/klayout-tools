@@ -91,7 +91,7 @@ nothing else about the run.
 ## Generated `.ys` script
 
 Per the Yosys survey's own recommendation, `klt synthesize` generates a
-`.ys` script into `.klt/synthesize/` (next to the request file — the same
+`.ys` script into `.klt/synthesize/<run_id>/` (next to the request file — the same
 "next to the input" default `klt sim`'s `.klt/sim/` artifacts directory
 already uses) and invokes `yosys -s <script>`, rather than string-
 interpolating an ever-growing `-p` command line. The script is kept as a
@@ -128,7 +128,7 @@ immediately below.
 
 **Embedded paths (issue #1844).** Every path embedded in the script *except*
 the resolved liberty is repo-relative when it resolves inside the invocation's
-repo — the RTL `sources`/adder sources, and the `.klt/synthesize/` output
+repo — the RTL `sources`/adder sources, and the `.klt/synthesize/<run_id>/` output
 paths (`tee -o`, `write_verilog`) — so a `.ys` produced inside a repo can be
 committed as a reproducible evidence artifact without leaking the author's
 home directory or worktree layout. Such a script is **run with `cwd` set to
@@ -149,7 +149,7 @@ exports. The generated `synth_<top>.ys` is now scan-clean in *every* embedded
 path, so committing it leaks nothing:
 
 ```console
-$ klt env-provenance scan .klt/synthesize/synth_counter.ys
+$ klt env-provenance scan ".klt/synthesize/<run_id>/synth_counter.ys"
 clean: 0 leak(s) in 1 file(s)            # exit 0
 ```
 
@@ -167,7 +167,7 @@ substitution, and needs nothing from `klt`:
 
 ```console
 $ sed "s|\$PDK_ROOT|$(klt pdk find --format json | jq -r .root)|g" \
-    .klt/synthesize/synth_counter.ys > /tmp/synth_counter.run.ys
+    ".klt/synthesize/<run_id>/synth_counter.ys" > /tmp/synth_counter.run.ys
 $ yosys -s /tmp/synth_counter.run.ys            # run from the repo root
 ```
 
@@ -198,7 +198,44 @@ not resolve inside a repo. Where relative paths *are* written, the pairing is
 explicit and local: the same `repo_root` is both the rewrite base and the
 `cwd` the script is run with.
 
-### Artifacts written to `.klt/synthesize/`
+### Artifacts written to `.klt/synthesize/<run_id>/`
+
+Each invocation exclusively creates a new directory beneath the request file's
+`.klt/synthesize/` directory. The response's additive `run_id` identifies it;
+all existing `{path, scope}` fields retain their meaning and refer to this
+invocation's files. There is no mutable "latest" alias. Earlier successful and
+failed runs are retained, including arithmetic trials, baseline scripts, and
+equivalence artifacts. Callers manage retention; this command does not prune them.
+
+Ordinary requests omit `run_id` and receive a generated `run-<UUID hex>` ID.
+A pipeline that must prepare a downstream request in advance may supply its own
+`run_id`: 1–64 ASCII letters, digits, underscores, or hyphens, starting with a
+letter or digit. An existing directory is an error, even after failure; retry
+with a new ID. Exclusive directory creation also rejects concurrent callers
+that supply the same ID, while automatically allocated runs remain isolated.
+
+A zero engine exit is insufficient: the current run must contain a readable,
+nonempty netlist, parseable synthesis statistics, and its ABC log when the
+library enables ABC constraints. Missing artifacts fail explicitly. A current
+ABC log without a readable `stime` summary produces `timing: null` and a
+`timing_unavailable` warning; any requested clock target remains unverified.
+Unknown-library capability warnings still describe unavailable ABC constraints.
+
+Provenance hashes are computed before engine execution. Before returning,
+synthesis checks the declared RTL files, request file, and resolved Liberty for
+replacement or changes in size, modification time, or change time. A changed
+or removed input causes an error, including edits that restore the old bytes.
+The guard spans optional arithmetic, equivalence, restructuring, and baseline
+analysis. **This is a mutation check on declared inputs, not a snapshot of
+transitive Verilog includes or an immutable copy of the PDK.** Keep those
+untracked dependencies stable while the run executes.
+
+This changes the former fixed `<request_dir>/.klt/synthesize/<top>_synth.v`
+convention. Consume the response paths, or reconstruct the request-relative
+path using this response's `run_id`; do not search for a newest directory.
+For a request outside any repository the normalized path remains
+`{"path": null, "scope": "external"}`, and `run_id` still identifies the
+retained directory next to that request.
 
 | File | Contents |
 | --- | --- |
@@ -207,6 +244,7 @@ explicit and local: the same `repo_root` is both the rewrite base and the
 | `<top>_synth.v` | The mapped gate-level netlist (`netlist_path`). |
 | `<top>_stats.json` | The captured `stat -liberty … -json` output this command parses for `instance_count`/`area_um2`. |
 | `<top>_abc.constr` | The generated two-line ABC constraint file (`set_driving_cell` / `set_load`) — present only for a `cell_library` with a constraint-table entry (see below). |
+| `synth_<top>.run.log` | Captured stdout and stderr for the executed script, retained on success, nonzero exit, and timeout. Named `synth_<top>.log` when no rehydrated script is needed; trial/probe/baseline scripts have their own sibling logs. Abrupt process interruption preserves files already written. |
 | `<top>_abc.log` | The captured `abc` pass output, including ABC's own `stime -p` summary line this command parses into `timing` — same file, same `tee -q -o` discipline as the stats capture. |
 
 ### ABC constraints, delay target, and cell exclusions
@@ -221,7 +259,8 @@ anywhere in this flow.
 - **`-constr <top>_abc.constr`** is passed whenever the resolved
   `pdk.cell_library` has an entry in `synthesize.py`'s own
   `_ABC_CONSTR_INPUTS` table (`sky130_fd_sc_hd`,
-  `gf180mcu_fd_sc_mcu9t5v0`, `sg13g2_stdcell` today). Its `set_driving_cell`/
+  `gf180mcu_fd_sc_mcu9t5v0`, `gf180mcu_fd_sc_mcu7t5v0`, `sg13g2_stdcell`
+  today). Its `set_driving_cell`/
   `set_load` values are ORFS's own `ABC_DRIVER_CELL`/`ABC_LOAD_IN_FF` for
   that platform (IHP's own LibreLane platform config's `SYNTH_DRIVING_CELL`/
   `OUTPUT_CAP_LOAD` for `sg13g2_stdcell`, which ships no ORFS platform
@@ -247,7 +286,21 @@ anywhere in this flow.
 
 A `cell_library` in **neither** table is never given a guessed driving cell
 or exclusion list: its generated script keeps exactly the pre-#807 shape
-(`abc -liberty <lib>`, no `tee`), and `timing` stays `null`.
+(`abc -liberty <lib>`, no `tee`), and `timing` stays `null`. A missing
+constraint mapping emits an `unsupported_cell_library` warning naming the
+library and the skipped constraints, sizing/buffering, and ABC timing,
+including when the request supplied a clock period.
+
+**gf180 7t load policy (issue #2088).** Both gf180 track variants use
+13.43 fF. The [ORFS gf180 platform config](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts/blob/95ebc50a258390f4c7896e5f04db743f62279c2d/flow/platforms/gf180/config.mk#L39-L44)
+selects `gf180mcu_fd_sc_mcu7t5v0__buf_4` with `TRACK_OPTION=7t` and keeps
+its load value independent of track height. We retain the existing 9t
+policy: interpret the platform's `0.01343` as pF and convert to the fF
+required by Yosys `set_load`. The [same revision's 7t Liberty](https://github.com/The-OpenROAD-Project/OpenROAD-flow-scripts/blob/95ebc50a258390f4c7896e5f04db743f62279c2d/flow/platforms/gf180/lib/gf180mcu_fd_sc_mcu7t5v0__tt_025C_5v00.lib.gz)
+declares `capacitive_load_unit(1, pf)` and gives `buf_4` input `I` a
+capacitance of 0.009315 pF (9.315 fF). That pin capacitance cross-checks
+the scale; it does not replace the platform output-load policy. This is
+a sourced default, with no claim that either candidate optimizes QoR.
 
 **Yosys version note.** `abc -dont_use` does not exist in older Yosys
 builds (verified: present in 0.68, absent in Ubuntu 24.04's 0.33, where
@@ -283,9 +336,10 @@ table:
 | --- | --- | --- |
 | `sky130_fd_sc_hd` | `sky130_fd_sc_hd__conb_1` `HI` | `sky130_fd_sc_hd__conb_1` `LO` |
 | `gf180mcu_fd_sc_mcu9t5v0` | `gf180mcu_fd_sc_mcu9t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu9t5v0__tiel` `ZN` |
+| `gf180mcu_fd_sc_mcu7t5v0` | `gf180mcu_fd_sc_mcu7t5v0__tieh` `Z` | `gf180mcu_fd_sc_mcu7t5v0__tiel` `ZN` |
 | `sg13g2_stdcell` | `sg13g2_tiehi` `L_HI` | `sg13g2_tielo` `L_LO` |
 
-The first two rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
+The first three rows are ORFS's own `TIEHI_CELL_AND_PORT`/`TIELO_CELL_AND_PORT`
 for that platform, cross-checked against the installed liberty (the sky130
 cell drives both constants from one instance; gf180mcu has two distinct
 cells, and its `__filltie` is a well-tie filler, not a logic constant driver
@@ -309,7 +363,10 @@ Two consequences worth knowing:
   `repair_design`.
 
 A `cell_library` with no `_TIE_CELLS` entry emits no `hilomap` line at all,
-rather than a guessed cell name. A design that needs no constant tie (the
+rather than a guessed cell name. Its `unsupported_cell_library` warning
+states that `setundef -zero` and `hilomap` were skipped and that bare
+0/1/x constants may remain unroutable in place-and-route.
+A design that needs no constant tie (the
 repo's own `gcd.v`) is unaffected: its netlist and `stat` output are
 byte-identical with and without the pass.
 
@@ -345,7 +402,7 @@ verbatim (`output signed [15:0] sample;`) and offers no flag to suppress it
 at the floorplan stage, rejects the keyword outright:
 
 ```
-[ERROR STA-0171] .../.klt/synthesize/<top>_synth.v line 963, syntax error
+[ERROR STA-0171] .../.klt/synthesize/<run_id>/<top>_synth.v line 963, syntax error
 ```
 
 Nothing in yosys's pass set clears a wire's `is_signed` attribute either, so
@@ -665,7 +722,7 @@ to verify.
   "resizes_applied": [
     {"instance": "_377_", "from_cell": "sky130_fd_sc_hd__xnor2_1", "to_cell": "sky130_fd_sc_hd__xnor2_2"}
   ],
-  "restructured_netlist_path": { "path": ".klt/synthesize/gcd_synth_restructured.v", "scope": "repo" },
+  "restructured_netlist_path": { "path": ".klt/synthesize/<run_id>/gcd_synth_restructured.v", "scope": "repo" },
   "equivalence": {"status": "equivalent", "engine": "yosys", "engine_version": "0.67+post", "timeout_s": 60.0, "elapsed_s": 0.05, "artifacts": {"...": "..."}}
 }
 ```
@@ -729,7 +786,7 @@ it did before this field existed, and `response.arithmetic` is `null`.
    reported as `status: "no-wide-adders"` and the run continues untouched.
 2. **Generate.** Each candidate architecture is generated at every probed
    width by [`klt arith-gen`](arith-gen.md)'s own generator, into
-   `.klt/synthesize/arith/<architecture>/rtl/`.
+   `.klt/synthesize/<run_id>/arith/<architecture>/rtl/`.
 3. **Prove** (unless `verify_adders: false`). Each generated adder is proven
    equivalent to a behavioural `a + b + cin` of the same width by
    [`klt equiv`](equiv.md). See "Equivalence gate for substituted adders"
@@ -760,7 +817,7 @@ Every surviving candidate — **plus Yosys's own default expansion**, as a real
 row in the table — gets a full trial synthesis using exactly the engine
 configuration the real run will use (same liberty, same
 `-constr`/`-D`/`-dont_use`/`hilomap` knobs), into its own
-`.klt/synthesize/arith/<label>/` directory. Every trial's script, netlist,
+`.klt/synthesize/<run_id>/arith/<label>/` directory. Every trial's script, netlist,
 stats and ABC log survive as debuggable artifacts: "measured, not guessed" is
 only a real claim if the measurement is reproducible afterwards.
 
@@ -850,8 +907,8 @@ The `arithmetic` field, `null` unless `request.arithmetic` was given:
         "delay_source": "abc_stime",
         "meets_constraint": false,
         "label": "default",
-        "netlist_path": { "path": ".klt/synthesize/arith/default/modexp_synth.v", "scope": "repo" },
-        "script_path": { "path": ".klt/synthesize/arith/default/synth_modexp.ys", "scope": "repo" }
+        "netlist_path": { "path": ".klt/synthesize/<run_id>/arith/default/modexp_synth.v", "scope": "repo" },
+        "script_path": { "path": ".klt/synthesize/<run_id>/arith/default/synth_modexp.ys", "scope": "repo" }
       }
     },
     {
@@ -953,7 +1010,7 @@ synthesis run used (so the netlist's standard-cell instances resolve as
 real combinational logic, not an undefined blackbox — see `klt equiv`'s
 "Request" section) — and runs it. The generated equiv request and its own
 artifacts (the `.ys` script, the flattened combined netlist, the raw Yosys
-log) land under `.klt/synthesize/.klt/equiv/`, alongside this run's own
+log) land under `.klt/synthesize/<run_id>/.klt/equiv/`, alongside this run's own
 `script_path`/`netlist_path` — never deleted, kept as debuggable artifacts
 like every other file this command writes. The outcome:
 
@@ -1002,7 +1059,8 @@ separately if it turns out to matter for evidence-record committing.
 | `schema` | string | Request contract identifier + major version. Not validated — user-authored input, never emitted by this tool. |
 | `engine` | string | `"yosys"` (default; only value implemented). |
 | `sources` | array\<string\> | RTL source file paths (`read_verilog` inputs), resolved relative to the request file's own directory. Required, non-empty. |
-| `hdl_toplevel` | string | The design's top module name. Required. |
+| `hdl_toplevel` | string | The design's top module name. Required; must not contain path separators. |
+| `run_id` | string \| omitted | Optional safe identifier for an exclusively created invocation directory; see "Artifacts". Omit to allocate a new ID automatically. Reusing an existing ID fails. |
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
@@ -1034,6 +1092,7 @@ caller decision rather than something this command should pick.
   "engine": "yosys",
   "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
+  "run_id": "run-example",
   "status": "ok",
   "instance_count": 347,
   "area_um2": 3238.1056,
@@ -1076,15 +1135,15 @@ caller decision rather than something this command should pick.
     "by_category": {},
     "representatives": []
   },
-  "netlist_path": { "path": ".klt/synthesize/gcd_synth.v", "scope": "repo" },
-  "script_path": { "path": ".klt/synthesize/synth_gcd.ys", "scope": "repo" },
-  "run_script_path": { "path": ".klt/synthesize/synth_gcd.run.ys", "scope": "repo" },
+  "netlist_path": { "path": ".klt/synthesize/run-example/gcd_synth.v", "scope": "repo" },
+  "script_path": { "path": ".klt/synthesize/run-example/synth_gcd.ys", "scope": "repo" },
+  "run_script_path": { "path": ".klt/synthesize/run-example/synth_gcd.run.ys", "scope": "repo" },
   "provenance": {
     "klt_version": "0.1.0",
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "source" }
   },
   "equivalence": null,
   "restructuring": null,
@@ -1098,6 +1157,7 @@ caller decision rather than something this command should pick.
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`'s own version token). `engine_version` is `null` if unresolvable. |
 | `hdl_toplevel` | string | Echo of the request. |
+| `run_id` | string | Identifier of this invocation's retained directory, relative to `<request_dir>/.klt/synthesize/`. Additive; includes failed-run collision protection when supplied in a request. |
 | `status` | string | Always `"ok"` — synthesis has no pass/fail concept of its own from *this field's* point of view; a failed run never emits this envelope at all. The response-level pass/fail signal issue #1588 adds is `structural.has_critical`/exit code `3` below — `status` itself is unaffected and stays `"ok"` either way. |
 | `instance_count` | integer | Total standard-cell instances after liberty mapping, rolled up over the **whole design hierarchy** — `stat -json`'s per-module `num_cells` aggregated recursively across every sub-module Yosys left un-flattened, each level scaled by its instance count (issue #821; the top module's own `num_cells` alone is `0` for a design whose top is a pure wrapper). Matches `stat -json`'s own `design.num_cells` rollup. **Deliberately not named `cell_count`**: `klt layout-metrics`'s existing `cell_count` field counts *distinct cell definitions* in a GDS hierarchy, a different concept. |
 | `area_um2` | number | `stat -json`'s `area`, in µm² (the liberty's own unit). `0.0` for a design whose only cells are internal, non-liberty primitives (e.g. an inferred latch — Yosys's own `stat -liberty ... -json` omits the `area` key entirely in that case; verified live, issue #1588). |
@@ -1108,11 +1168,11 @@ caller decision rather than something this command should pick.
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
-| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log, never the raw log itself: `{total, by_category, representatives}`. `total` is a raw line count (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
+| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
 | `run_script_path` | object | The `.ys` script Yosys was actually handed (issue #1870), same `{path, scope}` shape — the rehydrated `synth_<top>.run.ys` sibling with the real absolute liberty path substituted for `$PDK_ROOT`, or exactly `script_path` when no token was written (a liberty resolving outside the PDK install root). Additive field, no `schema_version` bump. Machine-specific by construction: commit `script_path`, not this. |
-| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `sources` (a combined, order-independent hash when more than one source file is given). |
+| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the pre-execution content hash of declared `sources` (a combined, order-independent hash when more than one source file is given), with `input.role: "source"` (issue #2027 — RTL source, not a layout stream or a netlist); mutation of declared inputs before return is an error. Transitive includes are not snapshotted. |
 | `equivalence` | object \| null | `null` unless `--verify-equivalence` was given. When given and the gate passed: `{status: "equivalent", engine, engine_version, timeout_s, elapsed_s, artifacts}` — `artifacts` is `klt equiv`'s own `{script_path, netlist_path, log_path}` (see [`docs/cli/equiv.md`](equiv.md)). A non-equivalent or inconclusive verdict never reaches this field — it is a `SynthesizeError` instead (see "Equivalence gate" above). |
 | `restructuring` | object \| null | `null` unless `--restructure-timing` was given: `{target_period_ns, max_iterations, initial_worst_path_delay_ns, final_worst_path_delay_ns, converged, iterations_used, gave_up_reason, resizes_applied, restructured_netlist_path, equivalence}` — see "Timing-driven restructuring" above for the full field-by-field description, including the `restructured_netlist_path` netlist-handoff contract for #700 (`klt par`). |
 | `arithmetic` | object \| null | `null` unless `request.arithmetic` was given (issue #1722) — the arithmetic-architecture substitution and, in `"auto"` mode, the per-candidate delay/area table it selected from: `{mode, requested, min_width, status, reason, adder_widths, target_period_ns, selected_architecture, candidates, selected_measured}`. See "Arithmetic architecture" above for the full field-by-field description; each `candidates[].measured.netlist_path`/`script_path` is the same `{path, scope}` shape as the top-level fields (issue #1844). |
@@ -1162,16 +1222,29 @@ heuristic and Yosys's own optimization already resolve these structurally
 runs) — `structural` only *reports* that the design carried the condition,
 it does not gate netlist production.
 
-## `warnings`: a bounded summary of the Yosys run log
+## `warnings`: engine diagnostics and missing library capabilities
 
 A bounded, deterministic summary of every `Warning: ` line in the captured
 Yosys run log — never the raw log itself, which is typically thousands of
-lines of interleaved pass output. `total` is a raw line count (deliberately
-not deduplicated the way `structural.comb_loops`/`multi_driven` are — this
+lines of interleaved pass output. Engine warnings are counted per raw line
+(deliberately not deduplicated the way `structural.comb_loops`/`multi_driven` are — this
 answers "how noisy was this run"); `by_category`/`representatives` group
 into a small, sorted taxonomy (`latch_inferred`, `logic_loop`,
 `multiple_drivers`, `undriven_wire`, `other`), capped at 10 representative
-entries.
+entries. The summary also includes one `unsupported_cell_library` warning
+when a library lacks a verified constraint or tie-cell mapping. Its text
+names the library and every skipped capability; `total` counts this
+warning in addition to engine warning lines. These warnings are emitted
+with or without a clock period. Missing constraint and tie mappings are
+checked independently, so a partially supported library reports only
+what it lacks. An absent `-dont_use` entry is intentional for gf180 and
+does not trigger this warning.
+
+These capability entries follow the shared
+[requested-but-unperformed analysis contract](../json-contract.md#requested-but-unperformed-analysis).
+They retain the existing `{category, count, text}` shape inside
+`warnings.representatives`; a successful netlist with a capability warning
+does not verify the skipped analysis or guarantee downstream routability.
 
 ## `baseline`: optional QoR delta against a prior run
 
@@ -1280,6 +1353,7 @@ $ klt synthesize request.json --format json
   "engine": "yosys",
   "engine_version": "0.67+post",
   "hdl_toplevel": "gcd",
+  "run_id": "run-example",
   "status": "ok",
   "instance_count": 347,
   "area_um2": 3238.1056,
@@ -1372,9 +1446,9 @@ $ klt synthesize adder4_request.json --verify-equivalence --format json
     "timeout_s": 60.0,
     "elapsed_s": 0.08,
     "artifacts": {
-      "script_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.ys",
-      "netlist_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv_netlist.v",
-      "log_path": "/abs/path/.klt/synthesize/.klt/equiv/equiv.log"
+      "script_path": "/abs/path/.klt/synthesize/<run_id>/.klt/equiv/equiv.ys",
+      "netlist_path": "/abs/path/.klt/synthesize/<run_id>/.klt/equiv/equiv_netlist.v",
+      "log_path": "/abs/path/.klt/synthesize/<run_id>/.klt/equiv/equiv.log"
     }
   }
 }
@@ -1497,11 +1571,13 @@ area_um2: 0.0, critical_path_ns: 0.0}` — see
   resolved against the *request file's* directory (see
   [`docs/cli/place-and-route.md`](place-and-route.md)) — a different base
   in the common case where the request file does not sit at the repo root.
-  Rather than reconcile the two bases, a caller wiring the two commands
-  together should use this command's own deterministic output convention
-  (`<request_dir>/.klt/synthesize/<hdl_toplevel>_synth.v`, see "Artifacts"
-  above) regardless of `netlist_path.scope` — `klayout_tools.digital_fleet`
-  already does this.
+  Resolve a populated `netlist_path.path` against the repository root, or
+  use `<request_dir>/.klt/synthesize/<run_id>/<hdl_toplevel>_synth.v` with
+  this response's `run_id`. `klayout_tools.digital_fleet` prepares a unique
+  safe ID per job, passes it in the synthesis request, and pins the P&R
+  request to that exact directory. Its first eval gate completes synthesis;
+  the metrics stage reuses the same cached result. A directory collision
+  refuses the run before P&R can consume previous evidence.
 - **Fleet-scale evaluation of many design-space candidates.** See
   [`docs/cli/place-and-route.md`](place-and-route.md)'s "Fleet evaluation of
   digital candidates" section (Epic #391 Phase 6) — `klayout_tools.digital_fleet`

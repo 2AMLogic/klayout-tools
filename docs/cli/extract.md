@@ -637,7 +637,12 @@ every occurrence of that type):
    `well_label`, `poly_label`) — not promoted from a nested sub-cell, only
    text drawn in the cell itself — each distinct label names a pin, and its
    own footprint's centre is the pin's access point, probed on the specific
-   conductor layer the label was drawn on.
+   conductor layer **that label** was drawn on. A pin labelled on more than
+   one conductor (a hard macro routinely draws both an `li1.pin` text on the
+   pad its interior drives and a `met2.pin` text on the stub the parent
+   routes to) contributes one candidate per label, each carrying its own
+   layer — the probe layer is a property of the access point, not of the pin
+   (issue #2142).
 2. **LEF fallback** (`--abstract-cell-lef`). When a matched cell type draws
    no such label, each `--abstract-cell-lef` path (a LEF file, or a
    directory of `*.lef`/`*.tlef` files) is searched for a `MACRO` block of
@@ -646,8 +651,20 @@ every occurrence of that type):
    local micrometre frame — the standard convention every real PDK
    standard-cell LEF follows, `ORIGIN 0 0` matching the cell's own drawn GDS
    origin). The LEF's own layer name is not translated to a GDS layer, so a
-   LEF-resolved pin is probed against the deck's conductor stack bottom-up
-   instead of one specific layer.
+   LEF-resolved pin is probed against the deck's **signal** conductor stack
+   bottom-up (`metals[]`, then `poly`) instead of one specific layer.
+
+**`nwell`/`tap` are never a fallback answer** (issue #2142). Whichever
+source resolved the pin, the probe only ever lands on the deck's
+body-identity field layers when one of them is the access point's *own*
+declared layer (a `well_label` pin). A well strap or a guard/substrate ring
+is one electrically continuous shape spanning most of a block, so its probed
+net is the same design-wide net at every coordinate it covers: used as a
+"nothing else is drawn here" fallback it binds *every* pin that misses its
+own conductor onto that one foreign net at once. A candidate point with
+nothing but well/tap under it now resolves to nothing at all, which surfaces
+as the ordinary per-instance "no conductor found at its resolved access
+point" `warnings[]` entry below rather than as a silent short into a rail.
 3. **Neither resolves.** A matched cell type with no in-cell label and no
    matching LEF macro is an application error naming the cell type — never a
    silently dropped pin or an unconnected instance.
@@ -723,15 +740,24 @@ unrelated cells collapsed into one bogus composite name
 (`net_a|net_b|net_c|...`, reported in `merged_net_labels[]` — see "Merged
 net labels" below), purely because a *different* macro was black-boxed.
 
-So the matched instances' own pre-erasure `nwell`/`substrate_isolation`
-cover is unioned back into the **classification** side only. The erased
-region remains the **conductor**: a black box's well is still not a wire the
-parent can route through, `--abstract-cell-lef` pin probing still cannot
-bind a pin onto it, and the PMOS body terminal still reads the conductor
-region so no device can be recognised with a body terminal whose geometry
-was erased. The practical contract: **extracting with `--abstract-cells` on
-one cell type must report the same net names for every net that does not
-touch that cell as a flat (no-`--abstract-cells`) extraction does.**
+The matched instances' pre-erasure `nwell`/`substrate_isolation` cover is
+unioned back into the body-identity classifications. Nwell geometry is also
+retained as an electrical conductor (issue #2082): wells in abutted cells
+physically join across cell boundaries, so well/body pins must see that
+continuity even when the devices are black boxes. This uses the original
+polygons with each instance's placement transform. Separate wells remain
+separate, and wrongly tied wells and broken metal supplies still produce
+power-connectivity findings. Metals retain precedence for LEF pin probing.
+Device-recognition geometry, including active/poly and internal signal
+ties, remains erased; retaining a well does not restore devices inside a
+black box.
+
+A newly extracted SPICE netlist therefore carries the resolved well
+connectivity directly. Standalone SPICE files produced by older versions
+carry no abstraction metadata and must be re-extracted to recover it; LVS
+cannot safely dismiss their body-pin findings merely from a pin name.
+The practical contract remains: **abstracting one cell type must preserve
+the net identities of physically unrelated geometry elsewhere in the design.**
 
 **Output.** Every distinct matched cell type becomes its own
 `.SUBCKT <cell type> <pins...> ... .ENDS` block in the written SPICE (empty
@@ -804,6 +830,38 @@ instance's input nets (the input is wired first, for the same reason). Two
 connectivity: both are already real, externally-routed nets, and which one is
 larger says nothing about which one this pin's geometry belongs to.
 
+**Candidate discovery stops at a second declared pin** (issue #1994). The
+"named beats unnamed" rule above is only as good as the candidate list it is
+handed, and the walk that discovers extra candidates — the cell's own
+pre-erasure poly/diffusion connectivity — is also how a real standard cell
+ties one of its pins to another *inside* the black box. A tie/constant
+generator is the worked example: `sky130_fd_sc_hd__conb_1` draws no diffusion
+at all and produces its constants by tying `HI` to the `VPWR` rail (and `LO`
+to `VGND`) through a plain poly strip, so walking out from the `HI` label
+reaches the cell's own supply rail. Offered that candidate, the ranking has no
+way to refuse it: a supply rail always carries a name, and a genuinely
+*unused* tie output's own island never does, so every unused `HI` bound
+straight onto `VPWR`.
+
+The practical failure that produced was backwards — a design extracted
+`match` while its power grid was **missing** (no rail geometry, so no named
+candidate for the pin to lose to) and turned into dozens of false `klt lvs`
+errors the moment the grid was *added*, all of them pointing at cells working
+exactly as intended. So candidate discovery now checks whether the cell-local
+net it walked onto carries **another declared pin's label** (scanned across
+every label layer the deck declares, so a rail labelled on `met1` is still
+seen from a signal pin labelled on `li1`). If it does, the walk has crossed a
+pin boundary, the net's unlabelled fragments can no longer be attributed to
+either pin, and only fragments carrying *this* pin's own label are kept — so
+the pin falls back to its own declared access point rather than to a wrong
+answer. An abstracted cell's interior tie is not something a black box is
+allowed to expose in the first place; that is exactly why abstraction erases
+the poly/diffusion carrying it before the real extraction pass runs.
+
+A tie output the parent genuinely *does* route to the supply rail is
+unaffected: that connection is drawn outside the cell, survives erasure, and
+resolves through the pin's own primary access point like any other routed pin.
+
 **Self-check: two declared pins on one net.** After wiring, any abstracted
 instance that resolved two or more of its *separately declared* pins onto
 the same net produces one aggregated `warnings[]` entry naming the instance,
@@ -819,7 +877,12 @@ declare separate body-tie pins that the layout ties to the rails, e.g.
 sky130's `VPB`/`VPWR` and `VNB`/`VGND` pairs. That is the design's own
 intent, not a fault; the entry is aggregated into a single `warnings[]`
 string (with a count for the remainder) precisely so a whole-block flow that
-trips it everywhere stays readable.
+trips it everywhere stays readable. That legitimacy is also why it stays a
+warning rather than becoming a hard failure (issue #2142 asked): on a real
+sky130 block every abstracted standard cell trips it by design, so failing
+on it by default would reject correct netlists wholesale. The fault it was
+reported against is instead fixed at its source — see the probe-layer rules
+above.
 
 **Mirrored/rotated instances** resolve their pins correctly: each
 occurrence's own instance transform (rotation, mirroring, array
@@ -3242,11 +3305,13 @@ counting them here would double-count it (#226):
   comment their active-layer parasitic caps out for the same reason.
 
 The coefficients are curated per-PDK-family in each deck module's `PARASITICS`
-table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py` / `sg13g2.py`),
+table (`src/klayout_tools/decks/sky130.py` / `gf180mcu.py` / `sg13g2.py` /
+`sg13cmos5l.py`),
 **transcribed with citations from each PDK's public magic-format technology
 file** — `sky130.tech` / `gf180mcu.tech` in fossi-foundation/open-pdks
 (GPLv3), and `libs.tech/magic/ihp-sg13g2-extract.tech` in
-IHP-GmbH/IHP-Open-PDK (Apache-2.0) — sheet resistances from its `resist`
+IHP-GmbH/IHP-Open-PDK and `libs.tech/magic/ihp-sg13cmos5l-extract.tech`
+in IHP-GmbH/ihp-sg13cmos5l (both Apache-2.0) — sheet resistances from its `resist`
 entries, area/fringe capacitances from its `defaultareacap` /
 `defaultperimeter` entries, vertical-overlap coupling from its
 `defaultoverlap` entries — never NDA'd, the same public-source curation
@@ -3263,6 +3328,20 @@ full rationale, including why `ihp-sg13g2-extract.tech` (not
 `libs.tech/parasitics/itf/sg13g2_typ.itf`) is the source: the `.itf` file
 carries only a raw process-stack description with no directly-transcribable
 area/perimeter-capacitance table.
+
+`sg13cmos5l` covers all five metal levels (Metal1-Metal4, TopMetal1) and
+four adjacent vertical-overlap pairs (issue #2113). Its coefficients come
+from its own [pinned Magic extraction file](https://github.com/IHP-GmbH/ihp-sg13cmos5l/blob/607e18d4bd9214a52575c194b4181ef449f9252f/libs.tech/magic/ihp-sg13cmos5l-extract.tech),
+using nominal `variants (),(lvs)` resistance and `variants ()` capacitance.
+Source mΩ/square and aF-based capacitances are divided by 1000 for Ω/square
+and fF-based coefficients. Magic's `metal5` here is **TopMetal1 (126/0)**;
+SG13G2's Metal5 and TopMetal1 capacitances do not describe this stack.
+The table uses the source's `defaultperimeter` values, including M2/M4
+entries that differ from its `defaultsideoverlap`-to-substrate primitive.
+This adds nominal, first-order interconnect R/C to the existing extraction
+model; it does not add process-corner selection or calibrated PLL/PVT
+signoff. Diffusion/poly, via resistance, and lateral coupling coefficients
+remain uncurated for this deck.
 
 Even so, the R/C values remain **order-of-magnitude and uncalibrated to
 silicon**: while now sourced and re-verifiable against the published process
@@ -4913,6 +4992,74 @@ deterministic across runs of the same layout/deck but is **not** meaningful
 on its own — use `net_id`, not the `_dup<n>` count, to identify which net an
 instance name's card belongs to.
 
+### Hierarchical net names are dot-free (issue #2145)
+
+A net can arrive carrying an **instance path** in its name, joined with a
+dot — `XBIAS.vb1`, `XS1.nh`. The two ways this happens today are
+`--def-net-names` (issue #951), which replays `klt place-and-route`'s own
+DEF net names onto the extracted nets, and a drawn label that spells the
+same convention by hand. It is precisely the internal nodes of a composed,
+routed cell — the set a `--parasitics` post-layout run wants to probe — that
+get named this way.
+
+`.` is **ngspice's own hierarchy separator**, so a node token containing one
+is read as a path expression, not as a flat identifier:
+`v(xdut.XBIAS.vb1)` parses as instance `xdut` → instance `XBIAS` → node
+`vb1`. Since the flattened cell has no instance called `XBIAS`, the node
+cannot be probed, `.meas`'d, or `.ic`'d by the very name the netlist wrote
+for it — and the same token means one thing in the `.SUBCKT` pin list and
+another wherever a node reference is parsed. Unlike the comma and
+leading-`$` cases above, KLayout's `NetlistSpiceWriter` applies no escape of
+its own here: a net named `XBIAS.vb1` was written verbatim.
+
+**`klt extract` therefore renames the net itself, to `_`:**
+
+| Original net name | Reported and written as |
+|---|---|
+| `XBIAS.vb1` | `XBIAS_vb1` |
+| `XS1.nh,XS1.nt` (also label-merged) | `XS1_nh\|XS1_nt` |
+| `VPWR` (no dot) | `VPWR` — unchanged |
+
+The exact rule, so a consumer never has to re-derive it:
+
+- **Only net/node tokens are rewritten.** SPICE dot-commands (`.SUBCKT`,
+  `.ENDS`, `.GLOBAL`, `.model`, …) and numeric literals with a decimal point
+  (`L=0.28U`, `3.99494e-16`) are a different lexical class entirely, written
+  from different inputs, and are never touched.
+- **Every dot in the name is replaced**, not only the first — `A.b.c`
+  becomes `A_b_c`.
+- **The rewrite composes with the other two** (`,` → `|`, leading `$` →
+  `\$`) rather than replacing them; all three are applied to the same name.
+- **One spelling everywhere.** The renamed net is what the written SPICE
+  netlist, `nets[].name`, `devices[].nets[...]`, `merged_net_labels[].net`,
+  `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`, the `--spef`
+  output, and `klt lvs`'s `net_correspondence[]`/`mismatches[].net` all
+  carry — the same cross-artifact join-by-name property the `,`/`$` rules
+  already preserve. A simulated node name still maps back to the report by
+  exact string match.
+- **Collisions are resolved per netlist, not per name.** No rewrite that
+  leaves dot-free names alone can be injective, so `a.b` can land on a
+  pre-existing `a_b`, and `a.b_c` and `a_b.c` both want `a_b_c`. Within one
+  circuit the first claimant keeps the unsuffixed spelling and each later
+  one gets the smallest free `_<n>` suffix (`a_b_1`, `a_b_2`, …), so two
+  distinct nets never share a name in one written netlist. Use `net_id`
+  (`Net.cluster_id`), not the suffix, to identify a net.
+- **It is disclosed, not silent.** Every run that renames at least one net
+  appends a `warnings[]` entry naming the count and up to five
+  `before -> after` examples.
+- **CLI net-name arguments use the rewritten spelling.**
+  `--critical-net`, `--distributed-rc`, `--mom-net` and `--mom-rlc-net` all
+  match against the post-rename namespace — i.e. against exactly what
+  `nets[].name` reports. (`--pins`/`--def-pins`/`--top-cell-pins` are
+  matched *before* the rename, against the raw drawn-label text, the same as
+  for the `,` case — see "Declared pins" above.)
+- **`klt lvs` is unaffected in its matching.** `NetlistComparer` pairs nets
+  by connectivity, never by name (see "Anonymous net numbering" above), so
+  renaming a layout net changes what is *reported*, not what is *matched*.
+
+A net whose name never contained a dot — the overwhelming majority — is
+byte-identical to a run before this rule existed.
+
 ## Verified compatible with `klt sim`'s netlist convention
 
 Hard acceptance bar (Epic #153: "`klt extract` output feeds `klt sim`
@@ -5040,7 +5187,7 @@ exit codes).
     "klayout_version": "0.29.8",
     "pdk": null,
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
 ```
@@ -5340,6 +5487,22 @@ written to stdout. No Python traceback is printed.
   ```json
   { "schema_version": 1, "error": { "command": "extract", "message": "unknown deck 'nope' (available: gf180mcu, sky130)" } }
   ```
+
+## Cross-validation against magic (independent oracle)
+
+`klt extract`'s device list, device parameters and connectivity are
+cross-checked against **magic**'s `extract` -> `ext2spice` flow — a separate
+extractor with its own open_pdks device recognition (issue #2014, pairing #1
+of tracking issue #2007). On the same GDS bytes the two agree exactly, on both
+sky130 and gf180mcu: device count, per-class counts, every
+`w`/`l`/`as`/`ad`/`ps`/`pd` value, drain/gate/source nets, and net count —
+and they react identically to seeded defects (an input-to-output short, a set
+of deleted `licon1` cuts). `tests/test_extract_magic_oracle.py` is
+real-binary-gated and skips without `magic`;
+`.github/workflows/magic-oracle.yml` runs it for real on demand. Parasitic
+extraction (`--parasitics`) is *not* covered by that pairing. See
+[`docs/design/magic-oracle.md`](../design/magic-oracle.md) for the
+methodology, the measured results, and the declared naming/scope differences.
 
 ## Out of scope
 

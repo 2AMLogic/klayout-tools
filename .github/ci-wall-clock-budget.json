@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "CI wall-clock budgets for .github/workflows/ci.yml, enforced by the",
+    "'CI wall-clock budget' job via scripts/check_ci_wall_clock.py (issue",
+    "#1971). Budgets are in SECONDS and were derived from the measured",
+    "baseline recorded below -- see docs/guides/ci-wall-clock-budget.md for",
+    "the full per-job breakdown, the derivation, and how to re-measure.",
+    "",
+    "These are regression budgets, NOT the hard ceilings that ci.yml's",
+    "per-job `timeout-minutes` already provides. A timeout only fires once a",
+    "job blows way past budget (the `test` matrix has a 45-minute ceiling on",
+    "a job whose median is 3 minutes); these budgets fire at roughly 2x the",
+    "measured p90, which is the band where a real regression lives and",
+    "ordinary runner noise does not.",
+    "",
+    "Raising a budget is a legitimate change -- say why in the PR. Silently",
+    "raising it to make a red run green is the drift this file exists to stop."
+  ],
+  "exclude_jobs": [
+    "CI wall-clock budget"
+  ],
+  "default_job_budget_seconds": 600,
+  "total_job_budget_seconds": 1500,
+  "run_wall_clock_budget_seconds": 1800,
+  "jobs": {
+    "Lint (ruff)": 120,
+    "Native engines (Rust)": 240,
+    "Native engines (Rust) — congestion pre-check": 120,
+    "Native engines (Rust) — yield statistics": 120,
+    "Native engines (Rust) — static timing": 120,
+    "Native engines (Rust) — technology mapping": 120,
+    "Native engines (Rust) — waveform build/query": 120,
+    "site/ (tsc + vitest)": 120,
+    "Tests (Python 3.10)": 360,
+    "Tests (Python 3.11)": 360,
+    "Tests (Python 3.12)": 360,
+    "Tests (Python 3.13)": 360,
+    "klt verify Action smoke test": 120
+  },
+  "baseline": {
+    "measured_on": "2026-09-17",
+    "sample": "the 25 most recent successful ci.yml runs",
+    "source": "gh api repos/2AMLogic/klayout-tools/actions/runs/<id>/jobs",
+    "total_job_seconds_min": 978,
+    "total_job_seconds_median": 1006,
+    "total_job_seconds_max": 1094,
+    "run_wall_clock_seconds_median": 408,
+    "run_wall_clock_seconds_p90": 488,
+    "run_wall_clock_seconds_max": 782,
+    "job_seconds_p90": {
+      "Lint (ruff)": 14,
+      "Native engines (Rust)": 113,
+      "Native engines (Rust) — congestion pre-check": 38,
+      "Native engines (Rust) — yield statistics": 44,
+      "Native engines (Rust) — static timing": 43,
+      "Native engines (Rust) — technology mapping": 13,
+      "Native engines (Rust) — waveform build/query": 28,
+      "site/ (tsc + vitest)": 9,
+      "Tests (Python 3.10)": 194,
+      "Tests (Python 3.11)": 188,
+      "Tests (Python 3.12)": 188,
+      "Tests (Python 3.13)": 179,
+      "klt verify Action smoke test": 26
+    },
+    "job_seconds_max": {
+      "Lint (ruff)": 55,
+      "Native engines (Rust)": 117,
+      "Native engines (Rust) — congestion pre-check": 41,
+      "Native engines (Rust) — yield statistics": 45,
+      "Native engines (Rust) — static timing": 46,
+      "Native engines (Rust) — technology mapping": 14,
+      "Native engines (Rust) — waveform build/query": 47,
+      "site/ (tsc + vitest)": 10,
+      "Tests (Python 3.10)": 200,
+      "Tests (Python 3.11)": 194,
+      "Tests (Python 3.12)": 198,
+      "Tests (Python 3.13)": 187,
+      "klt verify Action smoke test": 28
+    }
+  }
+}

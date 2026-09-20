@@ -423,6 +423,65 @@ command's own contract changes:
   coupling-canary fixtures in `tests/test_pex.py` keep theirs for exactly
   that reason.
 
+## Unbiased device bodies invalidate the comparison (issue #1983)
+
+A PMOS device's body terminal extracts onto a **floating, anonymous net** (a
+KLayout-synthesized `$5`-style name) whenever no well tie — drawn or derived
+— reaches that device's `nwell` island. Per
+[`extract.md`](extract.md#coverage), that net has **no DC bias path at all**,
+which makes a full-circuit resimulation of the extracted netlist
+"physically wrong, not merely imprecise": ngspice converges and produces
+numbers, and those numbers are not comparable to a schematic-level
+netlist's.
+
+`klt pex`'s entire output *is* such a resimulation, compared row-by-row
+against a schematic leg — so this condition does not merely reduce a
+`delta[]` row's precision, it invalidates the comparison the row reports. And
+a `klt pex` report is the artifact
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 (post-layout
+verification — the item with the strictest citation rule in the checklist) is
+cited from, while never carrying the extraction's own JSON. A reader of a
+committed `klt pex` record therefore had no way to tell a post-layout number
+measured on a properly-biased netlist from one measured on a floating-body
+netlist.
+
+The `body_bias` block states it:
+
+```json
+"body_bias": {
+  "status": "unbiased",
+  "unbiased_device_count": 3,
+  "unbiased_nets": ["\\$5", "\\$7"],
+  "unbiased_pmos_body_nets": [
+    {"device": "$1", "net": "\\$5"},
+    {"device": "$2", "net": "\\$5"},
+    {"device": "$3", "net": "\\$7"}
+  ]
+}
+```
+
+It is reduced from the extraction this command drove itself (`klt extract`'s
+`unbiased_pmos_body_nets[]`, issue #555) — nothing here re-derives the
+condition, and the entries are carried through verbatim, same field name and
+same `{"device", "net"}` shape, so a reader who knows one artifact already
+knows the other.
+
+**Reported, not enforced.** `status` is untouched: a run whose deltas all met
+tolerance still reports `status: "pass"` with `body_bias.status: "unbiased"`,
+and the exit code is unchanged. Whether an unbiased body should invalidate a
+*claim* is a policy question for the consumer of the evidence — `klt signoff`
+surfaces it on item 7's citation (`citation.body_bias`, see
+[`signoff.md`](signoff.md)) without grading on it, and
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7 states the
+condition a `pex` citation is only valid under. Grading on it here would
+retroactively fail every design on a PDK whose deck has no well-tap
+mechanism, which is a separate decision from making the condition visible.
+
+**A clean run says so positively.** `status: "biased"` with a zero count is
+emitted for a run that checked and found every body biased — distinct from a
+pre-#1983 record that never reported it at all, where the field is simply
+absent.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -505,6 +564,13 @@ full `repo`/`external`/`absent` scope meanings.
   "passed": 3,
   "failed": 0,
   "errored": 0,
+  "coverage": {
+    "testbenches": 1,
+    "delta_rows": 3,
+    "corners_compared": 3,
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
+  },
   "pin_count_mismatch": null,
   "flat_dut_mismatch": null,
   "provenance": {
@@ -512,7 +578,7 @@ full `repo`/`external`/`absent` scope meanings.
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "volare", "version": "<stamp>" },
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
 ```
@@ -522,15 +588,17 @@ full `repo`/`external`/`absent` scope meanings.
 | Field               | Type              | Description                                                                          |
 | ------------------- | ----------------- | -------------------------------------------------------------------------------------- |
 | `schema_version`    | integer           | Version of this command's JSON shape (`2` as of issue #1261's `{path, scope}` path-normalization change, per `docs/json-contract.md`).      |
-| `status`             | string            | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass` — mirrors `klt sim`. |
+| `status`             | string            | Aggregate: `"pass"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence: `error` > `fail` > `not_checked` > `pass` — mirrors `klt sim`. |
 | `layout`             | object            | `{path, scope}` — `<layout>` normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when `<layout>` sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
 | `netlist`            | object            | `{path, scope}` — the extracted (parasitic-annotated) netlist `klt extract` wrote, normalised the same way as `layout`. |
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
 | `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), and `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
+| `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
 | `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
 | `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |
+| `coverage`           | object            | Issue #1996 (additive field). What this `status` was actually compared over: `testbenches`, `delta_rows`, `corners_compared`, plus the shared `nothing_checked`/`nothing_checked_reasons` roll-up. See "`coverage`: an empty `delta[]` is not a pass" below. |
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
@@ -546,14 +614,32 @@ full `repo`/`external`/`absent` scope meanings.
 | `delta_pct`       | number \| null  | `100 * (extracted_value - schematic_value) / abs(schematic_value)`, rounded to 3 decimals; `null` when either value is missing or `schematic_value` is exactly `0`. |
 | `status`          | string          | `"pass"`, `"fail"`, or `"error"` — mirrors the **extracted-side** measurement's own `klt sim` status (the side item 7 actually grades) against its declared `measurements[].limits`, except `"error"` also covers a missing/errored schematic-side value (no trustworthy delta to report). Never a delta-magnitude threshold of its own — the same measurement `limits` a caller already declared, not a second, undocumented tolerance. |
 
+### `coverage`: an empty `delta[]` is not a pass
+
+The [common v1 coverage contract](../coverage-contract.md) accompanies the
+existing `testbenches`, `delta_rows` and `corners_compared` coverage counters.
+`checked` names actual `(corner, spec_row)` comparisons with pass/fail
+results. Error rows are `unavailable_comparison` skips; a testbench with no
+corners or measurements is a `no_comparison_pairs` skip.
+
+A comparison with identical values still produces a checked row and can
+pass. An empty `delta` is known zero (`no_delta_rows`): without another
+failure/error it now returns `status: "not_checked"`, exit 4. Error rows can
+also leave zero actual comparisons, but the aggregate remains `error` with
+exit 4. The legacy counters continue to include all delta rows, so a row
+count alone must not be treated as proof of comparison.
+
+`klt signoff` refuses zero, unknown or malformed common coverage. Partial
+comparisons remain disclosed for the Phase 2 success policy.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                     |
 | --------- | -------------------------------------------------------------------------------------------- |
-| `0`       | Every `delta[]` row passed.                                                                   |
+| `0`       | At least one actual comparison ran and every `delta[]` row passed.                                                                   |
 | `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
-| `4`       | Ran successfully; at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2). |
+| `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2). |
 
 (`2` is reserved for argparse usage errors, as with every other `klt`
 subcommand. Exit codes `3`/`4` mirror `klt sim`'s own precedent — see

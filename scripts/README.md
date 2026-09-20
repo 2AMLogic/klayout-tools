@@ -19,6 +19,8 @@ scripts/
   install-icarus-verilog.sh      # build + install a pinned, checksum-verified Icarus Verilog from source (CI provisioning)
   install-verilator.sh           # build + install a pinned, checksum-verified Verilator from source (CI provisioning)
   install-symbiyosys.sh          # install a pinned SymbiYosys (sby) + Bitwuzla backend for sequential equivalence checking (CI provisioning, #1312)
+  install-magic.sh               # build + install a pinned, checksum-verified magic from source for the DRC/extract cross-validation oracle (#2014)
+  fetch-magic-tech.sh            # generate the open_pdks magic decks (sky130A, gf180mcuC) that oracle runs against, from pinned open_pdks source (#2014)
   _install_common.sh             # shared fetch/checksum/build boilerplate sourced by the install-*.sh scripts (#687)
   ci-apt-install.sh              # mirror-resilient `apt-get update && apt-get install` for CI's package steps
   check-release-lag.sh           # report how far main has drifted ahead of the latest tagged release (#1020)
@@ -144,6 +146,41 @@ scripts/install-verilator.sh
 uv sync --extra dev --extra functional-verification
 uv run pytest tests/test_functional_verification_toolchain_pins.py
 ```
+
+## `install-magic.sh` / `fetch-magic-tech.sh`
+
+Provisioning for the magic-backed cross-validation oracle (issue #2014,
+pairing #1 of tracking issue #2007):
+[`tests/test_drc_magic_oracle.py`](../tests/test_drc_magic_oracle.py) and
+[`tests/test_extract_magic_oracle.py`](../tests/test_extract_magic_oracle.py)
+check `klt drc` / `klt extract` against magic, an independently implemented
+geometry engine. Both test modules skip cleanly without these two — they are
+run for real by
+[`.github/workflows/magic-oracle.yml`](../.github/workflows/magic-oracle.yml)
+(`workflow_dispatch`).
+
+`install-magic.sh` builds a pinned, checksum-verified magic from source with
+`--without-x` (headless). `apt-get install magic` resolves Ubuntu 24.04's
+`8.3.105`, which the open_pdks decks — both declaring `requires
+magic-8.3.411` — reject outright; same stale-distro-package reasoning as
+`install-yosys.sh`. Same `--force`/idempotent/`$MAGIC_INSTALL_PREFIX`
+conventions.
+
+`fetch-magic-tech.sh` generates the `sky130A`/`gf180mcuC` magic technology
+files into gitignored `pdks/magic-tech/` by running open_pdks' own
+`preproc.py` over its own source `.tech` files — three small files from a
+pinned, checksummed open_pdks commit, rather than a multi-GB PDK install
+(an installed open_pdks PDK works too; the oracle resolves that path first).
+
+```
+scripts/install-magic.sh
+export PATH="$HOME/.cache/magic-8.3.683/bin:$PATH"
+scripts/fetch-magic-tech.sh
+uv run pytest tests/test_drc_magic_oracle.py tests/test_extract_magic_oracle.py
+```
+
+See [`docs/design/magic-oracle.md`](../docs/design/magic-oracle.md) for the
+methodology, the measured results, and the declared shared surface.
 
 ## `ci-apt-install.sh`
 

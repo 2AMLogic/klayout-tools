@@ -261,8 +261,66 @@ def test_cli_json_contract_keys(tmp_path, pdk_root, capsys):
         "navigable_regions",
         "drc_hints",
         "warnings",
+        "provenance",
     }
     assert data["device_count"] == 2
+
+
+def test_generate_report_includes_provenance_block(tmp_path, pdk_root):
+    """Issue #2035: `klt gen`'s report must carry the same shared
+    `provenance` block (klt version + KLayout engine version) every other
+    verb's report already carries, built via `build_provenance(pdk=...)`.
+    A generator request involves no rule/model deck and no single input
+    layout stream, so `deck`/`input` stay `None` -- matching `klt lvs`
+    against a pre-extracted netlist."""
+    output = tmp_path / "res.gds"
+    report = generate(
+        {
+            "generator": "resistor_strip",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "options": {"output": str(output)},
+        }
+    )
+
+    provenance = report["provenance"]
+    assert set(provenance) == {
+        "klt_version",
+        "klayout_version",
+        "pdk",
+        "deck",
+        "input",
+    }
+    assert provenance["klt_version"]
+    assert provenance["klayout_version"]
+    # No rule/model deck and no single input layout stream for this verb.
+    assert provenance["deck"] is None
+    assert provenance["input"] is None
+    # `provenance.pdk` must agree with the report's own top-level `pdk`.
+    assert set(provenance["pdk"]) == {"name", "source", "version"}
+    assert provenance["pdk"]["name"] == report["pdk"]["variant"]
+    assert provenance["pdk"]["version"] == report["pdk"]["version"]
+    assert provenance["pdk"]["source"]
+
+
+def test_generate_provenance_pdk_resolves_via_env_fallback(
+    tmp_path, pdk_root, monkeypatch
+):
+    """Issue #2035, edge case: `provenance.pdk` must still resolve when the
+    PDK comes from the `$PDK`/`$PDK_ROOT` env-var fallback rather than an
+    explicit request `pdk` block -- the same fallback `generate()`'s own
+    docstring describes."""
+    monkeypatch.setenv("PDK", "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(pdk_root))
+    output = tmp_path / "res_env.gds"
+    report = generate(
+        {
+            "generator": "resistor_strip",
+            "options": {"output": str(output)},
+        }
+    )
+
+    assert report["provenance"]["pdk"]["name"] == "sky130A"
+    assert report["provenance"]["pdk"]["name"] == report["pdk"]["variant"]
 
 
 def test_cli_default_format_is_text(tmp_path, pdk_root, capsys):
@@ -424,6 +482,68 @@ def test_cli_bad_format_is_usage_error(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main(["gen", "resistor_strip", "--format", "bogus"])
     assert excinfo.value.code == 2
+
+
+# --------------------------------------------------------------------------- #
+# Self-detected usage errors emit the documented envelope (issue #2029)
+#
+# These two paths are past argparse -- `args.format` is known -- so the
+# json-contract carve-out for argparse's own plain-text usage errors does not
+# cover them. They owe the caller the documented JSON error envelope while
+# still exiting 2 (a usage error), not 1 (an application error).
+# --------------------------------------------------------------------------- #
+
+#: (test id, argv after "gen", substring the message must contain)
+_SELF_DETECTED_USAGE_ERRORS = [
+    ("missing_generator", [], "generator name is required"),
+    (
+        "generator_with_pdk_pcell",
+        ["resistor_strip", "--pdk-pcell", "toy_lib/ToyCell"],
+        "cannot be given too",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "argv,message_fragment",
+    [(argv, fragment) for _id, argv, fragment in _SELF_DETECTED_USAGE_ERRORS],
+    ids=[case_id for case_id, _argv, _fragment in _SELF_DETECTED_USAGE_ERRORS],
+)
+def test_cli_usage_error_json_envelope(argv, message_fragment, capsys):
+    exit_code = main(["gen", *argv, "--format", "json"])
+
+    captured = capsys.readouterr()
+    # Exit 2 asserted explicitly: routing these paths through `emit_error`
+    # must not silently collapse EXIT_USAGE_ERROR into ERROR_EXIT_CODE (1).
+    assert exit_code == 2
+    assert captured.out == ""
+
+    error = json.loads(captured.err)
+    assert error["schema_version"] == 1
+    assert error["error"]["command"] == "gen"
+    assert isinstance(error["error"]["message"], str)
+    assert error["error"]["message"]
+    assert message_fragment in error["error"]["message"]
+    assert "Traceback" not in captured.err
+    # The envelope carries the message alone -- the text rendering's `klt gen:`
+    # prefix must not leak into the JSON payload.
+    assert not error["error"]["message"].startswith("klt gen:")
+
+
+@pytest.mark.parametrize(
+    "argv,message_fragment",
+    [(argv, fragment) for _id, argv, fragment in _SELF_DETECTED_USAGE_ERRORS],
+    ids=[case_id for case_id, _argv, _fragment in _SELF_DETECTED_USAGE_ERRORS],
+)
+def test_cli_usage_error_text_format_unchanged(argv, message_fragment, capsys):
+    """`--format text` keeps the pre-existing `klt gen: <message>` line."""
+    exit_code = main(["gen", *argv])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err.startswith("klt gen: ")
+    assert message_fragment in captured.err
 
 
 # --------------------------------------------------------------------------- #
@@ -5790,7 +5910,8 @@ def sg13cmos5l_pdk_root(tmp_path):
 def test_pdk_family_resolves_ihp_sg13cmos5l_variant_alias():
     """`_pdk_family` must resolve the real-world `"ihp-sg13cmos5l"` variant
     string to the `"sg13cmos5l"` family key -- the same
-    `_PDK_VARIANT_FAMILY_ALIASES` mechanism `"ihp-sg13g2"` relies on."""
+    `pdk_families.PDK_VARIANT_FAMILY_ALIASES` mechanism `"ihp-sg13g2"`
+    relies on."""
     assert gen._pdk_family(_SG13CMOS5L_VARIANT) == "sg13cmos5l"
 
 
@@ -7792,6 +7913,48 @@ def test_dogbone_terminal_example_matches_committed_json(family):
 
     assert actual["status"] == "clean"
     assert actual == expected
+
+
+def _load_dogbone_example_generator():
+    """Import `examples/dogbone-terminal/generate.py` as a module (it lives
+    outside the installed package, so it has no importable name of its own)."""
+    import importlib.util
+
+    script = _DOGBONE_EXAMPLE_DIR / "generate.py"
+    spec = importlib.util.spec_from_file_location("_klt_dogbone_example_gen", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("family", ["sky130", "gf180mcu"])
+def test_dogbone_terminal_example_regenerates_byte_identical(tmp_path, family):
+    """Generator-level drift guard (issue #1977): re-running
+    `examples/dogbone-terminal/generate.py`'s own `build_example()` still
+    reproduces the committed `example_<family>.gds` byte-for-byte.
+
+    `test_dogbone_terminal_example_matches_committed_json` above only
+    re-runs `run_drc` against the *committed* GDS, so it cannot see the
+    generator itself drift -- which is exactly what happened before #1977:
+    `mos_array`'s gf180mcu unit device gained a source/drain implant
+    (`Nplus`, 32/0 -- #1581's `DF.12` fix) and its PCell parameter list grew
+    on both families, silently invalidating the committed streams while
+    every existing test stayed green.
+
+    A byte compare (rather than a geometry compare) is deliberate: the GDS
+    carries `mos_array`'s PCell context-info properties too, so a parameter
+    added to the generator drifts the fixture without moving a single
+    polygon. When this fails, regenerate with
+    `uv run --extra dev python3 examples/dogbone-terminal/generate.py` and
+    review the resulting diff as a deliberate fixture update.
+    """
+    generate_module = _load_dogbone_example_generator()
+
+    gds_path, _ = generate_module.build_example(family, str(tmp_path))
+
+    committed = _DOGBONE_EXAMPLE_DIR / f"example_{family}.gds"
+    assert Path(gds_path).read_bytes() == committed.read_bytes()
 
 
 def test_dogbone_terminal_example_channel_narrower_than_pads():

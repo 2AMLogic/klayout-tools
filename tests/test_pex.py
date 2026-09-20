@@ -31,7 +31,11 @@ import pytest
 from klayout_tools import sim
 from klayout_tools.cli import main
 from klayout_tools.pex import (
+    BODY_BIAS_BIASED,
+    BODY_BIAS_UNBIASED,
     PexError,
+    _body_bias_report,
+    _build_coverage,
     _build_delta_rows,
     _check_dut_declares_a_circuit,
     _delta_pct,
@@ -44,6 +48,7 @@ from klayout_tools.pex import (
     _rewrite_dut_include,
     _row_status,
     _subckt_interfaces,
+    _unextracted_delta_rows,
     run_pex,
 )
 
@@ -217,6 +222,54 @@ def test_check_dut_declares_a_circuit_raises_for_unreadable_file(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# `body_bias` (issue #1983): whether the extracted netlist this run
+# re-simulated actually had a DC bias path for every device body.
+# --------------------------------------------------------------------------- #
+
+
+def test_body_bias_report_biased_when_extraction_found_no_floating_bodies():
+    """The clean case: `klt extract` reported no unbiased PMOS body, so the
+    post-layout numbers are comparable to the schematic leg -- and the block
+    says so positively rather than merely staying empty."""
+    assert _body_bias_report({"unbiased_pmos_body_nets": []}) == {
+        "status": BODY_BIAS_BIASED,
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+        "unbiased_pmos_body_nets": [],
+    }
+
+
+def test_body_bias_report_biased_for_extraction_without_the_field():
+    """An extraction report that carries no `unbiased_pmos_body_nets` key at
+    all (nothing in this repo produces one, but the reduction must not
+    explode on a hand-built report) reads as the clean case."""
+    assert _body_bias_report({})["status"] == BODY_BIAS_BIASED
+
+
+def test_body_bias_report_unbiased_names_devices_and_nets():
+    """Issue #1983: a PMOS body on an anonymous, deck-synthesized net has no
+    DC bias path at all, which per `docs/cli/extract.md` makes a
+    resimulation of this netlist physically wrong -- `klt pex` now says so in
+    its own envelope, instead of that fact living only in an extraction
+    report a committed `klt pex` evidence record never carried.
+
+    The entries are carried through verbatim (same `{"device", "net"}` shape
+    `klt extract` uses), and `unbiased_nets` de-duplicates them so two PMOS
+    devices sharing one floating well read as one net, not two."""
+    entries = [
+        {"device": "$1", "net": "\\$5"},
+        {"device": "$2", "net": "\\$5"},
+        {"device": "$3", "net": "\\$7"},
+    ]
+    report = _body_bias_report({"unbiased_pmos_body_nets": entries})
+
+    assert report["status"] == BODY_BIAS_UNBIASED
+    assert report["unbiased_device_count"] == 3
+    assert report["unbiased_nets"] == ["\\$5", "\\$7"]
+    assert report["unbiased_pmos_body_nets"] == entries
+
+
+# --------------------------------------------------------------------------- #
 # `_delta_pct` / `_row_status`
 # --------------------------------------------------------------------------- #
 
@@ -349,6 +402,93 @@ def test_build_delta_rows_iterates_extracted_corner_order():
         spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
     )
     assert [row["corner_id"] for row in rows] == ["tt/1.800V/27C", "ss/1.620V/-40C"]
+
+
+# --------------------------------------------------------------------------- #
+# `coverage` / `nothing_checked` (issue #1996)
+# --------------------------------------------------------------------------- #
+
+
+def test_build_coverage_empty_delta_reports_nothing_checked():
+    """An empty delta reports known zero actual comparisons."""
+    coverage = _build_coverage(testbenches_summary=[], delta=[], corner_count=0)
+
+    assert coverage == {
+        "testbenches": 0,
+        "schema_version": 1,
+        "known": True,
+        "checked": [],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
+        "delta_rows": 0,
+        "corners_compared": 0,
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["no_delta_rows"],
+    }
+
+
+def test_build_coverage_real_comparison_with_zero_differences_is_not_nothing_checked():
+    """Issue #1996's edge case: a comparison that actually *ran* and found
+    every row within tolerance is not "nothing checked". `_build_delta_rows`
+    emits one row per compared `(corner, measurement)` pair unconditionally
+    -- there is no "within tolerance, so omit the row" path -- so the two
+    cases are structurally distinguishable, and this pins that."""
+    schematic = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    extracted = _sim_report(
+        [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+    )
+    rows = _build_delta_rows(
+        spec_row_prefix=None, schematic_report=schematic, extracted_report=extracted
+    )
+    # Identical values on both sides: a zero delta, and still a row.
+    assert [row["delta_pct"] for row in rows] == [0.0]
+
+    coverage = _build_coverage(
+        testbenches_summary=[
+            {"request": "tb.json", "corner_count": 1, "measurement_names": ["vout"]}
+        ],
+        delta=rows,
+        corner_count=1,
+    )
+
+    assert coverage == {
+        "testbenches": 1,
+        "schema_version": 1,
+        "known": True,
+        "checked": ['comparison:[0,"tt/1.800V/27C","vout"]'],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
+        "delta_rows": 1,
+        "corners_compared": 1,
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
+
+
+def test_build_coverage_errored_rows_are_unavailable_comparisons():
+    """Error rows are unavailable comparisons; the producer retains error status."""
+    rows = _unextracted_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=_sim_report(
+            [{"corner_id": "tt/1.800V/27C", "measurements": [_measurement(1.0)]}]
+        ),
+    )
+
+    coverage = _build_coverage(
+        testbenches_summary=[
+            {"request": "tb.json", "corner_count": 1, "measurement_names": ["vout"]}
+        ],
+        delta=rows,
+        corner_count=1,
+    )
+
+    assert coverage["delta_rows"] == 1
+    assert coverage["nothing_checked"] is True
+    assert coverage["nothing_checked_reasons"] == ["unavailable_comparison"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1253,10 +1393,37 @@ def test_integration_run_pex_end_to_end(tmp_path, resistor_layout):
     assert report["extraction"]["device_count"] == 1
     assert report["extraction"]["net_count"] == 2
     assert report["extraction"]["model"] is not None
+    # Issue #1983: a drawn poly resistor has no MOS body to leave floating,
+    # so the run states the clean verdict positively -- an item-7 reader can
+    # now tell "checked, every body biased" from "never reported", which
+    # before this field was indistinguishable.
+    assert report["body_bias"] == {
+        "status": "biased",
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+        "unbiased_pmos_body_nets": [],
+    }
     assert report["corner_count"] == 1
     assert report["passed"] == 1
     assert report["failed"] == 0
     assert report["errored"] == 0
+    # Issue #1996: a real comparison ran, so this `"pass"` is earned -- the
+    # edge case the coverage block exists to distinguish from an empty
+    # `delta[]`, checked here end to end against real ngspice rather than
+    # only against a hand-built row list.
+    assert report["coverage"] == {
+        "testbenches": 1,
+        "schema_version": 1,
+        "known": True,
+        "checked": ['comparison:[0,"default/novdd/27C","vout"]'],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
+        "delta_rows": 1,
+        "corners_compared": 1,
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    }
     assert len(report["testbenches"]) == 1
     assert report["testbenches"][0]["measurement_names"] == ["vout"]
     # Issue #1261: same normalization applies to each `testbenches[]`

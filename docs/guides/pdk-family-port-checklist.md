@@ -102,25 +102,126 @@ docstring documents the same list; re-verify line numbers against current
 | `_unmodeled_voltage_marker_registry()` | family → `UNMODELED_VOLTAGE_MARKERS` | Yes |
 | `_nominal_dbu_registry()` | family → `NOMINAL_DBU_UM` | Yes |
 | `_extraction_registry()` | family → `EXTRACTION_DECK` | Yes |
-| `_parasitics_registry()` | family → `PARASITICS` | **No** — parasitics are a later phase; a MOS-only starter has nothing calibrated yet |
+| `_parasitics_registry()` | family → `PARASITICS` | Yes — register the empty `ParasiticsDeck()` the starter declares. `klt extract --parasitics` then runs and discloses every un-curated metal level through `parasitics.metals_without_coefficient` and a `warnings[]` entry (issue #1440); an unregistered family fails outright with "unknown deck" instead |
 
 Each function has an inline `from . import ...` — add the new module name
 to that import line as well as the returned dict literal, in every
-function except `_parasitics_registry()`.
+function (issue #1440 was exactly `_parasitics_registry()` being skipped).
 
-### 4. Register in `pdk_models.py` for `klt extract --pdk`
+### 4. Declare the family, then register it for `klt extract --pdk`
 
-`src/klayout_tools/pdk_models.py` binds extracted devices to real PDK
-SPICE subcircuit names:
+**First**, declare the family itself in `src/klayout_tools/pdk_families.py`
+— the single authoritative variant→family classification for the whole
+package (issue #2026). Nothing else in the repo interprets a `--pdk`
+variant name into a family, so these two tables are where a new family
+becomes *knowable*:
+
+- `KNOWN_PDK_FAMILIES` — append the new family name. Keep the invariant
+  its own comment states: no family may be a prefix of another.
+- `PDK_VARIANT_FAMILY_ALIASES` — needed whenever the resolved `--pdk`
+  variant name (what `klt pdk find` reports, e.g. `ihp-sg13g2`) doesn't
+  share a prefix with the deck/family name (`sg13g2`). `sg13g2` needed
+  `PDK_VARIANT_FAMILY_ALIASES["ihp-sg13g2"] = "sg13g2"`; any IHP-shaped
+  family will need the analogous entry.
+
+**Then**, `src/klayout_tools/pdk_models.py` binds extracted devices to real
+PDK SPICE subcircuit names:
 
 - `_MOS_MODEL_TABLE[(deck_name, family)]` — the NMOS/PMOS (and HV
   variants, if curated) subckt name/terminal-order mapping.
-- `_KNOWN_PDK_FAMILIES` — append the new family name.
-- `_PDK_VARIANT_FAMILY_ALIASES` — needed whenever the resolved `--pdk`
-  variant name (what `klt pdk find` reports, e.g. `ihp-sg13g2`) doesn't
-  share a prefix with the deck/family name (`sg13g2`). `sg13g2` needed
-  `_PDK_VARIANT_FAMILY_ALIASES["ihp-sg13g2"] = "sg13g2"`; any IHP-shaped
-  family will need the analogous entry.
+
+### Required vs. optional: which family-keyed tables a port must touch
+
+*Reference aside covering §3 and §4, not a further step — the numbered
+steps resume at §5.*
+
+The lists in §3 and §4 are **not** the whole set of family-keyed tables in
+the repo, and they are deliberately not meant to be: the code holds
+dozens, and most carry meaning *by absence*. Blindly adding a row to every
+one of them makes the codebase worse, not better. Every family-keyed table
+falls into one of four categories, and only the first is a mandatory
+port step:
+
+| Category | Absence means | Port action | Examples |
+| --- | --- | --- | --- |
+| **Required registration** | the family silently misbehaves or is unknown | **Must add an entry** | `pdk_families.KNOWN_PDK_FAMILIES`, §3's six deck registries, `pdk_models._MOS_MODEL_TABLE` |
+| **Conditionally required** | a specific, advertised capability is missing | Add **iff** you advertise that capability | `pdk_families.PDK_VARIANT_FAMILY_ALIASES` (iff the variant name isn't prefix-matchable), calibrated parasitic coefficients inside the already-registered deck, `decks`' HV/resistor/cap device entries |
+| **Optional narrowing with a documented default** | a documented default applies — *not* an omission | Add only to override the default | `gen_layer_params._PDK_GATE_PAD_ACTIVE_CLEARANCE_UM` (defaults to `0.0`), `_PDK_CAP_GEOMETRY_MIN_UM` (generic geometry, not "capacitors unsupported"), `pdk_models._GEOMETRY_STYLE_BY_FAMILY` (defaults to unit-suffixed literals) |
+| **Declared support subset / exclusion list** | this subsystem does not cover the family, on purpose | Add only after actually verifying support | `pdk._CORNER_PDK_FAMILIES`, `remote_launcher._AMI_PDK_FAMILIES`, `gen_layer_params._MOS_ARRAY_WELL_TAP_FAMILIES`, `_GENERATOR_FAMILY_DEFERRED` |
+
+Two rules follow from this, and they are what keep a missed *required*
+registration (issue #1440's class) detectable without flattening the
+sparse tables:
+
+- **Classification is never restated.** A subsystem answers "do I support
+  this family?" locally, but never "what family is this variant?" — that
+  question has exactly one implementation,
+  `pdk_families.pdk_variant_family()`. The shape to copy is
+  `gen_layer_params._pdk_family()`: classify with the authoritative
+  helper, then check the result against your own table.
+- **A narrowing is declared, not implied.** Any family list shorter than
+  `KNOWN_PDK_FAMILIES` is built with `pdk_families.family_subset(...)`, so
+  a typo or a renamed family fails at import instead of silently shrinking
+  support. `tests/test_pdk_families.py` enforces this for every
+  `*_PDK_FAMILIES` constant in the package, and cross-checks that every
+  classification site agrees with the authoritative classifier.
+
+When you add a table of your own, put it in one of the four categories in
+its `#:` comment. "Which category is this?" having no written answer is
+precisely the ambiguity issue #2026 was filed about — a reader could not
+tell "short because only two families are supported" from "short because
+someone forgot".
+
+### Explicit capability decisions and the CI completeness check
+
+Membership validation alone cannot distinguish an intentional support withdrawal
+from an accidentally deleted entry. For each family in `KNOWN_PDK_FAMILIES`,
+declare every capability in
+[`pdk_capabilities.DECISIONS`](../../src/klayout_tools/pdk_capabilities.py),
+independently of the implementation registries (issue #2132):
+
+| Catalog capability | Precisely scoped promise |
+| --- | --- |
+| `curated_drc` | Starter rules and all four DRC metadata registrations in §3; empty metadata maps are allowed. |
+| `extraction` | A registered `ExtractionDeck`, without claiming every device class. |
+| `parasitics` | A registered `ParasiticsDeck`, distinguishing coefficient presence from registration. |
+| `default_mos_model_binding` | Default `(family, family)` `nfet` and `pfet` bindings, independently of voltage flavors and non-MOS models. |
+| `generator_layer_roles` | Family role resolution, subject to individual generator/option exclusions. |
+| `corner_resolution` | An implemented family corner resolver; installation availability is checked at runtime. |
+| `remote_ami_transport` | Maintained family AMI transport, still subject to `SUPPORTED_PDKS` and `ami_pdk_key()` variant restrictions. |
+| `mos_array_well_taps` | Verified automatic MOS-array well taps, independently of guard-ring support. |
+
+Use `supported` when the named owner declarations provide that capability.
+Use `unsupported` with a nonempty, capability-specific reason for a deliberate
+limit, and keep it consistent with the owner's support gate. A missing row or
+decision is an error; do not generate an unsupported default from missing data.
+New capabilities require explicit decisions for every known family too.
+
+Only `parasitics` allows `supported_without_coefficients`, with a reason and a
+real registered deck containing no RC/coupling coefficient values. `None` means
+missing; numeric zero is a declared coefficient, and geometric lookback distances
+are not coefficients. Once any coefficients are curated, change the decision to
+`supported`. That promises some declared values, not complete calibration or
+silicon accuracy; existing partial-gap warnings still apply. Test missing-data
+behavior with a synthetic empty deck so later coefficient additions can proceed.
+
+Run `uv run --extra dev pytest tests/test_pdk_capabilities.py`. Normal pytest/CI
+also runs this live-owner invariant without installed PDKs, external engines, or
+network access. Its adapter preserves unknown family keys and reads actual
+registries and support sets; failures identify family, capability, owner, and
+problem. Removing a required registration must fail this check even when the
+family remains registered elsewhere.
+
+Keep the sparse policies above: absent gate clearance means `0.0`, absent
+capacitor floors use generic geometry, and absent model geometry style uses
+unit-suffixed literals. A well/tap role alone does not establish verified tap
+insertion. In particular, sg13cmos5l's `mos_array` exclusion applies to
+`add_guard_ring`, while ordinary arrays remain supported. Family AMI membership
+does not enable every variant. None of these defaults require dummy table rows.
+
+This finite catalog covers eight named contracts, not every family-keyed table
+or automatically discovered capability. Parent #2011 remains open for its
+explicit completion review; completing #2132 does not by itself close that epic.
 
 ### 5. Golden-pair tests, not just unit tests
 

@@ -76,7 +76,10 @@ def test_real_doc_parses_without_error():
     doc = parse_tier_doc()
 
     assert [row["tier"] for row in doc["ladder"]] == ["T1", "T2", "T3", "T4"]
-    assert [item["id"] for item in doc["t1_items"]] == list(range(1, 11))
+    # Eleven items since issue #2025 added item 11 ("Power delivery
+    # (structural)") -- the checklist's own length, parsed, never a literal
+    # duplicated in code.
+    assert [item["id"] for item in doc["t1_items"]] == list(range(1, 12))
 
 
 def test_real_doc_ladder_rows_have_claim_and_demonstrated_by():
@@ -96,7 +99,7 @@ def test_real_doc_per_kind_items_have_both_columns():
     doc = parse_tier_doc()
     by_id = {item["id"]: item for item in doc["t1_items"]}
 
-    for item_id in (1, 2, 5, 7):
+    for item_id in (1, 2, 5, 7, 11):
         item = by_id[item_id]
         assert item["text"] is None
         assert set(item["columns"]) == {"analog", "digital"}
@@ -122,6 +125,7 @@ def test_real_doc_item_titles():
     assert titles[3] == "DRC clean"
     assert titles[4] == "LVS clean"
     assert titles[10] == "Repo hygiene"
+    assert titles[11] == "Power delivery (structural)"
 
 
 def test_real_doc_item_5_has_a_kind_independent_note():
@@ -130,6 +134,32 @@ def test_real_doc_item_5_has_a_kind_independent_note():
 
     assert len(item_5["notes"]) == 1
     assert "ratified" in item_5["notes"][0]
+
+
+def test_real_doc_item_11_columns_name_their_own_evidence():
+    """Issue #2025: item 11's two columns must each name the artifacts `klt
+    signoff` actually grades them on, and its shared note must carry the
+    `klt erc` supply-spec clause both columns rest on."""
+    doc = parse_tier_doc()
+    item_11 = next(item for item in doc["t1_items"] if item["id"] == 11)
+
+    assert item_11["text"] is None
+    assert "net_correspondence" in item_11["columns"]["analog"]
+    assert "klt erc" in item_11["columns"]["analog"]
+
+    digital = item_11["columns"]["digital"]
+    assert "power.pdn" in digital
+    assert "tapcell_master" in digital
+    assert "power_connectivity" in digital
+    assert "full-custom" in digital
+
+    assert len(item_11["notes"]) == 1
+    note = item_11["notes"][0]
+    assert "erc.missing_tie" in note
+    assert "erc.unconnected_net" in note
+    # IR-drop/EM stays out of T1 -- the ruling's own scoping, stated in the
+    # item so a reader cannot conflate the two questions.
+    assert "klt power" in note
 
 
 def test_default_doc_path_points_at_the_real_doc():

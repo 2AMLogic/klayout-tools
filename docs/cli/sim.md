@@ -79,6 +79,7 @@ application error (exit 1), exactly like an unsupported `engine`.
 | `local` (default) | Runs corners sequentially, one `ngspice -b` subprocess at a time, in-process.                                       |
 | `local-parallel`  | Fans the same expanded corner list across a bounded local worker pool (`concurrent.futures`) — same report, same corner order, just concurrent. |
 | `remote`           | Provisions one right-sized EC2 instance and runs the *same* `local-parallel` worker-pool code on it over SSH/SCP instead of the caller's own cores (Epic #253 Phase 2). See "Remote backend" below. |
+| `batch`            | Submits the *same* `local-parallel` invocation to 2am's EDA batch fleet as an S3 job contract — no `RunInstances` authority, no SSH key, diversified Spot capacity acquired by 2am's own launch script ([#2080](https://github.com/2AMLogic/klayout-tools/issues/2080)). See "Batch backend" below. |
 
 **`local-parallel` worker count.** `options.max_workers` (overridable with
 `--max-workers`) bounds the pool size. When omitted, it defaults to a
@@ -264,6 +265,131 @@ equality of the two backends are readable without provisioning anything;
 the field table above. The example's README carries the measured wall-clock
 comparison and the run's cost.
 
+## Batch backend
+
+`request.backend: "batch"` submits the corner matrix to
+[2AMLogic/2am](https://github.com/2AMLogic/2am)'s EDA batch fleet as an S3
+**job contract** instead of provisioning an instance itself
+([#2080](https://github.com/2AMLogic/klayout-tools/issues/2080), the consumer
+half of 2am#117). Like `remote`, it is **the same code path as
+`local-parallel`, run on a different box** — the submitted job command is a
+plain `klt sim ... --backend local-parallel --format json` invocation on the
+fleet's own pinned image, so corner expansion, ordering, measurement
+extraction, and pass/fail classification are never reimplemented for it.
+
+What differs from `remote` is *who acquires the machine*:
+
+| | `remote` | `batch` |
+| --- | --- | --- |
+| Capacity | This process calls `RunInstances` itself (Spot by default, one AZ/type) | 2am's `batch-fleet-provision.sh launch` calls `CreateFleet` across a diversified AZ × instance-type pool |
+| Credentials here | AWS credentials with `RunInstances` + an SSH private key on every host that runs a sim | An `aws` CLI profile name (`batch-runner-submit`) — S3 put/get only; no key material, no EC2 authority |
+| Transport | SSH/SCP push-then-pull | `s3://<bucket>/jobs/<job-id>/` (`job.json`, `inputs/`, `status.json`, `outputs/`) |
+| Spot interruption | The whole request fails | `status.json` reports `interrupted`; 2am's scheduled `reconcile` re-launches the job and this client simply keeps waiting |
+| Spend guardrail | A caller-side `max_hourly_cost_usd` estimate | The fleet's own shared concurrency cap and budget, enforced inside `launch` before any AWS call |
+
+```json
+{
+  "backend": "batch",
+  "models": { "pdk": "sky130A", "lib": "libs.tech/ngspice/sky130.lib.spice" },
+  "batch": {
+    "bucket": "<your-batch-jobs-bucket>",
+    "region": "us-east-1",
+    "profile": "batch-runner-submit",
+    "provision_script_path": "~/GitHub/2am/infra/aws/batch-fleet-provision.sh",
+    "poll_interval_s": 30,
+    "poll_timeout_s": 5400
+  }
+}
+```
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `batch.provision_script_path` | string, required (or `$KLT_BATCH_PROVISION_SCRIPT`) | Path to 2am's `infra/aws/batch-fleet-provision.sh` on *this* host. Resolution order: this field, then `$KLT_BATCH_PROVISION_SCRIPT`, then an error naming both — never a guessed path into a sibling checkout. An unresolvable script is an error raised **before any S3 write**, mirroring `remote.ssh_key_path`'s own early check. |
+| `batch.bucket` | string, required (or `$KLT_BATCH_JOB_BUCKET`, or the fleet config) | The job bucket. Resolution order: this field, then `$KLT_BATCH_JOB_BUCKET`, then `BATCH_JOB_BUCKET` in the `batch-fleet.env` sitting beside the resolved provision script (2am's own fleet config, which is the value its IAM policy is bound to). The deployed bucket name is read from that fleet config at runtime and is deliberately not reproduced in this repo — it encodes deployment-specific account detail, so every example here shows the `<your-batch-jobs-bucket>` placeholder instead. No literal default is compiled into `klt`: an unresolvable bucket is an error naming all three sources. |
+| `batch.jobs_prefix` | string | S3 key prefix jobs live under. Defaults to the fleet config's `BATCH_JOBS_PREFIX`, else `"jobs"`. |
+| `batch.region` | string | AWS region passed to both the `aws` CLI and `launch`. Defaults to `$KLT_BATCH_REGION`, else the fleet config's `BATCH_REGION`, else the `aws` CLI's own resolution. |
+| `batch.profile` | string | `aws` CLI **profile name** the submit path runs under — a name, never a credential; the key it resolves to lives in the operator's own AWS config. Defaults to `$KLT_BATCH_PROFILE`, else the fleet config's `BATCH_SUBMIT_PROFILE`, else `"batch-runner-submit"`. |
+| `batch.poll_interval_s` | number | How often `status.json` is re-read. Defaults to `30`. |
+| `batch.poll_timeout_s` | number | Wall-clock budget waiting for a terminal `status.json`. Defaults to the fully-serial worst case (`options.timeout_s × corner count + 120`) plus 1800s of Spot-acquisition/boot slack. On overrun every unit is reported with a `batch_poll_timeout` diagnostic (the job may still be running on the fleet — see "Failure classification" below). |
+
+**The seam is 2am's, verbatim** (`infra/aws/batch-fleet.md` §"The seam: what
+a consumer-repo wrapper does"), and `klt` implements exactly its four steps:
+
+1. **write** `inputs/netlist.cir` + `inputs/request.json`, then
+   `job.json` — uploaded last, so a launch can never observe a job spec
+   whose inputs are still uploading.
+2. **launch** `batch-fleet-provision.sh launch --job <job-id> --apply
+   --profile <profile>`, exactly once per job. `klt` shells out rather than
+   issuing its own `CreateFleet`: `launch` enforces the diversification
+   floors (≥3 AZs, ≥3 instance types, refused before any AWS call), the
+   live subnet/AZ pool cross-product, the capacity-shortfall retry, and the
+   shared-budget concurrency cap. Re-deriving that here would duplicate
+   already-tested logic; skipping it would be a safety regression.
+3. **poll** `status.json`. `running` and `interrupted` both mean *wait* —
+   an `interrupted` job is re-launched by 2am's own scheduled `reconcile`,
+   never re-submitted by this client (that would double-spend the shared
+   fleet budget). `done`/`failed`/`timeout` are terminal.
+4. **collect** `outputs/`, read `report.json` out of it, and return it
+   through the same reducer the `remote` backend uses — so a `--format json`
+   report from `batch` is structurally identical to `local`/`remote`'s.
+
+**Why the job command redirects to a file.** 2am's harness merges *all*
+stdout/stderr — its own log lines and the job command's — into one
+`harness.log`, so stdout is not a clean channel back to the submitter (only
+`outputs/**` and `status.json` are). The generated `job.json` therefore ends
+in `> "$EDA_OUTPUT_DIR/report.json"`, and `--outdir "$EDA_OUTPUT_DIR/artifacts"`
+is added when `options.keep_artifacts` is set so per-corner logs/rawfiles
+land inside the one tree the harness collects. The generated document's
+schema is [`docs/schemas/batch-job-spec.schema.json`](../schemas/batch-job-spec.schema.json).
+
+**`options.resume` is rejected for `batch`**, exactly as for `remote`: the
+corners come back from an independently-run job via a report this process
+did not construct, so there is no local `corner_id` to reconcile a
+checkpoint against. The dispatch-time fail-fast probe is likewise skipped —
+probing *this* host's ngspice says nothing about the fleet instance's
+hardware.
+
+**`hosts > 1` submits one job per shard** (see "Fleet sharding" below), with
+the same contiguous-slice semantics, the same deterministic merge back into
+global unit order, and the same `environment.remote.fleet[]` array a sharded
+`remote` run produces. A shard whose job never returns is reported unit by
+unit with a `lost_shard` diagnostic rather than aborting its siblings.
+
+A `batch` run's response fills the same additive `environment.remote` slot
+`remote` does, carrying what `status.json` actually observed:
+
+```json
+"remote": {
+  "provider": "aws-batch-fleet",
+  "job_id": "klt-sim-4f2b19c0ae31",
+  "bucket": "<your-batch-jobs-bucket>",
+  "region": "us-east-1",
+  "instance_id": "i-0abc123",
+  "instance_type": "c7i.4xlarge",
+  "availability_zone": "us-east-1b",
+  "ami_id": "ami-0abc123",
+  "lifecycle": "spot",
+  "spot": true,
+  "state": "done",
+  "exit_code": "0",
+  "concurrency": "2",
+  "physical_cores": "8",
+  "elapsed_seconds": 412
+}
+```
+
+**Prerequisites live in 2am, not here.** The batch AMI bake, the job
+bucket's `provision --apply`, the `batch-runner-submit` access key, and the
+scheduled `reconcile` timer are all 2am-side operator steps. The backend and
+its tests need none of them (every AWS/launch call goes through an
+injectable command runner — no test in this repo touches AWS or the
+network), but a *live* run does.
+
+**Worked example: [`examples/sim-batch/`](../../examples/sim-batch/README.md).**
+The same 5-corner ring-oscillator matrix as `examples/sim-remote/`, with
+`backend: "batch"` — the live-run report slot is deliberately empty until
+those 2am prerequisites are done.
+
 ## Fleet sharding (`remote.hosts`)
 
 `request.remote.hosts` (overridable with `--hosts`, same precedence rule as
@@ -352,6 +478,18 @@ not just equivalent.
   to that shard alone). `environment.remote.fleet[]` reports one entry per
   host exactly as above, plus an `attempts` field (`1`, or `2` if that
   shard's automatic retry fired).
+- **`backend: "batch"`: one fleet job per shard.** `hosts > 1` with
+  `backend: "batch"` submits `hosts` independent S3 job contracts
+  ([#2080](https://github.com/2AMLogic/klayout-tools/issues/2080)) — the
+  same contiguous slices, pushed as each job's own `_explicit_points`, and
+  the same deterministic merge and `fleet[]` reporting. The difference from
+  `remote` is only *who acquires the machine*: 2am's fleet schedules each
+  job on its own diversified Spot capacity, so there is no K-instance
+  launch, cost gate, or teardown to run here. `hosts` may not exceed the
+  unit count, for the same reason. A shard whose job fails to submit,
+  launch, or collect is a `lost_shard` exactly as above; a shard whose job
+  *ran* and failed reports `batch_job_failed`/`batch_job_timeout` per unit
+  instead (see "Failure classification" below).
 
 ## Wall-clock budget, orphan safety, and resume
 
@@ -986,6 +1124,9 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `budget_exceeded`  | The corner never started: the sweep's own `options.wall_clock_budget_s` was exceeded first. See "Wall-clock budget, orphan safety, and resume" above. |
 | `orphaned`         | The corner never started: the launching process exited before its turn. See "Wall-clock budget, orphan safety, and resume" above. |
 | `lost_shard`       | The corner's `hosts > 1` shard never returned (Epic #375). See "Fleet sharding" above. |
+| `batch_job_failed` | The corner never started, or its report was never written: the `batch` backend's fleet job reached a terminal `failed` state with an exit code outside `klt sim`'s own `0`/`3`/`4` (see "Batch backend" above). |
+| `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
+| `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal. The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
 
 **A `diagnostics` entry at `severity: "error"` makes that corner
@@ -1389,8 +1530,9 @@ the *response* echoes back.
 | ------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `netlist`                | string, required  | Path to the circuit-body netlist under test (see "Netlist convention" above). Relative paths resolve against the request file's directory.                            |
 | `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
-| `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there (see "Execution backends" and "Remote backend" above). Overridable with the `--backend` CLI flag. |
+| `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there; `"batch"` submits an S3 job contract to 2am's EDA batch fleet (see "Execution backends", "Remote backend", and "Batch backend" above). Overridable with the `--backend` CLI flag. |
 | `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`launcher_cidrs`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`, `ami_manifest`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
+| `batch.*`                | object            | Request fields for the `batch` backend (`provision_script_path`, `bucket`, `jobs_prefix`, `region`, `profile`, `poll_interval_s`, `poll_timeout_s`) — see "Batch backend" above. Only read/validated when `backend: "batch"` is selected. |
 | `remote.hosts`           | integer           | Shard the expanded unit list across this many hosts and merge the per-shard reports. Defaults to `1` (today's single-host behaviour, byte-identical). Must be a positive integer, and (for `backend: "remote"`) no greater than the unit count. `local`/`local-parallel` shard in-process; `backend: "remote"` provisions a real `hosts`-instance EC2 fleet ([#906](https://github.com/2AMLogic/klayout-tools/issues/906)). Overridable with the `--hosts` CLI flag, same precedence rule as `backend`/`--backend`. See "Fleet sharding" above. |
 | `models.lib`             | string            | Model library to bind process-corner `.lib` sections from. Required only when `corners.process` is set. See "Model library resolution" above.                        |
 | `models.pdk`/`pdk_root`  | string            | Resolve `models.lib` through `klt pdk find` instead of a literal path.                                                                                                 |
@@ -1513,10 +1655,11 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | --------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | `schema_version`| integer         | Version of this command's JSON shape (`3` as of issue #1274, which extended issue #1261's `{path, scope}` path-normalization to `environment.models_lib`; per-command, per `docs/json-contract.md`).                 |
 | `netlist`       | object          | `{path, scope}` — the resolved `netlist` path, normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when it sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
-| `status`        | string          | Aggregate: `"pass"`, `"fail"`, or `"error"`. Precedence: `error` > `fail` > `pass`.                              |
+| `status`        | string          | Aggregate: `"pass"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence: `error` > `fail` > `not_checked` > `pass`.                              |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. |
+| `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
 | `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
@@ -1568,6 +1711,30 @@ corner-sweep rollup fields above are declared.
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
 
+### `coverage`
+
+The [common v1 coverage contract](../coverage-contract.md) reports actual
+corner/measurement work alongside the existing `corners_simulated`,
+`measurements_declared`, `measurements_with_limits` and
+`unrecognized_limit_keys` fields. Those counters retain their original
+meanings (`corners_simulated == corner_count`, including errored attempts);
+common `checked` counts actual applied min/max bounds or deliberate
+characterization observations.
+
+An empty corner matrix (`empty_corner_matrix`), no requested measurements,
+unavailable measurement values, null bounds, and unrecognized limit keys
+are explicit skips. Only `min` and `max` are applied. A typo such as
+`{"maximum": 1.8}` cannot count as an applied bound. Partial valid bounds
+and skipped bounds remain distinguishable by identity.
+
+A deliberate no-limit characterization counts a produced measurement as
+checked and its omitted limit as inapplicable. A launched corner alone does
+not count. With no failure/error, zero actual checks yields
+`status: "not_checked"` and exit 4. Real corner errors and failed bounds
+(including Monte Carlo sigma windows) retain precedence and their existing
+exit codes. `klt signoff` refuses zero/unknown/malformed common coverage;
+Phase 2 owns any new generic partial-success policy.
+
 ### Semantics and guarantees
 
 Carried over from the spike's proposed contract (see the spike document for
@@ -1618,11 +1785,11 @@ the full reasoning):
 
 | Code | Meaning                                                                    |
 | ---- | ---------------------------------------------------------------------------- |
-| `0`  | Every corner passed.                                                         |
+| `0`  | Checked at least one measurement/bound and no corner or rollup failed.                                                         |
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | At least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
+| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), or at least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
 
 Under `--op-lint` the same four codes keep the same *meanings* against that
 mode's own verdict: `0` ran with no `error`-severity finding (a

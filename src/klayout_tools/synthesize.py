@@ -201,11 +201,13 @@ import json
 import os
 import re
 import subprocess
+import uuid
 from typing import Any
 
 from . import env_provenance
 from ._paths import _load_request_json, validate_request_shape
 from ._provenance import (
+    INPUT_ROLE_SOURCE,
     _combined_content_hash,
     _yosys_version,
     build_provenance,
@@ -318,6 +320,16 @@ _ABC_STIME_RE = re.compile(
 #:   farads, three orders of magnitude below any real pin in that library,
 #:   so the unit-consistent value for Yosys's femtofarad-denominated
 #:   ``set_load`` is 13.43 fF -- ORFS's own number, converted, not a guess.
+#: - ``gf180mcu_fd_sc_mcu7t5v0`` (issue #2088) ->
+#:   ``gf180mcu_fd_sc_mcu7t5v0__buf_4`` / ``13.43`` fF. Same platform
+#:   policy and pF-to-fF conversion as 9t: ORFS's ``config.mk`` above
+#:   resolves the driver with ``TRACK_OPTION=7t`` but keeps its load
+#:   independent of track height. Verified against ORFS commit
+#:   ``95ebc50a258390f4c7896e5f04db743f62279c2d`` (2026-09-19), including
+#:   its ``flow/platforms/gf180/lib/`` 7t ``tt_025C_5v00`` liberty. That
+#:   file gives ``buf_4`` input ``I`` a capacitance of 0.009315 pF
+#:   (9.315 fF); this is a cross-check, not a replacement for the sourced
+#:   platform output-load policy. No claim of optimal QoR is implied.
 #: - ``sg13g2_stdcell`` (issue #1784) -> ``sg13g2_buf_4`` / ``6.0`` fF. IHP
 #:   ships no ORFS platform config of its own; the source of truth here is
 #:   IHP-Open-PDK's own LibreLane platform config
@@ -337,10 +349,12 @@ _ABC_STIME_RE = re.compile(
 #: here shells out to, reads, or requires an ORFS checkout, and no ORFS file
 #: is vendored. A ``cell_library`` with no entry keeps this command's
 #: pre-#807 behaviour exactly (no ``-constr``, no sizing/buffering, no
-#: ``timing``), rather than guessing a driving cell for it.
+#: ``timing``), with an explicit capability warning rather than guessing
+#: a driving cell for it.
 _ABC_CONSTR_INPUTS: dict[str, tuple[str, float]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__buf_1", 5.0),
     "gf180mcu_fd_sc_mcu9t5v0": ("gf180mcu_fd_sc_mcu9t5v0__buf_4", 13.43),
+    "gf180mcu_fd_sc_mcu7t5v0": ("gf180mcu_fd_sc_mcu7t5v0__buf_4", 13.43),
     "sg13g2_stdcell": ("sg13g2_buf_4", 6.0),
 }
 
@@ -455,6 +469,10 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
 #:   Deliberately **not** sky130's single dual-output shape carried over by
 #:   analogy -- this library has no ``conb``-equivalent, and its own
 #:   ``__filltie`` cell is a well-tie filler, not a logic constant driver.
+#: - ``gf180mcu_fd_sc_mcu7t5v0`` (issue #2088) -> ``__tieh`` port ``Z``
+#:   and ``__tiel`` port ``ZN``. ORFS's same platform config resolves
+#:   these with ``TRACK_OPTION=7t``; its pinned 7t liberty cited above
+#:   confirms both cells and their respective ``"1"``/``"0"`` functions.
 #: - ``sg13g2_stdcell`` (issue #1784) -> two distinct cells,
 #:   ``sg13g2_tiehi`` port ``L_HI`` and ``sg13g2_tielo`` port ``L_LO`` --
 #:   IHP's own LibreLane platform config's ``SYNTH_TIEHI_PORT``/
@@ -482,8 +500,8 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
 #:
 #: A ``cell_library`` with no entry gets **no** ``hilomap`` pass at all
 #: (byte-identical script to before #854) rather than a guessed cell name --
-#: the same graceful degradation :data:`_ABC_CONSTR_INPUTS`/
-#: :data:`_ABC_DONT_USE_GLOBS` already apply.
+#: :func:`_library_capability_warnings` discloses that both ``setundef``
+#: and ``hilomap`` were skipped, so bare constants can remain unroutable.
 _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "sky130_fd_sc_hd": (
         ("sky130_fd_sc_hd__conb_1", "HI"),
@@ -492,6 +510,10 @@ _TIE_CELLS: dict[str, tuple[tuple[str, str], tuple[str, str]]] = {
     "gf180mcu_fd_sc_mcu9t5v0": (
         ("gf180mcu_fd_sc_mcu9t5v0__tieh", "Z"),
         ("gf180mcu_fd_sc_mcu9t5v0__tiel", "ZN"),
+    ),
+    "gf180mcu_fd_sc_mcu7t5v0": (
+        ("gf180mcu_fd_sc_mcu7t5v0__tieh", "Z"),
+        ("gf180mcu_fd_sc_mcu7t5v0__tiel", "ZN"),
     ),
     "sg13g2_stdcell": (
         ("sg13g2_tiehi", "L_HI"),
@@ -903,11 +925,16 @@ def run_synthesize(
     The generated ``.ys`` script, the mapped netlist, the captured stats
     JSON, and -- when the resolved ``cell_library`` has an
     :data:`_ABC_CONSTR_INPUTS` entry -- the generated ``<top>_abc.constr``
-    file and captured ``<top>_abc.log`` are written to ``.klt/synthesize/``
+    file and captured ``<top>_abc.log`` are written to
+    ``.klt/synthesize/<run_id>/``
     next to the request file (the same "next to the input" default ``klt
     sim``'s ``.klt/sim/`` artifacts directory already uses) and kept as
-    debuggable artifacts, never deleted.
+    debuggable artifacts, never deleted. ``run_id`` is returned in the response;
+    an optional request ``run_id`` exclusively reserves that directory and
+    collisions are errors. Declared inputs are checked for mutation before
+    returning; transitive Verilog includes are not snapshotted.
     """
+    request_state = _input_file_state(request_path)
     request = load_request(request_path)
     request_dir = os.path.dirname(os.path.abspath(request_path))
     # Issue #1844: every output-path field this run's own JSON response
@@ -931,6 +958,8 @@ def run_synthesize(
     hdl_toplevel = request["hdl_toplevel"]
     if not isinstance(hdl_toplevel, str) or not hdl_toplevel:
         raise SynthesizeError("request.hdl_toplevel must be a non-empty string")
+    if re.search(r"[/\\\x00]", hdl_toplevel):
+        raise SynthesizeError("request.hdl_toplevel must not contain path separators")
 
     pdk_spec = request["pdk"]
     if not isinstance(pdk_spec, dict):
@@ -956,13 +985,28 @@ def run_synthesize(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
     )
 
-    output_dir = os.path.join(request_dir, ".klt", "synthesize")
-    try:
-        os.makedirs(output_dir, exist_ok=True)
-    except OSError as exc:
-        raise SynthesizeError(
-            f"could not create output directory '{output_dir}': {exc}"
-        ) from exc
+    input_state = {
+        path: _input_file_state(path) for path in [*resolved_sources, liberty_path]
+    }
+    input_state[request_path] = request_state
+    # Hash before any engine invocation. The final state check also covers
+    # arithmetic trials, equivalence, restructuring, and baseline analysis.
+    provenance = build_provenance(
+        deck_name=f"{cell_library}__{corner}",
+        deck_path=liberty_path,
+        pdk=pdk_info,
+        input_path=resolved_sources[0] if len(resolved_sources) == 1 else None,
+        # Issue #2027: what `klt synthesize` pins is its HDL *source*, not a
+        # layout stream or a netlist -- see `docs/json-contract.md`'s
+        # `provenance.input.role`.
+        input_role=INPUT_ROLE_SOURCE,
+    )
+    if len(resolved_sources) > 1:
+        provenance["input"] = {
+            "content_hash": _combined_content_hash(resolved_sources),
+            "role": INPUT_ROLE_SOURCE,
+        }
+    output_dir = _create_run_directory(request_dir, request)
 
     script_path = os.path.join(output_dir, f"synth_{hdl_toplevel}.ys")
     netlist_path = os.path.join(output_dir, f"{hdl_toplevel}_synth.v")
@@ -1057,44 +1101,35 @@ def run_synthesize(
     # is never the one executed.
     yosys_log = _run_yosys(executed_script_path, cwd=repo_root)
 
-    if not os.path.isfile(netlist_path):
-        raise SynthesizeError(
-            f"yosys exited successfully but did not produce '{netlist_path}'"
-        )
-
     # Issue #1973 Failure 1: strip any `signed` port/wire declaration Yosys's
     # `write_verilog` left in place -- see `_strip_signed_qualifiers`'s own
     # docstring for why this is a post-write text rewrite rather than a
     # Yosys pass. Rewritten in place only when something actually changed,
     # so a netlist with no `signed` declaration at all (the common case) is
     # never touched -- not even its mtime.
-    with open(netlist_path, encoding="utf-8") as handle:
-        netlist_text = handle.read()
+    netlist_text = _read_produced_netlist(netlist_path)
     stripped_netlist_text = _strip_signed_qualifiers(netlist_text)
     if stripped_netlist_text != netlist_text:
         with open(netlist_path, "w", encoding="utf-8") as handle:
             handle.write(stripped_netlist_text)
 
     module_stats = _read_stats(stats_path, hdl_toplevel)
+    timing = _read_produced_abc_timing(abc_log_path, delay_target_ps)
     engine_version = _yosys_version()
     structural = _compute_structural(module_stats, yosys_log, expected_latches)
-    warnings_summary = _summarize_warnings(yosys_log)
+    warnings_summary = _summarize_warnings(
+        yosys_log,
+        capability_warnings={
+            **_library_capability_warnings(cell_library),
+            **_missing_timing_warning(abc_log_path, timing),
+        },
+    )
     instance_counts_by_type = dict(
         sorted((module_stats.get("num_cells_by_type") or {}).items())
     )
     leakage_power_nw, leakage_by_type_nw = _compute_leakage(
         liberty_path, instance_counts_by_type
     )
-
-    deck_name = f"{cell_library}__{corner}"
-    provenance = build_provenance(
-        deck_name=deck_name,
-        deck_path=liberty_path,
-        pdk=pdk_info,
-        input_path=resolved_sources[0] if len(resolved_sources) == 1 else None,
-    )
-    if len(resolved_sources) > 1:
-        provenance["input"] = {"content_hash": _combined_content_hash(resolved_sources)}
 
     equivalence = None
     if verify_equivalence:
@@ -1129,6 +1164,7 @@ def run_synthesize(
         "engine": engine,
         "engine_version": engine_version,
         "hdl_toplevel": hdl_toplevel,
+        "run_id": os.path.basename(output_dir),
         "status": "ok",
         "instance_count": module_stats["num_cells"],
         "area_um2": module_stats["area"],
@@ -1143,7 +1179,7 @@ def run_synthesize(
         # instantiated cell type at all -- see `_compute_leakage`.
         "leakage_power_nw": leakage_power_nw,
         "leakage_by_type_nw": leakage_by_type_nw,
-        "timing": _read_abc_timing(abc_log_path, delay_target_ps),
+        "timing": timing,
         "sta": sta,
         "structural": structural,
         "warnings": warnings_summary,
@@ -1181,7 +1217,94 @@ def run_synthesize(
         output_dir=output_dir,
         repo_root=repo_root,
     )
+    _assert_inputs_unchanged(input_state)
     return response
+
+
+def _create_run_directory(request_dir: str, request: dict[str, Any]) -> str:
+    """Exclusively claim a retained directory; an existing ID is never reused."""
+    run_id = request.get("run_id", f"run-{uuid.uuid4().hex}")
+    if not isinstance(run_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", run_id
+    ):
+        raise SynthesizeError(
+            "request.run_id must be a safe identifier: 1-64 ASCII letters, "
+            "digits, underscores or hyphens, starting with a letter or digit"
+        )
+    parent = os.path.join(request_dir, ".klt", "synthesize")
+    output_dir = os.path.join(parent, run_id)
+    try:
+        os.makedirs(parent, exist_ok=True)
+        os.mkdir(output_dir)
+    except OSError as exc:
+        raise SynthesizeError(
+            f"could not create output directory '{output_dir}': {exc}; "
+            "each invocation needs a new run_id (prior evidence is retained)"
+        ) from exc
+    return output_dir
+
+
+def _input_file_state(path: str) -> tuple[int, ...]:
+    """Track declared inputs without copying RTL trees or PDK installations.
+
+    ctime also catches write-then-restore and replacement with equal bytes;
+    atime is deliberately excluded since reading the file may update it.
+    This is an execution-time mutation guard, not a transitive-include snapshot.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError as exc:
+        raise SynthesizeError(
+            f"could not read synthesis input '{path}': {exc}"
+        ) from exc
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _assert_inputs_unchanged(states: dict[str, tuple[int, ...]]) -> None:
+    for path, before in states.items():
+        try:
+            unchanged = _input_file_state(path) == before
+        except SynthesizeError:
+            unchanged = False
+        if not unchanged:
+            raise SynthesizeError(
+                f"synthesis input '{path}' changed during execution; "
+                "refusing to attribute outputs to an inconsistent input state"
+            )
+
+
+def _read_produced_netlist(path: str) -> str:
+    if not os.path.isfile(path):
+        raise SynthesizeError(f"yosys exited successfully but did not produce '{path}'")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SynthesizeError(f"could not read netlist '{path}': {exc}") from exc
+    if not text.strip():
+        raise SynthesizeError(f"yosys produced an empty netlist '{path}'")
+    return text
+
+
+def _read_produced_abc_timing(
+    path: str | None, delay_target_ps: int | None
+) -> dict[str, Any] | None:
+    if path is not None and not os.path.isfile(path):
+        raise SynthesizeError(f"yosys did not produce the expected ABC log '{path}'")
+    return _read_abc_timing(path, delay_target_ps)
+
+
+def _missing_timing_warning(
+    abc_log_path: str | None, timing: dict[str, Any] | None
+) -> dict[str, str]:
+    if abc_log_path is None or timing is not None:
+        return {}
+    return {
+        "timing_unavailable": (
+            "The current invocation's ABC log has no readable stime summary; "
+            "timing is null and any requested clock target remains unverified."
+        )
+    }
 
 
 def _verify_synthesis_equivalence(
@@ -1206,7 +1329,7 @@ def _verify_synthesis_equivalence(
     ``synthesize_output_dir`` (this run's own ``.klt/synthesize/`` -- never
     passed as an inline JSON string) so
     :func:`klayout_tools.equiv.run_equiv` resolves its own artifacts
-    directory as ``.klt/synthesize/.klt/equiv/``, right alongside this run's
+    directory as ``.klt/synthesize/<run_id>/.klt/equiv/``, right alongside this run's
     own script/netlist -- rather than the process's current working
     directory (the inline-JSON form's own relative-path anchor, per
     :func:`klayout_tools.equiv.load_request_arg`'s docs), which would
@@ -2017,7 +2140,7 @@ def _measure_candidate(
 
     Uses exactly the engine configuration the real run will use (same
     liberty, same ``-constr``/``-D``/``-dont_use``/``hilomap`` knobs), into
-    its own ``.klt/synthesize/arith/<label>/`` directory so every trial's
+    its own ``.klt/synthesize/<run_id>/arith/<label>/`` directory so every trial's
     script, netlist, stats and ABC log survive as debuggable artifacts --
     "measured, not guessed" is only a real claim if the measurement is
     reproducible afterwards.
@@ -2061,7 +2184,11 @@ def _measure_candidate(
 
     try:
         _run_yosys(script_path)
+        _read_produced_netlist(netlist_path)
         module_stats = _read_stats(stats_path, hdl_toplevel)
+        abc_timing = _read_produced_abc_timing(
+            abc_log_path, engine_options.delay_target_ps
+        )
     except SynthesizeError:
         return None
 
@@ -2069,7 +2196,7 @@ def _measure_candidate(
         instance_count=module_stats["num_cells"],
         area_um2=module_stats["area"],
         sta=_read_sta_timing(netlist_path, engine_options.liberty_path, hdl_toplevel),
-        abc_timing=_read_abc_timing(abc_log_path, engine_options.delay_target_ps),
+        abc_timing=abc_timing,
         target_period_ns=engine_options.target_period_ns,
     )
     measurement["label"] = label
@@ -2582,17 +2709,38 @@ def _run_yosys(
             cwd=cwd,
         )
     except OSError as exc:
+        _write_yosys_log(script_path, "", str(exc))
         raise SynthesizeError(f"could not launch yosys: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
+        _write_yosys_log(script_path, exc.stdout, exc.stderr)
         raise SynthesizeError(
             f"yosys did not complete within {timeout_s}s (script "
             f"'{script_path}') -- process killed"
         ) from exc
 
+    _write_yosys_log(script_path, completed.stdout, completed.stderr)
     if completed.returncode != 0:
         raise SynthesizeError(_synthesis_error_message(completed))
 
     return completed.stdout or ""
+
+
+def _write_yosys_log(
+    script_path: str, stdout: str | bytes | None, stderr: str | bytes | None
+) -> None:
+    """Keep both streams next to every executed script, including failed trials."""
+
+    def text(stream: str | bytes | None) -> str:
+        return (
+            stream.decode("utf-8", errors="replace")
+            if isinstance(stream, bytes)
+            else stream or ""
+        )
+
+    _write_text_file(
+        os.path.splitext(script_path)[0] + ".log",
+        f"[stdout]\n{text(stdout)}\n[stderr]\n{text(stderr)}",
+    )
 
 
 def _synthesis_error_message(completed: subprocess.CompletedProcess) -> str:
@@ -3148,12 +3296,44 @@ def _categorize_warning(message: str) -> str:
     return "other"
 
 
-def _summarize_warnings(log_text: str) -> dict[str, Any]:
+def _library_capability_warnings(cell_library: str) -> dict[str, str]:
+    """Disclose skipped synthesis capabilities without guessing library data.
+
+    Combine missing capabilities into one representative so neither is
+    hidden by warning aggregation. An absent ``dont_use`` entry is not a
+    missing capability: e.g. gf180 intentionally allows minimum-drive cells.
+    """
+    skipped = []
+    if cell_library not in _ABC_CONSTR_INPUTS:
+        skipped.append(
+            "ABC -constr (driving cell/output load), load-driven sizing/buffering "
+            "and ABC timing (timing is null)"
+        )
+    if cell_library not in _TIE_CELLS:
+        skipped.append(
+            "setundef -zero/hilomap (bare 0/1/x constants may remain unroutable "
+            "in place-and-route)"
+        )
+    if not skipped:
+        return {}
+    return {
+        "unsupported_cell_library": (
+            f"cell_library '{cell_library}' has no verified mapping for: "
+            + "; ".join(skipped)
+            + ". These capabilities were skipped."
+        )
+    }
+
+
+def _summarize_warnings(
+    log_text: str, *, capability_warnings: dict[str, str] | None = None
+) -> dict[str, Any]:
     """Build the response's ``warnings`` field (issue #1588): a bounded,
     deterministic summary of every ``Warning: `` line in ``log_text`` --
-    never the raw log itself.
+    never the raw log itself, plus one warning per supplied capability category.
 
-    ``total`` is a raw line count (deliberately **not** deduplicated the
+    ``total`` counts capability warnings plus raw engine warning lines
+    (deliberately **not** deduplicated the
     way :func:`_compute_structural`'s own ``comb_loops``/``multi_driven``
     counts are -- ``synth``'s internal ``check`` calls can reprint an
     unresolved problem's identical text more than once, so this answers
@@ -3163,9 +3343,9 @@ def _summarize_warnings(log_text: str) -> dict[str, Any]:
     :data:`_MAX_WARNING_REPRESENTATIVES` entries, one per category, each the
     first message text seen for that category (bounded, per issue #1588).
     """
-    total = 0
-    by_category: dict[str, int] = {}
-    first_seen: dict[str, str] = {}
+    first_seen = dict(capability_warnings or {})
+    total = len(first_seen)
+    by_category = dict.fromkeys(first_seen, 1)
     for line in log_text.splitlines():
         if not line.startswith("Warning: "):
             continue

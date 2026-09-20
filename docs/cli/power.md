@@ -433,8 +433,18 @@ IR-drop solve already produced are checked against those limits, per net.
   `"pass"` if at least one edge was checked and none failed, or
   `"not_checked"` if the net had no edge with both a declared limit and a
   solved current** — e.g. a net whose whole stackup declared no EM limits
-  at all. The overall `em_verdict.status` rolls the same three values up
-  across every net.
+  at all.
+- **The overall `em_verdict.status` rolls up the same underlying data, but
+  adds a fourth value the per-net `status` does not need** (issue #1997):
+  `"fail"` if any edge anywhere failed; else `"pass_partial"` if at least
+  one edge was checked and none failed, but `unchecked_edge_count` is still
+  nonzero (some other edge in the design was never checked at all); else
+  `"pass"` only when every edge that exists was actually checked
+  (`unchecked_edge_count == 0`); else `"not_checked"` if nothing was ever
+  checked. `"pass_partial"` exists because "at least one edge checked and
+  clean" is a much weaker claim at the whole-design level than at a single
+  net's — a design can have every net partially covered and still roll up
+  to a misleadingly plain `"pass"` without it.
 - **`em_verdict` is `null` when there was no IR-drop solve at all** (the
   spec declared neither `pads` nor `current_model`) — there are no branch
   currents to compare, the same condition under which `ir_drop_map` itself
@@ -639,7 +649,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 
 | Field                | Type               | Description                                                                                       |
 | -------------------- | ------------------ | --------------------------------------------------------------------------------------------------|
-| `status`             | string             | `"pass"`, `"fail"`, or `"not_checked"` — the roll-up across every net (see "EM current-density verdict" above). |
+| `status`             | string             | `"pass"`, `"pass_partial"` (issue #1997), `"fail"`, or `"not_checked"` — the roll-up across every net (see "EM current-density verdict" above). |
 | `checked_edge_count`/`unchecked_edge_count` | integer | Edges with both a declared limit and a solved current, vs. edges missing either.               |
 | `fail_count`         | integer            | Checked edges whose \|current\| exceeded their own `current_limit_a`. `0` on a clean run.         |
 | `worst_case`         | object \| null     | The checked edge with the smallest `margin_a` anywhere (most over its limit, or closest to it) — same shape as a `nets[].failing_edges[]` entry below, `null` if nothing was checked. |
@@ -686,6 +696,22 @@ its own disconnected island (one island per row per net; before issue
 #1442's row-rail fix, missing filler cells left literal gaps *within* a
 row's own rail too, fragmenting it into 88 `VPWR` / 105 `VGND` islands —
 see `tests/test_power.py`'s docstring for the full before/after story).
+
+**The paired fixture that shows what a PDN changes (issue #2079).** "17
+islands" is a property of *this routing*, not of `klt power`, and the corpus
+now carries the control that proves it: `tests/corpus/place_and_route/
+gcd-pdn.gds.gz` is the same `gcd` design through the same pipeline **with**
+a real `request.power` PDN (ORFS's own `platforms/sky130hd/pdn.tcl` met1
+followpins rail plus met4/met5 straps). Run against the full `met1`–`met5` +
+`via1`–`via4` stackup that PDN actually occupies, it resolves to exactly
+**1 `VPWR` island and 1 `VGND` island** (500 nodes, 1594 edges, zero
+warnings) — one connected mesh. Run against the same two-metal spec above,
+it reports 17 + 17 again, because the straps that connect the rows live on
+met4/met5 and this command only ever sees the layers a spec declares. Both
+halves are pinned by `tests/test_power.py`'s
+`test_gcd_pdn_fixture_resolves_each_supply_to_one_island`; see
+`tests/corpus/README.md`'s "`gcd-pdn`" section for that fixture's
+provenance.
 
 Adding `pads` (one per island, at each rail's left-hand end) and a
 `current_model` (0.2 mA hung on each `VPWR` rail's far end) to that same
@@ -878,13 +904,32 @@ criterion 4):**
   contributes edges `em_verdict` cannot check (`unchecked_edge_count`, not
   a failure) — see "EM current-density verdict" above.
 
+## Checked-work coverage
+
+The [common v1 coverage contract](../coverage-contract.md) is additive to
+this command's existing envelope.
+
+`coverage.scope` is `electromigration`. Checked IDs name net/island/edge
+currents compared to declared limits. Missing limits or unavailable branch
+currents are skipped. Without a requested current solve, EM work is
+inapplicable and the result is `not_checked`, exit 4; network extraction
+remains available in the report. The additive top-level `status` mirrors
+`em_verdict.status` when present: `fail` exits 3, `not_checked` exits 4,
+and existing `pass`/`pass_partial` exit 0. The existing signoff refusal for
+`pass_partial` is unchanged.
+
+Completed refusal/failure reports remain on stdout; actual invocation errors
+retain exit 1 and the stderr error envelope.
+
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
-| `0`       | Success — every requested power net was reported (with `island_count: 0` and a `warnings` entry for any net that matched no labelled geometry). **A `"fail"` `em_verdict.status` does not change the exit code** — like `worst_case_droop_mv`, the EM verdict is a reported result of a successful run, not a run failure; a caller gating CI on it should check `em_verdict.status`/`fail_count` in the JSON output, the same way a caller gates on `klt drc`'s violation count today. |
+| `0` | EM verdict is `pass` or the existing `pass_partial`. |
 | `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `power_nets`/`stackup`/`vias`/`pads`/`current_model` declaration, an ambiguous top cell (pass `--top`), or **every** requested power net matched no geometry at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
+| `3` | An EM limit was exceeded. |
+| `4` | No actual electromigration checks; `status: "not_checked"`. |
 
 ## See also
 

@@ -295,17 +295,18 @@ real open_pdks install never pays for the extra probe.
   engine can rely on generically — `sky130A.lydrc`, e.g., always reads the
   whole `$input` stream. Passing `--top` alongside `--engine klayout` is a
   clean error rather than a silently-ignored request.
-- **A deck that gates rules behind globals beyond `input`/`report` silently
-  checks nothing unless you pass them via `--deck-var`.** See `--deck-var
-  NAME=VALUE` above — without it, a deck assembled around FEOL/BEOL enable
-  flags or a metal-stack selector this invocation never sets can produce a
-  well-formed, empty `.lyrdb` report and a false `"status": "clean"`
-  verdict, indistinguishable from a genuinely clean layout (issue #1302).
-- **No `coverage` population.** Unlike the curated engine's declarative
-  `DrcRule` table, an external deck's rule set is opaque to `klt drc` — every
-  `coverage` sub-field (`deck_layers`, `layers_checked`,
-  `layers_in_stream_without_rules`, `rules_skipped`, `voltage_domain_warnings`,
-  `deck_scope`) is an empty list for this engine, never fabricated.
+- **External rule execution is unknown without instrumentation.** A deck
+  gated by `--deck-var` can produce an empty RDB, but neither an empty report
+  nor nonempty category declarations proves which checks executed. DRC v2
+  preserves declarations as `coverage.rule_categories`; `rules_checked`
+  contains only rules with actual findings. `coverage.known` is false and
+  `unknown` names `unmeasured_rule_execution`. No findings means
+  `status: "coverage_unknown"`, exit 4; actual violations retain exit 3.
+- **Partial layer coverage information.** External scripts are opaque to
+  the curated rule table, so layer/deck-specific legacy coverage arrays
+  remain empty. They do not claim that nothing or everything was checked.
+  See the [common coverage contract](../coverage-contract.md).
+
 - **`check` is always `"external"` and `layer` echoes the rule id.** An RDB
   report's `<category>` has no structured `width`/`space`/... check-kind
   identity or separate layer name the way this repo's own `DrcRule` does —
@@ -587,7 +588,7 @@ no per-net isolation) than it actually has.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 52
+design rule manual (which spans hundreds of rules). It currently covers 57
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
@@ -612,11 +613,12 @@ Broken down by check kind:
 | `isolated`   |     1 |
 | `enclosing`  |    16 |
 | `separation` |     2 |
-| `area`       |     5 |
-| **total**    |**52** |
+| `area`       |    10 |
+| **total**    |**57** |
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
-five `met{1..5}.area.1` minimum-area rules, issue #1955 — see the next
+five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
+`met{1..5}.holes_area.1` holes-area rules, issue #1976 — see the next
 paragraph.)
 
 `nwell.width.1`/`nwell.space.1` (issue #1420) close this deck's original
@@ -730,21 +732,31 @@ false positives on correct geometry; the 0.08 um two-adjacent-edges half
 stays uncovered, like the end-of-line variants noted for gf180mcu below.
 
 `met1.area.1`/`met2.area.1`/`met3.area.1`/`met4.area.1`/`met5.area.1`
-(issue #1955) are the five `"area"`-kind rules the kind-breakdown table
-above counts: a minimum-area check for every metal layer this deck already
-covers with a width/space rule, transcribed from the same real sky130A
-install cited above — `sky130A_mr.drc`'s `m1.6`/`m2.6`/`m3.6`/`m4.4a`/
-`m5.4`. Before these, the deck had no `"area"`-kind rule at all (the check
-primitive existed since issue #812, but no rule used it), so a
+(issue #1955) are five of the ten `"area"`-kind rules the kind-breakdown
+table above counts: a minimum-area check for every metal layer this deck
+already covers with a width/space rule, transcribed from the same real
+sky130A install cited above — `sky130A_mr.drc`'s `m1.6`/`m2.6`/`m3.6`/
+`m4.4a`/`m5.4`. Before these, the deck had no `"area"`-kind rule at all (the
+check primitive existed since issue #812, but no rule used it), so a
 minimum-area violation — a routine defect class in automated P&R output —
 passed `klt drc` with a bare `status: "clean"` verdict and no rule having
-looked at it. Each layer's holes-area sibling (`m1.7`/`m2.7`/`m3.7`/
-`m4.7`/`m5.7`, scoped to `Region.holes`, a concept this engine's `DrcRule`
-vocabulary cannot express) remains out of scope, and `"density"`/
-`"antenna"` remain unused entirely — density in particular stays a
-separate follow-on, since a real density check scopes to a floorplan
-boundary this engine's windowed `"density"` implementation has no concept
-of (see "`"area"`/`"density"`/`"antenna"` check kinds" above).
+looked at it.
+
+`met1.holes_area.1`/`met2.holes_area.1`/`met3.holes_area.1`/
+`met4.holes_area.1`/`met5.holes_area.1` (issue #1976) are the other five
+`"area"`-kind rules: the holes-area *companion* of each rule above,
+transcribed from the same install's `m1.7`/`m2.7`/`m3.7`/`m4.7`/`m5.7`. Each
+scopes the area threshold to the checked layer's **holes** (the interior
+voids of a merged metal region — an enclosed slot in a wide plate or a
+fill pattern) rather than the metal polygon itself, via
+`DerivedLayer`'s new `"holes"` mode (`klayout.db.Region.holes()`, see
+`DerivedLayer`'s own docstring in `src/klayout_tools/decks/rules.py`). A
+plate with no holes at all derives an empty region under this mode, which
+stays clean, not an error. `"density"`/`"antenna"` remain unused entirely —
+density in particular stays a separate follow-on, since a real density
+check scopes to a floorplan boundary this engine's windowed `"density"`
+implementation has no concept of (see "`"area"`/`"density"`/`"antenna"`
+check kinds" above).
 
 Antenna coverage, unlike density, is **not** a gap in the toolset — it is
 simply a different verb. `klt erc` (issue #860) produces a per-gate
@@ -1207,7 +1219,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "design.gds",
   "deck": "sky130",
   "dbu_um": 0.001,
@@ -1217,12 +1229,24 @@ all `klt` commands (`schema_version`, error shape, exit codes).
   "metrics": { "drc__error__count": 0 },
   "violations": [],
   "coverage": {
+    "schema_version": 1,
+    "known": true,
+    "checked": ["poly.space.1", "poly.width.1"],
+    "skipped": [
+      {"id": "metal1.space.1", "reason": "absent_input_layer"},
+      {"id": "metal1.width.1", "reason": "absent_input_layer"}
+    ],
+    "inapplicable": [],
+    "unknown": [],
     "deck_layers": ["22/0", "30/0", "33/0", "34/0"],
     "layers_checked": ["22/0", "30/0"],
+    "rules_checked": ["poly.space.1", "poly.width.1"],
     "layers_in_stream_without_rules": ["46/0", "75/0"],
     "rules_skipped": ["metal1.width.1", "metal1.space.1"],
     "voltage_domain_warnings": [],
-    "deck_scope": ["7.13 Metaln"]
+    "deck_scope": ["7.13 Metaln"],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
   },
   "provenance": {
     "klt_version": "0.4.2",
@@ -1230,7 +1254,7 @@ all `klt` commands (`schema_version`, error shape, exit codes).
     "klayout_version_mismatch": false,
     "pdk": null,
     "deck": { "name": "sky130", "content_hash": "sha256:<hex>", "released": true },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
 ```
@@ -1247,7 +1271,7 @@ On a run with findings:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "file": "design.gds",
   "deck": "sky130",
   "dbu_um": 0.001,
@@ -1269,12 +1293,24 @@ On a run with findings:
     }
   ],
   "coverage": {
+    "schema_version": 1,
+    "known": true,
+    "checked": ["poly.space.1", "poly.width.1"],
+    "skipped": [
+      {"id": "metal1.space.1", "reason": "absent_input_layer"},
+      {"id": "metal1.width.1", "reason": "absent_input_layer"}
+    ],
+    "inapplicable": [],
+    "unknown": [],
     "deck_layers": ["65/20", "66/20", "66/44", "68/20"],
     "layers_checked": ["65/20", "66/20", "66/44"],
+    "rules_checked": ["licon.width.1", "m1.width.1", "poly.width.1"],
     "layers_in_stream_without_rules": [],
     "rules_skipped": [],
     "voltage_domain_warnings": [],
-    "deck_scope": ["licon", "m1", "poly"]
+    "deck_scope": ["licon", "m1", "poly"],
+    "nothing_checked": false,
+    "nothing_checked_reasons": []
   }
 }
 ```
@@ -1283,13 +1319,13 @@ On a run with findings:
 
 | Field             | Type                     | Description                                                             |
 | ----------------- | ------------------------ | ------------------------------------------------------------------------ |
-| `schema_version`  | integer                  | Version of this command's JSON shape (starts at `1`; per-command).       |
+| `schema_version`  | integer                  | Version of this command's JSON shape (`2`; per-command).       |
 | `file`            | string                   | The input path exactly as provided on the command line.                  |
 | `deck`            | string                   | `--engine curated`: the deck name used (`"sky130"` or `"gf180mcu"`). `--engine klayout`: the resolved/given deck script's own path (no separate short name exists for an arbitrary PDK-native script). |
 | `engine`          | string                   | Present only for `--engine klayout` (always `"klayout"`) — purely additive; the curated engine's own output carries no `engine` key at all, unchanged since it was the sole engine until issue #565. |
 | `engine_deck_errors` | object                | Present only on an `--engine klayout` run that tolerated a failed deck run via `--allow-deck-errors` (issue #1941): `{"exit_status": <int>, "error_lines": [<klayout's own `ERROR` lines>]}`. Omitted entirely otherwise (including on every run that predates the flag being passed), so an ordinary payload is unchanged. Its presence means the deck may have aborted part-way through and the `status`/`violation_count` below cover only the rules that ran before the abort — see "Engine" → `"klayout"`. |
 | `dbu_um`          | number (float)           | The input layout's database unit in micrometres, same semantics as `klt layers`. See "Database units (dbu)" above — rule thresholds are rescaled to this value automatically, so it need not match any deck's nominal dbu. |
-| `status`          | `"clean"` \| `"violations"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
+| `status`          | `"clean"` \| `"violations"` \| `"not_checked"` \| `"coverage_unknown"` | Never `"error"` — a failed run does not emit this envelope at all (see Exit codes). |
 | `violation_count` | integer                  | `len(violations)`.                                                       |
 | `rule_counts`     | object\<string, int\>    | Per-rule-id violation counts; keys sorted for determinism.               |
 | `metrics`         | object                   | Declared-namespace re-keying of `violation_count` (issue #1847). See below. |
@@ -1337,22 +1373,26 @@ builds regardless of the engine's internal shape-enumeration order.
 
 ### `coverage`
 
-Additive field (see [`docs/json-contract.md`](../json-contract.md) — no
-`schema_version` bump): what the run actually checked, distinct from what it
-found. `status: "clean"` alone cannot tell a consumer apart "genuinely
-checked and passed" from "the deck had no rules for anything this layout
-draws" — `coverage` closes that gap. `status`'s own two-value contract
-(`"clean"` / `"violations"`) is unchanged; a non-empty
-`layers_in_stream_without_rules` does not change `status`.
+The [common v1 coverage fields](../coverage-contract.md) accompany the
+verb-specific fields below. New DRC reports use envelope `schema_version: 2`
+because external `rules_checked` now denotes proven checks, not declared
+categories. Known zero curated work becomes `not_checked` (exit 4);
+unknown external execution becomes `coverage_unknown` (exit 4). Actual
+violations take precedence. Partial curated work retains its existing
+`clean`/`violations` semantics pending the Phase 2 policy.
 
 | Field                             | Type            | Description                                                                 |
 | ---------------------------------- | --------------- | ----------------------------------------------------------------------------- |
 | `deck_layers`                      | array\<string\> | Every `"<layer>/<datatype>"` the selected deck's rules reference — a static property of the deck, independent of the input stream. Sorted ascending by `(layer, datatype)`. |
 | `layers_checked`                   | array\<string\> | The subset of `deck_layers` actually present in this stream (i.e. found via `Layout.find_layer(...)`), matching what the per-rule check loop actually ran against. Sorted ascending by `(layer, datatype)`. |
+| `rules_checked`                    | array\<string\> | The complement of `rules_skipped` (issue #1996): rule ids that actually ran against real geometry. `--engine curated`: `rules_checked` and `rules_skipped` partition the deck — every rule is in exactly one. `--engine klayout`: only rule IDs with actual findings; declarations are retained separately as `rule_categories`. Sorted alphabetically. |
 | `layers_in_stream_without_rules`   | array\<string\> | `"<layer>/<datatype>"` pairs present in the input stream that no active rule in the selected deck references at all — the load-bearing field: turns `"clean"` into "clean, and here is exactly what was not looked at." Sorted ascending by `(layer, datatype)`. |
 | `rules_skipped`                    | array\<string\> | Rule ids silently skipped because a layer they read was absent from this stream — `layer`/`other_layer`, or a `derived_layer` input (with one documented exception: a `"not_interacting"` derived rule still runs when its marker layer is absent, see "Voltage-domain rule pairs" above). Sorted alphabetically. |
 | `voltage_domain_warnings`          | array\<object\> | `{"marker": "<layer>/<datatype>", "description": string}` — see below. Sorted by marker `(layer, datatype)`. |
 | `deck_scope`                       | array\<string\> | Every distinct DRM section / official rule-id prefix the selected deck's rules claim to implement — a static property of the deck, independent of the input stream (issue #566). Sorted alphabetically. |
+| `rule_categories`                  | array\<string\> | KLayout engine only: declared RDB categories, never execution proof. |
+| `nothing_checked`                  | boolean         | Whether this run checked *nothing at all*, so its `status` says nothing about the layout — the shared convention in [`../json-contract.md`](../json-contract.md). See below. |
+| `nothing_checked_reasons`          | array\<string\> | Why, using the shared reason codes. Empty exactly when `nothing_checked` is `false`. |
 
 `layers_checked` and `layers_in_stream_without_rules` are computed from the
 input stream's own layer table (reusing the same per-layer enumeration
@@ -1360,6 +1400,22 @@ input stream's own layer table (reusing the same per-layer enumeration
 layer present in the stream's layer table with zero shapes still counts as
 "in the stream" for this purpose, matching `Layout.find_layer(...)`'s own
 semantics.
+
+#### `coverage.nothing_checked`
+
+Common coverage v1 requires `nothing_checked == (known && checked == [])`.
+The curated engine retains the reasons `deck_has_no_rules` and
+`all_rules_skipped`; both now produce `not_checked`/4 rather than `clean`/0.
+Missing input layers are named per rule in `skipped` with reason
+`absent_input_layer`. Rules that execute and find no violations still count
+as checked. Partial coverage is not zero coverage.
+
+The external KLayout engine reports `known=false`, an explicit unknown
+execution record and `nothing_checked=false`. The legacy
+`deck_reported_no_rules` reason remains readable in old reports but is no
+longer emitted: categories alone never establish execution coverage.
+`klt signoff` refuses both known-zero and unknown coverage. Changing deck
+enable flags does not provide the missing execution instrumentation.
 
 #### `coverage.voltage_domain_warnings`
 
@@ -1512,7 +1568,9 @@ claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this
 field existed). sky130's five `met{1..5}.area.1` rules (issue #1955) each
 carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
-(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), so 34 of its 52 rules are covered.
+(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), and its five
+`met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
+`m3.7`/`m4.7`/`m5.7`, so 39 of its 57 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
@@ -1646,11 +1704,31 @@ Both modes reuse the same 0/3 split a normal run uses: `0` when `status` is
 unparseable `<report.json>` exits `1` with a clean error message, same as
 any other application-level failure.
 
+## Cross-validation against magic (independent oracle)
+
+This deck's verdicts are cross-checked against **magic**, a separate geometry
+engine with its own independently transcribed open_pdks sky130/gf180mcu rule
+decks — issue #2014, pairing #1 of tracking issue #2007. Both engines read the
+same GDS bytes; `tests/test_drc_magic_oracle.py` asserts they agree on a clean
+corpus cell and on a seeded 0.09 µm met1 spacing violation (same rule, same
+place). It is real-binary-gated and skips without `magic` installed;
+`.github/workflows/magic-oracle.yml` runs it for real on demand.
+
+What that does **not** prove is as important as what it does: `klt`'s deck is
+a curated subset (see "Coverage" above), so the claim is one-directional —
+everything `klt drc` flags, magic flags too. `coverage` stays the contract for
+what was never checked. See
+[`docs/design/magic-oracle.md`](../design/magic-oracle.md) for the full
+methodology, the measured results, and the declared shared surface.
+
 ## Exit codes
+
+Known zero or unknown execution returns the completed report on stdout with
+exit `4`; real violations retain exit `3`.
 
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
-| `0`  | Ran clean — no violations. Under `--check`: the committed report still holds (`status: "match"`). |
+| `0`  | At least one curated rule ran, with no violations. Under `--check`: the committed report still holds (`status: "match"`). |
 | `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`). Under `--check`: a missing/unparseable committed report. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Ran successfully, violations found. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
@@ -1683,8 +1761,27 @@ successfully and the documented success payload *is* on stdout.
 See `examples/drc/`: `generate.py` builds `example.gds` (a poly bar
 narrower than the minimum width, and a diff shape under-enclosing a licon1
 contact — two seeded violations — plus one clean, wide met1 shape), and
-`example.drc.json` is the exact expected output of:
+`example.drc.json` is the expected output of:
 
 ```
 klt drc examples/drc/example.gds --deck sky130 --format json
 ```
+
+minus its `provenance` block, whose `klt_version`/`klayout_version` are
+environment-dependent and therefore deliberately kept out of the committed
+fixture (the block's own shape is covered by `docs/json-contract.md` and
+`tests/test_drc.py::test_json_contract` instead).
+
+Regenerate **both** files with the one script — never by redirecting `klt
+drc --format json` into the fixture, which keeps `provenance` and fails the
+drift guard `tests/test_drc.py::test_example_gds_matches_committed_json`:
+
+```
+uv run python3 examples/drc/generate.py
+```
+
+It writes `example.gds` byte-reproducibly (GDS2 wall-clock write timestamps
+suppressed) and `example.drc.json` with `provenance` stripped, so a
+regeneration on an unchanged tree leaves `git status` clean —
+`tests/test_drc.py::test_example_generator_reproduces_committed_fixtures`
+guards exactly that.

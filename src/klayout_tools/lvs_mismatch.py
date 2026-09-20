@@ -43,7 +43,70 @@ from collections.abc import Sequence
 from typing import Any, NamedTuple
 
 
-def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
+class _SupplyPinUniverse(NamedTuple):
+    """The two library-derived name sets :func:`_build_net_correspondence`
+    needs to mark a supply-net correspondence as unverified (issue #2136).
+
+    ``power_pin_names`` is the standard-cell library's own power/ground pin
+    universe (``lvs.py``'s ``_gate_level_power_pin_names``);
+    ``layout_supply_nets`` is the set of layout net names one of those pins
+    demonstrably lands on (``lvs.py``'s ``_layout_supply_net_names``). Both
+    are upper-cased, and both are derived -- never a hardcoded per-PDK name
+    table or a ``V*`` glob. Built only for a ``reference.form:
+    "gate-level-verilog"`` run with resolvable library pin orders; ``None``
+    everywhere else.
+    """
+
+    power_pin_names: frozenset[str]
+    layout_supply_nets: frozenset[str]
+
+
+def _net_name_aliases(name: str | None) -> frozenset[str]:
+    """``name`` upper-cased, plus each of its ``|``-separated aliases.
+
+    A label-merged net is reported as ``VPWR|VDD`` (see ``_name_or_none``),
+    and which alias a given lookup table happens to hold is not something
+    either side controls -- so membership tests in this module consider the
+    joined spelling *and* every alias it joins.
+    """
+    if not name:
+        return frozenset()
+    return frozenset(
+        {name.upper(), *(alias.upper() for alias in name.split("|") if alias)}
+    )
+
+
+def _is_unverified_supply_correspondence(
+    layout_name: str | None,
+    reference_name: str | None,
+    universe: _SupplyPinUniverse | None,
+) -> bool:
+    """True when this pairing puts a layout **supply** net opposite a
+    reference net that is not itself a supply pin (issue #2136).
+
+    A ``reference.form: "gate-level-verilog"`` reference carries no
+    power/ground pins at all (see ``verilog_netlist.py``'s own "No
+    power/ground pins" note), so the comparer never has a same-named
+    candidate for the layout's ``VGND``/``VPWR`` and pairs it with whatever
+    its graph heuristics reach first -- routinely an unrelated signal net.
+    That pairing is reported as an ordinary match today, indistinguishable
+    from one the compare actually verified.
+
+    The reference-side half of the test is not redundant: it is what keeps
+    a genuine supply-to-supply pairing (a reference that *does* declare the
+    supply pin -- possible for a hand-written stub, and the shape every
+    non-``gate-level-verilog`` form has) out of the flag.
+    """
+    if universe is None:
+        return False
+    if not (_net_name_aliases(layout_name) & universe.layout_supply_nets):
+        return False
+    return not (_net_name_aliases(reference_name) & universe.power_pin_names)
+
+
+def _build_net_correspondence(
+    logger: Any, supply_universe: _SupplyPinUniverse | None = None
+) -> list[dict[str, Any]]:
     """Turn ``logger.net_matches`` (every successful net pairing the
     comparer produced -- unambiguous and ambiguous alike) into the
     documented ``net_correspondence[]`` response field (issue #311).
@@ -71,6 +134,18 @@ def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
     layout)`` so repeated runs against the same inputs diff clean,
     matching this module's existing determinism guarantee for
     ``mismatches[]`` (see ``_sort_key``).
+
+    ``supply_universe`` (issue #2136, ``None`` for every ``reference.form``
+    other than ``"gate-level-verilog"`` and for any run whose library
+    pin orders could not be resolved) adds a ``heuristic`` boolean to every
+    entry: ``True`` for a pairing that puts a layout supply net opposite a
+    reference net that is not itself a supply pin (see
+    :func:`_is_unverified_supply_correspondence`), ``False`` otherwise. The
+    key is **omitted entirely** when ``supply_universe`` is ``None``, so a
+    caller can tell "checked, and this pairing is genuine" (``False``) apart
+    from "no supply universe was derivable, so nothing here was checked"
+    (absent) -- and so every other reference form's output stays
+    byte-identical to what it was before this issue.
     """
     from .lvs import _name_or_none
 
@@ -81,11 +156,16 @@ def _build_net_correspondence(logger: Any) -> list[dict[str, Any]]:
         key = (scope, layout_name, reference_name)
         if key in seen:
             continue
-        seen[key] = {
+        entry: dict[str, Any] = {
             "layout": layout_name,
             "reference": reference_name,
             "pin": bool(layout_net is not None and layout_net.pin_count() > 0),
         }
+        if supply_universe is not None:
+            entry["heuristic"] = _is_unverified_supply_correspondence(
+                layout_name, reference_name, supply_universe
+            )
+        seen[key] = entry
     return sorted(
         seen.values(),
         key=lambda entry: (entry["reference"] or "", entry["layout"] or ""),
@@ -386,6 +466,83 @@ def _device_body_net_name(device: Any) -> str | None:
     return None
 
 
+#: KLayout's own placeholder spelling for a net that carries no drawn label:
+#: ``Net.expanded_name()`` returns ``"$<n>"`` (``"$0"``, ``"$5"``, ...).
+#:
+#: **Raw, not backslash-escaped -- the two spellings are not interchangeable
+#: (issue #2048).** ``extract_report.py``'s ``_ANONYMOUS_NET_PREFIX`` is
+#: ``"\\$"`` because every net name *that* module reports has already
+#: passed through :func:`~klayout_tools.extract.spice_safe_net_name`, which
+#: escapes the leading ``$`` to match the written netlist's own node
+#: spelling (issue #1162). Nothing on *this* module's path does that
+#: escaping: :func:`_device_body_net_name` reads ``Net.expanded_name()``
+#: straight off the in-memory netlist, so the prefix to match here is the
+#: bare ``"$"``. Reusing ``extract_report.py``'s escaped constant here would
+#: silently never match any real body net.
+_RAW_ANONYMOUS_NET_PREFIX = "$"
+
+
+def _is_unresolved_body_net(name: str | None) -> bool:
+    """Whether a body terminal's net name (as returned by
+    :func:`_device_body_net_name`) fails to identify a real, drawn- or
+    derived-tap net: either KLayout synthesized an anonymous placeholder for
+    it (``"$<n>"`` -- no label reached the net, so nothing biases the body),
+    or the terminal reached no net at all (``None``).
+
+    The in-memory counterpart of ``extract.py``'s
+    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, which
+    makes the same per-device determination against the already-escaped
+    ``"\\$<n>"`` spelling it reports in ``klt extract``/``klt pex`` JSON --
+    see :data:`_RAW_ANONYMOUS_NET_PREFIX` for why the prefix differs between
+    the two paths even though the condition is identical.
+    """
+    return name is None or name.startswith(_RAW_ANONYMOUS_NET_PREFIX)
+
+
+def _body_unverified_counts(layout_circuit: Any, deck: Any) -> dict[str, int]:
+    """``{device-class name: unverified device count}`` for every MOS device
+    class in ``layout_circuit`` whose body terminals were compared against a
+    deck-synthesized net rather than a real schematic one (issue #281).
+
+    The single source of truth for that determination: :func:`_body_net_warnings`
+    renders these counts as its ``device.body_unverified`` ``mismatches[]``
+    prose, and :func:`~klayout_tools.lvs._body_verification_report` renders the
+    same counts as the machine-checkable ``body_verification`` block (issue
+    #1983) -- so the warning a reader sees and the field a grader reads can
+    never disagree. See :func:`_body_net_warnings` for the full rationale on
+    *which* devices count as unverified on which decks.
+
+    Empty when every MOS body terminal resolved to a real net (a layout that
+    drew its substrate/well ties on a deck that has a tap mechanism), which is
+    exactly the "verified" case.
+    """
+    counts: dict[str, int] = {}
+
+    nfet_count = sum(
+        1
+        for device in layout_circuit.each_device()
+        if device.device_class().name == deck.nfet_class
+        and _device_body_net_name(device) in (deck.substrate_net, None)
+    )
+    if nfet_count:
+        counts[deck.nfet_class] = nfet_count
+
+    # Issue #2048: per-device, not deck-structural. A deck that merely
+    # *declares* a tap mechanism does not guarantee any individual PMOS body
+    # reached a real net -- so ask each device, exactly as `klt extract`'s
+    # `_detect_unbiased_pmos_body_nets` already does.
+    pfet_count = sum(
+        1
+        for device in layout_circuit.each_device()
+        if device.device_class().name == deck.pfet_class
+        and _is_unresolved_body_net(_device_body_net_name(device))
+    )
+    if pfet_count:
+        counts[deck.pfet_class] = pfet_count
+
+    return counts
+
+
 def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     """Issue #281 (narrowed to real-tap-drawn layouts by #490): flag, as
     non-blocking ``severity: "warning"`` entries, the MOS body terminals
@@ -405,19 +562,28 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     e.g. gf180mcu before issue #1084) is structurally unverified. The NMOS
     warning therefore counts only devices whose body net name equals
     ``deck.substrate_net`` (or resolves to no net at all), not every NMOS
-    device. The PMOS warning only fires when the deck also has no tap
-    mechanism at all -- neither a distinct drawn ``tap`` layer nor a
-    derived one (``deck.tap``/``tap_nplus``/``tap_pplus`` all ``None``,
-    issue #1084) -- a deck that has *either* ties PMOS bodies to a genuine,
-    named net unconditionally (no ring required, since every PMOS sits
-    inside an ``nwell`` by construction), so no warning is warranted there.
-    A gf180mcu layout whose declared ``tap_nplus``/``tap_pplus`` implant
-    layers happen to draw no real tie shape in a *specific* layout still
-    resolves each such PMOS body to an anonymous net -- exactly as it did
-    before this deck declared those fields -- but is no longer flagged by
-    this deck-structural warning, mirroring sky130's own long-standing
-    (optimistic) treatment of a deck that merely *has* a tap mechanism as
-    sufficient, not a guarantee that every individual instance used it.
+    device.
+
+    **The PMOS arm is per-device too, since issue #2048.** It used to be
+    deck-structural: it fired only when the deck had no tap mechanism at all
+    (``deck.tap``/``tap_nplus``/``tap_pplus`` all ``None``, gf180mcu before
+    issue #1084), treating a deck that merely *declares* one as sufficient
+    for every PMOS in every layout it extracts. It is not: a gf180mcu layout
+    whose declared ``tap_nplus``/``tap_pplus`` implant layers draw no real
+    well-tie shape still resolves each such PMOS body to an anonymous,
+    KLayout-synthesized ``"$<n>"`` net with no DC bias path -- and that went
+    unflagged here while ``klt pex``'s ``body_bias`` block, built from
+    ``extract.py``'s per-device
+    :func:`~klayout_tools.extract._detect_unbiased_pmos_body_nets`, reported
+    the very same layout as ``"unbiased"``. The PMOS warning now counts
+    exactly the devices whose body terminal reached such a placeholder net
+    (or no net at all); see :func:`_is_unresolved_body_net`, and
+    :data:`_RAW_ANONYMOUS_NET_PREFIX` for why this in-memory path matches a
+    raw ``$`` where ``extract.py`` matches an escaped ``\\$``. A deck with a
+    real well-tap mechanism (sky130's drawn ``tap``/``well_label``) still
+    emits no PMOS warning on a well-labelled layout -- but now because each
+    PMOS body demonstrably landed on a named net (e.g. ``VPB``), not because
+    the deck declared a mechanism.
 
     Neither warning fires at all for the pre-extracted ``layout.netlist``
     request form -- callers only reach this helper when ``layout.file`` +
@@ -434,12 +600,12 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
 
     entries: list[dict[str, Any]] = []
 
-    nfet_count = sum(
-        1
-        for device in layout_circuit.each_device()
-        if device.device_class().name == deck.nfet_class
-        and _device_body_net_name(device) in (deck.substrate_net, None)
-    )
+    # Issue #1983: both this prose warning and the machine-checkable
+    # `body_verification` block are rendered from one determination, so a
+    # reader and a grader can never see different answers.
+    counts = _body_unverified_counts(layout_circuit, deck)
+
+    nfet_count = counts.get(deck.nfet_class, 0)
     if nfet_count:
         entries.append(
             _mismatch(
@@ -456,30 +622,25 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
             )
         )
 
-    if deck.tap is None and deck.tap_nplus is None and deck.tap_pplus is None:
-        pfet_count = sum(
-            1
-            for device in layout_circuit.each_device()
-            if device.device_class().name == deck.pfet_class
-        )
-        if pfet_count:
-            entries.append(
-                _mismatch(
-                    CATEGORY_DEVICE_BODY_UNVERIFIED,
-                    "warning",
-                    f"{pfet_count} PMOS device body terminal(s) were "
-                    "compared against an anonymous, deck-synthesized well "
-                    "net, not a real schematic net -- this deck has no "
-                    "distinct well-tap layer (see docs/cli/extract.md, "
-                    '"Coverage")',
-                    "layout",
-                    device={
-                        "layout": None,
-                        "reference": None,
-                        "class": deck.pfet_class,
-                    },
-                )
+    pfet_count = counts.get(deck.pfet_class, 0)
+    if pfet_count:
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_BODY_UNVERIFIED,
+                "warning",
+                f"{pfet_count} PMOS device body terminal(s) were "
+                "compared against an anonymous, KLayout-synthesized well "
+                "net, not a real schematic net -- no drawn or derived "
+                "well-tap geometry resolved these device(s)' body terminal "
+                'to a real net (see docs/cli/extract.md, "Coverage")',
+                "layout",
+                device={
+                    "layout": None,
+                    "reference": None,
+                    "class": deck.pfet_class,
+                },
             )
+        )
 
     return entries
 

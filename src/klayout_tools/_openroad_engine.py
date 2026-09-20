@@ -20,9 +20,18 @@ for the identical problem.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
-from collections.abc import Iterable
+import uuid
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from ._provenance import sha256_file
+from .env_provenance import find_repo_root, repo_relative_path
 
 _OPENROAD_VERSION_RE = re.compile(r"OpenROAD\s+(\S+)")
 
@@ -77,22 +86,173 @@ def _timing_status(values: Iterable[float | None]) -> str | None:
     return "constrained"
 
 
+@dataclass(frozen=True)
+class _OpenRoadResult:
+    """Captured process output plus this invocation's retained evidence."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    engine_log: dict[str, Any]
+
+    @contextmanager
+    def diagnostics(self, error_cls: type[Exception]) -> Iterator[None]:
+        """Preserve the caller's diagnosis, including missing metrics/output."""
+        try:
+            yield
+        except error_cls as exc:
+            raise error_cls(_log_error_context(str(exc), self.engine_log)) from exc
+
+
+def _log_error_context(message: str, record: dict[str, Any]) -> str:
+    return f"{message} -- openroad invocation: {json.dumps(record, sort_keys=True)}"
+
+
+def _captured_text(value: str | bytes | None) -> str:
+    """Decode only for diagnostics/parsing; retained files keep original bytes."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
+def _log_path(path: Path | None) -> dict[str, Any]:
+    root = find_repo_root()
+    if path is not None and root is None:
+        return {"path": None, "scope": "external"}
+    return repo_relative_path(path, repo_root=root)
+
+
+def _retention_error(record: dict[str, Any], artifact: str, exc: OSError) -> None:
+    # str(exc) can include an absolute filename; keep the new diagnostic
+    # paths subject to the same privacy rule as successful artifact paths.
+    record["retention_errors"].append(
+        {"artifact": artifact, "error": f"{type(exc).__name__}: {exc.strerror}"}
+    )
+
+
+def _write_log_artifact(
+    directory: Path, name: str, content: str | bytes | None, record: dict[str, Any]
+) -> dict[str, Any]:
+    path = directory / name
+    data = content.encode("utf-8") if isinstance(content, str) else content or b""
+    try:
+        with path.open("xb") as handle:
+            handle.write(data)
+    except OSError as exc:
+        _retention_error(record, name, exc)
+        return _log_path(None)
+    return _log_path(path)
+
+
+def _retain_openroad_logs(
+    script_path: str,
+    metrics_path: str,
+    *,
+    invocation_id: str,
+    script_hash: str | None,
+    outcome: str,
+    returncode: int | None,
+    stdout: str | bytes | None,
+    stderr: str | bytes | None,
+) -> dict[str, Any]:
+    """Write only to a newly created directory; retries never overwrite it."""
+    directory = Path(script_path).absolute().parent / "openroad-logs" / invocation_id
+    record: dict[str, Any] = {
+        "invocation_id": invocation_id,
+        "script_name": Path(script_path).name,
+        "script_path": _log_path(Path(script_path)),
+        "script_sha256": script_hash,
+        "metrics_path": _log_path(Path(metrics_path)),
+        "outcome": outcome,
+        "returncode": returncode,
+        "directory": _log_path(None),
+        "stdout_path": _log_path(None),
+        "stderr_path": _log_path(None),
+        "metadata_path": _log_path(None),
+        "retention_errors": [],
+    }
+    try:
+        directory.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        _retention_error(record, "directory", exc)
+        return record
+    record["directory"] = _log_path(directory)
+    record["stdout_path"] = _write_log_artifact(directory, "stdout.log", stdout, record)
+    record["stderr_path"] = _write_log_artifact(directory, "stderr.log", stderr, record)
+    record["metadata_path"] = _log_path(directory / "invocation.json")
+    record["metadata_path"] = _write_log_artifact(
+        directory, "invocation.json", json.dumps(record, indent=2) + "\n", record
+    )
+    return record
+
+
 def _run_openroad(
-    script_path: str, metrics_path: str, *, error_cls: type[Exception]
-) -> subprocess.CompletedProcess:
+    script_path: str,
+    metrics_path: str,
+    *,
+    error_cls: type[Exception],
+    engine_logs: list[dict[str, Any]] | None = None,
+) -> _OpenRoadResult:
     """Run ``openroad -no_init -exit -metrics <metrics_path> <script_path>``,
-    capturing stdout/stderr as text. Raises ``error_cls`` if the ``openroad``
+    capturing raw stdout/stderr and retaining both streams separately. The
+    result exposes UTF-8 text (replacement decoding) for existing parsers;
+    an invalid output byte cannot mask the engine failure or lose its logs.
+    Raises ``error_cls`` if the ``openroad``
     binary itself cannot be launched (e.g. not on ``PATH``); a non-zero exit
     from a successfully-launched run is left for the caller to inspect via
-    the returned ``CompletedProcess.returncode``."""
+    returned result's ``returncode``. No timeout is introduced. If a runner
+    supplies a timeout exception, its available partial streams are retained;
+    KeyboardInterrupt retains available data and keeps its interruption type.
+    Logs are local debugging evidence, not a successful-stage signal."""
+    invocation_id = uuid.uuid4().hex
+    script_hash = sha256_file(script_path)
+
+    def retain(outcome, returncode, stdout, stderr):
+        record = _retain_openroad_logs(
+            script_path,
+            metrics_path,
+            invocation_id=invocation_id,
+            script_hash=script_hash,
+            outcome=outcome,
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        if engine_logs is not None:
+            engine_logs.append(record)
+        return record
+
     try:
-        return subprocess.run(
+        completed = subprocess.run(
             ["openroad", "-no_init", "-exit", "-metrics", metrics_path, script_path],
             capture_output=True,
-            text=True,
         )
     except OSError as exc:
-        raise error_cls(f"could not launch openroad: {exc}") from exc
+        record = retain("launch_failed", None, None, None)
+        raise error_cls(
+            _log_error_context(f"could not launch openroad: {exc}", record)
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        record = retain("timed_out", None, exc.stdout, exc.stderr)
+        raise error_cls(
+            _log_error_context(f"openroad timed out: {exc}", record)
+        ) from exc
+    except KeyboardInterrupt as exc:
+        record = retain(
+            "interrupted",
+            None,
+            getattr(exc, "stdout", None),
+            getattr(exc, "stderr", None),
+        )
+        exc.args = (*exc.args, _log_error_context("openroad interrupted", record))
+        raise
+    record = retain("exited", completed.returncode, completed.stdout, completed.stderr)
+    return _OpenRoadResult(
+        completed.returncode,
+        _captured_text(completed.stdout),
+        _captured_text(completed.stderr),
+        record,
+    )
 
 
 def _openroad_version() -> str | None:

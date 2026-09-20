@@ -63,6 +63,28 @@ if TYPE_CHECKING:
     import klayout.db as kdb
 
 
+#: ngspice's own hierarchy separator (issue #2145). A node token containing
+#: it is parsed as a *path expression* (``XBIAS.vb1`` = instance ``XBIAS``,
+#: node ``vb1``) wherever a node reference is read, so a flat net whose name
+#: carries an instance path -- what ``klt place-and-route``'s DEF net names
+#: and hierarchy-qualified drawn labels both produce -- is unaddressable by
+#: its own written name in ``v()``/``.meas``/``.ic``. Only *net/node* tokens
+#: are rewritten: SPICE dot-commands (``.SUBCKT``/``.ENDS``/``.GLOBAL``) and
+#: numeric literals (``L=0.28U``) are a different lexical class entirely and
+#: are never routed through :func:`spice_safe_net_name`.
+SPICE_HIERARCHY_SEPARATOR = "."
+
+#: What :data:`SPICE_HIERARCHY_SEPARATOR` is rewritten to (issue #2145).
+#: ``_`` is an ordinary identifier character in every SPICE dialect and is
+#: the join several other extractors already use; ``/`` was rejected because
+#: ngspice's expression parser reads it as division inside ``v()``/``B``
+#: source expressions. Not injective on its own (``a.b`` and a pre-existing
+#: ``a_b`` both spell ``a_b``) -- no dot-free-preserving rewrite can be --
+#: so collisions are resolved per-netlist, not per-name, by ``extract.py``'s
+#: ``_rewrite_dotted_net_names``.
+SPICE_SAFE_HIERARCHY_JOIN = "_"
+
+
 def _n_squares(area_um2: float, perimeter_um: float) -> float:
     """Estimate the number of resistive *squares* of a net's copper on one
     layer from its total area and perimeter.
@@ -1980,14 +2002,16 @@ def _tie_substrate_nets_to_ground(
 
 def spice_safe_net_name(name: str) -> str:
     """Rewrite a KLayout ``Net.expanded_name()`` string to the exact spelling
-    KLayout's own ``NetlistSpiceWriter`` writes for that net's *node*
-    references in the ``.SUBCKT``/instance lines of the written SPICE file
-    (issue #696, issue #1162).
+    the written SPICE file uses for that net's *node* references in its
+    ``.SUBCKT``/instance lines (issue #696, issue #1162, issue #2145).
 
-    Two independent rewrites, both mirroring escaping ``NetlistSpiceWriter``
-    already applies when it writes a net as a node reference (as opposed to
-    the raw form it keeps in its own leading ``* pin ...``/``* net ...``
-    comments):
+    Three independent rewrites. The first two mirror escaping
+    ``NetlistSpiceWriter`` already applies when it writes a net as a node
+    reference (as opposed to the raw form it keeps in its own leading
+    ``* pin ...``/``* net ...`` comments); the third mirrors a rewrite this
+    repo applies to the *real* ``kdb.Net`` name before handing the netlist
+    to the writer (``extract.py``'s ``_rewrite_dotted_net_names``), because
+    ``NetlistSpiceWriter`` has no escape of its own for that character:
 
     1. **Merged labels (issue #696).** ``Net.expanded_name()`` joins every
        distinct text label found on one electrical net with ``,`` (see
@@ -2006,6 +2030,23 @@ def spice_safe_net_name(name: str) -> str:
        ``$`` such as ``mid$dle`` is left alone -- only the leading
        character triggers the ngspice comment hazard) wherever it appears
        as a node reference; this function does the same.
+    3. **Hierarchical names (issue #2145).** A net whose name came from a
+       composed/routed cell's own hierarchy -- a ``klt place-and-route``
+       DEF net name replayed by ``--def-net-names``, or a drawn label
+       carrying an instance path -- spells that path with ``.``
+       (``XBIAS.vb1``). ``.`` is ngspice's *own* hierarchy separator, so
+       such a token is read as a path expression (instance ``XBIAS`` ->
+       node ``vb1``) wherever a node reference is parsed: the node is
+       unaddressable by its written name in ``v()``/``.meas``/``.ic``, and
+       the same token means two different things depending on its position
+       on the card. ``NetlistSpiceWriter`` does *not* escape it (confirmed
+       against a live writer run: a net named ``XBIAS.vb1`` writes as
+       ``XBIAS.vb1``), so ``extract.py``'s ``_rewrite_dotted_net_names``
+       renames the real net to ``_`` instead before the netlist is written,
+       and this function applies the same ``.`` -> ``_`` rewrite so a name
+       that reaches a report *without* passing through that pass (a
+       reference netlist's nets in ``klt lvs``, say) is still reported in
+       the one SPICE-addressable spelling.
 
     Before this function existed (for case 1) and before issue #1162 (for
     case 2), every net name this module put into the JSON response
@@ -2026,17 +2067,21 @@ def spice_safe_net_name(name: str) -> str:
     convention).
 
     A no-op for the overwhelming majority of net names, which contain
-    neither a comma nor a leading ``$``.
+    neither a comma, nor a dot, nor a leading ``$``. Idempotent: its own
+    output contains none of the three, so re-applying it changes nothing.
     """
-    escaped = name.replace(",", "|")
+    escaped = name.replace(",", "|").replace(
+        SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN
+    )
     if escaped.startswith("$"):
         escaped = "\\" + escaped
     return escaped
 
 
 def _net_identity_name(net: kdb.Net) -> str:
-    """The comma -> ``|`` (issue #696) rewrite of ``net.expanded_name()``
-    *without* :func:`spice_safe_net_name`'s leading-``$`` backslash escape
+    """The comma -> ``|`` (issue #696) and ``.`` -> ``_`` (issue #2145)
+    rewrites of ``net.expanded_name()`` *without*
+    :func:`spice_safe_net_name`'s leading-``$`` backslash escape
     (issue #1162) -- used only where the resulting string becomes (part of)
     the *real* name of a ``kdb.Net``/``kdb.Device`` this module creates in
     the working circuit (``_compute_parasitics``'s internal coupling-pair
@@ -2060,8 +2105,23 @@ def _net_identity_name(net: kdb.Net) -> str:
     it enters a response field, e.g. ``parasitics.nets[].net``/``hub_net``/
     ``terminals[].leg_net``) picks up the escape, matching the netlist's own
     spelling without touching what the underlying net is actually called.
+
+    The ``.`` -> ``_`` rewrite (issue #2145) *is* included here, on the same
+    side of the line as the comma: unlike the leading-``$`` escape, it is
+    not applied by ``NetlistSpiceWriter``, so it has to be baked into the
+    real net name for the written netlist to carry it at all
+    (``extract.py``'s ``_rewrite_dotted_net_names`` does exactly that,
+    before this module ever sees the circuit). Including it here is
+    therefore a no-op in practice -- by the time ``_compute_parasitics``
+    runs, no net name still contains a dot -- kept only so this namespace
+    and :func:`spice_safe_net_name` cannot drift apart on a path that
+    bypasses that pass.
     """
-    return net.expanded_name().replace(",", "|")
+    return (
+        net.expanded_name()
+        .replace(",", "|")
+        .replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
+    )
 
 
 def _unique_net_name(base: str, existing: set[str], suffix: str = "__par") -> str:

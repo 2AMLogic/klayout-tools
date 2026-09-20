@@ -30,13 +30,16 @@ test suite reaches them by that path from before this split -- see that
 module's own re-export block).
 
 Dependency surface, same discipline the STA split documents for its own
-reverse dependency: ``write_layout`` (``_layout.py``) and
-``read_lef_macro_pin_ports`` (``lef_header.py``) are imported at module scope
-here directly from where they are actually defined -- neither creates a
-cycle, since neither of those modules imports back from here or from
-``place_and_route.py``, and neither is ever monkeypatched through
-``place_and_route.<name>``. The handful of names still defined in (or
-re-exported through) ``place_and_route.py`` itself (``PlaceAndRouteError``,
+reverse dependency: ``write_layout`` (``_layout.py``),
+``read_lef_macro_pin_ports`` (``lef_header.py``) and ``repair_min_area``
+(``place_and_route_min_area.py``, issue #2139 -- this merge's own
+post-route minimum-area repair pass, split off for the same reason this
+module was) are imported at module scope here directly from where they are
+actually defined -- none creates a cycle, since none of those modules
+imports back from here or from ``place_and_route.py``, and none is ever
+monkeypatched through ``place_and_route.<name>``. The handful of names still
+defined in (or re-exported through) ``place_and_route.py`` itself
+(``PlaceAndRouteError``,
 ``read_lef_header``, ``_resolve_gds_view``, ``_resolve_layer_map``) are
 imported *inside* the function that uses them, deferred rather than at
 module scope, both because ``place_and_route.py`` in turn imports this
@@ -59,6 +62,7 @@ from typing import Any
 
 from ._layout import write_layout
 from .lef_header import read_lef_macro_pin_ports
+from .place_and_route_min_area import repair_min_area
 
 #: ``UNITS DISTANCE MICRONS <n> ;`` -- mirrors ``congestion.py``'s own
 #: ``_UNITS_RE`` (kept as a separate, module-local copy here rather than
@@ -454,7 +458,7 @@ def _merge_def_to_gds(
     expected to stay empty, not an error.
 
     Returns ``{"path": <str | None>, "resolution": <str>, "def_net_names":
-    {...}}``. ``path``/``resolution`` describe the
+    {...}, "min_area_repair": {...}}``. ``path``/``resolution`` describe the
     :func:`~klayout_tools.place_and_route._resolve_layer_map` result actually
     applied (or not) to this merge, so the caller can surface it in the
     response envelope's ``layer_map`` field (issue #1029) -- a caller has no
@@ -462,6 +466,13 @@ def _merge_def_to_gds(
     guaranteed-matching layer/datatype assignment. ``def_net_names`` is
     :func:`_stamp_single_pin_def_net_names`'s own report (issue #1488), which
     the caller surfaces as the sibling ``def_net_names`` response field.
+    ``min_area_repair`` is
+    :func:`~klayout_tools.place_and_route_min_area.repair_min_area`'s own
+    report (issue #2139) -- what the post-route minimum-area repair pass
+    drew, and what it could **not** repair safely -- surfaced as the sibling
+    ``min_area_repair`` response field for the same reason: a caller has no
+    other way to tell whether the merged GDS it just got back really clears
+    the PDK's own ``*.area.*`` rules.
     """
     # Deferred import: `place_and_route.py` imports this function back at
     # module scope (to preserve `klayout_tools.place_and_route.
@@ -678,6 +689,27 @@ def _merge_def_to_gds(
                 "view"
             )
 
+    # Issue #2139: floor every routed-metal polygon against its own layer's
+    # minimum-*area* rule before writing. The tech LEF's own via cells
+    # (sky130's `L1M1_PR_MR`/`M2M3_PR`) and OpenROAD's PDN via patches each
+    # draw metal that is legal in isolation but below the layer's
+    # `*.area.*` floor once it is the whole merged polygon -- the
+    # `place-and-route` half of the gap #2075 fixed for `gen-compose`'s
+    # landing pads and explicitly could not reproduce here. Runs last, on
+    # the final `top_only`/`top` geometry: after the DIEAREA guard above
+    # (which must judge the *merge's* own extent, not this pass's patches,
+    # and whose parsed die box is reused here to keep every patch inside
+    # it), and after the #1488 marker pass (whose markers are drawn inside
+    # existing conductor and so change no merged polygon's area).
+    min_area_info = repair_min_area(
+        kdb,
+        layout=top_only,
+        top_cell=top,
+        variant=pdk_info["variant"],
+        routing_layers=set(_lef_net_layer_gds_map(layer_map_path).values()),
+        die_area_um=die_area_um,
+    )
+
     # write_layout() (see _layout.py, #320) always disables KLayout's default
     # wall-clock GDS2 BGNLIB/BGNSTR timestamps, so re-running an identical
     # place-and-route request twice produces a byte-identical merged GDS --
@@ -688,4 +720,5 @@ def _merge_def_to_gds(
         "path": layer_map_path,
         "resolution": layer_map_resolution,
         "def_net_names": def_net_names_info,
+        "min_area_repair": min_area_info,
     }

@@ -19,6 +19,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +30,7 @@ import pytest
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import signoff as signoff_module
 from klayout_tools.cli import main
+from klayout_tools.coverage import build_check_coverage
 from klayout_tools.design_evidence_tiers import DesignEvidenceTiersError
 from klayout_tools.signoff import (
     SignoffError,
@@ -40,6 +43,13 @@ from klayout_tools.signoff import (
 #: tests below (issue #825) to locate `examples/design-pipeline/`'s
 #: already-passing artifacts without depending on pytest's cwd.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Match the real-engine tier in test_sim.py and test_pex.py. CI installs
+# ngspice; the local check:ci command deliberately opts out of this tier.
+requires_ngspice = pytest.mark.skipif(
+    shutil.which("ngspice") is None or os.environ.get("KLT_SKIP_NGSPICE_TESTS") == "1",
+    reason="ngspice is unavailable or disabled by KLT_SKIP_NGSPICE_TESTS=1",
+)
 
 DRC_CLEAN_ENVELOPE = {
     "schema_version": 1,
@@ -81,6 +91,65 @@ DRC_VIOLATIONS_ENVELOPE = {
             "polygon": None,
         }
     ],
+}
+
+#: Issue #2002: a `status: "clean"` DRC run whose deck did *not* cover
+#: everything the stream draws -- two drawn layers with no rule at all, two
+#: rules the deck carries but this run skipped, and the DRM chapters the
+#: deck transcribes. This is the case docs/design-evidence-tiers.md item 3
+#: requires a claim to disclose, and the case `klt signoff` previously
+#: rendered identically to a fully-covering deck.
+DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": {
+        "deck_layers": ["65/20", "68/20"],
+        "layers_checked": ["65/20"],
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "voltage_domain_warnings": [],
+        "deck_scope": ["5.x", "6.x"],
+    },
+}
+
+#: Issue #2002 back-compat: DRC evidence committed before `klt drc` reported
+#: a `coverage` block at all. It must grade exactly as it always did, and
+#: must not be rendered as a deck that reported zero gaps.
+DRC_CLEAN_NO_COVERAGE_ENVELOPE = {
+    key: value for key, value in DRC_CLEAN_ENVELOPE.items() if key != "coverage"
+}
+
+#: Issue #1996: the vacuous case -- a PDK-native deck whose whole rule set
+#: was gated behind a `--deck-var` this run never set. The deck completed and
+#: wrote a well-formed, *empty* report, so `status` is `"clean"` and
+#: `violation_count` is `0`, exactly as for a real clean run; only
+#: `coverage.nothing_checked` distinguishes the two.
+DRC_CLEAN_NOTHING_CHECKED_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": {
+        "deck_layers": [],
+        "layers_checked": [],
+        "rules_checked": [],
+        "layers_in_stream_without_rules": [],
+        "rules_skipped": [],
+        "voltage_domain_warnings": [],
+        "deck_scope": [],
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["deck_reported_no_rules"],
+    },
+}
+
+#: Issue #1996's control: the same envelope shape, from a deck that actually
+#: ran its rules. Carries the convention's keys with `nothing_checked: false`
+#: -- a *positive* statement of coverage, which must grade exactly like a
+#: pre-convention envelope that makes no statement at all.
+DRC_CLEAN_SOMETHING_CHECKED_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": {
+        **DRC_CLEAN_ENVELOPE["coverage"],
+        "rules_checked": ["poly.width.1", "poly.space.1"],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    },
 }
 
 LVS_MATCH_ENVELOPE = {
@@ -323,6 +392,23 @@ SIM_FAIL_ENVELOPE = {
     "failed": 1,
 }
 
+#: Issue #1996: a `klt sim` request whose PVT corner matrix expanded to zero
+#: corners. Every counter is `0` and the aggregate verdict falls through to
+#: `"pass"` -- a verdict about nothing at all.
+SIM_EMPTY_CORNER_MATRIX_ENVELOPE = {
+    **SIM_PASS_ENVELOPE,
+    "corner_count": 0,
+    "passed": 0,
+    "coverage": {
+        "corners_simulated": 0,
+        "measurements_declared": 0,
+        "measurements_with_limits": 0,
+        "unrecognized_limit_keys": [],
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["empty_corner_matrix"],
+    },
+}
+
 #: `klt yield` (issue #816, Phase 1a of epic #710) JSON report shape, per
 #: docs/cli/yield.md's "JSON schema (the contract)" section -- hand-built
 #: here exactly like every other kind's fixture (no dependency on the
@@ -455,6 +541,84 @@ PEX_PASS_ENVELOPE = {
 
 PEX_FAIL_ENVELOPE = {**PEX_PASS_ENVELOPE, "status": "fail", "passed": 2, "failed": 1}
 
+#: Issue #1996: a `klt pex` run that produced no `delta[]` row at all, so no
+#: schematic-vs-extracted comparison was ever performed. `status` is `"pass"`
+#: because no row failed -- vacuously.
+PEX_NOTHING_CHECKED_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "corner_count": 0,
+    "delta": [],
+    "passed": 0,
+    "coverage": {
+        "testbenches": 1,
+        "delta_rows": 0,
+        "corners_compared": 0,
+        "nothing_checked": True,
+        "nothing_checked_reasons": ["no_delta_rows"],
+    },
+}
+
+#: Issue #1996's edge case: a comparison that really ran and found every row
+#: within tolerance. One `delta[]` row per compared `(corner, measurement)`
+#: pair, so this is *not* a vacuous pass and must never be graded as one.
+PEX_PASS_REAL_COMPARISON_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "coverage": {
+        "testbenches": 1,
+        "delta_rows": 1,
+        "corners_compared": 1,
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+    },
+}
+
+#: Issue #1983: a `klt pex` run whose extracted side had every device body
+#: on a real, named net -- the clean case, stated positively.
+PEX_PASS_BODY_BIASED_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "body_bias": {
+        "status": "biased",
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+        "unbiased_pmos_body_nets": [],
+    },
+}
+
+#: Issue #1983: the compromised case -- every graded delta row met its
+#: tolerance (`status: "pass"`), but the extracted netlist those numbers came
+#: from had PMOS bodies on anonymous, deck-synthesized nets with no DC bias
+#: path at all, which per docs/cli/extract.md makes the resimulation
+#: "physically wrong, not merely imprecise". Before #1983 this artifact was
+#: byte-indistinguishable from the one above.
+PEX_PASS_BODY_UNBIASED_ENVELOPE = {
+    **PEX_PASS_ENVELOPE,
+    "body_bias": {
+        "status": "unbiased",
+        "unbiased_device_count": 3,
+        "unbiased_nets": ["\\$5", "\\$7"],
+        "unbiased_pmos_body_nets": [
+            {"device": "$1", "net": "\\$5"},
+            {"device": "$2", "net": "\\$5"},
+            {"device": "$3", "net": "\\$7"},
+        ],
+    },
+}
+
+#: Issue #1983: `klt lvs` evidence whose compare matched while its MOS body
+#: terminals went structurally unverified (the `device.body_unverified`
+#: condition, now also stated as a gradeable `body_verification` block).
+LVS_MATCH_BODY_UNVERIFIED_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "body_verification": {
+        "status": "unverified",
+        "reason": None,
+        "device_classes": ["nfet"],
+        "device_count": 2,
+        "findings": [{"class": "nfet", "device_count": 2}],
+        "finding_count": 1,
+    },
+}
+
 #: `klt power` (issues #844/#845/#846, Epic #712 Phase 1) JSON report shape
 #: -- hand-built here exactly like every other kind's fixture (see
 #: docs/cli/power.md's JSON schema). Unlike every kind above, it carries no
@@ -500,6 +664,18 @@ POWER_EM_FAIL_ENVELOPE = {
         **POWER_PASS_ENVELOPE["em_verdict"],
         "status": "fail",
         "fail_count": 1,
+    },
+}
+
+#: At least one edge was checked and none failed, but some other edge in
+#: the design was never checked at all (issue #1997) -- rolled-up
+#: `"pass_partial"`, distinct from a genuinely complete `"pass"`.
+POWER_EM_PASS_PARTIAL_ENVELOPE = {
+    **POWER_PASS_ENVELOPE,
+    "em_verdict": {
+        **POWER_PASS_ENVELOPE["em_verdict"],
+        "status": "pass_partial",
+        "unchecked_edge_count": 3,
     },
 }
 
@@ -699,7 +875,19 @@ FUNCTIONAL_VERIFICATION_PASS_ENVELOPE = {
             "status": "passed",
             "sim_time_ns": 520.0,
             "real_time_s": 0.0051,
-        }
+        },
+        {
+            "name": "test_gcd_random_pairs",
+            "status": "passed",
+            "sim_time_ns": 4720.0,
+            "real_time_s": 0.0347,
+        },
+        {
+            "name": "test_gcd_corner_cases",
+            "status": "passed",
+            "sim_time_ns": 120.0,
+            "real_time_s": 0.0025,
+        },
     ],
     "coverage": None,
     "trace": None,
@@ -718,6 +906,15 @@ FUNCTIONAL_VERIFICATION_FAIL_ENVELOPE = {
     "status": "fail",
     "passed_count": 2,
     "failed_count": 1,
+    "tests": [
+        *FUNCTIONAL_VERIFICATION_PASS_ENVELOPE["tests"][:2],
+        {
+            **FUNCTIONAL_VERIFICATION_PASS_ENVELOPE["tests"][2],
+            "status": "failed",
+            "error_type": "AssertionError",
+            "error_message": "deliberate failure",
+        },
+    ],
 }
 
 #: The digital item-7 artifact (issue #1959): the same regression re-run
@@ -744,10 +941,17 @@ FUNCTIONAL_VERIFICATION_SDF_ENVELOPE = {
     },
 }
 
-#: A `klt place-and-route` response (docs/cli/place-and-route.md) -- trimmed
-#: to the fields that overlap `klt sta`'s own shape. Not a recognised kind,
-#: and adding `sta`/`functional-verification` recognition must not
-#: accidentally start classifying it as one (issue #1959).
+#: A `klt place-and-route` response (docs/cli/place-and-route.md), trimmed to
+#: the fields this module reasons about plus the ones that overlap `klt
+#: sta`'s own shape. Two things are being asserted by this fixture at once:
+#: it must classify as `place-and-route` (issue #2025, for T1 item 11's
+#: digital branch) and it must *never* classify as `sta` (issue #1959 -- the
+#: two verbs share `worst_slack_ns`/`timing_status`/`corners` but have
+#: different corner-sweep contracts).
+#:
+#: `power` is the PDN-complete shape: `request.power` was given, so `pdn`/
+#: `global_connect` are `true`, a real per-library `tapcell_master` was
+#: placed, and `straps[]` lists the layers the grid was drawn on.
 PLACE_AND_ROUTE_ENVELOPE = {
     "schema_version": 1,
     "engine": "openroad",
@@ -771,6 +975,245 @@ PLACE_AND_ROUTE_ENVELOPE = {
     "def_path": "/abs/path/gcd.def",
     "gds_path": "/abs/path/gcd.gds",
     "verilog_path": "/abs/path/gcd.v",
+    "power": {
+        "pdn": True,
+        "global_connect": True,
+        "power_net": "VPWR",
+        "ground_net": "VGND",
+        "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "endcap_master": None,
+        "filler_masters": ["sky130_fd_sc_hd__fill_1"],
+        "straps": [
+            {"layer": "met1", "spacing_um": None},
+            {"layer": "met4", "spacing_um": 0.56},
+        ],
+        "connects": [],
+        "row_rail": {"emitted": False},
+    },
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": {"name": "sky130A", "source": "volare", "version": "20240101"},
+        "deck": None,
+        # `klt place-and-route`'s own `provenance.input` hashes the *netlist*
+        # it routed, not the layout -- deliberately different from the
+        # layout hash `klt erc`/`klt lvs` pin, so a test that pins one must
+        # not accidentally pin the other.
+        "input": {"content_hash": "sha256:netlistA"},
+    },
+}
+
+#: Issue #2025: the same run with no `request.power` block at all -- the
+#: exact shape the fleet survey found on sky130-fpga and sky130-usb2-phy,
+#: where every T1 item but this one was satisfied on a layout with no power
+#: grid routed.
+PLACE_AND_ROUTE_NO_PDN_ENVELOPE = {
+    **PLACE_AND_ROUTE_ENVELOPE,
+    "power": {
+        "pdn": False,
+        "global_connect": False,
+        "power_net": None,
+        "ground_net": None,
+        "tapcell_master": None,
+        "endcap_master": None,
+        "filler_masters": [],
+        "straps": [],
+        "connects": [],
+        "row_rail": {"emitted": False},
+    },
+}
+
+#: Issue #2025: the `klt erc` **spec document** (docs/cli/erc.md, "Spec
+#: file") a supply-continuity run is driven by. `klt erc`'s envelope echoes
+#: this document's *path* but not its content, so `klt signoff` reads it to
+#: learn which supplies were actually declared -- without it, "no supply was
+#: ever declared" and "every declared supply resolved to one island" are
+#: indistinguishable (both report zero findings).
+ERC_SUPPLY_SPEC = {
+    "stackup": [
+        {"name": "poly", "layer": "66/20", "role": "gate"},
+        {"name": "li1", "layer": "67/20"},
+        {"name": "met1", "layer": "68/20", "label_layer": "68/5"},
+        {"name": "met4", "layer": "71/20", "label_layer": "71/5"},
+    ],
+    "vias": [
+        {"name": "licon1", "layer": "66/44", "between": ["poly", "li1"]},
+        {"name": "mcon", "layer": "67/44", "between": ["li1", "met1"]},
+    ],
+    "nets": [
+        {"name": "VPWR", "kind": "supply"},
+        {"name": "VGND", "kind": "supply"},
+        {"name": "A", "kind": "signal"},
+    ],
+    "ties": [
+        {
+            "name": "nwell_tie",
+            "well_layer": "64/20",
+            "tap_layer": "65/44",
+            "connect_to": "li1",
+            "net": "VPWR",
+        }
+    ],
+}
+
+#: Issue #2025: a `klt erc` envelope reporting no findings at all. The
+#: `spec` path is filled in per-test by `_erc_envelope` below, since it must
+#: point at a real, readable spec document on disk.
+ERC_CLEAN_ENVELOPE = {
+    "schema_version": 1,
+    "file": "routed.gds",
+    "spec": "erc-supply.json",
+    "pdk": "sky130",
+    "gate_role": "poly",
+    "gate_count": 1,
+    "gates": [
+        {
+            "gate_id": "gate0",
+            "net": "A",
+            "gate_area_um2": 2.0,
+            "antenna_verdict": "pass",
+            "levels": [],
+        }
+    ],
+    "erc_findings": [],
+    "erc_finding_count": 0,
+    "status": "clean",
+    "provenance": {
+        "klt_version": "0.2.0",
+        "klayout_version": "0.30.10",
+        "pdk": {"name": "sky130", "source": "built-in", "version": None},
+        "deck": None,
+        # Same layout the DRC/LVS fixtures pin -- a real T1 package runs
+        # every layout-side check against one stream.
+        "input": {"content_hash": "sha256:layoutA"},
+    },
+}
+
+#: Issue #2025: an ERC run whose antenna check found a violation on an
+#: unrelated *signal* net, with the supply rails perfectly continuous. The
+#: envelope's own `status` is `"violations"`, so this fixture is what proves
+#: item 11 grades the supply rules it names rather than the envelope's
+#: global verdict (#1994's tie-cell false positives are the same shape).
+ERC_ANTENNA_VIOLATION_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "gates": [
+        {
+            "gate_id": "gate0",
+            "net": "A",
+            "gate_area_um2": 2.0,
+            "antenna_verdict": "violate",
+            "levels": [
+                {
+                    "layer": "met1",
+                    "antenna_ratio": 431.0,
+                    "antenna_ratio_max": 400.0,
+                    "verdict": "violate",
+                }
+            ],
+        }
+    ],
+}
+
+#: Issue #2025: a declared supply that resolved to more than one island --
+#: the rail is split into pieces that never touch.
+ERC_SPLIT_SUPPLY_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "erc_findings": [
+        {
+            "rule": "erc.unconnected_net",
+            "description": "declared net 'VGND' matched 3 disconnected islands",
+            "net": "VGND",
+            "other_net": None,
+            "gate_id": None,
+            "layer": None,
+            "bbox": None,
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: Issue #2025: a well/tub with no connected tap.
+ERC_MISSING_TIE_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "erc_findings": [
+        {
+            "rule": "erc.missing_tie",
+            "description": "well shape has no tap connected to 'VPWR'",
+            "net": "VPWR",
+            "other_net": None,
+            "gate_id": None,
+            "layer": "nwell_tie",
+            "bbox": {"left": 0, "bottom": 0, "right": 1000, "top": 1000},
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: Issue #2025: a floating-gate finding on a signal net, with both supplies
+#: clean. Like the antenna fixture above, this must not block item 11.
+ERC_FLOATING_GATE_ENVELOPE = {
+    **ERC_CLEAN_ENVELOPE,
+    "status": "violations",
+    "erc_findings": [
+        {
+            "rule": "erc.floating_gate",
+            "description": "gate net has no connected geometry above the gate layer",
+            "net": None,
+            "other_net": None,
+            "gate_id": "gate1",
+            "layer": "poly",
+            "bbox": None,
+        }
+    ],
+    "erc_finding_count": 1,
+}
+
+#: Issue #2025: the analog/full-custom half of item 11's LVS condition -- a
+#: SPICE-reference compare, whose `power_connectivity` is `"unchecked"`
+#: (that form's reference carries its own supplies) and whose
+#: `net_correspondence` therefore pairs both supply nets to a reference-side
+#: net. The digital half needs no new fixture: it is
+#: `LVS_MATCH_POWER_MATCH_ENVELOPE` (defined above for issue #1965).
+LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_ENVELOPE,
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": "VGND", "pin": True},
+        {"layout": "VPWR", "reference": "VPWR", "pin": True},
+    ],
+}
+
+#: Issue #2025: a signal-only gate-level compare, whose reference netlist
+#: never declared the supplies -- they exist on the layout side alone, so
+#: they never pair. A block citing this one must prove item 11 through the
+#: PDN branch instead.
+LVS_MATCH_SIGNAL_ONLY_CORRESPONDENCE_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_ENVELOPE,
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": None, "pin": False},
+        {"layout": "VPWR", "reference": None, "pin": False},
+    ],
+}
+
+#: PR #2057 review follow-up: a `gate-level-verilog` reference that *does*
+#: declare explicit power ports, so its supplies pair in
+#: `net_correspondence` exactly like `LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE`
+#: -- but the caller explicitly disabled the power/ground check
+#: (`options.power_connectivity: false`). Pairing alone must not be enough
+#: to satisfy item 11's no-PAR branch: without the check having actually
+#: run, nothing verified the supplies landed on the right nets.
+LVS_MATCH_SUPPLY_CORRESPONDENCE_DISABLED_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_DISABLED_ENVELOPE,
+    "options": {"power_connectivity": False},
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": "VGND", "pin": True},
+        {"layout": "VPWR", "reference": "VPWR", "pin": True},
+    ],
 }
 
 DRC_ERROR_ENVELOPE = {
@@ -783,6 +1226,87 @@ def _write(tmp_path, name: str, payload: dict) -> str:
     path = tmp_path / name
     path.write_text(json.dumps(payload))
     return str(path)
+
+
+def _erc_evidence(
+    tmp_path,
+    envelope: dict = ERC_CLEAN_ENVELOPE,
+    spec: dict = ERC_SUPPLY_SPEC,
+    *,
+    prefix: str = "erc",
+) -> str:
+    """Write a `klt erc` envelope plus the spec document it names (issue
+    #2025) and return the envelope's path.
+
+    `klt erc`'s envelope echoes its spec's *path*, and `klt signoff` reads
+    that document to learn which supplies were declared -- so the two can
+    never be written independently in a test, or the grading would be
+    reading a spec that does not exist.
+    """
+    spec_path = _write(tmp_path, f"{prefix}-spec.json", spec)
+    return _write(tmp_path, f"{prefix}.json", {**envelope, "spec": spec_path})
+
+
+def _power_delivery_evidence(
+    tmp_path,
+    *,
+    kind: str = "analog",
+    erc_envelope: dict = ERC_CLEAN_ENVELOPE,
+    erc_spec: dict = ERC_SUPPLY_SPEC,
+    lvs_envelope: dict | None = None,
+    par_envelope: dict | None = PLACE_AND_ROUTE_ENVELOPE,
+    prefix: str = "pd",
+) -> list[str]:
+    """A complete, *passing* T1 item-11 citation (issue #2025): the compound
+    list of evidence paths a manifest names for "Power delivery
+    (structural)".
+
+    `kind="analog"` renders the analog/full-custom branch (a `klt erc` supply
+    run plus a SPICE-reference LVS report whose `net_correspondence` carries
+    the supplies, no P&R citation); `kind="digital"` renders the RTL-flow
+    branch (the same ERC run, a gate-level LVS report whose
+    `power_connectivity` matched, and the `klt place-and-route` response
+    proving a PDN was built).
+    """
+    if lvs_envelope is None:
+        lvs_envelope = (
+            LVS_MATCH_POWER_MATCH_ENVELOPE
+            if kind == "digital"
+            else LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE
+        )
+    parts = [
+        _erc_evidence(tmp_path, erc_envelope, erc_spec, prefix=f"{prefix}-erc"),
+        _write(tmp_path, f"{prefix}-lvs.json", lvs_envelope),
+    ]
+    if kind == "digital" and par_envelope is not None:
+        parts.append(_write(tmp_path, f"{prefix}-par.json", par_envelope))
+    return parts
+
+
+def _full_t1_evidence(tmp_path, *, kind: str = "analog") -> dict:
+    """Evidence naming a genuinely passing artifact for every T1 item --
+    the shared "this block really is at T1" fixture the roll-up and
+    tier-verdict tests build their negative cases from by removing one
+    entry.
+
+    Items 3-8 are kind-restricted (`_ITEM_ALLOWED_KINDS`): 3 -> `drc`,
+    4 -> `lvs`, 5 -> `sim`, 6 -> `yield`, 7 -> `pex`, 8 -> `generic` (issues
+    #871/#1152/#1959/#1987/#2044); item 11 is compound (issue #2025). Items
+    1, 2, 9 and 10 name no evidence at all in
+    `docs/design-evidence-tiers.md`, so they stay unrestricted and accept
+    the shared DRC fixture.
+    """
+    drc_path = _write(tmp_path, f"{kind}-drc.json", DRC_CLEAN_ENVELOPE)
+    evidence: dict = {str(item_id): drc_path for item_id in range(1, 11)}
+    evidence["4"] = _write(tmp_path, f"{kind}-lvs.json", LVS_MATCH_ENVELOPE)
+    evidence["5"] = _write(tmp_path, f"{kind}-sim.json", SIM_PASS_ENVELOPE)
+    evidence["6"] = _write(tmp_path, f"{kind}-yield.json", YIELD_PASS_ENVELOPE)
+    evidence["7"] = _write(tmp_path, f"{kind}-pex.json", PEX_PASS_ENVELOPE)
+    evidence["8"] = _write(
+        tmp_path, f"{kind}-characterization.json", GENERIC_PASS_ENVELOPE
+    )
+    evidence["11"] = _power_delivery_evidence(tmp_path, kind=kind, prefix=kind)
+    return evidence
 
 
 # --------------------------------------------------------------------------- #
@@ -1019,6 +1543,947 @@ def test_extract_check_always_passes(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# DRC coverage surfacing (issue #2002): the three `coverage` fields
+# docs/design-evidence-tiers.md item 3 requires a claim to disclose are
+# reported by `klt signoff` -- in the aggregation mode's `checks[].detail`,
+# in a tier report's item citation, and in the fleet roll-up -- while
+# changing no verdict anywhere. Report before enforce: the four design
+# questions in #2002 (hard-fail semantics, what "disclosed" is compared
+# against, and whether `klt lvs`'s own disclosures get the same treatment
+# for item 4) are deliberately left open.
+# --------------------------------------------------------------------------- #
+
+
+def test_drc_detail_surfaces_the_three_coverage_fields(tmp_path):
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["detail"]["coverage"] == {
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "deck_scope": ["5.x", "6.x"],
+    }
+
+
+def test_drc_coverage_gaps_do_not_change_the_verdict(tmp_path):
+    """The whole point of this increment: a deck with rule-free drawn layers
+    and skipped rules still grades exactly as a fully-covering one does. A
+    claim that was `met` before #2002 is still `met` after it -- surfacing
+    the gaps is not enforcing their disclosure."""
+    gappy = _write(tmp_path, "gappy.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    full = _write(tmp_path, "full.json", DRC_CLEAN_ENVELOPE)
+
+    gappy_result = build_signoff([gappy])
+    full_result = build_signoff([full])
+
+    assert gappy_result["status"] == full_result["status"] == "pass"
+    assert gappy_result["checks"][0]["passed"] is True
+    assert full_result["checks"][0]["passed"] is True
+
+
+def test_drc_detail_omits_coverage_for_a_pre_coverage_envelope(tmp_path):
+    """Back-compat: evidence committed before `klt drc` reported coverage
+    renders exactly as before -- no crash, and no `coverage` key claiming
+    zero gaps for a run that never measured any."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "coverage" not in check["detail"]
+    assert check["detail"] == {
+        "file": "design.gds",
+        "deck": "sky130",
+        "violation_count": 0,
+    }
+
+
+def test_non_drc_kinds_never_carry_a_coverage_disclosure(tmp_path):
+    """`klt lvs`'s own coverage-shaped disclosures (item 4) are explicitly
+    out of scope for #2002 -- nothing here fabricates a `coverage` key for a
+    kind whose envelope does not report one."""
+    lvs = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    extract = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+
+    result = build_signoff([lvs, extract])
+
+    assert all("coverage" not in check["detail"] for check in result["checks"])
+
+
+def test_tier_report_item_3_citation_surfaces_coverage_gaps(tmp_path):
+    """Item 3's citation quotes the gaps verbatim, and the item is still
+    `met` -- the artifact a reviewer reads now carries both halves of the
+    claim doc item 3 asks for."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    assert item_3["citation"]["coverage"] == {
+        "layers_in_stream_without_rules": ["70/20", "71/20"],
+        "rules_skipped": ["met5.4", "met5.5"],
+        "deck_scope": ["5.x", "6.x"],
+    }
+
+
+def test_tier_report_item_3_citation_omits_coverage_for_legacy_evidence(tmp_path):
+    """Back-compat on the tier-report path: a pre-`coverage` envelope still
+    renders item 3 `met`, with a citation shaped exactly as before."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"] == {
+        "file": path,
+        "command": None,
+        "kind": "drc",
+        "check_status": "clean",
+        "content_hash": "sha256:layoutA",
+        "exit_status": 0,
+    }
+
+
+def test_command_backed_drc_evidence_surfaces_coverage(monkeypatch):
+    """The coverage disclosure is read off the envelope the command printed,
+    not off a file -- both evidence bindings behave identically."""
+
+    def fake_run(command, **kwargs):
+        return fake_completed(
+            returncode=0,
+            stdout=json.dumps(DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE),
+        )
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"command": ["klt", "drc", "design.gds"]}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["coverage"]["rules_skipped"] == ["met5.4", "met5.5"]
+
+
+def test_malformed_coverage_block_is_normalised_not_crashed(tmp_path):
+    """A `coverage` block whose fields are the wrong type (a hand-edited or
+    future-shaped envelope) renders empty lists rather than raising -- and
+    still does not change the verdict."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "coverage": {
+            "layers_in_stream_without_rules": "70/20",
+            "rules_skipped": None,
+        },
+    }
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert check["detail"]["coverage"] == {
+        "layers_in_stream_without_rules": [],
+        "rules_skipped": [],
+        "deck_scope": [],
+    }
+
+
+def test_fleet_rollup_reports_each_blocks_drc_coverage(tmp_path):
+    """The `--fleet` path surfaces the same disclosure, reduced from each
+    block's own tier report -- and a block whose deck has gaps still rolls up
+    at exactly the tier it did before."""
+    gappy = _write(tmp_path, "gappy.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    fleet = {
+        "blocks": [
+            _fleet_block_manifest("gappy-block", evidence={"3": gappy}),
+        ]
+    }
+    result = build_fleet_report(fleet)
+
+    block = result["blocks"][0]
+    assert block["drc_coverage"] == [
+        {
+            "item": 3,
+            "partition": None,
+            "layers_in_stream_without_rules": ["70/20", "71/20"],
+            "rules_skipped": ["met5.4", "met5.5"],
+            "deck_scope": ["5.x", "6.x"],
+        }
+    ]
+    # Unchanged verdict: item 3 is met, the block is simply not T1 yet for
+    # the usual reason (items 1-2 have no evidence), never because of a gap.
+    assert block["t1_met_count"] == 1
+    assert block["blocking_item"]["id"] == 1
+
+
+def test_fleet_rollup_mixes_pre_and_post_coverage_evidence(tmp_path):
+    """A fleet spanning old (no `coverage`) and new (coverage-bearing)
+    evidence renders both without crashing: the legacy block simply
+    contributes no `drc_coverage` row, which reads as "reported nothing",
+    not "reported no gaps"."""
+    legacy = _write(tmp_path, "legacy.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+    modern = _write(tmp_path, "modern.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    fleet = {
+        "blocks": [
+            _fleet_block_manifest("legacy-block", evidence={"3": legacy}),
+            _fleet_block_manifest("modern-block", evidence={"3": modern}),
+        ]
+    }
+    result = build_fleet_report(fleet)
+
+    by_block = {block["block"]: block for block in result["blocks"]}
+    assert by_block["legacy-block"]["drc_coverage"] == []
+    assert by_block["modern-block"]["drc_coverage"][0]["rules_skipped"] == [
+        "met5.4",
+        "met5.5",
+    ]
+    assert by_block["legacy-block"]["t1_met_count"] == 1
+    assert by_block["modern-block"]["t1_met_count"] == 1
+
+
+def test_fleet_rollup_drc_coverage_is_empty_when_item_3_is_unmet(tmp_path):
+    """No citation, no disclosure: a failing DRC check contributes no
+    `drc_coverage` row even though its envelope carries a coverage block --
+    the roll-up only reduces what the tier report actually cited."""
+    failing = _write(tmp_path, "drc.json", DRC_VIOLATIONS_ENVELOPE)
+
+    fleet = {"blocks": [_fleet_block_manifest("failing", evidence={"3": failing})]}
+    result = build_fleet_report(fleet)
+
+    assert result["blocks"][0]["drc_coverage"] == []
+
+
+def test_cli_manifest_text_shows_coverage_beside_the_citation(tmp_path, capsys):
+    """The terminal rendering a reviewer actually reads names the gaps --
+    counts first, then the entries -- right under the `cite:` line whose
+    "clean" they qualify."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"3": drc_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    coverage_line = next(
+        line for line in out.splitlines() if line.strip().startswith("coverage:")
+    )
+    assert "layers_in_stream_without_rules=2 (70/20, 71/20)" in coverage_line
+    assert "rules_skipped=2 (met5.4, met5.5)" in coverage_line
+    assert "deck_scope=2 (5.x, 6.x)" in coverage_line
+
+
+def test_cli_manifest_text_omits_coverage_for_legacy_evidence(tmp_path, capsys):
+    """A pre-`coverage` envelope prints no coverage line at all -- an absent
+    statement must not read as "this deck reported no gaps"."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"3": drc_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "cite:" in out
+    assert "coverage:" not in out
+
+
+# --------------------------------------------------------------------------- #
+# Device-body bias surfacing (issue #1983): `klt pex`'s `body_bias` and
+# `klt lvs`'s `body_verification` are reported by `klt signoff` -- in the
+# aggregation mode's `checks[].detail`, in item 7's own citation, and in the
+# text rendering -- while changing no verdict anywhere. An untied body makes
+# a post-layout resimulation "physically wrong" (docs/cli/extract.md), and
+# item 7 has the strictest citation rule in the checklist, so the one
+# property that can silently invalidate its numbers must be visible in the
+# artifact that cites them.
+# --------------------------------------------------------------------------- #
+
+
+def test_pex_detail_surfaces_an_unbiased_body(tmp_path):
+    path = _write(tmp_path, "pex.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["kind"] == "pex"
+    assert check["detail"]["body_bias"] == {
+        "status": "unbiased",
+        "unbiased_device_count": 3,
+        "unbiased_nets": ["\\$5", "\\$7"],
+    }
+    # The per-device list stays in the cited envelope -- it can run to
+    # hundreds of entries on a real block, and the counts plus the distinct
+    # net names are enough to tell a clean run from a compromised one.
+    assert "unbiased_pmos_body_nets" not in check["detail"]["body_bias"]
+
+
+def test_pex_detail_surfaces_a_clean_body_bias_positively(tmp_path):
+    """ "Checked, and every body had a DC bias path" must be distinguishable
+    from "never reported" -- so the clean verdict is stated, not omitted."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_BODY_BIASED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["body_bias"] == {
+        "status": "biased",
+        "unbiased_device_count": 0,
+        "unbiased_nets": [],
+    }
+
+
+def test_unbiased_bodies_do_not_change_the_pex_verdict(tmp_path):
+    """Report, not enforce: a `pex` run whose extracted side had floating
+    device bodies grades exactly as one that did not. Unlike a
+    `power_connectivity` mismatch (#1965, a real miswire), an unbiased body
+    is a coverage condition some decks produce on every layout they extract
+    -- hard-failing it would retroactively fail whole PDKs' worth of
+    otherwise-valid evidence on a question this module cannot adjudicate."""
+    unbiased = _write(tmp_path, "unbiased.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+    biased = _write(tmp_path, "biased.json", PEX_PASS_BODY_BIASED_ENVELOPE)
+
+    unbiased_result = build_signoff([unbiased])
+    biased_result = build_signoff([biased])
+
+    assert unbiased_result["status"] == biased_result["status"] == "pass"
+    assert unbiased_result["checks"][0]["passed"] is True
+    assert biased_result["checks"][0]["passed"] is True
+
+
+def test_pex_detail_omits_body_bias_for_a_pre_1983_envelope(tmp_path):
+    """Back-compat: post-layout evidence committed before `klt pex` reported
+    body bias renders exactly as before -- no crash, and no fabricated
+    `"biased"` claim for a run that never measured it."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "body_bias" not in check["detail"]
+
+
+def test_non_pex_kinds_never_carry_a_body_bias_disclosure(tmp_path):
+    """`klt lvs`'s parallel `body_verification` answers a related but
+    distinct question and is surfaced separately -- nothing here fabricates
+    a `body_bias` key for a kind whose envelope does not report one."""
+    lvs = _write(tmp_path, "lvs.json", LVS_MATCH_BODY_UNVERIFIED_ENVELOPE)
+    drc = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_signoff([lvs, drc])
+
+    assert all("body_bias" not in check["detail"] for check in result["checks"])
+
+
+def test_malformed_body_bias_block_is_normalised_not_crashed(tmp_path):
+    """A hand-edited or truncated `body_bias` block must degrade to a
+    readable disclosure, never raise -- the same shape-normalisation
+    discipline `_drc_coverage_disclosure` applies."""
+    path = _write(
+        tmp_path,
+        "pex.json",
+        {**PEX_PASS_ENVELOPE, "body_bias": {"status": "unbiased"}},
+    )
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["body_bias"] == {
+        "status": "unbiased",
+        "unbiased_device_count": None,
+        "unbiased_nets": [],
+    }
+
+
+def test_lvs_detail_surfaces_body_verification_status(tmp_path):
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_BODY_UNVERIFIED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["detail"]["body_verification_status"] == "unverified"
+    # Preserved behaviour: `klt lvs`'s own non-blocking semantics for this
+    # condition are unchanged -- the check still passes.
+    assert check["passed"] is True
+    assert result["status"] == "pass"
+
+
+def test_lvs_detail_body_verification_status_is_none_for_pre_1983_evidence(tmp_path):
+    """An envelope with no `body_verification` key at all (committed before
+    #1983) reads as `None` -- distinct from the real `"verified"` value, so
+    old evidence never masquerades as having been checked."""
+    path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["body_verification_status"] is None
+
+
+def test_tier_report_item_7_citation_surfaces_an_unbiased_body(tmp_path):
+    """The load-bearing case: item 7's verdict and the property that can
+    invalidate the numbers backing it now sit in the same artifact. The item
+    is still `met` -- the disclosure qualifies the citation, it does not
+    revoke it."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["reason"] is None
+    assert item_7["citation"]["body_bias"] == {
+        "status": "unbiased",
+        "unbiased_device_count": 3,
+        "unbiased_nets": ["\\$5", "\\$7"],
+    }
+
+
+def test_tier_report_item_7_citation_omits_body_bias_for_legacy_evidence(tmp_path):
+    """Back-compat on the tier-report path: a pre-#1983 `pex` envelope still
+    renders item 7 `met`, with a citation shaped exactly as before."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert "body_bias" not in item_7["citation"]
+
+
+def test_cli_manifest_text_shows_body_bias_beside_the_item_7_citation(tmp_path, capsys):
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_BODY_UNBIASED_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"7": pex_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    body_bias_line = next(line for line in out.splitlines() if "body bias:" in line)
+    assert "unbiased" in body_bias_line
+    assert "3 device(s) with no DC bias path" in body_bias_line
+    assert "\\$5, \\$7" in body_bias_line
+
+
+def test_cli_manifest_text_omits_body_bias_for_legacy_evidence(tmp_path, capsys):
+    """A pre-#1983 `pex` envelope prints no body-bias line at all -- an
+    absent statement must not read as "every body was biased"."""
+    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"7": pex_path}),
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "cite:" in out
+    assert "body bias:" not in out
+
+
+# --------------------------------------------------------------------------- #
+# Vacuous-verdict refusal (issue #1996): `coverage.nothing_checked`
+# --------------------------------------------------------------------------- #
+
+
+def test_drc_nothing_checked_envelope_never_counts_as_a_passing_check(tmp_path):
+    """The gap #1996 closes: a deck gated behind an unset `--deck-var`
+    reports `status: "clean"` and `violation_count: 0` -- byte-identical to a
+    real clean run at the top level. It must not aggregate as a pass."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    # The envelope's own verdict is quoted unchanged -- `klt signoff` reports
+    # what the verb said, and then declines to count it.
+    assert check["status"] == "clean"
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["deck_reported_no_rules"]
+    assert result["status"] == "fail"
+
+
+def test_sim_empty_corner_matrix_never_counts_as_a_passing_check(tmp_path):
+    path = _write(tmp_path, "sim.json", SIM_EMPTY_CORNER_MATRIX_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["empty_corner_matrix"]
+
+
+def test_pex_empty_delta_never_counts_as_a_passing_check(tmp_path):
+    path = _write(tmp_path, "pex.json", PEX_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["status"] == "pass"
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["no_delta_rows"]
+
+
+def test_real_comparison_with_zero_differences_still_passes(tmp_path):
+    """Issue #1996's edge case, on the consumer side: a `pex` run that
+    compared every row and found each within tolerance carries the same
+    `coverage` block shape, saying `nothing_checked: false`. It must grade
+    exactly as it did before the convention existed."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_REAL_COMPARISON_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    # The key is present only for a refusal -- an explicit
+    # `nothing_checked: false` is a *positive* coverage statement, and grades
+    # exactly like an envelope that makes no statement at all.
+    assert "nothing_checked_reasons" not in check["detail"]
+    assert result["status"] == "pass"
+
+
+def test_coverage_gaps_alone_are_not_nothing_checked(tmp_path):
+    """`nothing_checked` is the *total* case, never a synonym for partial
+    coverage: a deck that skipped two rules and left two drawn layers
+    unchecked still checked something, and still passes (the #2002
+    report-not-enforce behaviour, unchanged)."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert "nothing_checked_reasons" not in check["detail"]
+
+
+def test_pre_convention_envelope_makes_no_coverage_statement(tmp_path):
+    """Back-compat: evidence committed before the convention existed carries
+    no `nothing_checked` key, which reads as "makes no statement" -- never as
+    a gap, and never as a guarantee of full coverage."""
+    legacy_drc = _write(tmp_path, "drc.json", DRC_CLEAN_NO_COVERAGE_ENVELOPE)
+    legacy_pex = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+
+    # Graded separately: the two fixtures carry deliberately different
+    # provenance, which would trip the (unrelated) consistency refusal.
+    for path in (legacy_drc, legacy_pex):
+        result = build_signoff([path])
+
+        assert result["status"] == "pass"
+        assert result["checks"][0]["passed"] is True
+        assert "nothing_checked_reasons" not in result["checks"][0]["detail"]
+
+
+def test_tier_report_refuses_a_nothing_checked_item_3_citation(tmp_path):
+    """The load-bearing case: a claim cannot cite an empty DRC report to
+    satisfy item 3. The item renders `unmet` with its own reason code --
+    distinct from `check_failed` (the deck found nothing wrong because it
+    looked at nothing, not because the layout is clean)."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "nothing_checked"
+    assert item_3["citation"] is None
+
+
+def test_tier_report_refuses_a_nothing_checked_item_7_citation(tmp_path):
+    path = _write(tmp_path, "pex.json", PEX_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "nothing_checked"
+    assert item_7["citation"] is None
+
+
+def test_tier_report_still_meets_item_7_for_a_real_comparison(tmp_path):
+    """The control for the test above: the same item, the same kind, a
+    `coverage` block present -- and a citation that stands, because the run
+    actually compared something."""
+    path = _write(tmp_path, "pex.json", PEX_PASS_REAL_COMPARISON_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["reason"] is None
+    assert item_7["citation"]["kind"] == "pex"
+
+
+def test_wrong_kind_still_wins_over_nothing_checked(tmp_path):
+    """Issue #826's invariant: an empty DRC report cited for item 7 must say
+    "cite a different artifact" (`wrong_kind`), not "re-run this one"
+    (`nothing_checked`) -- the reason names the actionable problem."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"7": path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "wrong_kind"
+
+
+def test_check_failed_still_wins_over_nothing_checked(tmp_path):
+    """A run that both failed *and* covered nothing is reported as the
+    failure it is -- `nothing_checked` is only ever reached by an envelope
+    whose own verdict passed."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {
+            **DRC_CLEAN_NOTHING_CHECKED_ENVELOPE,
+            "status": "violations",
+            "violation_count": 1,
+        },
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["reason"] == "check_failed"
+
+
+def test_command_backed_evidence_is_refused_for_nothing_checked(monkeypatch):
+    """Both evidence bindings behave identically -- the coverage statement is
+    read off the envelope the command printed, exactly as off a file."""
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args=args[0] if args else [],
+            returncode=0,
+            stdout=json.dumps(DRC_CLEAN_NOTHING_CHECKED_ENVELOPE),
+            stderr="",
+        ),
+    )
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"command": ["klt", "drc", "design.gds", "sky130"]}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "nothing_checked"
+
+
+def test_unknown_reason_code_from_a_newer_klt_still_refuses(tmp_path):
+    """Forward-compat: a reason code this build does not know is carried
+    through verbatim and still refuses -- an older reader must not silently
+    accept a newer producer's vacuous report."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {
+            **DRC_CLEAN_ENVELOPE,
+            "coverage": {
+                "nothing_checked": True,
+                "nothing_checked_reasons": ["some_future_reason"],
+            },
+        },
+    )
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == ["some_future_reason"]
+
+
+def test_malformed_nothing_checked_block_is_normalised_not_crashed(tmp_path):
+    """A hand-edited block that sets the flag without a usable reasons list
+    still refuses, and degrades to an empty list rather than raising."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {**DRC_CLEAN_ENVELOPE, "coverage": {"nothing_checked": True}},
+    )
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is False
+    assert check["detail"]["nothing_checked_reasons"] == []
+
+
+def test_truthy_but_non_boolean_nothing_checked_is_not_a_refusal(tmp_path):
+    """Only a literal `true` counts -- a hand-rolled generic envelope with a
+    truthy-but-wrong value must not be mistaken for the boolean the
+    convention specifies."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {**DRC_CLEAN_ENVELOPE, "coverage": {"nothing_checked": "yes"}},
+    )
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["passed"] is True
+
+
+def test_cli_text_names_the_nothing_checked_reasons(tmp_path, capsys):
+    """A `FAIL` beside a `status=clean` reads as a bare contradiction unless
+    the line says why -- the same fix #1978 applied for `power_connectivity`."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+
+    main(["signoff", path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if line.startswith("[FAIL]"))
+    assert "status=clean" in line
+    assert "(nothing checked: deck_reported_no_rules)" in line
+
+
+def test_cli_manifest_text_names_a_refused_citation(tmp_path, capsys):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_NOTHING_CHECKED_ENVELOPE)
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "reason: nothing_checked" in out
+
+
+# --------------------------------------------------------------------------- #
+# Partial-coverage qualification (issue #2109, Phase 2 of epic #1988): a run
+# that passed every check it ran *and* skipped requested work.
+# --------------------------------------------------------------------------- #
+
+#: A curated DRC run that executed one rule and skipped another whose input
+#: layer is absent, declared through the versioned checked-work contract.
+#: Its producer has **not** yet adopted the Phase 2 rollup (its own status is
+#: still the unconditional `"clean"`) -- the pre-adapter state every audited
+#: verb is in until its own child issue of #1988 lands.
+DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": build_check_coverage(
+        checked=["poly.width.1"],
+        skipped=[{"id": "met5.width.1", "reason": "absent_input_layer"}],
+    ),
+}
+
+#: The same run from a producer that *has* adopted the rollup: identical
+#: coverage, but its status is the partial token `rollup_status` derives.
+DRC_PARTIAL_STATUS_ENVELOPE = {
+    **DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE,
+    "status": "clean_partial",
+}
+
+#: The control: complete applicable coverage, positively established.
+DRC_FULL_COVERAGE_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "coverage": build_check_coverage(checked=["poly.width.1"]),
+}
+
+
+def test_partial_status_is_refused_as_partial_not_as_a_failure(tmp_path):
+    """The reason has to name the actionable problem (issue #826): a
+    `"clean_partial"` DRC report did not find a defect, it skipped requested
+    work. Before #2109 it landed on `check_failed` purely because the token
+    is not the kind's success word, sending a reader after a violation that
+    does not exist."""
+    path = _write(tmp_path, "drc.json", DRC_PARTIAL_STATUS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "partial_coverage"
+    assert item_3["citation"] is None
+
+
+def test_partial_status_never_aggregates_as_a_passing_check(tmp_path):
+    path = _write(tmp_path, "drc.json", DRC_PARTIAL_STATUS_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["status"] == "clean_partial"
+    assert check["passed"] is False
+    assert check["detail"]["coverage_state"] == "partial"
+    assert check["detail"]["coverage_qualification"] == {
+        "reason": "partial_coverage",
+        "skipped": [{"id": "met5.width.1", "reason": "absent_input_layer"}],
+    }
+    assert result["status"] == "fail"
+
+
+def test_power_em_pass_partial_is_refused_as_partial_not_as_a_failure(tmp_path):
+    """#1997's already-shipped partial verdict keeps working, and now reports
+    the accurate reason: one checked EM edge alongside three unchecked ones
+    is a coverage gap, not a current-density violation."""
+    path = _write(tmp_path, "power.json", POWER_EM_PASS_PARTIAL_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"5": path}))
+    aggregate = build_signoff([path])
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "partial_coverage"
+    assert aggregate["checks"][0]["passed"] is False
+
+
+def test_a_real_failure_still_outranks_a_partial_coverage_report(tmp_path):
+    """Failure precedence: a run that found a defect reports its failure
+    token, never the partial one, so the two can never be confused."""
+    path = _write(
+        tmp_path,
+        "drc.json",
+        {
+            **DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE,
+            "status": "violations",
+            "violation_count": 1,
+        },
+    )
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["reason"] == "check_failed"
+
+
+def test_a_met_item_discloses_the_requested_work_its_evidence_skipped(tmp_path):
+    """The pre-adapter case. `klt drc` still reports the unconditional
+    `"clean"` on a partial run until #2110 lands, and item 3's verdict is
+    still that status alone (docs/design-evidence-tiers.md item 3 leaves the
+    weighing to the claimant) -- but the citation now *says* the run skipped
+    requested work, so the gap is visible in the report instead of silent."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_PARTIAL_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["coverage_qualification"] == {
+        "reason": "partial_coverage",
+        "skipped": [{"id": "met5.width.1", "reason": "absent_input_layer"}],
+    }
+
+
+def test_complete_coverage_makes_no_qualification_claim(tmp_path):
+    """The control: positively established complete applicable coverage
+    carries no qualification key at all, on either path."""
+    path = _write(tmp_path, "drc.json", DRC_FULL_COVERAGE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    aggregate = build_signoff([path])
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert "coverage_qualification" not in item_3["citation"]
+    assert aggregate["checks"][0]["passed"] is True
+    assert aggregate["checks"][0]["detail"]["coverage_state"] == "full"
+    assert "coverage_qualification" not in aggregate["checks"][0]["detail"]
+
+
+def test_legacy_coverage_gaps_are_not_relabelled_as_a_partial_claim(tmp_path):
+    """Migration policy, stated as a test: a pre-contract envelope whose own
+    verb-specific fields describe a gap (`rules_skipped`) makes no common
+    coverage claim at all. It is neither refused nor re-read as `partial`."""
+    path = _write(tmp_path, "drc.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+    aggregate = build_signoff([path])
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert "coverage_qualification" not in item_3["citation"]
+    # The legacy disclosure #2002 added is untouched and still reported.
+    assert item_3["citation"]["coverage"]["rules_skipped"] == ["met5.4", "met5.5"]
+    assert "coverage_state" not in aggregate["checks"][0]["detail"]
+
+
+@pytest.mark.parametrize(
+    ("envelope", "reason"),
+    [
+        (DRC_CLEAN_NOTHING_CHECKED_ENVELOPE, "nothing_checked"),
+        (
+            {
+                **DRC_CLEAN_ENVELOPE,
+                "coverage": {"schema_version": 1, "known": "yes"},
+            },
+            "malformed_coverage",
+        ),
+    ],
+)
+def test_evidence_that_reached_no_verdict_is_still_refused_outright(
+    tmp_path, envelope, reason
+):
+    """Phase 2 widens what is *qualified*, never what is refused: the three
+    no-verdict rows keep their existing hard refusal and their own reasons."""
+    path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == reason
+
+
+def test_partial_coverage_is_ordered_like_check_failed_not_like_wrong_kind(tmp_path):
+    """`partial_coverage` replaces `check_failed` on the verdict path, so it
+    is reported for a kind the item does not accept too -- exactly as a
+    *failing* DRC report cited for item 7 reports `check_failed` rather than
+    `wrong_kind`. The kind gate only ever downgrades a would-be `"met"`."""
+    partial = _write(tmp_path, "partial.json", DRC_PARTIAL_STATUS_ENVELOPE)
+    failing = _write(tmp_path, "failing.json", DRC_VIOLATIONS_ENVELOPE)
+
+    reasons = {
+        name: next(
+            item
+            for item in build_tier_report(_manifest(evidence={"7": path}))["items"]
+            if item["id"] == 7
+        )["reason"]
+        for name, path in (("partial", partial), ("failing", failing))
+    }
+
+    assert reasons == {"partial": "partial_coverage", "failing": "check_failed"}
+
+
+def test_cli_fleet_text_flags_blocks_whose_deck_left_gaps(tmp_path, capsys):
+    """Fleet text names a gap-bearing block's coverage beside its tier, and
+    stays quiet for a block that reported none."""
+    gappy = _write(tmp_path, "gappy.json", DRC_CLEAN_WITH_COVERAGE_GAPS_ENVELOPE)
+    full = _write(tmp_path, "full.json", DRC_CLEAN_ENVELOPE)
+    fleet_path = _fleet_write(
+        tmp_path,
+        [
+            _fleet_block_manifest("gappy-block", evidence={"3": gappy}),
+            _fleet_block_manifest("full-block", evidence={"3": full}),
+        ],
+    )
+
+    main(["signoff", "--fleet", fleet_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    coverage_lines = [
+        line for line in out.splitlines() if line.strip().startswith("coverage:")
+    ]
+    assert len(coverage_lines) == 1
+    assert "#3 layers_in_stream_without_rules=2" in coverage_lines[0]
+
+
+# --------------------------------------------------------------------------- #
 # Critical-metric consumption (issue #1850): a declared `critical: true`
 # metric (klayout_tools.metrics.REGISTRY) mechanically blocks signoff
 # independent of the envelope's own `status`, per its own declared
@@ -1213,6 +2678,23 @@ def test_power_em_fail_check_fails(tmp_path):
     assert check["passed"] is False
     assert check["detail"]["em_verdict_status"] == "fail"
     assert check["detail"]["em_verdict_fail_count"] == 1
+
+
+def test_power_em_pass_partial_does_not_pass(tmp_path):
+    """`em_verdict.status == "pass_partial"` (issue #1997) -- every checked
+    edge stayed under its limit, but some other edge in the design was
+    never checked at all; this must not be treated as more passing than a
+    missing verdict, i.e. it must not silently pass."""
+    path = _write(tmp_path, "power.json", POWER_EM_PASS_PARTIAL_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["status"] == "fail"
+    check = result["checks"][0]
+    assert check["kind"] == "power"
+    assert check["passed"] is False
+    assert check["detail"]["em_verdict_status"] == "pass_partial"
+    assert check["detail"]["em_verdict_fail_count"] == 0
 
 
 def test_power_em_not_checked_does_not_pass(tmp_path):
@@ -1421,6 +2903,275 @@ def test_lvs_joins_the_input_hash_cross_check(tmp_path):
     assert values[lvs_path] == "sha256:layoutB"
 
 
+def test_drc_and_lvs_against_the_same_layout_stay_consistent(tmp_path):
+    """Issue #1987, the paired passing case for
+    `test_lvs_joins_the_input_hash_cross_check` above: binding LVS into the
+    `input.content_hash` comparison must only refuse a *genuinely* stale
+    pairing. A DRC and an LVS envelope naming the same layout hash are the
+    normal T1 combination and must still render `ok: true` with no
+    mismatches -- otherwise the fix would trade a silent false pass for a
+    blanket false refusal, which is just as useless a grade.
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    # Precondition: both fixtures really do pin the same layout, so the
+    # assertion below is about the comparison and not about the fixtures
+    # accidentally having drifted apart.
+    assert (
+        DRC_CLEAN_ENVELOPE["provenance"]["input"]
+        == LVS_MATCH_ENVELOPE["provenance"]["input"]
+    )
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
+@pytest.mark.parametrize("shape", ["absent", "null"])
+def test_pre_1969_lvs_envelope_is_excluded_not_a_forced_mismatch(tmp_path, shape):
+    """Issue #1987 edge case: an `lvs` envelope committed *before* `klt lvs`
+    started populating `provenance.input` (issue #1969) carries no
+    `input.content_hash` at all -- either the key is absent entirely or it
+    is an explicit `null`.
+
+    Such an envelope must stay non-participating, exactly as it was before
+    the field existed: `_check_scalar_field` collects only non-`None`
+    values, so a single populating check (the DRC sibling) leaves one
+    distinct value and no mismatch. The failure mode this guards against is
+    treating "nothing to say" as "disagrees with everyone", which would
+    retroactively refuse every archived report the moment the field shipped.
+    """
+    provenance = {**LVS_MATCH_ENVELOPE["provenance"]}
+    if shape == "absent":
+        del provenance["input"]
+    else:
+        provenance["input"] = None
+    old_shape_lvs = {**LVS_MATCH_ENVELOPE, "provenance": provenance}
+
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", old_shape_lvs)
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+    lvs_check = next(check for check in result["checks"] if check["kind"] == "lvs")
+    assert lvs_check["provenance"].get("input") is None
+
+
+def test_sim_does_not_participate_in_the_input_hash_cross_check(tmp_path):
+    """Issue #1987's scope note, pinned as behaviour: `klt sim` deliberately
+    leaves `provenance.input` `None` (it simulates a netlist against a model
+    library -- there is no input *layout* stream to pin), so it never
+    contributes a value to the `input.content_hash` comparison.
+
+    This was the reason `klt sim` did *not* get `klt lvs`'s issue-#1969
+    treatment: a netlist digest was not comparable with the layout digests
+    `drc`/`extract`/`lvs`/`pex` contribute, so populating the shared field
+    with one would have turned every legitimate layout-plus-simulation
+    manifest into a permanent `provenance_consistency` refusal. Issue #2027
+    removes that obstacle -- `provenance.input.role` now says which kind of
+    artifact a hash covers, and hashes are compared only within a role -- but
+    wiring `klt sim` itself up is separate work; until then its `input` stays
+    `None` and this test pins that.
+    """
+    assert SIM_PASS_ENVELOPE["provenance"]["input"] is None
+
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+
+    result = build_signoff([drc_path, lvs_path, sim_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
+# --------------------------------------------------------------------------- #
+# `provenance.input.role` (issue #2027): the cross-check compares hashes only
+# within one kind of artifact.
+#
+# `klt lvs`'s pre-extracted (`layout.netlist`) request shape hashes a *SPICE
+# netlist*, not a layout stream. Comparing that digest against a `klt drc`
+# report's *layout* digest can never agree, even when both describe the same
+# design -- the repo's own `examples/signoff/` pair (whose
+# `lvs.request.json` uses exactly that shape) reproduced the false refusal.
+# --------------------------------------------------------------------------- #
+
+
+#: A `klt drc` envelope carrying the post-#2027 `input` shape: the same
+#: layout hash `DRC_CLEAN_ENVELOPE` pins, now explicitly declared as a
+#: layout-stream digest.
+DRC_CLEAN_ROLE_LAYOUT_ENVELOPE = {
+    **DRC_CLEAN_ENVELOPE,
+    "provenance": {
+        **DRC_CLEAN_ENVELOPE["provenance"],
+        "input": {"content_hash": "sha256:layoutA", "role": "layout"},
+    },
+}
+
+#: A `klt lvs` envelope from the pre-extracted `layout.netlist` request
+#: shape: its `input.content_hash` is the digest of the SPICE netlist it was
+#: handed, which has no reason on earth to equal any layout hash.
+LVS_MATCH_PRE_EXTRACTED_ENVELOPE = {
+    **LVS_MATCH_ENVELOPE,
+    "provenance": {
+        **LVS_MATCH_ENVELOPE["provenance"],
+        "input": {"content_hash": "sha256:layoutAspice", "role": "netlist"},
+    },
+}
+
+
+def test_pre_extracted_lvs_netlist_hash_does_not_refuse_against_drc(tmp_path):
+    """Issue #2027: a `klt drc` report and a pre-extracted-shape `klt lvs`
+    report of the *same design* must aggregate, not refuse.
+
+    This is the issue's own reproduction, minus the engine run: the two
+    checks pin different digests because they hashed different *kinds* of
+    artifact (a GDS and the SPICE extracted from it), which the cross-check
+    used to read as "these ran against two different layout revisions". Both
+    checks pass and both describe one block, so the only correct verdict is
+    `pass`.
+    """
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+
+    # Precondition: the two digests really are different, so this test is
+    # about the roles and not about fixtures that happen to agree.
+    assert (
+        DRC_CLEAN_ROLE_LAYOUT_ENVELOPE["provenance"]["input"]["content_hash"]
+        != LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"]["input"]["content_hash"]
+    )
+
+    result = build_signoff([drc_path, lvs_path])
+
+    assert result["provenance_consistency"]["ok"] is True
+    assert result["provenance_consistency"]["mismatches"] == []
+    assert result["status"] == "pass"
+
+
+def test_layout_role_hashes_still_refuse_when_they_genuinely_disagree(tmp_path):
+    """Issue #2027's other half: role-grouping must not widen the gate into
+    a no-op. Two checks that *both* declare `role: "layout"` and pin
+    different layout digests are the genuine staleness this gate exists to
+    catch, and must still be refused.
+    """
+    other_layout_drc = {
+        **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE,
+        "provenance": {
+            **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:layoutB", "role": "layout"},
+        },
+    }
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE)
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+    stale_drc_path = _write(tmp_path, "drc-stale.json", other_layout_drc)
+
+    result = build_signoff([drc_path, extract_path, stale_drc_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    assert mismatches[0]["role"] == "layout"
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[drc_path] == "sha256:layoutA"
+    assert values[stale_drc_path] == "sha256:layoutB"
+
+
+def test_two_netlist_role_hashes_that_disagree_are_also_refused(tmp_path):
+    """The rule is per-role, not layout-only: two checks that both hashed a
+    netlist and disagree are just as much a stale pairing as two layouts
+    that disagree, and the emitted mismatch names the role it applies to.
+    """
+    other_netlist_lvs = {
+        **LVS_MATCH_PRE_EXTRACTED_ENVELOPE,
+        "provenance": {
+            **LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:otherspice", "role": "netlist"},
+        },
+    }
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE)
+    other_path = _write(tmp_path, "lvs-other.json", other_netlist_lvs)
+
+    result = build_signoff([lvs_path, other_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == ["input.content_hash"]
+    assert mismatches[0]["role"] == "netlist"
+
+
+def test_disagreement_in_two_roles_yields_one_mismatch_per_role(tmp_path):
+    """A bundle that disagrees on both roles at once reports both, as two
+    separately-attributable entries -- the `field` string stays the
+    documented `"input.content_hash"` for each, disambiguated by `role`.
+    """
+    stale_drc = {
+        **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE,
+        "provenance": {
+            **DRC_CLEAN_ROLE_LAYOUT_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:layoutB", "role": "layout"},
+        },
+    }
+    other_netlist_lvs = {
+        **LVS_MATCH_PRE_EXTRACTED_ENVELOPE,
+        "provenance": {
+            **LVS_MATCH_PRE_EXTRACTED_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:otherspice", "role": "netlist"},
+        },
+    }
+    paths = [
+        _write(tmp_path, "drc.json", DRC_CLEAN_ROLE_LAYOUT_ENVELOPE),
+        _write(tmp_path, "drc-stale.json", stale_drc),
+        _write(tmp_path, "lvs.json", LVS_MATCH_PRE_EXTRACTED_ENVELOPE),
+        _write(tmp_path, "lvs-other.json", other_netlist_lvs),
+    ]
+
+    result = build_signoff(paths)
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert [entry["field"] for entry in mismatches] == [
+        "input.content_hash",
+        "input.content_hash",
+    ]
+    assert [entry["role"] for entry in mismatches] == ["layout", "netlist"]
+
+
+def test_role_less_envelope_is_read_as_a_layout_hash(tmp_path):
+    """Back-compat: evidence committed before `role` existed carries only
+    `{content_hash}`. `"the input layout stream the run was made against"`
+    was that field's one documented meaning, so such an envelope keeps
+    participating in the layout-side comparison rather than dropping into a
+    bucket of its own -- otherwise shipping the discriminator would have
+    silently *weakened* the gate for every archived report.
+    """
+    assert "role" not in DRC_CLEAN_ENVELOPE["provenance"]["input"]
+    stale_role_bearing_drc = {
+        **DRC_CLEAN_ENVELOPE,
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": "sha256:layoutB", "role": "layout"},
+        },
+    }
+    old_path = _write(tmp_path, "drc-old.json", DRC_CLEAN_ENVELOPE)
+    new_path = _write(tmp_path, "drc-new.json", stale_role_bearing_drc)
+
+    result = build_signoff([old_path, new_path])
+
+    assert result["status"] == "refused"
+    mismatches = result["provenance_consistency"]["mismatches"]
+    assert mismatches[0]["role"] == "layout"
+    values = {entry["source"]: entry["value"] for entry in mismatches[0]["values"]}
+    assert values[old_path] == "sha256:layoutA"
+    assert values[new_path] == "sha256:layoutB"
+
+
 def test_mismatched_pdk_name_is_refused(tmp_path):
     other_pdk_sim = {
         **SIM_PASS_ENVELOPE,
@@ -1605,6 +3356,165 @@ def test_generic_kind_marker_takes_priority_over_native_structural_shape(tmp_pat
 
 
 # --------------------------------------------------------------------------- #
+# Typed, runtime-validated envelope boundary (issue #2033)
+#
+# `_classify` declares one TypedDict per recognised kind and validates every
+# incoming envelope against it at read time. These tests pin the *negative*
+# half of that contract: a malformed or missing-required-field envelope is
+# rejected (envelope-aggregation mode) or rendered `unrecognized_envelope`
+# (`--manifest` mode), never silently graded as a passing check.
+#
+# Scope note: this catches malformed/incomplete envelopes only. It does not
+# and cannot detect a *semantically* wrong-but-well-formed envelope (see
+# signoff.py's own "Typed, runtime-validated evidence ingestion" docstring
+# section).
+# --------------------------------------------------------------------------- #
+
+#: One (kind label, complete fixture, required field) case per recognised
+#: kind. Each named field is required by that kind's typed shape but is *not*
+#: one of the fields `_classify` discriminates on -- so dropping it produces a
+#: still-recognisable envelope that must nonetheless be rejected, rather than
+#: falling through to the pre-existing "unrecognized shape" path.
+_MISSING_REQUIRED_FIELD_CASES = [
+    ("drc", DRC_CLEAN_ENVELOPE, "status"),
+    ("lvs", LVS_MATCH_ENVELOPE, "status"),
+    ("sim", SIM_PASS_ENVELOPE, "status"),
+    ("yield", YIELD_PASS_ENVELOPE, "status"),
+    ("extract", EXTRACT_ENVELOPE, "status"),
+    ("pex", PEX_PASS_ENVELOPE, "status"),
+    ("power", POWER_PASS_ENVELOPE, "em_verdict"),
+    ("sta", STA_MULTI_CORNER_CLEAN_ENVELOPE, "status"),
+    ("functional-verification", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "status"),
+    ("generic", GENERIC_PASS_ENVELOPE, "status"),
+]
+
+
+def test_extract_envelope_missing_status_is_rejected_not_silently_passed(tmp_path):
+    """The motivating case (#1987/#1988): `extract` is the one kind
+    `_check_passed` counts as passing *unconditionally*, so before this
+    boundary was validated a truncated `klt extract` envelope with no
+    `status` field at all still produced `status: "pass"` with
+    `checks[0].status: null` -- a verdict from an envelope that could not
+    fail."""
+    truncated = {
+        key: value for key, value in EXTRACT_ENVELOPE.items() if key != "status"
+    }
+    path = _write(tmp_path, "extract.json", truncated)
+
+    with pytest.raises(SignoffError, match="required field 'status'"):
+        build_signoff([path])
+
+
+@pytest.mark.parametrize(
+    ("kind", "envelope", "field"),
+    _MISSING_REQUIRED_FIELD_CASES,
+    ids=[f"{kind}-{field}" for kind, _, field in _MISSING_REQUIRED_FIELD_CASES],
+)
+def test_missing_required_field_is_rejected(tmp_path, kind, envelope, field):
+    malformed = {key: value for key, value in envelope.items() if key != field}
+    path = _write(tmp_path, "evidence.json", malformed)
+
+    with pytest.raises(SignoffError) as excinfo:
+        build_signoff([path])
+
+    message = str(excinfo.value)
+    assert f"required field '{field}'" in message
+    # The message names the kind it *did* recognise, so a caller can tell a
+    # truncated envelope of a known kind from an unrecognised shape.
+    assert kind in message
+
+
+@pytest.mark.parametrize(
+    ("envelope", "field", "bad_value"),
+    [
+        (DRC_CLEAN_ENVELOPE, "status", 5),
+        (DRC_CLEAN_ENVELOPE, "schema_version", "1"),
+        (SIM_PASS_ENVELOPE, "corner_count", "three"),
+        (POWER_PASS_ENVELOPE, "em_verdict", "pass"),
+        (FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "test_count", None),
+    ],
+    ids=[
+        "drc-status",
+        "drc-schema_version",
+        "sim-corner_count",
+        "power-em_verdict",
+        "fv-test_count",
+    ],
+)
+def test_required_field_of_wrong_type_is_rejected(tmp_path, envelope, field, bad_value):
+    malformed = {**envelope, field: bad_value}
+    path = _write(tmp_path, "evidence.json", malformed)
+
+    with pytest.raises(SignoffError, match=f"field '{field}'"):
+        build_signoff([path])
+
+
+def test_malformed_envelope_citation_renders_unmet_unrecognized(tmp_path):
+    """`--manifest` mode routes the same rejection to the explicit
+    "unrecognized_envelope" path rather than raising: a T1 item citing a
+    truncated `klt drc` report is `unmet`, never `met`."""
+    truncated = {
+        key: value for key, value in DRC_CLEAN_ENVELOPE.items() if key != "status"
+    }
+    path = _write(tmp_path, "drc.json", truncated)
+
+    result = build_tier_report(_manifest(evidence={"3": path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "unrecognized_envelope"
+    assert item_3["citation"] is None
+
+
+def test_every_recognized_kind_declares_a_typed_shape():
+    """Drift guard: every kind `_classify` can return has a declared typed
+    shape backing it, so adding a kind without a shape (which would silently
+    re-open the unvalidated path for that kind) fails here."""
+    assert set(signoff_module._ENVELOPE_SHAPES) == {
+        "drc",
+        "lvs",
+        "sim",
+        "yield",
+        "extract",
+        "pex",
+        "power",
+        "sta",
+        "functional-verification",
+        "erc",
+        "place-and-route",
+        "generic",
+        "error",
+    }
+
+
+@pytest.mark.parametrize(
+    ("kind", "envelope"),
+    [
+        ("drc", DRC_CLEAN_ENVELOPE),
+        ("drc", DRC_CLEAN_NO_COVERAGE_ENVELOPE),
+        ("lvs", LVS_MATCH_ENVELOPE),
+        ("sim", SIM_PASS_ENVELOPE),
+        ("yield", YIELD_PASS_ENVELOPE),
+        ("extract", EXTRACT_ENVELOPE),
+        ("pex", PEX_PASS_ENVELOPE),
+        ("power", POWER_PASS_ENVELOPE),
+        ("power", POWER_NO_SOLVE_ENVELOPE),
+        ("sta", STA_MULTI_CORNER_CLEAN_ENVELOPE),
+        ("sta", STA_SINGLE_CORNER_CLEAN_ENVELOPE),
+        ("functional-verification", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE),
+        ("generic", GENERIC_PASS_ENVELOPE),
+        ("error", DRC_ERROR_ENVELOPE),
+    ],
+)
+def test_documented_fixtures_validate_against_their_typed_shape(kind, envelope):
+    """Positive half: every documented envelope shape this file fixtures --
+    including the deliberately back-compat ones (a `drc` report predating
+    `coverage`, a `power` report with no IR-drop solve) -- still classifies
+    exactly as before, with no new required field invented."""
+    assert signoff_module._classify(envelope, "fixture.json") == kind
+
+
+# --------------------------------------------------------------------------- #
 # CLI (`klt signoff`)
 # --------------------------------------------------------------------------- #
 
@@ -1678,6 +3588,27 @@ def test_cli_missing_file_exits_one_json_error(tmp_path, capsys):
     assert capsys.readouterr().out == ""
 
 
+def test_cli_malformed_envelope_exits_one_json_error(tmp_path, capsys):
+    """Issue #2033: a recognised-kind envelope that is malformed for that kind
+    surfaces through the CLI's ordinary error contract -- exit 1, the
+    documented JSON error envelope on stderr, nothing on stdout -- rather
+    than a passing verdict."""
+    truncated = {
+        key: value for key, value in EXTRACT_ENVELOPE.items() if key != "status"
+    }
+    path = _write(tmp_path, "extract.json", truncated)
+
+    exit_code = main(["signoff", path, "--format", "json"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    err = json.loads(captured.err)
+    assert err["error"]["command"] == "signoff"
+    assert "missing required field 'status'" in err["error"]["message"]
+    assert "klt extract shape" in err["error"]["message"]
+    assert captured.out == ""
+
+
 def test_cli_missing_file_exits_one_text_error(tmp_path, capsys):
     exit_code = main(["signoff", str(tmp_path / "missing.json")])
 
@@ -1710,20 +3641,23 @@ def _manifest(**overrides) -> dict:
     return base
 
 
-def test_analog_manifest_renders_ten_t1_items_plus_three_ladder_rows():
+def test_analog_manifest_renders_eleven_t1_items_plus_three_ladder_rows():
     result = build_tier_report(_manifest(kind="analog"))
 
     assert result["schema_version"] == 1
     assert result["block"] == "demo-block"
     assert result["kind"] == "analog"
-    assert result["t1_item_count"] == 10
+    # Eleven since issue #2025 added item 11 ("Power delivery (structural)")
+    # -- the count is `len(doc["t1_items"])`, never a literal, so this
+    # assertion is the guard that the doc and this command agree.
+    assert result["t1_item_count"] == 11
     assert result["t1_met_count"] == 0
     assert result["tier"] is None
     assert result["source_doc"] == "docs/design-evidence-tiers.md"
 
     t1_items = [item for item in result["items"] if item["tier"] == "T1"]
     ladder_items = [item for item in result["items"] if item["tier"] != "T1"]
-    assert [item["id"] for item in t1_items] == list(range(1, 11))
+    assert [item["id"] for item in t1_items] == list(range(1, 12))
     assert {item["tier"] for item in ladder_items} == {"T2", "T3", "T4"}
     assert all(item["status"] == "unmet" for item in result["items"])
 
@@ -1804,12 +3738,12 @@ def test_digital_column_documents_the_full_custom_sub_case_for_items_1_2_5():
 def test_mixed_signal_manifest_doubles_up_kind_independent_items():
     result = build_tier_report(_manifest(kind="mixed-signal"))
 
-    # Items 1/2/5/7 split per-kind, items 3/4/6/8/9/10 are kind-independent
-    # but still rendered once per partition per the doc's mixed-signal
-    # guidance -- 10 items x 2 partitions.
+    # Items 1/2/5/7/11 split per-kind, items 3/4/6/8/9/10 are
+    # kind-independent but still rendered once per partition per the doc's
+    # mixed-signal guidance -- 11 items x 2 partitions.
     t1_items = [item for item in result["items"] if item["tier"] == "T1"]
-    assert len(t1_items) == 20
-    assert result["t1_item_count"] == 20
+    assert len(t1_items) == 22
+    assert result["t1_item_count"] == 22
     partitions = {item["partition"] for item in t1_items}
     assert partitions == {"analog", "digital"}
 
@@ -1839,6 +3773,15 @@ def test_met_item_carries_a_citation_with_file_hash_and_exit_status(tmp_path):
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
         "exit_status": 0,
+        # Issue #2002: item 3's citation also quotes the three `coverage`
+        # fields docs/design-evidence-tiers.md requires the claim to
+        # disclose. `deck_scope` is `[]` because this fixture's coverage
+        # block predates that field, not because the deck declares no scope.
+        "coverage": {
+            "layers_in_stream_without_rules": [],
+            "rules_skipped": [],
+            "deck_scope": [],
+        },
     }
     assert result["t1_met_count"] == 1
 
@@ -2223,18 +4166,252 @@ def test_command_evidence_pex_wrong_kind_renders_unmet(monkeypatch):
     assert item_7["citation"] is None
 
 
-def test_items_other_than_7_are_unaffected_by_the_kind_restriction(tmp_path):
-    """Regression: items 1-6 and 8-10 still accept any recognised, passing
-    envelope kind -- only item 7 is kind-restricted."""
+def test_items_1_2_9_and_10_are_unaffected_by_the_kind_restriction(
+    tmp_path,
+):
+    """Regression: items 1, 2, 9 and 10 still accept any recognised,
+    passing envelope kind. They are the four `docs/design-evidence-tiers.md`
+    documents as having no tool behind them ("Citing them honestly is the
+    claimant's responsibility"), so they are the only unrestricted items left
+    after issue #2044 -- every item that names evidence (3-8) is
+    kind-restricted, and item 11 (issue #2025) is compound rather than
+    kind-restricted."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
 
-    evidence = {str(i): drc_path for i in range(1, 11) if i != 7}
+    evidence = {str(i): drc_path for i in (1, 2, 3, 9, 10)}
     result = build_tier_report(_manifest(evidence=evidence))
 
     for item in result["items"]:
-        if item["tier"] == "T1" and item["id"] != 7:
+        if item["tier"] == "T1" and item["id"] in (1, 2, 3, 9, 10):
             assert item["status"] == "met", item["id"]
             assert item["citation"]["kind"] == "drc"
+
+
+@pytest.mark.parametrize("kind", ["analog", "digital"])
+def test_items_3_and_4_reject_a_passing_extract_envelope(tmp_path, kind):
+    """Issue #1987: `klt extract` cannot fail (`_check_passed` is always True
+    for it), so it must never stand in for "DRC clean" or "LVS clean"."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"3": extract_path, "4": extract_path})
+    )
+    for item_id in (3, 4):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "unmet", item_id
+        assert item["reason"] == "wrong_kind", item_id
+        assert item["citation"] is None
+
+    # The right kind still satisfies each item, and a drc report does not
+    # satisfy item 4 (nor an lvs report item 3).
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"3": lvs_path, "4": drc_path})
+    )
+    for item_id in (3, 4):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["reason"] == "wrong_kind", item_id
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"3": drc_path, "4": lvs_path})
+    )
+    for item_id in (3, 4):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "met", item_id
+
+
+# --------------------------------------------------------------------------- #
+# Items 5, 6 and 8 are kind-restricted too (issue #2044)
+#
+# #1987 restricted items 3 and 4 because a `klt extract` citation -- which
+# `_check_passed` counts as passing unconditionally -- could otherwise stand
+# in for a check it never ran. Items 5, 6 and 8 name their evidence in
+# docs/design-evidence-tiers.md just as explicitly, and were still
+# unrestricted, so the same bare extract envelope graded all three "met".
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("kind", ["analog", "digital"])
+@pytest.mark.parametrize("item_id", [5, 6, 8])
+def test_items_5_6_and_8_reject_a_passing_extract_envelope(tmp_path, kind, item_id):
+    """The headline regression: a `klt extract` report, which cannot fail,
+    must never satisfy the corner-verification, Monte-Carlo, or
+    characterization items -- for either block kind."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={str(item_id): extract_path})
+    )
+
+    item = next(i for i in result["items"] if i["id"] == item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["citation"] is None
+
+
+@pytest.mark.parametrize("kind", ["analog", "digital"])
+def test_items_5_6_and_8_reject_a_wrong_kind_native_citation(tmp_path, kind):
+    """Not extract-specific: any kind the doc does not name for these items
+    is refused, exactly as it already was for items 3, 4 and 7. A clean DRC
+    report proves nothing about corner coverage, Monte Carlo sampling, or a
+    characterization sweep."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind=kind, evidence={"5": drc_path, "6": drc_path, "8": drc_path})
+    )
+
+    for item_id in (5, 6, 8):
+        item = next(i for i in result["items"] if i["id"] == item_id)
+        assert item["status"] == "unmet", item_id
+        assert item["reason"] == "wrong_kind", item_id
+        assert item["citation"] is None, item_id
+
+
+def test_genuine_evidence_for_items_5_6_and_8_still_renders_met(tmp_path):
+    """The other half of the restriction: the kinds the doc *does* name for
+    these items grade exactly as before -- `klt sim` (analog item 5), `klt
+    yield` (item 6), and the generic characterization envelope (item 8)."""
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "5": _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE),
+                "6": _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE),
+                "8": _write(tmp_path, "char.json", GENERIC_PASS_ENVELOPE),
+            },
+        )
+    )
+
+    by_id = {item["id"]: item for item in result["items"] if item["tier"] == "T1"}
+    assert by_id[5]["status"] == "met"
+    assert by_id[5]["citation"]["kind"] == "sim"
+    assert by_id[6]["status"] == "met"
+    assert by_id[6]["citation"]["kind"] == "yield"
+    assert by_id[8]["status"] == "met"
+    assert by_id[8]["citation"]["kind"] == "generic"
+
+
+@pytest.mark.parametrize(
+    "envelope,expected_kind",
+    [
+        (STA_MULTI_CORNER_CLEAN_ENVELOPE, "sta"),
+        (FUNCTIONAL_VERIFICATION_PASS_ENVELOPE, "functional-verification"),
+        (SIM_PASS_ENVELOPE, "sim"),
+    ],
+)
+def test_digital_item_5_still_accepts_every_kind_the_doc_names(
+    tmp_path, envelope, expected_kind
+):
+    """A digital partition's item 5 accepts all three artifacts the doc
+    names for it: `klt sta` and `klt functional-verification` for the RTL
+    flow (#1959), and `klt sim` for the full-custom sub-case, which
+    satisfies item 5 "instead by PVT corner-matrix SPICE simulation"."""
+    path = _write(tmp_path, "evidence.json", envelope)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": path}))
+
+    item_5 = next(i for i in result["items"] if i["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["kind"] == expected_kind
+
+
+def test_analog_item_5_rejects_the_digital_column_artifacts(tmp_path):
+    """Item 5's restriction is per partition kind, like item 7's: an analog
+    partition's corner verification is a PVT corner-matrix simulation, not
+    STA or a functional regression."""
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_PASS_ENVELOPE)
+
+    for path in (sta_path, fv_path):
+        result = build_tier_report(_manifest(kind="analog", evidence={"5": path}))
+        item_5 = next(i for i in result["items"] if i["id"] == 5)
+        assert item_5["status"] == "unmet"
+        assert item_5["reason"] == "wrong_kind"
+        assert item_5["citation"] is None
+
+
+def test_mixed_signal_partitions_apply_their_own_item_5_rule(tmp_path):
+    """A mixed-signal block grades one partition at a time, so its analog
+    partition requires `sim` while its digital partition accepts `sta` --
+    with no extra manifest syntax beyond the existing `<id>.<partition>`
+    key."""
+    sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
+    sta_path = _write(tmp_path, "sta.json", STA_MULTI_CORNER_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            kind="mixed-signal",
+            evidence={"5.analog": sim_path, "5.digital": sta_path},
+        )
+    )
+
+    item_5 = {
+        item["partition"]: item
+        for item in result["items"]
+        if item["id"] == 5 and item["tier"] == "T1"
+    }
+    assert item_5["analog"]["status"] == "met"
+    assert item_5["analog"]["citation"]["kind"] == "sim"
+    assert item_5["digital"]["status"] == "met"
+    assert item_5["digital"]["citation"]["kind"] == "sta"
+
+    # And the swap is refused in both directions.
+    swapped = build_tier_report(
+        _manifest(
+            kind="mixed-signal",
+            evidence={
+                "5.analog": sta_path,
+                "5.digital": _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE),
+            },
+        )
+    )
+    for item in swapped["items"]:
+        if item["id"] == 5 and item["tier"] == "T1":
+            assert item["status"] == "unmet", item["partition"]
+            assert item["reason"] == "wrong_kind", item["partition"]
+
+
+@pytest.mark.parametrize("item_id", [1, 2, 9, 10])
+def test_extract_still_satisfies_the_four_items_with_no_evidence_behind_them(
+    tmp_path, item_id
+):
+    """Deliberately out of scope for issue #2044: items 1, 2, 9 and 10 name
+    no evidence at all ("items 1, 2, 9, and 10 have none ... Citing them
+    honestly is the claimant's responsibility, not something the tool
+    verifies"), so they are graded on whether *some* passing envelope was
+    cited, topical relevance included -- and `extract` is no more irrelevant
+    there than the `drc` report that also satisfies them. Restricting them
+    needs an artifact to bind them to, which is a separate question."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={str(item_id): extract_path}))
+
+    item = next(i for i in result["items"] if i["id"] == item_id)
+    assert item["status"] == "met"
+    assert item["citation"]["kind"] == "extract"
+
+
+def test_extract_still_aggregates_normally_in_envelope_mode(tmp_path):
+    """Issue #2044 changes only whether an `extract` citation satisfies a
+    numbered tier item. Envelope-aggregation mode is untouched: the extract
+    check still appears in `checks[]`, still counts as passed, still reports
+    its device/net counts, and its provenance still participates in the
+    cross-envelope consistency check."""
+    extract_path = _write(tmp_path, "extract.json", EXTRACT_ENVELOPE)
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_signoff([extract_path, drc_path])
+
+    assert result["status"] == "pass"
+    assert result["check_count"] == 2
+    assert result["failed_count"] == 0
+    extract_check = next(c for c in result["checks"] if c["kind"] == "extract")
+    assert extract_check["status"] == "extracted"
+    assert extract_check["passed"] is True
+    assert extract_check["detail"]["device_count"] == EXTRACT_ENVELOPE["device_count"]
+    assert extract_check["provenance"] is not None
+    assert result["provenance_consistency"] == {"ok": True, "mismatches": []}
 
 
 # --------------------------------------------------------------------------- #
@@ -2271,18 +4448,20 @@ def test_generic_fail_status_for_item_8_renders_unmet_check_failed(tmp_path):
     assert item_8["citation"] is None
 
 
-def test_item_8_still_accepts_a_native_kind_too(tmp_path):
-    """Item 8 was, and remains, otherwise unrestricted: "generic" is an
-    *additional* accepted kind for it, not a replacement for the existing
-    any-native-kind permissiveness (issue #871's docstring, "every item
-    except item 7 accepts any recognised, passing envelope kind")."""
+def test_item_8_no_longer_accepts_a_native_kind(tmp_path):
+    """Issue #2044 closed item 8's any-native-kind permissiveness: `generic`
+    is now the *only* kind it accepts, because the generic envelope is the
+    only evidence `docs/design-evidence-tiers.md` gives it ("`klt signoff
+    --manifest` grades it via an opt-in generic evidence envelope"). A clean
+    `klt drc` report proves nothing about a characterization claim."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
 
     result = build_tier_report(_manifest(evidence={"8": drc_path}))
 
     item_8 = next(item for item in result["items"] if item["id"] == 8)
-    assert item_8["status"] == "met"
-    assert item_8["citation"]["kind"] == "drc"
+    assert item_8["status"] == "unmet"
+    assert item_8["reason"] == "wrong_kind"
+    assert item_8["citation"] is None
 
 
 @pytest.mark.parametrize("item_id", [3, 4, 5, 6, 7])
@@ -2508,15 +4687,8 @@ def test_deliberately_skipped_check_is_caught_amid_otherwise_full_evidence(tmp_p
     it, render it unmet with a "no runnable check" reason, and must not
     let the block reach tier T1 despite every other item being genuinely
     met."""
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-
-    evidence = {str(i): drc_path for i in range(2, 11)}  # 2-10, never 1
-    evidence["4"] = lvs_path
-    # Item 7 is kind-restricted (issue #871) -- give it real `pex` evidence
-    # so this test's "every other item is genuinely met" claim still holds.
-    evidence["7"] = pex_path
+    evidence = _full_t1_evidence(tmp_path)
+    del evidence["1"]  # never run, as if the check simply was not done
 
     result = build_tier_report(_manifest(evidence=evidence))
 
@@ -2535,25 +4707,16 @@ def test_deliberately_skipped_check_is_caught_amid_otherwise_full_evidence(tmp_p
 
     # The skipped item is exactly what stops the tier from being T1 -- a
     # skipped check must never silently pass through as "assumed met".
-    assert result["t1_met_count"] == 9
-    assert result["t1_item_count"] == 10
+    assert result["t1_met_count"] == 10
+    assert result["t1_item_count"] == 11
     assert result["tier"] is None
 
 
-def test_all_ten_t1_items_met_yields_tier_t1(tmp_path):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+def test_all_eleven_t1_items_met_yields_tier_t1(tmp_path):
+    result = build_tier_report(_manifest(evidence=_full_t1_evidence(tmp_path)))
 
-    # Item 7 is kind-restricted (issue #871) -- a `pex`-shaped citation is
-    # required there; every other item still accepts the shared DRC fixture.
-    evidence = {str(i): drc_path for i in range(1, 11)}
-    evidence["4"] = lvs_path
-    evidence["7"] = pex_path
-
-    result = build_tier_report(_manifest(evidence=evidence))
-
-    assert result["t1_met_count"] == 10
+    assert result["t1_met_count"] == 11
+    assert result["t1_item_count"] == 11
     assert result["tier"] == "T1"
 
 
@@ -2596,6 +4759,15 @@ def test_command_evidence_runs_and_grades_met(monkeypatch):
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
         "exit_status": 0,
+        # Issue #2002: a command-backed `drc` citation quotes the coverage
+        # block off the envelope the command actually printed, exactly like
+        # the file-backed path -- `deck_scope` is `[]` here because
+        # DRC_CLEAN_ENVELOPE's fixture coverage block predates that field.
+        "coverage": {
+            "layers_in_stream_without_rules": [],
+            "rules_skipped": [],
+            "deck_scope": [],
+        },
     }
     assert calls == [
         {
@@ -2962,6 +5134,7 @@ def test_real_extract_gate_reproduces_the_canarys_netlist_regeneration(tmp_path)
     not (_DESIGN_PIPELINE_DIR / "09-sim.request.json").exists(),
     reason="examples/design-pipeline/09-sim.request.json not present in this checkout",
 )
+@requires_ngspice
 def test_real_sim_gate_reproduces_the_canarys_corner_sim_pass():
     # "corner sim" (issue #825's phrasing): the post-extraction corner
     # sweep -- a real, multi-corner `klt sim` run against the layout's own
@@ -2995,6 +5168,7 @@ def test_real_sim_gate_reproduces_the_canarys_corner_sim_pass():
     not (_DESIGN_PIPELINE_DIR / "06-layout.gds").exists(),
     reason="examples/design-pipeline/06-layout.gds not present in this checkout",
 )
+@requires_ngspice
 def test_real_pex_gate_reproduces_the_canarys_post_layout_delta_pass(tmp_path):
     # Epic #709 Phase 1c (#803): item 7 ("Post-layout verification") is
     # kind-restricted to `pex`-kind evidence only (issue #871) -- this is
@@ -3089,14 +5263,9 @@ def test_cli_manifest_json_output(tmp_path, capsys):
 
 
 def test_cli_manifest_all_met_exits_zero(tmp_path, capsys):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-    evidence = {str(i): drc_path for i in range(1, 11)}
-    evidence["4"] = lvs_path
-    # Item 7 is kind-restricted to `pex` evidence (issue #871).
-    evidence["7"] = pex_path
-    manifest_path = _write(tmp_path, "manifest.json", _manifest(evidence=evidence))
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence=_full_t1_evidence(tmp_path))
+    )
 
     exit_code = main(["signoff", "--manifest", manifest_path, "--format", "json"])
 
@@ -3376,19 +5545,15 @@ def _fleet_write(tmp_path, blocks: list) -> str:
 
 
 def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-
-    # canary-a: every T1 item met -> T1, no blocking item. Item 7 is
-    # kind-restricted to `pex` evidence (issue #871).
-    full_evidence = {str(i): drc_path for i in range(1, 11)}
-    full_evidence["4"] = lvs_path
-    full_evidence["7"] = pex_path
+    # canary-a: every T1 item met -> T1, no blocking item. Items 3-8 are
+    # kind-restricted (issues #871/#1152/#1987/#2044) and item 11 is
+    # compound (issue #2025), so each cites the kind it actually accepts --
+    # see _full_t1_evidence().
+    full_evidence = _full_t1_evidence(tmp_path)
     block_a = _fleet_block_manifest("canary-a", evidence=full_evidence)
 
     # canary-b: everything but item 4 (LVS clean) met -> blocked on #4.
-    partial_evidence = {str(i): drc_path for i in range(1, 11) if i != 4}
+    partial_evidence = {k: v for k, v in full_evidence.items() if k != "4"}
     block_b = _fleet_block_manifest("canary-b", evidence=partial_evidence)
 
     # canary-c: nothing met -> blocked on item 1 (the first T1 item).
@@ -3405,7 +5570,7 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
     by_name = {block["block"]: block for block in result["blocks"]}
 
     assert by_name["canary-a"]["tier"] == "T1"
-    assert by_name["canary-a"]["t1_met_count"] == 10
+    assert by_name["canary-a"]["t1_met_count"] == 11
     assert by_name["canary-a"]["blocking_item"] is None
 
     assert by_name["canary-b"]["tier"] is None
@@ -3448,7 +5613,8 @@ def test_fleet_report_never_reparses_evidence_itself(tmp_path):
 # build_fleet_report() needed no code change to pick these two items up: it
 # already reduces whatever items[] build_tier_report() renders (see its own
 # "Fleet roll-up" docstring section), and build_tier_report() has rendered
-# all 10 T1 items -- including item 6 (statistical) and item 7 (post-layout)
+# every T1 item the doc lists -- including item 6 (statistical) and item 7
+# (post-layout)
 # -- since Phase 0 (#722). What changed under #870/#871 is which evidence
 # shapes those two items can now be *satisfied by* (a `klt yield` report for
 # item 6, a `klt pex` report -- and only that kind -- for item 7); before
@@ -3474,12 +5640,11 @@ def test_fleet_blocking_item_walks_through_statistical_then_post_layout_items(
     directly -- this is `build_fleet_report()`'s own blocking-item
     determination being exercised end to end."""
     drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
+    full_evidence = _full_t1_evidence(tmp_path)
+    yield_path = full_evidence["6"]
+    pex_path = full_evidence["7"]
 
-    base_evidence = {str(i): drc_path for i in range(1, 11) if i not in (6, 7)}
-    base_evidence["4"] = lvs_path
+    base_evidence = {k: v for k, v in full_evidence.items() if k not in ("6", "7")}
 
     def _row(evidence: dict[str, str]) -> dict[str, object]:
         block = _fleet_block_manifest("stat-postlayout-canary", evidence=evidence)
@@ -3525,7 +5690,7 @@ def test_fleet_blocking_item_walks_through_statistical_then_post_layout_items(
     fully_met = dict(with_item_6, **{"7": pex_path})
     row = _row(fully_met)
     assert row["tier"] == "T1"
-    assert row["t1_met_count"] == 10
+    assert row["t1_met_count"] == 11
     assert row["blocking_item"] is None
 
 
@@ -3543,13 +5708,7 @@ def test_fleet_tier_verdict_changes_once_real_yield_evidence_is_bound(tmp_path):
     over that campaign -> item 6 "met" on a freshly-observed exit status
     and envelope, block reaches T1.
     """
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-
-    base_evidence = {str(i): drc_path for i in range(1, 11) if i != 6}
-    base_evidence["4"] = lvs_path
-    base_evidence["7"] = pex_path
+    base_evidence = {k: v for k, v in _full_t1_evidence(tmp_path).items() if k != "6"}
 
     before_block = _fleet_block_manifest("gf180-sar-adc-canary", evidence=base_evidence)
     before = build_fleet_report({"blocks": [before_block]})
@@ -3688,16 +5847,10 @@ def test_fleet_block_manifest_non_object_raises(tmp_path):
 
 
 def test_cli_fleet_json_output(tmp_path, capsys):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-    full_evidence = {str(i): drc_path for i in range(1, 11)}
-    full_evidence["4"] = lvs_path
-    full_evidence["7"] = pex_path  # item 7 is kind-restricted (issue #871)
     fleet_path = _fleet_write(
         tmp_path,
         [
-            _fleet_block_manifest("canary-a", evidence=full_evidence),
+            _fleet_block_manifest("canary-a", evidence=_full_t1_evidence(tmp_path)),
             _fleet_block_manifest("canary-b", evidence={}),
         ],
     )
@@ -3711,14 +5864,9 @@ def test_cli_fleet_json_output(tmp_path, capsys):
 
 
 def test_cli_fleet_all_t1_exits_zero(tmp_path, capsys):
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
-    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_ENVELOPE)
-    pex_path = _write(tmp_path, "pex.json", PEX_PASS_ENVELOPE)
-    full_evidence = {str(i): drc_path for i in range(1, 11)}
-    full_evidence["4"] = lvs_path
-    full_evidence["7"] = pex_path  # item 7 is kind-restricted (issue #871)
     fleet_path = _fleet_write(
-        tmp_path, [_fleet_block_manifest("canary-a", evidence=full_evidence)]
+        tmp_path,
+        [_fleet_block_manifest("canary-a", evidence=_full_t1_evidence(tmp_path))],
     )
 
     exit_code = main(["signoff", "--fleet", fleet_path, "--format", "json"])
@@ -3968,15 +6116,35 @@ def test_sdf_annotated_functional_verification_is_marked_in_detail(tmp_path):
     assert result["checks"][0]["detail"]["sdf_corner"] == "typ"
 
 
-def test_place_and_route_envelope_is_still_unrecognized(tmp_path):
+def test_place_and_route_envelope_is_never_classified_as_sta(tmp_path):
     """`klt place-and-route`'s response overlaps `klt sta`'s timing fields
     (`worst_slack_ns`/`timing_status`/`corners`) but is a different verb with
-    a different corner-sweep contract -- recognising `sta` must not start
-    silently classifying it as one."""
+    a different corner-sweep contract. It became a recognised kind of its own
+    in issue #2025 (for T1 item 11's PDN condition) -- which must not make it
+    classify as, or stand in for, `sta`."""
     pnr_path = _write(tmp_path, "pnr.json", PLACE_AND_ROUTE_ENVELOPE)
 
-    with pytest.raises(SignoffError, match="unrecognized shape"):
-        build_signoff([pnr_path])
+    result = build_signoff([pnr_path])
+
+    assert result["checks"][0]["kind"] == "place-and-route"
+    assert result["checks"][0]["passed"] is True  # `status: "ok"` -- it ran
+    assert result["checks"][0]["detail"]["power_pdn"] is True
+    assert result["checks"][0]["detail"]["strap_layers"] == ["met1", "met4"]
+
+
+def test_place_and_route_citation_cannot_satisfy_the_timing_item(tmp_path):
+    """Issue #2025: recognising the P&R response must not let it borrow a
+    pass for item 5 (multi-corner timing), whose evidence is a `klt sta` run
+    against a *declared* corner set -- the P&R response's own sweep is the
+    PDK's full shipped list. It is accepted by item 11 alone."""
+    pnr_path = _write(tmp_path, "pnr.json", PLACE_AND_ROUTE_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": pnr_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "wrong_kind"
+    assert item_5["citation"] is None
 
 
 def test_sta_evidence_satisfies_item_5_for_a_digital_manifest(tmp_path):
@@ -4090,15 +6258,20 @@ def test_analog_item_7_still_requires_pex(tmp_path):
     assert item_7["citation"] is None
 
 
-def test_analog_item_5_accepts_any_recognised_kind_as_before(tmp_path):
-    """Regression: item 5 stays unrestricted for every block kind -- this
-    phase widens what is *recognised*, it does not tighten what item 5
-    accepts."""
-    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+def test_item_5_accepts_the_sim_corner_matrix_for_both_block_kinds(tmp_path):
+    """Item 5's Analog column names a PVT corner-matrix simulation, and the
+    full-custom digital sub-case satisfies it "instead by PVT corner-matrix
+    SPICE simulation" -- so a `klt sim` citation is accepted for both block
+    kinds. Issue #2044 restricted item 5's accepted kinds (a clean `klt drc`
+    report no longer satisfies it -- see
+    `test_item_5_rejects_a_wrong_kind_citation`), but deliberately kept both
+    of these paths open."""
     sim_path = _write(tmp_path, "sim.json", SIM_PASS_ENVELOPE)
 
-    analog = build_tier_report(_manifest(kind="analog", evidence={"5": drc_path}))
-    assert next(i for i in analog["items"] if i["id"] == 5)["status"] == "met"
+    analog = build_tier_report(_manifest(kind="analog", evidence={"5": sim_path}))
+    item_5 = next(i for i in analog["items"] if i["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["kind"] == "sim"
 
     full_custom_digital = build_tier_report(
         _manifest(kind="digital", evidence={"5": sim_path})
@@ -4255,3 +6428,589 @@ def test_fleet_rollup_blocking_item_reflects_the_new_digital_kinds(tmp_path):
     block = result["blocks"][0]
     assert block["blocking_item"]["id"] == 1
     assert block["blocking_item"]["reason"] == "no_evidence"
+
+
+# --------------------------------------------------------------------------- #
+# T1 item 11: power delivery (structural) -- issue #2025
+#
+# The operator ruling that added this item (approved 2026-09-17) settled a
+# question `docs/design-evidence-tiers.md` had deliberately left open: no T1
+# item required a power grid to *exist*, so 2 of 7 committed digital layouts
+# in the fleet survey satisfied every item while being unpowerable. Item 11
+# is the first compound T1 item -- its manifest entry is a *list* of evidence
+# entries, and no single artifact can satisfy it.
+#
+# Two properties are load-bearing enough to test from several angles:
+#
+# 1. **It never fabricates a "met".** An ERC run whose spec declared no
+#    supply (or no ties) reports zero supply findings for the same reason a
+#    DRC deck with no rules reports zero violations -- it never asked. That
+#    must render `supply_spec_incomplete`, not a pass.
+# 2. **It grades only the rules it names.** An antenna violation or a
+#    floating-gate finding makes the ERC envelope's own `status`
+#    `"violations"`, but neither is power delivery -- and #1994 tracks a
+#    known tie-cell false-positive of exactly that shape. Item 11 must not be
+#    blocked by them.
+# --------------------------------------------------------------------------- #
+
+
+def _item_11(result: dict, partition: str | None = None) -> dict:
+    return next(
+        item
+        for item in result["items"]
+        if item["id"] == 11 and item["partition"] == partition
+    )
+
+
+def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="digital")},
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    # The leading part keeps the single-citation contract every existing
+    # consumer reads; `parts` carries the whole cited set.
+    assert item["citation"]["kind"] == "erc"
+    assert [part["kind"] for part in item["citation"]["parts"]] == [
+        "erc",
+        "lvs",
+        "place-and-route",
+    ]
+    assert item["citation"]["power_delivery"] == {
+        "partition_kind": "digital",
+        "supply_nets": ["VPWR", "VGND"],
+        "pdn": True,
+        "strap_layers": ["met1", "met4"],
+        "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
+        "power_connectivity_status": "match",
+    }
+
+
+def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="analog")},
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert [part["kind"] for part in item["citation"]["parts"]] == ["erc", "lvs"]
+    assert item["citation"]["power_delivery"]["pdn"] is False
+    assert item["citation"]["power_delivery"]["power_connectivity_status"] == (
+        "unchecked"
+    )
+
+
+def test_item_11_digital_unmet_when_no_pdn_was_built(tmp_path):
+    """The headline case from the fleet survey: a routed digital block whose
+    P&R request carried no `power` block at all. Every other T1 item can be
+    met on that layout; item 11 must not be."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    par_envelope=PLACE_AND_ROUTE_NO_PDN_ENVELOPE,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "no_pdn"
+    assert item["citation"] is None
+
+
+def test_item_11_digital_unmet_when_no_tapcell_master_was_placed(tmp_path):
+    par = {
+        **PLACE_AND_ROUTE_ENVELOPE,
+        "power": {**PLACE_AND_ROUTE_ENVELOPE["power"], "tapcell_master": None},
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", par_envelope=par
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "no_pdn"
+
+
+@pytest.mark.parametrize(
+    "power_connectivity",
+    [POWER_CONNECTIVITY_UNCHECKED, POWER_CONNECTIVITY_UNCHECKED_DISABLED],
+    ids=["unchecked", "explicitly-disabled"],
+)
+def test_item_11_digital_rejects_unchecked_power_connectivity(
+    tmp_path, power_connectivity
+):
+    """`"unchecked"` satisfies item 4 (it means "the question does not apply
+    here") but must never satisfy item 11, which is the question."""
+    lvs = {**LVS_MATCH_ENVELOPE, "power_connectivity": power_connectivity}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", lvs_envelope=lvs
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_supply_unproven"
+
+
+def test_item_11_analog_unmet_when_the_reference_never_carried_the_supplies(
+    tmp_path,
+):
+    """A signal-only gate-level reference leaves the supply nets unpaired in
+    `net_correspondence` -- so an RTL-flow digital block cannot reach `met`
+    by simply omitting its P&R citation and falling into the analog branch."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    lvs_envelope=LVS_MATCH_SIGNAL_ONLY_CORRESPONDENCE_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_supply_unproven"
+
+
+def test_item_11_full_custom_digital_is_met_through_the_analog_artifacts(tmp_path):
+    """The doc's "Full-custom digital sub-case": a hand-captured digital
+    block declares `kind: "digital"` but has no P&R run to cite, exactly as
+    for items 1, 2, and 5. Its SPICE-reference LVS carries the supplies."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    lvs_envelope=LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["pdn"] is False
+    assert item["citation"]["power_delivery"]["partition_kind"] == "digital"
+
+
+def test_item_11_rejects_supply_correspondence_when_power_connectivity_disabled(
+    tmp_path,
+):
+    """PR #2057 review follow-up: a `gate-level-verilog` reference can
+    declare explicit power ports, so its supplies pair in
+    `net_correspondence` even though the caller disabled the power/ground
+    check (`options.power_connectivity: false`). Net-correspondence pairing
+    alone must not satisfy the no-PAR branch -- the check never actually
+    ran, so nothing verified the supplies landed on the right nets."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    lvs_envelope=LVS_MATCH_SUPPLY_CORRESPONDENCE_DISABLED_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_supply_unproven"
+
+
+@pytest.mark.parametrize(
+    ("envelope", "label"),
+    [
+        (ERC_SPLIT_SUPPLY_ENVELOPE, "a declared supply split across islands"),
+        (ERC_MISSING_TIE_ENVELOPE, "a well with no connected tap"),
+    ],
+)
+def test_item_11_unmet_when_erc_reports_a_supply_side_finding(
+    tmp_path, envelope, label
+):
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet", label
+    assert item["reason"] == "supply_not_continuous", label
+
+
+def test_item_11_unmet_when_two_declared_supplies_are_shorted(tmp_path):
+    erc = {
+        **ERC_CLEAN_ENVELOPE,
+        "status": "violations",
+        "erc_findings": [
+            {
+                "rule": "erc.supply_short",
+                "description": "'VPWR' and 'VGND' resolve to the same island",
+                "net": "VPWR",
+                "other_net": "VGND",
+                "gate_id": None,
+                "layer": None,
+                "bbox": None,
+            }
+        ],
+        "erc_finding_count": 1,
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=erc
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_not_continuous"
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [ERC_ANTENNA_VIOLATION_ENVELOPE, ERC_FLOATING_GATE_ENVELOPE],
+    ids=["antenna-violation", "floating-gate"],
+)
+def test_item_11_is_not_blocked_by_a_non_supply_erc_finding(tmp_path, envelope):
+    """Item 11 grades the supply-continuity rules its checklist text names,
+    not the ERC envelope's own `status` -- otherwise an antenna violation on
+    an unrelated signal net (or #1994's tie-cell false positives) would block
+    a power-delivery claim it says nothing about."""
+    assert envelope["status"] == "violations"
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["check_status"] == "violations"
+
+
+def test_item_11_unmet_when_the_erc_spec_declared_no_supply_net(tmp_path):
+    """The "it never asked" case: `klt erc` computes the supply rules only
+    for declared nets, so a spec with none reports zero findings. That must
+    never read as a clean supply."""
+    spec = {**ERC_SUPPLY_SPEC, "nets": [{"name": "A", "kind": "signal"}]}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_when_the_erc_spec_declared_no_ties(tmp_path):
+    """Same rule, other half: `erc.missing_tie` is never computed when the
+    spec omits `ties[]`, so zero tie findings proves nothing."""
+    spec = {key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_when_a_strap_layer_is_outside_the_erc_spec_stackup(tmp_path):
+    """The ERC run must actually look at the layers the supply is routed on
+    -- a "one island" verdict computed over met1 alone says nothing about a
+    grid whose straps also run on met4."""
+    spec = {
+        **ERC_SUPPLY_SPEC,
+        "stackup": [
+            entry
+            for entry in ERC_SUPPLY_SPEC["stackup"]
+            if entry["name"] not in {"met4"}
+        ],
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_when_the_erc_spec_document_cannot_be_read(tmp_path):
+    """`klt erc`'s envelope echoes its spec's path but not its content, so a
+    spec that has since been deleted leaves the item unprovable -- unmet,
+    never assumed."""
+    erc_path = _write(
+        tmp_path,
+        "erc.json",
+        {**ERC_CLEAN_ENVELOPE, "spec": str(tmp_path / "does-not-exist.json")},
+    )
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_POWER_MATCH_ENVELOPE)
+    par_path = _write(tmp_path, "par.json", PLACE_AND_ROUTE_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"11": [erc_path, lvs_path, par_path]})
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_requires_both_an_erc_and_an_lvs_citation(tmp_path):
+    """An ERC run alone proves supply continuity but says nothing about
+    whether the supplies were part of the LVS compare -- "cite a different
+    artifact", which is what `wrong_kind` means everywhere in this module."""
+    erc_path = _erc_evidence(tmp_path)
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": erc_path}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+    assert item["citation"] is None
+
+
+def test_item_11_rejects_an_unrelated_kind_in_the_cited_set(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    parts = _power_delivery_evidence(tmp_path, kind="analog") + [drc_path]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    assert _item_11(result)["reason"] == "wrong_kind"
+
+
+def test_item_11_unmet_when_the_cited_lvs_report_itself_fails(tmp_path):
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", lvs_envelope=LVS_MISMATCH_ENVELOPE
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_item_11_unmet_with_no_evidence_at_all(tmp_path):
+    result = build_tier_report(_manifest(kind="digital"))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "no_evidence"
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [[], [{"neither": "file-nor-command"}], 42],
+    ids=["empty-list", "malformed-part", "not-an-entry"],
+)
+def test_item_11_invalid_evidence_shapes(tmp_path, entry):
+    """One malformed part renders the whole item invalid rather than being
+    silently dropped from the cited set -- a shortened set is exactly how a
+    compound item would reach `met` without the artifact that was mistyped."""
+    parts = entry
+    if isinstance(entry, list) and entry:
+        parts = _power_delivery_evidence(tmp_path, kind="analog") + entry
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": parts}))
+
+    assert _item_11(result)["reason"] == "invalid_evidence"
+
+
+def test_item_11_parts_honour_their_own_pinned_content_hash(tmp_path):
+    parts = _power_delivery_evidence(tmp_path, kind="analog")
+    pinned = [
+        {"file": parts[0], "content_hash": "sha256:a-different-layout"},
+        parts[1],
+    ]
+
+    result = build_tier_report(_manifest(kind="analog", evidence={"11": pinned}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+
+
+def test_item_11_accepts_a_command_backed_part(tmp_path, monkeypatch):
+    """Compound parts go through the same resolution path every other item's
+    single citation does, so a gate-bound (command-backed) `klt erc` run
+    works with no separate wiring."""
+    spec_path = _write(tmp_path, "erc-spec.json", ERC_SUPPLY_SPEC)
+    erc_envelope = {**ERC_CLEAN_ENVELOPE, "spec": spec_path}
+    lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE)
+
+    def fake_run(command, **kwargs):
+        return fake_completed(returncode=0, stdout=json.dumps(erc_envelope))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": [
+                    {"command": ["klt", "erc", "routed.gds", spec_path]},
+                    lvs_path,
+                ]
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["command"] == f"klt erc routed.gds {spec_path}"
+    assert item["citation"]["file"] is None
+
+
+def test_item_11_keys_per_partition_for_a_mixed_signal_block(tmp_path):
+    """Item 11 is a per-kind item, so a mixed-signal manifest cites it once
+    per partition -- the analog partition through its SPICE-reference LVS,
+    the digital one through its PDN."""
+    result = build_tier_report(
+        _manifest(
+            kind="mixed-signal",
+            evidence={
+                "11.analog": _power_delivery_evidence(
+                    tmp_path, kind="analog", prefix="a"
+                ),
+                "11.digital": _power_delivery_evidence(
+                    tmp_path, kind="digital", prefix="d"
+                ),
+            },
+        )
+    )
+
+    analog = _item_11(result, partition="analog")
+    digital = _item_11(result, partition="digital")
+    assert analog["status"] == "met"
+    assert digital["status"] == "met"
+    assert analog["citation"]["power_delivery"]["pdn"] is False
+    assert digital["citation"]["power_delivery"]["pdn"] is True
+
+
+@pytest.mark.parametrize("item_id", [3, 5, 6, 8, 10])
+def test_erc_citation_cannot_satisfy_any_other_item(tmp_path, item_id):
+    """`erc` is opt-in per item, exactly like `generic`: it proves supply
+    continuity and antenna ratios, not DRC cleanliness, corner coverage,
+    characterization, or repo hygiene."""
+    erc_path = _erc_evidence(tmp_path)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={str(item_id): erc_path})
+    )
+
+    item = next(i for i in result["items"] if i["id"] == item_id)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "wrong_kind"
+
+
+def test_erc_envelope_is_graded_in_envelope_aggregation_mode(tmp_path):
+    """Unlike tier-verdict mode, aggregation mode grades an `erc` check on
+    the envelope's own `status` roll-up (`docs/cli/erc.md`)."""
+    clean_path = _erc_evidence(tmp_path, prefix="clean")
+    violations_path = _erc_evidence(
+        tmp_path, ERC_ANTENNA_VIOLATION_ENVELOPE, prefix="violations"
+    )
+
+    clean = build_signoff([clean_path])
+    assert clean["checks"][0]["kind"] == "erc"
+    assert clean["checks"][0]["passed"] is True
+    assert clean["checks"][0]["detail"]["gate_role"] == "poly"
+
+    violations = build_signoff([violations_path])
+    assert violations["checks"][0]["passed"] is False
+    assert violations["status"] == "fail"
+
+
+def test_erc_detail_breaks_findings_down_by_rule(tmp_path):
+    path = _erc_evidence(tmp_path, ERC_MISSING_TIE_ENVELOPE)
+
+    result = build_signoff([path])
+
+    assert result["checks"][0]["detail"]["erc_rule_counts"] == {"erc.missing_tie": 1}
+
+
+def test_cli_item_11_text_output_names_every_cited_part(tmp_path, capsys):
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            kind="digital",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="digital")},
+        ),
+    )
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert "Power delivery (structural)" in out
+    assert "also:" in out  # the non-leading parts of the compound citation
+    assert "kind=place-and-route" in out
+    assert "power delivery: supplies=VPWR, VGND" in out
+    assert "power_connectivity=match" in out

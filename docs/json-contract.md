@@ -143,15 +143,118 @@ names this explicitly for `extract`'s own schema — a **content**/
 consumer of the `--check`/`--rerun` machinery below should apply, not just
 `extract`'s.
 
+## Requested-but-unperformed analysis
+
+When a request asks for an analysis or capability, its response must make
+clear whether that work was performed. An absent or `null` result must not
+silently accompany an unqualified `"status": "ok"`. The command must
+either refuse with its documented error response or emit a warning that
+names the skipped capability and the reason it was skipped. A warning may
+qualify a successful partial result, but it does not establish that the
+requested analysis passed. A consumer requiring that analysis must treat
+it as unverified.
+
+This rule applies when a request implies a result, including a capability
+normally required by the requested flow; it does not turn every optional
+`null` field into a warning. Each verb documents which request fields
+require which results, when it refuses, and when it can return useful
+partial output with a warning. For example, a requested clock target with
+no timing result needs an explanation; merely echoing the target does not
+show that it was checked.
+
+### Shared warning entry
+
+Use this entry shape for warnings about skipped requested capabilities:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `category` | string | Stable, machine-readable category documented by the verb, such as `unsupported_cell_library`. Consumers branch on this value, not message wording. |
+| `count` | positive integer | Number of occurrences represented by this entry; `1` for a single capability warning. This is not the number of analyses completed or skipped. |
+| `text` | string | Explanation naming the affected capability or capabilities, why they were skipped, and the affected result fields. Include the relevant request value when it identifies the limitation. |
+
+The shared contract is the **entry**. Adoption preserves both a verb's
+existing warning container and its element types. A `warnings` array whose
+documented entries already have this object shape can use it directly.
+An existing `warnings: array<string>` must retain string elements: adding
+objects, including a mixture of strings and objects, breaks that contract.
+Such a verb exposes structured capability entries in a separate, additive,
+documented field, or introduces an explicitly versioned breaking migration
+with a `schema_version` bump.
+
+`klt synthesize` retains its existing object
+`warnings: {total, by_category, representatives}` and places them in
+`warnings.representatives[]`. Its `by_category` map exposes the category
+and count for consumers; its `representatives` entries explain them.
+Existing fields, counts, and engine diagnostic categories keep their
+documented meaning. Additive adoption must not rename, remove, or
+restructure an already-shipped field, change its element types, or change
+`warnings` from an object into an array.
+
+Each verb documents its capability categories and the results they
+qualify. A consumer can mechanically detect a known missing capability by
+category, without parsing `text`; an unfamiliar category must not be taken
+as proof that requested work completed. New categories remain additive
+under the value-set rule above. When warnings are aggregated or capped,
+the disclosure of skipped requested capabilities must remain visible.
+The shared output helpers do not infer missing analyses: the verb knows
+which work actually ran and is responsible for emitting the warning.
+
+### Worked example: synthesis without a verified library mapping
+
+The synthesis pilot implements this contract for missing library
+capabilities (issues #2088/#2099). Consider a resolved library named
+`acme_sc_hd` whose Liberty file is available but which has no verified
+constraint or tie-cell mapping. The relevant request fields are:
+
+```json
+{
+  "pdk": {"cell_library": "acme_sc_hd", "corner": "tt_025C_5v00"},
+  "constraints": {"clock_period_ns": 81.38}
+}
+```
+
+Synthesis can still produce a mapped netlist. With no engine warnings,
+the corresponding response excerpt is:
+
+```json
+{
+  "status": "ok",
+  "timing": null,
+  "warnings": {
+    "total": 1,
+    "by_category": {"unsupported_cell_library": 1},
+    "representatives": [
+      {
+        "category": "unsupported_cell_library",
+        "count": 1,
+        "text": "cell_library 'acme_sc_hd' has no verified mapping for: ABC -constr (driving cell/output load), load-driven sizing/buffering and ABC timing (timing is null); setundef -zero/hilomap (bare 0/1/x constants may remain unroutable in place-and-route). These capabilities were skipped."
+      }
+    ]
+  }
+}
+```
+
+The warning identifies both the skipped work and its cause. The netlist
+exists, but this response does not verify the requested 81.38 ns target or
+the constant mapping required for routing. A partially supported library
+names only its missing capabilities. See the
+[synthesis warning contract](cli/synthesize.md#warnings-engine-diagnostics-and-missing-library-capabilities)
+for aggregation and the existing engine categories.
+
+This first contract increment confirms that synthesis pilot; it does not
+claim every existing verb has been audited or add warnings to every
+response. Further verb adoption preserves each verb's existing envelope.
+
 ## Shared `provenance` block
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
-deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, and `erc`
-— emit a shared top-level `provenance` block so a "clean"/"pass"/"match"
-result is auditable and reproducible later. Two runs made against different
-deck revisions or PDK releases are otherwise indistinguishable in the output,
-so a signoff claim can't be checked or reproduced. This block is **additive**
-(see above): adopting it required no `schema_version` bump on any verb.
+deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
+`gen`, and `gen-compose` — emit a shared top-level `provenance` block so a
+"clean"/"pass"/"match" result is auditable and reproducible later. Two runs
+made against different deck revisions or PDK releases are otherwise
+indistinguishable in the output, so a signoff claim can't be checked or
+reproduced. This block is **additive** (see above): adopting it required no
+`schema_version` bump on any verb.
 
 `klt erc` (issue #1968) is a partial exception on `pdk`: its `--pdk` selects
 a built-in antenna-ratio limit table baked into `erc.py` itself (see
@@ -164,6 +267,19 @@ is always `null` (no `SOURCES` stamp to read); `provenance.pdk` itself is
 still `null` when `--pdk` was omitted, matching every other verb's
 conditional population.
 
+`klt erc` also carries one **extra** key no other verb emits (issue #2036):
+`provenance.spec`, shaped `{content_hash}` exactly like `input` below and
+likewise `sha256:`-prefixed. An ERC run is validated against *two* inputs,
+not one — the layout (`provenance.input`) and the stackup/vias/nets/ties
+spec file — and its verdict is only meaningful relative to the declarations
+it was run with, so pinning the layout alone leaves a committed report
+re-verifiable only halfway: edit the spec (drop a `ties` entry, re-point a
+`layer`) and the report goes on asserting a verdict for declarations it
+never saw. The top-level `spec` field is the spec's *path*; this is its
+content. It is a verb-local field, not a `build_provenance()` parameter —
+the same choice `klt lvs` made for its own second input
+(`environment.reference_sha256`).
+
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
 waveform trace has neither), so `pdk`/`deck`/`klayout_version` are always
@@ -174,25 +290,42 @@ every other verb below. See
 [`docs/design/waveform-query-contract-spike.md`](design/waveform-query-contract-spike.md)
 section 2 and [`docs/cli/wave.md`](cli/wave.md).
 
+`klt gen`/`klt gen-compose` (issue #2035) are a partial exception for the
+same reason, one field narrower: a generator or compose request is
+*parameters* (plus, for compose, the blocks' own generator sub-reports) —
+there is no rule/model deck and no single input layout stream to pin — so
+`provenance.deck`/`provenance.input` are always `null` for both verbs.
+Unlike `klt wave`, both do resolve a PDK, and unconditionally (a generator
+cannot draw geometry without one), so `provenance.pdk` is always populated
+and mirrors the identity the report's own top-level `pdk` field carries.
+`klt_version` and `klayout_version` are what these two verbs gained the
+block for: a consumer that commits generated geometry plus its report as
+evidence and re-runs the generator later can otherwise not tell a real
+geometry change from a klt/KLayout upgrade. See
+[`docs/cli/gen.md`](cli/gen.md) and
+[`docs/cli/gen-compose.md`](cli/gen-compose.md).
+
 ```json
 "provenance": {
   "klt_version": "0.4.2",
   "klayout_version": "0.29.8",
   "pdk": {"name": "sky130A", "source": "volare", "version": "<stamp>"},
   "deck": {"name": "sky130", "content_hash": "sha256:<hex>", "released": true},
-  "input": {"content_hash": "sha256:<hex>"}
+  "input": {"content_hash": "sha256:<hex>", "role": "layout"}
 }
 ```
 
-- `klt_version` — the running `klt` package version
-  (`klayout_tools.__version__`). This is the plain, static package version —
-  deliberately *not* the build-identity string (issue #1202), which a
-  post-tag source build reports as `X.Y.Z+g<sha>`; that one is available from
-  `klt version --format json` as `version`, alongside `git_commit` and the
-  tri-state `is_release`. Record it beside a report when "which build
-  produced this?" has to remain answerable later; `klt_version` alone cannot
-  tell a release from a source build made after that release's tag. See
-  `docs/cli/version.md`.
+- `klt_version` — the running `klt` build identity (issue #2090), resolved by
+  `build_identity.build_version()` exactly like `klt --version` and
+  `klt version --format json`'s `version`: `X.Y.Z` for a confirmed clean
+  release, `X.Y.Z+g<12-char sha>` for a post-tag build, an additional
+  `.dirty` for uncommitted changes, or `X.Y.Z+unknown` when no git provenance
+  can be recovered. Packaged builds use their build-time record; source
+  installs probe their checkout. Reports now carry the build identity
+  themselves. Reports from before this fix carry only the static package
+  version and cannot distinguish releases from post-tag builds.
+  `klayout_tools.__version__` and the version command's `package_version`
+  remain the plain package version. See `docs/cli/version.md`.
 - `klayout_version` — the KLayout Python engine build (`klayout.__version__`),
   or `null` if unresolvable.
 - `klayout_version_mismatch` (issue #1490, `klt drc`/`klt lvs` only — see
@@ -263,22 +396,52 @@ section 2 and [`docs/cli/wave.md`](cli/wave.md).
     deck `content_hash` plus its structural device-class coverage
     (`ExtractionDeck.device_classes`) directly, with no input layout needed —
     see `docs/cli/deck.md`.
-- `input` — the input layout stream the run was made against, as
-  `{content_hash}` (same shape as `deck`). `content_hash` is a
-  `sha256:`-prefixed hex digest of the file, so a stale committed report is a
-  one-line diff against a freshly computed hash instead of being
-  byte-identical to a current run. Populated by `drc`, `extract`, and (since
-  issue #1969) `lvs`, which records the hash of the layout side it compared —
-  the same file and the same digest its own `environment.layout_sha256`
-  records, in the `sha256:`-prefixed form this block uses. `lvs` deliberately
-  populated `null` here until #1969, on the reasoning that
-  `environment.layout_sha256`/`reference_sha256` already covered it; that was
-  wrong for `klt signoff --manifest`, whose staleness gate reads
-  `provenance.input.content_hash` generically across every check kind and
-  cannot see an LVS-only field, so every `content_hash`-pinned "LVS clean"
-  citation graded `stale_evidence`. `environment.layout_sha256` is unchanged
-  (still a bare hex digest, no `sha256:` prefix). `input` is still `null` for
-  a verb with no single input stream to pin this way.
+- `input` — the single input artifact the run was made against, as
+  `{content_hash, role}` (mirroring `deck`'s `{name, content_hash,
+  released}`). `content_hash` is a `sha256:`-prefixed hex digest of the file,
+  so a stale committed report is a one-line diff against a freshly computed
+  hash instead of being byte-identical to a current run. Populated by `drc`,
+  `extract`, `pex`, and (since issue #1969) `lvs`, which records the hash of
+  the layout side it compared — the same file and the same digest its own
+  `environment.layout_sha256` records, in the `sha256:`-prefixed form this
+  block uses. `lvs` deliberately populated `null` here until #1969, on the
+  reasoning that `environment.layout_sha256`/`reference_sha256` already
+  covered it; that was wrong for `klt signoff --manifest`, whose staleness
+  gate reads `provenance.input.content_hash` generically across every check
+  kind and cannot see an LVS-only field, so every `content_hash`-pinned "LVS
+  clean" citation graded `stale_evidence`. `environment.layout_sha256` is
+  unchanged (still a bare hex digest, no `sha256:` prefix). `input` is still
+  `null` for a verb with no single input artifact to pin this way.
+  - `role` (issue #2027) — **which kind of artifact `content_hash` covers**.
+    One of:
+
+    | `role` | Meaning | Verbs |
+    |---|---|---|
+    | `"layout"` | A layout stream (GDSII/OASIS, or a DEF) | `drc`, `extract`, `pex`, `erc`, `economy`, `lef-abstract`, `lvs` (`layout.file` shape), `sta` (`def` request) |
+    | `"netlist"` | A netlist (SPICE, or a gate-level Verilog netlist) | `lvs` (pre-extracted `layout.netlist` shape), `place-and-route`, `sta` (`verilog` request) |
+    | `"source"` | HDL source | `synthesize`, `equiv` |
+
+    The field exists because the hash alone is kind-blind, and one verb can
+    pin either kind: `klt lvs`'s `layout.file` shape hashes the original
+    GDS/OASIS stream (byte-identical to what `klt drc` hashes for the same
+    file), while its pre-extracted `layout.netlist` shape hashes a *SPICE
+    netlist*. **A consumer comparing `content_hash` across reports must
+    compare only within one `role`** — `klt signoff`'s
+    `provenance_consistency` gate does, the same way it compares
+    `deck.content_hash` only among checks naming the same deck. Before this
+    field, that gate compared a pre-extracted LVS run's netlist digest
+    against a DRC report's layout digest and rendered `refused` for a
+    consistent `drc` + `lvs` pair describing one design: a false alarm, not
+    caught staleness.
+    Adding `role` is additive — the key appears whenever `input` is
+    non-`null` and nothing else about the block changed. An envelope
+    committed before #2027 carries no `role`; read it as `"layout"`, the
+    field's only documented meaning at the time (`klt signoff` does exactly
+    that, so archived evidence keeps participating in the layout-side
+    comparison rather than being exempted from it). `klt wave`'s block is
+    built by the `klt-wave` binary rather than by this module and does not
+    carry `role`; the same "read it as `layout`" rule would misdescribe a
+    waveform trace, which is why no cross-report comparison consumes it.
 
 Fields that can't be resolved are `null` per the envelope convention — never
 silently fabricated. The block is built once in
@@ -414,6 +577,126 @@ convention).
   registry — it cannot be declared ahead of time because `klt` does not own
   the name.
 
+## Output-artifact path fields: envelope vs. plain string (issue #2073)
+
+`klt` reports an output-artifact path (a file it just wrote — a netlist, a
+DEF, a GDS, a script) in one of two shapes today, and the two coexist
+deliberately rather than by oversight:
+
+- **`{path, scope}` envelope** — `{"path": "<repo-relative POSIX path>",
+  "scope": "repo"}` when the artifact lives inside the invoking repo,
+  `{"path": null, "scope": "external"}` when it does not, `{"path": null,
+  "scope": "absent"}` when the field has no artifact to report. Built by
+  `env_provenance.repo_relative_path()` (`src/klayout_tools/env_provenance.py`)
+  — see that module's docstring for the full rationale (a repo-relative path
+  is committable evidence; a machine-specific absolute path is not).
+  `scope` is not decoration: the resolution rule differs per value — a
+  `"repo"` path must be joined to *the invoking repo's* root (the cwd `klt`
+  was run from), `"external"`/`"absent"` carry no usable path at all.
+- **Plain string** — a bare absolute filesystem path (or `null` before the
+  artifact exists), with no `scope` alongside it. The historical shape every
+  path field used before the envelope existed.
+
+**Resolved disposition (issue #2073): document the split, do not force a
+migration.** A consumer chaining stages together needs to know *which* shape
+a given field uses; it does not need every field to use the *same* shape.
+Migrating the "plain string" column below to the envelope would touch 12
+modules' `SCHEMA_VERSION` at once for fields whose consumers (`klt sta`,
+`klt lvs`, downstream tooling) already parse them as plain strings — a much
+larger blast radius and test-churn cost than documenting the existing,
+stable split. The table below is the durable fix: it is the one place a
+consumer (or a future migration) checks to know a field's shape without
+probing the value's Python type at runtime.
+
+**`{path, scope}` envelope fields**, as of `712a0219` (2026-09-18):
+
+| Command | Field(s) | `SCHEMA_VERSION` | Originating issue |
+|---|---|---|---|
+| `synthesize` | `netlist_path`, `script_path`, `run_script_path`, `restructuring.restructured_netlist_path`, `arithmetic.candidates[].measured.{netlist_path,script_path}` | 2 | #1844 |
+| `pex` | `layout`, `netlist`, `reference_netlist`, `testbenches[].{request,schematic_netlist}` | 2 | #1261 |
+| `sim` | `netlist`, `environment.models_lib`, `environment.resume.checkpoint_path` | 3 | #1261 (`models_lib` additionally #1274) |
+| `size` | `models_lib` | 2 | #1274 |
+| `place-and-route`, `sta` | New OpenROAD log fields `engine_logs[]` (P&R), `engine_log` / `corners[].engine_log` (STA): `script_path`, `metrics_path`, `directory`, `stdout_path`, `stderr_path`, `metadata_path` | 1 | #2124 |
+
+**Plain-string fields** — intentionally unchanged by this issue:
+
+| Command | Field(s) | `SCHEMA_VERSION` |
+|---|---|---|
+| `place-and-route` | `def_path`, `unrouted_def_path`, `gds_path`, `verilog_path` | 1 |
+| `sta` | `def_path`, `verilog_path`, `spef_path` | 1 |
+| `place-and-route` (nested `spef_sta` block) | `spef_path`, `sdf_path` | (parent's `SCHEMA_VERSION` = 1) |
+| `extract` | `netlist_path`, `spef_path`, `abstracted_cells[].lef_path` | 3 |
+| `equiv` | `artifacts.{script_path,netlist_path,log_path}`, `artifacts.stage2_{script_path,log_path}` | 1 |
+| `gen` | `gds_path` | 1 |
+| `gen-compose` | `gds_path` (top-level and per-block) | 1 |
+| `draw` | `gds_path` | 1 |
+| `layout-plan-execute` | `gds_path` | 1 |
+| `lef-abstract` | `output` | 1 |
+| `arith-gen` | `verilog_path`, `reference_path`, `testbench_path`, `techmap_path`, `equiv_request_path`, `output_dir` | 1 |
+| `functional-verification` | `info_path`, `log_path`, `options.trace.path` | 1 |
+| `yield-campaign` | `campaign.sim_report_path`, `campaign.request_path` | 1 (`yield_analysis.py`) |
+
+A field moving from this table to the envelope table above is a breaking
+change to that field (a retype, `dict` in place of `str`) and earns a
+`SCHEMA_VERSION` bump on its own module, following the `synthesize.py:246` /
+`pex.py:160` / `sim.py:127` precedent — the same rule "Design: additive
+envelope, not a wrapping envelope" states for the top-level envelope applies
+per-field here too. There is no tool-wide signal for "which shape does field
+X use today" beyond this table; re-check it (and this table's own `git log`)
+before writing a consumer that assumes one shape tool-wide.
+
+## Checked-work coverage (`coverage.schema_version: 1`)
+
+The [checked-work coverage contract](coverage-contract.md) defines required
+common fields, stable work identities/reasons, applicability, unknown engine
+coverage and Phase 1 refusal semantics. The machine schema is
+[coverage.schema.json](schemas/coverage.schema.json); Python validation also
+enforces identities being disjoint across work categories.
+
+Curated DRC, external KLayout DRC, ERC antenna, power EM, simulation sweeps
+and PEX comparisons adopt it in #2108. They preserve their existing coverage
+fields alongside the common version. Known zero checks produce
+`status: "not_checked"` (exit 4) unless an actual failure/error already wins.
+Uninstrumented external KLayout reports have unknown execution, regardless
+of whether RDB categories exist: absent findings their status is
+`coverage_unknown` (exit 4), never `clean`. DRC envelope v2 versions the
+correction to `coverage.rules_checked`; category declarations move to
+`coverage.rule_categories`.
+
+`nothing_checked` and `nothing_checked_reasons` remain available. In a v1
+coverage block, zero means **known** zero actual checked work. It is not a
+synonym for partial, unknown, attempted, or inapplicable work. Real errored
+runs can have zero checked work, while retaining their error verdict.
+Missing legacy coverage does not assert full coverage. Old explicit
+`nothing_checked: true` remains nonqualifying, and old external KLayout
+category lists do not establish execution. Optional Verilator coverage
+percentages remain distinct from executed functional-verification tests.
+
+`klt signoff` refuses zero, unknown and malformed common coverage in plain,
+numbered and compound evidence while preserving actual failure precedence.
+The full [compatibility mapping and public-path inventory](coverage-contract.md)
+also records which per-path adapters remain outstanding.
+
+### The common rollup rule (#2109)
+
+One decision table maps a producer's own outcome plus its coverage state onto
+eight rows — `errored`, `failed`, `malformed`, `unknown`, `zero`, `partial`,
+`legacy`, `full` — each with a stable `reason` code and an exit code (`0`
+success, `3` findings, `4` no verdict reached). Errors and real failures are
+decided before coverage, so a defect is never masked by a coverage gap and a
+gap is never dissolved by a clean status.
+
+Successful checks alongside a nonempty list of skipped *requested* work are
+`partial`: a real, exit-0 result that is **not** the verb's unconditional
+success token. Adapters report `f"{success}_partial"` (`clean_partial`,
+`pass_partial`) for it. Only `full` asserts positively established complete
+applicable coverage; missing common coverage (`legacy`) keeps grading by the
+verb-specific rules that always governed it and is never counted as proof of
+completeness. Optional Verilator code-coverage percentages are `legacy` and
+are never a requested-check claim. The
+[full table, field names and adapter migration contract](coverage-contract.md)
+are normative.
+
 ## Error shape
 
 Under `--format json`, errors are also JSON — not a plain-text line — written
@@ -445,7 +728,7 @@ rendering, not the contract, so this shape is not versioned.
 | --------- | -------------------------------------------------------------------------------------------- |
 | `0`       | Success. The documented success payload was written to stdout.                               |
 | `1`       | Application-level error (e.g. missing/unreadable file). Documented error shape on stderr.     |
-| `2`       | Usage error (missing required argument, invalid `--format` choice, etc.) — raised by argparse before a command's handler runs. |
+| `2`       | Usage error (missing required argument, invalid `--format` choice, etc.) — usually raised by argparse before a command's handler runs; a command may also detect one itself (see the carve-out below). |
 
 Codes `0`/`1`/`2` mean the same thing for every verb. A command may define
 **additional** codes above `2` for outcomes that are neither success nor
@@ -460,6 +743,17 @@ deliberately out of scope for the shared `output.py` helper — argparse always
 writes plain text for usage errors, in both `--format text` and `--format
 json` modes, since format-specific handling would require parsing the
 arguments before the parser itself has rejected them.
+
+**The carve-out is about argparse, not about exit code `2`.** A usage error a
+command detects *itself*, inside its own `run()` — e.g. `klt gen` rejecting a
+generator name passed alongside `--pdk-pcell` — is past the parser, so
+`args.format` is known and the documented envelope is owed: emit it with
+`return output.emit_error(name, message, args.format,
+exit_code=output.EXIT_USAGE_ERROR)`. The envelope shape and the exit code are
+independent — `emit_error` writes the same envelope either way, and returns
+whatever code the caller asks for (default `ERROR_EXIT_CODE`, `1`). A
+plain-text `print()` + bare `return 2` in a command's `run()` is a contract
+violation (issue #2029).
 
 ## `--format text` vs `--format json`
 

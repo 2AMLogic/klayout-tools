@@ -41,14 +41,10 @@ the binary's human-readable text summary.
 ``provenance.klt_version`` to its own crate version (`CARGO_PKG_VERSION`,
 e.g. ``"0.1.0"`` -- an internal, unpublished crate version, not meaningful
 to an agent asking "which `klt` build produced this"). This module
-overrides that field with the *installed `klayout-tools` package's own*
-version (:func:`klayout_tools._provenance._klt_version`) before returning
-either response -- the same "Python wrapper layer... may override that
-field with the installed `klayout-tools` package's own version" `build.rs`
-and `main.rs` (issue #1600/#1599) both anticipate in their own docstrings,
-one stage ahead of this module landing. Left unchanged (the crate's own
-version) only in the unlikely case the installed package's version cannot
-be resolved at all -- never overwritten with ``None``.
+overrides that field with the installed `klayout-tools` build identity
+(:func:`klayout_tools._provenance._klt_version`) before returning either
+response. This includes the commit/dirty suffix or ``+unknown`` when it is
+not a confirmed release, matching every shared provenance block.
 """
 
 from __future__ import annotations
@@ -178,7 +174,7 @@ def _parse_response(
 def _override_klt_version(response: dict[str, Any]) -> None:
     """Replace `response["provenance"]["klt_version"]` (the `klt-wave`
     binary's own `CARGO_PKG_VERSION`) with the installed `klayout-tools`
-    package's own version, when resolvable -- see this module's own
+    build identity -- see this module's own
     docstring, "`provenance.klt_version` override"."""
     provenance = response.get("provenance")
     if not isinstance(provenance, dict):

@@ -51,6 +51,12 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._provenance import _content_hash, build_provenance
 from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
 from ._report_verify import load_committed_report as _load_committed_report
+from .coverage import (
+    REASON_ALL_RULES_SKIPPED,
+    REASON_DECK_HAS_NO_RULES,
+    build_check_coverage,
+    work_id,
+)
 from .decks import (
     DrcRule,
     UnknownDeckError,
@@ -105,7 +111,12 @@ _ANTENNA_CHECKS = {"antenna"}
 # see that class's docstring for each one's derivation. Validated per rule
 # (rather than assumed) so a deck typo fails loudly with the rule id instead
 # of silently falling through to the default derivation.
-_DERIVED_LAYER_MODES = {"sized_intersection", "overlapping", "not_interacting"}
+_DERIVED_LAYER_MODES = {
+    "sized_intersection",
+    "overlapping",
+    "not_interacting",
+    "holes",
+}
 
 # `run_drc()`'s own field name -> its declared METRICS2.1-style name in
 # `metrics.py`'s registry (issue #1847, adopting the #247 registry beyond its
@@ -188,6 +199,30 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
+def _curated_nothing_checked_reasons(
+    deck: list[DrcRule], rules_checked: list[str]
+) -> list[str]:
+    """The curated engine's ``coverage.nothing_checked_reasons`` (issue #1996).
+
+    A deck that ran not one rule produces ``"not_checked"``.
+    ``rules_checked`` states what the verdict was actually
+    measured over, so its emptiness -- and only its emptiness -- is the
+    condition; the two reason codes then distinguish *why* there was nothing
+    to run. A degenerate deck declaring no rules at all reports
+    ``deck_has_no_rules``; a deck that declares rules but had every one
+    skipped for an absent input layer (the empty/wrong-PDK stream case
+    ``coverage.rules_skipped`` already enumerates) reports
+    ``all_rules_skipped``.
+
+    Returns ``[]`` for any run that checked at least one rule --
+    ``nothing_checked`` is never a synonym for *partial* coverage (see
+    :mod:`klayout_tools.coverage`).
+    """
+    if rules_checked:
+        return []
+    return [REASON_DECK_HAS_NO_RULES if not deck else REASON_ALL_RULES_SKIPPED]
+
+
 def run_drc(
     path: str,
     deck_name: str,
@@ -201,7 +236,7 @@ def run_drc(
     ``docs/cli/drc.md``)::
 
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "file": <path as provided>,
             "deck": <deck name>,
             "dbu_um": <database unit in micrometres, float>,
@@ -223,11 +258,14 @@ def run_drc(
                 "deck_layers": ["<layer>/<datatype>", ...],
                 "layers_checked": ["<layer>/<datatype>", ...],
                 "layers_in_stream_without_rules": ["<layer>/<datatype>", ...],
+                "rules_checked": [<rule id>, ...],
                 "rules_skipped": [<rule id>, ...],
                 "voltage_domain_warnings": [
                     {"marker": "<layer>/<datatype>", "description": str}, ...
                 ],
                 "deck_scope": [<scope identifier>, ...],
+                "nothing_checked": bool,
+                "nothing_checked_reasons": [<reason code>, ...],
             },
             "provenance": {  # shared reproducibility block, see _provenance.py
                 "klt_version": <str | None>,
@@ -290,10 +328,24 @@ def run_drc(
     deck's rules reference (a static property of the deck, independent of
     ``path``); ``coverage.layers_checked`` is the subset of those layers
     actually present in this stream; ``coverage.rules_skipped`` lists the
-    rule ids skipped because their layer(s) were absent. A ``"clean"``
-    ``status`` with a non-empty ``layers_in_stream_without_rules`` means
-    "clean, and here is exactly what was not looked at" rather than a
-    fully-verified pass.
+    rule ids skipped because their layer(s) were absent, and
+    ``coverage.rules_checked`` (issue #1996) its complement -- the rule ids
+    that actually ran against real geometry. A ``"clean"`` ``status`` with a
+    non-empty ``layers_in_stream_without_rules`` means "clean, and here is
+    exactly what was not looked at" rather than a fully-verified pass.
+
+    ``coverage.nothing_checked``/``nothing_checked_reasons`` (issue #1996)
+    are the shared convention declared in :mod:`klayout_tools.coverage`,
+    emitted by every verb that can reach a vacuous verdict. Here they are
+    ``True`` / ``["all_rules_skipped"]`` exactly when ``rules_checked`` is
+    empty while the deck declares rules (the degenerate empty-stream case:
+    every rule's layer is absent, so a ``"clean"`` verdict was measured over
+    nothing at all), or ``["deck_has_no_rules"]`` for a deck that declares
+    none. **This does not change the ``status`` field**, which stays
+    ``"clean"`` for that case exactly as before -- it only makes the
+    emptiness legible to a reader, which is what lets `klt signoff` refuse
+    to count such a report as evidence (see ``signoff.py``'s "Vacuous-
+    verdict refusal" docstring section).
 
     ``coverage.voltage_domain_warnings`` (issue #552) is a second, narrower
     trust gap ``layers_in_stream_without_rules`` alone does not surface:
@@ -418,11 +470,13 @@ def run_drc(
             deck_layer_tuples.add(rule.other_layer)
         if rule.derived_layer is not None:
             # `rule.layer` is only the derived rule's *reporting* identity
-            # (see DerivedLayer's docstring) -- the two layers actually read
+            # (see DerivedLayer's docstring) -- the layer(s) actually read
             # to compute the checked region are these, independent of
-            # whether either happens to equal `rule.layer`.
+            # whether either happens to equal `rule.layer`. `"holes"` mode
+            # (#1976) reads only `base` -- `intersect_with` is `None` for it.
             deck_layer_tuples.add(rule.derived_layer.base)
-            deck_layer_tuples.add(rule.derived_layer.intersect_with)
+            if rule.derived_layer.intersect_with is not None:
+                deck_layer_tuples.add(rule.derived_layer.intersect_with)
 
     # Reuse layers.py's existing per-layer enumeration (used today by
     # `klt layers`) for stream-layer enumeration, rather than a second
@@ -438,6 +492,7 @@ def run_drc(
     violations: list[dict[str, Any]] = []
     rule_counts: dict[str, int] = {}
     rules_skipped: list[str] = []
+    rules_checked: list[str] = []
 
     for rule in deck:
         # For a `derived_layer` rule (#345), the region actually checked is
@@ -453,14 +508,21 @@ def run_drc(
         if rule.derived_layer is not None:
             _validate_derived_layer(rule)
             base_index = layout.find_layer(*rule.derived_layer.base)
-            intersect_index = layout.find_layer(*rule.derived_layer.intersect_with)
+            intersect_index = (
+                layout.find_layer(*rule.derived_layer.intersect_with)
+                if rule.derived_layer.intersect_with is not None
+                else None
+            )
             if base_index is None:
                 # The derived region's own source shapes are absent from this
                 # stream -> no violations possible in any mode, skip like any
                 # other missing-layer rule.
                 rules_skipped.append(rule.id)
                 continue
-            if intersect_index is None and rule.derived_layer.mode != "not_interacting":
+            if intersect_index is None and rule.derived_layer.mode not in (
+                "not_interacting",
+                "holes",
+            ):
                 # The second input layer is absent -> both the
                 # "sized_intersection" and "overlapping" derivations yield an
                 # empty region, so there is nothing to check. "not_interacting"
@@ -469,6 +531,10 @@ def run_drc(
                 # that rule must still run against the full base region (see
                 # `DerivedLayer`'s docstring) -- the ordinary thin-oxide-only
                 # layout, which must stay checked against the unmarked column.
+                # "holes" is the other exception: it never reads a second
+                # layer at all (`intersect_with` is always `None` for it), so
+                # `intersect_index` being `None` here is expected, not a
+                # missing-layer condition.
                 rules_skipped.append(rule.id)
                 continue
         else:
@@ -486,6 +552,13 @@ def run_drc(
             if other_index is None:
                 rules_skipped.append(rule.id)
                 continue
+
+        # Every `continue` above is a skip; reaching here means this rule's
+        # input layer(s) all resolved, so it is about to be evaluated against
+        # real geometry -- record it so `coverage.rules_checked` (and the
+        # `coverage.nothing_checked` roll-up derived from it) can state what
+        # this verdict was actually measured over (issue #1996).
+        rules_checked.append(rule.id)
 
         layer_label = layer_names.get(rule.layer, f"{rule.layer[0]}/{rule.layer[1]}")
 
@@ -506,7 +579,18 @@ def run_drc(
                     else kdb.Region()
                 )
                 size_dbu = round(rule.derived_layer.sized_by_um / layout.dbu)
-                if rule.derived_layer.mode in ("overlapping", "not_interacting"):
+                if rule.derived_layer.mode == "holes":
+                    # Interior voids of the merged `base` region (#1976) --
+                    # `intersect_with`/`sized_by_um` are unused for this mode.
+                    # Explicit `.merged()` before `.holes()` documents the
+                    # requirement even though `Region.holes()` already applies
+                    # merged semantics itself -- a hole formed by several
+                    # abutting drawn rectangles (the common GDS idiom for a
+                    # slotted plate) is only visible once merged. A `base`
+                    # region with no holes at all derives an empty region,
+                    # which is simply nothing to report -- not an error.
+                    region = base_region.merged().holes()
+                elif rule.derived_layer.mode in ("overlapping", "not_interacting"):
                     # Marker-scoped whole-polygon selection (#1110): here
                     # `sized_by_um` is a guard band around the *marker*
                     # (`intersect_with`), not around `base`.
@@ -868,17 +952,37 @@ def run_drc(
         "layers_in_stream_without_rules": [
             _fmt(t) for t in sorted(layers_in_stream_without_rules)
         ],
+        "rules_checked": sorted(rules_checked),
         "rules_skipped": sorted(rules_skipped),
         "voltage_domain_warnings": voltage_domain_warnings,
         "deck_scope": deck_scope,
+        # Issue #1996: the shared roll-up, so a reader (`klt signoff`) can
+        # refuse a "clean" verdict measured over nothing without re-deriving
+        # that emptiness from `rules_skipped` vs. the deck's own rule count.
+        **build_check_coverage(
+            checked=sorted(rules_checked),
+            skipped=[
+                {"id": rule, "reason": "absent_input_layer"}
+                for rule in sorted(rules_skipped)
+            ],
+            nothing_checked_reasons=_curated_nothing_checked_reasons(
+                deck, rules_checked
+            ),
+        ),
     }
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "file": path,
         "deck": deck_name,
         "dbu_um": layout.dbu,
-        "status": "violations" if violations else "clean",
+        "status": (
+            "violations"
+            if violations
+            else "not_checked"
+            if coverage["nothing_checked"]
+            else "clean"
+        ),
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "metrics": {_VIOLATION_COUNT_METRIC_NAME: len(violations)},
@@ -1193,7 +1297,8 @@ def _rule_input_layers(rule: DrcRule) -> set[tuple[int, int]]:
     layers = set()
     if rule.derived_layer is not None:
         layers.add(rule.derived_layer.base)
-        layers.add(rule.derived_layer.intersect_with)
+        if rule.derived_layer.intersect_with is not None:
+            layers.add(rule.derived_layer.intersect_with)
     else:
         layers.add(rule.layer)
     if rule.other_layer is not None:
@@ -1441,10 +1546,25 @@ def _rdb_value_points_um(value_text: str) -> list[tuple[float, float]]:
 
 def _parse_klayout_rdb_report(
     report_path: str, dbu: float
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
+) -> tuple[list[dict[str, Any]], dict[str, int], list[str]]:
     """Classify a KLayout report-database (``.lyrdb``, RDB XML) file into
-    ``(violations, rule_counts)`` matching ``klt drc``'s existing
-    ``violations[]``/``rule_counts`` shape (see :func:`run_drc`'s docstring).
+    ``(violations, rule_counts, rule_categories)`` -- the first two matching
+    ``klt drc``'s existing ``violations[]``/``rule_counts`` shape (see
+    :func:`run_drc`'s docstring), the third (issue #1996) the sorted,
+    deduplicated list of ``<category>`` names the report *declares*.
+
+    ``rule_categories`` is the closest thing an externally-run deck offers to
+    "which rules did you actually run": KLayout's DRC DSL creates a category
+    the moment a rule calls ``output(...)``, whether or not that rule found
+    anything, so an ordinary clean run still declares one category per rule
+    and an empty ``<items/>`` list. A report declaring **no** categories at
+    all therefore means the deck never reached a single ``output(...)`` --
+    the all-rules-gated-behind-an-unset-``--deck-var`` case
+    :func:`run_drc_klayout_engine` reports as
+    ``coverage.nothing_checked``. (A deck that instead creates its categories
+    lazily, only when a violation exists, would report the same emptiness on
+    a genuinely clean run; that is an honest "this report cannot distinguish
+    the two", not a misclassification this module can silently resolve.)
 
     Unlike the curated engine (:func:`run_drc`), an arbitrary PDK-native
     ``.lydrc``/``.drc`` script is not built from this module's own
@@ -1504,12 +1624,14 @@ def _parse_klayout_rdb_report(
                 desc_el.text if desc_el is not None and desc_el.text else ""
             )
 
+    rule_categories = sorted(descriptions)
+
     violations: list[dict[str, Any]] = []
     rule_counts: dict[str, int] = {}
 
     items_el = root.find("items")
     if items_el is None:
-        return violations, rule_counts
+        return violations, rule_counts, rule_categories
 
     for item_el in items_el.findall("item"):
         category_el = item_el.find("category")
@@ -1570,7 +1692,16 @@ def _parse_klayout_rdb_report(
         )
         rule_counts[rule_id] = rule_counts.get(rule_id, 0) + 1
 
-    return violations, rule_counts
+    # A rule id that produced items but was never declared under
+    # `<categories>` (a deck writing RDB XML by hand, say) still counts as a
+    # rule this run reported on -- union rather than trust `<categories>`
+    # alone, so `rule_categories` can never be empty for a report that
+    # plainly found violations.
+    return (
+        violations,
+        rule_counts,
+        sorted(set(rule_categories) | set(rule_counts)),
+    )
 
 
 #: KLayout's own error prefix for a deck-script failure, as emitted by
@@ -1711,11 +1842,40 @@ def run_drc_klayout_engine(
     curated engine's ``sky130``/``gf180mcu`` deck identifiers are -- an
     arbitrary PDK-native script is identified by its own path).
 
-    Unlike the curated engine, ``coverage`` cannot be meaningfully populated
-    for an externally-run script this module has no declarative rule table
-    for -- every ``coverage`` sub-field is an empty list (never fabricated),
-    a known, documented limitation (see ``docs/cli/drc.md``, "Engine" ->
-    "klayout").
+    Unlike the curated engine, most of ``coverage`` cannot be meaningfully
+    populated for an externally-run script this module has no declarative
+    rule table for -- the layer-level sub-fields
+    (``deck_layers``/``layers_checked``/``layers_in_stream_without_rules``/
+    ``rules_skipped``/``voltage_domain_warnings``/``deck_scope``) are all
+    empty lists (never fabricated), a known, documented limitation (see
+    ``docs/cli/drc.md``, "Engine" -> "klayout").
+
+    Two sub-fields *are* populated, on a distinction issue #2108 sharpened.
+    ``coverage.rule_categories`` (issue #1996) is the sorted list of rule
+    categories the deck's own report declares -- KLayout's DRC DSL opens a
+    ``<category>`` the moment a rule calls ``output(...)``, whether or not
+    that call found anything, so this is the closest thing an RDB report
+    offers to "which rules did you attempt". It is *not* proof of execution,
+    though: a deck that gates its whole rule set behind a feature-toggle
+    global set via ``-rd`` (``--deck-var``) which this invocation left unset
+    produces the same well-formed, zero-category-or-zero-item report as one
+    that genuinely ran everything and found nothing -- previously
+    indistinguishable from a real ``status: "clean"``. ``coverage.checked``
+    (the common contract's identity list, plus this module's own
+    ``coverage.rules_checked`` alias) is therefore *not* ``rule_categories``:
+    it is only the rule ids that actually produced a finding (a real item is
+    the one signal this format cannot fake). Whenever no violation exists --
+    regardless of whether ``rule_categories`` is empty or populated --
+    ``coverage.known`` is ``False`` and ``coverage.unknown`` carries a single
+    ``engine_execution`` sentinel with reason ``unmeasured_rule_execution``,
+    and the envelope's own ``status`` is ``"coverage_unknown"`` (exit 4) --
+    never ``"clean"``. There is no instrumentation interface in this release
+    that lets an externally-run deck claim known-full coverage; see the
+    shared convention in :mod:`klayout_tools.coverage` and the
+    ``drc --engine klayout`` row of ``docs/coverage-contract.md``. A found
+    violation always overrides: ``status`` is ``"violations"`` and that
+    rule's id is recorded as checked, regardless of coverage unknownness
+    elsewhere in the same run.
 
     ``pdk_variant``/``pdk_root`` (the ``--pdk``/``--pdk-root`` flags, issue
     #1901) are resolved via :func:`klayout_tools.pdk.find_pdk`, when either
@@ -1830,7 +1990,9 @@ def run_drc_klayout_engine(
                 "accept a partial report anyway. klayout's own output:\n" + detail
             )
 
-        violations, rule_counts = _parse_klayout_rdb_report(report_path, dbu)
+        violations, rule_counts, rule_categories = _parse_klayout_rdb_report(
+            report_path, dbu
+        )
     finally:
         _cleanup_klayout_drc_work_dir(work_dir)
 
@@ -1846,7 +2008,7 @@ def run_drc_klayout_engine(
     )
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "file": path,
         "deck": deck_file,
         "engine": "klayout",
@@ -1865,17 +2027,35 @@ def run_drc_klayout_engine(
             else {}
         ),
         "dbu_um": dbu,
-        "status": "violations" if violations else "clean",
+        "status": "violations" if violations else "coverage_unknown",
         "violation_count": len(violations),
         "rule_counts": dict(sorted(rule_counts.items())),
         "violations": violations,
         "coverage": {
             "deck_layers": [],
             "layers_checked": [],
+            # Categories are declarations, not execution instrumentation.
+            # An actual finding proves only that finding's rule ran.
+            "rule_categories": rule_categories,
+            "rules_checked": sorted(rule_counts),
             "layers_in_stream_without_rules": [],
             "rules_skipped": [],
             "voltage_domain_warnings": [],
             "deck_scope": [],
+            **build_check_coverage(
+                checked=sorted(rule_counts),
+                # `work_id` namespaces this sentinel (via its JSON-encoded
+                # parts) so it cannot collide with a real RDB category name
+                # in `rule_counts` -- an external deck's rule names are
+                # caller-chosen and could otherwise coincidentally match a
+                # bare literal like "klayout:execution".
+                unknown=[
+                    {
+                        "id": work_id("engine_execution", "klayout"),
+                        "reason": "unmeasured_rule_execution",
+                    }
+                ],
+            ),
         },
         "provenance": build_provenance(
             deck_name=os.path.basename(deck_file),

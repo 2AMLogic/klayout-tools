@@ -90,7 +90,8 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
-from ._provenance import build_provenance
+from ._provenance import _content_hash, build_provenance
+from .coverage import build_check_coverage, work_id
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
 #: (#861), Phase 3 (#908), issue #1968, and issue #1979 all add fields/
@@ -106,6 +107,35 @@ from ._provenance import build_provenance
 #: `poly ∩ diff` gate-area computation, opt-in, legacy raw-poly-area
 #: behaviour preserved when omitted).
 SCHEMA_VERSION = 1
+
+
+def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str, Any]:
+    """Grade coverage against actual non-gate antenna levels, not gate count."""
+    checked = []
+    skipped = []
+    inapplicable = []
+    for gate in gates:
+        for index, level in enumerate(gate["levels"]):
+            identity = work_id("antenna", gate["gate_id"], level["layer"])
+            if index == 0:
+                inapplicable.append({"id": identity, "reason": "gate_reference_level"})
+            elif level["verdict"] in {"pass", "violate"}:
+                checked.append(identity)
+            else:
+                skipped.append(
+                    {
+                        "id": identity,
+                        "reason": "missing_antenna_pdk"
+                        if pdk is None
+                        else "missing_antenna_limit",
+                    }
+                )
+    return {
+        "scope": "antenna",
+        **build_check_coverage(
+            checked=checked, skipped=skipped, inapplicable=inapplicable
+        ),
+    }
 
 
 class ErcError(Exception):
@@ -794,6 +824,11 @@ def run_erc(
     ``gates[].levels[].verdict`` is ``"violate"``, else ``"violations"``)
     plus the shared ``provenance`` block (:func:`._provenance.build_provenance`)
     -- together the two things ``klt signoff`` needs to grade this output.
+    That block additionally carries (issue #2036) a verb-local
+    ``provenance.spec.content_hash``, pinning ``spec_path``'s contents the
+    same ``sha256:``-prefixed way ``provenance.input.content_hash`` pins the
+    layout, so a committed report can be re-verified against *both* inputs
+    its verdict depends on.
     Raises :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
     unresolvable layout/top cell, or a layout in which no net carries any
     geometry on the declared gate role at all.
@@ -990,11 +1025,28 @@ def run_erc(
                 else None
             )
 
-        level_verdicts = {level["verdict"] for level in levels}
-        if "violate" in level_verdicts:
+        # `antenna_verdict` rollup (issue #1997) -- only `levels[1:]` (the
+        # non-gate roles) count towards "graded" coverage: `levels[0]` (the
+        # gate role itself) is *always* `"unchecked"` by construction (see
+        # above), so its presence must never, on its own, downgrade an
+        # otherwise fully-graded gate to `"pass_partial"`. Among the graded
+        # levels: `"violate"` wins outright regardless of coverage; absent
+        # a violation, `"pass_partial"` reports that at least one graded
+        # level passed but at least one other graded level's own role
+        # wasn't in the selected PDK's limit table (e.g. sky130's table has
+        # no met3-5 entries -- see "Sky130 antenna-ratio limits" in
+        # docs/cli/erc.md) or `--pdk` was omitted entirely for some
+        # otherwise-checkable subset; plain `"pass"` only when every graded
+        # level was actually compared against a limit and none violated;
+        # `"unchecked"` when no graded level was ever compared at all (e.g.
+        # `--pdk` omitted, or a single-role stackup).
+        graded_verdicts = {level["verdict"] for level in levels[1:]}
+        if "violate" in graded_verdicts:
             antenna_verdict = "violate"
-        elif "pass" in level_verdicts:
-            antenna_verdict = "pass"
+        elif "pass" in graded_verdicts:
+            antenna_verdict = (
+                "pass_partial" if "unchecked" in graded_verdicts else "pass"
+            )
         else:
             antenna_verdict = "unchecked"
 
@@ -1049,10 +1101,13 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
+    coverage = _antenna_coverage(gates, pdk)
     status = (
-        "clean"
-        if erc_finding_count == 0 and not any_antenna_violation
-        else "violations"
+        "violations"
+        if erc_finding_count or any_antenna_violation
+        else "not_checked"
+        if coverage["nothing_checked"]
+        else "clean"
     )
 
     # `provenance.pdk` (issue #1968): `--pdk` here selects a built-in
@@ -1072,6 +1127,22 @@ def run_erc(
         else None
     )
 
+    provenance = build_provenance(pdk=provenance_pdk, input_path=file)
+
+    # `provenance.spec` (issue #2036): `klt erc` is validated against *two*
+    # inputs, not one -- the layout (`provenance.input`) and the stackup/
+    # vias/nets/ties spec. An ERC verdict is only meaningful relative to the
+    # declarations it was run against, so a report that pins the layout but
+    # not the spec still can't be re-verified: the spec can be edited (a
+    # dropped `ties` entry, a re-pointed `layer`) and a committed report goes
+    # on asserting a verdict for declarations it never saw. Attached here
+    # rather than via a second `build_provenance` parameter, following `klt
+    # lvs`'s precedent (`environment.reference_sha256`, `lvs.py`) of keeping
+    # a verb-specific second-input hash out of the shared helper's signature.
+    # `_content_hash` (not the bare `sha256_file`) so this reads identically
+    # to the `sha256:`-prefixed `provenance.input.content_hash` beside it.
+    provenance["spec"] = {"content_hash": _content_hash(spec_path)}
+
     return {
         "schema_version": SCHEMA_VERSION,
         "file": file,
@@ -1083,5 +1154,6 @@ def run_erc(
         "erc_findings": erc_findings,
         "erc_finding_count": erc_finding_count,
         "status": status,
-        "provenance": build_provenance(pdk=provenance_pdk, input_path=file),
+        "coverage": coverage,
+        "provenance": provenance,
     }

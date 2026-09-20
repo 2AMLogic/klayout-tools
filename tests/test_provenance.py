@@ -13,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from klayout_tools import _provenance
 from klayout_tools.decks import deck_source_path
 
@@ -62,8 +64,7 @@ def test_build_provenance_always_reports_versions():
         "deck",
         "input",
     }
-    # klt_version resolves from the installed package metadata.
-    assert isinstance(prov["klt_version"], str)
+    assert prov["klt_version"] == _provenance.build_identity.build_version()
 
 
 def test_build_provenance_no_deck_no_pdk_no_input_are_null():
@@ -172,6 +173,9 @@ def test_build_provenance_mismatch_check_does_not_shell_out(monkeypatch):
     def _fail(*_args, **_kwargs):  # pragma: no cover - must not be reached
         raise AssertionError("build_provenance shelled out to compute the pin")
 
+    # Build identity intentionally probes source installs; isolate the
+    # engine-pin check this test covers from that independent resolution.
+    monkeypatch.setattr(_provenance.build_identity, "build_version", lambda: "0.5.0")
     monkeypatch.setattr(_provenance.subprocess, "run", _fail)
     prov = _provenance.build_provenance(include_klayout_version_mismatch=True)
     assert prov["klayout_version_mismatch"] in (True, False)
@@ -301,7 +305,7 @@ def test_build_provenance_input_hash_is_sha256_prefixed(tmp_path):
 
     prov = _provenance.build_provenance(input_path=str(layout_file))
     digest = hashlib.sha256(b"gds bytes\n").hexdigest()
-    assert prov["input"] == {"content_hash": f"sha256:{digest}"}
+    assert prov["input"] == {"content_hash": f"sha256:{digest}", "role": "layout"}
 
 
 def test_build_provenance_input_none_when_path_not_given():
@@ -329,7 +333,60 @@ def test_build_provenance_input_hash_null_for_unresolvable_path(tmp_path):
     # name-without-resolvable-path behaviour.
     missing = tmp_path / "nope.gds"
     prov = _provenance.build_provenance(input_path=str(missing))
-    assert prov["input"] == {"content_hash": None}
+    assert prov["input"] == {"content_hash": None, "role": "layout"}
+
+
+# --------------------------------------------------------------------------- #
+# provenance.input.role (issue #2027)
+# --------------------------------------------------------------------------- #
+#
+# The hash alone is kind-blind. `klt drc`/`klt extract` hash a layout stream,
+# but `klt lvs` hashes a SPICE netlist for its pre-extracted
+# `layout.netlist` request shape, and `klt place-and-route` hashes the
+# gate-level netlist it placed. `klt signoff`'s provenance cross-check
+# compares `input.content_hash` across checks -- without a discriminator it
+# compared a netlist digest against a layout digest and *refused* to
+# aggregate a consistent bundle.
+
+
+def test_build_provenance_input_role_defaults_to_layout(tmp_path):
+    # The default is the field's pre-#2027 meaning ("the input layout stream
+    # the run was made against"), so every layout-hashing caller keeps
+    # emitting exactly what it emitted before the discriminator existed.
+    layout_file = tmp_path / "top.gds"
+    layout_file.write_bytes(b"gds bytes\n")
+
+    prov = _provenance.build_provenance(input_path=str(layout_file))
+
+    assert prov["input"]["role"] == _provenance.INPUT_ROLE_LAYOUT
+
+
+def test_build_provenance_input_role_is_recorded_verbatim(tmp_path):
+    netlist_file = tmp_path / "layout.spice"
+    netlist_file.write_text("* pre-extracted\n", encoding="utf-8")
+
+    prov = _provenance.build_provenance(
+        input_path=str(netlist_file), input_role=_provenance.INPUT_ROLE_NETLIST
+    )
+
+    assert prov["input"]["role"] == "netlist"
+
+
+def test_build_provenance_input_role_absent_when_no_input_pinned():
+    # `role` describes a hash; with no hash there is nothing to describe, so
+    # the whole block stays `None` rather than degrading to a role-only stub.
+    assert _provenance.build_provenance(input_role="netlist")["input"] is None
+
+
+def test_build_provenance_rejects_an_unknown_input_role(tmp_path):
+    # A typo'd role must fail loudly here rather than silently reaching
+    # `klt signoff`, where an unrecognised role becomes a group of one and
+    # quietly exempts the verb from the cross-check it was meant to join.
+    layout_file = tmp_path / "top.gds"
+    layout_file.write_bytes(b"gds bytes\n")
+
+    with pytest.raises(ValueError, match="unknown provenance input role"):
+        _provenance.build_provenance(input_path=str(layout_file), input_role="laoyut")
 
 
 # --------------------------------------------------------------------------- #
@@ -387,6 +444,118 @@ def test_combined_content_hash_none_when_any_file_unresolvable(tmp_path):
     missing = tmp_path / "nope.v"
 
     assert _provenance._combined_content_hash([str(existing), str(missing)]) is None
+
+
+# --------------------------------------------------------------------------- #
+# layout_geometry_digest (#2065)
+# --------------------------------------------------------------------------- #
+
+
+def _write_probe_layout(path, *, width_dbu=1000, order=(0, 1), array=True):
+    """Write a small hierarchical stream: a `SUB` cell instantiated into `TOP`
+    (once plainly, once as a regular array) plus two rectangles, a path and a
+    text in `TOP`.
+
+    `order` controls the order the two rectangles are inserted in (the file's
+    element order, which a writer is free to change without changing the
+    geometry), `width_dbu` the width of the first rectangle (real geometry).
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    sub = layout.create_cell("SUB")
+    metal = layout.layer(68, 20)
+    poly = layout.layer(66, 20)
+
+    boxes = [kdb.Box(0, 0, width_dbu, 500), kdb.Box(2000, 0, 3000, 500)]
+    for index in order:
+        top.shapes(metal).insert(boxes[index])
+    top.shapes(poly).insert(kdb.Path([kdb.Point(0, 0), kdb.Point(1000, 0)], 100))
+    top.shapes(poly).insert(kdb.Text("VDD", kdb.Trans(kdb.Vector(10, 20))))
+    sub.shapes(metal).insert(kdb.Box(0, 0, 100, 100))
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(kdb.Vector(500, 500))))
+    if array:
+        top.insert(
+            kdb.CellInstArray(
+                sub.cell_index(),
+                kdb.Trans(kdb.Vector(0, 0)),
+                kdb.Vector(1000, 0),
+                kdb.Vector(0, 1000),
+                3,
+                2,
+            )
+        )
+    layout.write(str(path))
+    return str(path)
+
+
+def test_layout_geometry_digest_is_sha256_prefixed(tmp_path):
+    path = _write_probe_layout(tmp_path / "a.gds")
+
+    digest = _provenance.layout_geometry_digest(path)
+    assert digest.startswith("sha256:")
+    assert len(digest) == len("sha256:") + 64
+
+
+def test_layout_geometry_digest_ignores_element_order_and_timestamps(tmp_path):
+    # The reason this helper exists rather than reusing `sha256_file`: two
+    # writes of the same geometry differ in raw bytes (BGNLIB/BGNSTR write
+    # timestamps, element order) but are the same layout.
+    first = _write_probe_layout(tmp_path / "a.gds", order=(0, 1))
+    second = _write_probe_layout(tmp_path / "b.gds", order=(1, 0))
+
+    assert _provenance.sha256_file(first) != _provenance.sha256_file(second)
+    assert _provenance.layout_geometry_digest(
+        first
+    ) == _provenance.layout_geometry_digest(second)
+
+
+def test_layout_geometry_digest_tracks_real_geometry_change(tmp_path):
+    # ...and equality still has to mean something: one rectangle 1nm wider is
+    # genuine drift.
+    first = _write_probe_layout(tmp_path / "a.gds", width_dbu=1000)
+    second = _write_probe_layout(tmp_path / "b.gds", width_dbu=1001)
+
+    assert _provenance.layout_geometry_digest(
+        first
+    ) != _provenance.layout_geometry_digest(second)
+
+
+def test_layout_geometry_digest_tracks_hierarchy_change(tmp_path):
+    # A dropped child-cell array is drift too -- instances are part of the
+    # geometry, not container metadata.
+    with_array = _write_probe_layout(tmp_path / "a.gds", array=True)
+    without_array = _write_probe_layout(tmp_path / "b.gds", array=False)
+
+    assert _provenance.layout_geometry_digest(
+        with_array
+    ) != _provenance.layout_geometry_digest(without_array)
+
+
+def test_layout_geometry_digest_is_container_format_independent(tmp_path):
+    # The digest covers decoded geometry, so the same layout written as GDS
+    # and as OASIS hashes identically -- container metadata is never read.
+    gds = _write_probe_layout(tmp_path / "a.gds")
+    oas = _write_probe_layout(tmp_path / "a.oas")
+
+    assert _provenance.sha256_file(gds) != _provenance.sha256_file(oas)
+    assert _provenance.layout_geometry_digest(
+        gds
+    ) == _provenance.layout_geometry_digest(oas)
+
+
+def test_layout_geometry_digest_none_for_missing_unreadable_or_empty_path(tmp_path):
+    # Never fabricated -- the same `None` convention every other unresolvable
+    # value in this module uses.
+    assert _provenance.layout_geometry_digest(None) is None
+    assert _provenance.layout_geometry_digest("") is None
+    assert _provenance.layout_geometry_digest(str(tmp_path / "nope.gds")) is None
+
+    garbage = tmp_path / "garbage.gds"
+    garbage.write_bytes(b"this is not a layout stream")
+    assert _provenance.layout_geometry_digest(str(garbage)) is None
 
 
 # --------------------------------------------------------------------------- #

@@ -14,6 +14,707 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed**: `klt extract` no longer writes a net name containing `.` into a
+  node-reference position of its SPICE output (issue #2145). A net can arrive
+  carrying an instance path joined with a dot — `XBIAS.vb1` — either from
+  `klt place-and-route`'s own DEF net names replayed by `--def-net-names`
+  (issue #951) or from a drawn label spelling the same convention by hand,
+  and those are precisely the internal nodes of a composed, routed cell that
+  a `--parasitics` post-layout run wants to probe. `.` is ngspice's own
+  hierarchy separator, so such a token was read as a path expression
+  (instance `XBIAS` → node `vb1`) wherever a node reference is parsed: the
+  node could not be probed, `.meas`'d or `.ic`'d by the very name the netlist
+  wrote for it, and the same token meant one thing in the `.SUBCKT` pin list
+  and another in a probe directive. Unlike the merged-label comma (issue
+  #696) and the leading `$` (issue #1162), KLayout's `NetlistSpiceWriter`
+  applies no escape of its own here, so the net itself is now renamed to the
+  `_`-joined spelling before the netlist is written: `XBIAS.vb1` →
+  `XBIAS_vb1`. Only net/node tokens are affected — SPICE dot-commands
+  (`.SUBCKT`, `.ENDS`, `.GLOBAL`) and numeric literals (`L=0.28U`) are a
+  different lexical class, written from different inputs, and are untouched.
+  The renamed spelling is what every artifact carries, so a simulated node
+  name still joins back to the report by exact string match: `nets[].name`,
+  `devices[].nets[...]`, `merged_net_labels[].net`,
+  `parasitics.nets[].net`/`.hub_net`/`.terminals[].leg_net`, the `--spef`
+  output, and `klt lvs`'s `net_correspondence[]`/`mismatches[].net`.
+  `--critical-net`/`--distributed-rc`/`--mom-net`/`--mom-rlc-net` match
+  against the post-rename namespace (`--pins`/`--def-pins`/`--top-cell-pins`
+  still match the raw drawn-label text, as they already did for the comma
+  case). Because no dot-free-preserving rewrite can be injective, collisions
+  are resolved per netlist rather than per name — the first claimant keeps
+  the unsuffixed spelling and each later one takes the smallest free `_<n>`
+  suffix — so two distinct nets never share a name in one written netlist;
+  identify a net by `net_id`, not by the suffix. Every run that renames at
+  least one net says so in `warnings[]`, with the count and up to five
+  `before -> after` examples. A net name that never contained a dot — the
+  overwhelming majority — is byte-identical to before. No `schema_version`
+  bump: no field changes shape, only the net-name values in them. See
+  `docs/cli/extract.md`'s "Hierarchical net names are dot-free".
+- **Fixed**: `klt extract --abstract-cells` no longer binds several of one
+  abstracted macro's own separately declared pins onto a single synthesized
+  net, nor absorbs a top-level net that is not one of that macro's pins
+  (issue #2142 — a different mechanism from #1911/#1934's cross-instance
+  well reclassification, as that report's own ablation matrix showed). Two
+  probe-layer defects caused it. (1) The conductor a pin was probed on was
+  tracked **per pin**, not per access point: a macro that labels one port on
+  two conductors (an `li1.pin` text on the pad its interior drives plus a
+  `met2.pin` text on the stub the parent routes to — ordinary hard-macro
+  drawing) had every one of that pin's points probed against the
+  first-seen label layer, so the off-layer points missed and fell through
+  the bottom-up cross-layer fallback onto the first conductor with *any*
+  geometry at that coordinate — in a real block, the parent's power strap
+  running underneath. Because a named net correctly outranks the unnamed
+  island a black-boxed macro's own pad becomes, that strap then won for
+  *every* such pin at once. The probe layer is now a property of the access
+  point, so each candidate probes the conductor its own label names. (2)
+  The `nwell`/`tap` field layers are no longer a cross-layer fallback
+  answer unless one of them is the access point's own declared layer: a
+  well strap or guard/substrate ring is one continuous shape whose probed
+  net is the same design-wide net everywhere it covers, so using it as a
+  "nothing else is drawn here" answer merged every pin that missed its own
+  conductor onto that one foreign net (PR #622's review had only *demoted*
+  well/tap below the metals, not stopped them answering). Such a point now
+  resolves to nothing and surfaces through the existing per-instance "no
+  conductor found at its resolved access point" warning. The `#1366`
+  two-pins-one-net self-check stays a warning rather than becoming a hard
+  failure — on a real sky130 block every abstracted standard cell trips it
+  legitimately via its `VPB`/`VPWR` and `VNB`/`VGND` body-tie pairs. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Pin resolution".
+- **Fixed**: `klt place-and-route`'s routed GDS no longer carries metal
+  below the PDK's own minimum-**area** rules, and the response says so
+  either way (issue #2139, the `place-and-route` half of #2072 that PR
+  #2075 could not reproduce). The DEF→GDS merge now runs a post-route
+  minimum-area repair pass: every merged routed-metal polygon is floored
+  against its own layer's plain `*.area.*` rule in the resolved PDK
+  family's curated deck — the *same* rule set `klt drc` judges the geometry
+  with — by drawing an abutting patch into the top cell. Two geometry
+  classes this repo does not author drive it: the foundry tech LEF's own
+  via landings (sky130's `L1M1_PR_MR` met1 landing is `0.0667 um²` against
+  an `m1.6` floor of `0.083 um²`; `M2M3_PR`'s met3 landing is `0.1089 um²`
+  against `m3.6`'s `0.240 um²`), and OpenROAD `pdngen`'s met5 via patches
+  (`2.272 um²` against `m5.4`'s `4.0 um²`). Every patch is bounded by the
+  DEF's own `DIEAREA`, by the layer's own minimum-spacing and
+  minimum-width rules, and by a verified single-merged-polygon area check,
+  so a repair can never author a short or a sliver. **Additive response
+  field** `min_area_repair` (`null` unless `stage_reached` is `"route"`)
+  reports `status`/`patches`/`repaired`/`remaining`, per-rule
+  before/after counts, and any polygon the pass refused to repair — and a
+  pass that could not run at all reports `status: "skipped"` with a
+  `reason` rather than an unmeasured clean. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s
+  "Minimum-area repair".
+- **Added**: `klt lvs`'s `net_correspondence[]` entries now carry a
+  `heuristic` boolean for a `reference.form: "gate-level-verilog"` run
+  whose `reference.library` pin orders resolve (issue #2136). Such a
+  reference carries no power/ground pins at all, so the comparer had no
+  same-named candidate for the layout's `VGND`/`VPWR` and paired it with
+  whatever its graph heuristics reached first — routinely an unrelated
+  signal net — reporting that fallback as an ordinary, unmarked
+  correspondence inside a `status: "match"` report. `heuristic: true` now
+  marks a pairing whose layout side is demonstrably a supply net (a pin
+  the library declares power/ground lands on it) while the reference side
+  is not a supply pin; `heuristic: false` marks every pairing the compare
+  stands behind. The key is **omitted** for every other `reference.form`
+  and for any run with no derivable supply universe, so "checked and
+  genuine" stays distinguishable from "never checked" — read it with
+  `entry.get("heuristic")`. Additive: `status`, `mismatches[]`, and the
+  `power_connectivity` block are unchanged, and `power_connectivity`
+  remains the check that actually validates supply connectivity. See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s "Supply correspondences are not
+  validated supply connectivity".
+- **Fixed**: `klt extract --deck sg13cmos5l --parasitics` now uses sourced
+  nominal R/C coefficients for Metal1-Metal4 and TopMetal1, plus all four
+  adjacent vertical-overlap pairs (issue #2113). The registered deck
+  previously reported zero wire R/C and missing coefficients. Values come
+  from SG13CMOS5L's own pinned Magic extraction table; the model remains
+  first-order and uncalibrated, without process-corner selection.
+- **Fixed**: `klt functional-verification` now refuses requested SDF
+  annotation when either required build/test transcript is missing,
+  unreadable, or fails during reading (issue #2130). Previously those logs
+  were silently treated as clean scans, allowing `annotated: true` and
+  post-layout signoff credit without inspected diagnostics. The refusal
+  uses the existing error path (exit 1, no success envelope). Readable empty
+  logs, known-benign partial-coverage reporting, and non-SDF runs retain
+  their existing behavior; no JSON shape change.
+- **Fixed** (#2108): DRC, ERC antenna, power EM, simulation and PEX report
+  versioned checked-work coverage and refuse known zero checks (`not_checked`,
+  exit 4). External KLayout category declarations no longer prove execution:
+  absent findings it reports `coverage_unknown`/4. DRC envelope v2 retains
+  declarations in `coverage.rule_categories` and corrects `rules_checked`.
+  Real failures retain precedence (including ERC/power exit 3). Plain,
+  numbered and compound signoff refuse zero, unknown and malformed coverage.
+  Existing coverage fields and verb-specific partial behavior remain;
+  [the compatibility mapping](docs/coverage-contract.md) lists migration
+  details and the remaining Phase 2 adapters.
+- **Added**: explicit per-family decisions for eight PDK capabilities and a
+  normal-CI check against their live registries/support gates (issue #2132).
+  Missing registrations now fail the invariant with contextual diagnostics;
+  intentional unsupported capabilities require reasons. Registered coefficient-free
+  parasitics remain distinct from missing decks. Existing sparse defaults,
+  support restrictions, coefficients, and CLI/JSON behavior are unchanged.
+- **Fixed**: `klt signoff` now grants SDF post-layout credit only for literal
+  JSON `true` in `environment.sdf.annotated` (issue #2131). Strings, numbers,
+  and malformed optional metadata report `sdf_annotated: false` and leave
+  digital item 7 unmet with `not_post_layout`, while preserving a valid
+  pre-layout regression's plain PASS and item-5 eligibility. Malformed
+  `environment` containers also no longer crash the plain detail renderer.
+- **Fixed**: `klt lvs`'s `power_connectivity` check no longer admits a
+  dangling signal output as a power/ground pin when the design's only
+  carrier of that pin name leaves it unconnected (issue #2076). An ordinary
+  `place-and-route` output hits this: CTS hangs clock-load cells off each
+  leaf clock net with their outputs unconnected, so if no other instantiated
+  cell declares a pin of the same name (flip-flops output `Q`, clock buffers
+  `X`), nothing in the converted reference mentioned the inverter's `Y` and
+  it was admitted beside the real supplies. That inflated `power_pins`, and
+  — with clock loads on two different leaf nets, the normal case on anything
+  bigger than a toy — reported `power_connectivity.status: "mismatch"` with a
+  `power.inconsistent_pin_net` finding on a pin that was never a supply,
+  making the check unusable as a gate on exactly the designs it is most
+  needed for. A pin name is now admitted only when **every** library cell the
+  reference instantiates declares it *and* no reference circuit carries it;
+  the previously documented behaviour for real supplies, filler/tap pruning,
+  and genuine supply defects is unchanged (all still derived structurally,
+  with no per-PDK power-pin name table). See `docs/cli/lvs.md` → "How the
+  power-pin universe is derived".
+- **Added**: `klt lvs`'s `power_connectivity` block now carries
+  `power_pins_derivation` (issue #2076) — the rule that produced
+  `power_pins`, the library masters the reference instantiates (the evidence
+  it was applied to), and whether the instantiated masters' declared pin
+  shapes genuinely corroborate each other. `corroborated` is `true` only when
+  at least two instantiated masters declare *distinct* pin sets — not merely
+  when more than one master name is instantiated: two drive-strength variants
+  of one logical cell (e.g. `mylib__inv_1`/`mylib__inv_2`, both
+  `A VGND VNB VPB VPWR Y`) declare the identical shape and corroborate
+  nothing, the same evidentiary gap a single master has. Purely additive, so
+  no `schema_version` bump: a consumer that quotes `power_pins` as a coverage
+  claim can now see when that claim rests on uncorroborated evidence
+  (`corroborated: false`, with a `reason` naming the master(s) involved)
+  instead of having to reverse-engineer it from the netlist.
+- **Added**: `klt place-and-route` now reports the power delivery it
+  actually *placed*, and warns loudly when there is none (issue #2086).
+  `request.power` is optional, and omitting it produced a run that
+  completes — exit 0, a routed DEF, a merged GDS, real area/timing numbers
+  — on a layout with **no PDN, no substrate/well taps, and (on a library
+  with no row-rail fallback) no fill at all**, with nothing in the output
+  saying so. The response's new `power.placed` block is
+  measured from the DEF the run wrote (`components`/`tapcells`/`endcaps`/
+  `fillers` instance counts, plus one `special_nets[]` entry per DEF
+  `SPECIALNETS` net with its `FOLLOWPIN` rail segments, `STRIPE` strap
+  segments, `stripe_layers` and PDN `vias`), graded into
+  `status`/`missing`. A new top-level `warnings` array (`[]` when empty,
+  never `null`) fires both when `request.power` was omitted and when a
+  *supplied* block produced an incomplete grid — the transcription-error
+  case, where a strap layer that draws nothing is just as silent. Every
+  warning's prose is derived from the measured counts (an omitted-block run
+  on `sky130_fd_sc_hd` really does place rails and fillers via the issue
+  #1442 row-rail fallback, and the warning narrows to the taps, straps and
+  PDN vias that are genuinely absent), and each expected supply is graded
+  on its own, so a routed `VDD` beside a bare `VSS` entry grades `partial`
+  rather than `complete`. The CLI writes each warning to **stderr** in both
+  `--format json` and `--format text`, leaving stdout a single parseable
+  document. `--format text` also prints the placed counts unconditionally.
+  Measured zeros and unavailable evidence are kept distinct:
+  `power.placed.evidence` is `"def"` only when a DEF was read and parsed —
+  which requires its `COMPONENTS` and (when present) `SPECIALNETS` sections
+  to carry exactly the number of records they declare and to terminate
+  their last record, so a truncated or miscounted section is reported as
+  unavailable rather than as a measured zero or a smaller-but-complete
+  grid — otherwise every count is `null` with an `unavailable_reason`,
+  never a fabricated `0`. This warns,
+  it does not refuse: `status` stays `"ok"` and the exit code stays `0`, so
+  a caller wanting a hard gate composes it on a non-empty `warnings` or
+  `power.placed.status != "complete"`. Additive throughout; no
+  `schema_version` bump.
+- **Added**: `tests/corpus/place_and_route/gcd-pdn.gds.gz` (issue #2079) — the
+  `gcd` worked-example design routed **with** a real `request.power` PDN
+  (ORFS's own `platforms/sky130hd/pdn.tcl` met1-followpins rail plus
+  met4/met5 straps, `power_net`/`ground_net` = `VPWR`/`VGND`), committed
+  beside the existing, deliberately grid-less `gcd.gds.gz` rather than
+  replacing it. Each supply resolves to exactly **one** net/island on the new
+  fixture (`klt lvs`'s `power_connectivity`: `"match"` across 1349
+  instances; `klt power` on the full met1–met5 stackup: 1 `VPWR` + 1 `VGND`
+  island) versus 17 per supply on the grid-less one, which stays byte-
+  identical — so every count previously measured against it, in tests and
+  docs alike, is unchanged. `tests/corpus/place_and_route/regenerate.sh` now
+  builds both, takes optional design-name arguments so one fixture can be
+  rebuilt without rewriting the others, and gates a power-bearing fixture on
+  a real gate-level `klt lvs` `power_connectivity` check before committing
+  it. No `klt` command behavior changed.
+- **Added**: `klt place-and-route` and `klt sta` now retain every OpenROAD
+  script invocation's `stdout.log`, `stderr.log`, and `invocation.json` under
+  `.klt/place-and-route/openroad-logs/<invocation_id>/` and
+  `.klt/sta/openroad-logs/<invocation_id>/` respectively (issue #2124) — main
+  stages, corner sweeps, and the optional SPEF timing session each get their
+  own directory, and a retry allocates a new invocation ID rather than
+  overwriting an earlier transcript. Successful JSON responses expose these
+  as new fields: `klt place-and-route` adds `engine_logs`, an array in
+  invocation order; `klt sta` adds `engine_log` for a single-corner response
+  and `corners[].engine_log` per corner for a multi-corner response. Each
+  entry carries `invocation_id`, `script_name`/`script_sha256`,
+  `script_path`/`metrics_path`, `directory`/`stdout_path`/`stderr_path`/
+  `metadata_path` (the new path fields use the shared `{path, scope}`
+  envelope), `outcome`/`returncode`, and `retention_errors` for any secondary
+  write failure. An engine or missing-metrics error keeps its existing
+  diagnosis and appends the invocation's log locations to `error.message`;
+  a log-write failure never masks or replaces the underlying engine result.
+  Purely additive — no `schema_version` bump for either command. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md#retained-openroad-logs)
+  and [`docs/cli/sta.md`](docs/cli/sta.md#retained-openroad-logs).
+- **Fixed**: `klt gen-compose`'s via-drop router now sizes a multi-hop
+  ladder's intermediate landing pads against each landing layer's own
+  minimum-*area* DRC rule, not just the fixed `_VIA_LANDING_SIZE_UM`
+  (0.42um, 0.1764um²) square (issue #2072). A route reaching a deep pin
+  (e.g. a `bond_pad`'s `top_metal`/met5 port) via sky130's full
+  li1→met1→met2→met3→met4→met5 stack previously drew an isolated,
+  sub-minimum-area landing pad on met3/met4 — a guaranteed
+  `met3.area.1`/`met4.area.1` violation under `klt drc --deck sky130`
+  once issue #1989 gave the curated deck a `met*.area.1` rule at all. The
+  digital `klt place-and-route` flow (OpenROAD-authored `VIA_`-prefixed
+  via cells, a separate code path) was investigated and did **not**
+  reproduce this on any of the three checked-in corpus fixtures — see the
+  issue for the full investigation.
+- **Added**: `klt gen-compose --format json` now emits `blocks[].source_path`
+  and `blocks[].source_digest` (issue #2065), recording which stream each
+  composed block's geometry was read from and a digest of that stream's
+  contents. A composition is a snapshot of inputs that keep moving under it,
+  and the report previously described only its own output — so "does this
+  composition still match what its inputs publish today?" could not be
+  answered from the report at all. `source_digest` is a **layout-aware**
+  digest (new `_provenance.layout_geometry_digest`), not a raw-byte file hash:
+  it covers the decoded geometry (dbu, cells sorted by name, each cell's
+  shapes keyed by layer/datatype and instances keyed by the placed cell's
+  name, canonicalised and sorted), so a re-written but geometrically identical
+  input hashes identically despite new `BGNLIB`/`BGNSTR` timestamps and
+  reordered elements, while real geometry drift shows up as a different
+  digest. `null` when it cannot be computed (stream moved/unreadable) — never
+  fabricated. Purely additive — no `schema_version` bump (`klt gen-compose`
+  stays at `1`), and the composed GDS itself is untouched. The raw-byte
+  `sha256_file`/`provenance.input.content_hash` contract `klt
+  drc`/`lvs`/`extract`/`sim` rely on is unchanged.
+- **Added**: a shared `coverage.nothing_checked` /
+  `coverage.nothing_checked_reasons` convention (issue #1996), declared once in
+  `src/klayout_tools/coverage.py` and documented in
+  [`docs/json-contract.md`](docs/json-contract.md). Several verbs could report a
+  passing top-level verdict on a run that checked **nothing**, with no field a
+  reader could consult to tell that apart from an earned pass: a PDK-native DRC
+  deck whose whole rule set is gated behind a `--deck-var` the caller never set
+  (`status: "clean"`, `violation_count: 0`), a `klt sim` request whose PVT corner
+  matrix expanded to zero corners or whose every `measurements[].limits` object
+  used keys `klt sim` does not apply (only `min`/`max` are read), and a `klt pex`
+  run that produced no `delta[]` row at all. All three now say so in their own
+  `coverage` block — `klt drc` gains `coverage.rules_checked` (the complement of
+  the existing `rules_skipped`, and, for `--engine klayout`, the rule categories
+  the deck's own RDB report declares) alongside the two roll-up keys, `klt sim`
+  and `klt pex` gain a `coverage` block they previously had none of. **No
+  producing verb's `status` changes**: `test_run_drc_coverage_empty_stream`'s
+  `"clean"` verdict and every other pinned verdict are untouched, and the keys
+  are purely additive (no `schema_version` bump). `nothing_checked` is never a
+  synonym for *partial* coverage — a run that checked one rule out of eighty
+  reports `false`, and a `klt pex` comparison that ran and found every row within
+  tolerance emits one `delta[]` row per compared pair, so "nothing changed" and
+  "nothing was compared" stay structurally distinct.
+- **Changed**: `klt signoff` now **refuses** evidence whose own `coverage` block
+  reports `nothing_checked: true` (issue #1996) — unlike the report-not-enforce
+  treatment #2002 gave partial coverage gaps, because a run that measured nothing
+  contains no statement about the design for a reviewer to weigh. Such a check's
+  `passed` is `false` whatever its `status` says (with
+  `checks[].detail.nothing_checked_reasons` naming why), and a tier-report item
+  citing it renders `"unmet"` with the new `reason: "nothing_checked"` — grouped
+  with `wrong_kind`/`not_post_layout` as a "no runnable check proves this item"
+  reason, never with `check_failed`, per issue #826's invariant. Read generically
+  from the shared convention rather than hard-coded per verb, so a future verb
+  adopting it is picked up automatically. Back-compatible: an envelope with no
+  `coverage` block, one predating the convention, or one reporting
+  `nothing_checked: false` grades exactly as it did before — the refusal fires
+  only on an explicit `true`.
+- **Added**: `klt gen` and `klt gen-compose` `--format json` reports now carry
+  the shared top-level `provenance` block (issue #2035) — the same one
+  `klt drc`/`lvs`/`extract`/`sim` already emit, built by the same
+  `build_provenance()` helper. `klt_version` and `klayout_version` are the
+  point: a project that commits generated geometry plus its report as evidence
+  and re-runs the generator later could previously not tell a real geometry
+  change from a klt/KLayout upgrade — the `gen` family's report was the one
+  `klt` artefact whose producing build could not be read back off the artefact.
+  `provenance.pdk` mirrors the identity of each report's existing top-level
+  `pdk` field; `provenance.deck` and `provenance.input` are always `null` for
+  both verbs, since a generator/compose request is parameters (plus, for
+  compose, the blocks' own generator sub-reports), with no rule/model deck and
+  no single input layout stream to pin. Purely additive — no `schema_version`
+  bump on either command (both stay at `1`).
+- **Changed**: `klt signoff` now validates every ingested envelope against a
+  declared shape for its kind (issue #2033, decomposed from #2011 item 2 — the
+  pilot for a typed, runtime-validated evidence boundary). Each recognised
+  kind is declared as a `TypedDict` (`src/klayout_tools/signoff.py`), and
+  `_classify` checks the incoming JSON against that kind's required fields at
+  read time: an envelope that matches a kind's discriminating shape but is
+  **missing a required field or carries one of the wrong type** is now
+  rejected rather than graded. Envelope-aggregation mode exits `1` naming the
+  kind and the offending field; `--manifest` grading renders the citing item
+  `"unmet"` with `reason: "unrecognized_envelope"`. **Grading change**: the
+  case this closes is `klt extract`, the one kind with no independent
+  pass/fail — a truncated extract envelope with no `status` field previously
+  produced a *passing* check (the "an envelope that cannot fail satisfies a
+  checklist item" failure mode of issues #1987/#1988). Required fields are
+  only each kind's discriminators plus the field its verdict is derived from;
+  every other field this verb reads stays optional, so evidence committed
+  before a later-added block existed (a `drc` report with no `coverage`, an
+  `lvs` report with no `power_connectivity`) validates and grades exactly as
+  before — verified against every `klt` envelope committed under `examples/`
+  and `evidence/`. No JSON shape change (no field added, renamed, removed or
+  nested), and no `schema_version` bump. This catches malformed/incomplete
+  envelopes only: it cannot detect a semantic mismatch between two well-formed
+  values (e.g. issue #1999's escaped-identifier mismatch), and is documented
+  as such in [`docs/cli/signoff.md`](docs/cli/signoff.md)'s new "Envelope
+  validation" section.
+- **Added**: `klt erc --format json` now emits `provenance.spec` as
+  `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
+  the stackup/vias/nets/ties spec file the run was validated against.
+  `provenance.input.content_hash` (issue #1968) already pinned the layout, but
+  an ERC verdict is only meaningful relative to the declarations it was run
+  with: the top-level `spec` field echoed a bare path, so editing the spec
+  (dropping a `ties` entry, re-pointing a `layer`) left a committed report
+  silently asserting a verdict for declarations it never saw. This is a
+  verb-local field rather than a new `build_provenance()` parameter, following
+  `klt lvs`'s precedent for a second input (`environment.reference_sha256`).
+  Purely additive — no `schema_version` bump (`klt erc` stays at `1`), and
+  `provenance.input`/`provenance.pdk`/`provenance.deck` are unchanged.
+- **Added**: `provenance.input.role` — a discriminator naming *which kind of
+  artifact* `provenance.input.content_hash` covers (issue #2027), one of
+  `"layout"` (a GDSII/OASIS stream or a DEF), `"netlist"` (a SPICE or
+  gate-level Verilog netlist), or `"source"` (HDL source). The hash alone was
+  kind-blind, and one verb can pin either kind: `klt lvs`'s `layout.file`
+  shape hashes the original layout stream, but its pre-extracted
+  `layout.netlist` shape hashes a *SPICE netlist*. **Bug fix**: `klt signoff`
+  compared `input.content_hash` across every check that populated it, so a
+  `klt drc` report and a pre-extracted-shape `klt lvs` report of the *same
+  design* could never agree and the run rendered `status: "refused"` — a
+  false alarm rather than caught staleness, reproducible with this repo's own
+  `examples/signoff/` pair (whose `lvs.request.json` uses that shape). The
+  gate now compares hashes only among checks declaring the same `role`,
+  exactly as it already compared `deck.content_hash` only among checks naming
+  the same deck; a genuine disagreement *within* a role is still refused, and
+  a bundle disagreeing on two roles reports one `mismatches[]` entry per role
+  (same `field`, distinguished by a new additive `mismatches[].role` key,
+  also shown in `--format text`). Evidence committed before this field
+  carries no `role` and is read as `"layout"` — the field's only documented
+  meaning at the time — so archived reports keep participating in the
+  layout-side comparison rather than being silently exempted from it.
+  Additive throughout: `role` appears whenever `input` is non-`null`, nothing
+  is renamed or removed, and no `schema_version` bumps. A knock-on effect is
+  that `klt sim` (and any other netlist-only verb) *can* now populate
+  `provenance.input` for the `--manifest` staleness pin without poisoning the
+  cross-check; wiring that up is separate work.
+- **Added / Changed**: the T1 (bronze) evidence checklist in
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) gains
+  **item 11, "Power delivery (structural)"** (issue #2025, operator ruling
+  2026-09-17), and `klt signoff --manifest`/`--fleet` grades it. A fleet
+  survey found 2 of 7 committed digital layouts had no power delivery
+  network at all while still citing an LVS `match` toward item 4 — nothing
+  in T1 required a power grid to *exist*. Item 11 asks the structural
+  question directly, per block kind:
+  - **digital** (RTL flow) — the cited `klt place-and-route` response
+    reports `power.pdn: true` with a `power.tapcell_master` named, every
+    `power.straps[].layer` is covered by the cited `klt erc` spec's own
+    stackup, and the cited `klt lvs` report's `power_connectivity.status`
+    is `"match"` (`"unchecked"` satisfies item 4 but **not** item 11).
+  - **analog / custom** (and the doc's full-custom digital sub-case, which
+    has no P&R run to cite) — the cited `klt lvs` report's
+    `net_correspondence` pairs every declared supply net to a
+    reference-side net, i.e. the reference netlist carried the supplies. A
+    SPICE reference satisfies this by construction.
+  - **both** — a `klt erc` **supply-spec** run declaring at least one
+    `"kind": "supply"` net and at least one `ties[]` entry, reporting no
+    `erc.unconnected_net`/`erc.supply_short` on a declared supply and no
+    `erc.missing_tie`. Item 11 grades those rules specifically, *not* the
+    ERC envelope's own `status`, so an antenna verdict on an unrelated
+    signal net (or the tie-cell false positives issue #1994 tracks) cannot
+    block a power-delivery claim.
+
+  IR-drop and EM (`klt power`) deliberately stay **out** of T1 (silver-tier
+  material): `_ITEMS_ACCEPTING_POWER_EVIDENCE` is still empty, and item 11
+  is the *structural* question ("is the supply connected to what it
+  powers"), never the *analysis* one. **Grading change**: `t1_item_count`
+  is now `11` (`22` for `mixed-signal`), so every block that was at T1
+  before reports one more item and drops to `tier: null` until it cites
+  item 11 — which is precisely why the doc required an operator ruling
+  before this item could be added (#1982). The count was already the parsed
+  checklist's own length, never a literal in code.
+
+  Supporting additive changes, all documented in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md): `klt erc` and `klt
+  place-and-route` responses are now recognised envelope kinds (`"erc"`,
+  `"place-and-route"`) in both modes, each **opt-in to item 11 alone** the
+  way `"generic"` is scoped to item 8 — an `erc` or `place-and-route`
+  citation for any other item renders `wrong_kind`, which matters most for
+  the latter, since a P&R response passes on `status: "ok"` alone and an
+  unrestricted citation would reopen the "cannot fail, therefore always
+  passes" hole issue #1987 closed for `klt extract`. Item 11's manifest
+  entry may be a **JSON array** of ordinary evidence entries (the first
+  compound item; every other item still takes exactly one), each resolved
+  through the same read/run/classify/hash path as any single citation. Its
+  `citation` gains two item-11-only members, `parts[]` and
+  `power_delivery`, alongside the unchanged single-citation fields. Four
+  new `reason` values distinguish which artifact to go fix: `no_pdn`,
+  `supply_spec_incomplete`, `supply_not_continuous`, `lvs_supply_unproven`.
+- **Changed**: `klt signoff --manifest`/`--fleet` now restricts T1 items 5
+  ("Full corner verification vs a ratified spec"), 6 ("Statistical claims carry
+  Monte Carlo evidence") and 8 ("Characterization report") to the evidence
+  kinds `docs/design-evidence-tiers.md` actually names for them (issue #2044),
+  completing what issue #1987 started for items 3 and 4. All three previously
+  accepted *any* recognised, passing envelope kind — including `klt extract`,
+  which has no failure verdict and so always counts as passed, so a manifest
+  citing `{"5": "extract.json"}` graded a corner-verification claim `met` on a
+  report that ran no simulation and could not have failed. **Grading change**:
+  item 5 accepts `sim` for an analog partition and `sta`/
+  `functional-verification`/`sim` for a digital one (`sim` being the
+  full-custom digital sub-case's own artifact); item 6 accepts `yield`; item 8
+  accepts `generic`, the purpose-built envelope issue #1152 gave the one T1
+  item naming no `klt` verb. Any other kind moves from `met` to `unmet` with
+  `reason: "wrong_kind"`. Items 1, 2, 9 and 10 are deliberately unchanged and
+  still accept any passing envelope, `extract` included — the doc documents
+  them as having no tool behind them, so there is no right artifact to restrict
+  them to. `klt extract` is otherwise untouched: its envelope still aggregates
+  normally in envelope-aggregation mode (`checks[]`, device/net counts) and its
+  `provenance` still participates in the consistency check that binds LVS to
+  the DRC'd layout. `examples/signoff/manifest.json` cites only items 3 and 4
+  and is unaffected. No JSON shape change (no field added, renamed, removed or
+  nested).
+- **Changed**: `klt signoff --manifest` now restricts T1 items 3 ("DRC clean")
+  and 4 ("LVS clean") to a `drc` and an `lvs` citation respectively, for every
+  block kind (issue #1987). Both items previously accepted *any* recognised,
+  passing envelope kind — including `klt extract`, which has no failure
+  verdict and so always counts as passed, meaning a manifest citing
+  `{"3": "extract.json", "4": "extract.json"}` graded both items `met` on a
+  report that ran neither check and could not have failed. **Grading change**:
+  a manifest citing a non-`drc` kind for item 3, or a non-`lvs` kind for item
+  4, moves from `met` to `unmet` with `reason: "wrong_kind"` — the same
+  outcome item 7 has rendered for a non-`pex` citation since issue #871. The
+  cited check did not fail on its own terms; it simply is not the check the
+  item names. `examples/signoff/manifest.json` already cites the right kinds
+  and is unaffected. Paired with issue #1969's `provenance.input.content_hash`
+  population below, an item-4 "LVS clean" claim is now both *the right check*
+  and *bound to the layout DRC ran on*: `provenance_consistency` refuses a
+  manifest whose `drc` and `lvs` envelopes pin different layout hashes. No
+  JSON shape change (no field added, renamed, removed or nested).
+- **Added**: a magic-backed **cross-validation oracle** for `klt drc` and
+  `klt extract` (issue #2014, pairing #1 of tracking issue #2007). Both verbs
+  were backed by KLayout alone — `tests/test_lvs.py`'s netgen tier
+  cross-validates LVS *comparison*, but both of its comparators are fed by
+  KLayout's own extraction, so extraction and DRC themselves had no
+  independent check at all. `tests/test_drc_magic_oracle.py` and
+  `tests/test_extract_magic_oracle.py` now run
+  [magic](http://opencircuitdesign.com/magic/) — a separate geometry engine
+  with its own open_pdks sky130/gf180mcu decks — over the *same* GDS bytes and
+  compare verdicts: zero violations on a clean sky130/gf180mcu corpus cell,
+  and agreement on three seeded defects (a 0.09 µm met1 spacing violation, an
+  input-to-output short, 11 deleted `licon1` cuts). Extraction agreement is
+  exact — device count, per-class counts, every `w`/`l`/`as`/`ad`/`ps`/`pd`
+  parameter, drain/gate/source connectivity, and net count all match on both
+  PDKs; DRC is compared as zero/non-zero plus rule identity and location,
+  because the two engines paint a spacing failure with different granularity.
+  Both modules are real-binary-gated and skip cleanly (with a specific reason)
+  when `magic` or a magic technology file is absent, so no existing CI leg
+  changes. New provisioning: `scripts/install-magic.sh` (pinned, checksummed
+  magic 8.3.683 built `--without-x`; the distro 8.3.105 is rejected by decks
+  that declare `requires magic-8.3.411`), `scripts/fetch-magic-tech.sh`
+  (generates `sky130A`/`gf180mcuC` decks from pinned open_pdks source rather
+  than requiring a multi-GB PDK install), and a `workflow_dispatch`
+  `magic-oracle.yml` job that provisions both and fails if the tests skip.
+  No `klt` runtime behaviour or JSON shape changes — magic stays an oracle,
+  never a runtime dependency. Methodology, measured results, the declared
+  shared surface and the unsupported cases: `docs/design/magic-oracle.md`.
+- **Added**: device-body tie/bias status is now a **gradeable field**, not
+  only a warning (issue #1983). `klt lvs` emitted `device.body_unverified` as
+  a `mismatches[]` entry that never changed `status`, and `klt pex` said
+  nothing at all about whether the netlist it re-simulated had a DC bias path
+  for its device bodies — even though `docs/cli/extract.md` states that an
+  untied body makes such a resimulation "physically wrong, not merely
+  imprecise". That silently weakened `docs/design-evidence-tiers.md` item 7
+  (post-layout verification, the item with the strictest citation rule in the
+  checklist): a `klt pex` citation could be backed by numbers that look like
+  measurements and are not, with nothing in the evidence saying so. Three
+  additive blocks close that:
+  - `klt lvs` gains a top-level **`body_verification`** block — `status`
+    (`"verified"`/`"unverified"`/`"unchecked"`), `reason`, `device_classes`,
+    `device_count`, `findings`, `finding_count` — rendered from the same
+    determination as the existing `device.body_unverified` warnings, so the
+    two can never disagree. `"unchecked"` (the pre-extracted
+    `layout.netlist` form, which verifies nothing either way) is now
+    distinguishable from `"verified"`; before, both simply carried no
+    warning.
+  - `klt pex` gains a top-level **`body_bias`** block — `status`
+    (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets`, and
+    `unbiased_pmos_body_nets` carried verbatim from the extraction this
+    command drives itself (`klt extract`'s own issue-#555 array).
+  - `klt signoff` surfaces both: `checks[].detail.body_verification_status`
+    on an `lvs` check, `checks[].detail.body_bias` on a `pex` check, and
+    `citation.body_bias` on a `"met"` item-7 citation (plus the `--format
+    text` rendering of the latter), so item 7's verdict and the one property
+    that can invalidate the numbers backing it sit in the same artifact.
+
+  **No verdict changes anywhere**: `klt lvs` still reports `status: "match"`
+  for a matching compare with unverified bodies (the warning's non-blocking
+  severity is unchanged), `klt pex` still reports `status: "pass"` and the
+  same exit code, and `klt signoff` grades an `lvs` check on `status ==
+  "match"` (plus the existing `power_connectivity` gate) and a `pex` check on
+  `status == "pass"` exactly as before. This is report-before-enforce, and a
+  deliberately different default from #1965's `power_connectivity` hard-fail:
+  a power-connectivity mismatch is a *defect*, whereas an unverified/unbiased
+  body is a *coverage* condition some PDK decks produce on every layout they
+  extract — hard-failing it would retroactively fail whole PDKs' worth of
+  otherwise-valid evidence. `docs/design-evidence-tiers.md` item 7 now states
+  the condition a `pex` citation is valid under, claimant-enforced exactly
+  like item 3's DRC-coverage disclosure. Purely additive and back-compatible:
+  the `body_bias` key is absent for every non-`pex` kind and for `pex`
+  evidence committed before this change (an absent statement reads as "this
+  artifact made no body-bias statement", never "every body was biased"),
+  `detail.body_verification_status` is `null` for pre-#1983 `lvs` evidence,
+  and `klt lvs --check --rerun` does not report either new block as drift on a
+  report committed before it existed. No `schema_version` bump.
+- **Added**: `klt signoff` now reports the cited DRC envelope's `coverage`
+  block (issue #2002). `docs/design-evidence-tiers.md` item 3 requires a claim
+  to enumerate its deck's coverage gaps and, since issue #1982, names the
+  exact fields that disclosure must quote — `coverage.layers_in_stream_without_rules`,
+  `coverage.rules_skipped`, `coverage.deck_scope` — but `klt signoff` read
+  none of them, so a deck with twenty rule-free drawn layers and sixteen
+  skipped rules produced exactly the artifact a fully-covering deck did. All
+  three are now surfaced verbatim in `checks[].detail.coverage`
+  (envelope-aggregation mode), in a `"met"` item's `citation.coverage`
+  (tier-report mode — item 3's own artifact), and in `blocks[].drc_coverage`
+  (fleet roll-up), plus the `--format text` rendering of the latter two.
+  **No verdict changes**: a `drc` check still passes on `status: "clean"`
+  alone, so no claim that graded `met` before this change grades differently
+  after it — this is report-before-enforce, and item 3's disclosure
+  requirement remains claimant-enforced (nothing compares the reported gaps
+  against what a claim actually disclosed). Purely additive and back-compatible:
+  the key is absent for every non-`drc` kind and for DRC evidence committed
+  before `klt drc` reported coverage, so an absent coverage statement reads as
+  "this artifact reported no coverage", never "this deck has no gaps", and a
+  `--fleet` run mixing pre- and post-`coverage` evidence renders both without
+  error. Whether a non-empty gap should ever change item 3's verdict, where a
+  claimant would state a disclosure for `klt signoff` to compare against, and
+  whether `klt lvs`'s own coverage-shaped disclosures deserve the same
+  treatment for item 4 are open questions #2002 deliberately left unanswered.
+- **Fixed**: `klt lvs` no longer reports `body_verification.status` as
+  `"verified"` for a layout whose PMOS bodies actually float (issue #2048).
+  The PMOS half of the determination (`_body_unverified_counts`) was
+  *deck-structural*: it only counted devices when the deck declared no well-tap
+  mechanism at all (`tap`/`tap_nplus`/`tap_pplus` all absent), so a deck that
+  merely **declares** one — gf180mcu's derived `tap_nplus`/`tap_pplus`, issue
+  #1084 — was treated as proof that every PMOS in every layout it extracts
+  reached a real net. It is not: a gf180mcu layout that draws no well tie
+  leaves each PMOS body on an anonymous, KLayout-synthesized `$<n>` net with no
+  DC bias path, and that layout still reported `"verified"` — while `klt pex`'s
+  `body_bias` block, built from `klt extract`'s per-device
+  `unbiased_pmos_body_nets[]` (issue #555), reported the very same layout as
+  `"unbiased"`. The arm is now per-device on both sides, so the two commands
+  agree and `"verified"` means what [`docs/cli/lvs.md`](docs/cli/lvs.md) says it
+  means ("**every** MOS body terminal ... resolved to a real drawn/derived
+  net"). Affects the `device.body_unverified` warning and the
+  `body_verification` block identically — they are rendered from the one
+  determination and still cannot disagree. sky130 is unchanged (its
+  `well_label`, 64/5, demonstrably names every PMOS body), now verified
+  per-device rather than excused by the deck's shape. **Strictly more
+  reporting, no verdict change**: the warning's non-blocking severity is
+  unchanged, so a matching compare with newly-counted PMOS bodies still reports
+  `status: "match"` and the same exit code; a gf180mcu report that previously
+  said `"verified"` now says `"unverified"`. No JSON shape change and no
+  `schema_version` bump.
+- **Fixed**: `klt extract --abstract-cells` no longer binds an abstracted
+  cell's **unused tie output** to the design's named supply net (issue #1994).
+  The extra pin access points discovered by walking a cell's own pre-erasure
+  poly/diffusion connectivity could cross from one declared pin to another —
+  for a tie/constant generator such as `sky130_fd_sc_hd__conb_1`, which ties
+  `HI` to `VPWR` (and `LO` to `VGND`) through a plain poly strip with no
+  diffusion at all, the walk handed the signal pin a candidate sitting on the
+  cell's own supply rail. The documented "a named net beats an unnamed one"
+  ranking then preferred it over the pin's own (correctly unnamed, because
+  genuinely unrouted) island. The effect was backwards: a design extracted
+  `match` while its power grid was *missing* and produced dozens of false
+  `klt lvs` errors the moment the grid was fixed. Candidate discovery now
+  stops at a second declared pin — when the cell-local net it walked onto
+  carries another pin's label (scanned across every label layer the deck
+  declares), only fragments carrying this pin's own label are kept, so the pin
+  falls back to its own declared access point. A tie output the parent
+  genuinely routes to the rail still binds to it (that connection is drawn
+  outside the cell and survives abstraction). No JSON shape change.
+- **Fixed**: `klt equiv --engine yosys-sequential` no longer drops a
+  top-level port whose name is a Verilog **escaped identifier** (issue
+  #1999) — the leading-`\` spelling a synthesis/P&R flow uses for a name
+  containing `.`, `[`, `]` or `/`, e.g. a flattened hierarchical output
+  `\q.x` or a bit-blasted bus bit `\q[0]`. Such an identifier is terminated
+  by whitespace, so Yosys writes its declaration as `output \q.x ;` (a space
+  before the semicolon) and the stage-1 port-list parser did not match it at
+  all. The port was therefore misclassified as an internal wire and
+  blacklisted by the cut-point refinement loop (issue #1353), deleting the
+  one proof obligation that distinguishes the two designs: two netlists
+  differing **only** on an escaped top-level port were reported
+  `"equivalent"` (verified live on Yosys 0.69). Escaped ports are now
+  recognised, never blacklisted, and carried into stage 2's counterexample
+  dump and the `iverilog`/`vvp` confirmation testbench under their plain,
+  unescaped name (`counterexample.diverging_outputs`, and each cycle's
+  `inputs`/`gold_outputs`/`gate_outputs` keys). No JSON shape change — an
+  affected run's `status` simply stops being wrong.
+- **Fixed**: the curated `sky130` DRC deck now also checks each routing
+  metal's **holes-area** minimum — `met1.holes_area.1`, `met2.holes_area.1`,
+  `met3.holes_area.1`, `met4.holes_area.1`, `met5.holes_area.1` (issue
+  #1976), the holes-area companion of the plain `met{1..5}.area.1` rules
+  below. Each is scoped to the checked layer's **holes** — the
+  interior voids enclosed by a merged metal region, e.g. a slot in a wide
+  plate or a fill pattern — rather than the metal polygon itself, via a new
+  `DerivedLayer` `"holes"` mode (`klayout.db.Region.holes()`). Thresholds
+  are transcribed from the same pinned `volare` sky130A install cited
+  below: `m1.7`/`m2.7`/`m5.7` 0.14 um², `m3.7`/`m4.7` 0.2 um² — carried on
+  `DrcRule`'s `area_min_dbu2` field as 140 000 / 200 000 dbu². Before this,
+  a too-small slot cut into a wide metal plate or MiM-cap plate — a real
+  manufacturability defect — came back `clean` rather than reported. A
+  plate with no holes at all correctly stays `clean`, not an error (an
+  empty `Region.holes()` result is not a violation). Each rule also
+  carries a populated `provenance` citing its own upstream rule id. The
+  sky130 deck is now 57 rules (was 52), and `provenance.deck.content_hash`
+  changes accordingly. See `docs/cli/drc.md`'s "Coverage" section for the
+  full per-kind breakdown.
+- **Fixed**: `klt lvs` no longer reports a `reference.form:
+  "gate-level-verilog"` reference's `assign`-aliased port as a false
+  mismatch (issue #2021, the other half of #1994's 77 false `klt lvs`
+  errors on the same design). Gate-level Verilog routinely carries a
+  port-to-port `assign` alias -- e.g. `assign dbg_uart_byte[i] =
+  rx_byte[i];`, two declared port names for one electrical node -- but the
+  conversion to SPICE resolves an `assign` alias transparently for every
+  *instance* connection, never for a module's own declared port list: the
+  aliased port was emitted as its own `.SUBCKT` pin with nothing inside the
+  body ever referencing it, reading back as an isolated, disconnected
+  reference net even though the layout has exactly one physical net for
+  both names. `klt lvs` now joins the alias port's net onto its canonical
+  target's net (following a multi-hop `assign` chain to its ultimate
+  target, same as the existing instance-connection resolution) before the
+  compare runs -- both port names stay individually declared, now on the
+  same net, matching a correctly-wired layout's own "one net, two named
+  pins" shape. Disclosed via a new, always-`"warning"`
+  `mismatches[].category: "topology.reference_port_alias_joined"` entry
+  (never flips `status`) naming the joined net and every alias port folded
+  into it -- see [`docs/cli/lvs.md`](docs/cli/lvs.md)'s
+  "`topology.reference_port_alias_joined`" section. Only a port whose value
+  comes purely from an `assign` is ever joined; a genuinely unconnected or
+  differently-wired reference port is untouched and still reports as a
+  real mismatch.
+- **Fixed**: `klt erc`'s per-gate `antenna_verdict` and `klt power`'s overall
+  `em_verdict.status` now report a new `"pass_partial"` value (issue #1997)
+  instead of silently reading as a plain `"pass"` when their own coverage
+  data shows only part of the relevant surface was actually checked.
+  `klt erc`: `antenna_verdict` is `"pass_partial"` when at least one graded
+  metal level (`levels[1:]`, excluding the gate role, which is always
+  `"unchecked"`) is `"unchecked"` and no graded level violates — the
+  canonical case is a full sky130 stack through met5, since sky130's own
+  antenna-ratio table has no met3/met4/met5 entries at all. `klt power`:
+  the overall `em_verdict.status` is `"pass_partial"` when
+  `unchecked_edge_count > 0` and `fail_count == 0` — e.g. only one edge in
+  the whole design had both a declared current limit and a solved current.
+  Real violations/failures are unaffected: `antenna_verdict` still reports
+  `"violate"` and `em_verdict.status` still reports `"fail"` regardless of
+  coverage. `klt signoff`'s power-evidence check (`em_verdict.status ==
+  "pass"`, exact match) already treats `"pass_partial"` at least as
+  strictly as `"pass"` — it does not pass.
 - **Fixed**: `klt lvs` now populates `provenance.input.content_hash` (issue
   #1969) with the `sha256:`-prefixed hash of the layout side it compared, for
   both the `klayout` and `netgen` engines. It was always `null` before, on the
@@ -97,11 +798,10 @@ not `klt --version`, if you need to detect this kind of drift. See
   upstream rule id. The sky130 deck is now 52 rules (was 47), `coverage.
   rules_skipped` gains the five new ids on a stream with no geometry on the
   corresponding metal, and `provenance.deck.content_hash` changes accordingly.
-  Each layer's *holes*-area sibling (`m1.7`-`m5.7`) stays untranscribed
-  (issue #1976 — `DrcRule` has no way to name a polygon's holes), and the
-  `"density"` check kind stays unused (this engine's windowed implementation
-  has no floorplan-boundary concept). See `docs/cli/drc.md`'s "Coverage"
-  section for the full per-kind breakdown.
+  Each layer's *holes*-area sibling (`m1.7`-`m5.7`) is transcribed separately
+  by issue #1976 (see above), and the `"density"` check kind stays unused
+  (this engine's windowed implementation has no floorplan-boundary concept).
+  See `docs/cli/drc.md`'s "Coverage" section for the full per-kind breakdown.
 - **Changed**: `klt gen-compose`'s closed guard/collector-ring rejection is now
   **plane-aware** instead of identity-only (issue #1960). Previously the check
   fired from block/port identity alone — *this block reports a

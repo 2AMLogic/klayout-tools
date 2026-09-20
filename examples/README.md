@@ -17,8 +17,8 @@ directory has its own README, start there.
   terminal" unit MOS device for `W` below `mos_array`/`diff_pair`'s
   `UNIT_MIN_W_UM` contact-fit floor, composed beside a real `klt gen
   mos_array` unit device in one cell (issue #1574). See its README.
-- [`drc/`](drc/) — minimal `klt drc` input: `generate.py` writes
-  `example.gds`, `example.drc.json` is the resulting violation report.
+- [`drc/`](drc/) — minimal `klt drc` input: `generate.py` writes both
+  `example.gds` and `example.drc.json`, the resulting violation report.
 - [`em/`](em/) — `klt mom` electromagnetic worked examples: block coupling,
   interconnect coupling, patch antenna, and spiral inductor fixtures.
 - [`functional-verification/`](functional-verification/) — `klt

@@ -327,7 +327,7 @@ cmos5l's resistor LVS rules are themselves symlinks into the pinned sibling
 `ihp-sg13g2` checkout. The resolved PDK-family *name* also differs from
 every other family here the same way `sg13g2`'s own does: the real
 `ihp-sg13cmos5l` install's own directory name is `"ihp-sg13cmos5l"`, resolved
-via a `_PDK_VARIANT_FAMILY_ALIASES` entry rather than a literal-prefix match
+via a `PDK_VARIANT_FAMILY_ALIASES` entry rather than a literal-prefix match
 — see "Family key and resolution" below.
 
 #### Adding a third PDK family
@@ -341,19 +341,19 @@ higher-voltage flavours, the companion `_PDK_RES_FLAVOR_LAYERS`/
 
 - **Family key and resolution**: `_pdk_family()` maps a resolved
   `pdk.variant` string to a family key in `_PDK_ROLE_LAYERS` by delegating to
-  `klayout_tools.pdk_models._pdk_variant_family()` (the same helper `sim.py`
-  already imports directly for its own MOS-model-binding lookup) — a plain
-  literal-prefix match against most variant strings (e.g. `"sky130A"` ->
-  `"sky130"`, `"gf180mcuC"` -> `"gf180mcu"`), *or* an explicit
-  `_PDK_VARIANT_FAMILY_ALIASES` entry for a variant whose resolved name is
-  not a prefix of its own family key at all (`"ihp-sg13g2"` -> `"sg13g2"`,
-  the exact shape a standalone, non-open_pdks-style PDK clone like
-  IHP-Open-PDK's SG13G2 or its sibling SG13CMOS5L produces — see `klt pdk
-  find`'s own flat-layout resolution in [`klt pdk`](pdk.md)). A brand-new
-  family needs a new `_KNOWN_PDK_FAMILIES`
-  entry in `pdk_models.py` (plus an alias there only if its resolved variant
-  name isn't a literal prefix of the family key), not a change to `gen.py`
-  itself.
+  `klayout_tools.pdk_families.pdk_variant_family()` (the package's single
+  authoritative variant→family classifier — no module derives a family from
+  a variant name itself) — a plain literal-prefix match against most variant
+  strings (e.g. `"sky130A"` -> `"sky130"`, `"gf180mcuC"` -> `"gf180mcu"`),
+  *or* an explicit `PDK_VARIANT_FAMILY_ALIASES` entry for a variant whose
+  resolved name is not a prefix of its own family key at all
+  (`"ihp-sg13g2"` -> `"sg13g2"`, the exact shape a standalone,
+  non-open_pdks-style PDK clone like IHP-Open-PDK's SG13G2 or its sibling
+  SG13CMOS5L produces — see `klt pdk find`'s own flat-layout resolution in
+  [`klt pdk`](pdk.md)). A brand-new family needs a new
+  `KNOWN_PDK_FAMILIES` entry in `pdk_families.py` (plus an alias there only
+  if its resolved variant name isn't a literal prefix of the family key),
+  not a change to `gen.py` itself.
 - **Mandatory roles**: `active`, `poly`, `contact`, and `metal` are drawn by
   essentially every generator (the base MOS/resistor unit-device geometry)
   and must resolve to a real `(layer, datatype)` pair — a generator cannot
@@ -1611,7 +1611,14 @@ family/variant split the resolver doesn't have. The response's
     "snapped_to_grid": false,
     "notes": []
   },
-  "warnings": []
+  "warnings": [],
+  "provenance": {
+    "klt_version": "0.4.2",
+    "klayout_version": "0.29.8",
+    "pdk": { "name": "sky130A", "source": "volare", "version": "open_pdks 0fe599b" },
+    "deck": null,
+    "input": null
+  }
 }
 ```
 
@@ -1630,6 +1637,7 @@ family/variant split the resolver doesn't have. The response's
 | `ports` | array\<object\> | Named terminals for downstream connection — see below. |
 | `drc_hints` | object | DRC-relevant metadata the generator itself already knows — see below. Advisory only; `klt drc` remains the actual authority on rule compliance. |
 | `warnings` | array\<string\> | Non-fatal generator notes (e.g. a requested dimension was snapped to the technology grid). Always present, empty when there is nothing to report. |
+| `provenance` | object | The shared `provenance` block (issue #2035) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). A generator request involves no rule/model deck and no single input layout stream (the request is parameters, not a layout file), so `provenance.deck`/`provenance.input` are always `null`; `provenance.pdk` mirrors the top-level `pdk` field's identity. |
 
 #### `ports[]` entries
 
@@ -1931,6 +1939,13 @@ to stdout (and no GDS/OASIS file is written). No Python traceback is printed.
   ```json
   { "schema_version": 1, "error": { "command": "gen", "message": "unknown generator 'bogus' -- available: resistor_strip (see `klt gen --list`)" } }
   ```
+
+This applies to **this command's own** usage checks too (no generator name
+with no mode flag; a generator name alongside `--pdk-pcell`): under
+`--format json` they emit the same envelope, and still exit `2` rather than
+`1` (issue #2029). Only argparse's usage errors — a bad `--format` value,
+two mode flags at once — stay plain text in both formats, per the carve-out
+in [`docs/json-contract.md`](../json-contract.md).
 
 ## Worked example
 

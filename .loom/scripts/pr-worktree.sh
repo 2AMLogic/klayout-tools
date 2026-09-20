@@ -75,6 +75,31 @@ print_success() { echo -e "${GREEN}✓ $1${NC}"; }
 print_info() { echo -e "${BLUE}ℹ $1${NC}"; }
 print_warning() { echo -e "${YELLOW}⚠ $1${NC}"; }
 
+# Runs the repo-owned .loom/hooks/post-worktree.sh (if present) inside a PR
+# review worktree (issue #2020). worktree.sh already invokes this hook for
+# issue worktrees; pr-worktree.sh did not, so a PR review worktree's `pytest`
+# run could silently import the MAIN CHECKOUT's src/ via a stale editable
+# install instead of the worktree's own copy -- a false negative on a PR
+# that fixes a bug, or a (more dangerous) false positive on a PR that
+# introduces one. .loom/hooks/ is NOT overwritten by a Loom upgrade (see
+# .loom/docs/repo-owned-files.md), so this call is stable across reinstalls
+# even though the file it invokes lives outside pr-worktree.sh itself.
+# Best-effort: a hook failure warns and never aborts worktree creation.
+run_post_worktree_hook() {
+    local worktree_path="$1" pr_number="$2"
+    local hook="$REPO_ROOT/.loom/hooks/post-worktree.sh"
+    if [[ -x "$hook" ]]; then
+        print_info "Running project-specific post-worktree hook..."
+        local branch
+        branch="$(git -C "$worktree_path" branch --show-current 2>/dev/null || true)"
+        if (cd "$worktree_path" && "$hook" "$worktree_path" "$branch" "$pr_number"); then
+            print_success "Post-worktree hook completed"
+        else
+            print_warning "Post-worktree hook failed (worktree still usable)"
+        fi
+    fi
+}
+
 show_help() {
     cat <<'EOF'
 Loom PR Worktree Helper
@@ -143,6 +168,7 @@ if [[ -d "$WORKTREE_PATH" ]]; then
         else
             print_warning "Could not refresh PR branch (continuing with existing checkout)"
         fi
+        run_post_worktree_hook "$WORKTREE_PATH" "$PR_NUMBER"
         echo "$WORKTREE_PATH"
         exit 0
     else
@@ -247,6 +273,8 @@ fi
 if [[ -f "$REPO_ROOT/.mcp.json" && ! -e "$WORKTREE_PATH/.mcp.json" ]]; then
     ln -s "$REPO_ROOT/.mcp.json" "$WORKTREE_PATH/.mcp.json" 2>/dev/null || true
 fi
+
+run_post_worktree_hook "$WORKTREE_PATH" "$PR_NUMBER"
 
 print_success "PR worktree ready at $WORKTREE_PATH"
 echo "$WORKTREE_PATH"

@@ -28,6 +28,8 @@ from klayout_tools import pdk
 from klayout_tools.cli import main
 from klayout_tools.drc import DrcError, run_drc_klayout_engine
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 #: Real-binary integration gate, mirroring `tests/test_lvs.py`'s
 #: `HAVE_NETGEN`/`_SKIP_NO_NETGEN` pattern for netgen.
 HAVE_KLAYOUT_BINARY = shutil.which("klayout") is not None
@@ -66,6 +68,31 @@ _EMPTY_RDB = """<?xml version="1.0" encoding="utf-8"?>
 <report-database>
  <description>stub</description>
  <categories>
+ </categories>
+ <cells>
+  <cell><name>TOP</name></cell>
+ </cells>
+ <items>
+ </items>
+</report-database>
+"""
+
+# Category declarations without findings do not prove which rules ran. The
+# `output(...)` call, so KLayout declared one `<category>` per rule, and none
+# of them produced an item. Structurally distinct from `_EMPTY_RDB` above --
+# same zero violations, but this report can say what it looked at.
+_CLEAN_WITH_CATEGORIES_RDB = """<?xml version="1.0" encoding="utf-8"?>
+<report-database>
+ <description>stub</description>
+ <categories>
+  <category>
+   <name>W.1</name>
+   <description>min width</description>
+  </category>
+  <category>
+   <name>S.1</name>
+   <description>min space</description>
+  </category>
  </categories>
  <cells>
   <cell><name>TOP</name></cell>
@@ -209,27 +236,95 @@ def test_klayout_engine_clean_report(tmp_path, monkeypatch):
 
     report = run_drc_klayout_engine(gds, deck_file)
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == gds
     assert report["deck"] == deck_file
     assert report["engine"] == "klayout"
     assert report["dbu_um"] == 0.001
-    assert report["status"] == "clean"
+    assert report["status"] == "coverage_unknown"
     assert report["violation_count"] == 0
     assert report["rule_counts"] == {}
     assert report["violations"] == []
     assert report["coverage"] == {
         "deck_layers": [],
         "layers_checked": [],
+        # An empty category table cannot establish whether rules executed.
+        "rules_checked": [],
         "layers_in_stream_without_rules": [],
         "rules_skipped": [],
         "voltage_domain_warnings": [],
         "deck_scope": [],
+        "nothing_checked": False,
+        "schema_version": 1,
+        "known": False,
+        "checked": [],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [
+            {
+                "id": 'engine_execution:["klayout"]',
+                "reason": "unmeasured_rule_execution",
+            }
+        ],
+        "rule_categories": [],
+        "nothing_checked_reasons": [],
     }
     assert report["provenance"]["deck"]["name"] == "deck.lydrc"
     assert report["provenance"]["deck"]["content_hash"].startswith("sha256:")
     assert report["provenance"]["input"]["content_hash"].startswith("sha256:")
     assert report["provenance"]["pdk"] is None
+
+
+def test_klayout_engine_all_rules_gated_off_reports_nothing_checked(
+    tmp_path, monkeypatch
+):
+    """An empty external RDB establishes unknown execution, not known zero."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["status"] == "coverage_unknown"
+    assert report["violation_count"] == 0
+    assert report["coverage"]["rules_checked"] == []
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["nothing_checked_reasons"] == []
+
+
+def test_klayout_engine_deck_var_set_reports_rules_checked(tmp_path, monkeypatch):
+    """Declared categories remain unknown execution even when enable flags are set."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_CLEAN_WITH_CATEGORIES_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file, deck_vars={"feol": "true"})
+
+    assert report["status"] == "coverage_unknown"
+    assert report["violation_count"] == 0
+    # Sorted, deduplicated -- the deck's own category names.
+    assert report["coverage"]["rules_checked"] == []
+    assert report["coverage"]["rule_categories"] == ["S.1", "W.1"]
+    assert report["coverage"]["known"] is False
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["nothing_checked_reasons"] == []
+
+
+def test_klayout_engine_violations_are_never_nothing_checked(tmp_path, monkeypatch):
+    """A report that found violations plainly checked something, so
+    `nothing_checked` is `False` and `rules_checked` names the rule that
+    fired -- even if that rule's category were somehow undeclared, the item's
+    own category id is unioned in (issue #1996)."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EDGE_PAIR_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["status"] == "violations"
+    assert report["coverage"]["rules_checked"] == ["W.1"]
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["nothing_checked_reasons"] == []
 
 
 def test_klayout_engine_edge_pair_violation_bbox_converted_to_dbu(
@@ -485,7 +580,7 @@ def test_cli_klayout_engine_pdk_flag_populates_provenance(
                 "json",
             ]
         )
-        == 0
+        == 4
     )
     data = json.loads(capsys.readouterr().out)
     assert data["provenance"]["pdk"]["name"] == "sky130A"
@@ -619,7 +714,7 @@ def test_klayout_engine_rule_output_mentioning_error_is_not_a_deck_error(
 
     report = run_drc_klayout_engine(gds, deck_file)
 
-    assert report["status"] == "clean"
+    assert report["status"] == "coverage_unknown"
     assert "engine_deck_errors" not in report
 
 
@@ -645,7 +740,7 @@ def test_klayout_engine_allow_deck_errors_accepts_partial_report(tmp_path, monke
 
     report = run_drc_klayout_engine(gds, deck_file, allow_deck_errors=True)
 
-    assert report["status"] == "clean"
+    assert report["status"] == "coverage_unknown"
     assert report["engine_deck_errors"]["exit_status"] == 1
     assert len(report["engine_deck_errors"]["error_lines"]) == 2
     assert report["engine_deck_errors"]["error_lines"][0].startswith(
@@ -714,9 +809,9 @@ def test_cli_drc_klayout_engine_allow_deck_errors_flag(tmp_path, monkeypatch, ca
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code == 4
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "clean"
+    assert payload["status"] == "coverage_unknown"
     assert payload["engine_deck_errors"]["exit_status"] == 1
 
 
@@ -724,7 +819,7 @@ def test_cli_drc_klayout_engine_allow_deck_errors_text_output_warns(
     tmp_path, monkeypatch, capsys
 ):
     """`--format text` must not render a tolerated partial run as an
-    unqualified `status: clean` either."""
+    unqualified `status: coverage_unknown` either."""
     _stub_klayout_drc_subprocess(
         monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
     )
@@ -745,7 +840,7 @@ def test_cli_drc_klayout_engine_allow_deck_errors_text_output_warns(
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code == 4
     out = capsys.readouterr().out
     assert "deck errors tolerated" in out
     assert "exit status 1" in out
@@ -777,7 +872,7 @@ def test_cli_drc_klayout_engine_request_document_allow_deck_errors(
 
     exit_code = main(["drc", str(request), "--format", "json"])
 
-    assert exit_code == 0
+    assert exit_code == 4
     payload = json.loads(capsys.readouterr().out)
     assert payload["engine_deck_errors"]["exit_status"] == 1
 
@@ -997,7 +1092,9 @@ def test_cli_drc_klayout_engine_with_explicit_deck_file(tmp_path, monkeypatch, c
     assert payload["violation_count"] == 1
 
 
-def test_cli_drc_klayout_engine_clean_exits_zero(tmp_path, monkeypatch, capsys):
+def test_cli_drc_klayout_engine_unknown_execution_exits_four(
+    tmp_path, monkeypatch, capsys
+):
     _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
     gds = _write_gds(tmp_path / "test.gds")
     deck_file = _write_deck_file(tmp_path / "deck.lydrc")
@@ -1015,10 +1112,10 @@ def test_cli_drc_klayout_engine_clean_exits_zero(tmp_path, monkeypatch, capsys):
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code == 4
     out = capsys.readouterr().out
     assert "engine: klayout" in out
-    assert "status: clean" in out
+    assert "status: coverage_unknown" in out
 
 
 def test_cli_drc_klayout_engine_deck_var_reaches_subprocess(tmp_path, monkeypatch):
@@ -1046,7 +1143,7 @@ def test_cli_drc_klayout_engine_deck_var_reaches_subprocess(tmp_path, monkeypatc
         ]
     )
 
-    assert exit_code == 0
+    assert exit_code == 4
     (cmd,) = captured
     assert "feol=true" in cmd
     assert "beol=true" in cmd
@@ -1144,15 +1241,17 @@ def test_klayout_engine_real_binary_reports_seeded_violation(tmp_path):
 
 
 @_SKIP_NO_KLAYOUT_BINARY
-def test_klayout_engine_real_binary_clean_layout(tmp_path):
+def test_klayout_engine_real_binary_no_findings_still_has_unknown_coverage(tmp_path):
     deck_file = _write_deck_file(tmp_path / "minimal.drc", _MINIMAL_WIDTH_DECK)
     # 1.0um wide shape -- wider than the 0.5um minimum, so no violation.
     gds = _write_gds(tmp_path / "clean.gds", layer=(1, 0), box=(0, 0, 1000, 1000))
 
     report = run_drc_klayout_engine(gds, deck_file, timeout_s=60.0)
 
-    assert report["status"] == "clean"
+    assert report["status"] == "coverage_unknown"
     assert report["violation_count"] == 0
+
+    assert report["coverage"]["known"] is False
 
 
 @_SKIP_NO_KLAYOUT_BINARY
@@ -1261,12 +1360,16 @@ def test_cli_klayout_engine_real_binary_resolves_sg13cmos5l_via_pdk_flags(
         ]
     )
 
-    assert exit_code == 0
+    # Zero violations leaves rule_counts empty, which cannot by itself
+    # establish that the declared category actually executed -- this PDK
+    # flag path refuses "coverage_unknown"/4, matching the mocked-subprocess
+    # coverage established in test_klayout_engine_clean_report.
+    assert exit_code == 4
 
     import json
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["status"] == "clean"
+    assert payload["status"] == "coverage_unknown"
     assert payload["violation_count"] == 0
     assert payload["deck"] == str(
         pdk_root / "libs.tech" / "klayout" / "tech" / "drc" / "ihp-sg13cmos5l.drc"

@@ -1,0 +1,852 @@
+{
+  "schema_version": 1,
+  "max_complexity": 10,
+  "generated_by": "scripts/check_complexity_baseline.py --update-baseline (ruff 0.16.2)",
+  "violations": [
+    {
+      "file": "scripts/derive-module-ownership.py",
+      "function": "find_related_modules",
+      "complexity": 21
+    },
+    {
+      "file": "scripts/design_agent_benchmark.py",
+      "function": "_build_live_agent_descriptor",
+      "complexity": 11
+    },
+    {
+      "file": "scripts/design_agent_benchmark.py",
+      "function": "_reference_solution_dependency_files",
+      "complexity": 13
+    },
+    {
+      "file": "scripts/design_agent_benchmark_interactive.py",
+      "function": "_default_invoke_interactive_agent",
+      "complexity": 20
+    },
+    {
+      "file": "scripts/ingest-canary.py",
+      "function": "_extract_table_nominal",
+      "complexity": 11
+    },
+    {
+      "file": "scripts/ingest-canary.py",
+      "function": "build_layout_json",
+      "complexity": 11
+    },
+    {
+      "file": "scripts/ingest-canary.py",
+      "function": "build_signals",
+      "complexity": 14
+    },
+    {
+      "file": "scripts/ingest-canary.py",
+      "function": "parse_spec_summary",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/arith_gen.py",
+      "function": "validate_cell_map",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/cli/economy_cmd.py",
+      "function": "_print_text",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/cli/equiv_cmd.py",
+      "function": "_print_text",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/cli/extract_cmd.py",
+      "function": "_print_text",
+      "complexity": 24
+    },
+    {
+      "file": "src/klayout_tools/cli/functional_verification_cmd.py",
+      "function": "_print_text",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/cli/gen_compose_cmd.py",
+      "function": "_print_text",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/cli/kb_cmd.py",
+      "function": "_print_show_text",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/cli/lvs_cmd.py",
+      "function": "_print_text",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/cli/mom_cmd.py",
+      "function": "_print_text",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/cli/sim_cmd.py",
+      "function": "_print_text",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/cli/synthesize_cmd.py",
+      "function": "_print_text",
+      "complexity": 18
+    },
+    {
+      "file": "src/klayout_tools/cli/yield_cmd.py",
+      "function": "_print_text",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/components.py",
+      "function": "_components_for_cell",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/decks/extraction.py",
+      "function": "device_recognition_layers",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/design_evidence_tiers.py",
+      "function": "_parse_t1_items",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/digital_fleet.py",
+      "function": "build_digital_job_description",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/draw.py",
+      "function": "draw",
+      "complexity": 21
+    },
+    {
+      "file": "src/klayout_tools/drc.py",
+      "function": "_parse_klayout_rdb_report",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/drc.py",
+      "function": "run_drc",
+      "complexity": 47
+    },
+    {
+      "file": "src/klayout_tools/economy.py",
+      "function": "_row_utilization",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/equiv.py",
+      "function": "_confirm_sequential_counterexample",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/equiv.py",
+      "function": "_resolve_side",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/equiv.py",
+      "function": "_run_sequential",
+      "complexity": 18
+    },
+    {
+      "file": "src/klayout_tools/equiv.py",
+      "function": "run_equiv",
+      "complexity": 19
+    },
+    {
+      "file": "src/klayout_tools/erc.py",
+      "function": "_net_connectivity_findings",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/erc.py",
+      "function": "_validate_stackup",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/erc.py",
+      "function": "run_erc",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/eval.py",
+      "function": "run_eval",
+      "complexity": 22
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "function": "_build_mom_capacitor_extractor",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "function": "_detect_diode_substrate_label_divergence",
+      "complexity": 19
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "function": "_extract_netlist",
+      "complexity": 120
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "function": "_resolve_resistors",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "function": "run_extract",
+      "complexity": 63
+    },
+    {
+      "file": "src/klayout_tools/extract.py",
+      "function": "run_extract_klayout_engine",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/extract_abstract.py",
+      "function": "_local_pin_candidate_points",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/extract_abstract.py",
+      "function": "_resolve_abstract_cell_pins",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/extract_abstract.py",
+      "function": "_wire_abstract_cells",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/extract_parasitics.py",
+      "function": "_compute_parasitics",
+      "complexity": 59
+    },
+    {
+      "file": "src/klayout_tools/extract_parasitics.py",
+      "function": "_inject_parasitics",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/extract_report.py",
+      "function": "_describe_devices",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/extract_report.py",
+      "function": "_describe_matched_device_groups",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/extract_spef.py",
+      "function": "_write_spef",
+      "complexity": 19
+    },
+    {
+      "file": "src/klayout_tools/extract_spef.py",
+      "function": "def_net_instance_pins",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/functional_verification.py",
+      "function": "_resolve_testbench",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/functional_verification.py",
+      "function": "load_mutation_proposals",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/functional_verification.py",
+      "function": "run_functional_verification",
+      "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/functional_verification.py",
+      "function": "run_functional_verification_with_mutations",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/functional_verification_sdf.py",
+      "function": "_reject_sdf_escaped_divider_interconnects",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/functional_verification_sdf.py",
+      "function": "_split_sdf_bus_port_interconnects",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/gen.py",
+      "function": "_coerce_param",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/gen.py",
+      "function": "_mos_array_describe",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen.py",
+      "function": "_mos_array_layout",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/gen.py",
+      "function": "_mos_array_validate",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/gen.py",
+      "function": "_well_island_isolation",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "_declared_bbox_overlap_warnings",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "_leg_conflict",
+      "complexity": 25
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "_parse_blocks",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "_parse_cell_ports",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "_parse_connectivity",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "_parse_legs",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "_write_composed_gds",
+      "complexity": 22
+    },
+    {
+      "file": "src/klayout_tools/gen_compose.py",
+      "function": "compose",
+      "complexity": 106
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "_declare_only_bundle_result",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "_leg_plane_clears_ring",
+      "complexity": 19
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "_resolve_via_drop_layer",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "_ring_gap_route_conflict",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "_same_layer_short_reason",
+      "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "_segment_obstacle_overlap_um",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "route_bundle",
+      "complexity": 45
+    },
+    {
+      "file": "src/klayout_tools/gen_compose_routing.py",
+      "function": "route_two_pin",
+      "complexity": 90
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/bjt_array.py",
+      "function": "_build_bjt_array_pcell",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/diff_pair.py",
+      "function": "_build_diff_pair_pcell",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "function": "_build_mos_array_pcell",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/mos_array.py",
+      "function": "produce_impl",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/gen_pcells/res_array.py",
+      "function": "_build_res_array_pcell",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/ir_solver.py",
+      "function": "_pcg",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/ir_solver.py",
+      "function": "solve_ir_drop",
+      "complexity": 42
+    },
+    {
+      "file": "src/klayout_tools/kb.py",
+      "function": "_recheck_measured_errors",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/layout_metrics.py",
+      "function": "layout_metrics_report",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/layout_plan.py",
+      "function": "_parse_abutment",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/layout_plan.py",
+      "function": "_parse_device_groups_shape",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/layout_plan.py",
+      "function": "_parse_rows",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/layout_plan_execute.py",
+      "function": "_build_connectivity",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/layout_plan_execute.py",
+      "function": "_resolve_group_params",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/layout_plan_execute.py",
+      "function": "_resolve_placement",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "_apply_compare_parameters",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "_apply_gate_level_port_aliases",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "_apply_reference_device_bulk",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "_read_reference_netlist",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "_reconstruct_lvs_request",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "_resolve_layout",
+      "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/lvs.py",
+      "function": "run_lvs",
+      "complexity": 60
+    },
+    {
+      "file": "src/klayout_tools/lvs_mismatch.py",
+      "function": "_build_mismatches",
+      "complexity": 18
+    },
+    {
+      "file": "src/klayout_tools/lvs_mismatch.py",
+      "function": "_classify_net_mismatch_pool",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/lvs_mismatch.py",
+      "function": "_degraded_param_pair",
+      "complexity": 18
+    },
+    {
+      "file": "src/klayout_tools/lvs_mismatch.py",
+      "function": "_make_compare_logger",
+      "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/lvs_mismatch.py",
+      "function": "_net_mismatch_pools",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/lvs_netgen.py",
+      "function": "_parse_netgen_report",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/mom.py",
+      "function": "run_mom",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/netlist_capacitor_recovery.py",
+      "function": "element",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/netlist_capacitor_recovery.py",
+      "function": "make_capacitor_class_recovery_reader",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/netlist_normalize.py",
+      "function": "_tokenize",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/op_sanity.py",
+      "function": "_classify_rails",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/op_sanity.py",
+      "function": "_declared_nodes",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/op_sanity.py",
+      "function": "_parse_op_log",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/op_sanity.py",
+      "function": "parse_netlist",
+      "complexity": 18
+    },
+    {
+      "file": "src/klayout_tools/op_sanity.py",
+      "function": "run_op_sanity",
+      "complexity": 22
+    },
+    {
+      "file": "src/klayout_tools/pdk_models.py",
+      "function": "create_model_binding_delegate",
+      "complexity": 28
+    },
+    {
+      "file": "src/klayout_tools/pdk_models.py",
+      "function": "write_device",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/pex.py",
+      "function": "run_pex",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "function": "_extract_stage_metrics",
+      "complexity": 21
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "function": "_power_delivery_lines",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "function": "_stage_script_lines",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "function": "_validate_constraints",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "function": "_validate_macros",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "function": "_validate_power",
+      "complexity": 28
+    },
+    {
+      "file": "src/klayout_tools/place_and_route.py",
+      "function": "run_place_and_route",
+      "complexity": 27
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_gds_merge.py",
+      "function": "_merge_def_to_gds",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_gds_merge.py",
+      "function": "_stamp_single_pin_def_net_names",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/place_and_route_sta.py",
+      "function": "_def_pin_net_names",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/post_route_sta.py",
+      "function": "run_sta",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/power.py",
+      "function": "_build_island_network",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/power.py",
+      "function": "_compute_em_verdict",
+      "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/power.py",
+      "function": "_solve_ir_drop",
+      "complexity": 17
+    },
+    {
+      "file": "src/klayout_tools/power.py",
+      "function": "_validate_current_model",
+      "complexity": 21
+    },
+    {
+      "file": "src/klayout_tools/power.py",
+      "function": "_validate_stackup",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/power.py",
+      "function": "run_power",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/precheck.py",
+      "function": "_check_pin_labels_over_drawing",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/render.py",
+      "function": "render_report",
+      "complexity": 21
+    },
+    {
+      "file": "src/klayout_tools/restructure.py",
+      "function": "restructure_for_timing",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "function": "_check_passed",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "function": "_classify",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/signoff.py",
+      "function": "_detail",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "function": "_rollup_measurements",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "function": "_run_corner",
+      "complexity": 20
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "function": "_run_local_parallel",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "function": "parse_ascii_rawfile",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/sim.py",
+      "function": "run_sim",
+      "complexity": 51
+    },
+    {
+      "file": "src/klayout_tools/sim_plot.py",
+      "function": "render_waveform_svg",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/size.py",
+      "function": "_parse_topology_log",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/size.py",
+      "function": "_run_single_device_size",
+      "complexity": 26
+    },
+    {
+      "file": "src/klayout_tools/size.py",
+      "function": "_run_topology_size",
+      "complexity": 18
+    },
+    {
+      "file": "src/klayout_tools/size.py",
+      "function": "_run_worst_case_margin",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/socket_check.py",
+      "function": "_validate_pins",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/stats.py",
+      "function": "_instance_weights",
+      "complexity": 14
+    },
+    {
+      "file": "src/klayout_tools/synthesize.py",
+      "function": "_compute_baseline",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/synthesize.py",
+      "function": "_read_stats",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/synthesize.py",
+      "function": "_resolve_arithmetic",
+      "complexity": 15
+    },
+    {
+      "file": "src/klayout_tools/synthesize.py",
+      "function": "run_synthesize",
+      "complexity": 16
+    },
+    {
+      "file": "src/klayout_tools/trajectory.py",
+      "function": "_validate_record",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/verilog_netlist.py",
+      "function": "_parse_instance_statement",
+      "complexity": 11
+    },
+    {
+      "file": "src/klayout_tools/yield_analysis.py",
+      "function": "_measurements_from_sim_report",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/yield_analysis.py",
+      "function": "_sampling_from",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/yield_analysis.py",
+      "function": "run_yield",
+      "complexity": 11
+    },
+    {
+      "file": "tests/helpers/magic_oracle.py",
+      "function": "parse_magic_spice",
+      "complexity": 13
+    },
+    {
+      "file": "tests/test_lvs_device_provenance.py",
+      "function": "_provenanced_device_rule_ids",
+      "complexity": 11
+    },
+    {
+      "file": "tests/test_lvs_native_extraction_cross_check.py",
+      "function": "_provenanced_device_rule_ids",
+      "complexity": 11
+    },
+    {
+      "file": "tests/test_lvs_native_extraction_cross_check_gf180mcu.py",
+      "function": "_provenanced_device_rule_ids",
+      "complexity": 11
+    },
+    {
+      "file": "tests/test_op_sanity.py",
+      "function": "_install_fake_ngspice",
+      "complexity": 12
+    },
+    {
+      "file": "tests/test_op_sanity.py",
+      "function": "fake_run",
+      "complexity": 11
+    },
+    {
+      "file": "tests/test_sg13g2_deck.py",
+      "function": "_provenanced_device_rule_ids",
+      "complexity": 16
+    }
+  ]
+}

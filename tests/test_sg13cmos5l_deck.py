@@ -48,9 +48,9 @@ See `src/klayout_tools/decks/sg13cmos5l.py`'s module docstring for this
 deck's full provenance notes, scope (`width`/`space`/`enclosing` DRC checks
 across `Activ`/`GatPoly`/`Metal1`-`TopMetal1`/`Via1`-`Via3`/`TopVia1`; LV *and*
 HV MOSFET LVS device class pairs, the three poly resistors, and the two MoM
-capacitors), and what was deliberately left un-transcribed and why (metal
-resistors, diodes, parasitics, and the MiM capacitor stack cmos5l's own
-forbidden-layer rule blocks outright).
+capacitors), plus nominal metal parasitics (issue #2113), and what was
+deliberately left un-transcribed and why (metal resistors, diodes, and the
+MiM capacitor stack cmos5l's own forbidden-layer rule blocks outright).
 """
 
 from __future__ import annotations
@@ -1196,3 +1196,120 @@ def test_sg13cmos5l_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
     (device,) = report["devices"]
     assert {device["nets"]["a"], device["nets"]["b"]} == {"M3_NET", "M4_NET"}
     assert device["params"] == {"w_um": pytest.approx(5.0), "l_um": pytest.approx(5.0)}
+
+
+def test_sg13cmos5l_is_registered_for_parasitics_extraction(tmp_path: Path):
+    """Registry support (#1440) now includes usable full-stack R/C (#2113)."""
+    from klayout_tools.decks import get_parasitics_deck, sg13cmos5l
+
+    assert get_parasitics_deck("sg13cmos5l") is sg13cmos5l.PARASITICS
+
+    assert len(sg13cmos5l.PARASITICS.metals) == len(EXTRACTION_DECK.metals) == 5
+    assert len(sg13cmos5l.PARASITICS.metal_overlaps) == 4
+    path = _write_gds(
+        _make_nfet_layout_routed_through_full_metal_stack(), tmp_path / "nfet.gds"
+    )
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "nfet.spice"), parasitics=True
+    )
+
+    assert report["status"] == "extracted"
+    parasitics = report["parasitics"]
+    assert parasitics["r_count"] == 3
+    assert parasitics["c_count"] == 3
+    assert parasitics["total_resistance_ohm"] > 0
+    assert parasitics["total_capacitance_ff"] > 0
+    assert parasitics["metals_without_coefficient"] == []
+    assert parasitics["overlap_pairs_without_coefficient"] == []
+    assert parasitics["cc_count"] == 0  # The via-connected stack is one net.
+    assert not any(
+        "PARASITICS.metals has no R/C coefficient" in w for w in report["warnings"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("layer", "resistance_ohm", "capacitance_ff"),
+    [
+        (8, 1.10, 3.138072),
+        (10, 0.88, 2.290960),
+        (30, 0.88, 1.828668),
+        (50, 0.88, 1.643160),
+        (126, 0.18, 1.788268),
+    ],
+    ids=["Metal1", "Metal2", "Metal3", "Metal4", "TopMetal1"],
+)
+def test_sg13cmos5l_parasitics_rectangular_wire(
+    tmp_path: Path, layer: int, resistance_ohm: float, capacitance_ff: float
+):
+    """20x2um: 10 squares, area 40um², perimeter 44um. Expected values are
+    hand-computed from the pinned CMOS5L Magic source, not the Python table.
+    TopMetal1 must differ from both SG13G2 Metal5 and SG13G2 TopMetal1."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(layer, 0)).insert(_box_um(0, 0, 20, 2))
+    top.shapes(layout.layer(layer, 2)).insert(kdb.Text("WIRE", 1000, 1000))
+    path = _write_gds(layout, tmp_path / "wire.gds")
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "wire.spice"), parasitics=True
+    )
+
+    parasitics = report["parasitics"]
+    assert parasitics["r_count"] == parasitics["c_count"] == 1
+    (wire,) = parasitics["nets"]
+    assert wire["net"] == "WIRE"
+    assert wire["resistance_ohm"] == pytest.approx(resistance_ohm)
+    assert wire["capacitance_ff"] == pytest.approx(capacitance_ff)
+    assert parasitics["cc_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("lower", "upper", "index", "coupling_ff", "lower_ground_ff", "upper_ground_ff"),
+    [
+        (8, 10, 0, 2.689, 1.737472, 1.563760),
+        (10, 30, 1, 2.689, 1.563760, 1.348908),
+        (30, 50, 2, 2.689, 1.348908, 1.285240),
+        (50, 126, 3, 1.70832, 1.285240, 1.519188),
+    ],
+    ids=["Metal1-Metal2", "Metal2-Metal3", "Metal3-Metal4", "Metal4-TopMetal1"],
+)
+def test_sg13cmos5l_parasitics_distinct_net_overlap(
+    tmp_path: Path,
+    lower: int,
+    upper: int,
+    index: int,
+    coupling_ff: float,
+    lower_ground_ff: float,
+    upper_ground_ff: float,
+):
+    """Two unconnected 20x2um plates couple over 40um². Ground area is fully
+    deducted on both nets, leaving each plate's 44um perimeter fringe term."""
+    layout = kdb.Layout()
+    layout.dbu = _DBU_UM
+    top = layout.create_cell("TOP")
+    for layer, name in ((lower, "LOWER"), (upper, "UPPER")):
+        top.shapes(layout.layer(layer, 0)).insert(_box_um(0, 0, 20, 2))
+        top.shapes(layout.layer(layer, 2)).insert(kdb.Text(name, 1000, 1000))
+    path = _write_gds(layout, tmp_path / "overlap.gds")
+    netlist_path = tmp_path / "overlap.spice"
+    report = run_extract(path, "sg13cmos5l", output=str(netlist_path), parasitics=True)
+
+    parasitics = report["parasitics"]
+    assert parasitics["cc_count"] == 1
+    assert parasitics["total_coupling_capacitance_ff"] == pytest.approx(coupling_ff)
+    by_net = {net["net"]: net for net in parasitics["nets"]}
+    assert set(by_net) == {"LOWER", "UPPER"}
+    assert by_net["LOWER"]["capacitance_ff"] == pytest.approx(lower_ground_ff)
+    assert by_net["UPPER"]["capacitance_ff"] == pytest.approx(upper_ground_ff)
+    (coupling,) = by_net["LOWER"]["coupled"]
+    assert coupling["net"] == "UPPER"
+    assert coupling["levels"] == [[index, index + 1]]
+    assert coupling["capacitance_ff"] == pytest.approx(coupling_ff)
+    (card,) = [
+        line
+        for line in netlist_path.read_text().splitlines()
+        if line.startswith("Ccc_")
+    ]
+    fields = card.split()
+    assert set(fields[1:3]) == {"LOWER__par", "UPPER__par"}
+    assert float(fields[3]) == pytest.approx(coupling_ff * 1e-15, rel=1e-6, abs=0)

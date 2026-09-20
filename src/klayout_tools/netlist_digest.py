@@ -20,8 +20,9 @@ the same private helpers ``klt lvs``'s reference-side request already
 resolves through (``path``/``form``/``deck``/``device_map``, the identical
 keyword shape) -- rather than opening a second, independent SPICE-reading
 code path. Importing a leading-underscore name from a sibling module in this
-package is an established convention here (see e.g. ``sim.py``'s
-``from .pdk_models import _pdk_variant_family``), not a layering violation.
+package is an established convention here (see e.g. ``extract.py``'s
+``from .extract_abstract import _sanitize_instance_name``), not a layering
+violation.
 
 **Shape.** ``devices[]``: ``{"name", "device_class", "terminals":
 {<terminal-name>: <net-name-or-None>}, "params": {<param-name>: <value>}}``.

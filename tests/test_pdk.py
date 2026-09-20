@@ -1169,6 +1169,44 @@ def test_lvs_deck_file_no_hyphen_variant_unaffected_by_vendor_prefix_fallback(
     assert result is None
 
 
+def test_lvs_deck_file_resolves_aliased_family_name_for_ihp_sg13g2(tmp_path):
+    # The family candidate comes from the authoritative classifier (issue
+    # #2026), which resolves `ihp-sg13g2` -> `sg13g2` through
+    # `pdk_families.PDK_VARIANT_FAMILY_ALIASES` -- a mapping the old inline
+    # trailing-uppercase-strip could never express (it left `ihp-sg13g2`
+    # unchanged and relied solely on the separate vendor-prefix-drop
+    # candidate). A real IHP-Open-PDK SG13G2 install ships `sg13g2.lvs`.
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root, assets=("klayout",))
+    lvs_dir = root / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "sg13g2.lvs").write_text("# native lvs deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result == str(lvs_dir / "sg13g2.lvs")
+
+
+def test_lvs_deck_file_does_not_guess_a_family_for_an_unrecognised_variant(tmp_path):
+    # Issue #2026: family derivation is delegated to the one authoritative
+    # classifier, which returns an unrecognised variant unchanged rather than
+    # guessing. `mysteryA` is therefore *not* reduced to `mystery` the way the
+    # removed inline trailing-uppercase-strip would have -- a variant whose
+    # family this repo has not declared in `pdk_families.KNOWN_PDK_FAMILIES`
+    # gets no speculative bare-family probe, matching this module's "never
+    # guessed" convention. (A genuinely new family is ported by registering it
+    # there -- see docs/guides/pdk-family-port-checklist.md.)
+    root = tmp_path / "install"
+    variant_dir = _make_install(root, "mysteryA", assets=("klayout",))
+    lvs_dir = variant_dir / "libs.tech" / "klayout" / "lvs"
+    lvs_dir.mkdir(parents=True)
+    (lvs_dir / "mystery.lvs").write_text("# bare-name deck\n")
+
+    result = pdk.lvs_deck_file(root=str(root))
+
+    assert result is None
+
+
 def test_lvs_deck_file_no_install_raises(tmp_path):
     with pytest.raises(pdk.PdkNotFoundError):
         pdk.lvs_deck_file(root=str(tmp_path / "does-not-exist"))
@@ -1968,6 +2006,24 @@ def test_corners_unrecognised_pdk_family_is_empty_not_error(tmp_path):
     assert report["corner_names"] == []
     assert report["model_lib"] is None
     assert "no curated corner-family grouping" in report["resolved_via"]
+
+
+def test_corners_known_family_without_a_corner_scanner_is_empty_not_error(tmp_path):
+    # `ihp-sg13g2` classifies to the *known* family `sg13g2` (issue #2026:
+    # `_corner_pdk_family` now delegates classification and only decides
+    # support), but `klt pdk corners` has no curated corner grouping or model
+    # deck for it -- a declared narrowing of the authoritative family set, so
+    # the answer is an explanatory empty result, not an error and not a
+    # mis-attributed sky130/gf180mcu scan.
+    root = tmp_path / "ihp-sg13g2"
+    _make_flat_install(root, assets=("ngspice",))
+
+    report = pdk.list_corners(root=str(root))
+
+    assert report["corners"] == []
+    assert report["model_lib"] is None
+    assert "no curated corner-family grouping" in report["resolved_via"]
+    assert "gf180mcu, sky130" in report["resolved_via"]
 
 
 def test_corners_no_ngspice_asset_is_empty_not_error(tmp_path):

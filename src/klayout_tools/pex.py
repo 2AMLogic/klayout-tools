@@ -141,6 +141,7 @@ from typing import Any
 
 from . import env_provenance
 from ._paths import _fold_spice_continuations, _resolve_relative
+from .coverage import REASON_NO_DELTA_ROWS, build_check_coverage, work_id
 from .extract import ExtractError, run_extract
 from .sim import SimError, load_request, run_sim
 
@@ -183,6 +184,25 @@ _PIN_COUNT_MISMATCH_RE = re.compile(
 #: ``name=value`` parameters). See :func:`_subckt_interfaces`.
 _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
 
+#: Issue #1983: ``body_bias.status`` values -- whether the extracted netlist
+#: this run re-simulated has a DC bias path for every device body.
+#:
+#: - ``"biased"``: every PMOS body terminal resolved to a real, named net, so
+#:   both legs' operating points are comparable.
+#: - ``"unbiased"``: at least one PMOS body landed on an anonymous,
+#:   KLayout-synthesized net with **no DC bias path at all** (``klt
+#:   extract``'s own ``unbiased_pmos_body_nets[]``, issue #555). Per
+#:   ``docs/cli/extract.md`` -> "Coverage", that makes a full-circuit
+#:   resimulation of the extracted netlist "physically wrong, not merely
+#:   imprecise" -- the run converges and produces numbers, and those numbers
+#:   are not comparable to the schematic leg's.
+#:
+#: Deliberately a *separate* verdict from this command's top-level
+#: ``status``, which stays exactly what it has always been (every graded
+#: ``delta[]`` row met its tolerance). See :func:`_body_bias_report`.
+BODY_BIAS_BIASED = "biased"
+BODY_BIAS_UNBIASED = "unbiased"
+
 
 class PexError(Exception):
     """Raised when a `klt pex` run cannot be completed: a bad testbench
@@ -195,6 +215,53 @@ class PexError(Exception):
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback -- matching every other `klt` verb's error contract.
     """
+
+
+def _body_bias_report(extract_report: Mapping[str, Any]) -> dict[str, Any]:
+    """The ``body_bias`` block (issue #1983): whether the extracted netlist
+    this run re-simulated actually has a DC bias path for every device body.
+
+    Built from the extraction this command drove itself -- ``klt extract``
+    already detects the condition and reports it as
+    ``unbiased_pmos_body_nets[]`` (issue #555), so nothing here re-derives
+    it; this reduces that array to a verdict plus its counts and carries the
+    entries through into `klt pex`'s own envelope.
+
+    **Why this belongs in the `klt pex` report and not only in the
+    extraction's.** ``docs/cli/extract.md`` states that a PMOS body on an
+    anonymous, synthesized net has no DC bias path at all, which makes a
+    full-circuit resimulation of that netlist *physically wrong, not merely
+    imprecise*. `klt pex`'s entire output is such a resimulation, compared
+    row-by-row against a schematic leg -- so this condition does not merely
+    reduce the precision of a ``delta[]`` row, it invalidates the comparison
+    the row reports. A `klt pex` record is also the artifact
+    ``docs/design-evidence-tiers.md`` item 7 is cited from, and that record
+    never carried the extraction's own JSON: a reader of the evidence had no
+    way to tell a post-layout number measured on a properly-biased netlist
+    from one measured on a floating-body netlist. That is the gap issue
+    #1983 reported.
+
+    **Reported, not enforced.** ``status`` is untouched: a run whose deltas
+    all met tolerance still reports ``status: "pass"`` with
+    ``body_bias.status: "unbiased"``. Whether an unbiased body should
+    invalidate the verdict is a policy question for the consumer of the
+    evidence (see ``docs/cli/signoff.md`` and
+    ``docs/design-evidence-tiers.md`` item 7), not one this command answers
+    on the caller's behalf -- and answering it here would retroactively fail
+    every design on a PDK whose deck has no well-tap mechanism, which is a
+    separate decision from making the condition visible.
+
+    ``unbiased_pmos_body_nets`` is carried verbatim (same field name, same
+    ``{"device", "net"}`` entry shape as ``klt extract``'s own) rather than
+    re-spelled, so a reader who knows one artifact already knows the other.
+    """
+    entries = list(extract_report.get("unbiased_pmos_body_nets") or [])
+    return {
+        "status": BODY_BIAS_UNBIASED if entries else BODY_BIAS_BIASED,
+        "unbiased_device_count": len(entries),
+        "unbiased_nets": sorted({entry["net"] for entry in entries}),
+        "unbiased_pmos_body_nets": entries,
+    }
 
 
 def _report_path(path: str | None, *, repo_root: str | None) -> dict[str, Any]:
@@ -794,6 +861,45 @@ def _unextracted_delta_rows(
     return rows
 
 
+def _build_coverage(
+    *,
+    testbenches_summary: list[dict[str, Any]],
+    delta: list[dict[str, Any]],
+    corner_count: int,
+) -> dict[str, Any]:
+    """Comparison coverage counts only rows with two comparable measurements."""
+    checked = []
+    skipped = []
+    for row_index, row in enumerate(delta):
+        # `row_index` (this row's own position in the report's `delta` list)
+        # scopes the identity -- `spec_row` is a *display* label
+        # (`<testbench file stem>.<name>`, docs/cli/pex.md), and two distinct
+        # testbench files sharing a basename in different directories (e.g.
+        # `a/request.json` and `b/request.json`) produce the same stem, which
+        # would otherwise collide as one "unique" work identity for two
+        # genuinely separate comparisons.
+        identity = work_id("comparison", row_index, row["corner_id"], row["spec_row"])
+        if row["status"] in {"pass", "fail"}:
+            checked.append(identity)
+        else:
+            skipped.append({"id": identity, "reason": "unavailable_comparison"})
+    for index, testbench in enumerate(testbenches_summary):
+        if not testbench["corner_count"] or not testbench["measurement_names"]:
+            skipped.append(
+                {"id": work_id("testbench", index), "reason": "no_comparison_pairs"}
+            )
+    return {
+        "testbenches": len(testbenches_summary),
+        "delta_rows": len(delta),
+        "corners_compared": corner_count,
+        **build_check_coverage(
+            checked=checked,
+            skipped=skipped,
+            nothing_checked_reasons=[REASON_NO_DELTA_ROWS] if not delta else None,
+        ),
+    }
+
+
 def _prepare_extracted_request(
     *,
     testbench_path: str,
@@ -1004,14 +1110,11 @@ def run_pex(
     and the named `flat_dut_mismatch` block (issue #1255, Gap 2; see
     :func:`_flat_dut_mismatch`).
 
-    Returns a dict matching the documented JSON schema (see
-    ``docs/cli/pex.md``) -- notably a `delta[]` array plus a
-    `reference_netlist` field, the shape issue #871 (Phase 2b of epic #706)
-    already taught `klt signoff`'s `_classify()` to recognise as kind
-    `"pex"` (see this module's docstring). Raises :class:`PexError` for
-    anything that prevents the run from completing at all (bad testbench, a
-    missing or ambiguous DUT reference, disagreeing schematic references, an
-    extraction or simulation failure).
+    ``coverage`` preserves the legacy counters alongside common checked-work
+    v1 identities, skips, applicability and unknown execution. Known zero
+    actual checks produces ``not_checked`` unless a real failure/error wins.
+    See :func:`_build_coverage` and ``docs/coverage-contract.md``.
+
     """
     if not testbench_paths:
         raise PexError("at least one testbench request is required")
@@ -1312,6 +1415,10 @@ def run_pex(
             }
         )
 
+    corner_count = len({row["corner_id"] for row in delta})
+    coverage = _build_coverage(
+        testbenches_summary=testbenches_summary, delta=delta, corner_count=corner_count
+    )
     passed = sum(1 for row in delta if row["status"] == "pass")
     failed = sum(1 for row in delta if row["status"] == "fail")
     errored = sum(1 for row in delta if row["status"] == "error")
@@ -1320,9 +1427,7 @@ def run_pex(
     elif failed:
         status = "fail"
     else:
-        status = "pass"
-
-    corner_count = len({row["corner_id"] for row in delta})
+        status = "not_checked" if coverage["nothing_checked"] else "pass"
 
     parasitics = extract_report.get("parasitics") or {}
     result: dict[str, Any] = {
@@ -1352,9 +1457,18 @@ def run_pex(
             # byte-identical to before this feature existed otherwise.
             "mom_rlc_override": parasitics.get("mom_rlc_override"),
         },
+        # Additive field (issue #1983): whether the extracted netlist this
+        # run re-simulated has a DC bias path for every device body, reduced
+        # from the extraction's own `unbiased_pmos_body_nets[]` (issue #555).
+        # Reported beside `status`, never folded into it -- see
+        # `_body_bias_report` for why an item-7 citation needs this in the
+        # artifact it cites, and why this command does not grade on it.
+        "body_bias": _body_bias_report(extract_report),
         "testbenches": testbenches_summary,
         "corner_count": corner_count,
         "delta": delta,
+        # Actual comparable rows, separately from attempted/error row counts.
+        "coverage": coverage,
         "passed": passed,
         "failed": failed,
         "errored": errored,

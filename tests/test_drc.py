@@ -78,7 +78,7 @@ def test_run_drc_reports_seeded_violation(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(path)
     assert report["deck"] == "sky130"
     assert report["dbu_um"] == 0.001
@@ -370,7 +370,7 @@ def test_run_drc_coverage_reports_uncovered_stream_layers(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["status"] == "clean"
+    assert report["status"] == "not_checked"
     assert report["coverage"]["layers_in_stream_without_rules"] == ["99/0"]
     assert report["coverage"]["layers_checked"] == []
     assert report["coverage"]["rules_skipped"] == sorted(
@@ -408,7 +408,7 @@ def test_run_drc_coverage_empty_stream(tmp_path):
 
     report = run_drc(str(path), "sky130")
 
-    assert report["status"] == "clean"
+    assert report["status"] == "not_checked"
     assert report["coverage"]["layers_checked"] == []
     assert report["coverage"]["layers_in_stream_without_rules"] == []
     assert set(report["coverage"]["deck_layers"]) == {
@@ -417,6 +417,40 @@ def test_run_drc_coverage_empty_stream(tmp_path):
     assert report["coverage"]["rules_skipped"] == sorted(
         rule.id for rule in get_deck("sky130")
     )
+
+
+def test_run_drc_coverage_empty_stream_reports_nothing_checked(tmp_path):
+    """Known zero work is explicit and non-successful even without violations."""
+    layout = kdb.Layout()
+    layout.create_cell("TOP")
+    path = tmp_path / "empty.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "not_checked"
+    assert report["coverage"]["rules_checked"] == []
+    assert report["coverage"]["nothing_checked"] is True
+    assert report["coverage"]["nothing_checked_reasons"] == ["all_rules_skipped"]
+
+
+def test_run_drc_coverage_rules_checked_is_the_complement_of_rules_skipped(tmp_path):
+    """Issue #1996: `rules_checked` and `rules_skipped` partition the deck --
+    every rule is in exactly one of them -- so a reader can tell "clean over
+    eight rules" from "clean over zero" without knowing the deck's own rule
+    table."""
+    path = tmp_path / "clean.gds"
+    _make_clean_layout().write(str(path))  # poly.drawing (66/20) only
+
+    report = run_drc(str(path), "sky130")
+
+    checked = report["coverage"]["rules_checked"]
+    skipped = report["coverage"]["rules_skipped"]
+    assert checked  # something ran, so this is not a vacuous verdict
+    assert set(checked).isdisjoint(skipped)
+    assert set(checked) | set(skipped) == {rule.id for rule in get_deck("sky130")}
+    assert report["coverage"]["nothing_checked"] is False
+    assert report["coverage"]["nothing_checked_reasons"] == []
 
 
 def test_run_drc_coverage_fully_covered_stream(tmp_path):
@@ -559,7 +593,7 @@ def test_json_contract(tmp_path, capsys):
         "coverage",
         "provenance",
     }
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
 
     prov = data["provenance"]
     assert set(prov.keys()) == {
@@ -632,14 +666,37 @@ def test_json_contract(tmp_path, capsys):
 
     coverage = data["coverage"]
     assert set(coverage.keys()) == {
+        "schema_version",
+        "known",
+        "checked",
+        "skipped",
+        "inapplicable",
+        "unknown",
         "deck_layers",
         "layers_checked",
         "layers_in_stream_without_rules",
+        "rules_checked",
         "rules_skipped",
         "voltage_domain_warnings",
         "deck_scope",
+        # Issue #1996: the shared vacuous-verdict convention
+        # (`klayout_tools.coverage`), emitted alongside the pre-existing
+        # layer/rule-level fields.
+        "nothing_checked",
+        "nothing_checked_reasons",
     }
+    assert isinstance(coverage["nothing_checked"], bool)
     for key, field in coverage.items():
+        if key in {
+            "nothing_checked",
+            "schema_version",
+            "known",
+            "checked",
+            "skipped",
+            "inapplicable",
+            "unknown",
+        }:
+            continue
         assert isinstance(field, list)
         if key == "voltage_domain_warnings":
             for entry in field:
@@ -648,6 +705,9 @@ def test_json_contract(tmp_path, capsys):
                 assert isinstance(entry["description"], str)
         else:
             assert all(isinstance(v, str) for v in field)
+    # A run that produced violations plainly checked something.
+    assert coverage["nothing_checked"] is False
+    assert coverage["nothing_checked_reasons"] == []
 
 
 def test_provenance_input_hash_tracks_layout_bytes(tmp_path):
@@ -811,10 +871,10 @@ def test_text_format_reports_unchecked_layers_summary(tmp_path, capsys):
     path = tmp_path / "uncovered.gds"
     layout.write(str(path))
 
-    assert main(["drc", str(path), "--deck", "sky130"]) == 0
+    assert main(["drc", str(path), "--deck", "sky130"]) == 4
     out = capsys.readouterr().out
 
-    assert "status: clean" in out
+    assert "status: not_checked" in out
     assert "unchecked layers in stream: 1" in out
 
 
@@ -906,7 +966,7 @@ def test_run_drc_gf180mcu_reports_seeded_violation(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["deck"] == "gf180mcu"
     assert report["dbu_um"] == 0.001
     assert report["status"] == "violations"
@@ -948,7 +1008,7 @@ def test_run_drc_gf180mcu_missing_layer_does_not_crash(tmp_path):
 
     report = run_drc(str(path), "gf180mcu")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["deck"] == "gf180mcu"
     assert report["status"] == "clean"
     assert report["violation_count"] == 0
@@ -961,7 +1021,7 @@ def test_run_drc_gf180mcu_json_contract(tmp_path, capsys):
     assert main(["drc", str(path), "--deck", "gf180mcu", "--format", "json"]) == 3
     data = json.loads(capsys.readouterr().out)
 
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert data["deck"] == "gf180mcu"
     assert data["status"] == "violations"
     assert sum(data["rule_counts"].values()) == data["violation_count"]
@@ -1269,7 +1329,7 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
     synthetic seeded fixtures."""
     report = run_drc(str(layout_path), "gf180mcu")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(layout_path)
     assert report["deck"] == "gf180mcu"
     assert report["dbu_um"] == 0.001
@@ -1302,6 +1362,14 @@ def test_gf180mcu_corpus_layout_produces_well_formed_report(layout_path: Path):
 # hand-drawn analog fixtures above. See
 # tests/corpus/place_and_route/README.md (in tests/corpus/README.md's
 # "Machine-generated macro-scale fixture" section) for full provenance.
+#
+# Deliberately the fixture routed **without** `request.power` (issue #2079).
+# Its power-complete sibling, `gcd-pdn.gds.gz`, is `klt drc --deck sky130`
+# clean too (`violation_count: 0`, measured on the regeneration that
+# committed it), so switching would neither strengthen nor weaken this
+# check -- while re-pinning `violation_count` against a different artifact
+# than the one #1420/#1430/#1443's whole `nwell`-rule history was measured
+# on. Reach for `gcd-pdn.gds.gz` when power delivery is what is under test.
 PLACE_AND_ROUTE_GDS = CORPUS_DIR / "place_and_route" / "gcd.gds.gz"
 
 
@@ -1316,7 +1384,7 @@ def test_openroad_gcd_fixture_produces_well_formed_report():
     and routing-layer usage the hand-drawn analog corpus never exercises."""
     report = run_drc(str(PLACE_AND_ROUTE_GDS), "sky130")
 
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["file"] == str(PLACE_AND_ROUTE_GDS)
     assert report["deck"] == "sky130"
     assert report["status"] in {"clean", "violations"}
@@ -3294,6 +3362,51 @@ def test_example_gds_matches_committed_json():
     assert actual == expected
 
 
+def test_example_generator_reproduces_committed_fixtures(tmp_path):
+    """Generator-level drift guard (issue #1977): re-running
+    `examples/drc/generate.py`'s own `build_example()` reproduces *both*
+    committed fixtures exactly -- the GDS byte-for-byte, the report
+    field-for-field.
+
+    `test_example_gds_matches_committed_json` above only re-runs `run_drc`
+    against the *committed* GDS, so it cannot see the generator itself drift
+    away from the artifact it is supposed to produce. Without this test,
+    following the documented regeneration procedure could leave `git status`
+    dirty and nothing would catch it.
+
+    The GDS compare is exact: `build_example()` suppresses the GDS2
+    wall-clock write timestamps (#320), so a regression back to
+    non-reproducible bytes fails here rather than surfacing as unexplained
+    fixture churn. The report's `"file"` field is the one legitimately
+    path-dependent value (`run_drc` echoes the path string it is given), so
+    it is normalised before comparing; everything else must match.
+    """
+    generate_module = _load_example_generator()
+
+    gds_path, json_path = generate_module.build_example(str(tmp_path))
+
+    assert Path(gds_path).read_bytes() == (REPO_ROOT / EXAMPLE_GDS).read_bytes()
+
+    actual = json.loads(Path(json_path).read_text())
+    expected = json.loads(EXAMPLE_DRC_JSON.read_text())
+    assert "provenance" not in actual  # stripped by the generator
+    actual["file"] = expected["file"]  # path-dependent by construction
+    assert actual == expected
+
+
+def _load_example_generator():
+    """Import `examples/drc/generate.py` as a module (it lives outside the
+    installed package, so it has no importable name of its own)."""
+    import importlib.util
+
+    script = REPO_ROOT / "examples" / "drc" / "generate.py"
+    spec = importlib.util.spec_from_file_location("_klt_drc_example_gen", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 # ---------------------------------------------------------------------------
 # dbu invariance (#172): the same physical geometry must produce the same
 # DRC verdict regardless of the stream's own database unit. Rule thresholds
@@ -4677,15 +4790,348 @@ def test_run_drc_sky130_met5_area_clean(tmp_path):
     assert report["violation_count"] == 0
 
 
+# ---------------------------------------------------------------------------
+# sky130 met1-met5 holes-area rule coverage (#1976)
+#
+# Each metal layer's plain minimum-area rule above (`met{N}.area.1`, #1955)
+# has a holes-area *companion* scoped to `Region.holes()` -- the interior
+# voids of a slotted plate or fill pattern, not the metal polygon itself:
+# `met1.holes_area.1`/`met2.holes_area.1`/`met5.holes_area.1` at 140_000
+# dbu^2 (0.14 um^2), `met3.holes_area.1`/`met4.holes_area.1` at 200_000
+# dbu^2 (0.2 um^2). Each fixture is a single polygon with one explicit
+# rectangular hole (`kdb.Polygon.insert_hole`), written to and read back
+# from a real GDS file -- GDS has no native hole concept, so the writer
+# decomposes it into a "keyhole" (hull and hole joined by a zero-width
+# slit); `Region.holes()`'s merged semantics (see `DerivedLayer`'s
+# `"holes"` mode docstring) reconstructs the real hole on read, exactly as
+# it must for the multi-rectangle "slotted plate" idiom real layout uses.
+#
+# The surrounding metal ring (`margin` below) is always thicker than the
+# layer's own `width.1`/`space.1` threshold, so those rules stay clean --
+# with one deliberate exception: met5's holes-area threshold (0.14 um^2,
+# i.e. a square hole side of ~0.37 um) is numerically *smaller* than met5's
+# own minimum-spacing threshold (1.6 um), so *any* met5 hole small enough to
+# violate `met5.holes_area.1` is, by construction, also narrower than 1.6 um
+# in its shortest dimension and therefore also violates `met5.space.1`
+# ("space" bounds intra-polygon notches/holes too, unlike `"isolated"` --
+# see `DrcRule`'s own docstring). This is not a test-fixture defect: the
+# real sky130A deck has exactly this same overlap between `m5.2` and `m5.7`
+# for any real too-small met5 slot. met5's violating fixture asserts both.
+# ---------------------------------------------------------------------------
+
+
+def _write_slotted_metal_plate(path, layer, layer_name, hole_w, hole_h, margin):
+    """Write a single-cell GDS with one `layer` polygon: an outer rectangle
+    with one rectangular hole punched `margin` dbu in from every edge (#1976).
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    lidx = layout.layer(*layer)
+    layout.set_info(lidx, kdb.LayerInfo(*layer, layer_name))
+    plate_w = hole_w + 2 * margin
+    plate_h = hole_h + 2 * margin
+    poly = kdb.Polygon(kdb.Box(0, 0, plate_w, plate_h))
+    poly.insert_hole(kdb.Box(margin, margin, margin + hole_w, margin + hole_h))
+    top.shapes(lidx).insert(poly)
+    layout.write(str(path))
+
+
+def _write_unslotted_metal_plate(path, layer, layer_name, width, height):
+    """Write a single-cell GDS with one solid `layer` rectangle -- no holes
+    at all, the negative control an empty `Region.holes()` result must not
+    be treated as a violation or crash the check (#1976)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    lidx = layout.layer(*layer)
+    layout.set_info(lidx, kdb.LayerInfo(*layer, layer_name))
+    top.shapes(lidx).insert(kdb.Box(0, 0, width, height))
+    layout.write(str(path))
+
+
+def test_run_drc_sky130_met1_holes_area_violation(tmp_path):
+    """A met1 hole smaller than the 140_000 dbu^2 (0.14 um^2)
+    `met1.holes_area.1` threshold trips exactly one violation. The 240 dbu
+    ring margin keeps `met1.width.1`/`met1.space.1` (140 dbu each) clean."""
+    path = tmp_path / "met1_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (68, 20), "met1.drawing", 300, 400, 240
+    )  # hole 120_000 dbu^2 < 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met1.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met1.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met1.drawing"
+
+
+def test_run_drc_sky130_met1_holes_area_clean(tmp_path):
+    """A met1 hole at/above the 140_000 dbu^2 `met1.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met1_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (68, 20), "met1.drawing", 350, 400, 240
+    )  # hole 140_000 dbu^2 >= 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met1_no_holes_clean(tmp_path):
+    """A plain, unslotted met1 plate -- no holes at all -- reports clean,
+    not an error: an empty `Region.holes()` result must not be treated as a
+    violation (#1976's negative control)."""
+    path = tmp_path / "met1_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (68, 20), "met1.drawing", 1000, 1000)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met2_holes_area_violation(tmp_path):
+    """A met2 hole smaller than the 140_000 dbu^2 (0.14 um^2)
+    `met2.holes_area.1` threshold trips exactly one violation. The 240 dbu
+    ring margin keeps `met2.width.1`/`met2.space.1` (140 dbu each) clean."""
+    path = tmp_path / "met2_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (69, 20), "met2.drawing", 300, 400, 240
+    )  # hole 120_000 dbu^2 < 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met2.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met2.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met2.drawing"
+
+
+def test_run_drc_sky130_met2_holes_area_clean(tmp_path):
+    """A met2 hole at/above the 140_000 dbu^2 `met2.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met2_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (69, 20), "met2.drawing", 350, 400, 240
+    )  # hole 140_000 dbu^2 >= 140_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met2_no_holes_clean(tmp_path):
+    """A plain, unslotted met2 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met2_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (69, 20), "met2.drawing", 1000, 1000)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met3_holes_area_violation(tmp_path):
+    """A met3 hole smaller than the 200_000 dbu^2 (0.2 um^2)
+    `met3.holes_area.1` threshold trips exactly one violation. The 400 dbu
+    ring margin keeps `met3.width.1`/`met3.space.1` (300 dbu each) clean."""
+    path = tmp_path / "met3_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (70, 20), "met3.drawing", 350, 400, 400
+    )  # hole 140_000 dbu^2 < 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met3.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met3.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met3.drawing"
+
+
+def test_run_drc_sky130_met3_holes_area_clean(tmp_path):
+    """A met3 hole at/above the 200_000 dbu^2 `met3.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met3_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (70, 20), "met3.drawing", 400, 500, 400
+    )  # hole 200_000 dbu^2 >= 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met3_no_holes_clean(tmp_path):
+    """A plain, unslotted met3 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met3_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (70, 20), "met3.drawing", 1500, 1500)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met4_holes_area_violation(tmp_path):
+    """A met4 hole smaller than the 200_000 dbu^2 (0.2 um^2)
+    `met4.holes_area.1` threshold trips exactly one violation. The 400 dbu
+    ring margin keeps `met4.width.1`/`met4.space.1` (300 dbu each) clean."""
+    path = tmp_path / "met4_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (71, 20), "met4.drawing", 350, 400, 400
+    )  # hole 140_000 dbu^2 < 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"met4.holes_area.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "met4.holes_area.1"
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met4.drawing"
+
+
+def test_run_drc_sky130_met4_holes_area_clean(tmp_path):
+    """A met4 hole at/above the 200_000 dbu^2 `met4.holes_area.1` threshold
+    passes."""
+    path = tmp_path / "met4_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (71, 20), "met4.drawing", 400, 500, 400
+    )  # hole 200_000 dbu^2 >= 200_000
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met4_no_holes_clean(tmp_path):
+    """A plain, unslotted met4 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met4_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (71, 20), "met4.drawing", 1500, 1500)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met5_holes_area_violation(tmp_path):
+    """A met5 hole smaller than the 140_000 dbu^2 (0.14 um^2)
+    `met5.holes_area.1` threshold trips a violation -- alongside
+    `met5.space.1`, since any hole this small is also narrower than met5's
+    own 1.6 um minimum spacing in its shortest dimension (see this
+    section's own docstring note above; not a fixture defect, the same
+    overlap the real sky130A deck's `m5.2`/`m5.7` pair has)."""
+    path = tmp_path / "met5_holes_area_violation.gds"
+    _write_slotted_metal_plate(
+        path, (72, 20), "met5.drawing", 300, 400, 1800
+    )  # hole 120_000 dbu^2 < 140_000; also < 1600 dbu min spacing
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"]["met5.holes_area.1"] == 1
+    holes_violations = [
+        v for v in report["violations"] if v["rule"] == "met5.holes_area.1"
+    ]
+    (violation,) = holes_violations
+    assert violation["check"] == "area"
+    assert violation["layer"] == "met5.drawing"
+
+
+def test_run_drc_sky130_met5_holes_area_clean(tmp_path):
+    """A met5 hole at/above the 140_000 dbu^2 `met5.holes_area.1` threshold,
+    and at/above its own 1.6 um minimum spacing in every dimension so
+    `met5.space.1` also stays clean, passes with no violations at all."""
+    path = tmp_path / "met5_holes_area_clean.gds"
+    _write_slotted_metal_plate(
+        path, (72, 20), "met5.drawing", 1700, 1700, 1800
+    )  # hole 2_890_000 dbu^2 >= 140_000; >= 1600 dbu in both dimensions
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_met5_no_holes_clean(tmp_path):
+    """A plain, unslotted met5 plate -- no holes at all -- reports clean,
+    not an error (#1976's negative control)."""
+    path = tmp_path / "met5_no_holes_clean.gds"
+    _write_unslotted_metal_plate(path, (72, 20), "met5.drawing", 5000, 5000)
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
+    """Every `met{1..5}.holes_area.1` rule carries a `provenance` citation
+    naming the official `sky130A_mr.drc` rule id it was transcribed from, at
+    the same pinned open_pdks commit the rest of the deck cites (#1976), and
+    a `DerivedLayer(mode="holes")` whose `base` matches the plain layer:
+
+      m1.7  m1.holes.with_area(0..0.14)  -> 140_000 dbu^2
+      m2.7  m2.holes.with_area(0..0.14)  -> 140_000 dbu^2
+      m3.7  m3.holes.with_area(0..0.2)   -> 200_000 dbu^2
+      m4.7  m4.holes.with_area(0..0.2)   -> 200_000 dbu^2
+      m5.7  m5.holes.with_area(0..0.14)  -> 140_000 dbu^2
+    """
+    expected = {
+        "met1.holes_area.1": ("m1.7", 140_000, (68, 20)),
+        "met2.holes_area.1": ("m2.7", 140_000, (69, 20)),
+        "met3.holes_area.1": ("m3.7", 200_000, (70, 20)),
+        "met4.holes_area.1": ("m4.7", 200_000, (71, 20)),
+        "met5.holes_area.1": ("m5.7", 140_000, (72, 20)),
+    }
+
+    holes_rules = {rule.id: rule for rule in get_deck("sky130") if rule.id in expected}
+    assert set(holes_rules) == set(expected)
+
+    for rule_id, (source_rule_id, area_min_dbu2, layer) in expected.items():
+        rule = holes_rules[rule_id]
+        assert rule.check == "area"
+        assert rule.layer == layer
+        assert rule.area_min_dbu2 == area_min_dbu2
+        assert rule.area_max_dbu2 is None
+        assert rule.derived_layer is not None
+        assert rule.derived_layer.mode == "holes"
+        assert rule.derived_layer.base == layer
+        assert rule.derived_layer.intersect_with is None
+        assert rule.provenance is not None, f"sky130/{rule_id}: no provenance"
+        assert rule.provenance.source_repo == "fossi-foundation/open-pdks"
+        assert rule.provenance.source_path == "sky130/klayout/sky130A_mr.drc"
+        assert rule.provenance.rule_id == source_rule_id
+        assert rule.provenance.commit == "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+
+
 def test_sky130_deck_check_kind_breakdown():
     """Structural regression for the deck's own `docs/cli/drc.md` "Coverage"
-    kind-breakdown table (#1955): 52 rules total -- 15 `width`, 13 `space`,
-    1 `isolated`, 16 `enclosing`, 2 `separation`, 5 `area`. Fails loudly (at
-    the exact number that changed) if a future rule addition/removal drifts
-    from that table without updating it."""
+    kind-breakdown table (#1976, extending #1955's 52-rule baseline): 57
+    rules total -- 15 `width`, 13 `space`, 1 `isolated`, 16 `enclosing`,
+    2 `separation`, 10 `area`. Fails loudly (at the exact number that
+    changed) if a future rule addition/removal drifts from that table
+    without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 52
+    assert len(deck) == 57
     counts = Counter(rule.check for rule in deck)
     assert counts == {
         "width": 15,
@@ -4693,7 +5139,7 @@ def test_sky130_deck_check_kind_breakdown():
         "isolated": 1,
         "enclosing": 16,
         "separation": 2,
-        "area": 5,
+        "area": 10,
     }
 
 
@@ -4718,7 +5164,15 @@ def test_sky130_area_rules_cite_pinned_sky130a_mr_drc():
         "met5.area.1": ("m5.4", 4_000_000, (72, 20)),
     }
 
-    area_rules = {rule.id: rule for rule in get_deck("sky130") if rule.check == "area"}
+    # `rule.derived_layer is None` excludes the `met{1..5}.holes_area.1`
+    # siblings added by #1976 (also `check="area"`, but scoped via
+    # `DerivedLayer(mode="holes")` -- see
+    # `test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc` for those).
+    area_rules = {
+        rule.id: rule
+        for rule in get_deck("sky130")
+        if rule.check == "area" and rule.derived_layer is None
+    }
     assert set(area_rules) == set(expected)
 
     for rule_id, (source_rule_id, area_min_dbu2, layer) in expected.items():

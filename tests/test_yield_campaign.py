@@ -31,6 +31,8 @@ from klayout_tools import sim, yield_campaign
 from klayout_tools.yield_analysis import _read_samples
 from klayout_tools.yield_campaign import CampaignError, run_campaign
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 requires_native = pytest.mark.skipif(
     importlib.util.find_spec("klt_yield_native") is None,
     reason=(

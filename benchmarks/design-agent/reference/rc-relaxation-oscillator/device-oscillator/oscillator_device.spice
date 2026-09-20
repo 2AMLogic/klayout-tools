@@ -27,8 +27,10 @@
 *   4. Full 18-corner oscillation validation -- see sim_request.json and
 *      README.md's Evidence section.
 *
-* Item 5 (#1795's regenerative-feedback/PTAT-CTAT bias-generator work) is
-* explicitly OUT OF SCOPE here -- see README.md.
+* Item 5 (#1795) is now partly addressed: the reference divider is
+* temperature-coefficient compensated (see "Zero-TC composite divider"
+* below). The PTAT/CTAT *bias generator* half of item 5 is still not
+* here, and -- see that section -- would not have helped anyway.
 *
 * -------------------------------------------------------------------
 * Comparator core: reused verbatim, not modified
@@ -51,38 +53,90 @@
 * genuinely device-level, curvature-corrected Banba bandgap (real
 * sky130_fd_pr__pnp_05v5 devices, trimmed PTAT/CTAT resistor ratios) does
 * not exist anywhere in this repo yet and is a substantial standalone
-* design effort in its own right -- explicitly out of scope for this
-* issue's "assemble an oscillator" increment (see also issue #1795's
-* deferred PTAT-CTAT bias-generator work, item 5 above).
+* design effort in its own right -- explicitly out of scope for #1814's
+* "assemble an oscillator" increment, and still not here after #1795.
 *
 * Instead: XMref mirrors the SAME nbias/pbias-derived {ib} current the
-* comparator core's own bias uses into a two-resistor divider string
-* (Rdiv2/Rdiv1, real sky130_fd_pr__res_xhigh_po devices) referenced to
+* comparator core's own bias uses into a divider string referenced to
 * ground, producing two real, device-set (not ideal-DC-source) absolute
 * node voltages:
 *   vth_lo = ib * r1
 *   vth_hi = ib * (r1 + r2)
 * This is a genuine improvement over the spike's ideal Vrl/Vrh sources
-* (the thresholds now depend on real MOSFET mirror + real poly resistor
+* (the thresholds now depend on real MOSFET mirror + real resistor
 * devices, and show real PVT sensitivity in the corner sweep below) at
 * far lower complexity than a full bandgap. It does NOT get the
-* first-order supply/temperature cancellation a trimmed bandgap would
-* (kb/entries/sky130-bandgap-reference.json's whole point).
+* first-order supply cancellation a trimmed bandgap would
+* (kb/entries/sky130-bandgap-reference.json's whole point) -- but it
+* does now get first-order *temperature* cancellation, from the
+* composite construction described next.
 *
-* What remains ideal here, and why it matters less than it looks: Iref/
-* Irefp are still ideal DC sources (as they are in ../comparator-core/
-* comparator_core.spice, which this file reuses verbatim). {ib} largely
-* cancels out of the period rather than setting it -- both the threshold
+* -------------------------------------------------------------------
+* Zero-TC composite divider (issue #1795)
+* -------------------------------------------------------------------
+* Why a PTAT/CTAT bias generator is the WRONG lever here. Iref/Irefp are
+* ideal DC sources (as they are in ../comparator-core/comparator_core.
+* spice, which this file reuses verbatim), and {ib} cancels out of the
+* period algebraically rather than setting it -- both the threshold
 * spacing and the charge current are derived from the same {ib}:
 *   dV    = ib * r2
 *   iosc  = k * ib             (k = XMchg/XMdis mirror ratio, ~1.95)
 *   T     = 2 * cosc * dV / iosc = 2 * cosc * r2 / k
-* so a real (non-ideal) bias generator would move the period only through
-* its second-order effects, not its absolute value. What does NOT cancel
-* is r2's own temperature coefficient, and that is the dominant PVT term
-* in the measured spread -- see README.md's Evidence section for the
-* number and docs/design/relaxation-oscillator-device-level-assembly.md
-* for the breakdown.
+* {ib} is absent from the final expression. Giving {ib} a deliberate
+* PTAT or CTAT shape -- issue #1795's originally-scoped fix, and option
+* (b) of README.md's own Handoff section -- therefore moves the period
+* only through second-order terms; it cannot cancel what dominates.
+* What survives the cancellation is r2 ALONE, so the period carries r2's
+* temperature coefficient and nothing else does. Compensating r2 itself
+* is the only first-order lever, and it needs no new active circuitry.
+*
+* Each leg is therefore built as a series composite of a NEGATIVE-tempco
+* poly resistor and a POSITIVE-tempco n-diffusion resistor, the standard
+* zero-TC construction:
+*   sky130_fd_pr__res_xhigh_po   rsheet 2000 ohm/sq, tc1 = -1.47e-3 /C
+*   sky130_fd_pr__res_generic_nd rsheet  120 ohm/sq, tc1 = +1.422e-3 /C
+* Choice of partner device. res_generic_nd's tc2 (+6.57e-7) is the
+* closest curvature match to res_xhigh_po's (+2.7e-6) of anything the
+* sky130.lib tt/ss/ff sections actually reach, and its body terminal is
+* the p-well (ground), which the po device's own sub terminal already
+* uses. res_generic_pd (197 ohm/sq) would be 37% shorter for the same
+* resistance but leaves ~1.6% residual bow instead of ~1.2%, and needs
+* its n-well body routed to vdd. res_iso_pw -- the obvious high-sheet
+* (3816 ohm/sq), high-tempco (+3.53e-3 /C) candidate -- is NOT reachable:
+* it is only included from sky130A's all.spice, never from the tt/ss/ff
+* .lib sections this benchmark's sim_request.json selects. Verified by
+* include-tree inspection on sky130A f6eeac7, 2026-09-18.
+*
+* Split ratio, measured not assumed. Forcing 5 uA through each device
+* standalone against the real tt models (ngspice-46, sky130A f6eeac7)
+* gives, normalised to 27 C:
+*   res_xhigh_po   -40C 1.11045   27C 1.0   125C 0.88185
+*   res_generic_nd -40C 0.90755   27C 1.0   125C 1.14846
+* Equalising the -40 C and 125 C endpoints of p*po + (1-p)*nd gives
+* p = 0.5131, i.e. the poly device carries ~51.3% of each leg's
+* resistance and the n-diffusion device ~48.7%. The residual is a
+* +1.17% bow (both endpoints high, 27 C low) against the 25.9% swing of
+* the all-poly divider it replaces -- a 22x reduction in the divider's
+* own temperature term.
+*
+* Cost, stated plainly: n-diffusion is 17x less resistive per square
+* than xhigh poly, so the compensating sections are long -- 308 um and
+* 726 um at W = 1 um, about 1030 um^2 of extra diffusion. That is the
+* price of the construction, not an oversight; res_generic_pd would trade
+* ~35% of it against a worse residual bow, and raising {ib} while
+* shrinking every resistance (and the XMchg/XMdis mirror ratio with it)
+* would trade it against re-validating the comparator core at a bias
+* point #1813 did not sign off on. Neither trade was taken here.
+*
+* Total resistances were re-centred at the same time: the 27 C dV moves
+* from 0.827 V to ~0.854 V so the (now nearly flat) period sits closer to
+* the 1.4-2.2 us band's geometric centre instead of at its old 27 C
+* value. vth_lo is held at its old 27 C value (~0.362 V) so both
+* comparators keep the common-mode they were validated at.
+*
+* No positive-feedback or regenerative element is introduced anywhere by
+* this change -- it is four passive two-terminal devices replacing two.
+* The only new nodes are the two series-junction nodes rmid1/rmid2.
 *
 * -------------------------------------------------------------------
 * Charge/discharge current source + SR-latch switching
@@ -111,23 +165,34 @@
 * Unlike ../oscillator.spice, this netlist has no Istart-equivalent
 * start-up kick. It does not need one -- but the reason is not that the
 * SR latch's bistability makes ngspice's .op pick one of the two valid
-* latch states. Measured at ss/1.62V/-40C, .op leaves the latch itself
-* *unresolved*: v(q) at t=0 is 0.5715 V, mid-rail, neither state.
+* latch states. Re-measured at ss/1.62V/-40C after the #1795 divider
+* change, .op leaves the latch itself *unresolved*: v(q) at t=0 is
+* 0.5726 V, mid-rail, neither state.
 *
 * What actually self-starts it is the timing node, not the latch. The
-* same .op leaves vo at 1.3623 V -- *outside* the threshold band
-* (vth_hi = 1.3025 V there), because with both charge and discharge
+* same .op leaves vo at 1.2276 V -- *outside* the threshold band
+* (vth_hi = 1.2217 V there), because with both charge and discharge
 * mirrors partially on and only Rleak to ground, the balance point .op
 * finds for vo is not between the thresholds. So at t=0 cmp_n is
-* unambiguously asserting ohi, the latch's own positive feedback resolves
-* q within a few ns, and the first full edge lands at t = 0.24 us. This
-* holds at every one of the 18 corners (see README.md's Evidence
-* section); it is measured, not assumed.
+* asserting ohi, the latch's own positive feedback resolves q, and the
+* first rising edge on q lands at t = 64.5 ns (measured). All 18 corners
+* reach four clean steady-state edges after the 6 us measurement gate,
+* which is only possible if every one of them started -- see README.md's
+* Evidence section; it is measured, not assumed.
+*
+* What the #1795 compensation changed here: that vo - vth_hi gap is now
+* 5.9 mV at ss/1.62V/-40C and 1.2-2.3 mV at 1.62V/27C (tt/ss/ff), where
+* the all-poly divider left 59.8 mV. Start-up does not actually hang on
+* those millivolts -- the .op solution is an *unstable* equilibrium, this
+* topology has no stable DC state, so any perturbation diverges into
+* oscillation -- but a few mV of comparator input offset is no longer
+* obviously smaller than the margin, and no testbench in this chain
+* models offset or mismatch yet. README.md's Handoff section carries it.
 *
 * Two consequences for the testbench, both handled in sim_request.json:
-*   - The first ~0.3 us is a start-up transient, not oscillation. Every
-*     edge measurement is TD-gated to start at 6 us so no start-up edge
-*     can land in a reported period.
+*   - The first fraction of a microsecond is a start-up transient, not
+*     oscillation. Every edge measurement is TD-gated to start at 6 us so
+*     no start-up edge can land in a reported period.
 *   - Before that gate was added, the *number* of q crossings inside the
 *     start-up transient was integration-timestep-dependent (a 5 ns
 *     maxstep saw two extra crossings at ss/1.62V/-40C that a 2 ns
@@ -139,18 +204,27 @@
 * -------------------------------------------------------------------
 * Expected solver diagnostics (benign, and not this topology's fault)
 * -------------------------------------------------------------------
-* Most corners report "Warning: Dynamic gmin stepping failed" and about
-* half additionally report "Warning: singular matrix: check node vth_lo"
-* during the DC operating-point solve. Source stepping then completes and
-* the .tran runs cleanly at all 18 corners. The singular-matrix note is
-* attributable to the sky130 resistor model, not to this circuit:
-* replacing XRdiv1/XRdiv2 with ideal R elements of the same value makes
-* it disappear while leaving everything else identical. sky130_fd_pr__
-* res_xhigh_po models its body resistance as a bias-dependent expression
-* containing abs(v(t1,t2)), whose Jacobian is discontinuous at exactly
-* zero bias -- which is where gmin/source stepping starts from. Worth
-* knowing before chasing it as a netlist bug; the shipped netlist keeps
-* the real resistor device rather than an ideal R.
+* 16 of 18 corners report "Warning: Dynamic gmin stepping failed" (and
+* "True gmin stepping failed") during the DC operating-point solve.
+* Source stepping then completes and the .tran runs cleanly at all 18.
+*
+* All 18 report "Warning: sky130_fd_pr__diode_pw2nd_05v5: IKR too small -
+* model effect disabled!" -- the high-injection knee-current parameter of
+* the parasitic p-well/n-diffusion junction diodes inside
+* sky130_fd_pr__res_generic_nd. Those diodes are reverse-biased by
+* construction here, so the disabled term is irrelevant to this circuit;
+* the warning belongs to the shipped model card.
+*
+* "Warning: singular matrix: check node vth_lo", which about half the
+* corners emitted before the #1795 divider change, is now gone at all 18.
+* It was attributable to the sky130 resistor model, not to this circuit:
+* sky130_fd_pr__res_xhigh_po models its body resistance as a
+* bias-dependent expression containing abs(v(t1,t2)), whose Jacobian is
+* discontinuous at exactly zero bias -- which is where gmin/source
+* stepping starts from. The plain, bias-independent res_generic_nd
+* section now in series with each poly section keeps the node conditioned
+* through that crossing. Side effect, not a design goal; the shipped
+* netlist still keeps the real resistor devices rather than ideal Rs.
 *
 * Circuit body only: no .control/.end cards (klt sim generates those --
 * see docs/cli/sim.md). Real sky130 devices via $PDK_ROOT. Device W/L in
@@ -159,22 +233,35 @@
 .param vdd=1.8
 .param ib=5u
 .param cosc=10p
-* Reference-divider resistors (sky130_fd_pr__res_xhigh_po, rsheet ~2000
-* ohm/sq): r1 sets vth_lo = ib*r1, r2 sets vth_hi-vth_lo = ib*r2. Lengths
-* below were hand-picked from the rsheet estimate then corrected against
-* the real device model's measured node voltages (see README.md).
+* Reference-divider resistors. r1 sets vth_lo = ib*r1, r2 sets
+* vth_hi-vth_lo = ib*r2, and each of r1/r2 is now a series composite of a
+* negative-tempco poly section and a positive-tempco n-diffusion section
+* (see "Zero-TC composite divider" above). Measured per-micron
+* resistances at 27 C, W = 1 um, from a 5 uA forced-current sweep against
+* the real tt models: res_xhigh_po 2118.6 ohm/um, res_generic_nd
+* 117.49 ohm/um. Both devices are exactly linear in length over the range
+* used here (checked at L = 40/80 um and l = 100/600 um).
+*   r1 = 38.14k (poly) + 36.19k (ndiff) = 74.33k  -> vth_lo ~ 0.363 V
+*   r2 = 89.83k (poly) + 85.30k (ndiff) = 175.13k -> dV     ~ 0.854 V
+* Poly fraction 0.5129/0.5131 against the 0.5131 zero-TC target.
 .param r1_w=1
-.param r1_l=35
+.param r1_l=18
+.param r1n_w=1
+.param r1n_l=308
 .param r2_w=1
-.param r2_l=80
+.param r2_l=42.4
+.param r2n_w=1
+.param r2n_l=726
 * Reference-node decoupling. Both threshold nodes are high-impedance
-* (vth_lo ~70 kohm, vth_hi ~230 kohm to ground), so each comparator's
+* (vth_lo ~74 kohm, vth_hi ~250 kohm to ground), so each comparator's
 * switching kickback through its own input-pair gate overlap lands
 * directly on the threshold it is in the act of crossing. 0.5 pF is ~15x
 * the input pair's total gate capacitance at these geometries (W=8, L=0.5
 * at ~8 fF/um^2) and orders of magnitude above its gate-drain overlap, so
-* the threshold holds still across an edge; the resulting ~35 ns / ~115 ns
-* node time constants still settle the reference long before the 6 us
+* the threshold holds still across an edge; the resulting ~37 ns / ~125 ns
+* node time constants (plus the compensating sections' own junction
+* capacitance, which only slows them further and is likewise settled long
+* before the gate) still settle the reference well before the 6 us
 * measurement gate in sim_request.json. Undecoupled, the kickback was
 * large enough to make an instantaneous threshold reading at
 * ff/1.62V/-40C come back 122 mV high -- see README.md.
@@ -190,8 +277,13 @@ XM5c pbias pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
 
 * --- device-level vth_lo/vth_hi reference generator ---
 XMref vth_hi pbias vdd vdd sky130_fd_pr__pfet_01v8 L=1 W=40 nf=2 mult=1
-XRdiv2 vth_hi vth_lo 0 sky130_fd_pr__res_xhigh_po W={r2_w} L={r2_l} mult=1 m=1
-XRdiv1 vth_lo 0      0 sky130_fd_pr__res_xhigh_po W={r1_w} L={r1_l} mult=1 m=1
+* r2 leg (sets dV): negative-tempco poly on top, positive-tempco
+* n-diffusion below, joined at rmid2.
+XRdiv2  vth_hi rmid2  0 sky130_fd_pr__res_xhigh_po   W={r2_w}  L={r2_l}  mult=1 m=1
+XRdiv2n rmid2  vth_lo 0 sky130_fd_pr__res_generic_nd w={r2n_w} l={r2n_l}
+* r1 leg (sets vth_lo): same construction, joined at rmid1.
+XRdiv1  vth_lo rmid1  0 sky130_fd_pr__res_xhigh_po   W={r1_w}  L={r1_l}  mult=1 m=1
+XRdiv1n rmid1  0      0 sky130_fd_pr__res_generic_nd w={r1n_w} l={r1n_l}
 Crefh vth_hi 0 {cref}
 Crefl vth_lo 0 {cref}
 

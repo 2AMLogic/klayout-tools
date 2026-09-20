@@ -229,7 +229,7 @@ before `equiv_make` runs.
     "klayout_version": "0.30.10",
     "pdk": null,
     "deck": null,
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "source" }
   }
 }
 ```
@@ -246,7 +246,7 @@ before `equiv_make` runs.
 | `counterexample` | object \| null | Present when `status == "counterexample"`, and also (issue #1349) when a solver-reported counterexample was downgraded to `status: "inconclusive"` because `counterexample.confirmed_by_simulation` came back `false` — the object itself is unchanged either way, it is only the top-level `status` that reflects whether the divergence was actually demonstrated. `null` for every other `"inconclusive"` cause (timeout, unproven-by-induction) and for `"equivalent"`. See "Counterexample shape" below. |
 | `diagnostics` | array\<object\> | `{severity, code, message}` entries — a timeout's own explanation, or a degraded (but non-fatal) counterexample-confirmation outcome (e.g. `iverilog` unavailable). Empty on a clean `"equivalent"`/`"counterexample"` run. |
 | `artifacts` | object | `{script_path, netlist_path, log_path}` — the generated `.ys` script, the flattened combined `gold`/`gate` Verilog netlist, and the raw Yosys log, all absolute paths under `.klt/equiv/` next to the request file. `netlist_path`/`log_path` are `null` when the run timed out before they were written. Never deleted — kept as debuggable artifacts, the same convention `klt synthesize`'s `.klt/synthesize/` uses. |
-| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `pdk`/`deck` are always `null` (no PDK/deck resolution — a liberty file, when given, is a plain input file, not a "deck"); `input` is the content hash of every `sources` file across both sides (a combined, order-independent hash when more than one file is given). |
+| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `pdk`/`deck` are always `null` (no PDK/deck resolution — a liberty file, when given, is a plain input file, not a "deck"); `input` is the content hash of every `sources` file across both sides (a combined, order-independent hash when more than one file is given), with `input.role: "source"` (issue #2027 — these are HDL sources, not a layout stream or a netlist). |
 
 ### Counterexample shape
 
@@ -301,6 +301,21 @@ refinement ran, `diagnostics` carries an `equiv_cutpoint_refinement` info
 entry with the count and `artifacts.stage1_blacklist_path` records the
 exact list, so the weakened obligation set can be audited rather than
 taken on trust.
+
+"Minus any top-level port" includes ports whose names are Verilog
+**escaped identifiers** — the leading-`\` spelling a synthesis/P&R flow
+uses for a name containing `.`, `[`, `]` or `/`, such as a flattened
+hierarchical output `\q.x` or a bit-blasted bus bit `\q[0]`. An escaped
+identifier is terminated by *whitespace* rather than by the next
+non-identifier character, so Yosys writes its declaration as `output \q.x ;`
+— with a space before the semicolon. Before issue #1999 the port-list parser
+did not allow for that space, so such a port was invisible to it, was
+mistaken for an internal wire, and was blacklisted: two netlists differing
+*only* on an escaped top-level port could be reported `"equivalent"`. They
+are now recognised, never blacklisted, and reported by their plain
+(unescaped) name everywhere in the JSON report — in
+`counterexample.diverging_outputs` and in each cycle's `inputs` /
+`gold_outputs` / `gate_outputs` keys.
 
 ### Sequential counterexample shape (`"yosys-sequential"` only)
 

@@ -2,7 +2,12 @@
 
 import json
 
-from klayout_tools.cli.output import emit_error, emit_success
+from klayout_tools.cli.output import (
+    ERROR_EXIT_CODE,
+    EXIT_USAGE_ERROR,
+    emit_error,
+    emit_success,
+)
 
 
 def test_emit_success_json_writes_exact_payload(capsys):
@@ -54,3 +59,28 @@ def test_emit_error_text_plain_line(capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "klt layers: file not found: missing.gds\n"
+
+
+def test_emit_error_exit_code_is_overridable_without_changing_envelope(capsys):
+    """A caller-supplied `exit_code` changes only the return value.
+
+    Issue #2029: a usage error a command detects itself (past argparse) still
+    owes the documented envelope, but must keep exit 2 rather than collapsing
+    into ERROR_EXIT_CODE (1).
+    """
+    exit_code = emit_error(
+        "gen", "a generator name is required", "json", exit_code=EXIT_USAGE_ERROR
+    )
+
+    assert exit_code == EXIT_USAGE_ERROR == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "schema_version": 1,
+        "error": {"command": "gen", "message": "a generator name is required"},
+    }
+
+
+def test_emit_error_exit_code_defaults_to_error_exit_code(capsys):
+    assert emit_error("layers", "boom", "text") == ERROR_EXIT_CODE == 1
+    capsys.readouterr()

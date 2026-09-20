@@ -224,7 +224,10 @@ def test_build_digital_job_description_basic_shape(tmp_path):
     assert synth_request["pdk"] == {"cell_library": "sky130_fd_sc_hd"}
 
     pr_request = json.loads(_input_by_name(job, "place_and_route_request.json").content)
-    assert pr_request["netlist"] == ".klt/synthesize/top_synth.v"
+    assert (
+        pr_request["netlist"]
+        == f".klt/synthesize/{synth_request['run_id']}/top_synth.v"
+    )
     assert pr_request["floorplan"] == candidate.floorplan
     assert pr_request["seed"] == 1
     assert pr_request["target_stage"] == "route"
@@ -232,11 +235,17 @@ def test_build_digital_job_description_basic_shape(tmp_path):
     descriptor = json.loads(_input_by_name(job, "eval_descriptor.json").content)
     assert descriptor["gates"] == [
         {
+            "check": "synthesize",
+            "name": "synthesize",
+            "args": {"request": "synthesize_request.json"},
+            "threshold": {"metric": "status", "equals": "ok"},
+        },
+        {
             "check": "place-and-route",
             "name": "place-and-route",
             "args": {"request": "place_and_route_request.json"},
             "threshold": {"metric": "stage_reached", "equals": "route"},
-        }
+        },
     ]
     assert descriptor["objective"] == {
         "check": "place-and-route",
@@ -312,7 +321,7 @@ def test_build_digital_job_description_with_verification(tmp_path):
 
     descriptor = json.loads(_input_by_name(job, "eval_descriptor.json").content)
     gate_checks = [gate["check"] for gate in descriptor["gates"]]
-    assert gate_checks == ["functional-verification", "place-and-route"]
+    assert gate_checks == ["synthesize", "functional-verification", "place-and-route"]
 
 
 def test_build_digital_job_description_objective_functional_verification_requires_it(

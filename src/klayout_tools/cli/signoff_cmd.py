@@ -208,7 +208,15 @@ def _print_text(result: dict) -> None:
         print()
         print("provenance mismatches (refusing to aggregate):")
         for mismatch in consistency["mismatches"]:
-            print(f"  {mismatch['field']}:")
+            # Issue #2027: `input.content_hash` is compared per
+            # `provenance.input.role`, so a bundle can carry more than one
+            # entry under that same field name -- qualify the heading with
+            # the role rather than printing the same line twice. Every other
+            # field (and any pre-#2027 report replayed through this
+            # renderer) carries no `role` and prints exactly as before.
+            role = mismatch.get("role")
+            qualifier = f" (role: {role})" if role else ""
+            print(f"  {mismatch['field']}{qualifier}:")
             for entry in mismatch["values"]:
                 print(f"    {entry['source']}: {entry['value']}")
 
@@ -230,7 +238,77 @@ def _print_text(result: dict) -> None:
             and check["detail"].get("power_connectivity_status") == "mismatch"
         ):
             line += " (power_connectivity: mismatch)"
+        # Issue #1996: same problem, same fix -- a check whose envelope
+        # reports `coverage.nothing_checked` is `FAIL`ed by `_build_check`
+        # while its own `status` still reads `clean`/`pass`, which without
+        # this reads as a bare contradiction. Name the reasons on the line.
+        reasons = check["detail"].get("nothing_checked_reasons")
+        if reasons is not None:
+            joined = ", ".join(reasons) if reasons else "unspecified"
+            line += f" (nothing checked: {joined})"
         print(line)
+
+
+#: How many entries of each `coverage` list the text rendering names before
+#: summarising the rest as `+N more`. The JSON output always carries every
+#: entry -- this cap only keeps a terminal line readable for a deck with
+#: dozens of rule-free layers.
+_COVERAGE_PREVIEW = 4
+
+
+def _format_coverage(coverage: dict) -> str:
+    """One line summarising a `drc` citation's three disclosed `coverage`
+    fields (issue #2002): each field's entry count, plus the first few
+    entries by name.
+
+    Counts first so a non-zero gap is visible without reading the names, and
+    every field is always shown -- including a `0` -- because "this deck
+    skipped no rules" is exactly the statement item 3 asks a claim to make,
+    and it must not be indistinguishable from a field that went unreported
+    (an envelope with no `coverage` block at all prints no coverage line at
+    all; see the call site).
+    """
+    parts = []
+    for field in (
+        "layers_in_stream_without_rules",
+        "rules_skipped",
+        "deck_scope",
+    ):
+        entries = coverage.get(field) or []
+        shown = ", ".join(str(entry) for entry in entries[:_COVERAGE_PREVIEW])
+        if len(entries) > _COVERAGE_PREVIEW:
+            shown += f", +{len(entries) - _COVERAGE_PREVIEW} more"
+        suffix = f" ({shown})" if entries else ""
+        parts.append(f"{field}={len(entries)}{suffix}")
+    return ", ".join(parts)
+
+
+def _format_body_bias(body_bias: dict) -> str:
+    """One line summarising a `pex` citation's `body_bias` statement (issue
+    #1983): the verdict, and -- when it is `"unbiased"` -- how many devices
+    and which synthesized nets are involved.
+
+    The verdict is always shown, including `"biased"`, for the same reason
+    `_format_coverage` always shows a `0`: "every device body had a DC bias
+    path" is the statement item 7's evidence is being asked to make, and it
+    must not be indistinguishable from an artifact that never made it (an
+    envelope with no `body_bias` block prints no line at all; see the call
+    site).
+    """
+    status = body_bias.get("status") or "unknown"
+    if status == "biased":
+        return f"{status} (every device body has a DC bias path)"
+    count = body_bias.get("unbiased_device_count") or 0
+    nets = body_bias.get("unbiased_nets") or []
+    shown = ", ".join(str(net) for net in nets[:_COVERAGE_PREVIEW])
+    if len(nets) > _COVERAGE_PREVIEW:
+        shown += f", +{len(nets) - _COVERAGE_PREVIEW} more"
+    suffix = f" on {shown}" if nets else ""
+    return (
+        f"{status} ({count} device(s) with no DC bias path{suffix}) -- "
+        "these post-layout numbers are not comparable to the schematic leg; "
+        "see docs/cli/extract.md"
+    )
 
 
 def _print_tier_report_text(result: dict) -> None:
@@ -266,6 +344,48 @@ def _print_tier_report_text(result: dict) -> None:
                 f"content_hash={citation['content_hash']}, "
                 f"exit_status={citation['exit_status']})"
             )
+            # Issue #2002: a `drc` citation's own coverage statement, shown
+            # beside the "clean" it qualifies -- item 3's doc text requires
+            # the claim to disclose these, and `klt signoff` does not grade
+            # them, so a reviewer needs them in the artifact they read. Absent
+            # for evidence committed before `klt drc` reported coverage.
+            coverage = citation.get("coverage")
+            if coverage:
+                print(f"        coverage: {_format_coverage(coverage)}")
+            # Issue #1983: a `pex` citation's own body-bias statement, shown
+            # beside the post-layout numbers it qualifies -- an extracted
+            # netlist with no DC bias path for its device bodies makes those
+            # numbers physically wrong (docs/cli/extract.md), and `klt
+            # signoff` does not grade on it, so a reviewer of item 7 needs it
+            # in the artifact they read. Absent for evidence committed before
+            # `klt pex` reported body bias.
+            body_bias = citation.get("body_bias")
+            if body_bias:
+                print(f"        body bias: {_format_body_bias(body_bias)}")
+            # Issue #2025: T1 item 11's citation is compound -- the `cite:`
+            # line above names its leading (`erc`) part, so every other
+            # cited artifact gets its own line rather than being reachable
+            # only through the JSON. Absent for every single-artifact item,
+            # which renders exactly as before.
+            for part in citation.get("parts") or []:
+                if part is citation or part.get("kind") == citation["kind"]:
+                    continue
+                part_source = (
+                    part["file"] if part["file"] is not None else part["command"]
+                )
+                print(
+                    f"        also: {part_source} "
+                    f"(kind={part['kind']}, status={part['check_status']})"
+                )
+            power_delivery = citation.get("power_delivery")
+            if power_delivery:
+                print(
+                    "        power delivery: supplies="
+                    f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
+                    f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
+                    "power_connectivity="
+                    f"{power_delivery['power_connectivity_status']}"
+                )
         elif item["reason"]:
             # Loud, not silent: an unmet item always names *why* -- "no
             # runnable check exists" (e.g. no_evidence) reads distinctly
@@ -300,6 +420,20 @@ def _print_fleet_report_text(result: dict) -> None:
                 f"        {_RED}blocking: #{blocking_item['id']}{partition} "
                 f"{blocking_item['title']} (reason: {blocking_item['reason']})"
                 f"{_RESET}"
+            )
+        # Issue #2002: what each block's DRC evidence said it did *not*
+        # check, beside its tier. Printed only for a row that actually
+        # reported a gap -- the roll-up's job is "what is worth looking at",
+        # and a fully-covering (or unreported) deck adds a line of noise per
+        # block to a fleet-wide listing. The JSON always carries every
+        # `drc_coverage` row, gaps or not.
+        for row in block.get("drc_coverage") or []:
+            if not row["layers_in_stream_without_rules"] and not row["rules_skipped"]:
+                continue
+            row_partition = f" [{row['partition']}]" if row["partition"] else ""
+            print(
+                f"        coverage: #{row['item']}{row_partition} "
+                f"{_format_coverage(row)}"
             )
 
     print()

@@ -60,7 +60,13 @@ implicitly breaks another. The one narrowed exception is PDK-*resolution*
 logic (e.g. liberty/LEF file lookup): letting those drift independently
 across modules is a correctness risk, not a design feature (issue #1652), so
 that logic is shared via public helpers in `pdk.py` and each verb module
-keeps only a thin, module-specific wrapper.
+keeps only a thin, module-specific wrapper. Variant→family *classification*
+— the innermost piece of that, which even `pdk.py` must not restate — lives
+one layer lower in `pdk_families.py`, a stdlib-only leaf module any layer
+may import (issue #2026). A subsystem may still support a **narrower** set
+of families than the toolkit; it declares that narrowing with
+`pdk_families.family_subset()` rather than by interpreting variant names
+itself.
 
 **Wrap the proven engine.** The heavy lifting stays in an existing,
 battle-tested engine; the agent-native surface is ours. KLayout is the

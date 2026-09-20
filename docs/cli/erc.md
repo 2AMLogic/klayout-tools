@@ -337,9 +337,29 @@ the fix — see "Gate area: `poly ∩ diff` vs. raw poly area" above), while
 longer trivially `1.0`; it remains `"unchecked"` regardless, for the same
 poly-perimeter-vs-area reason above.
 
-Each `gates[]` entry also reports an aggregate `antenna_verdict`: `
-"violate"` if any of its `levels[]` violate, else `"pass"` if any level
-passed, else `"unchecked"`.
+Each `gates[]` entry also reports an aggregate `antenna_verdict`, rolled up
+from its *graded* levels (`levels[1:]` — everything except the gate role
+itself, which is always `"unchecked"` and never counts towards coverage
+here):
+
+- **`antenna_verdict: "violate"`** — at least one graded level violates.
+  Wins outright regardless of any other level's coverage.
+- **`antenna_verdict: "pass_partial"`** (issue #1997) — no graded level
+  violates, at least one graded level passed, but at least one other
+  graded level is `"unchecked"` — a genuine coverage gap, not a clean
+  bill of health. The canonical example: a full sky130 stack through met5,
+  since sky130's own antenna-ratio table (below) has no met3/met4/met5
+  entries at all — only li1/met1/met2 are ever actually graded, so a
+  stack that also declares met3-5 always reports `"pass_partial"`, never
+  a plain `"pass"`, unless every graded level's role happens to be one the
+  table covers.
+- **`antenna_verdict: "pass"`** — every graded level was actually compared
+  against a limit, and none violated. Reserved for a spec whose `stackup`
+  declares only roles the selected PDK's table covers (or when every
+  declared role's antenna ratio is otherwise fully graded).
+- **`antenna_verdict: "unchecked"`** — no graded level was ever compared
+  against a limit at all (e.g. `--pdk` was omitted, so every level
+  including the graded ones comes back `"unchecked"`).
 
 ### Sky130 antenna-ratio limits
 
@@ -498,7 +518,8 @@ the shared envelope (`schema_version`, error shape, exit codes).
     "klayout_version": "0.29.8",
     "pdk": { "name": "sky130", "source": "built-in", "version": null },
     "deck": null,
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" },
+    "spec": { "content_hash": "sha256:<hex>" }
   }
 }
 ```
@@ -561,7 +582,7 @@ forward regardless (a `diode_insertion` remedy):
 | `gates[].gate_id`| string          | `"gate<index>"`, ascending in internal net-id order (stable within one run, not guaranteed stable across `klt`/KLayout versions). |
 | `gates[].net`    | string \| null  | The net's own label text, if any `stackup` role's `label_layer` carries one; `null` if unlabelled. |
 | `gates[].gate_area_um2` | number   | This net's own merged area on the gate-role layer, in µm² — or, when `stackup[0].active_layer` is supplied, that area intersected with the active/diffusion layer (`poly ∩ diff`, issue #1979). Identical to `levels[0].cumulative_area_um2` only when `active_layer` is omitted. |
-| `gates[].antenna_verdict` | string | `"violate"` if any `levels[]` entry violates, else `"pass"` if any level passed, else `"unchecked"`. |
+| `gates[].antenna_verdict` | string | `"violate"` if any *graded* `levels[1:]` entry (excludes `levels[0]`, the gate role, which is always `"unchecked"`) violates; else `"pass_partial"` if at least one graded level passed but at least one other graded level is `"unchecked"` (issue #1997 — a genuine coverage gap, e.g. met3-5 on a full sky130 stack); else `"pass"` if every graded level passed; else `"unchecked"`. |
 | `gates[].levels` | array\<object\> | One entry per `stackup` role, in fabrication order — see below.                                  |
 | `levels[].layer` | string          | The contributing `stackup` role's own `name`.                                                     |
 | `levels[].step_area_um2` | number   | This net's own merged area on this role's layer, in µm².                                         |
@@ -585,16 +606,34 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
 | `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
-| `status`         | string          | (issue #1968) `"clean"` only when `erc_finding_count == 0` **and** no `gates[].levels[].verdict` is `"violate"`; otherwise `"violations"` — a roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict. |
-| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). |
+| `status`         | string          | (issue #1968) `"violations"` if any connectivity/antenna finding exists; otherwise `"not_checked"` if no antenna level was graded, else `"clean"` — a roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict. |
+| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
+
+## Checked-work coverage
+
+The [common v1 coverage contract](../coverage-contract.md) is additive to
+this command's existing envelope.
+
+`coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
+actually compared against a limit. Missing PDK or level limits are skipped;
+the gate reference level is inapplicable. Structural connectivity findings
+remain independent. Any finding/antenna violation yields `violations` and
+exit 3; otherwise zero graded antenna levels yields `not_checked` and exit
+4. Checked clean runs exit 0. Existing per-gate partial verdicts are retained;
+Phase 2 owns the overall partial policy.
+
+Completed refusal/failure reports remain on stdout; actual invocation errors
+retain exit 1 and the stderr error envelope.
 
 ## Exit codes
 
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
-| `0`       | Success — at least one gate net was found and reported. This is unaffected by `erc_findings`: a `0` exit with a non-empty `erc_findings` array means the run *completed* successfully, not that the layout is ERC-clean — check `erc_finding_count` (matching `klt drc`'s own "clean run" vs. "found violations" distinction). |
+| `0` | At least one antenna level was graded, with no antenna or connectivity finding. |
 | `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
+| `3` | Antenna or connectivity violations. |
+| `4` | No actual antenna checks; `status: "not_checked"`. |
 
 ## Cross-checked against klayout's own built-in antenna engine
 

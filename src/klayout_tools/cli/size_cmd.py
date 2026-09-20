@@ -105,11 +105,20 @@ def _print_text(report: dict) -> None:
             )
 
     _print_design_centering(report)
+    _print_method_and_env(report)
 
-    method = report["method"]
-    print()
-    print(f"method: {method['name']}")
-    print(f"rationale: {method['rationale']}")
+
+def _print_method_and_env(report: dict) -> None:
+    """The "method"/"rationale" and "engine"/"models_lib" tail lines --
+    shared between single-device and topology text rendering. A
+    single-device report always carries ``method``, so the ``is not None``
+    guard (needed for a topology report, where it's optional) is a no-op
+    there."""
+    method = report.get("method")
+    if method is not None:
+        print()
+        print(f"method: {method['name']}")
+        print(f"rationale: {method['rationale']}")
 
     env = report["environment"]
     print()
@@ -223,19 +232,4 @@ def _print_topology_text(report: dict) -> None:
             print(f"  #{step['index']} {widths}  worst|gm/Id err|={worst_str}")
 
     _print_design_centering(report)
-
-    method = report.get("method")
-    if method is not None:
-        print()
-        print(f"method: {method['name']}")
-        print(f"rationale: {method['rationale']}")
-
-    env = report["environment"]
-    print()
-    print(f"engine: {env['engine']} {env['engine_version'] or '-'}")
-    # Issue #1274: `models_lib` is the `{path, scope}` shape
-    # `env_provenance.repo_relative_path` defines -- rendered through the
-    # same shared helper `klt sim`/`klt env-provenance` use, so a PDK
-    # outside the repo prints `<outside repo>`, never an absolute home path
-    # (and never a raw dict repr).
-    print(f"models_lib: {render_path_field(env['models_lib'])}")
+    _print_method_and_env(report)

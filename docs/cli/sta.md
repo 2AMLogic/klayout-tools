@@ -159,10 +159,19 @@ A request naming both, or neither, is a request error.
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": { "name": "sky130_fd_sc_hd__tt_025C_1v80", "content_hash": "sha256:<hex>" },
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   }
 }
 ```
+
+**Path field shape (issue #2073).** `def_path`/`verilog_path`/`spef_path`
+below are plain absolute-path strings, not the `{path, scope}` envelope
+`klt synthesize`/`klt pex`/`klt sim`/`klt size` report their own output
+paths as — including `klt place-and-route`'s `def_path` that this command's
+own `def` field typically consumes as input (see "Response" above). This is
+a deliberate, documented split, not an oversight — see
+`docs/json-contract.md`'s "Output-artifact path fields: envelope vs. plain
+string" for the full enumeration and rationale.
 
 | Field | Type | Description |
 | --- | --- | --- |
@@ -183,7 +192,7 @@ A request naming both, or neither, is a request error.
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree the loaded DEF already contains. `null` if the DEF has no clock tree (`report_clock_skew_metric` reports nothing to measure). |
 | `estimated_power_mw` | number \| null | From `report_power_metric`, against whatever parasitics (SPEF-annotated or LEF-capacitance-only) this run used. |
 | `spef_annotation` | object \| null | `null` unless `request.spef` was given. See "Annotation evidence" below for the field shapes — and read it before quoting a SPEF-annotated timing number as a real-parasitics measurement. |
-| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def`. On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
+| `provenance` | object | The shared envelope block (`docs/json-contract.md`). `deck` names the resolved liberty file (`<cell_library>__<corner>`); `pdk` is `find_pdk()`'s resolved triple; `input` is the content hash of `def` (`input.role: "layout"`) — or of `verilog` in netlist mode, where the role is `"netlist"` instead (issue #2027, so a consumer never compares a netlist digest against a layout one). On a `pdk.corners` (list) response this block carries `deck: null` at the top level — see "Multi-corner characterization" below for where the per-corner `deck` block actually lives. |
 
 ## Multi-corner characterization (`pdk.corners`, issue #1871)
 
@@ -230,7 +239,7 @@ closes that gap natively:
     "klayout_version": "0.30.10",
     "pdk": { "name": "sky130A", "source": "PDK_ROOT environment variable", "version": "<stamp>" },
     "deck": null,
-    "input": { "content_hash": "sha256:<hex>" }
+    "input": { "content_hash": "sha256:<hex>", "role": "layout" }
   },
   "corners": [
     {
@@ -645,6 +654,42 @@ The scalar `pdk.corner` form above still works unchanged — change only
 Because `def` never changes either way, every corner analyses the identical
 placed-and-routed geometry — a real characterization of one design, not of N
 different place-and-route outcomes.
+
+## Retained OpenROAD logs
+
+Each STA script invocation retains `stdout.log`, `stderr.log`, and
+`invocation.json` under `.klt/sta/openroad-logs/<invocation_id>/`, beside its
+generated script. A retry creates a new invocation ID and preserves previous
+logs. Single-corner JSON responses add `engine_log`; multi-corner responses
+add `corners[].engine_log` for each actual session.
+
+The entry has the same [fields and retention semantics as P&R](place-and-route.md#retained-openroad-logs):
+invocation ID, script filename/hash, normalized script/metrics/log paths,
+process outcome/return code, and `retention_errors`. New paths use
+`{path, scope}` envelopes; existing `def_path`, `verilog_path`, and
+`spef_path` fields retain their original shapes. `repo` paths resolve from
+the invoking repository root. For withheld `external` paths, find
+`openroad-logs/<invocation_id>/` beside the generated script in the request's
+`.klt/sta/` directory.
+
+Engine and missing-metrics errors retain their original diagnosis and append
+` -- openroad invocation: <JSON entry>` to `error.message`. Retention
+failures are secondary diagnostics and do not mask the engine failure.
+Both captured streams remain separate and unabridged; the raw transcripts
+may contain engine-emitted absolute paths. Log retention does not make a
+partial output into successful timing evidence or isolate other STA artifacts.
+
+```sh
+klt sta request.json --format json >sta.json 2>sta.error.json
+status=$?
+# Inspect status and sta.error.json before consuming sta.json.
+```
+
+The JSON error is on stderr with exit status `1`; stdout is empty on an
+application failure. An empty redirected `sta.json` is created by the shell,
+not evidence of a completed analysis. No timeout is added, and logs are
+written after capture: timeout/interrupt data is retained when available,
+but an abrupt termination cannot guarantee a complete transcript.
 
 ## Exit codes
 
