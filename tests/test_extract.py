@@ -13539,6 +13539,60 @@ def test_anonymous_net_json_spelling_matches_written_netlist_node_token(tmp_path
         assert not leg_net.startswith("\\\\")
 
 
+def test_merged_label_leg_net_json_spelling_matches_written_netlist_node_token(
+    tmp_path,
+):
+    """Regression (issue #2150): a **merged-label** net's (issue #696, `Y`
+    and `Y2` shorted onto one pad, reported as `Y|Y2`) star-topology
+    leg/hub net used to be double-escaped in the written `.spice` file.
+
+    `_net_identity_name()` used to pre-convert the parent net's `,` to `|`
+    before minting the leg/hub net's *real* name (`Y|Y2__t0`) -- but that
+    baked a literal `|` into a real net name, which KLayout's
+    `NetlistSpiceWriter` then treated as an unsafe character and
+    hex-escaped (`Y\\x7cY2__t0`), instead of leaving it alone. The JSON
+    report kept reporting the un-hex-escaped `Y|Y2__t0` (via
+    `spice_safe_net_name`), so the two artifacts diverged for exactly this
+    net -- breaking the same byte-identical join
+    `test_anonymous_net_json_spelling_matches_written_netlist_node_token`
+    (#1162) already covers for an anonymous net's leading `$`."""
+    path = _write_gds(_make_inverter_layout(extra_y_label="Y2"), tmp_path / "multi.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "multi.spice"), parasitics=True
+    )
+
+    assert report["merged_net_labels"] == [{"net": "Y|Y2", "labels": ["Y", "Y2"]}]
+
+    para_entry = next(n for n in report["parasitics"]["nets"] if n["net"] == "Y|Y2")
+    node_tokens = _spice_node_tokens(Path(report["netlist_path"]).read_text())
+
+    # `hub_net` and every `terminals[].leg_net` are real node tokens the
+    # written netlist actually uses -- not merely similar-looking strings.
+    # Star topology reuses the net itself as the hub for one terminal
+    # (issue #592's "at zero resistance from the hub" convention), so a
+    # 2-terminal net like `Y` here produces exactly one fresh leg, not two.
+    assert para_entry["hub_net"] in node_tokens
+    leg_nets = [term["leg_net"] for term in para_entry["terminals"]]
+    assert len(leg_nets) == 1
+    for leg_net in leg_nets:
+        assert leg_net.startswith("Y|Y2__t")
+        assert leg_net in node_tokens
+        # The old bug's exact signature: a hex-escaped literal pipe. No leg
+        # net name may contain one -- the written netlist should carry the
+        # same `|`-joined spelling the JSON reports, not KLayout's generic
+        # unsafe-character escape for a `|` it doesn't expect to see.
+        assert "\\x7c" not in leg_net
+        assert "\\x7C" not in leg_net
+
+    # And the raw hex-escaped form must not appear anywhere in the written
+    # netlist text for this net either (belt-and-suspenders: catches a
+    # regression even if some future leg-naming change stops matching the
+    # `leg_net` value exactly).
+    netlist_text = Path(report["netlist_path"]).read_text()
+    assert "\\x7c" not in netlist_text
+    assert "\\x7C" not in netlist_text
+
+
 # --------------------------------------------------------------------------- #
 # Hierarchical (dot-joined) net names (issue #2145)
 # --------------------------------------------------------------------------- #

@@ -14,6 +14,20 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2150): `klt extract --parasitics`'s `parasitics.nets[].terminals[]
+  .leg_net`/`.hub_net` now stays byte-identical to the written `.spice`
+  file's own node spelling for a star/ladder leg or hub net synthesized from
+  a **merged-label** net (one whose real name already contains a `|` from
+  the issue #696 comma-\>`|` rewrite, e.g. parent net `Y|Y2`). Previously the
+  synthesized leg/hub net's real name baked that `|` in directly
+  (`Y|Y2__t0`), so KLayout's `NetlistSpiceWriter` treated the literal `|` as
+  an unsafe character and hex-escaped it to `Y\x7cY2__t0` in the written
+  netlist — a byte mismatch against the JSON-reported `leg_net`/`hub_net`
+  value for exactly this case. `_net_identity_name()` no longer pre-converts
+  the comma to `|` when minting the real net; the writer's own comma-\>`|`
+  rewrite now runs exactly once, matching `spice_safe_net_name()`'s reported
+  spelling. Other net-name cases (#696, #1162, #2145) are unaffected.
+
 - **Fixed** (#2110): `klt drc --engine curated` now applies the shared
   coverage rollup. Partial runs report `clean_partial`, zero-work runs report
   `not_checked`, and violations retain precedence. Rules skipped for absent
