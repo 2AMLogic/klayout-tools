@@ -11,6 +11,8 @@ import pytest
 
 from klayout_tools import _openroad_engine as engine
 
+pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
 
 class EngineError(Exception):
     pass
