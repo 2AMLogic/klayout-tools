@@ -3712,8 +3712,12 @@ def _resolve_evidence(
         exit_status = completed.returncode
 
         try:
-            envelope = json.loads(completed.stdout)
-        except json.JSONDecodeError:
+            envelope = json.loads(
+                completed.stdout,
+                parse_constant=_reject_json_constant,
+                parse_float=_finite_json_float,
+            )
+        except ValueError:
             if exit_status == 0:
                 return None, _REASON_UNREADABLE_EVIDENCE
             return None, _REASON_COMMAND_FAILED
