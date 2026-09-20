@@ -532,6 +532,45 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  signoff-example:
+    name: examples/signoff round-trip
+    # `examples/signoff/drc.json` / `lvs.json` are real `klt drc` / `klt lvs`
+    # envelopes -- the evidence `examples/signoff/manifest.json` cites. Nothing
+    # regenerated them when those verbs changed, so they drifted a long way
+    # from reality before anyone noticed (issue #2028: a whole coverage-schema
+    # bump behind, and a `provenance.input: null` claim `klt lvs` stopped
+    # making in #1969, with README.md documenting the stale shape as current).
+    #
+    # scripts/check-signoff-example.sh regenerates the directory and fails on
+    # any diff -- see its header for what a failure means and how to fix it
+    # (regenerate and commit, in the same PR as the verb change).
+    #
+    # Deliberately its own job rather than a step inside `test`: it needs no
+    # ngspice/Yosys/Verilator toolchain (the example is PDK-free by design),
+    # so it runs on ubuntu-latest in well under a minute instead of queueing
+    # behind the heavy pool for a matrix it would run four redundant times in.
+    #
+    # No row in .github/ci-wall-clock-budget.json on purpose: an unbudgeted
+    # job falls back to `default_job_budget_seconds` (600 s), which is the
+    # documented path for a job with no measured baseline yet
+    # (docs/guides/ci-wall-clock-budget.md, "Budget derivation"). Give it a
+    # real budget at the next re-measure rather than guessing one now.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked
+
+      - name: Regenerate examples/signoff and assert no diff
+        run: scripts/check-signoff-example.sh
+
   site:
     name: site/ (tsc + vitest)
     # `site/` is a self-contained Vite + React project (site/README.md) --
@@ -1043,6 +1082,7 @@ jobs:
       - native-statime
       - native-techmap
       - native-wave
+      - signoff-example
       - site
       - test
       - action-smoke-test
