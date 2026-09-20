@@ -2079,13 +2079,13 @@ def spice_safe_net_name(name: str) -> str:
 
 
 def _net_identity_name(net: kdb.Net) -> str:
-    """The comma -> ``|`` (issue #696) and ``.`` -> ``_`` (issue #2145)
-    rewrites of ``net.expanded_name()`` *without*
-    :func:`spice_safe_net_name`'s leading-``$`` backslash escape
-    (issue #1162) -- used only where the resulting string becomes (part of)
-    the *real* name of a ``kdb.Net``/``kdb.Device`` this module creates in
-    the working circuit (``_compute_parasitics``'s internal coupling-pair
-    keys and ground-net list, and everything derived from them inside
+    """The ``.`` -> ``_`` (issue #2145) rewrite of ``net.expanded_name()``
+    *without* :func:`spice_safe_net_name`'s leading-``$`` backslash escape
+    (issue #1162) **and without** its comma -> ``|`` rewrite (issue #696) --
+    used only where the resulting string becomes (part of) the *real* name
+    of a ``kdb.Net``/``kdb.Device`` this module creates in the working
+    circuit (``_compute_parasitics``'s internal coupling-pair keys and
+    ground-net list, and everything derived from them inside
     ``_inject_parasitics``: ``_unique_net_name``'s collision-avoidance set,
     the actual leg/hub nets ``circuit.create_net`` mints, and
     ``_sanitize_instance_name``'s input).
@@ -2106,21 +2106,32 @@ def _net_identity_name(net: kdb.Net) -> str:
     ``terminals[].leg_net``) picks up the escape, matching the netlist's own
     spelling without touching what the underlying net is actually called.
 
-    The ``.`` -> ``_`` rewrite (issue #2145) *is* included here, on the same
-    side of the line as the comma: unlike the leading-``$`` escape, it is
-    not applied by ``NetlistSpiceWriter``, so it has to be baked into the
-    real net name for the written netlist to carry it at all
-    (``extract.py``'s ``_rewrite_dotted_net_names`` does exactly that,
-    before this module ever sees the circuit). Including it here is
-    therefore a no-op in practice -- by the time ``_compute_parasitics``
-    runs, no net name still contains a dot -- kept only so this namespace
-    and :func:`spice_safe_net_name` cannot drift apart on a path that
-    bypasses that pass.
+    **The comma is deliberately left alone here (issue #2150), unlike the
+    dot.** ``NetlistSpiceWriter`` already rewrites a literal comma to ``|``
+    on its own whenever it writes *any* net -- including one this module
+    synthesizes -- as a node reference (confirmed directly against a live
+    writer run: a net named ``a,b`` writes as ``a|b``, exactly the rewrite
+    :func:`spice_safe_net_name` predicts). Pre-converting the comma to
+    ``|`` here, as this function used to, baked a *literal pipe* into the
+    real name of a leg/hub net synthesized from a merged-label parent net
+    (e.g. a parent identity of ``Y|Y2`` producing a leg literally named
+    ``Y|Y2__t0``) -- but a pipe is not a character the writer's own
+    comma-substitution logic ever expects to find *already present* in a
+    net name, so it treats it the same as any other SPICE-unsafe character
+    and hex-escapes it (``Y\\x7cY2__t0``), double-transforming the one case
+    where the identity namespace's own base name happened to need escaping
+    twice. Leaving the comma as a real, literal comma in every name this
+    function returns (identity, collision-avoidance, and the leg/hub names
+    minted from it) means the writer's own comma -> ``|`` rewrite is the
+    *only* place ``|`` is ever introduced, so it never collides with a
+    pipe the writer must then re-escape. The dot cannot use this same
+    trick: ``NetlistSpiceWriter`` applies no rewrite of its own for it (see
+    :func:`spice_safe_net_name`'s docstring, case 3), so the ``.`` -> ``_``
+    rewrite still has to be baked into the real name here for the written
+    netlist to carry it at all.
     """
-    return (
-        net.expanded_name()
-        .replace(",", "|")
-        .replace(SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN)
+    return net.expanded_name().replace(
+        SPICE_HIERARCHY_SEPARATOR, SPICE_SAFE_HIERARCHY_JOIN
     )
 
 

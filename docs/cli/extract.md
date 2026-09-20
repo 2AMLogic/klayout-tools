@@ -4955,6 +4955,18 @@ map an emitted `R`/`C` card back to the net it parasitizes, use
 `parasitics.nets[].net` (or the netlist's own node names on that card), not
 the sanitized instance name.
 
+This holds even when `hub_net`/`leg_net` names a **synthesized** star/ladder
+leg or hub net minted from a merged-label parent (e.g. parent net `Y|Y2`
+producing a leg reported as `Y|Y2__t0`) — before issue #2150's fix, the
+internal net `--parasitics` creates for that leg already had the `|`
+baked into its real (pre-write) name, so `NetlistSpiceWriter` treated that
+literal `|` as an unsafe character and hex-escaped it (`Y\x7cY2__t0`) instead
+of leaving it alone, breaking the byte-identical guarantee for exactly this
+one case. The internal net's real name now keeps the parent's original
+comma (`Y,Y2__t0`) so the writer's own comma-\>`|` rewrite is the only place
+`|` is introduced, matching the `spice_safe_net_name()`-derived JSON spelling
+byte-for-byte.
+
 ### Anonymous nets are backslash-escaped
 
 KLayout's own `NetlistSpiceWriter` backslash-escapes a leading `$` (`\$2`,
