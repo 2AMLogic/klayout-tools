@@ -378,7 +378,21 @@ written to every block.
       independent, device-aware LVS run first (and confirm that LVS deck's
       own connectivity setup does not join nets by label alone, e.g. via a
       bare `connect_implicit('*')` rule, before trusting a "match" verdict
-      as that independent check).
+      as that independent check). **Caveat (issue #2183)**: the mirror-image
+      false positive applies to `erc.supply_short`. `klt erc` traces
+      conductor geometry with no device recognition, so a drawn device body
+      on a declared role — a poly resistor, a poly fuse, a MiM/MOM
+      capacitor plate — reads as a wire. A block that deliberately spans
+      its two supplies through such a device (a power-on-reset divider, a
+      brown-out detector, a supply-referenced bias string) therefore
+      reports an `erc.supply_short` that is an artifact of the declaration,
+      not a power-delivery defect. **Declare those bodies in the spec's
+      `devices[]` array** — see `docs/cli/erc.md`'s "Device bodies are not
+      wires" section — and the item becomes gradeable for such a block. A
+      grader seeing an `erc.supply_short` on a supply-sensing analog block
+      should check the cited report's `provenance.devices` (empty, or
+      missing the bodies on the conducting path) before reading the finding
+      as a real short.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 

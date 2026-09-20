@@ -2511,3 +2511,358 @@ def test_active_layer_does_not_change_schema_version(tmp_path):
 
     report = run_erc(str(gds), str(spec), pdk="sky130")
     assert report["schema_version"] == 1
+
+
+# --- devices[]: drawn device bodies are not wires (issue #2183) --------------
+
+
+def _resistor_divider_fixture(path) -> None:
+    """A rail-to-rail poly-resistor string: two labelled `li1` supply rails
+    joined *only* through a drawn poly resistor body, contacted at each end
+    -- the defining topology of a power-on-reset divider, a brown-out
+    detector, or a supply-referenced bias string.
+
+    The layout is DRC-plausible and electrically correct: VDD and VSS are
+    two distinct nodes with a resistor between them, not a short. But every
+    shape on the path is on a declared conductor role, so without a
+    `devices[]` declaration the connectivity model reads the resistor body
+    as a wire and reports a false `erc.supply_short` -- the reproduction
+    from issue #2183.
+
+    Layer numbers: poly=1/0, contact=2/0, li1=3/0, li1 label=3/5, and the
+    PDK device-body marker on 62/0 (gf180mcu's own `Resistor` layer number,
+    kept recognisable).
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(1, 0)
+    contact = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    label = layout.layer(3, 5)
+    res_marker = layout.layer(62, 0)
+
+    # The two supply rails, on li1, 6 um apart -- no metal runs between them.
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(2), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(10), _um(1)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(9), _um(0.5))))
+
+    # The resistor: one poly bar from rail to rail, contacted at each head.
+    top.shapes(poly).insert(kdb.Box.new(_um(1), _um(0.2), _um(9), _um(0.8)))
+    top.shapes(contact).insert(kdb.Box.new(_um(1.2), _um(0.3), _um(1.4), _um(0.5)))
+    top.shapes(contact).insert(kdb.Box.new(_um(8.6), _um(0.3), _um(8.8), _um(0.5)))
+
+    # The PDK's own device-body marker over the resistor body (not the
+    # heads): 6 um x 0.8 um = 4.8 um^2.
+    top.shapes(res_marker).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+
+    layout.write(str(path))
+
+
+#: The `devices[]` declaration matching `_resistor_divider_fixture`.
+_RESISTOR_DEVICES = [{"name": "poly_resistor", "body_layer": "62/0", "on": "poly"}]
+
+
+def _resistor_divider_spec(devices=None):
+    spec = {
+        "stackup": [
+            {"name": "poly", "layer": "1/0", "role": "gate"},
+            {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
+        ],
+        "vias": [{"name": "contact", "layer": "2/0", "between": ["poly", "li1"]}],
+        "nets": [
+            {"name": "VDD", "kind": "supply"},
+            {"name": "VSS", "kind": "supply"},
+        ],
+    }
+    if devices is not None:
+        spec["devices"] = devices
+    return spec
+
+
+def _run_resistor_divider(tmp_path, devices=None, name="divider"):
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _resistor_divider_fixture(gds)
+    _write_spec(spec, _resistor_divider_spec(devices))
+    return run_erc(str(gds), str(spec))
+
+
+def test_undeclared_device_body_reports_a_false_supply_short(tmp_path):
+    """The bug, reproduced: with no `devices[]` declaration the drawn
+    resistor body conducts, so the two rails resolve to one island."""
+    report = _run_resistor_divider(tmp_path)
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+    finding = report["erc_findings"][0]
+    assert {finding["net"], finding["other_net"]} == {"VDD", "VSS"}
+    assert report["erc_status"] == "violations"
+
+
+def test_declared_device_body_breaks_the_rail_to_rail_string(tmp_path):
+    """The fix: declaring the device-body marker subtracts it from `poly`'s
+    connectivity, so the same layout reports zero findings of any rule --
+    matching the issue's own isolation experiment (delete only the
+    resistor-marked poly -> clean)."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+
+    assert report["erc_findings"] == []
+    assert report["erc_finding_count"] == 0
+    assert report["erc_status"] == "clean"
+
+
+def test_declared_device_body_keeps_both_supplies_reachable(tmp_path):
+    """The carve-out must break the *string*, not the rails: each supply
+    still resolves to exactly one island (no `erc.unconnected_net`), and the
+    resistor heads still reach their own rail through the contacts."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+
+    assert not any(
+        f["rule"] in ("erc.unconnected_net", "erc.floating_gate")
+        for f in report["erc_findings"]
+    )
+    # Both resistor heads survive as gate-role geometry, each on its own
+    # net now that the body between them is gone.
+    assert report["gate_count"] == 2
+
+
+def test_device_body_subtraction_is_reported_in_provenance(tmp_path):
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+
+    assert report["provenance"]["devices"] == [
+        {
+            "name": "poly_resistor",
+            "body_layer": "62/0",
+            "on": "poly",
+            "body_area_um2": 4.8,
+        }
+    ]
+
+
+def test_devices_omitted_reports_an_empty_provenance_list(tmp_path):
+    report = _run_resistor_divider(tmp_path)
+
+    assert report["provenance"]["devices"] == []
+
+
+def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path):
+    """A `body_layer` this stream never carries is not an error (matching
+    `stackup`/`vias`' own convention) -- but the measured `body_area_um2`
+    says so, instead of leaving a caller to infer that the carve-out bit."""
+    report = _run_resistor_divider(
+        tmp_path,
+        devices=[{"name": "poly_resistor", "body_layer": "99/0", "on": "poly"}],
+    )
+
+    assert report["provenance"]["devices"][0]["body_area_um2"] == 0.0
+    # Nothing was subtracted, so the false short is still reported.
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+
+
+def test_devices_declaration_does_not_change_schema_version(tmp_path):
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+
+    assert report["schema_version"] == 1
+
+
+def test_device_body_does_not_disturb_an_unrelated_layout(tmp_path):
+    """A `devices[]` declaration whose marker touches nothing on the
+    declared role leaves every other finding exactly as it was: the basic
+    fixture's own floating gate is still reported."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    baseline = run_erc(str(gds), str(spec))
+
+    spec_dict = json.loads(spec.read_text())
+    spec_dict["devices"] = [
+        {"name": "poly_resistor", "body_layer": "62/0", "on": "poly"}
+    ]
+    with_devices = tmp_path / "basic_devices.erc.json"
+    _write_spec(with_devices, spec_dict)
+    report = run_erc(str(gds), str(with_devices))
+
+    assert report["erc_findings"] == baseline["erc_findings"]
+    assert report["gates"] == baseline["gates"]
+
+
+# --- devices[] on a via role: a MiM/MOM cap bridging two metal roles ---------
+
+
+def _mim_cap_fixture(path) -> None:
+    """Two declared metal roles bridged *only* by the declared via role's
+    own geometry -- the MiM/MOM capacitor shape the issue names by analogy
+    (a poly resistor is not the only drawn device on a declared conductor).
+
+    Layers: poly=1/0, contact=2/0, li1=3/0 (bottom plate + a labelled
+    supply rail), li1 label=3/5, mimvia=4/0 (the plate-to-plate layer),
+    met1=5/0 (top plate), met1 label=5/5, cap marker=63/0.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(1, 0)
+    contact = layout.layer(2, 0)
+    li1 = layout.layer(3, 0)
+    li1_label = layout.layer(3, 5)
+    mimvia = layout.layer(4, 0)
+    met1 = layout.layer(5, 0)
+    met1_label = layout.layer(5, 5)
+    cap_marker = layout.layer(63, 0)
+
+    # Bottom plate on li1 (VDD) and top plate on met1 (VSS), overlapping.
+    top.shapes(li1).insert(kdb.Box.new(_um(0), _um(0), _um(2), _um(1)))
+    top.shapes(li1_label).insert(kdb.Text("VDD", kdb.Trans(_um(0.5), _um(0.5))))
+    top.shapes(met1).insert(kdb.Box.new(_um(1), _um(0), _um(3), _um(1)))
+    top.shapes(met1_label).insert(kdb.Text("VSS", kdb.Trans(_um(2.5), _um(0.5))))
+
+    # The capacitor's own plate-to-plate geometry, on the declared via role.
+    top.shapes(mimvia).insert(kdb.Box.new(_um(1.2), _um(0.2), _um(1.8), _um(0.8)))
+    top.shapes(cap_marker).insert(kdb.Box.new(_um(1.1), _um(0.1), _um(1.9), _um(0.9)))
+
+    # An unrelated, properly strapped gate, so `run_erc` has a gate net.
+    top.shapes(poly).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(contact).insert(kdb.Box.new(_um(20.2), _um(0.2), _um(20.4), _um(0.4)))
+    top.shapes(li1).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+
+    layout.write(str(path))
+
+
+def _mim_cap_spec(devices=None):
+    spec = {
+        "stackup": [
+            {"name": "poly", "layer": "1/0", "role": "gate"},
+            {"name": "li1", "layer": "3/0", "label_layer": "3/5"},
+            {"name": "met1", "layer": "5/0", "label_layer": "5/5"},
+        ],
+        "vias": [
+            {"name": "contact", "layer": "2/0", "between": ["poly", "li1"]},
+            {"name": "mimvia", "layer": "4/0", "between": ["li1", "met1"]},
+        ],
+        "nets": [
+            {"name": "VDD", "kind": "supply"},
+            {"name": "VSS", "kind": "supply"},
+        ],
+    }
+    if devices is not None:
+        spec["devices"] = devices
+    return spec
+
+
+def _run_mim_cap(tmp_path, devices=None, name="mimcap"):
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _mim_cap_fixture(gds)
+    _write_spec(spec, _mim_cap_spec(devices))
+    return run_erc(str(gds), str(spec))
+
+
+def test_undeclared_cap_body_on_a_via_role_shorts_two_supplies(tmp_path):
+    report = _run_mim_cap(tmp_path)
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+
+
+def test_device_declared_on_a_via_role_breaks_the_plate_to_plate_bridge(tmp_path):
+    """`on` may name a `vias` entry, not just a `stackup` role: a MiM/MOM
+    cap's bridge between two declared metal roles *is* the via-role
+    geometry, so that is where the carve-out has to apply."""
+    report = _run_mim_cap(
+        tmp_path,
+        devices=[{"name": "mim_cap", "body_layer": "63/0", "on": "mimvia"}],
+    )
+
+    assert report["erc_findings"] == []
+    assert report["provenance"]["devices"][0]["on"] == "mimvia"
+
+
+# --- devices[]: spec validation (issue #2183) --------------------------------
+
+
+def _run_devices_spec(tmp_path, devices):
+    gds = tmp_path / "divider.gds"
+    spec = tmp_path / "divider.erc.json"
+    _resistor_divider_fixture(gds)
+    _write_spec(spec, _resistor_divider_spec(devices))
+    return run_erc(str(gds), str(spec))
+
+
+def test_devices_must_be_an_array(tmp_path):
+    with pytest.raises(ErcError, match="'devices' must be an array"):
+        _run_devices_spec(tmp_path, {"name": "poly_resistor"})
+
+
+def test_devices_entry_must_be_an_object(tmp_path):
+    with pytest.raises(ErcError, match=r"devices\[0\] must be a JSON object"):
+        _run_devices_spec(tmp_path, ["62/0"])
+
+
+def test_devices_entry_requires_body_layer(tmp_path):
+    with pytest.raises(ErcError, match=r"devices\[0\] missing 'body_layer'"):
+        _run_devices_spec(tmp_path, [{"on": "poly"}])
+
+
+def test_devices_entry_requires_on(tmp_path):
+    with pytest.raises(ErcError, match=r"devices\[0\] missing 'on'"):
+        _run_devices_spec(tmp_path, [{"body_layer": "62/0"}])
+
+
+def test_devices_on_must_name_a_declared_conductor(tmp_path):
+    with pytest.raises(ErcError, match=r"devices\[0\]\.on must name a 'stackup'"):
+        _run_devices_spec(tmp_path, [{"body_layer": "62/0", "on": "met9"}])
+
+
+def test_devices_body_layer_must_parse(tmp_path):
+    with pytest.raises(ErcError, match=r"devices\[0\]\.body_layer"):
+        _run_devices_spec(tmp_path, [{"body_layer": "sixty-two", "on": "poly"}])
+
+
+def test_devices_names_must_be_unique(tmp_path):
+    with pytest.raises(ErcError, match="duplicate device name 'poly_resistor'"):
+        _run_devices_spec(
+            tmp_path,
+            [
+                {"name": "poly_resistor", "body_layer": "62/0", "on": "poly"},
+                {"name": "poly_resistor", "body_layer": "62/0", "on": "li1"},
+            ],
+        )
+
+
+def test_devices_null_is_treated_as_omitted(tmp_path):
+    gds = tmp_path / "divider.gds"
+    spec = tmp_path / "divider.erc.json"
+    _resistor_divider_fixture(gds)
+    spec_dict = _resistor_divider_spec()
+    spec_dict["devices"] = None
+    _write_spec(spec, spec_dict)
+
+    report = run_erc(str(gds), str(spec))
+    assert report["provenance"]["devices"] == []
+
+
+def test_two_devices_on_the_same_role_are_unioned(tmp_path):
+    """Two declarations sharing one `on` role must both apply -- the second
+    cannot replace the first."""
+    gds = tmp_path / "divider.gds"
+    spec = tmp_path / "divider.erc.json"
+    _resistor_divider_fixture(gds)
+    _write_spec(
+        spec,
+        _resistor_divider_spec(
+            [
+                {"name": "poly_resistor", "body_layer": "62/0", "on": "poly"},
+                {"name": "poly_fuse", "body_layer": "99/0", "on": "poly"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    assert report["erc_findings"] == []
+    assert [d["name"] for d in report["provenance"]["devices"]] == [
+        "poly_resistor",
+        "poly_fuse",
+    ]

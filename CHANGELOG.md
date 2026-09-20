@@ -32,6 +32,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   change: no code in `src/klayout_tools/erc.py` changed, no `schema_version`
   bump.
 
+- **Added** (#2183): `klt erc` specs may declare an optional `devices[]`
+  array — `{"name", "body_layer": "<layer>/<datatype>", "on": "<stackup or
+  vias name>"}` — naming where a drawn **device body** sits on an
+  already-declared conductor role (a PDK's own `RES_MK`/`SAB`/`Resistor`,
+  `CAP_MK`/`MIM_L_MK`/`FuseTop`-style marker). Each entry's region is
+  subtracted from that role's conductor region before connectivity is
+  registered, so a rail-to-rail device string breaks the net at the device
+  body instead of reading as a dead short. Without it, `erc.supply_short`
+  was a **false positive** for any supply-sensing analog block — a
+  power-on-reset comparator, a brown-out detector, a supply-referenced bias
+  string — which made `docs/design-evidence-tiers.md`'s T1 item 11
+  unsatisfiable by construction for that whole class of design. What each
+  declaration actually removed is echoed in the new `provenance.devices`
+  (with the measured `body_area_um2`, `0.0` when the marker layer carries
+  no geometry), so a carve-out is readable from the report and not only
+  from the spec. Additive on both sides: a spec declaring no `devices[]`
+  produces an identical report apart from the new empty list, and
+  `schema_version` stays `1`. Both the documented limitation and the
+  declaration are now written up in
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "Device bodies are not wires"
+  section and in item 11 itself.
+
 - **Fixed** (#2182): `klt signoff --manifest`'s staleness gate no longer
   conflates two distinct situations under one `reason: "stale_evidence"`.
   A manifest entry that pins `content_hash` now renders the new

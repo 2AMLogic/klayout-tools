@@ -249,15 +249,42 @@ use) — matching `klt power`'s own convention.
   - `net` (string, required) — the net name (matched the same way as
     `nets[].name` above) the tap must ultimately reach.
   - Omitted entirely -> `erc.missing_tie` is never computed.
+- `devices` (optional array, default `[]`, issue #2183) — where a drawn
+  **device body** sits on an already-declared conductor role, so the
+  connectivity model stops reading it as a wire (see "Device bodies are
+  not wires" below for what goes wrong without it):
+  - `name` (string, optional, defaults to `"device<index>"`) — echoed in
+    `provenance.devices`; must be unique within the array.
+  - `body_layer` (string, `"<layer>/<datatype>"`, required) — the PDK's
+    own device-body **marker** layer: gf180mcu's `Resistor`/`RES_MK`/`SAB`
+    for a poly resistor, `CAP_MK`/`MIM_L_MK`/`FuseTop` for a MiM cap — the
+    same markers the curated decks already use for device recognition and
+    `klt extract` already consults. A `body_layer` absent from the given
+    layout is not an error (matching `stackup`/`vias`' own convention); it
+    subtracts nothing and reports `body_area_um2: 0.0`.
+  - `on` (string, required) — which declared role that body's geometry is
+    drawn on: either a `stackup` `name` (a poly resistor body, a fuse, a
+    capacitor plate) **or** a `vias` `name` (a MiM/MOM cap whose whole
+    plate-to-plate bridge between two declared metal roles *is* the via
+    role's own geometry). That role's conductor region is registered with
+    this entry's region subtracted; two entries sharing one `on` are
+    unioned, not last-one-wins.
+  - Omitted entirely -> no carve-out at all, i.e. the pre-#2183 behaviour
+    (`gates[]`, the antenna verdicts, and every finding are unchanged).
 
 ## Connectivity model
 
 Connectivity is traced with `klayout.db.LayoutToNetlist`, used purely for
-wire/via connectivity — no device recognition is registered, unlike `klt
+wire/via connectivity — no device *extraction* is registered, unlike `klt
 extract`'s deck-based extraction. This is the same API `extract.py`'s own
 metal/via connectivity graph and `klt power`'s resistive-network extraction
 already use, scoped down to only the layers this spec declares (`stackup`
 and `vias`).
+
+**That makes a drawn device body indistinguishable from a wire unless you
+say where it is** — see "Device bodies are not wires (`devices[]`)" below
+for the consequence (a false `erc.supply_short` on any rail-to-rail device
+string) and for the `devices[]` declaration that fixes it.
 
 `gates[]`, every antenna ratio derived from it, and the `nets[]`-driven
 findings (`erc.unconnected_net` / `erc.multiply_driven_net` /
@@ -308,6 +335,12 @@ declared taps" as a general net-merging conductor (reusing `ties[]`'s
 `well_layer`/`tap_requires` declaration shape) is a larger, separate
 follow-on — see #2180 for the option this section defers.
 
+**The mirror-image case is "Device bodies are not wires" below**: this
+section is *too little* declared connectivity (real continuity the stackup
+cannot see, producing a false `erc.unconnected_net`); that one is *too
+much* (declared geometry that is a device rather than a wire, producing a
+false `erc.supply_short`).
+
 ### Well/tap connectivity (`ties[]`, issue #2169)
 
 A `ties[]` entry is evaluated in its own second extraction: the same
@@ -352,6 +385,63 @@ declared supply. And a block sitting in a native substrate with no *drawn*
 well/tub layer cannot declare a substrate tie at all: `well_layer`
 requires drawn geometry, so only the drawn-well half of such a design is
 graded.
+
+### Device bodies are not wires (`devices[]`, issue #2183)
+
+A conductor role carries *geometry*, and the model above has no way to tell
+a wire from a **drawn device body** on the same layer: a poly resistor, a
+poly fuse, a MiM/MOM capacitor plate. Whatever the body is electrically, it
+conducts across its own extent in this graph.
+
+**Without a `devices[]` declaration, that makes `erc.supply_short` a false
+positive for any design whose topology deliberately spans two declared
+supplies through a drawn device.** A supply-sensing resistive divider
+across the rails is the defining topology of a power-on-reset comparator, a
+brown-out detector, a supply-referenced bias string, and most start-up
+circuits; on such a block, two `nets[]` entries with `"kind": "supply"`
+report a short no matter how clean the layout is — the same mechanism
+applies to a poly fuse, or to a MiM/MOM cap whose two plates sit on
+declared metal roles bridged by a declared via role. **Until the device
+bodies on the path are declared, read an `erc.supply_short` on such a block
+as "the supply verdict is unavailable", not as a power-delivery defect.**
+
+`devices[]` is how a spec declares them (schema in "Spec file" above). Each
+entry names a device-body marker layer — the `RES_MK`/`SAB`/`Resistor`,
+`CAP_MK`/`MIM_L_MK`/`FuseTop`-style layer the curated PDK decks already use
+for device recognition, and which `klt extract` already consults — plus the
+`stackup` or `vias` role that body is drawn on. That region is **subtracted
+from the role's conductor region before it is registered**, so the body
+breaks the net instead of bridging it. This is exactly the manual
+derivation a caller would otherwise have to perform by pre-processing the
+GDS (deleting the marked geometry and running against the edited stream),
+promoted from a caller hack to a declaration — which matters because a
+pre-processed stream means the committed report no longer describes the
+committed layout, defeating the point of a content-hash-pinned artifact.
+
+Three properties, all deliberate:
+
+- **The carve-out is visible in the report.** `provenance.devices` echoes
+  every declaration with the area it actually removed (`body_area_um2`),
+  so a declaration that silently matched nothing — wrong datatype, marker
+  layer absent from this stream — is distinguishable from one that bit,
+  and two runs of the same layout that disagree about `erc.supply_short`
+  carry the reason in the payload.
+- **It applies to both graphs.** The `ties[]` extraction (above) sees the
+  same carve-out: a drawn resistor body is not a wire there either.
+- **It cuts, so declare it where the device is.** Subtraction is purely
+  geometric — a marker layer that over-covers real routing will break that
+  routing's connectivity too, which typically shows up as a new
+  `erc.unconnected_net` or `erc.floating_gate`. `body_area_um2` and the
+  finding list are the cross-check; a marker that covers only the device
+  body (the usual PDK convention) leaves everything else untouched.
+
+**Still not modelled**: what the device *is*. Nothing here recognises a
+resistor as a resistor, checks its terminals, or knows the body is
+resistive rather than open — `devices[]` only removes the body from the
+wire graph. A real device-aware read of the same layout is `klt extract` /
+`klt lvs`'s job, and the two are complementary: LVS confirms the divider
+exists and matches the schematic, `klt erc` confirms nothing *else* joins
+the rails.
 
 For every net the extraction discovers whose geometry includes the declared
 gate-role layer (`stackup[0]`):
@@ -405,7 +495,10 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   `Net.expanded_name()` already joins every label attached to one shorted
   island into a single comma-separated name (e.g.
   `"SHORTED_VDD,VSS"`) — this check splits that string to recover which
-  declared names collided.
+  declared names collided. **A drawn device body between the two names
+  produces this finding too**, since the body is a conductor in this graph
+  — declare it in `devices[]` (see "Device bodies are not wires" above), or
+  read the finding as unreliable for that block.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer`), a tap must
   be drawn inside it (`tap_layer`, narrowed by `tap_requires`) *and* at
@@ -678,9 +771,24 @@ the shared envelope (`schema_version`, error shape, exit codes).
     "pdk": { "name": "sky130", "source": "built-in", "version": null },
     "deck": null,
     "input": { "content_hash": "sha256:<hex>", "role": "layout" },
-    "spec": { "content_hash": "sha256:<hex>" }
+    "spec": { "content_hash": "sha256:<hex>" },
+    "devices": []
   }
 }
+```
+
+A run whose spec declares `devices[]` echoes what each declaration actually
+removed from the connectivity graph:
+
+```json
+"devices": [
+  {
+    "name": "poly_resistor",
+    "body_layer": "62/0",
+    "on": "poly",
+    "body_area_um2": 4.8
+  }
+]
 ```
 
 A violating `levels[]` entry's `remedy` is populated instead of `null` —
@@ -769,6 +877,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
+| `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region (`0.0` when its marker layer carries no geometry in this layout). `[]` when the spec declares no `devices`. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. |
 
 ## Checked-work coverage
 

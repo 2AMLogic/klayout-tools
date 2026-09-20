@@ -33,11 +33,14 @@ neighbouring level has margin) naming the specific net and layer -- see
 :func:`_antenna_remedy`.
 
 Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
-purely for wire/via connectivity (no device recognition registered) --
-exactly the same API ``extract.py``'s own metal/via connectivity graph and
-``power.py``'s ``run_power`` already use, scoped down to only the
-caller-declared gate + stackup layers (plus, in a *separate* graph used
-only for the tie check, each declared tie's derived tap sites -- see
+purely for wire/via connectivity (no device *extraction* is registered --
+but see the optional ``devices`` spec section below, issue #2183, which
+lets a spec declare where a drawn device body sits so it stops reading as
+a wire) -- exactly the same API ``extract.py``'s own metal/via
+connectivity graph and ``power.py``'s ``run_power`` already use, scoped
+down to only the caller-declared gate + stackup layers (plus, in a
+*separate* graph used only for the tie check, each declared tie's derived
+tap sites -- see
 :func:`_extract_connectivity`). This is the "LVS's shared
 net extraction" 1c's own issue description names as the connectivity model
 1a builds and 1c reuses -- ``LayoutToNetlist`` is the same engine
@@ -86,6 +89,22 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   ``gates[]`` is built on, so no ``ties`` declaration can reach the antenna
   half of the same report (issue #2169).
 
+Device bodies (``devices``, issue #2183): a conductor role carries
+*geometry*, and nothing in the model above distinguishes a wire from a
+drawn device body sitting on the same layer -- a poly resistor, a poly
+fuse, a MiM/MOM capacitor plate. A rail-to-rail device string (the
+defining topology of a power-on-reset comparator, a brown-out detector, a
+supply-referenced bias string) therefore reads as a dead metal short
+between the two supplies it deliberately spans, and reports a false
+``erc.supply_short``. The optional ``devices`` array is how a spec says
+where those bodies are: each entry names a device-body marker layer (the
+``RES_MK``/``SAB``/``Resistor``, ``CAP_MK``/``MIM_L_MK``/``FuseTop``-style
+layer a PDK deck already uses for device recognition, and which
+``extract.py`` already consults) and the ``stackup``/``vias`` role it sits
+on, and that region is **subtracted** from the role's conductor region
+before it is registered -- so the body breaks the net instead of bridging
+it. See :func:`_device_body_cuts`.
+
 See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 """
 
@@ -122,6 +141,10 @@ from .coverage import build_check_coverage, coverage_rollup, rollup_status, work
 #: own roll-up and checked-work scope, beside the antenna-driven `status`/
 #: `coverage` -- again additively: both new keys are pure additions, and no
 #: existing field's value changes for any input (see `run_erc`).
+#: Issue #2183 adds the optional `devices[]` spec section and the
+#: `provenance.devices` echo of what it subtracted -- additive on both
+#: sides: a spec that declares no `devices[]` produces a byte-identical
+#: report except for the new (empty) `provenance.devices` list.
 SCHEMA_VERSION = 1
 
 
@@ -554,6 +577,128 @@ def _validate_ties(
     return entries
 
 
+def _validate_device_entry(
+    entry: Any, spec_path: str, index: int, conductor_names: list[str]
+) -> dict[str, Any]:
+    """One ``devices[]`` entry (issue #2183). Split out of
+    :func:`_validate_devices` to keep that function under the repo's C901
+    complexity ratchet, exactly as :func:`_parse_tap_requires` is split out
+    of :func:`_validate_ties`."""
+    if not isinstance(entry, dict):
+        raise ErcError(f"spec '{spec_path}': devices[{index}] must be a JSON object")
+    for key in ("body_layer", "on"):
+        if key not in entry:
+            raise ErcError(f"spec '{spec_path}': devices[{index}] missing {key!r}")
+
+    body_layer = _parse_layer_datatype(
+        str(entry["body_layer"]), spec_path, f"devices[{index}].body_layer", ErcError
+    )
+    on = str(entry["on"])
+    if on not in conductor_names:
+        raise ErcError(
+            f"spec '{spec_path}': devices[{index}].on must name a 'stackup' or "
+            f"'vias' entry (got {on!r}; declared: {', '.join(conductor_names)})"
+        )
+
+    return {
+        "name": str(entry.get("name", f"device{index}")),
+        "body_layer": body_layer,
+        "on": on,
+    }
+
+
+def _validate_devices(
+    spec: dict[str, Any],
+    spec_path: str,
+    stackup_names: list[str],
+    vias: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate the optional ``devices`` array (issue #2183): where a drawn
+    *device body* sits on an already-declared conductor role, so the
+    connectivity model stops reading it as a wire.
+
+    Each entry is ``{"name" (optional, defaults to "device<index>"),
+    "body_layer": "<layer>/<datatype>", "on": "<stackup or vias name>"}``.
+    ``body_layer`` is the PDK's own device-body marker layer (gf180mcu's
+    ``Resistor``/``RES_MK``/``SAB`` for a poly resistor, ``CAP_MK``/
+    ``MIM_L_MK``/``FuseTop`` for a MiM cap -- the same markers a deck
+    already uses for device recognition and ``klt extract`` already
+    consults), and ``on`` names the role that body's geometry is drawn on:
+    a ``stackup`` role for a poly/metal body, or a ``vias`` entry for a
+    device whose *bridge* between two declared roles is the via-role
+    geometry itself (a MiM cap's top-plate/fuse layer). Omitted or empty ->
+    no carve-out, today's behaviour exactly.
+
+    A ``body_layer`` absent from the given layout is not an error -- it
+    subtracts nothing, and is reported with ``body_area_um2: 0.0`` in
+    ``provenance.devices`` so a caller can see the declaration matched no
+    geometry -- matching the same convention ``stackup``/``vias`` already
+    follow for a layer a particular fixture doesn't use."""
+    raw = spec.get("devices", [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ErcError(f"spec '{spec_path}': 'devices' must be an array")
+
+    conductor_names = stackup_names + [via["name"] for via in vias]
+    entries: list[dict[str, Any]] = []
+    names: list[str] = []
+    for i, entry in enumerate(raw):
+        device = _validate_device_entry(entry, spec_path, i, conductor_names)
+        if device["name"] in names:
+            raise ErcError(
+                f"spec '{spec_path}': duplicate device name {device['name']!r}"
+            )
+        names.append(device["name"])
+        entries.append(device)
+    return entries
+
+
+def _device_body_cuts(
+    layout: Any, top_cell: Any, devices: list[dict[str, Any]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Resolve ``devices[]`` into ``(cuts, applied)`` (issue #2183).
+
+    ``cuts`` maps a ``stackup``/``vias`` role name to the merged region of
+    every declared device body on it -- what :func:`_extract_connectivity`
+    subtracts from that role's conductor region before registering it, so a
+    drawn device body breaks the net rather than bridging it. Two devices
+    declared ``on`` the same role are unioned, not the last one winning.
+
+    ``applied`` is the per-declaration echo for ``provenance.devices``:
+    name, the ``"<layer>/<datatype>"`` string as declared, the role, and
+    the **actual** subtracted area in µm². That last field is the honest
+    part -- a declaration whose marker layer is absent from this layout
+    (or drawn on a different datatype) reports ``0.0`` and silently
+    changes nothing, which is exactly what a caller re-reading a committed
+    report needs to be able to tell apart from a carve-out that bit."""
+    dbu2_um2 = layout.dbu * layout.dbu
+    cuts: dict[str, Any] = {}
+    applied: list[dict[str, Any]] = []
+    for device in devices:
+        body = _region(layout, top_cell, device["body_layer"]).merged()
+        role = device["on"]
+        cuts[role] = (cuts[role] + body).merged() if role in cuts else body
+        layer, datatype = device["body_layer"]
+        applied.append(
+            {
+                "name": device["name"],
+                "body_layer": f"{layer}/{datatype}",
+                "on": role,
+                "body_area_um2": round(body.area() * dbu2_um2, 9),
+            }
+        )
+    return cuts, applied
+
+
+def _cut_device_bodies(region: Any, cut: Any | None) -> Any:
+    """``region`` minus the declared device bodies on the same role (issue
+    #2183), or ``region`` unchanged when this role declares none."""
+    if cut is None:
+        return region
+    return (region - cut).merged()
+
+
 def _bbox_dict(box: Any) -> dict[str, int]:
     """A violation-style ``bbox`` dict (raw database units, matching
     ``klt drc``'s own ``violations[].bbox`` convention -- see
@@ -896,12 +1041,24 @@ def _extract_connectivity(
     stackup: list[dict[str, Any]],
     vias: list[dict[str, Any]],
     ties: list[dict[str, Any]],
+    device_cuts: dict[str, Any],
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
     non-empty, each tie's derived *tap* conductor.
 
     Returns ``(l2n, circuit, layer_index, tie_layers)``.
+
+    **A declared device body is not a wire (issue #2183).** ``device_cuts``
+    (from :func:`_device_body_cuts`, ``{}`` when the spec declares no
+    ``devices[]``) maps a ``stackup``/``vias`` role to the merged region of
+    the device bodies drawn on it; each role's conductor region is
+    registered with that region subtracted, so a rail-to-rail poly-resistor
+    string breaks the net at the resistor body instead of conducting
+    through it and inventing an ``erc.supply_short`` between the two
+    supplies it deliberately spans. Nothing else about the graph changes:
+    with ``devices[]`` omitted, ``device_cuts`` is empty and every region
+    below is the raw drawn layer, exactly as before.
 
     **A declared well is never a conductor here (issue #2169).** The
     previous model registered the whole ``well_layer`` region, self-
@@ -932,7 +1089,9 @@ def _extract_connectivity(
     layer_index: dict[str, int] = {}
     regions: dict[str, Any] = {}
     for entry in stackup:
-        conductor_region = _region(layout, top_cell, entry["layer"])
+        conductor_region = _cut_device_bodies(
+            _region(layout, top_cell, entry["layer"]), device_cuts.get(entry["name"])
+        )
         regions[entry["name"]] = conductor_region
         layer_index[entry["name"]] = l2n.register(conductor_region, entry["name"])
         l2n.connect(conductor_region)
@@ -942,7 +1101,9 @@ def _extract_connectivity(
             l2n.connect(conductor_region, label_texts)
 
     for via in vias:
-        via_region = _region(layout, top_cell, via["layer"])
+        via_region = _cut_device_bodies(
+            _region(layout, top_cell, via["layer"]), device_cuts.get(via["name"])
+        )
         l2n.register(via_region, via["name"])
         l2n.connect(via_region)
         role_a, role_b = via["between"]
@@ -1024,6 +1185,17 @@ def run_erc(
       Ties are extracted in their own connectivity graph
       (:func:`_extract_connectivity`), so they affect ``erc.missing_tie``
       and nothing else.
+    - ``devices`` (optional array, default ``[]``, issue #2183): where a
+      drawn *device body* sits on an already-declared conductor role --
+      ``{"name" (optional, defaults to "device<index>"), "body_layer":
+      "<layer>/<datatype>", "on": "<stackup or vias name>"}``. Each
+      entry's region is subtracted from that role's conductor region
+      before it is registered, so a rail-to-rail poly-resistor string (a
+      power-on-reset divider, a brown-out detector, a bias string) breaks
+      the net at the device body instead of reading as a dead short
+      between the two supplies it spans. Omitted entirely -> no carve-out,
+      today's behaviour exactly. What was applied (and the area each
+      declaration actually removed) is echoed in ``provenance.devices``.
 
     ``top`` selects the top cell to analyse when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
@@ -1068,6 +1240,7 @@ def run_erc(
     vias = _validate_vias(spec, spec_path, stackup_names)
     nets_decl = _validate_nets(spec, spec_path)
     ties = _validate_ties(spec, spec_path, stackup_names)
+    devices = _validate_devices(spec, spec_path, stackup_names, vias)
 
     layout = load_layout(file, ErcError)
     top_cells = select_top_cells(layout, top, ErcError)
@@ -1088,8 +1261,14 @@ def run_erc(
     # same report) or invent an `erc.supply_short` between two rails that
     # are not actually shorted: with `ties` omitted or declared, these
     # outputs are identical by construction, not merely by convention.
+    # `devices[]` (issue #2183): the declared device bodies, resolved once
+    # and subtracted from their own role in *both* graphs below -- a drawn
+    # resistor body is not a wire in the tie graph either. Empty (and so a
+    # no-op) whenever the spec declares no `devices`.
+    device_cuts, devices_applied = _device_body_cuts(layout, top_cell, devices)
+
     l2n, circuit, layer_index, _ = _extract_connectivity(
-        layout, top_cell, stackup, vias, []
+        layout, top_cell, stackup, vias, [], device_cuts
     )
 
     gate_role = stackup[0]["name"]
@@ -1265,7 +1444,7 @@ def run_erc(
     # or the `nets[]` findings already computed.
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
-            layout, top_cell, stackup, vias, ties
+            layout, top_cell, stackup, vias, ties, device_cuts
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
     erc_findings.sort(
@@ -1373,6 +1552,18 @@ def run_erc(
     # `_content_hash` (not the bare `sha256_file`) so this reads identically
     # to the `sha256:`-prefixed `provenance.input.content_hash` beside it.
     provenance["spec"] = {"content_hash": _content_hash(spec_path)}
+
+    # `provenance.devices` (issue #2183): what the `devices[]` carve-out
+    # actually removed from the connectivity graph this verdict was computed
+    # on. A subtraction that changes which nets exist has to be visible in
+    # the report -- otherwise two runs of the same layout, one with a
+    # `devices[]` declaration and one without, disagree about
+    # `erc.supply_short` with nothing in either payload to say why. Each
+    # entry carries the *measured* `body_area_um2`, so a declaration that
+    # silently matched no geometry (wrong datatype, marker layer absent
+    # from this stream) is distinguishable from one that bit. Always
+    # present; `[]` when no `devices` were declared.
+    provenance["devices"] = devices_applied
 
     return {
         "schema_version": SCHEMA_VERSION,
