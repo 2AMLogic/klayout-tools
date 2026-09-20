@@ -26,17 +26,18 @@ term and — on the runs measured here — the dominant one.
 | signoff_test | 8.5 | 29 | 17.6 |
 | scoping_prs | 7.2 | 46 | **9.4** |
 
-**Median: 21.0 s per tool use.** Wall-clock tracks tool *count* far more
-closely than token count or model choice. Opus runs hold three of the four
+**Median: 21.0 s elapsed per tool use.** In this small sample, wall-clock
+correlates more closely with tool *count* than token count or model choice.
+Opus runs hold three of the four
 fastest slots and the single slowest — the task shape predicts duration, the
 model does not.
 
 ## The 21 seconds is two different things
 
-**Round-trip latency.** Every tool call costs an inference pass regardless of
-what the call does. The floor is visible in the fastest runs: `module_map` and
-`scoping_prs` sat at 9–10 s/tool doing cheap reads. That is close to
-irreducible per call — so the lever is *fewer calls*, not faster ones.
+**Round-trip latency.** Every tool call includes an inference pass regardless
+of what the call does. The fastest runs, `module_map` and `scoping_prs`, sat at
+9–10 s/tool while doing cheap reads. These observations suggest that fewer
+calls can help, but they do not measure a fixed latency independently of work.
 
 **Real compute.** `pdn_fix` spent 576 s inside one `klt place-and-route`;
 `trial1_synth` spent 934 s. `numeric_contract` is the clearest case: only 35
@@ -48,10 +49,10 @@ the first and does nothing for the second.
 
 ## Guidance
 
-**1. Batch reads.** At ~21 s of fixed cost per call, five `gh api` reads in one
-shell invocation cost 21 s rather than 105 s. In the runs above, roughly half of
-all tool calls were reads that could have been grouped. This is the largest
-available saving and it costs nothing.
+**1. Batch reads.** Several `gh api` reads in one shell invocation can reduce
+round trips when the reads are independent. In the runs above, roughly half of
+all tool calls were reads that could have been grouped. The exact time saved
+depends on the work and runner, so treat batching as qualitative guidance.
 
 **2. Hand down findings, not just environments.** Reusing a provisioned
 environment already shows up in the numbers — `lvs_power_check` reused
@@ -72,7 +73,9 @@ asked one question and finished in 7 minutes. Scope is the dispatcher's dial.
 problem, not a speed one: a `git checkout -b` in one changed the other's
 working tree mid-run. Nothing was lost because the affected files were
 untracked, but branch switching changes another agent's inputs silently.
-`git worktree add` per agent removes the class.
+The repository's `.loom/scripts/worktree.sh N` and
+`.loom/scripts/pr-worktree.sh PR` helpers provide one managed worktree per
+agent and remove the class.
 
 ## Scope of this measurement
 

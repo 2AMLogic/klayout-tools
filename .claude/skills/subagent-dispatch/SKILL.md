@@ -1,6 +1,6 @@
 ---
 name: "Subagent dispatch: keeping runs short"
-description: "Reduce subagent wall-clock by cutting tool-call count, not by picking a faster model. Measured at ~21s fixed cost per tool use across 21 runs; batching reads is the largest available saving."
+description: "Reduce subagent wall-clock by cutting tool-call count, not by picking a faster model. The measured median was ~21s elapsed per tool use across 21 runs; batching reads is the largest available saving."
 domain: agent-operations
 type: skill
 user-invocable: false
@@ -18,9 +18,10 @@ consumption; this is about the number of round trips it makes.
 
 ## The one number
 
-**~21 seconds per tool use, median, across 21 runs.** Wall-clock tracks tool
-*count*, not token count and not model choice. A run's duration is roughly
-`tool_calls × 21s` plus whatever real compute it waits on.
+**~21 seconds elapsed per tool use, median, across 21 runs.** The observation
+correlates with tool count in this small sample; it is not a fixed latency or a
+claim about token count or model choice. A run also includes whatever real
+compute it waits on.
 
 ## Before dispatching
 
@@ -29,7 +30,8 @@ consumption; this is about the number of round trips it makes.
   tool calls spent rediscovering it.
 - **Narrow the task.** Six numbered sub-tasks produced a 61-minute run; one
   clear question produced a 7-minute one.
-- **Give it its own worktree** — `git worktree add`. Two agents in one checkout
+- **Give it its own worktree** — `.loom/scripts/worktree.sh N` for an issue or
+  `.loom/scripts/pr-worktree.sh PR` for an existing PR. Two agents in one checkout
   will change each other's working tree on a branch switch, silently.
 - **Name what is long-running** so the agent starts it and works elsewhere
   rather than waiting on it.
