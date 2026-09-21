@@ -2364,6 +2364,156 @@ def test_ties_disclosure_rejects_non_object(tmp_path):
         run_erc(str(gds), str(spec))
 
 
+# --- ties: disclosed tool limitation (issue #2247) -----------------------
+
+
+def test_ties_disclosure_kind_tool_limitation_gets_its_own_coverage_reason(tmp_path):
+    """Issue #2247: a run that declares zero `ties[]` because the *build*
+    cannot grade a declared tie safely (#2169's unisolated tie extraction
+    producing a false `erc.supply_short`) is not the same state as a stream
+    that has no tap to name at all -- the two have different remedies, so
+    they must not collapse into one coverage reason."""
+    unexpressible = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "unexpressible",
+        {"ties_disclosure": {"reason": "no implant layers are drawn on this stream"}},
+    )
+    tool_limited = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "tool_limited",
+        {
+            "ties_disclosure": {
+                "kind": "tool_limitation",
+                "reason": (
+                    "klayout-tools#2169: ties[] on the pinned release joins the "
+                    "well/tap regions into the primary connectivity graph"
+                ),
+            }
+        },
+    )
+
+    def _tie_reason(report):
+        return {r["id"]: r["reason"] for r in report["erc_coverage"]["inapplicable"]}[
+            "erc.missing_tie:[]"
+        ]
+
+    assert _tie_reason(unexpressible) == "ties_disclosed_unexpressible"
+    assert _tie_reason(tool_limited) == "ties_disclosed_tool_limitation"
+
+    # Still purely a coverage-reason distinction: a disclosure of either
+    # kind changes no geometry, no finding, and no roll-up.
+    assert unexpressible["erc_findings"] == tool_limited["erc_findings"] == []
+    assert unexpressible["erc_status"] == tool_limited["erc_status"] == "clean"
+
+
+def test_ties_disclosure_kind_is_echoed_only_when_declared(tmp_path):
+    """The echo stays verbatim (issue #2247): a pre-#2247 spec that names no
+    `kind` gets the byte-identical `{"reason": ...}` echo it always had, and
+    one that does name a kind gets it back unchanged."""
+    default = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "kindless",
+        {"ties_disclosure": {"reason": "no implant layers are drawn on this stream"}},
+    )
+    assert default["ties_disclosure"] == {
+        "reason": "no implant layers are drawn on this stream"
+    }
+
+    explicit = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "kinded",
+        {
+            "ties_disclosure": {
+                "reason": "see klayout-tools#2169",
+                "kind": "unexpressible",
+            }
+        },
+    )
+    assert explicit["ties_disclosure"] == {
+        "reason": "see klayout-tools#2169",
+        "kind": "unexpressible",
+    }
+
+
+def test_ties_disclosure_kind_unexpressible_is_the_default(tmp_path):
+    """Omitting `kind` must keep the exact meaning #2234 gave the key --
+    otherwise every already-committed disclosure would silently change
+    which obstacle it claims."""
+    report = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "default_kind",
+        {"ties_disclosure": {"reason": "no implant layers are drawn on this stream"}},
+    )
+    reasons = {r["id"]: r["reason"] for r in report["erc_coverage"]["inapplicable"]}
+    assert reasons["erc.missing_tie:[]"] == "ties_disclosed_unexpressible"
+
+
+@pytest.mark.parametrize("kind", ["tool-limitation", "", "unknown", True, 1, ["a"]])
+def test_ties_disclosure_rejects_an_unknown_kind(tmp_path, kind):
+    """A `kind` outside the two documented values is a spec error, not a
+    silent fallback to the default: a typo that quietly downgraded a
+    tool-limitation disclosure to an unexpressible one would misdirect the
+    reader of the report of record."""
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": {"reason": "because", "kind": kind},
+        },
+    )
+    with pytest.raises(ErcError, match="ties_disclosure.kind must be one of"):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_disclosure_kind_null_is_the_default(tmp_path):
+    """An explicit JSON `null` is "not declared", matching every other
+    optional key in this spec -- not a rejected value."""
+    report = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "null_kind",
+        {"ties_disclosure": {"reason": "no implant layers are drawn", "kind": None}},
+    )
+    assert report["ties_disclosure"] == {"reason": "no implant layers are drawn"}
+    reasons = {r["id"]: r["reason"] for r in report["erc_coverage"]["inapplicable"]}
+    assert reasons["erc.missing_tie:[]"] == "ties_disclosed_unexpressible"
+
+
+def test_cli_text_output_names_a_non_default_disclosure_kind(tmp_path, capsys):
+    """Issue #2247: the courtesy view must not render the two disclosure
+    kinds identically either -- a human reading the terminal should be able
+    to tell a "redraw the layout" case from a "use a different build" one
+    without opening the JSON."""
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "basic.erc.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": {
+                "kind": "tool_limitation",
+                "reason": "pinned klt cannot grade a declared tie (#2169)",
+            },
+        },
+    )
+
+    assert main(["erc", str(gds), str(spec)]) == 3
+    out = capsys.readouterr().out
+    assert (
+        "ties_disclosure (tool_limitation): pinned klt cannot grade a "
+        "declared tie (#2169)" in out
+    )
+
+
 def test_ties_rejects_a_non_boolean_tap_is_dedicated(tmp_path):
     gds = tmp_path / "basic.gds"
     _basic_fixture(gds)

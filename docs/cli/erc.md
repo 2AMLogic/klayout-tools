@@ -292,18 +292,44 @@ use) — matching `klt power`'s own convention.
     `nets[].name` above) the tap must ultimately reach.
   - Omitted entirely -> `erc.missing_tie` is never computed.
 - `ties_disclosure` (optional object, default `null`, issue #2234) — a
-  top-level statement that this stream has no expressible tap, and why:
+  top-level statement that this run declares no tap, and why:
   - `reason` (string, required, non-empty) — free-text explanation, e.g.
     `"no implant layers are drawn on this stream"`.
+  - `kind` (optional string, default `"unexpressible"`, issue #2247) —
+    *which* obstacle is being disclosed. Exactly two values are accepted;
+    anything else (including a near-miss like `"tool-limitation"`) is a spec
+    error rather than a silent fallback to the default, because a typo that
+    quietly downgraded one disclosure to the other would misdirect the
+    reader of the report of record:
+    - `"unexpressible"` — there is no tap to name: no narrowing marker, no
+      dedicated tap layer, no nameable tap geometry. Cleared by drawing
+      something. Records `"ties_disclosed_unexpressible"`.
+    - `"tool_limitation"` — the tap *is* expressible, but the `klt` build
+      this evidence has to be produced on cannot grade a declared tie
+      safely. The reported instance is issue #2169: on a build whose tie
+      extraction is not isolated from the primary connectivity graph, a
+      correct `ties[]` declaration produces a false `erc.supply_short` on
+      any routed design, so the honest thing a release-pinned flow can do is
+      declare no tie and say why. Cleared by a different *build*, not by a
+      redrawn layout. Records `"ties_disclosed_tool_limitation"`.
   - Changes no geometry and no finding. What it changes is the
     `erc_coverage.inapplicable` reason recorded for the undeclared
-    `erc.missing_tie` work when `ties` is empty —
-    `"ties_disclosed_unexpressible"` instead of `"no_ties_declared"` — so a
-    consumer (`klt signoff`'s T1 item 11, `docs/design-evidence-tiers.md`)
-    can distinguish "this stream disclosed it cannot express a tap" from
-    "nobody declared ties at all", which previously rendered identically.
-    Echoed verbatim as the top-level `ties_disclosure` field; `null` when
-    omitted.
+    `erc.missing_tie` work when `ties` is empty (one of the two tokens
+    above, instead of `"no_ties_declared"`) — so a consumer (`klt signoff`'s
+    T1 item 11, `docs/design-evidence-tiers.md`) can distinguish a
+    considered, disclosed omission from "nobody declared ties at all", which
+    previously rendered identically, *and* can tell the two disclosed
+    obstacles apart.
+  - **Neither kind is verified by this run, and neither can be.** A
+    disclosure is the caller's word about their own stream or their own
+    toolchain — which is exactly why it never moves a finding and why item
+    11 stays unmet on both. What the report does pin down is the build that
+    produced it: `provenance.klt_version`, so a reader can check for
+    themselves whether a disclosed tool limitation applies to the run in
+    front of them.
+  - Echoed verbatim as the top-level `ties_disclosure` field, carrying
+    `kind` only when the spec itself declared it (so a pre-#2247 spec's
+    report is byte-identical); `null` when omitted.
 - `devices` (optional array, default `[]`, issue #2183) — where a drawn
   **device body** sits on an already-declared conductor role, so the
   connectivity model stops reading it as a wire (see "Device bodies are
@@ -452,7 +478,12 @@ conductors, so `erc.missing_tie` will report the well as tied whenever any
 of them happens to reach the declared supply. And a block sitting in a
 native substrate with no *drawn* well/tub layer cannot declare a substrate
 tie at all: `well_layer` requires drawn geometry, so only the drawn-well
-half of such a design is graded.
+half of such a design is graded. Neither #2234's `tap_boxes`/
+`ties_disclosure` nor #2247's `ties_disclosure.kind` closes that one — both
+relax how the *tap* side is expressed or disclosed, and a `ties_disclosure`
+only ever describes *undeclared* work, so a design that declares its n-well
+tie and can express nothing for its substrate has no way to disclose the
+missing half either. Tracked as its own open issue (#2255).
 
 #### A degenerate tie is reported as skipped, not as a pass (issue #2199)
 
@@ -523,9 +554,9 @@ Two ways to close that gap, each with a different cost:
   an assertion matching no drawn geometry at all is not a silent pass
   either — it produces the same honest "no tap drawn inside it"
   `erc.missing_tie` finding a real absent tap would.
-- **`ties_disclosure`** — a top-level statement that this stream has no
-  expressible tap, and why, when even `tap_boxes` cannot name real
-  geometry. This changes no finding and no geometry; it only changes the
+- **`ties_disclosure`** — a top-level statement that this run declares no
+  tap, and why, when even `tap_boxes` cannot name real geometry. This
+  changes no finding and no geometry; it only changes the
   `erc_coverage.inapplicable` reason recorded for the undeclared
   `erc.missing_tie` work when `ties` is empty
   (`"ties_disclosed_unexpressible"` instead of `"no_ties_declared"`), so
@@ -535,6 +566,10 @@ Two ways to close that gap, each with a different cost:
   [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11.
   Item 11 still reports **unmet** either way: a disclosure proves nothing
   about the tap's actual connectivity, it only makes the reason honest.
+  A second obstacle is disclosable the same way — `kind:
+  "tool_limitation"`, when the tap *is* expressible but the build cannot be
+  trusted to grade it; see "When the obstacle is the build, not the stream"
+  below.
 
 A worked `tap_boxes` declaration — a tap ring drawn on the transistor
 active layer, with no implant anywhere in the stream, named one ring edge
@@ -573,6 +608,55 @@ box). Nothing here forecloses adding one later: it would be another
 narrowing input to the same tap region, graded by the same
 `checked_by_assertion` classification and the same geometric degeneracy
 test.
+
+##### When the obstacle is the build, not the stream (`ties_disclosure.kind`, issue #2247)
+
+Everything above is about a stream that has no tap to *name*. There is a
+second reason a careful flow ends up with zero `ties[]`, and it is not the
+same one: the tap is perfectly nameable, but the `klt` build the evidence
+has to be produced on cannot grade a declared tie safely.
+
+That is not hypothetical. Before issue #2169, a declared `ties[]` entry
+joined its well/tap regions into the *same* connectivity graph the `nets[]`
+findings are computed on, so a blanket well conducted across its whole
+plan-view extent and any routed design collapsed into one or two electrical
+islands — a false `erc.supply_short` between the supplies, from a correct
+declaration. A flow pinned to a released build that predates the fix (the
+deterministic thing to pin, and what
+[`../../README.md`](../../README.md)'s pinned-install guidance recommends)
+therefore has exactly two honest options: declare the tie and publish a
+report with a supply short it knows is an artifact, or declare no tie.
+
+Declaring no tie is the right call — but before #2247 it was
+indistinguishable from the other two zero-`ties[]` states, and
+`"unexpressible"` positively misdescribes it: it tells a reader to go draw a
+tap that is already drawn. `ties_disclosure.kind: "tool_limitation"` is how
+a spec says which obstacle it hit:
+
+```json
+{
+  "ties": [],
+  "ties_disclosure": {
+    "kind": "tool_limitation",
+    "reason": "klayout-tools#2169: on the pinned klt release a declared tie joins the well/tap regions into the primary connectivity graph and reports a false erc.supply_short; well-tie continuity is evidenced by the cited device-aware LVS match instead"
+  }
+}
+```
+
+The run records `"ties_disclosed_tool_limitation"` for the undeclared
+`erc.missing_tie` work, and `klt signoff`'s T1 item 11 renders
+`supply_spec_disclosed_tool_limitation` — a third reason, distinct from both
+`supply_spec_incomplete` and `supply_spec_disclosed_unexpressible`.
+
+**It is still unmet, on exactly the same principle.** A disclosure is a
+statement about the caller's toolchain, not a computed `erc.missing_tie`
+result, and this one cannot even be checked by the run it appears in. What
+*is* checkable is the build that produced the report — `provenance.klt_version`
+— so a reader can see for themselves whether the disclosed limitation
+applies to the run in front of them. The distinction earns its keep by
+naming the right remedy: re-run against a build whose tie extraction is
+isolated and declare the tie, rather than go looking for a tap that is
+already there.
 
 ### Device bodies are not wires (`devices[]`, issue #2183)
 
@@ -1309,7 +1393,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration, issue #2199), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
-| `ties_disclosure` | object \| null | (issue #2234) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" above. |
+| `ties_disclosure` | object \| null | (issues #2234, #2247) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`, plus `"kind": "unexpressible"\|"tool_limitation"` when the spec declared one); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" and "When the obstacle is the build, not the stream" above. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 | `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
@@ -1335,8 +1419,10 @@ per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
 declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
 that declares no `nets`/`ties` asked for none of that work, so those rules
 are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`,
-or `ties_disclosed_unexpressible` in place of `no_ties_declared` when the
-spec's top-level `ties_disclosure` was given, issue #2234), never skipped —
+or — when the spec's top-level `ties_disclosure` was given — one of
+`ties_disclosed_unexpressible` (issue #2234) / `ties_disclosed_tool_limitation`
+(issue #2247, `kind: "tool_limitation"`) in place of `no_ties_declared`),
+never skipped —
 an undeclared rule must not make this scope partial, and the distinction is
 what lets a consumer tell "no supply was declared, so `erc.supply_short`
 was never computed" from "the declared supplies came back clean" off the

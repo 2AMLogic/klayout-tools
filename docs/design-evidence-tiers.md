@@ -378,7 +378,27 @@ written to every block.
       `supply_spec_disclosed_unexpressible` rather than a met item — a
       disclosure proves nothing about the tap's actual connectivity — but
       that reason is distinguishable from a spec that omitted `ties[]`
-      without ever considering the question. Those are the
+      without ever considering the question. **A second obstacle is
+      disclosable the same way** (issue #2247): `ties_disclosure.kind:
+      "tool_limitation"` says the tap *is* expressible, but the `klt` build
+      this evidence had to be produced on cannot grade a declared tie
+      safely — the reported instance being issue #2169, where a declared
+      tie on an affected build joins the well/tap regions into the primary
+      connectivity graph and reports a false `erc.supply_short` on any
+      routed design. The item renders
+      `supply_spec_disclosed_tool_limitation`: a third reason, still
+      **unmet** on the same principle (a disclosure is the caller's word
+      about their toolchain, never a computed `erc.missing_tie` result),
+      but kept distinct because the remedy differs — re-run against a
+      build whose tie extraction is isolated and declare the tie, rather
+      than go looking for a tap that is already drawn. The report's own
+      `provenance.klt_version` is what a grader checks to see whether a
+      disclosed tool limitation applies to the run in front of them.
+      So the three zero-`ties[]` states this item can render are
+      mechanically distinguishable: `supply_spec_incomplete` (nobody asked
+      the question), `supply_spec_disclosed_unexpressible` (no tap to
+      name), and `supply_spec_disclosed_tool_limitation` (a tap, and a
+      build that cannot be trusted to grade it). Those are the
       rules this item grades, not the
       report's overall `status`: an antenna verdict or a floating-gate
       finding is a real defect, but it is not this item's subject and does
@@ -425,7 +445,16 @@ written to every block.
       above; a grader should check `provenance.deck` alongside
       `provenance.devices` before treating a clean `erc.supply_short` read
       as covered by auto-detection rather than a hand-declaration that
-      happens to be present.
+      happens to be present. **Known gap (issue #2255)**: every `ties[]`
+      entry still requires a *drawn* `well_layer`, so a block sitting in a
+      native substrate — no drawn pwell/tub shape anywhere, NMOS-in-bulk —
+      cannot declare its substrate tie at all, and (because a
+      `ties_disclosure` only ever describes *undeclared* work) cannot
+      disclose the missing half either when it declares its n-well tie. For
+      such a block only the drawn-well half of this item is graded today;
+      neither #2234 nor #2247 closes that, and a grader should read a met
+      item 11 on a native-substrate block as covering the declared ties
+      only.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 

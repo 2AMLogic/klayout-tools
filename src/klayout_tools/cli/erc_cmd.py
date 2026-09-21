@@ -32,7 +32,7 @@ regardless of whether an antenna table exists.
 
 import argparse
 
-from ..erc import ErcError, run_erc
+from ..erc import DISCLOSURE_KIND_UNEXPRESSIBLE, ErcError, run_erc
 from .output import emit_error, emit_success
 
 #: `status` -> exit code (issue #2115, applying the common rollup rule's
@@ -114,16 +114,26 @@ def _print_text(report: dict) -> None:
 
     print()
     print(f"erc_status: {report['erc_status']}")
-    # The spec's own "no expressible tap, here is why" statement (issue
+    # The spec's own "no tap declared, here is why" statement (issue
     # #2234), when it declared one. The JSON payload carries it as
     # `ties_disclosure`; surfacing it here keeps the courtesy view from
-    # rendering a disclosed-unexpressible stream identically to one that
-    # never declared `ties` at all -- the exact conflation the disclosure
-    # form exists to end. `.get` because this renderer is also pointed at
-    # stored payloads produced before the field existed.
+    # rendering a disclosing stream identically to one that never declared
+    # `ties` at all -- the exact conflation the disclosure form exists to
+    # end. A non-default `kind` (issue #2247) is named in the label for the
+    # same reason: the two disclosures have different remedies, and a human
+    # reading the terminal should not have to open the JSON to tell a
+    # "redraw the layout" case from a "use a different build" one. `.get`
+    # because this renderer is also pointed at stored payloads produced
+    # before the field existed.
     disclosure = report.get("ties_disclosure")
     if disclosure is not None:
-        print(f"ties_disclosure: {disclosure['reason']}")
+        kind = disclosure.get("kind", DISCLOSURE_KIND_UNEXPRESSIBLE)
+        label = (
+            "ties_disclosure"
+            if kind == DISCLOSURE_KIND_UNEXPRESSIBLE
+            else f"ties_disclosure ({kind})"
+        )
+        print(f"{label}: {disclosure['reason']}")
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"
