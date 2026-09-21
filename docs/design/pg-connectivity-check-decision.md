@@ -263,9 +263,10 @@ report's `reason` rather than silently producing an empty result.
 
 ## Ordering: the check runs before the power-only prune
 
-`_prune_power_only_layout_circuits` (#1622) removes every layout-side circuit
+`_prune_power_only_circuits` (#1622, extended symmetrically to the reference
+side by #2244) removes every circuit — layout-side, reference-side, or both —
 whose entire declared pin list is power/ground — filler cells, tap cells,
-decaps — because a signal-only reference never instantiates them.
+decaps — because a signal-only compare has nothing to say about them.
 
 The PG check runs **before** that prune, deliberately. Those cells are
 precisely the ones whose power connectivity is the *only* thing about them
