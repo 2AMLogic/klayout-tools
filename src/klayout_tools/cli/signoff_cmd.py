@@ -288,11 +288,47 @@ def _format_body_bias(body_bias: dict) -> str:
     )
 
 
+def _print_t1_scope_shortfall(row: dict, source_doc: str) -> None:
+    """Print the one-line disclosure for a checklist shorter than what this
+    build grades (issue #2202), or nothing when there is none to make.
+
+    ``row`` is a tier report or one ``--fleet`` ``blocks[]`` entry -- both
+    carry the ``t1_item_count``/``build_t1_item_count`` pair, and the
+    shortfall is a property of that pair, not of the mode. Both callers
+    therefore delegate the *whole* decision here (rather than testing a
+    returned line themselves) so neither grows a branch for it.
+
+    Printed only for a genuine shortfall (this build grades *more* than the
+    parsed doc lists). The opposite skew -- a doc listing items this build
+    has no rules for -- is already loud per row (``graded_by_build: false``),
+    and ``None`` (this build cannot read its own doc) claims nothing at all,
+    matching the JSON field's own rule.
+    """
+    build_count = row.get("build_t1_item_count")
+    doc_count = row["t1_item_count"]
+    if build_count is None or build_count <= doc_count:
+        return
+    print(
+        f"        {_RED}scope: {build_count - doc_count} more T1 item(s) "
+        f"this build grades are not in {source_doc}{_RESET} "
+        f"(this build's own doc lists {build_count})"
+    )
+
+
 def _print_tier_report_text(result: dict) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
     print(f"tier: {result['tier'] or 'none'}")
     print(f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met")
+    # Issue #2202: the reverse of the per-row `graded_by_build` note below.
+    # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
+    # this build grades renders a shorter checklist, so `11/11 items met`
+    # and `9/9 items met` read identically though the second is a weaker
+    # claim. No per-row note can say this -- the missing items are not rows
+    # -- so it is said beside the count it qualifies. Absent (as before)
+    # whenever the two counts agree, and when this build cannot read its own
+    # doc to compare against.
+    _print_t1_scope_shortfall(result, result["source_doc"])
     print()
 
     for item in result["items"]:
@@ -407,6 +443,11 @@ def _print_fleet_report_text(result: dict) -> None:
             f"[{color}{marker}{_RESET}] {block['block']} ({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
         )
+        # Issue #2202: same disclosure as tier-report mode, for the same
+        # reason -- this row renders `t1_item_count`, so it must also render
+        # what that count is short of. `source_doc` is the roll-up's one
+        # shared doc (forwarded verbatim to every block).
+        _print_t1_scope_shortfall(block, result["source_doc"])
         blocking_item = block["blocking_item"]
         if blocking_item:
             partition = (

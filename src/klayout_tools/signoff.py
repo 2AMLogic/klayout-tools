@@ -786,12 +786,15 @@ SCHEMA_VERSION = 1
 #: never imply the other changed.
 #:
 #: Still ``1`` after issue #2176 (``build``, ``items[].graded_by_build``, the
-#: ``ungradeable_by_build`` reason), deliberately: both fields are *new*
-#: keys, and a new ``reason`` value is a value set growing within an
+#: ``ungradeable_by_build`` reason) and issue #2202
+#: (``build_t1_item_count``), deliberately: every one of those fields is a
+#: *new* key, and a new ``reason`` value is a value set growing within an
 #: unchanged shape -- both explicitly additive under
 #: ``docs/json-contract.md`` ("adding new fields does not" bump; "an
-#: additive change can introduce a new enum-like value"). The grading change
-#: that rides with them refuses a citation this build has no rules for,
+#: additive change can introduce a new enum-like value"). Issue #2202's
+#: field has no behaviour change behind it at all: it reports *beside*
+#: ``t1_item_count``, and never reinterprets it. The grading change that
+#: rode with #2176 refuses a citation this build has no rules for,
 #: which is a *correction* of a verdict that was wrong, not a redefinition
 #: of what ``status``/``reason`` mean -- the same shape as issue #1987's
 #: (item 3 stopped accepting `klt extract` citations) and issue #2044's
@@ -1098,6 +1101,51 @@ def _is_graded_by_build(item_id: int, build_item_ids: frozenset[int] | None) -> 
     if build_item_ids is None:
         return True
     return item_id in build_item_ids
+
+
+def _build_t1_row_count(
+    build_item_ids: frozenset[int] | None, partition_count: int
+) -> int | None:
+    """How many T1 rows **this build's own shipped doc** would have rendered
+    for a block graded across ``partition_count`` partitions (issue #2202),
+    or ``None`` when that doc cannot be read at all.
+
+    The counterpart of ``t1_item_count``, and the answer to the direction
+    :func:`_is_graded_by_build` does *not* cover. That one reports items the
+    **parsed doc** lists which this build has no rules for -- rows that are
+    rendered, and must not look graded. The reverse -- a doc *older* than the
+    build, listing fewer items than this build knows how to check -- produces
+    no wrong verdict at all: every rendered row is correctly graded. It is a
+    pure **scope** gap, and an invisible one, because the missing items are
+    simply not rows. A report claiming ``tier: "T1"`` on 9/9 items is a
+    strictly weaker claim than one claiming it on 11/11, and without this
+    field the two are distinguishable only by a reader who already knows
+    which build produced which (issue #2176's ``build`` block narrows that to
+    a *reconstruction* -- which is exactly what a committed artifact must not
+    require).
+
+    Multiplied by ``partition_count`` for the same reason ``t1_item_count``
+    is: a ``mixed-signal`` block renders each T1 item once per partition, so
+    an unmultiplied count would read as a shortfall (11 vs. 22) on every
+    mixed-signal report that has none. The two counts are therefore directly
+    comparable, and equal whenever the parsed doc's item list matches the
+    build's.
+
+    ``None`` when :func:`_build_t1_item_ids` is ``None`` (an install with
+    neither the packaged doc nor a source checkout): the same "never invent a
+    claim you cannot substantiate" rule :func:`_is_graded_by_build` applies
+    to the other direction -- a fabricated count here would be read as a
+    shortfall, or as its absence, and neither would be true.
+
+    Note that neither count bounds the other: a doc can both omit items this
+    build grades *and* add items it does not, in which case
+    ``t1_item_count`` exceeds this value while some rows also carry
+    ``graded_by_build: false``. The two fields answer different questions and
+    are deliberately not derived from each other.
+    """
+    if build_item_ids is None:
+        return None
+    return len(build_item_ids) * partition_count
 
 
 #: The :func:`~.build_identity.version_report` fields echoed into a tier /
@@ -3587,6 +3635,11 @@ def build_tier_report(
             "kind": "analog",
             "tier": "T1" | None,
             "t1_item_count": 11,
+            # How many T1 rows this build's *own* shipped doc would have
+            # rendered (issue #2202) -- equal to `t1_item_count` unless
+            # `--tiers-doc`/`$KLT_TIERS_DOC` points at a doc with a
+            # different item list. `None` if the shipped doc is unreadable.
+            "build_t1_item_count": 11,
             "t1_met_count": 3,
             "source_doc": "docs/design-evidence-tiers.md",
             "source_doc_content_hash": "sha256:...",
@@ -3762,6 +3815,23 @@ def build_tier_report(
     grading build itself, in `klt version --format json`'s own shape, so a
     committed report still says what it could and could not check long after
     the terminal that produced it is gone.
+
+    **And how much of the checklist it did not look at** (issue #2202): the
+    other direction of the same divergence -- a doc *older* than the build,
+    listing fewer items than this build grades -- produces no wrong verdict,
+    because the report is the parsed doc's skeleton and the missing items are
+    simply not rows. That makes it invisible: ``tier: "T1"`` awarded on 9/9
+    items reads exactly like ``tier: "T1"`` awarded on 11/11, though it is a
+    strictly weaker claim. ``build_t1_item_count``
+    (:func:`_build_t1_row_count`) is what this build's own doc would have
+    rendered, beside ``t1_item_count``'s what the parsed doc did, so the
+    shortfall is a subtraction rather than a reconstruction from the
+    ``build`` block by a reader who has the matching checkout. Equal for the
+    shipped doc (and for any override with the same item list), and ``None``
+    -- never a fabricated count -- when this build cannot read its own doc.
+    Missing items are deliberately *not* rendered as rows: the report is the
+    parsed doc's skeleton by design, and inventing rows it does not contain
+    would destroy the property that makes the override meaningful at all.
 
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an
@@ -4005,6 +4075,11 @@ def build_tier_report(
         "kind": kind,
         "tier": tier,
         "t1_item_count": total,
+        # Issue #2202: what this build's *own* doc would have rendered, so a
+        # doc with fewer items than the build grades discloses the shortfall
+        # instead of hiding it behind a full-looking `t1_met_count/
+        # t1_item_count`. `None` when the shipped doc is unreadable.
+        "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
@@ -5248,6 +5323,10 @@ def build_fleet_report(
                     "kind": "analog",
                     "tier": "T1",
                     "t1_item_count": 11,
+                    # What this build's own doc would have rendered
+                    # (issue #2202) -- equal unless the parsed doc's item
+                    # list differs; None if that doc is unreadable.
+                    "build_t1_item_count": 11,
                     "t1_met_count": 11,
                     "source_doc_content_hash": "sha256:...",
                     "blocking_item": None,
@@ -5268,6 +5347,7 @@ def build_fleet_report(
                     "kind": "analog",
                     "tier": None,
                     "t1_item_count": 11,
+                    "build_t1_item_count": 11,
                     "t1_met_count": 3,
                     "source_doc_content_hash": "sha256:...",
                     "blocking_item": {
@@ -5351,6 +5431,17 @@ def build_fleet_report(
     ``reason: "ungradeable_by_build"`` naming the *build*, not the manifest,
     as what is missing.
 
+    ``blocks[].build_t1_item_count`` (issue #2202) is the *reverse*
+    divergence, and unlike per-item ``graded_by_build`` it is carried here
+    as well as in each block's own ``--manifest`` report -- because
+    ``blocks[].t1_item_count``, the count whose shortfall it discloses, is
+    carried here too. A row reading ``T1: 9/9 items met`` against a doc older
+    than this build is a weaker claim than ``11/11`` and must not be
+    indistinguishable from it in the roll-up either. Its value is identical
+    across rows within one roll-up for blocks of the same ``kind``
+    (``tiers_doc`` and the build are both shared), and doubles for a
+    ``mixed-signal`` row exactly as ``t1_item_count`` does.
+
     Raises :class:`SignoffError` if ``fleet`` is not a JSON object, its
     ``blocks`` field is missing, not a JSON array, or empty; if any
     ``blocks[]`` entry is neither a string nor a JSON object, or a
@@ -5407,6 +5498,11 @@ def build_fleet_report(
                 "kind": tier_report["kind"],
                 "tier": tier_report["tier"],
                 "t1_item_count": tier_report["t1_item_count"],
+                # Issue #2202: carried here too, unlike per-item
+                # `graded_by_build`, because `t1_item_count` itself is
+                # carried here -- the shortfall this discloses is a property
+                # of that count, so the two must never be rendered apart.
+                "build_t1_item_count": tier_report["build_t1_item_count"],
                 "t1_met_count": tier_report["t1_met_count"],
                 "source_doc_content_hash": tier_report["source_doc_content_hash"],
                 "blocking_item": blocking_item,

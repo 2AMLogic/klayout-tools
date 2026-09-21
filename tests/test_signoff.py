@@ -6319,6 +6319,180 @@ def test_cli_text_output_names_the_build_and_the_ungradeable_rows(tmp_path, caps
 
 
 # --------------------------------------------------------------------------- #
+# A doc *older* than the build: `build_t1_item_count` (issue #2202) -- the
+# reverse of `graded_by_build`. No verdict is wrong here; the checklist is
+# just shorter than what this build could have checked, and without this
+# field nothing in the artifact says so.
+# --------------------------------------------------------------------------- #
+
+
+def _shipped_t1_item_count() -> int:
+    """How many T1 items the shipped doc lists -- derived, never a literal,
+    so this file's expectations track the doc the way the command does."""
+    return len(signoff_module._build_t1_item_ids())
+
+
+def test_shipped_doc_reports_equal_doc_and_build_item_counts():
+    """AC: with no override the two counts agree, so the common case reads
+    exactly as it did before this field existed (issue #2202)."""
+    result = build_tier_report(_manifest())
+
+    assert result["t1_item_count"] == _shipped_t1_item_count()
+    assert result["build_t1_item_count"] == result["t1_item_count"]
+    # Purely additive: no schema bump rides with the new key.
+    assert result["schema_version"] == 1
+
+
+def test_an_override_with_the_same_item_list_is_not_a_shortfall(tmp_path):
+    """A vendored *copy* of the shipped doc is the ordinary `--tiers-doc`
+    use, and must not read as a scope gap."""
+    copied = tmp_path / "vendored-design-evidence-tiers.md"
+    copied.write_text(
+        signoff_module.DEFAULT_DOC_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    result = build_tier_report(_manifest(), tiers_doc=str(copied))
+
+    assert result["build_t1_item_count"] == result["t1_item_count"]
+
+
+def test_mixed_signal_counts_both_partitions_on_both_sides():
+    """`t1_item_count` doubles for a mixed-signal block (each item renders
+    once per partition), so the build-side count must double too -- an
+    unmultiplied one would report a shortfall on every mixed-signal report
+    that has none."""
+    result = build_tier_report(_manifest(kind="mixed-signal"))
+
+    assert result["t1_item_count"] == 2 * _shipped_t1_item_count()
+    assert result["build_t1_item_count"] == result["t1_item_count"]
+
+
+def test_a_doc_shorter_than_this_build_discloses_the_shortfall(tmp_path):
+    """The gap this issue is about: a T1 claim awarded on a 3-item checklist
+    by a build that grades 11 is a strictly weaker claim, and used to be
+    indistinguishable from the full one (issue #2202)."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": drc_path, "2": drc_path, "3": drc_path}),
+        tiers_doc=_write_tiers_doc(tmp_path),
+    )
+
+    # A full-looking T1 claim...
+    assert result["tier"] == "T1"
+    assert result["t1_met_count"] == 3
+    assert result["t1_item_count"] == 3
+    # ...that now says what it was *not* measured against.
+    assert result["build_t1_item_count"] == _shipped_t1_item_count()
+    assert result["build_t1_item_count"] > result["t1_item_count"]
+
+
+def test_the_shortfall_scales_with_partitions_too(tmp_path):
+    """Both counts are row counts, so a mixed-signal block's shortfall is
+    reported in rows as well -- 6 rendered against 22 gradeable."""
+    result = build_tier_report(
+        _manifest(kind="mixed-signal"), tiers_doc=_write_tiers_doc(tmp_path)
+    )
+
+    assert result["t1_item_count"] == 6
+    assert result["build_t1_item_count"] == 2 * _shipped_t1_item_count()
+
+
+def test_an_unresolvable_shipped_doc_reports_no_count_rather_than_a_wrong_one(
+    tmp_path, monkeypatch
+):
+    """AC: a build that cannot read its *own* doc has no substantiated count
+    to report, so it reports `null` -- never a fabricated number, which
+    would be read either as a shortfall or as the absence of one."""
+    monkeypatch.setattr(
+        signoff_module, "DEFAULT_DOC_PATH", tmp_path / "no-such-shipped-doc.md"
+    )
+
+    result = build_tier_report(_manifest(), tiers_doc=_write_tiers_doc(tmp_path))
+
+    assert result["build_t1_item_count"] is None
+    # The doc-side count is unaffected: it comes from the parsed doc, which
+    # is readable here.
+    assert result["t1_item_count"] == 3
+
+
+def test_both_divergence_directions_are_reported_independently(tmp_path):
+    """A doc can simultaneously omit items this build grades and add items
+    it does not. The two fields answer different questions and neither is
+    derived from the other (issue #2202)."""
+    result = build_tier_report(_manifest(), tiers_doc=_write_future_tiers_doc(tmp_path))
+
+    # The future doc lists two items (3 and the future one)...
+    assert result["t1_item_count"] == 2
+    # ...one of which this build cannot grade (the #2176 direction)...
+    assert _item(result, _FUTURE_ITEM_ID)["graded_by_build"] is False
+    # ...while this build's own doc lists far more (the #2202 direction).
+    assert result["build_t1_item_count"] == _shipped_t1_item_count()
+
+
+def test_fleet_rows_carry_the_shortfall_beside_their_item_count(tmp_path):
+    """Scope decision (issue #2202): unlike per-item `graded_by_build`, this
+    field *is* carried into `--fleet` rows -- because `t1_item_count`, the
+    count whose shortfall it discloses, is carried there too."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_fleet_report(
+        {
+            "blocks": [
+                {
+                    "block": "b1",
+                    "kind": "analog",
+                    "evidence": {"1": drc_path, "2": drc_path, "3": drc_path},
+                },
+                {"block": "b2", "kind": "mixed-signal", "evidence": {}},
+            ]
+        },
+        tiers_doc=_write_tiers_doc(tmp_path),
+    )
+
+    analog, mixed = result["blocks"]
+    assert analog["t1_item_count"] == 3
+    assert analog["build_t1_item_count"] == _shipped_t1_item_count()
+    # Per-row, not per-roll-up: a mixed-signal row's counts both double.
+    assert mixed["t1_item_count"] == 6
+    assert mixed["build_t1_item_count"] == 2 * _shipped_t1_item_count()
+    # Still additive -- the fleet schema is unchanged by this field.
+    assert result["schema_version"] == 2
+
+
+def test_cli_text_output_discloses_the_shortfall(tmp_path, capsys):
+    """The disclosure is in the terminal-first rendering too: a reader of
+    `T1: 3/3 items met` must not have to open the JSON to learn the
+    checklist was a third of what this build grades."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"1": drc_path, "2": drc_path, "3": drc_path}),
+    )
+    tiers_doc = _write_tiers_doc(tmp_path)
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--tiers-doc", tiers_doc])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "T1: 3/3 items met" in out
+    missing = _shipped_t1_item_count() - 3
+    assert f"scope: {missing} more T1 item(s) this build grades are not in" in out
+    assert f"this build's own doc lists {_shipped_t1_item_count()}" in out
+
+
+def test_cli_text_output_says_nothing_when_the_counts_agree(tmp_path, capsys):
+    """No line for the common case -- a report against the shipped doc reads
+    exactly as it did before (issue #2202)."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    assert "scope:" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
 # build_fleet_report(): fleet-wide tier roll-up (issue #827, Phase 1c of
 # epic #706)
 # --------------------------------------------------------------------------- #
