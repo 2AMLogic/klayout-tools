@@ -861,7 +861,22 @@ TIER_REPORT_SCHEMA_VERSION = 1
 #: ``docs/json-contract.md``'s "value sets within an unchanged shape" rule
 #: (the `klt precheck` ``layer_whitelist[].shapes`` precedent, issue #452),
 #: so this bumps rather than landing silently.
-FLEET_REPORT_SCHEMA_VERSION = 2
+#:
+#: ``3`` (issue #2203): ``blocks[].blocking_item`` moves again, for exactly
+#: the same reason and so under exactly the same rule. An unmet item this
+#: build has no grading rules for (``graded_by_build: False``, issue #2176)
+#: is now *preferred* as the blocker over every other unmet item, where
+#: version ``2`` demoted it below any gradeable one -- it satisfied
+#: :func:`_is_structurally_ungradeable_item` incidentally, so #2178's skip
+#: swept it up. A fleet manifest graded against a ``--tiers-doc`` newer than
+#: the running build therefore reports a different ``blocking_item.id``
+#: under ``3`` than under ``2`` (see :func:`_blocking_t1_item` for the rule
+#: and the rationale). That case is reachable in practice -- it is the case
+#: issue #2176 exists for -- so this is a real observable move, not a
+#: speculative bump. Nothing else changes shape: ``ungraded_items`` lists
+#: exactly the same rows it did under ``2``, and no field is added, removed
+#: or retyped.
+FLEET_REPORT_SCHEMA_VERSION = 3
 
 #: Block kinds recognised by ``docs/design-evidence-tiers.md``'s "Block
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
@@ -1187,6 +1202,41 @@ def _build_t1_row_count(
     if build_item_ids is None:
         return None
     return len(build_item_ids) * partition_count
+
+
+def _is_ungradeable_by_build(item: dict[str, Any]) -> bool:
+    """Is this **rendered** T1 item one this build has no grading rules for
+    at all -- an id only a ``--tiers-doc``/``$KLT_TIERS_DOC`` copy of the doc
+    lists (issue #2203)?
+
+    Reads the ``graded_by_build`` field :func:`_is_graded_by_build` already
+    put on every rendered T1 item, rather than re-deriving the answer: the
+    roll-up must never be able to disagree with the per-block report about
+    which items were gradeable. A T2-T4 ladder row carries no such key (its
+    ``reason: "tier_not_supported"`` already says the repository cannot check
+    it), so an absent field reads as "graded" -- the same direction
+    :func:`_is_graded_by_build` defaults in when it cannot *prove* divergence.
+
+    **Deliberately distinct from :func:`_is_structurally_ungradeable_item`**,
+    which answers a different question: "does any `klt` verb exist for this
+    id, repo-wide". Today's ``graded_by_build: False`` population happens to
+    be a strict *subset* of that one -- an id no grading table names is
+    structurally ungradeable by that function's own derivation -- which is
+    exactly why the fleet reduction cannot key on the structural predicate
+    alone and expect to tell the two apart (issue #2203). They mean opposite
+    things to a reader:
+
+    ===========================  ==========================  ======================
+    ..                           structurally ungradeable    ungradeable by build
+    ===========================  ==========================  ======================
+    What is missing              a `klt` verb, repo-wide     *this build's* rules
+    Fix                          commit/cite the artifact    a newer `klt`
+    Expected?                    yes, for every manifest     no, never
+    ===========================  ==========================  ======================
+
+    See :func:`_blocking_t1_item` for what the roll-up does with each.
+    """
+    return item.get("graded_by_build", True) is False
 
 
 #: The :func:`~.build_identity.version_report` fields echoed into a tier /
@@ -5607,23 +5657,29 @@ def build_fleet_report(
         }
 
     ``blocking_item`` is the one T1 item this roll-up names as the block's
-    blocker, or ``None`` when ``tier == "T1"``. It is the first rendered
-    unmet T1 item (in the same order :func:`build_tier_report` renders items
-    -- item id, then partition for a mixed-signal block) that has a check
-    behind it; only when *no* such item is unmet does it fall back to the
-    first unmet **structurally ungradeable** item (items 1, 2, 9 and 10 --
-    see :func:`_is_structurally_ungradeable_item` and
-    :func:`_blocking_t1_item` for the full rule and why, issue #2178). It is
-    deliberately a single item, not the full unmet list: the roll-up's job is
-    "what is the next thing to fix", not a re-rendering of the per-block
-    report (open that block's own ``--manifest`` report for the full
-    item-by-item detail).
+    blocker, or ``None`` when ``tier == "T1"``. Candidates are taken in the
+    order :func:`build_tier_report` renders items (item id, then partition
+    for a mixed-signal block), ranked in three classes
+    (:func:`_blocking_t1_item`, issues #2178 and #2203):
 
-    ``ungraded_items`` is every unmet structurally-ungradeable T1 item, in
-    render order and in ``blocking_item``'s own shape
-    (:func:`_ungraded_t1_items`) -- the rows ``blocking_item`` steps over, so
-    that demoting them never silently hides them. ``[]`` for a block that
-    cites all four, and for a block at ``tier: "T1"``.
+    1. an unmet item **this build has no grading rules for**
+       (``graded_by_build: False``) wins outright -- the roll-up could not
+       evaluate it at all, which no other explanation outranks and which no
+       manifest edit can clear;
+    2. otherwise the first unmet item that has a check behind it;
+    3. otherwise the first unmet **structurally ungradeable** item (items 1,
+       2, 9 and 10, which have no `klt` verb at all).
+
+    It is deliberately a single item, not the full unmet list: the roll-up's
+    job is "what is the next thing to fix", not a re-rendering of the
+    per-block report (open that block's own ``--manifest`` report for the
+    full item-by-item detail).
+
+    ``ungraded_items`` is every unmet T1 item with no runnable check behind
+    it -- both ungradeable classes above -- in render order and in
+    ``blocking_item``'s own shape (:func:`_ungraded_t1_items`), so that
+    ranking them never silently hides them. ``[]`` for a block that cites all
+    four, and for a block at ``tier: "T1"``.
 
     No evidence is read or graded here beyond what :func:`build_tier_report`
     already did -- this function only reduces its output, so a block's
@@ -5659,12 +5715,10 @@ def build_fleet_report(
     see which `klt` produced it. It is reported once for the whole roll-up
     rather than per block -- one process grades every block. Per-item
     ``graded_by_build`` lives in each block's own tier report; here an item
-    this build cannot grade surfaces as an ``ungraded_items`` row (and, when
-    it is the only gap left, as the ``blocking_item`` fallback), because an
-    item no grading table names is by construction structurally ungradeable
-    too (:func:`_is_structurally_ungradeable_item`) -- with
-    ``reason: "ungradeable_by_build"`` naming the *build*, not the manifest,
-    as what is missing.
+    this build cannot grade surfaces as an ``ungraded_items`` row **and** as
+    the ``blocking_item`` (class 1 above, issue #2203), with
+    ``reason: "ungradeable_by_build"`` -- or ``"no_evidence"`` if it was
+    never cited -- naming the *build*, not the manifest, as what is missing.
 
     ``blocks[].build_t1_item_count`` (issue #2202) is the *reverse*
     divergence, and unlike per-item ``graded_by_build`` it is carried here
@@ -5822,30 +5876,63 @@ def _blocking_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     as the block's blocker, or ``None`` if every T1 item is met.
 
     The candidate order is :func:`build_tier_report`'s own item order (item
-    id, then partition), with one rule layered on top (issue #2178): a
-    **structurally ungradeable** item (:func:`_is_structurally_ungradeable_item`
-    -- items 1, 2, 9 and 10 today) is only reported as *the* blocker when no
-    gradeable T1 item is unmet. Concretely:
+    id, then partition), with a **three-class priority** layered on top
+    (issues #2178, #2203). Concretely:
 
-    1. the first unmet T1 item that has a check behind it, if any;
-    2. otherwise the first unmet structurally-ungradeable T1 item;
-    3. otherwise ``None`` (every T1 item is met).
+    1. the first unmet T1 item this build has no grading rules for at all
+       (:func:`_is_ungradeable_by_build`), if any;
+    2. otherwise the first unmet T1 item that has a check behind it;
+    3. otherwise the first unmet **structurally ungradeable** T1 item
+       (:func:`_is_structurally_ungradeable_item` -- items 1, 2, 9 and 10
+       today);
+    4. otherwise ``None`` (every T1 item is met).
 
-    Rule 1 is the whole point. ``docs/cli/signoff.md``'s "Items 1, 2, 9, and
-    10" section tells a manifest author that the honest default for those
-    four is to leave them **uncited**, since no `klt` verb can check their
-    topical relevance -- which means every honestly-authored manifest renders
-    item 1 ``unmet``/``no_evidence`` *by construction*. Reducing on "first
-    unmet in render order" therefore answered "blocked on item 1" for every
-    such block, hiding whatever its real gaps were. Skipping those four keeps
-    the answer to "what is the next thing to fix" a thing that can actually
-    be fixed by running something.
+    **Rule 2 over rule 3 is issue #2178's rule.** ``docs/cli/signoff.md``'s
+    "Items 1, 2, 9, and 10" section tells a manifest author that the honest
+    default for those four is to leave them **uncited**, since no `klt` verb
+    can check their topical relevance -- which means every honestly-authored
+    manifest renders item 1 ``unmet``/``no_evidence`` *by construction*.
+    Reducing on "first unmet in render order" therefore answered "blocked on
+    item 1" for every such block, hiding whatever its real gaps were.
+    Demoting those four keeps the answer to "what is the next thing to fix" a
+    thing that can actually be fixed by running something. Rule 3 then keeps
+    the degenerate case honest rather than silently clean: a block whose
+    *only* unmet items are those four is still not T1, so it must still name
+    a blocker -- one of those four -- never ``None``.
 
-    Rule 2 keeps the degenerate case honest rather than silently clean: a
-    block whose *only* unmet items are the ungradeable four is still not T1,
-    so it must still name a blocker -- one of those four -- never ``None``.
-    The full set skipped by rule 1 is reported alongside as the roll-up row's
-    ``ungraded_items`` (:func:`_ungraded_t1_items`), so nothing is dropped.
+    **Rule 1 is issue #2203's rule, and it is the deliberate opposite.**
+    Before it, an ``ungradeable_by_build`` row (an item id only a
+    ``--tiers-doc``/``$KLT_TIERS_DOC`` copy of the doc lists) was swept into
+    rule 3 *incidentally*, because it satisfies
+    :func:`_is_structurally_ungradeable_item` too -- an id no grading table
+    names is structurally ungradeable by that function's own derivation. But
+    #2178's argument for demoting an item does not transfer to it, and in
+    fact inverts:
+
+    - **Items 1/2/9/10 are demoted because they are expected.** Every honest
+      manifest has them unmet; they are the roll-up's background noise, and
+      a weak answer to "why isn't this block T1 yet".
+    - **An ``ungradeable_by_build`` row is never expected**, and it is the
+      *sharpest* available answer to that question: it says this roll-up
+      could not evaluate that item at all. Every other explanation it could
+      print is conditional on it being able to grade the checklist it was
+      handed; when it cannot, naming some other item implies a completeness
+      the verdict does not have. It is also the only class of blocker a
+      manifest edit cannot clear -- a ``graded_by_build: False`` item can
+      never render ``"met"`` on this build, so "blocked on item 4, run `klt
+      lvs`" would point the reader at work that cannot get this block to T1.
+      The fix is a newer `klt` (or grading against the doc this one ships).
+
+    So it outranks *both* other classes, cited (``ungradeable_by_build``) or
+    uncited (``no_evidence``) -- the class is read from ``graded_by_build``,
+    not from ``reason``, because the build is the gap either way.
+
+    The full set demoted by rules 1 and 2 -- both ungradeable classes -- is
+    reported alongside as the roll-up row's ``ungraded_items``
+    (:func:`_ungraded_t1_items`), so nothing is dropped. When rule 1 fires,
+    the named blocker is itself one of those rows; that was already true of
+    rule 3's fallback before #2203, so the two fields' relationship is
+    unchanged.
 
     T2-T4 ladder rows are never candidates -- they are always ``"unmet"`` by
     design (this toolkit's closed loop targets T1) and are not what gates the
@@ -5856,31 +5943,65 @@ def _blocking_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     tier report can never disagree about *why* an item is unmet -- only about
     which unmet item is worth naming first.
     """
-    ungradeable_fallback: dict[str, Any] | None = None
+    # One pass, three "first match" slots rather than an early return: rule 1
+    # dominates rules 2 and 3, and an ungradeable-by-build item can sit
+    # anywhere in render order, so no candidate is final until every T1 row
+    # has been seen.
+    by_build: dict[str, Any] | None = None
+    gradeable: dict[str, Any] | None = None
+    structural: dict[str, Any] | None = None
+
     for item in items:
         if item["tier"] != "T1" or item["status"] == "met":
             continue
-        if _is_structurally_ungradeable_item(item["id"]):
-            if ungradeable_fallback is None:
-                ungradeable_fallback = _blocking_item_view(item)
-            continue
-        return _blocking_item_view(item)
-    return ungradeable_fallback
+        # Order matters: today every ungradeable-by-build id is *also*
+        # structurally ungradeable, so this branch has to be asked first for
+        # the two classes to stay distinguishable at all.
+        if _is_ungradeable_by_build(item):
+            if by_build is None:
+                by_build = _blocking_item_view(item)
+        elif _is_structurally_ungradeable_item(item["id"]):
+            if structural is None:
+                structural = _blocking_item_view(item)
+        elif gradeable is None:
+            gradeable = _blocking_item_view(item)
+
+    for candidate in (by_build, gradeable, structural):
+        if candidate is not None:
+            return candidate
+    return None
 
 
 def _ungraded_t1_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every unmet, **structurally ungradeable** T1 item in ``items``
-    (:func:`_is_structurally_ungradeable_item`), in render order -- exactly
-    the rows :func:`_blocking_t1_item`'s rule 1 steps over, trimmed to the
-    same ``{"id", "title", "partition", "reason"}`` shape ``blocking_item``
-    uses (issue #2178).
+    """Every unmet T1 item in ``items`` with **no runnable check behind it in
+    this roll-up**, in render order, trimmed to the same ``{"id", "title",
+    "partition", "reason"}`` shape ``blocking_item`` uses (issues #2178,
+    #2203).
 
-    Reported so that skipping those items in the blocker reduction *demotes*
-    them rather than hides them: a reader still sees that this block claims
-    items 1/2/9/10 with nothing cited behind them, but is no longer told that
-    is the one thing standing between it and T1 when a real, runnable gap
-    exists elsewhere. Empty for a block that cites all four (met items are
-    never listed) and for a block at ``tier: "T1"``.
+    That is the union of the two ungradeable classes
+    :func:`_blocking_t1_item` ranks separately:
+
+    - **structurally ungradeable** (:func:`_is_structurally_ungradeable_item`
+      -- items 1, 2, 9 and 10 today): no `klt` verb exists for the id at all;
+    - **ungradeable by this build** (:func:`_is_ungradeable_by_build`): an id
+      only a ``--tiers-doc``/``$KLT_TIERS_DOC`` copy of the doc lists, which
+      this build has no rules for.
+
+    The union is written out explicitly even though the first predicate
+    happens to cover both populations today (issue #2203): this function's
+    contract is the union, not whatever one derived predicate incidentally
+    spans, and relying on that coincidence is exactly what made the two
+    indistinguishable in the blocker reduction.
+
+    Reported so that ranking those items below a runnable gap *demotes* them
+    rather than hides them: a reader still sees that this block claims items
+    1/2/9/10 with nothing cited behind them, but is no longer told that is
+    the one thing standing between it and T1 when a real, runnable gap exists
+    elsewhere. Empty for a block that cites all four (met items are never
+    listed) and for a block at ``tier: "T1"``.
+
+    Unchanged by #2203's re-ranking: which rows are listed here is the same
+    set as before -- only which of them ``blocking_item`` names can move.
 
     Like :func:`_drc_coverage_rows`, this reduces the per-block tier report
     this roll-up already computed and reads no evidence of its own.
@@ -5890,7 +6011,10 @@ def _ungraded_t1_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in items
         if item["tier"] == "T1"
         and item["status"] != "met"
-        and _is_structurally_ungradeable_item(item["id"])
+        and (
+            _is_structurally_ungradeable_item(item["id"])
+            or _is_ungradeable_by_build(item)
+        )
     ]
 
 
