@@ -1675,6 +1675,45 @@ resolver, and the envelope is additive — new fields may be added without a
 schema/`schema_version` bump; renaming, removing, or retyping an existing
 field requires one.
 
+**That guarantee covers the JSON envelope's *shape* only. Generator
+*geometry* output is not guaranteed stable across `klt` releases before
+`1.0`.** The GDS a generator draws for the same request can and does change
+between releases — deliberately, as PDK-signoff-driven fixes land, not as
+uncontrolled drift. Two concrete precedents from `CHANGELOG.md`'s `## 0.5.0
+(2026-09-15)` section: `guard_ring`/`mos_array`/`diff_pair`/`bjt_array`/
+`esd_device`'s `gf180mcu` geometry gained new implant coverage to close real
+signoff-DRC gaps (issues #1577, #1580), and every generator's output database
+unit moved from a fixed `0.001um` to one resolved per-PDK from the tech LEF's
+`DATABASE MICRONS` declaration (issue #1496) — both changed the exact bytes
+of a generated GDS for affected PDK families without any generator `params`
+or request shape changing.
+
+A consumer that commits generated GDS as evidence and later re-runs the
+generator to byte-compare against it should **not** treat a byte diff as
+proof of an operator edit without first checking whether the two runs'
+`provenance.klt_version`/`provenance.klayout_version` (the shared
+`provenance` block — see
+[`docs/json-contract.md`](../json-contract.md#shared-provenance-block))
+differ, and if so, consulting `CHANGELOG.md` for whether that version range
+includes a geometry-affecting change to the generator/PDK family in
+question. Compare `provenance.klt_version` specifically, not a bare `klt
+--version` string recorded out-of-band — the provenance field reflects the
+exact build (including post-tag/`+g<sha>`/`.dirty` suffixes) that actually
+drew the geometry, which a separately-noted package version string can miss.
+
+This is deliberately not "generator output is stable" (item 1 of issue
+#2246's original request): pinning geometry across releases would either
+block legitimate DRC-margin fixes like the ones above or require an opt-in
+legacy-geometry-profile escape hatch this project does not maintain.
+`provenance.klt_version`/`klayout_version` (issue #2035) are judged
+sufficient granularity for detecting *that* an upgrade happened; they are
+coarser than a dedicated per-generator geometry-revision counter (they
+don't say *which* generator's geometry a given upgrade touched), but the
+manual CHANGELOG lookup that gap implies is a one-time, low-frequency check
+against a short, dated list of "Changed"/"Fixed" entries — not a routine
+per-run cost. No dedicated geometry-revision field is planned; see issue
+#2246 for the analysis.
+
 ## `klt gen --list`
 
 Enumerates every registered generator and its `params` schema — the same data
