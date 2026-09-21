@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#2227, `--format text` only — **no** `schema_version` bump and
+  no change to any `--format json` payload): `klt signoff`'s text rendering
+  no longer emits ANSI colour unconditionally. Colour now follows
+  `stdout.isatty()` — on at a terminal, off when redirected to a file or
+  piped — and is suppressed outright by `--no-color`, the new
+  `--color=never`, or `$NO_COLOR` (any non-empty value,
+  [no-color.org](https://no-color.org/)). `--color=always` opts back in
+  through a pipe and outranks `$NO_COLOR`. The motivating case is the
+  committed tier report `--manifest` exists to produce: `klt signoff
+  --manifest m.json --format text > signoff.txt` is now escape-free by
+  default, readable in a pull-request diff, and greppable without stripping
+  ANSI first — so the committed file can stay byte-identical to what the
+  grader emitted. Terminal output is unchanged. **Callers that relied on the
+  escapes being present in redirected/piped output must now pass
+  `--color=always`.** See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Colour in `--format text`"
+  section.
+
 - **Added** (#2224, additive — **no** `schema_version` bump on `klt
   synthesize` or `klt place-and-route`; the `--check`/`--rerun` payloads are
   their own `schema_version: 1` documents, not a change to either verb's

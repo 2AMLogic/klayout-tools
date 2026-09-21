@@ -36,6 +36,16 @@ grading rules rather than an overridden doc's item list.
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
 
+The two doc-parsing modes' ``--format text`` rendering colours its verdict
+markers -- "met" green, "unmet" red -- so a scan of the printed skeleton
+shows what is missing at a glance. **Whether** those escapes are emitted is
+decided once per invocation by :func:`.color.resolve_palette` and handed to
+the renderers as a :class:`.color.Palette`: colour at a terminal, plain text
+through a pipe or redirect, and off outright under ``--no-color`` /
+``--color=never`` / ``$NO_COLOR`` (issue #2227). The committed tier report
+``--manifest`` exists to produce is therefore escape-free by default,
+without the caller stripping ANSI on the way out.
+
 Exit codes (see ``docs/cli/signoff.md`` for the full table):
     0 - envelope-aggregation mode: every check passed and every input's
         provenance agreed. Tier-report mode: every T1 item is ``"met"``
@@ -70,6 +80,7 @@ from ..signoff import (
     build_tier_report,
     describe_grader,
 )
+from .color import Palette, resolve_palette
 from .output import emit_error, emit_success
 
 EXIT_PASS = 0
@@ -77,17 +88,6 @@ EXIT_FAIL = 3
 EXIT_REFUSED = 4
 
 _EXIT_CODES = {"pass": EXIT_PASS, "fail": EXIT_FAIL, "refused": EXIT_REFUSED}
-
-#: ANSI colour codes for the tier-report text rendering -- "unmet" items
-#: render red, "met" items render green, so a scan of the printed skeleton
-#: shows what's missing at a glance. Always emitted (not gated on
-#: ``isatty()``): this command's text output is a terminal-first courtesy
-#: rendering, like every other ``klt`` verb's, and an agent piping it
-#: through a pager/log still gets a machine-greppable ``\033[3Nm`` marker
-#: per line.
-_RED = "\033[31m"
-_GREEN = "\033[32m"
-_RESET = "\033[0m"
 
 
 def run(args: argparse.Namespace) -> int:
@@ -179,7 +179,10 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
-    emit_success(result, args.format, _print_tier_report_text)
+    palette = resolve_palette(args)
+    emit_success(
+        result, args.format, lambda payload: _print_tier_report_text(payload, palette)
+    )
 
     return EXIT_PASS if result["tier"] == "T1" else EXIT_FAIL
 
@@ -203,7 +206,10 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
-    emit_success(result, args.format, _print_fleet_report_text)
+    palette = resolve_palette(args)
+    emit_success(
+        result, args.format, lambda payload: _print_fleet_report_text(payload, palette)
+    )
 
     return EXIT_PASS if result["not_t1_count"] == 0 else EXIT_FAIL
 
@@ -374,7 +380,7 @@ def _format_body_bias(body_bias: dict) -> str:
     )
 
 
-def _print_t1_scope_shortfall(row: dict, source_doc: str) -> None:
+def _print_t1_scope_shortfall(row: dict, source_doc: str, palette: Palette) -> None:
     """Print the one-line disclosure for a checklist shorter than what this
     build grades (issue #2202), or nothing when there is none to make.
 
@@ -395,13 +401,13 @@ def _print_t1_scope_shortfall(row: dict, source_doc: str) -> None:
     if build_count is None or build_count <= doc_count:
         return
     print(
-        f"        {_RED}scope: {build_count - doc_count} more T1 item(s) "
-        f"this build grades are not in {source_doc}{_RESET} "
+        f"        {palette.red}scope: {build_count - doc_count} more T1 item(s) "
+        f"this build grades are not in {source_doc}{palette.reset} "
         f"(this build's own doc lists {build_count})"
     )
 
 
-def _print_tier_report_text(result: dict) -> None:
+def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
     print(f"tier: {result['tier'] or 'none'}")
@@ -414,16 +420,16 @@ def _print_tier_report_text(result: dict) -> None:
     # -- so it is said beside the count it qualifies. Absent (as before)
     # whenever the two counts agree, and when this build cannot read its own
     # doc to compare against.
-    _print_t1_scope_shortfall(result, result["source_doc"])
+    _print_t1_scope_shortfall(result, result["source_doc"], palette)
     print()
 
     for item in result["items"]:
         marker = "MET  " if item["status"] == "met" else "UNMET"
-        color = _GREEN if item["status"] == "met" else _RED
+        color = palette.green if item["status"] == "met" else palette.red
         item_id = str(item["id"]) if item["id"] is not None else "-"
         partition = f" [{item['partition']}]" if item["partition"] else ""
         print(
-            f"[{color}{marker}{_RESET}] {item['tier']} #{item_id}{partition} "
+            f"[{color}{marker}{palette.reset}] {item['tier']} #{item_id}{partition} "
             f"{item['title']}"
         )
         # Issue #2176: a row this build has no grading rules for at all --
@@ -434,7 +440,7 @@ def _print_tier_report_text(result: dict) -> None:
         # shipped doc, which renders exactly as before.
         if item.get("graded_by_build") is False:
             print(
-                f"        {_RED}not graded by this build{_RESET} "
+                f"        {palette.red}not graded by this build{palette.reset} "
                 f"(no rules for item #{item_id} in klt {result['build']['version']}"
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
@@ -509,7 +515,7 @@ def _print_tier_report_text(result: dict) -> None:
             # runnable check exists" (e.g. no_evidence) reads distinctly
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
-            print(f"        {_RED}reason: {item['reason']}{_RESET}")
+            print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
 
     print()
     print(
@@ -522,7 +528,7 @@ def _print_tier_report_text(result: dict) -> None:
     print(f"build: klt {result['build']['version']}")
 
 
-def _print_fleet_report_text(result: dict) -> None:
+def _print_fleet_report_text(result: dict, palette: Palette) -> None:
     print(
         f"fleet: {result['t1_count']}/{result['block_count']} blocks at T1 "
         f"({result['not_t1_count']} not yet)"
@@ -531,25 +537,26 @@ def _print_fleet_report_text(result: dict) -> None:
 
     for block in result["blocks"]:
         marker = "T1   " if block["tier"] == "T1" else "not-T1"
-        color = _GREEN if block["tier"] == "T1" else _RED
+        color = palette.green if block["tier"] == "T1" else palette.red
         print(
-            f"[{color}{marker}{_RESET}] {block['block']} ({block['kind']})  "
+            f"[{color}{marker}{palette.reset}] {block['block']} "
+            f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
         )
         # Issue #2202: same disclosure as tier-report mode, for the same
         # reason -- this row renders `t1_item_count`, so it must also render
         # what that count is short of. `source_doc` is the roll-up's one
         # shared doc (forwarded verbatim to every block).
-        _print_t1_scope_shortfall(block, result["source_doc"])
+        _print_t1_scope_shortfall(block, result["source_doc"], palette)
         blocking_item = block["blocking_item"]
         if blocking_item:
             partition = (
                 f" [{blocking_item['partition']}]" if blocking_item["partition"] else ""
             )
             print(
-                f"        {_RED}blocking: #{blocking_item['id']}{partition} "
+                f"        {palette.red}blocking: #{blocking_item['id']}{partition} "
                 f"{blocking_item['title']} (reason: {blocking_item['reason']})"
-                f"{_RESET}"
+                f"{palette.reset}"
             )
         # Issue #2178: the unmet T1 items with no `klt` verb behind them
         # (1, 2, 9, 10) -- the rows `blocking_item` deliberately steps over
