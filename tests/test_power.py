@@ -1265,11 +1265,16 @@ def test_cli_json_contract(tmp_path, capsys):
         "ir_drop_map",
         "worst_case_droop_mv",
         "em_verdict",
+        # Added additively by #2260 -- the echo of what each `devices[]`
+        # declaration subtracted, empty for a spec that declares none, so
+        # again no `schema_version` bump.
+        "devices",
         "warnings",
     }
     assert data["ir_drop_map"] is None
     assert data["worst_case_droop_mv"] is None
     assert data["em_verdict"] is None
+    assert data["devices"] == []
     assert data["schema_version"] == 1
 
 
