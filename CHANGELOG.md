@@ -14,6 +14,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2234, additive — **no** `schema_version` bump on `klt erc` or
+  `klt signoff`; every field below is new, and a spec that uses neither new
+  key produces the same report it did before, except for the
+  always-present-but-`null` `ties_disclosure` echo and an empty
+  `erc_coverage.checked_by_assertion`): two ways for a stream whose taps
+  carry **no distinguishing implant/marker layer at all** to declare them —
+  the implant-free full-custom case where neither `ties[].tap_requires` (no
+  implant is drawn to intersect) nor `ties[].tap_is_dedicated` (the PDK ships
+  no tap-only layer) has anything true to say, so every tie declaration
+  lands *degenerate* (#2199) and
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) item 11's
+  zero-`erc.missing_tie` condition is unreachable by construction.
+  `ties[].tap_boxes` (array of `[left, bottom, right, top]` micrometre
+  boxes) **asserts** where the tap geometry is, intersected into `tap_layer`
+  and composable with `tap_requires`; because it rests on the caller's word
+  rather than on a drawn marker it is graded under its own coverage
+  classification, `erc_coverage.checked_by_assertion` (a subset of
+  `checked`, additive to the four common-contract lists), and it is held to
+  exactly the falsifiability bar #2199 set: an assertion that removes
+  nothing from the drawn `tap_layer` inside the well is still
+  `degenerate_tap_declaration`, and one matching no drawn geometry produces
+  the same honest "no tap drawn" finding a genuinely absent tap would. The
+  top-level `ties_disclosure` (`{"reason": <non-empty string>}`) is for a
+  stream that cannot express a tap at all: it changes no geometry and no
+  finding, only the `erc_coverage.inapplicable` reason recorded for the
+  undeclared `erc.missing_tie` work (`ties_disclosed_unexpressible` in place
+  of `no_ties_declared`), which `klt signoff`'s T1 item 11 renders as the
+  distinct reason `supply_spec_disclosed_unexpressible` — still **unmet**, a
+  disclosure proves nothing about the tap's actual connectivity, but no
+  longer indistinguishable from a spec that never considered the question.
+  A `met` item 11 citation's `power_delivery` block additionally carries
+  `ties_checked_by_assertion`. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "A tie with no distinguishing
+  marker layer at all".
+
 - **Changed** (#2227, `--format text` only — **no** `schema_version` bump and
   no change to any `--format json` payload): `klt signoff`'s text rendering
   no longer emits ANSI colour unconditionally. Colour now follows

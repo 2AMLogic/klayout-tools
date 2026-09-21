@@ -365,7 +365,20 @@ written to every block.
       reason `degenerate_tap_declaration`, issue #2199) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
-      already rejects a spec declaring no `ties[]` at all. Those are the
+      already rejects a spec declaring no `ties[]` at all. **A stream with
+      no distinguishing implant/marker layer at all** — common for
+      generated/full-custom analog whose implants are derived downstream,
+      see `docs/cli/erc.md`'s #2199 section — can still declare a checked
+      tie via `ties[].tap_boxes` (issue #2234): a caller-asserted list of
+      tap-geometry boxes, graded under its own
+      `erc_coverage.checked_by_assertion` classification and held to the
+      same degenerate/falsifiability test as every other narrowing form.
+      When a stream genuinely cannot express a tap at all, a top-level
+      `ties_disclosure` declares that explicitly; the item still renders
+      `supply_spec_disclosed_unexpressible` rather than a met item — a
+      disclosure proves nothing about the tap's actual connectivity — but
+      that reason is distinguishable from a spec that omitted `ties[]`
+      without ever considering the question. Those are the
       rules this item grades, not the
       report's overall `status`: an antenna verdict or a floating-gate
       finding is a real defect, but it is not this item's subject and does

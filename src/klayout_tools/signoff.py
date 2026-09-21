@@ -411,8 +411,9 @@ that. So this phase adds three things:
 - **A dedicated grading path**, :func:`_grade_power_delivery`: the cited set
   must contain a `klt erc` supply-spec run and the LVS report item 4 grades,
   plus -- for an RTL-flow digital block -- the `klt place-and-route` response
-  that says a PDN was built at all. Its four item-specific reasons
+  that says a PDN was built at all. Its five item-specific reasons
   (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
+  :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`,
   :data:`_REASON_SUPPLY_NOT_CONTINUOUS`, :data:`_REASON_LVS_SUPPLY_UNPROVEN`)
   keep "no grid was ever built" distinguishable from "the grid is built but
   a rail is split in two", per issue #826's invariant.
@@ -1597,7 +1598,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
     "power": "pass_partial",
 }
 
-#: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Four
+#: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Five
 #: reasons, not one, for the same reason :data:`_REASON_NOT_POST_LAYOUT` is
 #: distinct from :data:`_REASON_WRONG_KIND`: item 11 is a *compound* claim,
 #: and a report that collapsed "no grid was ever built" into the same
@@ -1613,13 +1614,26 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
 #:   spec document does not ask the question item 11 grades: it could not be
 #:   read, declares no ``"kind": "supply"`` net, declares no ``ties[]``
-#:   (so ``erc.missing_tie`` was never computed -- an uncomputed check is
-#:   not a clean one), declares a ``ties[]`` entry the ERC run itself
+#:   with no disclosure of why (see :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`
+#:   below for the disclosed case, issue #2234) -- an uncomputed check is
+#:   not a clean one -- declares a ``ties[]`` entry the ERC run itself
 #:   reported as *degenerate* (issue #2199, see
 #:   :func:`_erc_missing_tie_skipped` -- a check that could not tell a tap
 #:   from a source/drain contact is likewise not a clean one), or its
 #:   stackup does not cover every strap layer the P&R response reports.
 #:   Fix: widen the spec and re-run `klt erc`.
+#: - :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` -- the cited `klt
+#:   erc` run declares zero ``ties[]``, exactly as
+#:   :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`'s "no ``ties[]``" case -- but its
+#:   spec explicitly disclosed why no tap can be expressed
+#:   (``ties_disclosure``, issue #2234, see :func:`_erc_missing_tie_disclosed`).
+#:   Still ``"unmet"`` -- a disclosure proves nothing about the tap's actual
+#:   connectivity, so it can never substitute for a computed
+#:   ``erc.missing_tie`` result -- but distinguishable from "nobody declared
+#:   ties at all", which :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` still covers.
+#:   Fix: express the tap (``tap_boxes``, ``tap_requires``, or
+#:   ``tap_is_dedicated``) and re-run `klt erc`, or accept this item stays
+#:   unmet for this stream.
 #: - :data:`_REASON_SUPPLY_NOT_CONTINUOUS` -- the ERC run *did* ask, and the
 #:   answer is no: a declared supply resolved to zero or several islands
 #:   (``erc.unconnected_net``), two declared supplies resolved to the same
@@ -1633,6 +1647,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   reference-side net, so the supplies were not part of the compare.
 _REASON_NO_PDN = "no_pdn"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
+_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 
@@ -4118,8 +4133,17 @@ def build_tier_report(
     - ``"supply_spec_incomplete"`` (issue #2025, item 11 only) -- the cited
       `klt erc` run's own spec document does not ask the question item 11
       grades: unreadable, no ``"kind": "supply"`` net declared, no ``ties[]``
-      declared (so ``erc.missing_tie`` was never computed), or a stackup that
+      declared with no disclosure of why (see
+      ``"supply_spec_disclosed_unexpressible"`` below for the disclosed
+      case) so ``erc.missing_tie`` was never computed, or a stackup that
       does not cover every strap layer the P&R response reports.
+    - ``"supply_spec_disclosed_unexpressible"`` (issue #2234, item 11 only)
+      -- the cited `klt erc` run declares zero ``ties[]``, exactly as
+      ``"supply_spec_incomplete"``'s "no ``ties[]``" case, but its spec
+      explicitly disclosed why no tap can be expressed on this stream
+      (``ties_disclosure``). Still unmet -- a disclosure proves nothing
+      about the tap's actual connectivity -- but distinguishable from
+      "nobody declared ties at all".
     - ``"supply_not_continuous"`` (issue #2025, item 11 only) -- the ERC run
       did ask, and the answer is no: a declared supply resolved to zero or
       several islands, two declared supplies resolved to one island, or a
@@ -5018,11 +5042,11 @@ def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
 
 def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
     """Read the **spec document** a resolved `klt erc` citation names
-    (``envelope["spec"]``), and reduce it to the three facts T1 item 11
-    grades against -- or ``None`` when it cannot be read or parsed.
+    (``envelope["spec"]``), and reduce it to the facts T1 item 11 grades
+    against -- or ``None`` when it cannot be read or parsed.
 
     Returns ``{"supply_nets": [<name>, ...], "stackup": {<name/layer>, ...},
-    "tie_count": <int>}``:
+    "tie_count": <int>, "ties_disclosure_reason": <str> | None}``:
 
     - ``supply_nets`` -- every ``nets[]`` entry declared ``"kind":
       "supply"``, by name. Item 11 requires at least one: `klt erc` computes
@@ -5037,6 +5061,12 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
     - ``tie_count`` -- ``len(ties)``. Item 11 requires at least one for the
       same "an uncomputed check is not a clean one" reason: ``ties`` omitted
       means ``erc.missing_tie`` was never computed at all.
+    - ``ties_disclosure_reason`` -- the spec's top-level
+      ``ties_disclosure.reason`` (issue #2234), if it declared one, else
+      ``None``. Purely a human-readable detail: the actual
+      disclosed-vs-omitted *gate* reads the envelope's own
+      ``erc_coverage``, not this field -- see
+      :func:`_erc_missing_tie_disclosed`.
 
     **Why this reads a second document at all.** `klt erc`'s envelope
     (``docs/cli/erc.md``'s JSON schema) echoes the spec's *path* but not its
@@ -5069,6 +5099,12 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     ties = document.get("ties")
+    disclosure = document.get("ties_disclosure")
+    disclosure_reason = (
+        disclosure.get("reason")
+        if isinstance(disclosure, dict) and isinstance(disclosure.get("reason"), str)
+        else None
+    )
     return {
         "supply_nets": [
             entry["name"]
@@ -5086,6 +5122,14 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
             if isinstance(entry.get(field), str) and entry[field]
         },
         "tie_count": len(ties) if isinstance(ties, list) else 0,
+        # Issue #2234: the spec's own `ties_disclosure.reason`, read purely
+        # for a human-readable `detail` when item 11 renders
+        # `supply_spec_disclosed_unexpressible` -- see
+        # :func:`_resolve_erc_supply_spec`. The disclosure gate itself reads
+        # the *envelope*'s own `erc_coverage` (:func:`_erc_missing_tie_disclosed`),
+        # not this field, so a deleted/edited spec document never flips a
+        # rendered reason -- only degrades the detail text.
+        "ties_disclosure_reason": disclosure_reason,
     }
 
 
@@ -5303,6 +5347,74 @@ def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
     )
 
 
+def _erc_missing_tie_disclosed(envelope: dict[str, Any]) -> bool:
+    """Whether the cited `klt erc` run declares zero ``ties[]`` *and*
+    explicitly disclosed why no tap can be expressed (issue #2234).
+
+    `klt erc` records the undeclared ``erc.missing_tie`` work in
+    ``erc_coverage.inapplicable`` with a reason of either
+    ``"no_ties_declared"`` (``ties`` simply omitted/empty, no explanation)
+    or ``"ties_disclosed_unexpressible"`` (the spec's top-level
+    ``ties_disclosure`` was given) -- see ``docs/cli/erc.md``. Both describe
+    the identical "zero ties" fact reported by :func:`_erc_supply_spec`'s
+    ``tie_count == 0``; this function is what lets
+    :func:`_resolve_erc_supply_spec` tell them apart and render
+    :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` instead of the plain
+    :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` for the disclosed case --
+    :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` is still returned either way (a
+    disclosure proves nothing about the tap's actual connectivity, so item
+    11 stays ``"unmet"`` regardless); only the *reason* differs.
+
+    Matched on ``erc_coverage.inapplicable`` (not ``skipped`` --
+    :func:`_erc_missing_tie_skipped` covers a *declared but degenerate* tie,
+    a different case) and on the reason string itself, since presence alone
+    does not distinguish disclosed from undisclosed here -- both render an
+    ``erc.missing_tie:`` entry in ``inapplicable`` regardless. An envelope
+    with no ``erc_coverage`` block (every report before #2179) discloses
+    nothing and is graded exactly as it was.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return False
+    return any(
+        isinstance(record, dict)
+        and isinstance(record.get("id"), str)
+        and record["id"].startswith("erc.missing_tie:")
+        and record.get("reason") == "ties_disclosed_unexpressible"
+        for record in block.get("inapplicable") or []
+    )
+
+
+def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
+    """The cited `klt erc` run's ``erc_coverage.checked_by_assertion``
+    (issue #2234): the ``erc.missing_tie`` work identities whose tap region
+    came from a caller **assertion** (``ties[].tap_boxes``) rather than
+    PDK-marker narrowing -- ``[]`` for every run that used none, and for
+    every report produced before the field existed.
+
+    Carried into a ``"met"`` item 11 citation's ``power_delivery`` block
+    (:func:`_grade_power_delivery`) for the same reason `klt erc` grades it
+    as its own classification rather than folding it into ``checked``: an
+    asserted tie is real, evaluated work -- the geometry was intersected and
+    the connectivity walked, and a degenerate or unmatched assertion is
+    rejected exactly as any other narrowing form is (``docs/cli/erc.md`` →
+    "A tie with no distinguishing marker layer at all") -- but *which
+    geometry counts as the tap* rested on the caller's word rather than on a
+    drawn marker. That is a provenance difference a reader of the verdict of
+    record should not have to re-open the cited ERC envelope to discover.
+    It does not change the verdict: item 11 is ``"met"`` on an asserted tie
+    exactly as on a marker-derived one.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return []
+    return [
+        identity
+        for identity in block.get("checked_by_assertion") or []
+        if isinstance(identity, str)
+    ]
+
+
 def _resolve_erc_supply_spec(
     erc: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
@@ -5325,6 +5437,14 @@ def _resolve_erc_supply_spec(
     if supply_spec is None or not supply_spec["supply_nets"]:
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if supply_spec["tie_count"] == 0:
+        # Issue #2234: same "zero ties" fact either way, but a disclosed
+        # stream gets its own reason -- see `_erc_missing_tie_disclosed`.
+        if _erc_missing_tie_disclosed(erc["envelope"]):
+            return (
+                None,
+                _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE,
+                {"ties_disclosure_reason": supply_spec["ties_disclosure_reason"]},
+            )
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if _erc_missing_tie_skipped(erc["envelope"]):
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
@@ -5386,6 +5506,7 @@ def _grade_power_delivery(
     ``stale_evidence``/``unverifiable_provenance``), never a
     power-delivery-specific one. Item-specific
     reasons (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
+    :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
@@ -5460,6 +5581,11 @@ def _grade_power_delivery(
         "power_connectivity_status": (
             lvs["envelope"].get("power_connectivity") or {}
         ).get("status"),
+        # Issue #2234: which of the cited run's `erc.missing_tie` checks
+        # rested on a caller assertion (`ties[].tap_boxes`) rather than on
+        # PDK-marker narrowing -- `[]` for a purely marker-derived (or
+        # pre-#2234) run. See `_erc_ties_checked_by_assertion`.
+        "ties_checked_by_assertion": _erc_ties_checked_by_assertion(erc["envelope"]),
     }
     return "met", None, citation, {}
 
