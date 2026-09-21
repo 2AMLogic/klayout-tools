@@ -185,9 +185,19 @@
 * the all-poly divider left 59.8 mV. Start-up does not actually hang on
 * those millivolts -- the .op solution is an *unstable* equilibrium, this
 * topology has no stable DC state, so any perturbation diverges into
-* oscillation -- but a few mV of comparator input offset is no longer
-* obviously smaller than the margin, and no testbench in this chain
-* models offset or mismatch yet. README.md's Handoff section carries it.
+* oscillation.
+*
+* Issue #2156 measured that rather than leaving it argued. The gap is a
+* feedback-loop DC residual, not a headroom offset can eat: a deliberate
+* input-referred offset moves vo and the effective threshold together,
+* so over voffhi = -50..+50 mV the .op margin moves by only 0.37-0.69 mV
+* at the three 27C corners (10.6 mV at ss/-40C, the loosest) and never
+* changes sign (see "Comparator input-referred offset injection"
+* below, and README.md for the per-corner table). All 44
+* deterministic offset cases in sim_request_startup_offset.json and all
+* 128 mismatch Monte Carlo samples in sim_request_startup_mismatch.json
+* start and reach sustained oscillation; README.md's "Start-up under
+* comparator offset and mismatch" section has the numbers.
 *
 * Two consequences for the testbench, both handled in sim_request.json:
 *   - The first fraction of a microsecond is a start-up transient, not
@@ -315,8 +325,67 @@ XMP7 out nb   vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=4 nf=1 mult=1
 CLo out 0 0.02p
 .ends
 
-Xhi vo vth_hi ohi vdd nbias cmp_n
-Xlo vo vth_lo olo vdd pbias cmp_p
+* -------------------------------------------------------------------
+* Comparator input-referred offset injection (issue #2156)
+* -------------------------------------------------------------------
+* Voffhi/Vofflo are deterministic, input-referred offset generators in
+* series with each comparator's vref pin, swept by
+* sim_request_startup_offset.json. They follow exactly the
+* ".param name=<default> / <source> ... DC {name}" convention
+* docs/cli/sim.md's corners.supply_v section documents (the same one
+* .param vdd / Vdd already uses here), so a request sweeps them with
+* corners.supply_v keys named voffhi/vofflo.
+*
+* Both default to exactly 0 V. An ideal 0 V source is a short, so with
+* the defaults this netlist is electrically identical to the pre-#2156
+* one, and that was checked rather than assumed: the full 18-corner
+* sim_request.json sweep re-run against this file passes 18/18 with
+* every period_avg within 0.41% of the published Evidence table (the
+* residual is the sky130A version difference, not this change), and a
+* standalone .op against this file returns bit-identical node voltages
+* to the same .op against the pre-#2156 file -- which are also #1795's
+* published figures to their published precision (ss/1.62V/-40C:
+* vo 1.227632 V vs 1.2276, vth_hi 1.221691 V vs 1.2217, q 0.5725938 V
+* vs 0.5726).
+*
+* One caveat worth stating: at ss/1.62V/-40C the DC problem is
+* genuinely degenerate, and klt sim's *transient* deck for that corner
+* settles on a resolved-latch root rather than the metastable one the
+* standalone .op finds. That is a solve-path difference, not a circuit
+* difference -- see README.md's "Which side of the knife edge" note.
+* It does not affect start-up, which is the whole point.
+*
+* Sign convention: a POSITIVE voff RAISES the effective threshold the
+* comparator actually compares vo against, i.e.
+*   v(vth_hi_in) = v(vth_hi) + voffhi
+*   v(vth_lo_in) = v(vth_lo) + vofflo
+* Injecting at vref rather than at in is the input-referred equivalent of
+* a real input-pair Vth/beta mismatch (the quantity a comparator's offset
+* spec names), and it leaves the timing node vo undisturbed.
+*
+* What the sweep found, and why the thin .op margin is not a headroom.
+* The natural reading of "vo sits only 1.2-5.9 mV above vth_hi at t=0"
+* is that a few mV of comparator offset could close that gap and stop
+* cmp_n asserting. Measured, it cannot: the gap is a high-gain feedback
+* loop's DC residual, not a static headroom. At the metastable .op,
+* cmp_n is in its linear region and the loop (cmp_n -> latch -> charge/
+* discharge switches -> vo) holds vo wherever ohi sits mid-rail -- so
+* moving the effective threshold moves vo with it. Over voffhi =
+* -50..+50 mV at tt/1.62V/27C the .op margin stays 1.48-1.96 mV -- a
+* 208x attenuation of the injected offset; 144x at ss/27C and 271x at
+* ff/27C. ss/-40C is looser, 9.5x, staying 4.35-14.90 mV on the 8 of
+* its 11 rows whose t=0 solve sits on the knife edge at all; the other
+* 3 start from an already-resolved latch, which is the easier case.
+* (README.md's "Start-up under comparator offset and mismatch" section
+* has the full table.) Offset relocates the balance point; it does not
+* consume the margin.
+.param voffhi=0
+.param vofflo=0
+Voffhi vth_hi_in vth_hi DC {voffhi}
+Vofflo vth_lo_in vth_lo DC {vofflo}
+
+Xhi vo vth_hi_in ohi vdd nbias cmp_n
+Xlo vo vth_lo_in olo vdd pbias cmp_p
 
 * --- output edge-combination logic: NOT(olo) inverter + cross-coupled NOR SR latch ---
 XINVp olo_b olo vdd vdd sky130_fd_pr__pfet_01v8 L=0.15 W=2 nf=1 mult=1

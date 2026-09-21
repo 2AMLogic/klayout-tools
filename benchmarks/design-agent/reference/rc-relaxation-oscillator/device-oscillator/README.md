@@ -24,24 +24,45 @@ below for the explicit call issue #1814 asked for. The file the task
 actually scores against remains the behavioral
 [`../oscillator.spice`](../oscillator.spice).
 
+[#2156](https://github.com/2AMLogic/klayout-tools/issues/2156) then
+validated start-up against comparator offset and device mismatch — the
+open item #1795 left behind, because compensation also shrank the `.op`
+start-up margin ~10x. Both sweeps come back clean (**44/44** deterministic
+offset cases, **128/128** mismatch Monte Carlo samples), and they explain
+*why* the thin margin was never the risk it looked like; see
+[Start-up under comparator offset and mismatch](#start-up-under-comparator-offset-and-mismatch).
+
 Reproduce:
 
 ```
+# the 18-corner PVT gate (unchanged by #2156)
 klt sim benchmarks/design-agent/reference/rc-relaxation-oscillator/device-oscillator/sim_request.json
+
+# start-up under a deterministic worst-case comparator offset (44 cases)
+klt sim benchmarks/design-agent/reference/rc-relaxation-oscillator/device-oscillator/sim_request_startup_offset.json
+
+# start-up under sky130 MOS device mismatch (4 corners x 32 samples)
+klt sim benchmarks/design-agent/reference/rc-relaxation-oscillator/device-oscillator/sim_request_startup_mismatch.json
 ```
 
 (18 corners x a 20 us transient of real sky130A devices. ~5 minutes wall
 on 4 idle workers when #1814 measured it; the #1795 re-run reported
 ~740 s of CPU *per corner* because the host was running a saturated agent
 fleet at the time — take the wall-clock figure as a quiet-machine number,
-and the per-corner numbers in the report as load-dependent.)
+and the per-corner numbers in the report as load-dependent. The two
+start-up sweeps are 26 us transients and are load-dependent the same
+way: on 4 workers of a loaded 8-core host the 44 offset cases took
+~63 CPU-minutes / ~16 minutes wall, and the 128 mismatch samples scale
+from the same ~60-170 s per case. Expect roughly 11 min / 32 min on a
+quiet machine and half again as long under a busy agent fleet.)
 
 ## What got assembled
 
 `docs/design/relaxation-oscillator-comparator-core-spike.md`'s "What is
 deliberately still missing" section listed four pieces the comparator-core
 spike did not have. All four are in
-[`oscillator_device.spice`](oscillator_device.spice):
+[`oscillator_device.spice`](oscillator_device.spice), plus the start-up
+validation #2156 added on top of them:
 
 | Piece | Realisation |
 |---|---|
@@ -49,6 +70,7 @@ spike did not have. All four are in
 | Output edge-combination logic | `NOT(olo)` inverter + cross-coupled CMOS NOR SR latch; `S = ohi`, `R = NOT(olo)`, `q` is the clock and also the single charge/discharge control |
 | Device-level `vth_lo`/`vth_hi` reference generator | `XMref` mirrors `{ib}` into a **zero-TC composite divider** — each leg a series `sky130_fd_pr__res_xhigh_po` (negative tempco) + `sky130_fd_pr__res_generic_nd` (positive tempco) pair (`XRdiv1`/`XRdiv1n`, `XRdiv2`/`XRdiv2n`), with 0.5 pF `Crefl`/`Crefh` decoupling against comparator kickback — replaces the spike's ideal `Vrl`/`Vrh` DC sources |
 | 18-corner oscillation validation | [`sim_request.json`](sim_request.json), results below |
+| Start-up validation under comparator offset and device mismatch (#2156) | [`sim_request_startup_offset.json`](sim_request_startup_offset.json) (44 deterministic `Voff` cases) and [`sim_request_startup_mismatch.json`](sim_request_startup_mismatch.json) (4 corners x 32 MOS-mismatch samples), via the `Voffhi`/`Vofflo` injection sources; results in [Start-up under comparator offset and mismatch](#start-up-under-comparator-offset-and-mismatch) |
 
 The `cmp_n`/`cmp_p` `.subckt` bodies are copied **verbatim** from
 `../comparator-core/comparator_core.spice` — nothing about the comparator
@@ -56,7 +78,11 @@ core itself was re-tuned, by #1814's assembly or by #1795's compensation.
 `{ib}`, the `XMchg`/`XMdis` mirror ratio, `Cosc`, the latch, and the
 switches are all untouched by #1795 as well: the only netlist change that
 issue made was splitting the two divider resistors into four and
-re-centring their total.
+re-centring their total. #2156's netlist change is smaller still and
+electrically a no-op at its defaults — two 0 V series sources on the
+comparator `vref` pins, there purely so a request can sweep them; see
+[Start-up under comparator offset and mismatch](#start-up-under-comparator-offset-and-mismatch)
+for the 18/18 re-run that confirms it.
 
 The **bias generator** half of #1814's scope item 5 (#1795's originally
 scoped PTAT/CTAT work) is still not here — and, as
@@ -146,16 +172,194 @@ gated.
     1.2-2.3 mV at 1.62V/27C (measured `tt`/`ss`/`ff`), where the all-poly
     divider left 59.8 mV: both `vo`'s DC balance point and `vth_hi` moved
     down with compensation, and not by the same amount.
-  - This does **not** mean start-up now hangs on a few millivolts. The
-    `.op` solution is an *unstable* equilibrium — this topology has no
-    stable DC state, so any perturbation diverges into oscillation, and
-    that is what the 18/18 corner transients show. What the shrunken
-    margin does mean is that a few mV of comparator input offset is no
-    longer obviously small compared to it, so an offset- and
-    mismatch-aware start-up check has moved from "clearly unnecessary" to
-    "not yet done" — see
-    [Handoff](#handoff-what-the-follow-on-should-attack). No testbench in
-    this chain models offset or mismatch at all yet.
+  - This does **not** mean start-up now hangs on a few millivolts, and
+    that is now **measured rather than argued** (#2156). The gap is a
+    feedback-loop DC residual, not a headroom: an input-referred
+    comparator offset moves `vo` and the effective threshold *together*,
+    so ±50 mV of injected offset — 8-40x the margin — changes the margin
+    by about half a millivolt. Every one of 44 deterministic offset cases
+    and 128 mismatch Monte Carlo samples starts and sustains
+    oscillation. Full result:
+    [Start-up under comparator offset and mismatch](#start-up-under-comparator-offset-and-mismatch).
+
+### Start-up under comparator offset and mismatch
+
+Issue [#2156](https://github.com/2AMLogic/klayout-tools/issues/2156).
+Before this, nothing in this chain — not `../comparator-core/`, not this
+directory — modelled comparator input offset or device mismatch at all.
+That was defensible while `.op` left ~60 mV between `vo` and `vth_hi`;
+at 1.2-5.9 mV it was not, because a realistic sky130 comparator's
+input-referred offset is the same order as the measured margin.
+
+**How the offset is injected.** `oscillator_device.spice` gains two DC
+sources, `Voffhi`/`Vofflo`, in series with each comparator's `vref` pin
+(`Xhi` now sees `vth_hi_in = vth_hi + voffhi`, `Xlo` sees
+`vth_lo_in = vth_lo + vofflo`). Injecting at `vref` rather than at `in`
+is the input-referred equivalent of a real input-pair Vth/beta mismatch
+and leaves the timing node `vo` undisturbed. Both default to **exactly
+0 V**, which is an ideal short, and they follow the `.param name / DC
+{name}` convention `docs/cli/sim.md` documents for `corners.supply_v`
+keys — so a request sweeps them the same way it sweeps `vdd`.
+
+**The default really is a no-op**, checked rather than asserted:
+`sim_request.json`'s full 18-corner sweep re-run against the modified
+netlist is **18/18 pass** with every `period_avg` within **0.41%** of
+the table above (worst `tt`/1.62 V/27 C, -0.410%; the residual is the
+sky130A version difference, not this change), and a standalone `.op`
+against the modified netlist returns **bit-identical** node voltages to
+the same `.op` against the pre-#2156 one — which are in turn #1795's
+published figures to their published precision (ss/1.62V/-40C:
+`vo` 1.227632 V, `vth_hi` 1.221691 V, `q` 0.5725938 V).
+`sim_request.json` itself is untouched.
+
+#### The headline: the margin is a loop residual, not a headroom
+
+The intuition the issue was filed on — "only 1.2 mV of margin, so a few
+mV of offset could close it" — is wrong, and the reason is structural.
+At the metastable `.op`, `cmp_n` sits in its linear region and the loop
+`cmp_n -> latch -> charge/discharge switches -> vo` holds `vo` wherever
+`ohi` lands mid-rail. **Move the effective threshold and `vo` moves with
+it.** The sweep's own `startup_margin_mv`
+(`1000 * (v(vo) - v(vth_hi_in))` at t=0), in mV — read off the 44 cases
+below, so it is reproducible from the committed request rather than from
+a side deck:
+
+| `voffhi` (mV) | -50 | -25 | -10 | 0 | +10 | +25 | +50 |
+|---|---|---|---|---|---|---|---|
+| tt/27C | 1.481 | 1.557 | 1.612 | **1.654** | 1.701 | 1.783 | 1.961 |
+| ss/27C | 2.034 | 2.141 | 2.219 | **2.279** | 2.346 | 2.464 | 2.727 |
+| ff/27C | 1.102 | 1.161 | 1.203 | **1.236** | 1.272 | 1.334 | 1.472 |
+| ss/-40C | 4.350 | 4.906 | 5.425 | *resolved* | 6.579 † | *resolved* | 14.900 |
+
+Across 100 mV of `voffhi` the margin moves by **0.48 mV** at `tt`/27C,
+0.69 mV at `ss`/27C and 0.37 mV at `ff`/27C — the loop attenuates
+input-referred offset by **208x / 144x / 271x** respectively, and the
+margin never changes sign. At those three corners the margin is a
+function of `voffhi` *alone*, to six digits: the `+10/-10` and `+10/+10`
+rows agree exactly, as do the two `±50` pairs.
+
+`ss`/-40C is the loose one — 10.55 mV of margin movement across the same
+100 mV, only **9.5x** attenuation — and it is also the only corner where
+the t=0 solve ever lands somewhere other than the knife edge.
+*resolved* marks the three of the 44 cases (all at `ss`/-40C: `0/0`,
+`+10/+10`, `+25/-25`) where it settled on a **fully resolved latch
+state** instead — `q` at the upper rail, margin -264 to -671 mV. That is
+a *better* start condition, not a worse one: it is the non-marginal
+case, and all three still oscillate. († the `+10` cell shows the
+`+10/-10` row; its `+10/+10` sibling is one of those three.)
+
+**Which side of the knife edge a DC solver lands on is numerically
+fragile, and that is itself the point.** At `ss`/1.62 V/-40 C a
+standalone `.op` deck lands on the metastable root — `vo` 1.227632 V,
+`vth_hi` 1.221691 V, `q` 0.5725938 V, i.e. #1795's published figures to
+their published precision, and *bit-identical against the pre-#2156
+netlist*, which is the tightest available check that the two new sources
+change nothing. `klt sim`'s transient deck for the same corner starts
+from a resolved latch instead. Both are valid solutions of a degenerate
+DC problem, and the difference is the solve path, not the circuit. A
+start-up argument that depended on which root a solver picked would be
+worthless; this one does not, because the transient starts and sustains
+from either.
+
+#### Deterministic worst-case offset sweep — 44/44 pass
+
+`sim_request_startup_offset.json`: 11 `(voffhi, vofflo)` rows — 0,
+±10 mV, ±25 mV, ±50 mV in both differential and common-mode
+combinations — across the four thinnest-margin corners the issue named
+(1.62 V/27 C at `tt`/`ss`/`ff`, plus `ss`/1.62 V/-40 C). ±50 mV is a
+deliberately generous bracket — 25-40x the `.op` margin at the 27 C
+corners — so this sweep *brackets* rather than samples; the Monte Carlo
+below is the one that samples.
+
+| quantity | range over all 44 cases | gate |
+|---|---|---|
+| `t_startup` (first mid-band transit of `vo`) | 153 - 1011 ns | < 3 us |
+| `q_first_edge` (latch resolves out of its t=0 state) | 4.3 - 594 ns | < 2 us |
+| `period_avg` (6 steady-state periods) | 1.5547 - 2.0344 us | 1.4 - 2.2 us |
+| `period_drift_pct` (late 3 periods vs. early 3) | -0.33 / +0.37 % | ±2 % |
+| `dv_eff` (effective threshold spacing) | 0.7526 - 0.9576 V | — |
+| `vo` high / low | 1.1812 - 1.3088 / 0.2892 - 0.3958 V | ≤1.55 / ≥0.15 |
+
+`dv_eff` tracking the injected differential offset one-for-one
+(0.8531 V nominal, ±0.100 V at ±50 mV differential) is the check that
+the injection is doing what it claims.
+
+**Start-up latency is the thing that moves, and it moves a little.**
+That is what the issue predicted. At `ss`/1.62 V/-40 C `t_startup` goes
+from 702 ns with no offset to 153-841 ns across the offset rows; over
+the whole sweep the worst case is 1011 ns, about half a period, against
+a 1.5-2.0 us period. Nothing approaches a failure to start.
+
+#### Monte Carlo over sky130 MOS mismatch — 128/128 pass
+
+`sim_request_startup_mismatch.json`: the same four corners on their
+`*_mm` mismatch-enabled `.lib` sections, 32 samples each,
+`seed: 20260920`, with `Voffhi`/`Vofflo` left at 0 so the only
+perturbation is the PDK's own per-instance device variation.
+
+| corner | `t_startup` min/med/max (ns) | `period_avg` min/med/max (us) | `dv_eff` min/max (V) |
+|---|---|---|---|
+| `tt_mm`/27C | 399 / 510 / 1047 | 1.6986 / 1.7659 / 1.8907 | 0.7986 - 0.8949 |
+| `ss_mm`/27C | 416 / 486 / 666 | 1.6918 / 1.7577 / 1.8702 | 0.8111 - 0.8867 |
+| `ff_mm`/27C | 346 / 495 / 1116 | 1.6373 / 1.7416 / 1.8564 | 0.8087 - 0.9014 |
+| `ss_mm`/-40C | 32 / 468 / 792 | 1.7163 / 1.8130 / 1.9666 | 0.8066 - 0.9039 |
+
+All 128 samples reach sustained oscillation inside the 1.4-2.2 us band
+(worst 1.6373 / 1.9666 us — clearing the fast limit by **16.9%** and
+the slow one by **11.9%**, on the same `value/limit` convention the
+Evidence table above uses), with `period_drift_pct` inside ±1.37% and
+`q_first_edge` never later than 919 ns. `startup_margin_mv` ranges
+-809.8 to +33.8 mV over the 128 samples: mismatch happily drives the
+t=0 state to either side of, or well away from, the balance point, and
+start-up is indifferent to which.
+
+**What this sweep does *not* cover.** `klt sim`'s own per-family
+mismatch-activity report (`monte_carlo.family_mismatch` in the response)
+records `mosfet: active = true` and `resistor: active = null` for
+sky130 — MOS per-instance mismatch is real here, but the composite
+divider's `res_xhigh_po`/`res_generic_nd` sections are **not** being
+varied, so divider-resistor mismatch remains unmodelled. That gap is
+narrower than it sounds for *start-up* (the deterministic sweep already
+walks the threshold pair ±50 mV, a far larger excursion than resistor
+mismatch would produce), but it does mean the `dv_eff` spread reported
+above is a MOS-only figure.
+
+The one number worth carrying forward: **MOS mismatch alone moves
+`dv_eff` by -6.4%/+6.0%** around nominal, against **+3.29%** for the
+entire 18-corner PVT matrix. Mismatch, not PVT, is now the larger term
+in the threshold spacing — see
+[Handoff](#handoff-what-the-follow-on-should-attack).
+
+#### Why these two requests measure edges on `vo`, not on `q`
+
+Both start-up requests take their steady-state edges from
+`WHEN v(vo)=0.8 RISE=n TD=10u` rather than from `v(q)` the way
+`sim_request.json` does, and gate at 10 us rather than 6 us. Both
+changes are forced by measurement robustness, and both were found the
+hard way:
+
+- **`q` can cross its 0.75 V level more than once on a single
+  transition.** At `ss`/1.62 V/+10 mV/+10 mV/27 C, `sim_request.json`'s
+  own `q`-based `RISE`-indexed measurements counted two crossings of one
+  edge and reported a **-47.9%** period drift on a circuit that was
+  oscillating perfectly. This is the same timestep-dependent
+  crossing-count fragility the netlist header already documents for
+  start-up edges; offset re-exposes it in steady state. `vo` is a 10 pF
+  node ramping between two thresholds and has no such glitch.
+  (Reproduce: that corner's deck with `TD=6u`, `q`-based edges →
+  `drift_pct = -47.86`.)
+- **Offset lengthens the start-up transient past the 6 us gate.** The
+  same corner and the same `q`-based measurement settle to **-0.25%**
+  drift at a 10 us gate, against -47.9% at 6 us.
+- **`period_drift_pct` compares two 3-period averages** (`t_edge7` vs
+  `t_edge4` vs `t_edge1`) rather than one period against an average,
+  so that single-cycle jitter under `_mm` mismatch cannot turn into a
+  false failure. The ±2% gate is set for that; the deterministic sweep
+  lands inside ±0.37% and the 128 mismatch samples inside ±1.37%.
+
+`q_edge1`/`q_edge4`/`q_period_avg` are still measured, ungated, so the
+*output clock* (not just the timing node) is still shown to produce four
+clean steady-state edges in every case.
 
 ### Where the PVT spread comes from
 
@@ -210,7 +414,9 @@ against measured `vo_high - vo_low` rather than nominal
 16 of 18 corners emit `Warning: Dynamic gmin stepping failed` (and
 `Warning: True gmin stepping failed`) during the DC operating-point
 solve; source stepping then completes and the transient runs cleanly
-everywhere.
+everywhere. The two start-up sweeps emit the same warning on every
+case (44/44 and 128/128) and likewise run clean — it is the degenerate
+DC problem, not the `Voff` sources, and it predates #2156.
 
 All 18 corners emit `Warning: sky130_fd_pr__diode_pw2nd_05v5: IKR too
 small - model effect disabled!` — the high-injection knee-current
@@ -407,12 +613,31 @@ cannot be a first-order fix. What is left, in rough order of value:
    comparator core) — are both still open. The second needs a
    comparator-core re-validation at the new bias, which is #1813's
    territory, not a divider change.
-3. **Offset, mismatch, and start-up under both.** No testbench in this
-   chain models either. This mattered less when `.op` left ~60 mV between
-   `vo` and `vth_hi` at t=0; it now leaves 1.2-5.9 mV (see the
-   [Evidence](#evidence) bullets), so a Monte-Carlo start-up check is the
-   natural next validation step even though the equilibrium is unstable
-   and every one of the 18 corners does start.
+3. ~~**Offset, mismatch, and start-up under both.**~~ **Done (#2156).**
+   This read: "No testbench in this chain models either... a Monte-Carlo
+   start-up check is the natural next validation step." Both checks now
+   exist and both are clean — 44/44 deterministic offset cases
+   ([`sim_request_startup_offset.json`](sim_request_startup_offset.json))
+   and 128/128 MOS-mismatch Monte Carlo samples
+   ([`sim_request_startup_mismatch.json`](sim_request_startup_mismatch.json)),
+   with the thin `.op` margin shown to be a feedback-loop residual rather
+   than a headroom offset can consume. See
+   [Start-up under comparator offset and mismatch](#start-up-under-comparator-offset-and-mismatch).
+   Two things that sweep surfaced are *not* closed and belong on this
+   list in its place:
+   - **Divider-resistor mismatch is still unmodelled.** `klt sim`
+     reports sky130's resistor-family mismatch activity as unverified
+     (`resistor: active = null`), so the `*_mm` sections vary MOS
+     devices only. Closing this needs either a verified resistor
+     mismatch mechanism in the PDK path or a deterministic
+     `r1`/`r2`-perturbation sweep analogous to the `Voff` one.
+   - **MOS mismatch now dominates the threshold spacing.** It moves
+     `dv_eff` by -6.4%/+6.0% against +3.29% for the whole 18-corner PVT
+     matrix. Nothing about start-up cares, but anyone using this as a
+     *frequency* reference should: the period's 1.6373-1.9666 us
+     mismatch spread is **20.1%**, 4.5x the 4.50% PVT spread, and the
+     obvious lever (a larger input pair in the comparator core) is
+     #1813's territory, not this file's.
 4. **The delay-induced overshoot on `dV`** (regenerative feedback in the
    comparator, per #1789's `1/sqrt(I)` finding) — now 2.5-5.7% of `dV`
    rather than up to 13.6%, so a much smaller prize than it was.
