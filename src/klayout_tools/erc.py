@@ -95,6 +95,35 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   reported as *skipped* work rather than as a passing check (issue #2199,
   see :func:`_degenerate_tie_names`).
 
+  **Caller-asserted taps** (``ties[].tap_boxes``, issue #2234): a stream
+  whose taps are genuinely drawn but carry no distinguishing implant/marker
+  layer at all -- so neither ``tap_requires`` nor ``tap_is_dedicated`` has
+  anything true to narrow or affirm -- can instead name the tap geometry
+  directly, as a list of ``[left, bottom, right, top]`` micrometre boxes
+  intersected into ``tap_layer``. This is caller *assertion* rather than
+  layer-derived narrowing, so it is graded under its own coverage
+  classification (``erc_coverage.checked_by_assertion``, see
+  :func:`_connectivity_coverage`) instead of being folded into an ordinary
+  geometrically-derived pass -- and it is held to the same falsifiability
+  bar as every other narrowing form: an assertion that removes nothing from
+  the drawn ``tap_layer`` inside the well is exactly as degenerate as an
+  omitted ``tap_requires`` (issue #2199's test is geometric, not "which key
+  was given"), and an assertion matching no drawn geometry at all produces
+  an honest "no tap" finding rather than a silent pass.
+
+  **Disclosed-unexpressible taps** (top-level ``ties_disclosure``, issue
+  #2234): a stream that genuinely has no way to express a tap -- no
+  narrowing marker, no dedicated tap layer, no distinguishable assertion --
+  can say so explicitly instead of simply omitting ``ties``, via a
+  top-level ``{"reason": "<why>"}`` spec key. This changes no finding and no
+  geometry; it only changes the ``erc_coverage.inapplicable`` reason
+  recorded for the undeclared ``erc.missing_tie`` work
+  (``"ties_disclosed_unexpressible"`` instead of ``"no_ties_declared"``), so
+  a consumer (``klt signoff``'s T1 item 11, see ``docs/design-evidence-tiers.md``)
+  can distinguish "this stream disclosed it cannot express a tap" from
+  "nobody declared ties at all" -- two states that previously rendered
+  identically.
+
 Device bodies (``devices``, issue #2183): a conductor role carries
 *geometry*, and nothing in the model above distinguishes a wire from a
 drawn device body sitting on the same layer -- a poly resistor, a poly
@@ -215,6 +244,16 @@ from .extract import (
 #: thing `antenna_ratio_max: null` has always meant for the limit), which
 #: is why it is an opt-in flag rather than a default: no existing caller's
 #: report can acquire a null it did not ask for.
+#: Issue #2234 adds two more optional spec keys, both additive and inert
+#: unless used: ``ties[].tap_boxes`` (a caller-asserted list of tap-geometry
+#: boxes, an alternative to ``tap_requires``/``tap_is_dedicated`` -- see
+#: :func:`_extract_connectivity`) and top-level ``ties_disclosure`` (a
+#: caller's explicit "no expressible tap, here is why" statement -- see
+#: :func:`_validate_ties_disclosure`). A spec that gives neither produces
+#: byte-identical output except for the new (``null``-when-absent)
+#: ``ties_disclosure`` echo field and the new (empty-when-unused)
+#: ``erc_coverage.checked_by_assertion`` list -- so, as with every prior
+#: additive change above, no bump.
 SCHEMA_VERSION = 1
 
 
@@ -271,12 +310,32 @@ def _antenna_coverage(
 #: when it applies and `docs/cli/erc.md` for how a spec clears it.
 REASON_DEGENERATE_TAP_DECLARATION = "degenerate_tap_declaration"
 
+#: The stable ``erc_coverage.inapplicable`` reason for the undeclared
+#: ``erc.missing_tie`` work when the spec's top-level ``ties_disclosure``
+#: (issue #2234) is present -- in place of the default
+#: :data:`REASON_NO_TIES_DECLARED` used when ``ties`` is simply omitted with
+#: no disclosure at all. Both reasons describe the same "zero ties
+#: declared" fact; only this one tells a reader the omission was a
+#: considered, disclosed choice rather than an oversight -- see
+#: :func:`_validate_ties_disclosure` and `docs/design-evidence-tiers.md`
+#: item 11.
+REASON_TIES_DISCLOSED_UNEXPRESSIBLE = "ties_disclosed_unexpressible"
+
+#: The stable ``erc_coverage.inapplicable`` reason for the undeclared
+#: ``erc.missing_tie`` work when ``ties`` is omitted/empty and no
+#: ``ties_disclosure`` was given -- the pre-#2234 behaviour, named as a
+#: constant so :data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` has a documented
+#: counterpart rather than a bare string literal to contrast with.
+REASON_NO_TIES_DECLARED = "no_ties_declared"
+
 
 def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
     ties: list[dict[str, Any]],
     degenerate_ties: set[str] | None = None,
+    asserted_ties: set[str] | None = None,
+    ties_disclosure: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -315,7 +374,14 @@ def _connectivity_coverage(
       Without that, the one rule ``docs/design-evidence-tiers.md`` item 11
       requires to be zero can be satisfied by a declaration that never
       looked at a tap at all -- an unfalsifiable pass, indistinguishable in
-      the envelope from a real one.
+      the envelope from a real one. A tie whose tap region was instead
+      derived from a caller *assertion* (``tap_boxes``, issue #2234) rather
+      than PDK-marker narrowing is, when not itself degenerate, both
+      ``checked`` (it is real, evaluated work -- see :func:`_tie_findings`)
+      *and* named again in the additional ``checked_by_assertion`` list this
+      block carries (``asserted_ties``), so a consumer can tell it apart
+      from a tie a bare ``tap_requires``/``tap_is_dedicated`` graded without
+      re-reading the spec document.
 
     A spec that declares no ``nets``/``ties`` asked for none of that work,
     so those rules are recorded as **inapplicable**, never skipped: a skip
@@ -324,12 +390,18 @@ def _connectivity_coverage(
     distinction is what lets a consumer tell "no supply was declared, so
     ``erc.supply_short`` was never computed" apart from "supplies were
     declared and came back clean" -- reading the envelope alone, without
-    re-opening the spec document.
+    re-opening the spec document. When ``ties`` is empty *and* the spec
+    carried a top-level ``ties_disclosure`` (issue #2234), the recorded
+    reason is :data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` instead of
+    :data:`REASON_NO_TIES_DECLARED` -- same "zero declared" fact, but now
+    distinguishable from an omission nobody considered.
     """
     degenerate = degenerate_ties or set()
+    asserted = asserted_ties or set()
     checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
     inapplicable: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
+    checked_by_assertion: list[str] = []
 
     checked.extend(work_id("erc.net_connectivity", decl["name"]) for decl in nets_decl)
     if not nets_decl:
@@ -345,9 +417,18 @@ def _connectivity_coverage(
             )
         else:
             checked.append(identity)
+            if tie["name"] in asserted:
+                checked_by_assertion.append(identity)
     if not ties:
         inapplicable.append(
-            {"id": work_id("erc.missing_tie"), "reason": "no_ties_declared"}
+            {
+                "id": work_id("erc.missing_tie"),
+                "reason": (
+                    REASON_TIES_DISCLOSED_UNEXPRESSIBLE
+                    if ties_disclosure
+                    else REASON_NO_TIES_DECLARED
+                ),
+            }
         )
 
     return {
@@ -355,6 +436,7 @@ def _connectivity_coverage(
         **build_check_coverage(
             checked=checked, skipped=skipped, inapplicable=inapplicable
         ),
+        "checked_by_assertion": sorted(checked_by_assertion),
     }
 
 
@@ -688,6 +770,53 @@ def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -
     return raw
 
 
+def _parse_tap_boxes(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[float, float, float, float]]:
+    """``ties[].tap_boxes`` (optional, issue #2234): a caller *assertion* of
+    where the tap geometry is, as a list of ``[left, bottom, right, top]``
+    micrometre boxes intersected into ``tap_layer`` -- the same
+    ``(left, bottom, right, top)`` shape :func:`~klayout_tools._layout.clip_box`
+    already converts for ``klt clip``/``components.py``. Composes with
+    ``tap_requires`` (both narrow the same region) but, unlike it, needs no
+    PDK marker layer to exist at all: a stream whose taps are genuinely
+    drawn but carry no distinguishing implant/marker layer can point
+    directly at them instead. Omitted/``null`` -> ``[]`` (no assertion,
+    pre-#2234 behaviour, byte-identical). Split out of :func:`_validate_ties`
+    to keep that function under the repo's C901 complexity ratchet, as
+    :func:`_parse_tap_requires` is.
+    """
+    raw = entry.get("tap_boxes", [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].tap_boxes must be an array of "
+            "[left, bottom, right, top] micrometre boxes"
+        )
+    boxes: list[tuple[float, float, float, float]] = []
+    for j, value in enumerate(raw):
+        field = f"ties[{index}].tap_boxes[{j}]"
+        if (
+            not isinstance(value, list)
+            or len(value) != 4
+            or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in value
+            )
+        ):
+            raise ErcError(
+                f"spec '{spec_path}': {field} must be a 4-number "
+                "[left, bottom, right, top] array"
+            )
+        left, bottom, right, top = (float(v) for v in value)
+        if left >= right or bottom >= top:
+            raise ErcError(
+                f"spec '{spec_path}': {field} must have left < right and bottom < top"
+            )
+        boxes.append((left, bottom, right, top))
+    return boxes
+
+
 def _validate_ties(
     spec: dict[str, Any], spec_path: str, stackup_names: list[str]
 ) -> list[dict[str, Any]]:
@@ -713,7 +842,20 @@ def _validate_ties(
     nothing needs narrowing because the layer is already tap-only. A tie
     that declares neither is *degenerate* -- see
     :func:`_degenerate_tie_names` -- and is graded as skipped rather than
-    checked work."""
+    checked work.
+
+    ``tap_boxes`` (optional array of ``[left, bottom, right, top]``
+    micrometre boxes, issue #2234) is a third, caller-*asserted* way: rather
+    than narrowing ``tap_layer`` by a PDK marker layer's boolean, the spec
+    names the tap geometry directly. For a stream that draws taps with no
+    distinguishing marker at all -- neither ``tap_requires`` nor
+    ``tap_is_dedicated`` has anything true to narrow or affirm -- this is
+    the only way to declare a tie that is not degenerate. Graded under its
+    own coverage classification (:func:`_connectivity_coverage`'s
+    ``checked_by_assertion``) rather than folded into an ordinary
+    geometrically-derived pass, and held to the same falsifiability test as
+    every other narrowing form (:func:`_degenerate_tie_names`): an assertion
+    that removes nothing from the drawn ``tap_layer`` is still degenerate."""
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -743,6 +885,7 @@ def _validate_ties(
 
         tap_requires = _parse_tap_requires(entry, spec_path, i)
         tap_is_dedicated = _parse_tap_is_dedicated(entry, spec_path, i)
+        tap_boxes = _parse_tap_boxes(entry, spec_path, i)
 
         connect_to = str(entry["connect_to"])
         if connect_to not in stackup_names:
@@ -762,11 +905,52 @@ def _validate_ties(
                 "tap_layer": tap_layer,
                 "tap_requires": tap_requires,
                 "tap_is_dedicated": tap_is_dedicated,
+                "tap_boxes": tap_boxes,
                 "connect_to": connect_to,
                 "net": net,
             }
         )
     return entries
+
+
+def _validate_ties_disclosure(
+    spec: dict[str, Any], spec_path: str
+) -> dict[str, str] | None:
+    """The optional top-level ``ties_disclosure`` spec key (issue #2234): a
+    caller's explicit statement that this stream has no expressible tap, and
+    why -- ``{"reason": "<non-empty string>"}``. Omitted/``null`` -> ``None``
+    (pre-#2234 behaviour, unchanged).
+
+    This changes no geometry and no finding: :func:`run_erc` computes
+    exactly the same ``erc_findings`` whether or not it is given. What it
+    changes is the ``erc_coverage.inapplicable`` reason recorded for the
+    undeclared ``erc.missing_tie`` work when ``ties`` is empty
+    (:data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` in place of
+    :data:`REASON_NO_TIES_DECLARED`, see :func:`_connectivity_coverage`), so
+    a consumer -- `klt signoff`'s T1 item 11 in particular, see
+    `docs/design-evidence-tiers.md` -- can distinguish "disclosed as
+    unexpressible" from "nobody declared ties", which previously rendered
+    identically. A non-empty ``ties`` declaration alongside a disclosure is
+    not rejected (a spec may express some taps and disclose the rest), but
+    the disclosure only ever affects the *undeclared* work's reason.
+
+    Validated the same strict way every other optional boolean/string spec
+    key in this module is (:func:`_parse_tap_is_dedicated`): present but
+    malformed is a spec error, not silently coerced or ignored -- an empty
+    or missing ``reason`` would be exactly the unfalsifiable "disclosed
+    nothing" shape this key exists to rule out.
+    """
+    raw = spec.get("ties_disclosure")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ErcError(f"spec '{spec_path}': 'ties_disclosure' must be a JSON object")
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ErcError(
+            f"spec '{spec_path}': ties_disclosure.reason must be a non-empty string"
+        )
+    return {"reason": reason.strip()}
 
 
 def _validate_device_entry(
@@ -1817,16 +2001,20 @@ def _extract_connectivity(
 
     Instead, a tie contributes exactly one conductor: its **tap sites** --
     ``tap_layer`` intersected with every ``tap_requires`` layer (the
-    ``Comp ∩ Nplus``-style boolean a real PDK tap is drawn as) and then
-    clipped to the well itself, since a tap is by definition inside the
-    well it taps. Those sites are wired up to ``connect_to``'s ``stackup``
-    region exactly as before, so a tap still reaches (or fails to reach)
-    the declared supply net through real routing. The well contributes only
-    *where the taps are*, never across its own extent, and taps in the same
-    well are not shorted to each other through it.
+    ``Comp ∩ Nplus``-style boolean a real PDK tap is drawn as), further
+    intersected with the union of ``tap_boxes`` when the spec asserts them
+    (issue #2234), and then clipped to the well itself, since a tap is by
+    definition inside the well it taps. Those sites are wired up to
+    ``connect_to``'s ``stackup`` region exactly as before, so a tap still
+    reaches (or fails to reach) the declared supply net through real
+    routing. The well contributes only *where the taps are*, never across
+    its own extent, and taps in the same well are not shorted to each other
+    through it.
     """
     # Imported lazily, matching `load_layout`'s lazy `klayout.db` import.
     import klayout.db as kdb
+
+    from ._layout import clip_box as _clip_box
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
 
@@ -1861,6 +2049,15 @@ def _extract_connectivity(
         tap_region = drawn_tap
         for required in tie["tap_requires"]:
             tap_region = tap_region & _region(layout, top_cell, required)
+        # `tap_boxes` (issue #2234): a caller assertion of exactly where the
+        # tap sites are, as literal micrometre boxes -- composes with
+        # `tap_requires` (both narrow the same region) but needs no drawn
+        # PDK marker layer to exist at all.
+        if tie["tap_boxes"]:
+            asserted_region = kdb.Region()
+            for box_um in tie["tap_boxes"]:
+                asserted_region += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
+            tap_region = tap_region & asserted_region.merged()
         tap_sites = (tap_region & well_region).merged()
         tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
         l2n.connect(tap_sites)
@@ -1873,10 +2070,19 @@ def _extract_connectivity(
                 "tap_index": tap_index,
                 # Issue #2199: measured here, where both regions exist,
                 # rather than re-derived later from the spec alone -- see
-                # `_degenerate_tie_names`.
+                # `_degenerate_tie_names`. `tap_boxes` narrowing feeds the
+                # same measurement as `tap_requires` -- an assertion that
+                # removes nothing from the drawn `tap_layer` inside the well
+                # is exactly as degenerate as omitting it (issue #2234).
                 "tap_narrowed": not (
                     (drawn_tap & well_region).merged() - tap_sites
                 ).is_empty(),
+                # Whether this tie's tap region was derived (at least in
+                # part) from a caller assertion rather than pure PDK-marker
+                # narrowing -- read by `_connectivity_coverage` to grade a
+                # non-degenerate asserted tie as `checked_by_assertion`
+                # (issue #2234).
+                "tap_asserted": bool(tie["tap_boxes"]),
             }
         )
 
@@ -2053,6 +2259,7 @@ def run_erc(
     vias = _validate_vias(spec, spec_path, stackup_names)
     nets_decl = _validate_nets(spec, spec_path)
     ties = _validate_ties(spec, spec_path, stackup_names)
+    ties_disclosure = _validate_ties_disclosure(spec, spec_path)
     devices = _validate_devices(spec, spec_path, stackup_names, vias)
 
     layout = load_layout(file, ErcError)
@@ -2242,12 +2449,23 @@ def run_erc(
     # outright wrong -- being able to reach `gates[]`, the antenna ratios,
     # or the `nets[]` findings already computed.
     degenerate_ties: set[str] = set()
+    asserted_ties: set[str] = set()
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
         degenerate_ties = _degenerate_tie_names(tie_layers)
+        # Issue #2234: a non-degenerate tie whose tap region was derived (at
+        # least in part) from a caller assertion (`tap_boxes`) rather than
+        # pure PDK-marker narrowing -- graded `checked_by_assertion` by
+        # `_connectivity_coverage` below, distinct from a bare
+        # `tap_requires`/`tap_is_dedicated` pass.
+        asserted_ties = {
+            tie["name"]
+            for tie in tie_layers
+            if tie["tap_asserted"] and tie["name"] not in degenerate_ties
+        }
     erc_findings.sort(
         key=lambda f: (
             f["rule"],
@@ -2321,7 +2539,9 @@ def run_erc(
     # `"clean_partial"` for it: an `erc.missing_tie` check that cannot tell
     # a tap from a source/drain contact must not be readable as the clean
     # missing-tie verdict `docs/design-evidence-tiers.md` item 11 asks for.
-    erc_coverage = _connectivity_coverage(gates, nets_decl, ties, degenerate_ties)
+    erc_coverage = _connectivity_coverage(
+        gates, nets_decl, ties, degenerate_ties, asserted_ties, ties_disclosure
+    )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
     )
@@ -2416,5 +2636,11 @@ def run_erc(
         "status": status,
         "coverage": coverage,
         "erc_coverage": erc_coverage,
+        # (issue #2234) The spec's top-level `ties_disclosure`, echoed
+        # verbatim -- `None` when the spec did not declare one, matching
+        # every other optional-spec-key echo's conditional population. See
+        # `_validate_ties_disclosure` and this module's docstring, "Missing
+        # substrate/well tie".
+        "ties_disclosure": ties_disclosure,
         "provenance": provenance,
     }

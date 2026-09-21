@@ -114,6 +114,16 @@ def _print_text(report: dict) -> None:
 
     print()
     print(f"erc_status: {report['erc_status']}")
+    # The spec's own "no expressible tap, here is why" statement (issue
+    # #2234), when it declared one. The JSON payload carries it as
+    # `ties_disclosure`; surfacing it here keeps the courtesy view from
+    # rendering a disclosed-unexpressible stream identically to one that
+    # never declared `ties` at all -- the exact conflation the disclosure
+    # form exists to end. `.get` because this renderer is also pointed at
+    # stored payloads produced before the field existed.
+    disclosure = report.get("ties_disclosure")
+    if disclosure is not None:
+        print(f"ties_disclosure: {disclosure['reason']}")
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"

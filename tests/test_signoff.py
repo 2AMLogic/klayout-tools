@@ -8321,6 +8321,9 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
         "strap_layers": ["met1", "met4"],
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
         "power_connectivity_status": "match",
+        # Issue #2234: this fixture's ERC envelope carries no
+        # `erc_coverage` at all, so no tie rested on a caller assertion.
+        "ties_checked_by_assertion": [],
     }
 
 
@@ -8339,6 +8342,47 @@ def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
     assert item["citation"]["power_delivery"]["power_connectivity_status"] == (
         "unchecked"
     )
+
+
+def test_item_11_met_names_the_ties_that_rested_on_a_caller_assertion(tmp_path):
+    """Issue #2234: an asserted tie (`ties[].tap_boxes`) is graded `met`
+    exactly as a marker-derived one -- `klt erc` already rejected a
+    degenerate or unmatched assertion before it could get here -- but the
+    verdict of record says *which* taps rested on the caller's word, quoting
+    the cited run's own `erc_coverage.checked_by_assertion`, so the
+    distinction survives into the signoff report rather than being reachable
+    only by re-opening the ERC envelope."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
+            "skipped": [],
+            "inapplicable": [],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": ['erc.missing_tie:["nwell_tie"]'],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["ties_checked_by_assertion"] == [
+        'erc.missing_tie:["nwell_tie"]'
+    ]
 
 
 def test_item_11_digital_unmet_when_no_pdn_was_built(tmp_path):
@@ -8595,6 +8639,82 @@ def test_item_11_unmet_when_the_erc_spec_declared_no_ties(tmp_path):
     """Same rule, other half: `erc.missing_tie` is never computed when the
     spec omits `ties[]`, so zero tie findings proves nothing."""
     spec = {key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_but_distinct_reason_when_ties_disclosed_unexpressible(tmp_path):
+    """Issue #2234: the same "zero ties" fact as the test above, but the
+    spec explicitly disclosed why -- distinguishable in the rendered reason
+    and detail, even though the item stays unmet either way (a disclosure
+    proves nothing about the tap's actual connectivity, so it can never
+    substitute for a computed `erc.missing_tie` result)."""
+    spec = {
+        **{key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"},
+        "ties_disclosure": {"reason": "no implant layers are drawn on this stream"},
+    }
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": [
+                'erc.net_connectivity:["VPWR"]',
+                'erc.net_connectivity:["VGND"]',
+            ],
+            "skipped": [],
+            "inapplicable": [
+                {
+                    "id": "erc.missing_tie:[]",
+                    "reason": "ties_disclosed_unexpressible",
+                }
+            ],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": [],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_spec=spec, erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_disclosed_unexpressible"
+    assert item["detail"] == {
+        "ties_disclosure_reason": "no implant layers are drawn on this stream"
+    }
+
+
+def test_item_11_disclosure_without_the_matching_coverage_reason_is_still_incomplete(
+    tmp_path,
+):
+    """The gate reads the envelope's own `erc_coverage`
+    (`_erc_missing_tie_disclosed`), not the spec document alone -- a spec
+    that declares `ties_disclosure` but whose cited ERC run reports the
+    ordinary `no_ties_declared` reason (an older `klt erc`, or a hand-edited
+    envelope) still renders the plain incomplete reason."""
+    spec = {
+        **{key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"},
+        "ties_disclosure": {"reason": "no implant layers are drawn on this stream"},
+    }
     result = build_tier_report(
         _manifest(
             kind="digital",
@@ -9089,6 +9209,47 @@ def test_cli_item_11_text_output_names_every_cited_part(tmp_path, capsys):
     assert "kind=place-and-route" in out
     assert "power delivery: supplies=VPWR, VGND" in out
     assert "power_connectivity=match" in out
+    # Issue #2234: nothing rested on a caller assertion here, so the
+    # marker-derived rendering is byte-for-byte what it was before.
+    assert "taps asserted by the caller" not in out
+
+
+def test_cli_item_11_text_output_names_caller_asserted_taps(tmp_path, capsys):
+    """Issue #2234: a tie whose tap geometry the caller asserted is still a
+    `met` item -- but the text rendering says which taps rested on the
+    caller's word, rather than leaving that only in the JSON."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
+            "skipped": [],
+            "inapplicable": [],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": ['erc.missing_tie:["nwell_tie"]'],
+        },
+    }
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", erc_envelope=envelope
+                )
+            },
+        ),
+    )
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert 'taps asserted by the caller: 1 (erc.missing_tie:["nwell_tie"])' in out
 
 
 # --------------------------------------------------------------------------- #

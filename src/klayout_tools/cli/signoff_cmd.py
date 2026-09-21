@@ -325,6 +325,43 @@ def _print_input_verified(citation: dict) -> None:
     print(f"        input: {statement}")
 
 
+def _print_power_delivery(citation: dict) -> None:
+    """Print T1 item 11's compound-citation summary (issue #2025), or
+    nothing at all for every other item's single-artifact citation.
+
+    Its own function for the same reason :func:`_print_input_verified` is
+    (and since issue #2234's extra line, the same C901 budget reason):
+    the caller, :func:`_print_tier_report_text`, is already at the
+    complexity ratchet's limit.
+
+    The second line (issue #2234) names the ties whose tap geometry rested
+    on a caller **assertion** (``ties[].tap_boxes``) rather than on a drawn
+    PDK marker. It is disclosure only -- such a tie is graded ``met``
+    exactly as a marker-derived one, and `klt erc` has already rejected a
+    degenerate or unmatched assertion before the citation could reach here
+    -- but leaving that provenance reachable only through the JSON would
+    make the two indistinguishable in the rendering a reviewer actually
+    reads. Printed only when non-empty, so a purely marker-derived report
+    (and every report produced before the field existed) renders exactly as
+    it did before.
+    """
+    power_delivery = citation.get("power_delivery")
+    if not power_delivery:
+        return
+    print(
+        "        power delivery: supplies="
+        f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
+        f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
+        f"power_connectivity={power_delivery['power_connectivity_status']}"
+    )
+    asserted = power_delivery.get("ties_checked_by_assertion") or []
+    if asserted:
+        print(
+            f"        taps asserted by the caller: {len(asserted)} "
+            f"({', '.join(asserted)})"
+        )
+
+
 def _format_coverage(coverage: dict) -> str:
     """One line summarising a `drc` citation's three disclosed `coverage`
     fields (issue #2002): each field's entry count, plus the first few
@@ -501,15 +538,7 @@ def _print_tier_report_text(result: dict, palette: Palette) -> None:
                     f"        also: {part_source} "
                     f"(kind={part['kind']}, status={part['check_status']})"
                 )
-            power_delivery = citation.get("power_delivery")
-            if power_delivery:
-                print(
-                    "        power delivery: supplies="
-                    f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
-                    f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
-                    "power_connectivity="
-                    f"{power_delivery['power_connectivity_status']}"
-                )
+            _print_power_delivery(citation)
         elif item["reason"]:
             # Loud, not silent: an unmet item always names *why* -- "no
             # runnable check exists" (e.g. no_evidence) reads distinctly

@@ -2085,6 +2085,285 @@ def test_a_tie_whose_tap_matches_no_geometry_is_not_called_degenerate(tmp_path):
     assert report["erc_status"] == "violations"
 
 
+# --- ties: caller-asserted taps (issue #2234) ---------------------------
+#
+# The gap the tests above cannot close: `tap_requires` needs a PDK implant
+# layer to actually be *drawn* (an implant-free full-custom stream draws
+# none at all), and `tap_is_dedicated` needs a tap-only marker layer to
+# exist (many PDKs, including gf180mcu, have none). `tap_boxes` is the
+# third way -- naming the tap geometry directly -- and it is held to the
+# same falsifiability bar #2199 already established for the other two.
+
+
+def _routed_tie_entries_with_tap_boxes(vdd_box, vss_box):
+    """Two tie declarations against `_routed_tie_layout`'s fixture, each
+    asserting its tap directly via `tap_boxes` -- no `tap_requires`
+    narrowing, no `tap_is_dedicated` affirmation, matching the reproduction
+    this issue names: a stream with no distinguishing marker layer at
+    all."""
+    return [
+        {
+            "name": "nwell_tie",
+            "well_layer": "10/0",
+            "tap_layer": "11/0",
+            "tap_boxes": [list(vdd_box)],
+            "connect_to": "li1",
+            "net": "VDD",
+        },
+        {
+            "name": "pwell_tie",
+            "well_layer": "13/0",
+            "tap_layer": "11/0",
+            "tap_boxes": [list(vss_box)],
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    ]
+
+
+# `_routed_tie_layout`'s real tap contacts (see that fixture's docstring):
+# VDD's is `Box(2, 10.2, 2.6, 10.8)`, VSS's is `Box(2, 1.2, 2.6, 1.8)`.
+# These windows contain each real tap and nothing else on the same layer --
+# in particular, neither of the ordinary source/drain contacts at
+# x in {7.1..7.5, 13.1..13.5} falls inside either box.
+_VDD_TAP_BOX = (1.5, 10.0, 3.0, 11.0)
+_VSS_TAP_BOX = (1.5, 1.0, 3.0, 2.0)
+
+
+def test_tap_boxes_resolves_real_taps_without_any_narrowing_marker(tmp_path):
+    """Issue #2234's own fifth reproduction case: no `tap_requires`
+    narrowing at all (the implant-free full-custom case the issue is about)
+    and no `tap_is_dedicated` affirmation (no tap-only marker layer either)
+    -- `tap_boxes` names the two contacted tap rings directly and resolves
+    both cleanly, with zero `erc.missing_tie` findings."""
+    ties = _routed_tie_entries_with_tap_boxes(_VDD_TAP_BOX, _VSS_TAP_BOX)
+    report = _run_routed_tie(tmp_path, "tap_boxes_clean", ties)
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert report["erc_coverage"]["skipped"] == []
+    assert set(report["erc_coverage"]["checked_by_assertion"]) == {
+        'erc.missing_tie:["nwell_tie"]',
+        'erc.missing_tie:["pwell_tie"]',
+    }
+    # `checked_by_assertion` names a subset of `checked`, never a parallel,
+    # disjoint list -- an asserted tie is still real, evaluated work.
+    assert set(report["erc_coverage"]["checked_by_assertion"]) <= set(
+        report["erc_coverage"]["checked"]
+    )
+    assert report["erc_status"] == "clean"
+    assert report["gate_count"] == 2
+
+
+def test_tap_boxes_checked_by_assertion_is_per_tie_not_blanket(tmp_path):
+    """`checked_by_assertion` names only the ties that actually used
+    `tap_boxes` -- a sibling tie graded through ordinary `tap_requires`
+    narrowing in the same run must not be swept in."""
+    ties = [
+        {
+            "name": "nwell_tie",
+            "well_layer": "10/0",
+            "tap_layer": "11/0",
+            "tap_boxes": [list(_VDD_TAP_BOX)],
+            "connect_to": "li1",
+            "net": "VDD",
+        },
+        {
+            "name": "pwell_tie",
+            "well_layer": "13/0",
+            "tap_layer": "11/0",
+            "tap_requires": ["12/0"],
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    ]
+    report = _run_routed_tie(tmp_path, "tap_boxes_mixed", ties)
+
+    assert report["erc_coverage"]["checked_by_assertion"] == [
+        'erc.missing_tie:["nwell_tie"]'
+    ]
+    assert {
+        'erc.missing_tie:["nwell_tie"]',
+        'erc.missing_tie:["pwell_tie"]',
+    } <= set(report["erc_coverage"]["checked"])
+
+
+def test_tap_boxes_that_narrow_nothing_are_still_degenerate(tmp_path):
+    """The falsifiability test is geometric (issue #2199), not "which
+    narrowing key was given": a `tap_boxes` assertion spanning the whole
+    well removes nothing from the drawn tap layer inside it, and is exactly
+    as unfalsifiable as omitting `tap_requires` altogether."""
+    ties = _routed_tie_entries_with_tap_boxes((0, 8, 20, 12), (0, 0, 20, 4))
+    report = _run_routed_tie(tmp_path, "tap_boxes_degenerate", ties)
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["nwell_tie"]': "degenerate_tap_declaration",
+        'erc.missing_tie:["pwell_tie"]': "degenerate_tap_declaration",
+    }
+    assert report["erc_coverage"]["checked_by_assertion"] == []
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_tap_boxes_matching_no_geometry_is_an_honest_finding_not_a_silent_pass(
+    tmp_path,
+):
+    """An assertion that names geometry the layout never drew is not a
+    silent pass either: the well is honestly reported as untied, and the
+    tie stays checked (asserted) work rather than being excused as
+    degenerate."""
+    empty_box = (15.0, 8.0, 16.0, 9.0)  # inside the n-well, no contact there
+    ties = _routed_tie_entries_with_tap_boxes(empty_box, _VSS_TAP_BOX)
+    report = _run_routed_tie(tmp_path, "tap_boxes_empty", ties)
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert [f["net"] for f in missing] == ["VDD"]
+    assert "no 'nwell_tie' tap contact drawn" in missing[0]["description"]
+    assert report["erc_coverage"]["skipped"] == []
+    assert (
+        'erc.missing_tie:["nwell_tie"]'
+        in report["erc_coverage"]["checked_by_assertion"]
+    )
+    assert report["erc_status"] == "violations"
+
+
+def test_tap_boxes_rejects_a_malformed_entry(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_boxes": [[1.0, 2.0, 3.0]],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match=r"tap_boxes\[0\]"):
+        run_erc(str(gds), str(spec))
+
+
+def test_tap_boxes_rejects_an_inverted_box(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_boxes": [[3.0, 2.0, 1.0, 4.0]],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match="left < right and bottom < top"):
+        run_erc(str(gds), str(spec))
+
+
+# --- ties: disclosed-unexpressible taps (issue #2234) --------------------
+
+
+def _run_routed_tie_with_spec_overrides(tmp_path, stem, spec_overrides):
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, {**_routed_tie_spec(ties=None), **spec_overrides})
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def test_ties_disclosure_distinguishes_disclosed_from_plain_omission(tmp_path):
+    """Two runs that both declare zero `ties[]` must not render
+    identically once one of them discloses why it cannot express a tap --
+    the whole point of the disclosure form."""
+    omitted = _run_routed_tie(tmp_path, "omitted")
+    disclosed = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "disclosed",
+        {"ties_disclosure": {"reason": "no implant layers are drawn on this stream"}},
+    )
+
+    omitted_reasons = {
+        r["id"]: r["reason"] for r in omitted["erc_coverage"]["inapplicable"]
+    }
+    disclosed_reasons = {
+        r["id"]: r["reason"] for r in disclosed["erc_coverage"]["inapplicable"]
+    }
+    assert omitted_reasons["erc.missing_tie:[]"] == "no_ties_declared"
+    assert disclosed_reasons["erc.missing_tie:[]"] == "ties_disclosed_unexpressible"
+
+    # Purely a coverage-reason distinction -- findings and status are
+    # unaffected either way.
+    assert omitted["erc_findings"] == disclosed["erc_findings"] == []
+    assert omitted["erc_status"] == disclosed["erc_status"] == "clean"
+
+    assert omitted["ties_disclosure"] is None
+    assert disclosed["ties_disclosure"] == {
+        "reason": "no implant layers are drawn on this stream"
+    }
+
+
+def test_ties_disclosure_omitted_is_none(tmp_path):
+    report = _run_routed_tie(tmp_path, "no_disclosure")
+    assert report["ties_disclosure"] is None
+
+
+def test_ties_disclosure_rejects_missing_reason(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": {},
+        },
+    )
+    with pytest.raises(
+        ErcError, match="ties_disclosure.reason must be a non-empty string"
+    ):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_disclosure_rejects_non_object(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": "no taps on this stream",
+        },
+    )
+    with pytest.raises(ErcError, match="'ties_disclosure' must be a JSON object"):
+        run_erc(str(gds), str(spec))
+
+
 def test_ties_rejects_a_non_boolean_tap_is_dedicated(tmp_path):
     gds = tmp_path / "basic.gds"
     _basic_fixture(gds)
@@ -2328,10 +2607,12 @@ def test_cli_json_contract(tmp_path, capsys):
         "erc_status",
         "status",
         "provenance",
+        "ties_disclosure",
     }
     assert data["schema_version"] == 1
     assert data["pdk"] is None
     assert data["gate_count"] == 2
+    assert data["ties_disclosure"] is None
 
 
 def test_cli_text_output(tmp_path, capsys):
@@ -2345,6 +2626,36 @@ def test_cli_text_output(tmp_path, capsys):
     assert "gates: 2" in out
     assert "GATE_A" in out
     assert "met2: step=" in out
+
+
+def test_cli_text_output_prints_the_ties_disclosure(tmp_path, capsys):
+    """Issue #2234: the courtesy view must not render a stream that
+    disclosed why it cannot express a tap identically to one that never
+    declared `ties` at all -- which is the whole point of the disclosure
+    form, and would be lost if it lived only in the JSON payload."""
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "basic.erc.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": {"reason": "no implant layers are drawn"},
+        },
+    )
+
+    assert main(["erc", str(gds), str(spec)]) == 3
+    out = capsys.readouterr().out
+    assert "ties_disclosure: no implant layers are drawn" in out
+
+    # ... and a spec that declared none prints no such line at all.
+    plain = tmp_path / "plain.erc.json"
+    _basic_spec(plain)
+    assert main(["erc", str(gds), str(plain)]) == 3
+    assert "ties_disclosure:" not in capsys.readouterr().out
 
 
 def test_cli_text_output_prints_island_locations(tmp_path, capsys):

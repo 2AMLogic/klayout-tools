@@ -270,11 +270,40 @@ use) — matching `klt power`'s own convention.
     is an error rather than a coercion — a truthy `"false"` string quietly
     asserting the opposite of what it reads is the exact silent-pass shape
     this key exists to close.
+  - `tap_boxes` (optional array of `[left, bottom, right, top]` micrometre
+    boxes, default `[]`, issue #2234) — a caller **assertion** of exactly
+    where the tap geometry is, intersected into `tap_layer` (composes with
+    `tap_requires`, which narrows the same region). Unlike `tap_requires`/
+    `tap_is_dedicated`, this needs no PDK marker layer to exist at all —
+    the escape hatch for a stream whose taps are genuinely drawn but carry
+    no distinguishing implant/marker layer at all (see "A tie with no
+    distinguishing marker layer at all" below). Graded under its own
+    coverage classification (`erc_coverage.checked_by_assertion`) rather
+    than folded into an ordinary geometrically-derived pass, and held to
+    the same degenerate/falsifiability test as every other narrowing form
+    (see "A degenerate tie is reported as skipped, not as a pass" below):
+    an assertion that removes nothing from the drawn `tap_layer` inside the
+    well is exactly as degenerate as an omitted `tap_requires`. Each box's
+    `left`/`bottom`/`right`/`top` must satisfy `left < right` and
+    `bottom < top`.
   - `connect_to` (string, required) — the `stackup` role name the tap is
     wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
   - `net` (string, required) — the net name (matched the same way as
     `nets[].name` above) the tap must ultimately reach.
   - Omitted entirely -> `erc.missing_tie` is never computed.
+- `ties_disclosure` (optional object, default `null`, issue #2234) — a
+  top-level statement that this stream has no expressible tap, and why:
+  - `reason` (string, required, non-empty) — free-text explanation, e.g.
+    `"no implant layers are drawn on this stream"`.
+  - Changes no geometry and no finding. What it changes is the
+    `erc_coverage.inapplicable` reason recorded for the undeclared
+    `erc.missing_tie` work when `ties` is empty —
+    `"ties_disclosed_unexpressible"` instead of `"no_ties_declared"` — so a
+    consumer (`klt signoff`'s T1 item 11, `docs/design-evidence-tiers.md`)
+    can distinguish "this stream disclosed it cannot express a tap" from
+    "nobody declared ties at all", which previously rendered identically.
+    Echoed verbatim as the top-level `ties_disclosure` field; `null` when
+    omitted.
 - `devices` (optional array, default `[]`, issue #2183) — where a drawn
   **device body** sits on an already-declared conductor role, so the
   connectivity model stops reading it as a wire (see "Device bodies are
@@ -466,6 +495,84 @@ alike; what changed is that the envelope now states that the check could
 not be performed instead of letting a clean verdict stand for it. To clear
 the skip, narrow the tap with `tap_requires`, or affirm `tap_is_dedicated`
 when the layer really is tap-only.
+
+#### A tie with no distinguishing marker layer at all (`tap_boxes`, `ties_disclosure`, issue #2234)
+
+`tap_requires` and `tap_is_dedicated` both need *something drawn* to lean
+on — a PDK implant layer to intersect, or a tap-only marker layer to
+affirm. Neither exists for every stream: a stream whose taps are genuinely
+drawn but carry **no distinguishing mark at all** (the implant-free
+full-custom case the degenerate-tie section above describes) has nothing
+true to narrow or affirm, so every `ties[]` entry for it lands degenerate.
+
+Two ways to close that gap, each with a different cost:
+
+- **`tap_boxes`** — a caller **assertion** of exactly where the tap
+  geometry is, as a list of `[left, bottom, right, top]` micrometre boxes
+  intersected into `tap_layer` (composes with `tap_requires`, which
+  narrows the same region, but needs no PDK marker layer at all). This is
+  caller assertion rather than layer-derived narrowing, so a non-degenerate
+  asserted tie is graded under its own coverage classification —
+  `erc_coverage.checked_by_assertion`, a list of the same `erc.missing_tie`
+  work identities that also appear in `checked` — rather than folded into
+  an ordinary geometrically-derived pass. It is held to the exact same
+  falsifiability test as every other narrowing form: an assertion that
+  removes nothing from the drawn `tap_layer` inside the well is exactly as
+  degenerate as an omitted `tap_requires` (the test in "A degenerate tie is
+  reported as skipped" above is geometric, not "which key was given"), and
+  an assertion matching no drawn geometry at all is not a silent pass
+  either — it produces the same honest "no tap drawn inside it"
+  `erc.missing_tie` finding a real absent tap would.
+- **`ties_disclosure`** — a top-level statement that this stream has no
+  expressible tap, and why, when even `tap_boxes` cannot name real
+  geometry. This changes no finding and no geometry; it only changes the
+  `erc_coverage.inapplicable` reason recorded for the undeclared
+  `erc.missing_tie` work when `ties` is empty
+  (`"ties_disclosed_unexpressible"` instead of `"no_ties_declared"`), so
+  `klt signoff`'s T1 item 11 can render a distinct
+  `supply_spec_disclosed_unexpressible` reason instead of the plain
+  `supply_spec_incomplete` it gives an omission nobody considered — see
+  [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11.
+  Item 11 still reports **unmet** either way: a disclosure proves nothing
+  about the tap's actual connectivity, it only makes the reason honest.
+
+A worked `tap_boxes` declaration — a tap ring drawn on the transistor
+active layer, with no implant anywhere in the stream, named one ring edge
+at a time (a single box spanning the whole ring would also span everything
+the ring encloses):
+
+```json
+{
+  "ties": [
+    {
+      "name": "substrate_tie",
+      "well_layer": "21/0",
+      "tap_layer": "22/0",
+      "tap_boxes": [
+        [-10.7, -74.5, 191.3, -73.1],
+        [-10.7, -33.1, 191.3, -31.7],
+        [-10.7, -73.1, -9.3, -33.1],
+        [189.9, -73.1, 191.3, -33.1]
+      ],
+      "connect_to": "metal1",
+      "net": "vss"
+    }
+  ],
+  "ties_disclosure": null
+}
+```
+
+**Why boxes rather than cell names.** A `tap_cells` form (naming the cells
+whose geometry is the tap) was considered alongside this one and is not
+implemented, because it answers strictly fewer streams: a tap ring is
+routinely drawn as *top-cell geometry* rather than as an instance — that is
+exactly how the stream this feature was reported from draws both of its
+rings — and a cell-name assertion has nothing to name there, while a box
+assertion covers the hierarchical case too (a placement's own window is a
+box). Nothing here forecloses adding one later: it would be another
+narrowing input to the same tap region, graded by the same
+`checked_by_assertion` classification and the same geometric degeneracy
+test.
 
 ### Device bodies are not wires (`devices[]`, issue #2183)
 
@@ -1202,6 +1309,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration, issue #2199), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
+| `ties_disclosure` | object \| null | (issue #2234) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" above. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
 | `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
@@ -1226,12 +1334,14 @@ per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
 `erc.multiply_driven_net`/`erc.supply_short` rules all key off the same
 declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
 that declares no `nets`/`ties` asked for none of that work, so those rules
-are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`),
-never skipped — an undeclared rule must not make this scope partial, and the
-distinction is what lets a consumer tell "no supply was declared, so
-`erc.supply_short` was never computed" from "the declared supplies came back
-clean" off the envelope alone. The gate scope is never empty: a run in which
-no net carries gate-role geometry is exit 1, not a zero-coverage report.
+are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`,
+or `ties_disclosed_unexpressible` in place of `no_ties_declared` when the
+spec's top-level `ties_disclosure` was given, issue #2234), never skipped —
+an undeclared rule must not make this scope partial, and the distinction is
+what lets a consumer tell "no supply was declared, so `erc.supply_short`
+was never computed" from "the declared supplies came back clean" off the
+envelope alone. The gate scope is never empty: a run in which no net
+carries gate-role geometry is exit 1, not a zero-coverage report.
 
 A declared `ties[]` entry is the one case this scope records as **skipped**
 (`degenerate_tap_declaration`, issue #2199): work that was requested and
@@ -1239,6 +1349,14 @@ could not be performed, because the declared tap region is
 indistinguishable from an ordinary source/drain contact. That is a
 requested skip, so it does make the scope partial — see "A degenerate tie
 is reported as skipped, not as a pass" above.
+
+`erc_coverage` additionally carries `checked_by_assertion` (array\<string\>,
+issue #2234): the subset of `checked` work identities whose tap region was
+derived (at least in part) from a caller assertion (`ties[].tap_boxes`)
+rather than pure PDK-marker narrowing — `[]` when no tie used it. This is
+purely informational, additive to the four common-contract lists: a
+consumer that only reads `checked`/`skipped`/`inapplicable` sees an
+asserted tie exactly as it sees any other checked, non-degenerate tie.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as
