@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2216, additive — **no** `schema_version` bump on `klt version`
+  or either `klt signoff` doc-parsing mode): `klt version --format json` now
+  reports `grading_ruleset_id`, a `sha256:`-prefixed content hash of the
+  shipped `signoff.py` grading module -- the missing half `git_commit`/
+  `git_tag` could not answer, since those identify the *source checkout* a
+  build was made from, not the *grading rules* actually compiled into it. A
+  registry wheel built from a release tag and a `pip install git+...@<tag>`
+  snapshot of that same tag now report the identical id (byte-identical
+  grading code, no shared `.git` history required to prove it), while a
+  full-repo checkout that has moved past the tag on `main` reports a
+  different one whenever `signoff.py`'s grading logic actually changed.
+  Echoed into every `klt signoff --manifest`/`--fleet` report's own `build`
+  block, so a committed tier-verdict report names the grading rules that
+  produced it. Also new: `klt signoff --describe-grader`, which enumerates
+  -- at runtime, without reading source -- which T1 checklist item ids this
+  build has grading rules for, alongside the same `grading_ruleset_id`,
+  built on the existing `_build_t1_item_ids()`/`_is_graded_by_build()`
+  machinery (#2176) that already computed this internally to populate each
+  tier-report row's `graded_by_build` field. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Identifying the grading
+  build" section.
+
 - **Added** (#2202, additive — **no** `schema_version` bump on either mode):
   `klt signoff --manifest`/`--fleet` now report `build_t1_item_count` beside
   the existing `t1_item_count` — how many T1 rows **this build's own shipped

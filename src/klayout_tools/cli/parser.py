@@ -2426,6 +2426,19 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "'Where the tier doc comes from' section."
         ),
     )
+    signoff_parser.add_argument(
+        "--describe-grader",
+        action="store_true",
+        help=(
+            "print which T1 checklist item ids this build has grading "
+            "rules for, plus the content hash identifying the grading code "
+            "itself, without reading source or running any check -- "
+            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc "
+            "(this always reports the build's own shipped grading rules, "
+            "never an overridden doc's item list). See docs/cli/signoff.md's "
+            "'Identifying the grading build' section."
+        ),
+    )
     _add_format_arg(signoff_parser)
     signoff_parser.set_defaults(func=signoff_cmd.run)
 

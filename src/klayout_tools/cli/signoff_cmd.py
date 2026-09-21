@@ -1,4 +1,4 @@
-"""``klt signoff`` command: three modes sharing one verb.
+"""``klt signoff`` command: four modes sharing one verb.
 
 1. **Envelope aggregation** (the original mode, issue #309): combine
    ``klt drc``/``klt lvs``/``klt extract``/``klt sim`` JSON envelope files
@@ -15,16 +15,23 @@
    grade every block named in a fleet manifest (one call to tier-verdict
    mode per block) and reduce each block's result down to its current tier
    and, for any block not yet at T1, the single T1 item still blocking it.
+4. **Describe the grading build** (``--describe-grader``, issue #2216):
+   print which T1 item ids this build has grading rules for, plus the
+   content hash identifying the grading code itself -- purely informational,
+   reads no manifest and runs no check. See :func:`..signoff.describe_grader`.
 
-The three modes are mutually exclusive: ``--manifest``/``--fleet`` each
-replace the positional ``<file>...`` arguments and each other.
+The four modes are mutually exclusive: ``--manifest``/``--fleet``/
+``--describe-grader`` each replace the positional ``<file>...`` arguments and
+each other.
 
 The two doc-parsing modes read ``design-evidence-tiers.md`` from
 ``--tiers-doc``, else ``$KLT_TIERS_DOC``, else the copy bundled inside the
 installed package, else the source checkout's ``docs/`` (issue #1050 --
 :func:`klayout_tools.design_evidence_tiers.default_doc_path`), so they work
 from a wheel/``uv tool`` install with no repo checkout. ``--tiers-doc`` is
-refused in envelope-aggregation mode, which never reads the doc.
+refused in envelope-aggregation mode, which never reads the doc, and in
+``--describe-grader`` mode, which always reports this build's own shipped
+grading rules rather than an overridden doc's item list.
 
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
@@ -33,6 +40,8 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
     0 - envelope-aggregation mode: every check passed and every input's
         provenance agreed. Tier-report mode: every T1 item is ``"met"``
         (``tier: "T1"``). Fleet mode: every block's tier is ``"T1"``.
+        ``--describe-grader`` mode: always (it is informational only and
+        cannot fail once argument validation passes).
     1 - failed to run (missing/unreadable/malformed input file, an envelope
         with an unrecognized shape, or an invalid manifest/fleet manifest)
         -- returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
@@ -59,6 +68,7 @@ from ..signoff import (
     build_fleet_report,
     build_signoff,
     build_tier_report,
+    describe_grader,
 )
 from .output import emit_error, emit_success
 
@@ -83,6 +93,8 @@ _RESET = "\033[0m"
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    if getattr(args, "describe_grader", False):
+        return _run_describe_grader(args, manifest_source, fleet_source)
     if manifest_source and fleet_source:
         return emit_error(
             "signoff",
@@ -101,6 +113,31 @@ def run(args: argparse.Namespace) -> int:
     if manifest_source:
         return _run_tier_report(args, manifest_source)
     return _run_envelope_aggregation(args)
+
+
+def _run_describe_grader(
+    args: argparse.Namespace,
+    manifest_source: str | None,
+    fleet_source: str | None,
+) -> int:
+    if args.files or manifest_source or fleet_source:
+        return emit_error(
+            "signoff",
+            "--describe-grader cannot be combined with <file> arguments, "
+            "--manifest, or --fleet",
+            args.format,
+        )
+    if getattr(args, "tiers_doc", None):
+        return emit_error(
+            "signoff",
+            "--tiers-doc is not meaningful with --describe-grader -- it "
+            "always reports this build's own shipped grading rules, never "
+            "an overridden doc's item list",
+            args.format,
+        )
+    result = describe_grader()
+    emit_success(result, args.format, _print_describe_grader_text)
+    return EXIT_PASS
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:
@@ -174,6 +211,20 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
 def _read_manifest(source: str, *, description: str = "manifest") -> Any:
     """Use the same strict JSON reader for manifest, fleet, and evidence."""
     return _read_json_source(source, description)
+
+
+def _print_describe_grader_text(result: dict) -> None:
+    print(f"klt {result['version']}")
+    print(f"grading_ruleset_id: {result['grading_ruleset_id']}")
+    item_ids = result["graded_t1_item_ids"]
+    if item_ids is None:
+        print(
+            f"graded T1 items: unknown ({result['source_doc']} could not be "
+            "read by this build)"
+        )
+    else:
+        joined = ", ".join(str(item_id) for item_id in item_ids)
+        print(f"graded T1 items ({result['source_doc']}): {joined}")
 
 
 def _print_text(result: dict) -> None:
