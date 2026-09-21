@@ -10,7 +10,7 @@ the antenna + ERC signoff epic
 [#713](https://github.com/2AMLogic/klayout-tools/issues/713).
 
 ```
-klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--format text|json]
+klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>] [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -27,6 +27,14 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--format text|json]
   "Antenna-ratio verdict" below for what happens when it's omitted. Not
   validated by argparse: an unrecognised name is a clean exit-1 error, like
   `klt drc`'s own `--deck`.
+- `--deck` (issue #2204) — a curated extraction deck (currently: `gf180mcu`,
+  `sg13cmos5l`, `sg13g2`, `sky130` — the same registry `klt extract
+  --deck`/`klt lvs --deck` resolve, no PDK install needed) whose own
+  device-body marker declarations are auto-detected and carved out of the
+  matching `stackup`/`vias` role — see "Deck-driven device-marker
+  auto-detection" below. Optional and independent of `--pdk` (which selects
+  only the antenna-ratio limit table). Not validated by argparse: an
+  unrecognised name is a clean exit-1 error, same convention as `--pdk`.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
@@ -281,6 +289,9 @@ use) — matching `klt power`'s own convention.
     unioned, not last-one-wins.
   - Omitted entirely -> no carve-out at all, i.e. the pre-#2183 behaviour
     (`gates[]`, the antenna verdicts, and every finding are unchanged).
+  - An explicit entry always wins over a `--deck`-detected carve-out for the
+    same role (issue #2204) — see "Deck-driven device-marker auto-detection"
+    below.
 
 ## Connectivity model
 
@@ -499,6 +510,78 @@ wire graph. A real device-aware read of the same layout is `klt extract` /
 `klt lvs`'s job, and the two are complementary: LVS confirms the divider
 exists and matches the schematic, `klt erc` confirms nothing *else* joins
 the rails.
+
+### Deck-driven device-marker auto-detection (`--deck`, issue #2204)
+
+`devices[]` requires the caller to know, and correctly transcribe, the PDK's
+device-body marker layer/datatype — `62/0` for gf180mcu's `Resistor`,
+`RES_MK`/`SAB`, `CAP_MK`/`MIM_L_MK`/`FuseTop` for its MiM caps. That
+information already exists in this repo's curated extraction decks, and a
+mis-transcription fails *silently*: it subtracts nothing, and the only
+signal is `provenance.devices[].body_area_um2 == 0.0`. `--deck <name>`
+(currently: `gf180mcu`, `sg13cmos5l`, `sg13g2`, `sky130`) resolves one of
+those curated decks — the same name-keyed registry `klt extract --deck`/`klt
+lvs --deck` use, needing no PDK install — and reads its own device-marker
+declarations directly, instead of asking the spec author to transcribe them.
+
+**The matching rule.** A deck names its device-recognition layers as
+`(layer, datatype)` pairs on `ResistorDevice`/`CapacitorDevice` entries (see
+`src/klayout_tools/decks/extraction.py`), and this command's own `stackup`/
+`vias` roles carry `(layer, datatype)` too. A deck device applies to a
+declared role **only when the device's conducting-body layer equals that
+role's layer/datatype exactly** — no name-guessing, no partial-overlap
+heuristics:
+
+- **`ResistorDevice`** — the conducting-body layer is `body` (e.g. Poly2 for
+  gf180mcu's `ppolyf_u`, which is also that deck's own gate role). The
+  subtracted region is `body & marker`, narrowed by `requires` (every layer
+  must also cover it) and `excludes` (each subtracted) — the *same* region
+  `klt extract`'s own resistor recognition computes, not a second,
+  potentially drifting derivation.
+- **`CapacitorDevice`** — two independent conducting-body layers, each
+  checked separately:
+  - `top_plate` (e.g. gf180mcu's `FuseTop`) — the recognised top-plate
+    region, narrowed by `top_plate_requires`/`top_plate_excludes`.
+  - `top_plate_via`, when the deck declares one (e.g. gf180mcu's `Via4`) —
+    **only** the geometric overlap between that via's own footprint and the
+    capacitor's recognised bottom plate, exactly the region issue #364/#1388
+    already exclude from `klt extract`'s own generic via connectivity — not
+    the whole via layer. A capacitor's `top_plate_via` is typically *also*
+    the deck's ordinary inter-metal via layer (gf180mcu's `Via4` both lands
+    a MiM cap's top plate on Metal5 and routes ordinary Metal4↔Metal5 vias
+    everywhere else), so cutting the entire layer would silently disconnect
+    every legitimate via on it, not just the ones under a capacitor.
+  - `bottom_plate` is **not** a matched layer: unlike a resistor body or a
+    MiM top plate, a capacitor's bottom plate is ordinary conductor that
+    genuinely carries the same net's real routing (`klt extract` ties it
+    into the metal's own connectivity node rather than cutting it out) —
+    subtracting it here would introduce a false disconnect, not fix one.
+
+Only `ResistorDevice`/`CapacitorDevice` are matched today — `BipolarDevice`/
+`DiodeDevice`/`MomCapacitorDevice` are a candidate follow-on, not a silent
+omission.
+
+**Visibility, both ways.** A deck device whose conducting-body layer matches
+no declared role is still listed in `provenance.devices` (`"on": null`)
+whenever that layer actually carries geometry on this layout — so a spec
+that omits, or misnames, the role a real device sits on is visible rather
+than silently invisible. A device whose layer carries *no* geometry at all
+here is omitted outright: a curated deck ships dozens of resistor/capacitor
+flavours a given design never draws, and listing every one of them on every
+`--deck`-selected run would bury the signal this guarantee exists to
+surface.
+
+**Precedence.** An explicit `devices[]` entry for a role always wins over
+this deck's own auto-detection for that role: the declared entry is the one
+that actually cuts, and the deck-detected match for the same role is still
+listed (`"body_area_um2": 0.0`, `"superseded_by"` naming the declared entry
+that won) rather than silently dropped.
+
+**Byte-identical when unused.** Omitting `--deck` (every caller before this
+issue) leaves `gates[]`, every antenna ratio, every finding,
+`provenance.deck`, and every `provenance.devices` entry's shape
+byte-identical to a run before this feature existed — see "JSON schema"
+below for exactly which fields are conditional on `--deck`.
 
 For every net the extraction discovers whose geometry includes the declared
 gate-role layer (`stackup[0]`):
@@ -909,6 +992,40 @@ removed from the connectivity graph:
 ]
 ```
 
+A run that additionally selects `--deck <name>` (issue #2204) populates
+`provenance.deck` and adds `source`/`superseded_by` to every
+`provenance.devices` entry — both hand-declared and deck-detected. Here an
+explicit `devices[]` entry for `poly` wins over the deck's own
+auto-detected `ppolyf_u` match for the same role:
+
+```json
+"provenance": {
+  "deck": {
+    "name": "gf180mcu",
+    "content_hash": "sha256:<hex>",
+    "released": true
+  },
+  "devices": [
+    {
+      "name": "my_resistor",
+      "body_layer": "110/5",
+      "on": "poly",
+      "body_area_um2": 4.8,
+      "source": "declared",
+      "superseded_by": null
+    },
+    {
+      "name": "ppolyf_u",
+      "body_layer": "30/0",
+      "on": "poly",
+      "body_area_um2": 0.0,
+      "source": "deck",
+      "superseded_by": "my_resistor"
+    }
+  ]
+}
+```
+
 A violating `levels[]` entry's `remedy` is populated instead of `null` —
 e.g. a `layer_jumping` remedy (`li1` violates its own 75 limit, but the
 carried-over cumulative area still clears `met1`'s much looser 400 limit,
@@ -998,8 +1115,8 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration, issue #2199), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
-| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
-| `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region (`0.0` when its marker layer carries no geometry in this layout). `[]` when the spec declares no `devices`. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. |
+| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
+| `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region (`0.0` when its marker layer carries no geometry in this layout). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
 
 ## Checked-work coverage
 

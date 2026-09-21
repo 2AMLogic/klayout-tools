@@ -4284,5 +4284,28 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "usage-error exit 2."
         ),
     )
+    erc_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "curated extraction deck (currently: "
+            f"{_deck_names_str()}) whose own device-body marker "
+            "declarations (poly resistors, MiM/MOM caps) are auto-"
+            "detected and carved out of the matching 'stackup'/'vias' "
+            "role wherever a marker's conducting-body layer equals that "
+            "role's own layer exactly -- the deck-driven alternative to "
+            "hand-transcribing a 'devices[]' entry (issue #2183). "
+            "Independent of --pdk (which selects only the antenna-ratio "
+            "limit table) -- needs no PDK install, the same curated "
+            "registry 'klt extract --deck'/'klt lvs --deck' resolve. An "
+            "explicit 'devices[]' entry for a role still wins over this "
+            "deck's own detection for that role. Optional -- omitted, no "
+            "auto-detection is attempted and every output is byte-"
+            "identical to a run before this flag existed. Not validated "
+            "by argparse -- an unknown name exits 1 with a clean error, "
+            "per docs/cli/erc.md's exit-code contract, rather than "
+            "argparse's usage-error exit 2."
+        ),
+    )
     _add_format_arg(erc_parser)
     erc_parser.set_defaults(func=erc_cmd.run)

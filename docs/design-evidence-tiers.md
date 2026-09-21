@@ -398,7 +398,21 @@ written to every block.
       grader seeing an `erc.supply_short` on a supply-sensing analog block
       should check the cited report's `provenance.devices` (empty, or
       missing the bodies on the conducting path) before reading the finding
-      as a real short.
+      as a real short. **`--deck` (issue #2204) removes the need for
+      hand-declaration for a device a curated extraction deck already knows
+      about**: running the same supply-spec check with `--deck <name>`
+      (e.g. `gf180mcu`/`sky130`) auto-carves out every deck-recognised
+      `ResistorDevice`/`CapacitorDevice` body whose conducting-body layer
+      matches a declared `stackup`/`vias` role, echoed in
+      `provenance.devices` exactly as a hand-declared entry is (plus
+      `source: "deck"`) — see `docs/cli/erc.md`'s "Deck-driven
+      device-marker auto-detection". A run without `--deck`, or whose
+      device is not yet covered by any curated deck's `resistors`/
+      `capacitors` tables, still needs the explicit `devices[]` declaration
+      above; a grader should check `provenance.deck` alongside
+      `provenance.devices` before treating a clean `erc.supply_short` read
+      as covered by auto-detection rather than a hand-declaration that
+      happens to be present.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 

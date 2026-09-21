@@ -111,6 +111,23 @@ on, and that region is **subtracted** from the role's conductor region
 before it is registered -- so the body breaks the net instead of bridging
 it. See :func:`_device_body_cuts`.
 
+Deck-driven device-marker auto-detection (``--deck``, issue #2204): hand-
+transcribing a PDK's device-body marker layer/datatype into ``devices[]``
+is a silent-failure risk -- a mis-transcription subtracts nothing, and the
+only signal is ``provenance.devices[].body_area_um2 == 0.0``. When
+``--deck`` names a curated extraction deck (the same name-keyed registry
+``klt extract``/``klt lvs`` resolve, no PDK install needed), that deck's own
+``ResistorDevice``/``CapacitorDevice`` declarations are matched against the
+declared ``stackup``/``vias`` roles by *exact* conducting-body-layer
+equality and auto-carved out the same way an explicit ``devices[]`` entry
+would be -- see :func:`_deck_device_cuts` for the matching rule and
+:func:`_resolve_deck`. An explicit ``devices[]`` entry for a role still
+wins over the deck's own auto-detection for that role. Every auto-applied
+carve-out is echoed in ``provenance.devices`` exactly as a hand-declared one
+is, plus ``"source"``/``"superseded_by"`` fields distinguishing it -- see
+``run_erc``. Omitting ``--deck`` (every caller before this issue) leaves
+every output byte-identical to before this feature existed.
+
 See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 """
 
@@ -124,6 +141,13 @@ from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
 from ._provenance import _content_hash, build_provenance
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
+from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
+from .decks import get_extraction_deck as _get_extraction_deck
+from .extract import (
+    _capacitor_plate_regions,
+    _capacitor_top_via_overlap_region,
+    _resistor_body_region,
+)
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
 #: (#861), Phase 3 (#908), issue #1968, and issue #1979 all add fields/
@@ -156,6 +180,13 @@ from .coverage import build_check_coverage, coverage_rollup, rollup_status, work
 #: work in `erc_coverage` (see `_degenerate_tie_names`). No field is added,
 #: removed, or retyped: the change is which coverage list an existing
 #: identity lands in, and the `erc_status` token that follows from it.
+#: Issue #2204 adds the optional `--deck` CLI flag (no new spec key):
+#: `provenance.deck` is populated (previously always `null`) and every
+#: `provenance.devices[]` entry additionally carries `"source"`/
+#: `"superseded_by"` -- but *only* when `--deck` is given. A run that omits
+#: `--deck` (every caller before this issue) produces byte-identical output,
+#: including `provenance.devices` entries with their pre-#2204 4-key shape
+#: -- so, as with every prior additive change above, no bump.
 SCHEMA_VERSION = 1
 
 
@@ -371,6 +402,44 @@ def _resolve_antenna_limits(pdk: str | None) -> dict[str, tuple[float, str]] | N
             f"{', '.join(sorted(_ANTENNA_LIMITS_BY_PDK))})"
         )
     return limits
+
+
+def _resolve_deck(deck: str | None) -> ExtractionDeck | None:
+    """Resolve ``--deck`` to its curated :class:`~klayout_tools.decks.ExtractionDeck`
+    (issue #2204) -- the deck-driven device-marker auto-detection this
+    module's own ``devices[]`` carve-out (#2183) otherwise requires a caller
+    to hand-transcribe.
+
+    Deliberately the *same* curated, name-keyed registry lookup ``klt
+    extract --deck``/``klt lvs --deck`` use
+    (:func:`~klayout_tools.decks.get_extraction_deck`), not an installed PDK
+    resolved via ``--pdk-root`` -- see this module's own docstring
+    ("Device bodies", "Deck-driven device-marker auto-detection") for why
+    that is enough: the curated deck already names every device-recognition
+    marker layer a spec author would otherwise transcribe by hand, and
+    needs no filesystem PDK install to read. Deliberately a *separate* flag
+    from ``--pdk`` (which selects only the built-in antenna-ratio limit
+    table, see :func:`_resolve_antenna_limits`) -- the two answer unrelated
+    questions and ``--pdk`` has no ``gf180mcu`` entry today, while the
+    extraction-deck registry does.
+
+    Returns ``None`` when ``deck`` is ``None`` -- no auto-detection is
+    attempted, and every device-related output (``gates[]``, every antenna
+    ratio, every finding, ``provenance.deck``, ``provenance.devices``) is
+    byte-identical to a run before this feature existed (issue #2204's own
+    acceptance criteria).
+
+    Raises :class:`ErcError` for an unrecognised deck name, matching
+    :func:`_resolve_antenna_limits`'s own convention for an unrecognised
+    ``--pdk``: a clean exit-1 error, not an argparse usage error, checked
+    eagerly before any layout is even loaded.
+    """
+    if deck is None:
+        return None
+    try:
+        return _get_extraction_deck(deck)
+    except UnknownExtractionDeckError as exc:
+        raise ErcError(str(exc)) from exc
 
 
 def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]:
@@ -765,6 +834,171 @@ def _device_body_cuts(
                 "body_area_um2": round(body.area() * dbu2_um2, 9),
             }
         )
+    return cuts, applied
+
+
+def _deck_role_layers(
+    stackup: list[dict[str, Any]], vias: list[dict[str, Any]]
+) -> dict[str, tuple[int, int]]:
+    """``stackup``/``vias`` role name -> declared ``(layer, datatype)``, in
+    declaration order (issue #2204) -- the map :func:`_deck_device_cuts`
+    matches a curated deck's own device-conductor layers against."""
+    layers: dict[str, tuple[int, int]] = {
+        entry["name"]: entry["layer"] for entry in stackup
+    }
+    layers.update({via["name"]: via["layer"] for via in vias})
+    return layers
+
+
+def _deck_device_cuts(
+    layout: Any,
+    top_cell: Any,
+    deck: ExtractionDeck,
+    role_layers: dict[str, tuple[int, int]],
+    declared_roles: dict[str, str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Resolve a curated extraction ``deck``'s own device-marker
+    declarations into ``(cuts, applied)`` -- the deck-driven analogue of
+    :func:`_device_body_cuts` (issue #2204, built on #2183's hand-declared
+    ``devices[]``).
+
+    **The mapping rule** (this issue's own "Marker-to-role mapping" design
+    note): a deck device applies to a declared ``stackup``/``vias`` role
+    *only when the device's conducting-body layer equals that role's
+    ``(layer, datatype)`` exactly* -- no name-guessing, no partial-overlap
+    heuristics. The subtracted region is computed the *same* way ``klt
+    extract``'s own device recognition computes it, factored out of
+    ``extract.py`` for exactly this reuse (issue #2204):
+
+    - :class:`~klayout_tools.decks.ResistorDevice` -- conducting-body layer
+      is ``body``; region is ``body & marker`` narrowed by ``requires``/
+      ``excludes`` (:func:`~klayout_tools.extract._resistor_body_region`).
+    - :class:`~klayout_tools.decks.CapacitorDevice` -- two independent
+      conducting-body layers, each checked separately:
+
+      - ``top_plate`` -- region is the recognised top-plate region itself
+        (:func:`~klayout_tools.extract._capacitor_plate_regions`'s first
+        return value), narrowed by ``top_plate_requires``/
+        ``top_plate_excludes``.
+      - ``top_plate_via`` (when the deck declares one) -- region is *only*
+        the geometric overlap between that via's own footprint and this
+        capacitor's recognised bottom plate
+        (:func:`~klayout_tools.extract._capacitor_top_via_overlap_region`,
+        issue #364/#1388's own derivation) -- **not** the whole via layer,
+        which is typically also this deck's ordinary inter-metal via role
+        (e.g. gf180mcu's Via4 both lands a MiM cap's top plate on Metal5
+        *and* routes ordinary Metal4-Metal5 vias everywhere else): cutting
+        the entire layer from a matching ``vias`` role would silently
+        disconnect every legitimate via on it, not just the ones under a
+        capacitor.
+      - ``bottom_plate`` is deliberately **not** a matched layer: unlike a
+        resistor body or a MiM top plate, a capacitor's bottom plate is
+        ordinary conductor that genuinely carries the same net's real
+        routing (``klt extract`` ties it into the metal's own connectivity
+        node rather than cutting it out) -- subtracting it here would
+        introduce a false disconnect, not fix one.
+
+    Only `~klayout_tools.decks.ResistorDevice`/`CapacitorDevice` entries are
+    matched -- `BipolarDevice`/`DiodeDevice`/`MomCapacitorDevice` are a
+    candidate follow-on, not a silent omission (matching this repo's own
+    "name every deliberately-uncovered case" convention).
+
+    **A device whose conducting-body layer matches no declared role is
+    still listed** (``on: None``, ``body_area_um2: 0.0``) whenever that
+    layer actually carries geometry on this layout -- so a spec that
+    declares the wrong role name, or omits the role a real device sits on
+    entirely, is visible rather than silently invisible (issue #2204's own
+    acceptance criterion). A device whose layer carries *no* geometry at
+    all here is omitted outright: every curated deck carries dozens of
+    resistor/capacitor flavours a given design never draws, and listing
+    every one of them on every ``--deck``-selected run would bury the
+    signal this criterion exists to surface.
+
+    **An explicit ``devices[]`` entry wins** (this issue's own acceptance
+    criterion): ``declared_roles`` (role name -> the hand-declared device
+    name that already covers it, built by the caller from the *validated*
+    ``devices[]`` list) marks a role as already spoken for. A deck device
+    that would otherwise apply there is still listed, with
+    ``body_area_um2: 0.0`` and ``superseded_by`` naming the declared entry
+    that won -- so the precedence is visible in the report, not just
+    implied by its absence from ``cuts``.
+
+    Every entry additionally carries ``"source": "deck"``, distinguishing
+    it from a hand-declared entry's own ``"source": "declared"`` (added by
+    ``run_erc`` only when a deck is selected -- see that function for why
+    the field is conditional).
+    """
+    dbu2_um2 = layout.dbu * layout.dbu
+    roles_by_layer: dict[tuple[int, int], list[str]] = {}
+    for role, layer in role_layers.items():
+        roles_by_layer.setdefault(layer, []).append(role)
+
+    cuts: dict[str, Any] = {}
+    applied: list[dict[str, Any]] = []
+
+    def _record(name: str, layer: tuple[int, int], region: Any) -> None:
+        region = region.merged()
+        if region.is_empty():
+            return
+        layer_str = f"{layer[0]}/{layer[1]}"
+        matched_roles = roles_by_layer.get(layer, [])
+        if not matched_roles:
+            applied.append(
+                {
+                    "name": name,
+                    "body_layer": layer_str,
+                    "on": None,
+                    "body_area_um2": 0.0,
+                    "source": "deck",
+                    "superseded_by": None,
+                }
+            )
+            return
+        for role in matched_roles:
+            declared_name = declared_roles.get(role)
+            if declared_name is not None:
+                applied.append(
+                    {
+                        "name": name,
+                        "body_layer": layer_str,
+                        "on": role,
+                        "body_area_um2": 0.0,
+                        "source": "deck",
+                        "superseded_by": declared_name,
+                    }
+                )
+                continue
+            cuts[role] = (cuts[role] + region).merged() if role in cuts else region
+            applied.append(
+                {
+                    "name": name,
+                    "body_layer": layer_str,
+                    "on": role,
+                    "body_area_um2": round(region.area() * dbu2_um2, 9),
+                    "source": "deck",
+                    "superseded_by": None,
+                }
+            )
+
+    for resistor in deck.resistors:
+        _record(
+            resistor.name,
+            resistor.body,
+            _resistor_body_region(layout, top_cell, resistor),
+        )
+
+    for capacitor in deck.capacitors:
+        top_region, _bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        _record(capacitor.name, capacitor.top_plate, top_region)
+        if capacitor.top_plate_via is not None:
+            _record(
+                capacitor.name,
+                capacitor.top_plate_via,
+                _capacitor_top_via_overlap_region(layout, top_cell, capacitor),
+            )
+
     return cuts, applied
 
 
@@ -1363,6 +1597,7 @@ def run_erc(
     *,
     top: str | None = None,
     pdk: str | None = None,
+    deck: str | None = None,
 ) -> dict[str, Any]:
     """Run ``klt erc``'s connectivity-model extraction, antenna-ratio
     check, and core ERC finding checks end to end.
@@ -1416,6 +1651,8 @@ def run_erc(
       between the two supplies it spans. Omitted entirely -> no carve-out,
       today's behaviour exactly. What was applied (and the area each
       declaration actually removed) is echoed in ``provenance.devices``.
+      An explicit entry always wins over a ``deck``-detected carve-out for
+      the same role (issue #2204, see below).
 
     ``top`` selects the top cell to analyse when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
@@ -1426,6 +1663,23 @@ def run_erc(
     against -- see :data:`_SKY130_ANTENNA_RATIO_MAX_EGAR`. Omit it to still
     get every level's derived ``antenna_ratio``, just with ``verdict``
     ``"unchecked"`` everywhere (no PDK limit to compare against).
+
+    ``deck`` (optional, e.g. ``"gf180mcu"``, issue #2204) selects a curated
+    extraction deck (:func:`~klayout_tools.decks.get_extraction_deck` --
+    the same registry ``klt extract --deck``/``klt lvs --deck`` resolve,
+    needing no PDK install) whose own ``ResistorDevice``/``CapacitorDevice``
+    declarations are matched against the declared ``stackup``/``vias``
+    roles and auto-carved out exactly where ``devices[]`` would otherwise
+    have to name them by hand -- see :func:`_deck_device_cuts` for the
+    matching rule and precedence, and ``docs/cli/erc.md``'s "Deck-driven
+    device-marker auto-detection" for the full picture. Deliberately
+    independent of ``pdk``: ``pdk`` selects only the antenna-ratio limit
+    table, has no ``gf180mcu`` entry, and resolves nothing when a deck name
+    would be valid for extraction but not for the antenna table (or vice
+    versa). Omitted (the default) -> no auto-detection is attempted, and
+    every output this feature could touch (``gates[]``, every antenna
+    ratio, every finding, ``provenance.deck``, ``provenance.devices``) is
+    byte-identical to a run before this feature existed.
 
     Returns a dict matching the documented ``klt erc`` JSON schema (see
     ``docs/cli/erc.md``), including ``schema_version``, (issue #861)
@@ -1451,11 +1705,12 @@ def run_erc(
     roll-up ``"clean_partial"`` rather than ``"clean"`` (issue #2199, see
     :func:`_degenerate_tie_names`).
 
-    Raises :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
-    unresolvable layout/top cell, or a layout in which no net carries any
-    geometry on the declared gate role at all.
+    Raises :class:`ErcError` for a malformed spec, an unknown ``pdk`` or
+    ``deck``, an unresolvable layout/top cell, or a layout in which no net
+    carries any geometry on the declared gate role at all.
     """
     antenna_limits = _resolve_antenna_limits(pdk)
+    deck_obj = _resolve_deck(deck)
 
     spec = _load_spec_json(spec_path, ErcError)
     stackup = _validate_stackup(spec, spec_path)
@@ -1489,6 +1744,33 @@ def run_erc(
     # resistor body is not a wire in the tie graph either. Empty (and so a
     # no-op) whenever the spec declares no `devices`.
     device_cuts, devices_applied = _device_body_cuts(layout, top_cell, devices)
+
+    # `--deck` (issue #2204): a curated deck's own device-marker
+    # declarations, auto-carved out wherever a marker's conducting-body
+    # layer matches a declared role's own layer exactly -- see
+    # `_deck_device_cuts` for the matching rule. An explicit `devices[]`
+    # entry for a role always wins (that role is passed in `declared_roles`
+    # below, so `_deck_device_cuts` never computes a cut for it, only a
+    # `superseded_by`-marked provenance echo). No-op when `--deck` was
+    # omitted -- `deck_obj` is `None`, and neither `device_cuts` nor
+    # `devices_applied` is touched, matching this feature's own
+    # byte-identical-when-unused acceptance criterion.
+    if deck_obj is not None:
+        role_layers = _deck_role_layers(stackup, vias)
+        declared_roles: dict[str, str] = {}
+        for device in devices:
+            declared_roles.setdefault(device["on"], device["name"])
+        deck_cuts, deck_devices_applied = _deck_device_cuts(
+            layout, top_cell, deck_obj, role_layers, declared_roles
+        )
+        for role, region in deck_cuts.items():
+            device_cuts[role] = (
+                (device_cuts[role] + region).merged() if role in device_cuts else region
+            )
+        devices_applied = [
+            {**entry, "source": "declared", "superseded_by": None}
+            for entry in devices_applied
+        ] + deck_devices_applied
 
     l2n, circuit, layer_index, _ = _extract_connectivity(
         layout, top_cell, stackup, vias, [], device_cuts
@@ -1770,7 +2052,20 @@ def run_erc(
         else None
     )
 
-    provenance = build_provenance(pdk=provenance_pdk, input_path=file)
+    # `provenance.deck` (issue #2204): `--deck` names a curated extraction
+    # deck (see `_resolve_deck`), so this is populated exactly the way every
+    # other `--deck`-taking verb populates it (`deck_name`/`deck_path` -->
+    # `build_provenance`'s own `_deck_block`), unlike `provenance.pdk`
+    # above, which is hand-built because `klt erc` resolves no filesystem
+    # PDK at all. `None` when `--deck` was omitted, matching every other
+    # verb's conditional `deck` population -- and this module's own
+    # byte-identical-when-unused guarantee for this feature.
+    provenance = build_provenance(
+        deck_name=deck,
+        deck_path=deck_source_path(deck) if deck is not None else None,
+        pdk=provenance_pdk,
+        input_path=file,
+    )
 
     # `provenance.spec` (issue #2036): `klt erc` is validated against *two*
     # inputs, not one -- the layout (`provenance.input`) and the stackup/
@@ -1795,7 +2090,17 @@ def run_erc(
     # entry carries the *measured* `body_area_um2`, so a declaration that
     # silently matched no geometry (wrong datatype, marker layer absent
     # from this stream) is distinguishable from one that bit. Always
-    # present; `[]` when no `devices` were declared.
+    # present; `[]` when no `devices` were declared and no `--deck` was
+    # selected.
+    #
+    # Issue #2204: when `--deck` selects a curated deck, every entry
+    # (hand-declared and deck-detected alike) additionally carries
+    # `"source"` (`"declared"` vs `"deck"`) and `"superseded_by"` (the
+    # declared device name that pre-empted a deck-detected carve-out for the
+    # same role, `None` otherwise) -- see `_deck_device_cuts`. Both keys are
+    # omitted entirely when no `--deck` was given, so a caller who never
+    # opts into this feature sees byte-identical `provenance.devices`
+    # entries to before this issue.
     provenance["devices"] = devices_applied
 
     return {

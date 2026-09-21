@@ -267,6 +267,16 @@ is always `null` (no `SOURCES` stamp to read); `provenance.pdk` itself is
 still `null` when `--pdk` was omitted, matching every other verb's
 conditional population.
 
+`klt erc`'s `provenance.deck` (issue #2204) is, by contrast, populated
+exactly the way every other `--deck`-taking verb below populates it (the
+same `{name, content_hash, released}` shape) once `--deck` selects a curated
+deck — see "Deck-driven device-marker auto-detection" in
+[`docs/cli/erc.md`](cli/erc.md). Before that issue this field was always
+`null` for `klt erc` (it applied no rule/model deck at all); `--deck` is
+optional and independent of `--pdk`, and `provenance.deck` stays `null`
+when it is omitted, matching this field's own conditional-population
+convention everywhere else.
+
 `klt erc` also carries one **extra** key no other verb emits (issue #2036):
 `provenance.spec`, shaped `{content_hash}` exactly like `input` below and
 likewise `sha256:`-prefixed. An ERC run is validated against *two* inputs,
@@ -323,6 +333,20 @@ matched no geometry is distinguishable from one that bit. Same rationale
 as `provenance.spec` above: a report whose verdict depends on a
 transformation of its input has to say what the transformation did. See
 [`docs/cli/erc.md`](cli/erc.md)'s "Device bodies are not wires".
+
+When `--deck` selects a curated deck (issue #2204), every
+`provenance.devices` entry — both hand-declared and deck-detected — gains
+two additional keys: `source` (`"declared"` vs `"deck"`) and
+`superseded_by` (the hand-declared device name that pre-empted a
+deck-detected carve-out for the same role, `null` otherwise). A
+deck-detected device whose conducting-body layer matches no declared role
+is still listed (`"on": null`), so a mis-scoped spec is visible rather than
+silently invisible. Both new keys are **additive and conditional**: a run
+that omits `--deck` produces `provenance.devices` entries with the pre-#2204
+4-key shape, byte-identical to before this issue — no `schema_version`
+bump, matching this block's own additive-envelope convention. See
+[`docs/cli/erc.md`](cli/erc.md)'s "Deck-driven device-marker
+auto-detection".
 
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
