@@ -91,6 +91,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   canonical evidence stays exactly what `sim_backend: "iverilog"` produces.
   See [`docs/cli/equiv.md`](docs/cli/equiv.md)'s "Replay backend" section.
 
+- **Fixed** (#2226, `klt erc`, no `schema_version` bump — this is a
+  *conformance* fix, not the semantics redefinition
+  [`docs/json-contract.md`](docs/json-contract.md)'s "value sets within an
+  unchanged shape" caveat requires a bump for: the field's documented
+  meaning is the same before and after, and only the implementation moves
+  to match it. The `klt precheck` precedent that did earn a bump, issue
+  #452, is the opposite direction — docs and code agreed, and the
+  *definition* itself changed):
+  `provenance.devices[].body_area_um2` now reports the area the
+  declaration **actually** subtracted from its `on` role — the marker
+  layer intersected with that role's own drawn conductor region — instead
+  of the marker layer's own area. Both the field table in
+  [`docs/cli/erc.md`](docs/cli/erc.md) and the implementation's docstring
+  already described it that way; the computation did not. Two consequences
+  for readers of committed ERC reports: a well-formed declaration no longer
+  over-states its carve-out (device-body markers are conventionally drawn
+  with enclosure past the conductor they mark, so `area(marker)` exceeded
+  the real cut for essentially every correct declaration), and a
+  declaration whose `on` names a role its marker never touches now reports
+  `0.0` instead of the same large number a correct declaration reports —
+  restoring the wrong-`on` cross-check the field exists to perform. Such a
+  declaration (marker drawn on the stream, zero overlap with its declared
+  role) additionally emits a one-line warning on stderr; `--format json`
+  goes to stdout only, so a piped report is unaffected. Connectivity, net
+  extraction, and every finding are byte-identical — the region subtracted
+  from the role was already `region - marker`, which equals
+  `region - (marker ∩ region)`. `--deck`-detected entries are unaffected:
+  their regions are derived from the role's own layer by construction.
+
 - **Added** (#2216, additive — **no** `schema_version` bump on `klt version`
   or either `klt signoff` doc-parsing mode): `klt version --format json` now
   reports `grading_ruleset_id`, a `sha256:`-prefixed content hash of the

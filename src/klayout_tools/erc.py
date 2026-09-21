@@ -114,7 +114,9 @@ it. See :func:`_device_body_cuts`.
 Deck-driven device-marker auto-detection (``--deck``, issue #2204): hand-
 transcribing a PDK's device-body marker layer/datatype into ``devices[]``
 is a silent-failure risk -- a mis-transcription subtracts nothing, and the
-only signal is ``provenance.devices[].body_area_um2 == 0.0``. When
+only signal is ``provenance.devices[].body_area_um2 == 0.0`` (plus, since
+issue #2226, a stderr warning whenever the mis-transcribed marker layer is
+nonetheless drawn somewhere on this layout). When
 ``--deck`` names a curated extraction deck (the same name-keyed registry
 ``klt extract``/``klt lvs`` resolve, no PDK install needed), that deck's own
 ``ResistorDevice``/``CapacitorDevice`` declarations are matched against the
@@ -149,6 +151,7 @@ See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from ._layout import load_layout, select_top_cells
@@ -822,7 +825,11 @@ def _validate_devices(
     subtracts nothing, and is reported with ``body_area_um2: 0.0`` in
     ``provenance.devices`` so a caller can see the declaration matched no
     geometry -- matching the same convention ``stackup``/``vias`` already
-    follow for a layer a particular fixture doesn't use."""
+    follow for a layer a particular fixture doesn't use. A ``body_layer``
+    that *is* drawn here but nowhere near its declared ``on`` role reports
+    the same ``0.0`` (issue #2226) -- that number is the intersection with
+    the role, not the marker's own area -- plus a stderr warning, since
+    that case is a spec bug rather than an unused layer."""
     raw = spec.get("devices", [])
     if raw is None:
         raw = []
@@ -843,8 +850,34 @@ def _validate_devices(
     return entries
 
 
+def _warn_device_body_missed_role(name: str, body_layer: str, role: str) -> None:
+    """The stderr warning printed once per ``devices[]`` declaration whose
+    marker layer *is* drawn on this layout but does not touch the role it
+    was declared ``on`` (issue #2226) -- so it subtracts nothing at all.
+
+    That combination is almost always a spec bug (the wrong ``on`` role, or
+    a marker drawn on a different datatype than the one declared) rather
+    than a deliberate no-op, and the report alone makes it quiet: a
+    ``body_area_um2`` of ``0.0`` is only visible to a caller who thinks to
+    look. Printed to stderr, following
+    :func:`klayout_tools._provenance._warn_klayout_version_mismatch`'s
+    precedent, so a caller piping ``--format json`` to a file still sees it
+    (JSON goes to stdout only -- ``docs/json-contract.md``)."""
+    print(
+        f"klt erc: warning: devices[] entry {name!r} declares body_layer "
+        f"{body_layer} on role {role!r}, but that marker layer carries "
+        f"geometry which does not overlap the region drawn for {role!r} -- "
+        "the carve-out subtracted nothing (body_area_um2: 0.0). Check the "
+        "'on' role and the marker's layer/datatype.",
+        file=sys.stderr,
+    )
+
+
 def _device_body_cuts(
-    layout: Any, top_cell: Any, devices: list[dict[str, Any]]
+    layout: Any,
+    top_cell: Any,
+    devices: list[dict[str, Any]],
+    role_layers: dict[str, tuple[int, int]],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Resolve ``devices[]`` into ``(cuts, applied)`` (issue #2183).
 
@@ -856,25 +889,57 @@ def _device_body_cuts(
 
     ``applied`` is the per-declaration echo for ``provenance.devices``:
     name, the ``"<layer>/<datatype>"`` string as declared, the role, and
-    the **actual** subtracted area in µm². That last field is the honest
-    part -- a declaration whose marker layer is absent from this layout
-    (or drawn on a different datatype) reports ``0.0`` and silently
-    changes nothing, which is exactly what a caller re-reading a committed
-    report needs to be able to tell apart from a carve-out that bit."""
+    the **actual** subtracted area in µm².
+
+    That last field is the honest part, and honest means *intersected*
+    (issue #2226). It is ``area(marker ∩ the role's own drawn conductor
+    region)``, not ``area(marker)``: a device-body marker is conventionally
+    drawn with enclosure past the conductor it marks, so the marker's own
+    area over-states the carve-out for a well-formed declaration -- and,
+    worse, is identically non-zero for a declaration whose ``on`` names a
+    role the marker never touches, which is the one failure the field
+    exists to expose. Intersected, ``0.0`` means what the docs say it
+    means: *this declaration changed nothing* -- whether because its marker
+    layer is absent from this layout, drawn on a different datatype, or
+    declared ``on`` the wrong role.
+
+    ``role_layers`` (from :func:`_deck_role_layers`) supplies each declared
+    role's own ``(layer, datatype)`` so that conductor region can be
+    resolved here; it is read once per role that a declaration actually
+    names. The intersection is computed per declaration against the role's
+    *pre-cut* drawn region -- never against the accumulating ``cuts[role]``
+    union -- so two declarations sharing one ``on`` each report their own
+    subtracted area rather than the union's.
+
+    ``cuts`` still carries the raw marker region: ``region - marker`` and
+    ``region - (marker ∩ region)`` are the same set, so connectivity is
+    byte-identical to before this issue. Only the reported area changes.
+
+    A declaration that subtracts nothing *while its marker layer is drawn
+    somewhere on this layout* additionally gets a one-line stderr warning
+    (:func:`_warn_device_body_missed_role`) -- the wrong-``on`` case the
+    report alone renders too quietly."""
     dbu2_um2 = layout.dbu * layout.dbu
     cuts: dict[str, Any] = {}
     applied: list[dict[str, Any]] = []
+    conductors: dict[str, Any] = {}
     for device in devices:
         body = _region(layout, top_cell, device["body_layer"]).merged()
         role = device["on"]
+        if role not in conductors:
+            conductors[role] = _region(layout, top_cell, role_layers.get(role))
+        subtracted = (body & conductors[role]).merged()
         cuts[role] = (cuts[role] + body).merged() if role in cuts else body
         layer, datatype = device["body_layer"]
+        body_layer = f"{layer}/{datatype}"
+        if subtracted.is_empty() and not body.is_empty():
+            _warn_device_body_missed_role(device["name"], body_layer, role)
         applied.append(
             {
                 "name": device["name"],
-                "body_layer": f"{layer}/{datatype}",
+                "body_layer": body_layer,
                 "on": role,
-                "body_area_um2": round(body.area() * dbu2_um2, 9),
+                "body_area_um2": round(subtracted.area() * dbu2_um2, 9),
             }
         )
     return cuts, applied
@@ -885,7 +950,11 @@ def _deck_role_layers(
 ) -> dict[str, tuple[int, int]]:
     """``stackup``/``vias`` role name -> declared ``(layer, datatype)``, in
     declaration order (issue #2204) -- the map :func:`_deck_device_cuts`
-    matches a curated deck's own device-conductor layers against."""
+    matches a curated deck's own device-conductor layers against, and (issue
+    #2226) the map :func:`_device_body_cuts` resolves each declared role's
+    own conductor region from so it can report the area a ``devices[]``
+    entry *actually* subtracted. Built unconditionally by ``run_erc``, not
+    only when ``--deck`` is given, since the second caller always runs."""
     layers: dict[str, tuple[int, int]] = {
         entry["name"]: entry["layer"] for entry in stackup
     }
@@ -2009,7 +2078,15 @@ def run_erc(
     # and subtracted from their own role in *both* graphs below -- a drawn
     # resistor body is not a wire in the tie graph either. Empty (and so a
     # no-op) whenever the spec declares no `devices`.
-    device_cuts, devices_applied = _device_body_cuts(layout, top_cell, devices)
+    # `role_layers` (role name -> its declared `(layer, datatype)`) is what
+    # lets `_device_body_cuts` report the area each declaration *actually*
+    # subtracted -- `marker ∩ that role's own drawn region` -- rather than
+    # the marker layer's own area (issue #2226). `--deck` reuses the same
+    # map below for its exact-layer-equality matching rule.
+    role_layers = _deck_role_layers(stackup, vias)
+    device_cuts, devices_applied = _device_body_cuts(
+        layout, top_cell, devices, role_layers
+    )
 
     # `--deck` (issue #2204): a curated deck's own device-marker
     # declarations, auto-carved out wherever a marker's conducting-body
@@ -2022,7 +2099,6 @@ def run_erc(
     # `devices_applied` is touched, matching this feature's own
     # byte-identical-when-unused acceptance criterion.
     if deck_obj is not None:
-        role_layers = _deck_role_layers(stackup, vias)
         declared_roles: dict[str, str] = {}
         for device in devices:
             declared_roles.setdefault(device["on"], device["name"])
@@ -2303,9 +2379,11 @@ def run_erc(
     # the report -- otherwise two runs of the same layout, one with a
     # `devices[]` declaration and one without, disagree about
     # `erc.supply_short` with nothing in either payload to say why. Each
-    # entry carries the *measured* `body_area_um2`, so a declaration that
-    # silently matched no geometry (wrong datatype, marker layer absent
-    # from this stream) is distinguishable from one that bit. Always
+    # entry carries the *measured* `body_area_um2` -- the marker
+    # intersected with its role's own conductor region (issue #2226), not
+    # the marker layer's own area -- so a declaration that silently
+    # subtracted nothing (wrong datatype, wrong `on` role, marker layer
+    # absent from this stream) is distinguishable from one that bit. Always
     # present; `[]` when no `devices` were declared and no `--deck` was
     # selected.
     #
