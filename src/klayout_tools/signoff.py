@@ -799,6 +799,7 @@ from .coverage import (
     coverage_validation_error,
 )
 from .design_evidence_tiers import (
+    CANONICAL_DOC_LABEL,
     DEFAULT_DOC_PATH,
     DesignEvidenceTiersError,
     doc_source_label,
@@ -813,6 +814,7 @@ __all__ = [
     "build_signoff",
     "build_tier_report",
     "build_fleet_report",
+    "describe_grader",
 ]
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -827,21 +829,23 @@ SCHEMA_VERSION = 1
 #: never imply the other changed.
 #:
 #: Still ``1`` after issue #2176 (``build``, ``items[].graded_by_build``, the
-#: ``ungradeable_by_build`` reason) and issue #2202
-#: (``build_t1_item_count``), deliberately: every one of those fields is a
-#: *new* key, and a new ``reason`` value is a value set growing within an
-#: unchanged shape -- both explicitly additive under
-#: ``docs/json-contract.md`` ("adding new fields does not" bump; "an
-#: additive change can introduce a new enum-like value"). Issue #2202's
-#: field has no behaviour change behind it at all: it reports *beside*
-#: ``t1_item_count``, and never reinterprets it. The grading change that
-#: rode with #2176 refuses a citation this build has no rules for,
-#: which is a *correction* of a verdict that was wrong, not a redefinition
-#: of what ``status``/``reason`` mean -- the same shape as issue #1987's
-#: (item 3 stopped accepting `klt extract` citations) and issue #2044's
-#: (items 5/6/8 gained kind restrictions) grading corrections, neither of
-#: which bumped this constant. Contrast
-#: :data:`FLEET_REPORT_SCHEMA_VERSION` below, which bumped for issue #2178
+#: ``ungradeable_by_build`` reason), issue #2202
+#: (``build_t1_item_count``), and issue #2216 (``build.grading_ruleset_id``),
+#: deliberately: every one of those fields is a *new* key, and a new
+#: ``reason`` value is a value set growing within an unchanged shape -- both
+#: explicitly additive under ``docs/json-contract.md`` ("adding new fields
+#: does not" bump; "an additive change can introduce a new enum-like
+#: value"). Issue #2202's field has no behaviour change behind it at all: it
+#: reports *beside* ``t1_item_count``, and never reinterprets it. Issue
+#: #2216's field is the same shape: a new key inside the already-additive
+#: ``build`` block, reporting *beside* its existing fields rather than
+#: redefining any of them. The grading change that rode with #2176 refuses a
+#: citation this build has no rules for, which is a *correction* of a
+#: verdict that was wrong, not a redefinition of what ``status``/``reason``
+#: mean -- the same shape as issue #1987's (item 3 stopped accepting `klt
+#: extract` citations) and issue #2044's (items 5/6/8 gained kind
+#: restrictions) grading corrections, neither of which bumped this constant.
+#: Contrast :data:`FLEET_REPORT_SCHEMA_VERSION` below, which bumped for issue #2178
 #: because an already-shipped field's *meaning* changed there.
 TIER_REPORT_SCHEMA_VERSION = 1
 
@@ -877,6 +881,13 @@ TIER_REPORT_SCHEMA_VERSION = 1
 #: exactly the same rows it did under ``2``, and no field is added, removed
 #: or retyped.
 FLEET_REPORT_SCHEMA_VERSION = 3
+
+#: Schema version for :func:`describe_grader`'s own JSON shape (issue
+#: #2216) -- distinct from the other three for the same reason they are
+#: distinct from each other: this mode's top-level fields are unrelated to
+#: envelope-aggregation, tier-report, and fleet-roll-up mode, so bumping one
+#: must never imply another changed.
+DESCRIBE_GRADER_SCHEMA_VERSION = 1
 
 #: Block kinds recognised by ``docs/design-evidence-tiers.md``'s "Block
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
@@ -1247,6 +1258,15 @@ def _is_ungradeable_by_build(item: dict[str, Any]) -> bool:
 #: process happens to resolve says nothing about what its grading rules can
 #: check, and every cited envelope already carries the engine *its own* run
 #: used in its ``provenance`` block.
+#:
+#: ``grading_ruleset_id`` (issue #2216) is the opposite case from the
+#: KLayout fields -- it is included, not dropped: unlike the resolved engine
+#: version, it *is* a statement about what this build's grading rules can
+#: check, which is exactly what a report's ``build`` block exists to name.
+#: `git_commit`/`git_tag` alone cannot answer "did the grading rules that
+#: produced this report change" without a reader cross-referencing commit
+#: history that may not even be checked out (a wheel install has no `.git`
+#: directory); the content hash answers it directly.
 _BUILD_IDENTITY_FIELDS = (
     "version",
     "package_version",
@@ -1254,6 +1274,7 @@ _BUILD_IDENTITY_FIELDS = (
     "git_tag",
     "dirty",
     "is_release",
+    "grading_ruleset_id",
 )
 
 
@@ -1287,6 +1308,75 @@ def _build_identity() -> dict[str, Any]:
     the fields it drops and why.
     """
     return dict(_build_identity_fields())
+
+
+def _graded_t1_item_ids() -> frozenset[int] | None:
+    """Every T1 item id this build has grading rules for (issue #2216) --
+    the full set :func:`_is_graded_by_build` tests membership against, one
+    call instead of probing per id.
+
+    The union of both halves that function's own docstring names as
+    "graded": the ids named by a grading table (:data:`_ITEM_ALLOWED_KINDS`,
+    :data:`_ITEMS_GRADED_AS_POWER_DELIVERY`) and this build's own shipped
+    doc's item list (:func:`_build_t1_item_ids` -- covers the four items
+    with no `klt` verb behind them at all, items 1, 2, 9 and 10, which carry
+    no table entry by design). In practice the first set is always a subset
+    of the second for a self-consistent build (every table id is also one
+    the shipped doc lists), so this is normally just
+    :func:`_build_t1_item_ids`'s own answer -- the union guards the
+    hypothetical case of the two drifting apart without silently
+    under-reporting either.
+
+    ``None`` when :func:`_build_t1_item_ids` is, for the same "never invent
+    a claim you cannot substantiate" reason: an install that cannot read its
+    own shipped doc cannot *prove* which ids it grades, so it must not
+    enumerate a set it cannot back up.
+    """
+    build_item_ids = _build_t1_item_ids()
+    if build_item_ids is None:
+        return None
+    graded_table_ids = frozenset(_ITEM_ALLOWED_KINDS) | _ITEMS_GRADED_AS_POWER_DELIVERY
+    return graded_table_ids | build_item_ids
+
+
+def describe_grader() -> dict[str, Any]:
+    """The ``klt signoff --describe-grader`` JSON payload (issue #2216).
+
+    Answers, at runtime and without reading source, the two questions a
+    consumer who commits a tier-verdict report as evidence cannot otherwise
+    answer from a `klt` version string alone:
+
+    - **Which grading code is this** -- ``grading_ruleset_id``, the same
+      content hash :func:`~.build_identity.version_report` and every tier /
+      fleet report's own ``build`` block carry (see that function's
+      docstring for why a content hash rather than a derivation of
+      ``git_commit``).
+    - **Which T1 checklist items can it grade at all** --
+      ``graded_t1_item_ids``, built on :func:`_build_t1_item_ids` and the
+      same "is this item graded" test :func:`_is_graded_by_build` already
+      applies per item while rendering a tier report's ``items[]`` --
+      surfaced here directly rather than requiring a caller to run a whole
+      tier report against a throwaway manifest just to read which ids came
+      back ``graded_by_build: true``.
+
+    Always reports **this build's own shipped** grading rules --
+    deliberately not affected by ``--tiers-doc``/``$KLT_TIERS_DOC``, which
+    overrides the item *list* a tier report parses, not the grading logic
+    compiled into the running build (:func:`_build_t1_item_ids` reads
+    :data:`~.design_evidence_tiers.DEFAULT_DOC_PATH` for exactly this
+    reason). ``klt signoff --describe-grader --tiers-doc <path>`` is
+    therefore refused by the CLI layer rather than silently ignoring the
+    flag -- see ``docs/cli/signoff.md``.
+    """
+    report = version_report()
+    graded_ids = _graded_t1_item_ids()
+    return {
+        "schema_version": DESCRIBE_GRADER_SCHEMA_VERSION,
+        "version": report["version"],
+        "grading_ruleset_id": report["grading_ruleset_id"],
+        "source_doc": CANONICAL_DOC_LABEL,
+        "graded_t1_item_ids": (sorted(graded_ids) if graded_ids is not None else None),
+    }
 
 
 #: Provenance sub-fields compared for consistency across every input
@@ -3751,6 +3841,11 @@ def build_tier_report(
                 "git_tag": None,
                 "dirty": False,
                 "is_release": False,
+                # A content hash of the grading code itself (issue #2216) --
+                # distinct from git_commit/git_tag, which identify the
+                # checkout, not the grading rules. See
+                # `~.build_identity.grading_ruleset_id`.
+                "grading_ruleset_id": "sha256:...",
             },
             "items": [
                 {
@@ -5600,6 +5695,8 @@ def build_fleet_report(
                 "git_tag": None,
                 "dirty": False,
                 "is_release": False,
+                # A content hash of the grading code itself (issue #2216).
+                "grading_ruleset_id": "sha256:...",
             },
             "blocks": [
                 {

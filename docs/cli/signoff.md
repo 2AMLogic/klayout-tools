@@ -1,6 +1,6 @@
 # `klt signoff`
 
-Three modes, one verb:
+Four modes, one verb:
 
 1. **Envelope aggregation** (the original mode, issue #309) — combine one or
    more `klt drc`/`klt lvs`/`klt extract`/`klt sim`/`klt yield`/`klt pex`/`klt
@@ -34,11 +34,16 @@ Three modes, one verb:
    any block not yet at T1, the single item still blocking it — one query
    across a whole fleet of canaries instead of opening each block's own
    report. See "Fleet roll-up" below.
+4. **Describe the grading build** (`--describe-grader`, issue #2216) — print
+   which T1 item ids this build has grading rules for, plus the content hash
+   identifying the grading code itself, without reading a manifest or
+   running any check. See "Identifying the grading build" below.
 
 ```
 klt signoff <file>... [--format text|json]
 klt signoff --manifest <manifest-file> [--tiers-doc <path>] [--format text|json]
 klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|json]
+klt signoff --describe-grader [--format text|json]
 ```
 
 - `<file>...` — one or more paths to `klt drc`/`klt lvs`/`klt extract`/`klt
@@ -61,9 +66,14 @@ klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|js
 - `--tiers-doc` — path to the `design-evidence-tiers.md` to parse the T1-T4
   item skeleton from, instead of the copy this install ships. Only
   meaningful with `--manifest`/`--fleet`; passing it in envelope-aggregation
-  mode is an error (that mode never reads the doc). See "Where the tier doc
-  comes from" below, and "An overridden doc can outrun the build" for what
-  the report says when the doc lists an item this build has no rules for.
+  mode, or with `--describe-grader`, is an error (neither reads an
+  overridden doc — see "Where the tier doc comes from" below, and "An
+  overridden doc can outrun the build" for what the report says when the doc
+  lists an item this build has no rules for).
+- `--describe-grader` — print which T1 item ids this build has grading rules
+  for, plus its grading-code content hash. Mutually exclusive with
+  `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`. See "Identifying the
+  grading build" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 
@@ -1025,6 +1035,94 @@ happens to resolve says nothing about what its grading rules can check, and
 each cited envelope already records the engine *its own* run used in its
 `provenance` block.
 
+`build` also carries `grading_ruleset_id` (issue #2216) — see "Identifying
+the grading build" immediately below for what it means and why it exists.
+
+### Identifying the grading build
+
+**A `klt` version string alone does not identify the grading build.** Three
+installs can report the exact same `klt --version` output while grading a
+tier-verdict report by different rules:
+
+| Install | What `git_commit`/`git_tag` say | What actually grades the report |
+| --- | --- | --- |
+| A PyPI-published wheel built from tag `v0.5.0` | commit `abc123`, tag `v0.5.0` | `signoff.py` as it stood at `abc123` |
+| `pip install klayout-tools@git+...@v0.5.0` | the *same* commit `abc123`, tag `v0.5.0` | the *same* `signoff.py` — but installed with no shared `.git` history against the wheel to compare |
+| A full-repo checkout on `main`, 40 commits past `v0.5.0` | commit `def456`, no tag | `signoff.py` as it stands on `main` — which may have added or changed a grading rule, e.g. item 11's power-delivery grading (issue #2025) |
+
+`git_commit`/`git_tag` (in `klt version --format json`, and in every tier /
+fleet report's `build` block) identify the **source checkout** each install
+was made from — they say nothing about the **grading code** actually
+compiled into the running build, and a consumer who commits a tier-verdict
+report as evidence has no way to tell, from those fields alone, which
+grading rules produced it.
+
+Two mechanisms close that gap, both driven by the same content hash:
+
+1. **`grading_ruleset_id`** — a `sha256:`-prefixed content hash of the
+   shipped `signoff.py` grading module, reported by `klt version --format
+   json` (see [`version.md`](version.md)) and echoed into every tier / fleet
+   report's own `build` block (above), so a committed report names the
+   grading rules that produced it, not just the source checkout. It is
+   **identical** between two installs of byte-identical grading code
+   (the wheel and the `git+...` snapshot in the table above both report the
+   same id, with no shared git history required to prove it) and **changes**
+   whenever `signoff.py`'s grading logic changes (the `main` checkout in the
+   table reports a different id from the tag it moved past). `null` only if
+   this install's `signoff.py` cannot be read at all — never fabricated.
+2. **`klt signoff --describe-grader`** — enumerates, at runtime and without
+   reading source, which T1 checklist item ids this build has grading rules
+   for at all, alongside the same `grading_ruleset_id`:
+
+   ```
+   $ klt signoff --describe-grader
+   klt 0.5.0+g99a5716ccccb
+   grading_ruleset_id: sha256:db8d81e870446863816913d28c35f525da893f340bd361041645130f66a88de1
+   graded T1 items (docs/design-evidence-tiers.md): 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+   ```
+
+   ```json
+   {
+     "schema_version": 1,
+     "version": "0.5.0+g99a5716ccccb",
+     "grading_ruleset_id": "sha256:db8d81e870446863816913d28c35f525da893f340bd361041645130f66a88de1",
+     "source_doc": "docs/design-evidence-tiers.md",
+     "graded_t1_item_ids": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+   }
+   ```
+
+   `graded_t1_item_ids` builds on `_build_t1_item_ids()`/`_is_graded_by_build()`
+   — the same functions each tier-report row's own `graded_by_build` field
+   already uses internally (see "An overridden doc can outrun the build"
+   above) — surfaced directly rather than requiring a caller to run a whole
+   tier report against a throwaway manifest just to read which ids came back
+   graded. `null` when this build cannot read its own shipped doc at all,
+   the same "never invent a claim this build cannot substantiate" rule
+   `graded_by_build` follows.
+
+   Always reports **this build's own shipped** grading rules — deliberately
+   unaffected by `--tiers-doc`/`$KLT_TIERS_DOC` (which override the item
+   *list* a tier report parses, not the grading logic compiled into the
+   running build), so combining either with `--describe-grader` is refused
+   by the CLI rather than silently ignored.
+
+`grading_ruleset_id` is a whole-module content hash, not a narrower
+per-item-grading-function extraction: `signoff.py` has no sharp internal
+boundary between "grading logic" and "everything else" that would not
+itself need re-verifying every time a helper is renamed or refactored across
+that line. A doc-only edit inside `signoff.py` (e.g. a docstring correction)
+therefore also moves the id — a deliberately conservative trade-off for
+never missing a real grading-logic change, the same choice
+`source_doc_content_hash` (above) makes for the checklist doc itself rather
+than a narrower per-item extraction.
+
+`grading_ruleset_id` is purely additive: no `schema_version` bump rides with
+it on `klt version --format json`, the tier-report schema, or the
+fleet-report schema, matching the same "adding new fields does not require a
+bump" rule under which `build`/`graded_by_build`/`build_t1_item_count`
+themselves landed (issues #2176, #2202) — see
+[`../json-contract.md`](../json-contract.md).
+
 ### Item 7 is kind-restricted, per block kind
 
 T1 items 1, 2, 9 and 10 accept *any* recognised, *native*
@@ -1609,7 +1707,8 @@ distinguishable from "no samples document was ever named" (see
     "git_commit": "0123456789abcdef0123456789abcdef01234567",
     "git_tag": null,
     "dirty": false,
-    "is_release": false
+    "is_release": false,
+    "grading_ruleset_id": "sha256:1a2b3c4d5e6f..."
   },
   "items": [
     {
@@ -1675,7 +1774,7 @@ distinguishable from "no samples document was ever named" (see
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
-| `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release"}`, exactly as `klt version --format json` reports them — see "Which build graded this" above for the two groups of fields it deliberately omits. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
+| `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release", "grading_ruleset_id"}`, exactly as `klt version --format json` reports them — see "Which build graded this" and "Identifying the grading build" above. `grading_ruleset_id` (issue #2216) is a content hash identifying the grading code, distinct from `git_commit`/`git_tag`. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `items`         | array\<object\>      | One entry per T1 checklist item (per partition, for `mixed-signal`), then one entry per T2-T4 ladder row. |
 
 #### `items[]` entries
@@ -1880,7 +1979,8 @@ under `3` as it did under `2`; only `blocking_item` moved.
     "git_commit": "0123456789abcdef0123456789abcdef01234567",
     "git_tag": null,
     "dirty": false,
-    "is_release": false
+    "is_release": false,
+    "grading_ruleset_id": "sha256:1a2b3c4d5e6f..."
   },
   "blocks": [
     {
@@ -2102,6 +2202,14 @@ Fleet roll-up mode (`--fleet`):
 | `1`       | The fleet manifest file was missing/unreadable/not valid JSON/not a JSON object, its `blocks` field was missing/not a non-empty JSON array, a `blocks[]` entry was neither a string nor a JSON object (or a string entry couldn't be read/parsed), a resolved block manifest had no non-empty `block` name, a block manifest was structurally invalid (see "Tier-verdict report mode" above), or `--fleet` was combined with `<file>...`/`--manifest`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `not_t1_count > 0` — ran successfully, but at least one block's tier is not `"T1"`. |
+
+`--describe-grader` mode:
+
+| Exit code | Meaning                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `0`       | Always, once argument validation passes — purely informational, cannot fail. |
+| `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`. |
+| `2`       | Usage error (bad `--format` value) — from argparse.                      |
 
 **Gate on `status`/`tier`/`not_t1_count`, not the exit code, in every mode
 above.** These codes are additive — a future release may add a new one

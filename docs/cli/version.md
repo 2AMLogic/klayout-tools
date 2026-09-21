@@ -46,6 +46,7 @@ a release.
   "git_tag": null,
   "dirty": false,
   "is_release": false,
+  "grading_ruleset_id": "sha256:1a2b3c4d5e6f...",
   "klayout_version": "0.30.12",
   "klayout_version_expected": "0.30.10"
 }
@@ -66,6 +67,19 @@ a release.
   release build, `false` for a confirmed non-release build, `null` when the
   question is unanswerable. A consumer gating on "this is a release" must
   require `is_release === true`; `null` is not a weaker `true`.
+- `grading_ruleset_id` (issue #2216) — **a `klt` version string alone does
+  not identify the grading build.** Three installs can report the exact same
+  `version`/`git_commit` yet grade a `klt signoff --manifest`/`--fleet`
+  tier-verdict report by different rules — a registry wheel built from a
+  release tag, a `pip install git+...@<tag>` snapshot of that same tag, and a
+  full-repo checkout that has moved past the tag on `main`. This field is a
+  `sha256:`-prefixed content hash of the shipped `signoff.py` grading module:
+  identical between two installs of byte-identical grading code regardless
+  of how each was installed, and different whenever the grading logic
+  changes — see [`signoff.md`'s "Identifying the grading
+  build"](signoff.md#identifying-the-grading-build) for the full mechanism,
+  including `klt signoff --describe-grader`. `null` only if this install's
+  `signoff.py` cannot be read at all (never fabricated).
 - `klayout_version` (issue #1490) — the KLayout engine actually resolved
   into this process (`klayout.__version__`, same value as
   `provenance.klayout_version`), or `null` if unresolvable.

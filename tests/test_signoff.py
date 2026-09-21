@@ -6267,12 +6267,17 @@ def test_tier_report_build_block_matches_klt_version(capsys):
             "git_tag",
             "dirty",
             "is_release",
+            "grading_ruleset_id",
         )
     }
     # `klt version`'s own schema_version and the KLayout-engine fields are
     # deliberately not echoed -- see signoff._BUILD_IDENTITY_FIELDS.
     assert "schema_version" not in result["build"]
     assert "klayout_version" not in result["build"]
+    # Issue #2216: unlike the KLayout-engine fields, this one *is* echoed --
+    # it identifies the grading rules that produced this report.
+    assert result["build"]["grading_ruleset_id"] == version_json["grading_ruleset_id"]
+    assert result["build"]["grading_ruleset_id"].startswith("sha256:")
 
 
 def test_fleet_report_carries_the_same_build_block_and_inherits_the_refusal(
@@ -6330,6 +6335,102 @@ def test_cli_text_output_names_the_build_and_the_ungradeable_rows(tmp_path, caps
     assert "not graded by this build" in out
     assert f"reason: {signoff_module._REASON_UNGRADEABLE_BY_BUILD}" in out
     assert f"build: klt {build_tier_report(_manifest())['build']['version']}" in out
+
+
+# --------------------------------------------------------------------------- #
+# `--describe-grader` (issue #2216): enumerate which T1 item ids this build
+# has grading rules for, and its grading-code content hash, without reading
+# a manifest or running any check.
+# --------------------------------------------------------------------------- #
+
+
+def test_describe_grader_enumerates_what_the_build_actually_grades():
+    """AC: the enumerated ids match what `_is_graded_by_build` actually
+    reports per item on a real tier report."""
+    result = signoff_module.describe_grader()
+
+    build_item_ids = signoff_module._build_t1_item_ids()
+    assert result["graded_t1_item_ids"] == sorted(build_item_ids)
+
+    tier_report = build_tier_report(_manifest())
+    graded_by_report = {
+        item["id"]
+        for item in tier_report["items"]
+        if item["id"] is not None and item.get("graded_by_build", True)
+    }
+    assert graded_by_report == set(result["graded_t1_item_ids"])
+
+
+def test_describe_grader_shape():
+    result = signoff_module.describe_grader()
+    assert set(result) == {
+        "schema_version",
+        "version",
+        "grading_ruleset_id",
+        "source_doc",
+        "graded_t1_item_ids",
+    }
+    assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
+    assert result["grading_ruleset_id"].startswith("sha256:")
+    assert result["source_doc"] == "docs/design-evidence-tiers.md"
+    assert result["graded_t1_item_ids"] == sorted(result["graded_t1_item_ids"])
+
+
+def test_describe_grader_reports_none_when_the_shipped_doc_is_unreadable(
+    monkeypatch,
+):
+    """Never fabricate a claim this build cannot substantiate -- mirrors
+    `_is_graded_by_build`'s own "unreadable shipped doc" fallback."""
+    monkeypatch.setattr(signoff_module, "_build_t1_item_ids", lambda: None)
+    result = signoff_module.describe_grader()
+    assert result["graded_t1_item_ids"] is None
+
+
+def test_describe_grader_matches_klt_versions_grading_ruleset_id(capsys):
+    """The two entry points (`klt version --format json` and `klt signoff
+    --describe-grader`) must never disagree about which build is running."""
+    assert main(["version", "--format", "json"]) == 0
+    version_json = json.loads(capsys.readouterr().out)
+
+    result = signoff_module.describe_grader()
+    assert result["grading_ruleset_id"] == version_json["grading_ruleset_id"]
+    assert result["version"] == version_json["version"]
+
+
+def test_cli_describe_grader_json(capsys):
+    assert main(["signoff", "--describe-grader", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == signoff_module.describe_grader()
+
+
+def test_cli_describe_grader_text(capsys):
+    assert main(["signoff", "--describe-grader"]) == 0
+    out = capsys.readouterr().out
+    result = signoff_module.describe_grader()
+    assert f"klt {result['version']}" in out
+    assert result["grading_ruleset_id"] in out
+    assert "11" in out  # a shipped item id must appear somewhere in the list
+
+
+def test_cli_describe_grader_refuses_manifest():
+    assert main(["signoff", "--describe-grader", "--manifest", "manifest.json"]) == 1
+
+
+def test_cli_describe_grader_refuses_fleet():
+    assert main(["signoff", "--describe-grader", "--fleet", "fleet.json"]) == 1
+
+
+def test_cli_describe_grader_refuses_files(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    assert main(["signoff", "--describe-grader", drc_path]) == 1
+
+
+def test_cli_describe_grader_refuses_tiers_doc(tmp_path):
+    doc_copy = tmp_path / "vendored.md"
+    doc_copy.write_text(
+        signoff_module.DEFAULT_DOC_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    assert main(["signoff", "--describe-grader", "--tiers-doc", str(doc_copy)]) == 1
 
 
 # --------------------------------------------------------------------------- #
