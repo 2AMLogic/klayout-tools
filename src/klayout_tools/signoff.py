@@ -1191,9 +1191,15 @@ _REASON_STALE_EVIDENCE = "stale_evidence"
 #: so the remedy is different -- "re-produce this evidence with a producer
 #: that records provenance" (or unpin `content_hash` for this entry), not
 #: "re-run the same producer again". A `klt yield` envelope is unaffected by
-#: this distinction: :func:`_yield_samples_content_hash` always supplies a
-#: computed fallback hash when its samples file exists, so its
-#: ``resolution["content_hash"]`` is never ``None`` for that reason alone.
+#: this distinction: :func:`_yield_samples_content_hash` supplies a computed
+#: fallback hash whenever its samples document can be found -- resolved
+#: relative to the report file's own directory first, falling back to this
+#: process's own working directory for compatibility (issue #2197) -- so its
+#: ``resolution["content_hash"]`` is ``None`` for that reason alone only when
+#: the named document could not be located in *either* place (see
+#: ``resolution["content_hash_unresolved"]``, which then names what was
+#: named and where this looked, so that case stays distinguishable from an
+#: envelope that recorded no samples document at all).
 _REASON_UNVERIFIABLE_PROVENANCE = "unverifiable_provenance"
 _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
 #: Issue #825 (Phase 1 of epic #706): a command-backed evidence entry's
@@ -3982,9 +3988,43 @@ def _normalize_evidence_parts(raw: Any) -> list[dict[str, Any]] | None:
     return None if spec is None else [spec]
 
 
+def _resolve_relative_to_report(path: str, spec: dict[str, Any]) -> str | None:
+    """Resolve ``path`` -- a document a **file-backed** evidence entry's own
+    report *names* (not one the manifest names) -- against that report
+    file's own directory, the way a reader who opened the report and
+    followed its reference would.
+
+    Returns ``None`` when there is no report file to be relative to (a
+    command-backed ``spec`` -- :func:`_resolve_relative_to_spec` already
+    resolves such a reference against the producing subprocess's own
+    ``cwd``, the command-backed analogue of "the report's own directory";
+    or a file-backed ``spec`` with no ``file`` recorded), or when ``path``
+    is already absolute (nothing to rebase).
+
+    Issue #2197: `klt yield`'s JSON report records the samples document path
+    exactly as it was invoked with -- the ordinary ``klt yield
+    mc-samples.json`` run made from inside its own evidence directory
+    records ``"samples": "mc-samples.json"``, a path that resolves only from
+    that directory. Grading a manifest from the repo root -- the only place
+    a manifest with repo-relative evidence paths *can* be graded from --
+    previously resolved that path against this process's own cwd instead,
+    silently failing to find it. Resolving it against the report file's own
+    directory first -- see :func:`_yield_samples_content_hash` -- fixes that
+    without requiring the manifest or the `klt yield` invocation to change.
+    """
+    if os.path.isabs(path):
+        return path
+    if spec.get("kind") != "file":
+        return None
+    file = spec.get("file")
+    if not file:
+        return None
+    return os.path.join(os.path.dirname(file), path)
+
+
 def _yield_samples_content_hash(
     envelope: dict[str, Any], spec: dict[str, Any]
-) -> str | None:
+) -> tuple[str | None, dict[str, Any] | None]:
     """The citation's ``content_hash`` for a ``klt yield`` evidence entry
     (issue #870, Phase 2a of epic #706).
 
@@ -3998,17 +4038,29 @@ def _yield_samples_content_hash(
     helper every other kind's own `provenance` block already uses
     (``_provenance.py``).
 
-    The path is resolved relative to ``spec["cwd"]`` for a command-backed
-    entry -- the same directory the subprocess that produced ``samples``
-    ran in, so a relative path in the report resolves exactly as it did for
-    that subprocess -- or relative to this process's own current working
-    directory for a file-backed entry, matching how the evidence *file*
-    itself is resolved (no recorded cwd exists for a pre-existing report).
+    **Resolution order** (issue #2197): for a **file-backed** entry, the
+    path is tried relative to the report file's own directory first (the way
+    a reader opening the report and following its reference would --
+    :func:`_resolve_relative_to_report`), then, if that does not exist,
+    relative to this process's own current working directory (the previous,
+    pre-#2197 behaviour, kept as a compatibility fallback for a samples
+    document that genuinely lives elsewhere). For a **command-backed**
+    entry, the path is resolved relative to ``spec["cwd"]`` -- the same
+    directory the subprocess that produced ``samples`` ran in, so a relative
+    path in the report resolves exactly as it did for that subprocess, and
+    is unaffected by this issue (that directory is recorded independently of
+    where `klt signoff` itself is invoked from).
 
-    Returns ``None`` when the envelope names no ``samples`` document (or it
-    isn't a string), or the referenced file can't be hashed (missing,
+    Returns ``(content_hash, unresolved)``. ``content_hash`` is ``None``
+    when the envelope names no ``samples`` document (or it isn't a string),
+    or when neither candidate location could be hashed (missing,
     unreadable) -- exactly mirroring ``sha256_file``'s own "unhashable
-    input" fallback, never raising.
+    input" fallback, never raising. ``unresolved`` is ``None`` unless a
+    ``samples`` document *was* named but could not be found anywhere tried
+    -- populated in that one case so a reader (and :func:`_citation`) can
+    tell "this input could not be verified" apart from "no hash was ever
+    recorded", per issue #2197 -- previously both collapsed into the same
+    silent ``content_hash: null``.
 
     Follow-up reconciliation: if a later #710 phase adds its own
     ``provenance.input.content_hash`` to `klt yield`'s JSON shape, the
@@ -4017,9 +4069,22 @@ def _yield_samples_content_hash(
     """
     samples = envelope.get("samples")
     if not isinstance(samples, str):
-        return None
-    digest = sha256_file(_resolve_relative_to_spec(samples, spec))
-    return f"sha256:{digest}" if digest is not None else None
+        return None, None
+
+    candidates: list[str] = []
+    report_relative = _resolve_relative_to_report(samples, spec)
+    if report_relative is not None:
+        candidates.append(report_relative)
+    cwd_relative = _resolve_relative_to_spec(samples, spec)
+    if cwd_relative not in candidates:
+        candidates.append(cwd_relative)
+
+    for candidate in candidates:
+        digest = sha256_file(candidate)
+        if digest is not None:
+            return f"sha256:{digest}", None
+
+    return None, {"samples": samples, "searched": candidates}
 
 
 def _grade_evidence(
@@ -4174,10 +4239,13 @@ def _resolve_evidence(
     deliberately does *not* itself reject, leaving that to the caller's own
     grading rules), ``file``/``command`` (exactly one of which is non-``None``,
     per the citation contract), ``exit_status`` (observed for a
-    command-backed entry, inferred ``0`` for a file-backed one), and
+    command-backed entry, inferred ``0`` for a file-backed one),
     ``content_hash`` (the resolved *actual* input hash, including `klt
     yield`'s samples-document fallback -- never compared against the spec's
-    pin here; that stays the caller's decision).
+    pin here; that stays the caller's decision), and
+    ``content_hash_unresolved`` (``None`` unless `klt yield`'s
+    samples-document fallback named a document it could not find anywhere it
+    looked -- issue #2197; see :func:`_yield_samples_content_hash`).
     """
     if spec["kind"] == "command":
         command = spec["command"]
@@ -4234,12 +4302,15 @@ def _resolve_evidence(
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
+    content_hash_unresolved: dict[str, Any] | None = None
     if actual_hash is None and check_kind == "yield":
         # klt yield's current JSON shape (issue #816) carries no
         # `provenance` block of its own -- see this module's "Statistical-
         # evidence binding" docstring section and
         # :func:`_yield_samples_content_hash`.
-        actual_hash = _yield_samples_content_hash(envelope, spec)
+        actual_hash, content_hash_unresolved = _yield_samples_content_hash(
+            envelope, spec
+        )
 
     return (
         {
@@ -4250,6 +4321,7 @@ def _resolve_evidence(
             "command": command_label,
             "exit_status": exit_status,
             "content_hash": actual_hash,
+            "content_hash_unresolved": content_hash_unresolved,
         },
         None,
     )
@@ -4294,6 +4366,19 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     partial = _partial_coverage_disclosure(resolution["envelope"])
     if partial is not None:
         citation["coverage_qualification"] = partial
+    # Issue #2197: a `yield` citation whose report named a samples document
+    # that could not be found anywhere this module looked (report-relative,
+    # then cwd-relative) carries that fact explicitly, so `content_hash:
+    # null` here reads as "this input could not be verified" rather than
+    # being indistinguishable from any other benign reason a hash might be
+    # absent. Present only in that one case -- never when the report simply
+    # named no samples document at all, and never consulted by any grading
+    # rule (an unpinned manifest entry still renders `"met"`; a pinned one
+    # already renders `"unmet"`/`unverifiable_provenance` via the
+    # `content_hash` mismatch check above `_citation` is only reached past).
+    content_hash_unresolved = resolution.get("content_hash_unresolved")
+    if content_hash_unresolved is not None:
+        citation["content_hash_unresolved"] = content_hash_unresolved
     return citation
 
 
@@ -4308,9 +4393,11 @@ def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
     a command-backed entry, this process's own cwd otherwise.
 
     Shared by :func:`_yield_samples_content_hash` (the `klt yield` samples
-    document) and :func:`_erc_supply_spec` (the `klt erc` spec document) --
-    both are "the envelope points at a second document this module has to
-    read, because the envelope itself does not carry what we need".
+    document -- as the compatibility fallback tried *after*
+    :func:`_resolve_relative_to_report`, per issue #2197) and
+    :func:`_erc_supply_spec` (the `klt erc` spec document) -- both are "the
+    envelope points at a second document this module has to read, because
+    the envelope itself does not carry what we need".
     """
     cwd = spec.get("cwd") if spec.get("kind") == "command" else None
     if cwd and not os.path.isabs(path):
