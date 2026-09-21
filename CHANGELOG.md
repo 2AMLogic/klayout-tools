@@ -14,6 +14,30 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2223, additive — **no** `schema_version` bump on `klt equiv`):
+  an optional Verilator fast-path backend for `klt equiv`'s
+  counterexample/vector replay, selected by `request.sim_backend` (or
+  `--sim-backend`): `"iverilog"` (default, **canonical for evidence**,
+  unchanged), `"verilator"` (replays via `verilator --binary` — an
+  interpreted event loop replaced by compiled C++, ~6.4× faster on a
+  downstream long-vector bring-up and widening with vector length), or
+  `"both"`. Under `"both"` the two backends **must agree**: a differing
+  confirmation verdict, or a replayed-output difference the declared
+  2-state/4-state modelling gap does not explain, is reported as an
+  error-severity `sim_backend_disagreement` diagnostic with
+  `confirmed_by_simulation` reset to `null` and `status` downgraded to
+  `"inconclusive"` (exit `4`) — never a pass, and never silently resolved
+  in favour of one backend. New additive response fields: top-level
+  `sim_backend`, `counterexample.simulation.four_state`, and
+  `counterexample.simulation_cross_check` (the second backend's own run
+  plus `agreement` and per-signal `output_mismatches`). With no `verilator`
+  installed nothing is fabricated: the Verilator-only backend degrades to
+  the same `simulation_unavailable` warning a missing `iverilog` already
+  produces (it never silently runs `iverilog` and labels the result
+  Verilator's), and `"both"` records `agreement: "unavailable"` while the
+  canonical evidence stays exactly what `sim_backend: "iverilog"` produces.
+  See [`docs/cli/equiv.md`](docs/cli/equiv.md)'s "Replay backend" section.
+
 - **Added** (#2216, additive — **no** `schema_version` bump on `klt version`
   or either `klt signoff` doc-parsing mode): `klt version --format json` now
   reports `grading_ruleset_id`, a `sha256:`-prefixed content hash of the
