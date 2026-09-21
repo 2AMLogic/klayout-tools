@@ -863,6 +863,26 @@ STA_SINGLE_CORNER_CLEAN_ENVELOPE = {
     },
 }
 
+#: A `klt sta` response as written *before* `timing_status` existed (issues
+#: #1865/#1915 added it): the single-corner shape with `geometry_source` --
+#: `_classify`'s primary marker for this kind, present since the verb shipped
+#: (#1959) -- but neither of the shape discriminators it is paired with
+#: (`timing_status`, or a `corners` list). Valid output from an
+#: already-stable verb at the time, and (since committed evidence is
+#: append-only) still sitting in canary manifests today: issue #2198's
+#: version-skew case.
+STA_PRE_TIMING_STATUS_ENVELOPE = {
+    **{
+        field: value
+        for field, value in STA_SINGLE_CORNER_CLEAN_ENVELOPE.items()
+        if field != "timing_status"
+    },
+    "provenance": {
+        **STA_SINGLE_CORNER_CLEAN_ENVELOPE["provenance"],
+        "klt_version": "0.4.0",
+    },
+}
+
 #: OpenSTA's unconstrained-design sentinel (`1e+39`) restated -- a *positive*
 #: number, so a naive `worst_slack_ns >= 0` rule would report "timing closed"
 #: on a design that was never timed (docs/cli/sta.md's `timing_status`).
@@ -7177,6 +7197,105 @@ def test_place_and_route_envelope_is_never_classified_as_sta(tmp_path):
     assert result["checks"][0]["passed"] is True  # `status: "ok"` -- it ran
     assert result["checks"][0]["detail"]["power_pdn"] is True
     assert result["checks"][0]["detail"]["strap_layers"] == ["met1", "met4"]
+
+
+# --------------------------------------------------------------------------- #
+# Version skew vs. "not a klt artifact" (issue #2198)
+#
+# `_classify` recognises `sta` by a *pair* of markers -- `geometry_source`
+# plus `timing_status`/`corners` -- so a response carrying the primary marker
+# alone fails loudly rather than being graded as timing evidence. But
+# `timing_status` is additive (#1865/#1915), so that "failure" is the shape
+# every pre-#1865 `klt sta` response has, and committed evidence is
+# append-only: the stock only grows. These tests pin that such an envelope is
+# still refused, but reported as `envelope_version_skew` -- distinguishable
+# from a genuinely foreign document, which keeps rendering
+# `unrecognized_envelope`.
+# --------------------------------------------------------------------------- #
+
+
+def test_pre_timing_status_sta_evidence_renders_envelope_version_skew(tmp_path):
+    """The headline case: a `klt sta` response written before
+    `timing_status` existed carries `geometry_source` alone. It is not graded
+    as timing evidence -- but the manifest must say "evidence a newer grader
+    cannot read", not "no STA evidence"."""
+    sta_path = _write(tmp_path, "sta-0.4.0.json", STA_PRE_TIMING_STATUS_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": sta_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "unmet"
+    assert item_5["reason"] == "envelope_version_skew"
+    assert item_5["citation"] is None
+
+
+def test_envelope_version_skew_is_distinct_from_unrecognized_envelope(tmp_path):
+    """The whole point of the new reason: the two situations must not render
+    the same row. A genuinely foreign document is untouched by issue
+    #2198."""
+    skewed_path = _write(tmp_path, "sta-0.4.0.json", STA_PRE_TIMING_STATUS_ENVELOPE)
+    foreign_path = _write(tmp_path, "foreign.json", {"not": "an envelope"})
+
+    skewed = build_tier_report(_manifest(kind="digital", evidence={"5": skewed_path}))
+    foreign = build_tier_report(_manifest(kind="digital", evidence={"5": foreign_path}))
+
+    skewed_item = next(item for item in skewed["items"] if item["id"] == 5)
+    foreign_item = next(item for item in foreign["items"] if item["id"] == 5)
+    assert skewed_item["reason"] == "envelope_version_skew"
+    assert foreign_item["reason"] == "unrecognized_envelope"
+    assert skewed_item["reason"] != foreign_item["reason"]
+
+
+def test_pre_timing_status_sta_envelope_raises_naming_the_near_miss(tmp_path):
+    """Envelope-aggregation mode still refuses it (exit 1 via
+    `SignoffError`), but the message names the kind it nearly matched and the
+    fields it lacks -- something the unrecognised-shape raise structurally
+    cannot say about a foreign document."""
+    sta_path = _write(tmp_path, "sta-0.4.0.json", STA_PRE_TIMING_STATUS_ENVELOPE)
+
+    with pytest.raises(SignoffError) as excinfo:
+        build_signoff([sta_path])
+
+    message = str(excinfo.value)
+    assert "sta" in message
+    assert "geometry_source" in message
+    assert "timing_status" in message
+    assert "corners" in message
+    # The near-miss raise is a SignoffError subclass, so every existing
+    # caller keeps its behavior; only callers that can act on the
+    # distinction catch it specifically.
+    assert isinstance(excinfo.value, signoff_module.EnvelopeVersionSkewError)
+    assert excinfo.value.kind == "sta"
+    assert excinfo.value.primary_field == "geometry_source"
+    assert excinfo.value.missing_fields == ("timing_status", "corners")
+
+
+def test_version_skew_is_never_graded_as_sta_evidence(tmp_path):
+    """Refusing to grade the primary marker alone is the behavior
+    `_classify`'s marker pair exists to produce -- issue #2198 changes how it
+    is *reported*, not whether it passes. This envelope reports clean timing
+    numbers (`worst_slack_ns: 0.41233`, zero violations); they must not
+    become a `met` item 5."""
+    sta_path = _write(tmp_path, "sta-0.4.0.json", STA_PRE_TIMING_STATUS_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"5": sta_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] != "met"
+    assert result["tier"] != "T1"
+
+
+def test_place_and_route_envelope_is_not_reported_as_an_sta_near_miss(tmp_path):
+    """A kind whose markers are *both* original (`stage_reached`+`power`) has
+    no version-skew shape: the P&R response carries no `geometry_source`, and
+    matches its own branch long before the near-miss check runs. It must keep
+    classifying as `place-and-route`, not as a skewed `sta`."""
+    pnr_path = _write(tmp_path, "pnr.json", PLACE_AND_ROUTE_ENVELOPE)
+
+    result = build_signoff([pnr_path])
+
+    assert result["checks"][0]["kind"] == "place-and-route"
+    assert "geometry_source" not in PLACE_AND_ROUTE_ENVELOPE
 
 
 def test_place_and_route_citation_cannot_satisfy_the_timing_item(tmp_path):

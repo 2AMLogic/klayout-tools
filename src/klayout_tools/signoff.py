@@ -737,7 +737,16 @@ import types
 from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
-from typing import Any, TypedDict, Union, cast, get_args, get_origin, get_type_hints
+from typing import (
+    Any,
+    NoReturn,
+    TypedDict,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
 from .build_identity import version_report
@@ -1177,6 +1186,24 @@ _REASON_CHECK_ERRORED = "check_errored"
 _REASON_CHECK_FAILED = "check_failed"
 _REASON_STALE_EVIDENCE = "stale_evidence"
 
+#: Issue #2198: the resolved evidence *is* a `klt` envelope -- it carries a
+#: kind's **primary** marker (see :data:`_NEAR_MISS_MARKERS`) -- but not the
+#: shape discriminator :func:`_classify` pairs that marker with, because the
+#: discriminator was added to the verb's response *after* this artifact was
+#: written. Deliberately distinct from
+#: :data:`_REASON_UNRECOGNIZED_ENVELOPE`, which collapses three unrelated
+#: situations already ("not a JSON object", "matches no recognised shape",
+#: "matches one but is malformed for it") and, without this reason, a fourth:
+#: a well-formed response from an older `klt`. Committed evidence is
+#: append-only by construction (``docs/design-evidence-tiers.md``,
+#: "Provenance hygiene in evidence records"), so the fleet's stock of
+#: envelopes written against older schemas only grows -- and every additive
+#: marker field silently converts some of it from "gradeable" to "looks like
+#: it isn't a `klt` file". The two remedies differ and the report must say
+#: which applies: "re-run this check under a newer `klt`" (version skew) vs.
+#: "this citation is wrong" (unrecognised).
+_REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
+
 #: Issue #2182: a manifest entry pins ``content_hash``, but the resolved
 #: envelope carries **no input hash at all** -- ``resolution["content_hash"]
 #: is None`` -- rather than one that mismatches the pin. Two ways this
@@ -1401,6 +1428,39 @@ class SignoffError(Exception):
     The CLI turns this into a clean stderr message + exit code 1, never a
     traceback -- matching every other ``klt`` verb's error contract.
     """
+
+
+class EnvelopeVersionSkewError(SignoffError):
+    """Raised by :func:`_classify` for an envelope that carries a kind's
+    **primary** marker but none of the shape discriminators that marker is
+    paired with (issue #2198) -- the shape a `klt` response written before
+    the discriminator field existed has.
+
+    A :class:`SignoffError` subclass on purpose: every existing caller keeps
+    treating it exactly as it treated the unrecognised-shape raise (the CLI
+    still exits 1 with a clean message), while a caller that *can* act on
+    the distinction -- :func:`_resolve_evidence`, which renders
+    :data:`_REASON_ENVELOPE_VERSION_SKEW` rather than
+    :data:`_REASON_UNRECOGNIZED_ENVELOPE` -- catches it first.
+
+    ``kind``/``primary_field``/``missing_fields`` name the near-miss, so the
+    message can say which verb's response this almost is and which field it
+    lacks -- something the unrecognised-shape raise structurally cannot say
+    about a genuinely foreign document.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str,
+        primary_field: str,
+        missing_fields: tuple[str, ...],
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.primary_field = primary_field
+        self.missing_fields = missing_fields
 
 
 def build_signoff(sources: list[str]) -> dict[str, Any]:
@@ -1995,6 +2055,79 @@ def _validate_envelope(kind: str, envelope: Mapping[str, Any], source: str) -> N
             )
 
 
+#: Issue #2198: the kinds :func:`_classify` recognises by a **pair** of
+#: markers -- a primary marker that is unique to one verb's response, plus a
+#: shape discriminator that was added to that response later. One entry per
+#: such kind: ``(kind, primary field, the discriminators any one of which
+#: completes the match)``.
+#:
+#: An envelope carrying the primary marker but none of the discriminators is
+#: still refused (it is *not* graded as evidence of that kind -- the whole
+#: point of pairing the markers), but it is refused as
+#: :class:`EnvelopeVersionSkewError` /
+#: :data:`_REASON_ENVELOPE_VERSION_SKEW` rather than as a generic
+#: unrecognised shape, because that is overwhelmingly what it is: a
+#: well-formed response from a `klt` that predates the discriminator.
+#:
+#: ``sta`` is the only such kind today. Its primary marker,
+#: ``geometry_source``, shipped with the verb (#1959); its ``timing_status``
+#: discriminator is additive (#1865/#1915), so every `klt sta` response
+#: committed before that -- valid output from an already-stable verb -- has
+#: exactly this shape. A kind whose markers are *both* original (e.g.
+#: ``place-and-route``'s ``stage_reached``+``power``) has no version-skew
+#: shape and belongs nowhere in this table: it is matched by its own branch
+#: in :func:`_classify` long before the near-miss check runs.
+_NEAR_MISS_MARKERS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("sta", "geometry_source", ("timing_status", "corners")),
+)
+
+
+def _raise_unclassified(envelope: Mapping[str, Any], source: str) -> NoReturn:
+    """Refuse an envelope no kind's full marker set matched, as either
+    version skew or an unrecognised shape (issue #2198).
+
+    Called only from :func:`_classify`'s final ``else``, so a response that
+    legitimately classifies as some *other* kind can never be reported as a
+    near-miss. Separate from :func:`_classify` so that near-miss detection
+    does not add a branch to that already-branchy chain.
+    """
+    for kind, primary_field, discriminators in _NEAR_MISS_MARKERS:
+        if isinstance(envelope.get(primary_field), str):
+            missing = ", ".join(f"'{field}'" for field in discriminators)
+            raise EnvelopeVersionSkewError(
+                f"envelope '{source}' carries klt {kind}'s "
+                f"'{primary_field}' marker but none of the fields that "
+                f"identify its shape ({missing}) -- it looks like a klt "
+                f"{kind} response written before those fields existed, so "
+                f"it is refused rather than graded as {kind} evidence. "
+                "Re-run the check with the current klt to produce a "
+                "gradeable envelope (see docs/cli/signoff.md).",
+                kind=kind,
+                primary_field=primary_field,
+                missing_fields=discriminators,
+            )
+
+    raise SignoffError(
+        f"envelope '{source}' has an unrecognized shape (schema_version="
+        f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
+        "yield/pex/power/sta/functional-verification/erc/place-and-route "
+        "success or error envelope, and not a generic evidence envelope "
+        '("kind": "generic") either -- klt signoff aggregates those eleven '
+        "verbs' output plus opt-in generic evidence today (see "
+        "docs/cli/signoff.md)"
+    )
+
+
+def _classify_failure_reason(error: SignoffError) -> str:
+    """The ``_REASON_*`` value a :func:`_classify` refusal renders as in
+    ``--manifest`` grading (issue #2198): version skew is reported
+    distinguishably from a genuinely unrecognised envelope, since the remedy
+    ("re-run under a newer klt") is not the same."""
+    if isinstance(error, EnvelopeVersionSkewError):
+        return _REASON_ENVELOPE_VERSION_SKEW
+    return _REASON_UNRECOGNIZED_ENVELOPE
+
+
 def _classify(envelope: Mapping[str, Any], source: str) -> str:
     """Detect an envelope's kind from its own structural shape. Raises
     :class:`SignoffError` for an envelope that matches none of them.
@@ -2020,6 +2153,17 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
     grading turns it into an explicit ``"unrecognized_envelope"`` item (see
     :func:`_grade_evidence`), and :func:`build_signoff` surfaces it as the
     CLI's ordinary clean error exit.
+
+    Version skew is distinguished from a genuinely foreign document (issue
+    #2198): an envelope carrying a kind's *primary* marker but none of the
+    discriminators it is paired with -- the shape a response written before
+    an additive discriminator existed has -- raises
+    :class:`EnvelopeVersionSkewError` (a :class:`SignoffError`), which
+    ``--manifest`` grading renders as
+    ``reason: "envelope_version_skew"`` instead. It is refused either way;
+    what changes is that the report can now say "re-run this under a newer
+    `klt`" rather than "this is not a `klt` artifact". See
+    :data:`_NEAR_MISS_MARKERS` for which kinds have such a shape.
     """
     if "schema_version" not in envelope:
         raise SignoffError(
@@ -2141,15 +2285,13 @@ def _classify(envelope: Mapping[str, Any], source: str) -> str:
         kind = "place-and-route"
 
     else:
-        raise SignoffError(
-            f"envelope '{source}' has an unrecognized shape (schema_version="
-            f"{envelope.get('schema_version')!r}): not a klt drc/lvs/extract/sim/"
-            "yield/pex/power/sta/functional-verification/erc/place-and-route "
-            "success or error envelope, and not a generic evidence envelope "
-            '("kind": "generic") either -- klt signoff aggregates those eleven '
-            "verbs' output plus opt-in generic evidence today (see "
-            "docs/cli/signoff.md)"
-        )
+        # Issue #2198: refused either as version skew (a kind's primary
+        # marker with none of the discriminators it is paired with -- the
+        # shape a response written before the discriminator existed has) or
+        # as a genuinely unrecognised shape. Never graded as evidence either
+        # way; the distinction is only in what the report says to do about
+        # it. See :func:`_raise_unclassified`.
+        _raise_unclassified(envelope, source)
 
     # Issue #2033: recognised is not the same as well-formed -- see
     # :func:`_validate_envelope` and this module's "Typed, runtime-validated
@@ -3637,6 +3779,16 @@ def build_tier_report(
     - ``"unrecognized_envelope"`` -- the resolved evidence parsed as JSON
       but is not a JSON object, or is a JSON object that does not match any
       recognised ``klt`` envelope shape (:func:`_classify`).
+    - ``"envelope_version_skew"`` (issue #2198) -- the resolved evidence is
+      a ``klt`` envelope carrying a kind's *primary* marker (today:
+      ``sta``'s ``geometry_source``) but none of the shape discriminators
+      that marker is paired with (``timing_status``/``corners``), which is
+      the shape a response written before those additive fields existed has.
+      Refused exactly like an unrecognised shape -- it is never graded as
+      that kind's evidence -- but reported distinguishably, because the
+      remedy differs: re-run the check under the current ``klt``, rather
+      than fix a citation that points at the wrong artifact. See
+      :data:`_NEAR_MISS_MARKERS`.
     - ``"command_failed"`` -- a command-backed entry's subprocess could not
       be launched, timed out, or exited nonzero *without* leaving a
       parseable envelope on stdout. A nonzero exit whose stdout *does* parse
@@ -4296,8 +4448,12 @@ def _resolve_evidence(
 
     try:
         check_kind = _classify(envelope, source_label)
-    except SignoffError:
-        return None, _REASON_UNRECOGNIZED_ENVELOPE
+    except SignoffError as exc:
+        # Issue #2198: an envelope from a `klt` predating a marker field
+        # `_classify` now requires is refused like any unrecognised shape,
+        # but reported distinguishably -- the remedy ("re-run under a newer
+        # klt") is not the remedy for a foreign document.
+        return None, _classify_failure_reason(exc)
 
     provenance = envelope.get("provenance") or {}
     input_block = provenance.get("input") or {}
@@ -4770,7 +4926,8 @@ def _grade_power_delivery(
     unreadable, unrecognised, an ``error`` envelope, or stale (or
     unverifiable, issue #2182) against its own pinned ``content_hash``
     renders that part's own ordinary reason
-    (``unreadable_evidence``/``unrecognized_envelope``/``check_errored``/
+    (``unreadable_evidence``/``unrecognized_envelope``/
+    ``envelope_version_skew``/``check_errored``/
     ``stale_evidence``/``unverifiable_provenance``), never a
     power-delivery-specific one. Item-specific
     reasons (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
