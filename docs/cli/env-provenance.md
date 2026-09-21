@@ -7,6 +7,7 @@ field (issue #1254).
 ```
 klt env-provenance emit [--path LABEL=PATH ...] [--format text|json]
 klt env-provenance scan FILE [FILE ...] [--format text|json]
+klt env-provenance lint-envelope FILE [FILE ...] [--allow-prefix PREFIX ...] [--format text|json]
 ```
 
 The rule this implements is stated in
@@ -151,6 +152,91 @@ Exit codes: `0` clean, `3` the scan ran fine and found leaks (a successful run
 with findings, mirroring [`klt drc`](drc.md)'s exit `3`), `1` a file could not
 be read (never a silent "clean"), `2` argparse usage error.
 
+## `lint-envelope` (issue #2224)
+
+Reports **any** absolute host path in a committed JSON envelope, naming the
+offending *field*:
+
+```
+$ klt env-provenance lint-envelope build/gcd.pnr.json
+build/gcd.pnr.json: def_path: /Users/someone/work/.klt/place-and-route/gcd.def
+build/gcd.pnr.json: gds_path: /Users/someone/work/.klt/place-and-route/gcd.gds
+violations: 2 absolute path(s) in 1 file(s)
+replace each absolute host path with a repo-relative reference (…) or with a content hash (…)
+```
+
+```json
+{
+  "schema_version": 1,
+  "status": "violations",
+  "finding_count": 2,
+  "recommendation": "replace each absolute host path with a repo-relative reference …",
+  "files": [
+    {
+      "file": "build/gcd.pnr.json",
+      "findings": [{ "field": "def_path", "match": "/Users/…/gcd.def" }]
+    }
+  ]
+}
+```
+
+### Why this is not `scan`
+
+The two answer different questions and neither subsumes the other:
+
+| | `scan` | `lint-envelope` |
+|---|---|---|
+| Question | "does this record **name a person or machine**?" | "does every reference in it **still resolve on another checkout**?" |
+| Input | arbitrary text (Markdown records, logs) | JSON only (parsed, not grepped) |
+| Matches | home-*shaped* paths + supplied identifiers | **any** absolute path, POSIX or Windows |
+| Locates a finding by | line number | dotted field path (`macros.1.lef`) |
+| Exit `3` means | a disclosure leak | an unreproducible reference |
+
+`/opt/build/out.def` and `/tmp/run-3/top.gds` name nobody — `scan` is right to
+ignore them — and still make a regenerated artifact byte-differ on any other
+machine. That is the failure mode behind 2AMLogic/gf180-surge#39, where a
+committed corpus-scan artifact embedded `/Users/<user>/…` provenance and
+regeneration on another checkout produced different bytes. The dotted field
+path matters for the same reason: the remedy is field-specific (retype to
+`{path, scope}`, or drop the path in favour of a content hash), so a line
+number is not actionable on a one-line JSON document.
+
+### Rules
+
+- **Two components minimum.** `/Users/rob/x` and `/opt/build/out.def` are
+  findings; a lone `/` or a `/VDD`-style hierarchical net name is not.
+- **URLs are excised before scanning.** `https://example.com/cli/drc.md`'s
+  path component is not a host filesystem path.
+- **`~/…` and `$PDK_ROOT/…` are not flagged.** Neither pins a machine: the
+  first names no user, the second is a token resolved at read time (the shape
+  [`klt synthesize`](synthesize.md) already writes into generated `.ys`
+  scripts).
+- **Mapping keys are scanned too.** A dict *keyed* by an absolute path leaks
+  exactly as thoroughly as one valued by it.
+- **`--allow-prefix` is explicit, never inferred from the environment.** Pass
+  `--allow-prefix /usr/share/pdk` for a genuinely machine-wide install root.
+  Reading `$PDK_ROOT` instead would make the verdict depend on the linting
+  machine, which is exactly what a reproducibility lint cannot do. Prefixes
+  match on a path-component boundary, so `/opt/pdk` admits `/opt/pdk/sky130A/…`
+  but not `/opt/pdk-scratch/…`.
+
+Exit codes: `0` clean, `3` findings, `1` a file could not be read or is not
+valid JSON (never a silent "clean"), `2` argparse usage error.
+
+### Wiring it into a repo's CI
+
+Not wired into this repo's CI — same reasoning as `scan` (see "Non-goals"),
+and for a concrete second reason: this repo's own `examples/` tree still
+contains committed artifacts with absolute paths from the worktrees that
+generated them, so a blanket gate would fail on pre-existing records rather
+than on new ones. A downstream repo committing flow evidence should gate its
+*newly-added* records:
+
+```bash
+git diff --name-only --diff-filter=A origin/main...HEAD -- '*.json' \
+  | xargs -r klt env-provenance lint-envelope --allow-prefix "$PDK_ROOT"
+```
+
 ## Using it from a harness
 
 A Python harness should import the module rather than shell out — same
@@ -176,7 +262,8 @@ path netlist: sim/bandgap/bandgap.spice
 ```
 
 Also exported: `opaque_host_id()`, `repo_relative_path()`, `find_repo_root()`,
-`find_leaks()`, `scan_files()`, and `render_path_field()` (the same
+`find_leaks()`, `scan_files()`, `find_absolute_path_fields()`,
+`lint_envelope_files()`, and `render_path_field()` (the same
 per-field `{path, scope}` -> text rendering `render_text_lines()` uses
 internally, exported so a `--format text` renderer for a *different* command
 — e.g. `klt pex`/`klt sim`'s own `layout`/`netlist`/`reference_netlist`/
@@ -192,6 +279,11 @@ that formats its own records can use just the pieces it needs.
 - **Not a secret scanner.** `scan` looks for identifier-shaped paths in
   evidence records. It is not a credential scanner and is not a substitute for
   one.
-- **Not wired into this repo's CI.** `scan` is a tool a repo points at its own
-  newly-added records; deciding which paths to gate on (and what to do about
-  records that predate the rule) belongs to the repo doing the gating.
+- **Not wired into this repo's CI.** `scan` and `lint-envelope` are tools a
+  repo points at its own newly-added records; deciding which paths to gate on
+  (and what to do about records that predate the rule) belongs to the repo
+  doing the gating.
+- **`lint-envelope` does not rewrite anything.** It reports the field; the fix
+  (retype to `{path, scope}`, or drop the path for a content hash) is a
+  per-field contract decision — see
+  [`../json-contract.md`](../json-contract.md) → "Output-artifact path fields".

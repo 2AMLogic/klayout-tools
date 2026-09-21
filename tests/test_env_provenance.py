@@ -415,3 +415,183 @@ def test_cli_scan_missing_file_is_an_application_error(tmp_path, capsys):
 
 def test_cli_group_without_a_subcommand_reports_usage(capsys):
     assert main(["env-provenance"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# `klt env-provenance lint-envelope` (issue #2224): the reproducibility scan
+# --------------------------------------------------------------------------- #
+
+
+def _write_envelope(path, payload) -> str:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def test_lint_envelope_flags_an_injected_home_path_and_names_the_field():
+    """The negative control from issue #2224: an envelope carrying an
+    absolute `/Users/...` path fails the lint, and the finding names the
+    offending field, not just a line number."""
+    findings = ep.find_absolute_path_fields(
+        {
+            "schema_version": 1,
+            "def_path": "/Users/someone/work/gcd.def",
+            "gds_path": "build/gcd.gds",
+        }
+    )
+    assert [finding["field"] for finding in findings] == ["def_path"]
+    assert findings[0]["match"] == "/Users/someone/work/gcd.def"
+
+
+def test_lint_envelope_passes_a_clean_envelope():
+    """A record using the repo-relative `{path, scope}` shape (and hashes)
+    has nothing to flag."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "schema_version": 1,
+                "netlist_path": {"path": "build/gcd_synth.v", "scope": "repo"},
+                "liberty": {"path": None, "scope": "external"},
+                "provenance": {"input": {"content_hash": "sha256:abc123"}},
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_flags_non_home_absolute_paths_scan_would_miss():
+    """The distinction that justifies a second scan: `/opt/build/...` and
+    `/tmp/...` name nobody -- `find_leaks` (the disclosure scan) correctly
+    ignores them -- yet they break byte comparison on another checkout just
+    as thoroughly as a home path does."""
+    payload = {"def_path": "/opt/build/out.def", "gds_path": "/tmp/run-3/top.gds"}
+    assert ep.find_leaks(json.dumps(payload)) == []
+    assert sorted(
+        finding["field"] for finding in ep.find_absolute_path_fields(payload)
+    ) == ["def_path", "gds_path"]
+
+
+def test_lint_envelope_names_nested_and_indexed_fields():
+    findings = ep.find_absolute_path_fields(
+        {"macros": [{"lef": "lef/sram.lef"}, {"lef": "/Users/x/sram.lef"}]}
+    )
+    assert [finding["field"] for finding in findings] == ["macros.1.lef"]
+
+
+def test_lint_envelope_flags_a_leaking_mapping_key():
+    """A dict *keyed* by an absolute path leaks exactly as thoroughly as one
+    valued by it."""
+    findings = ep.find_absolute_path_fields({"per_file": {"/Users/x/a.gds": 3}})
+    assert findings == [{"field": "per_file./Users/x/a.gds", "match": "/Users/x/a.gds"}]
+
+
+def test_lint_envelope_allows_a_declared_install_prefix():
+    payload = {"liberty": "/usr/share/pdk/sky130A/libs.ref/x.lib"}
+    assert ep.find_absolute_path_fields(payload) != []
+    assert (
+        ep.find_absolute_path_fields(payload, allow_prefixes=["/usr/share/pdk"]) == []
+    )
+
+
+def test_lint_envelope_allow_prefix_respects_component_boundaries():
+    """`--allow-prefix /opt/pdk` must not admit `/opt/pdk-scratch/...`."""
+    payload = {"liberty": "/opt/pdk-scratch/x.lib"}
+    assert ep.find_absolute_path_fields(payload, allow_prefixes=["/opt/pdk"]) != []
+
+
+def test_lint_envelope_ignores_urls_and_relative_paths():
+    """A `https://` reference and a repo-relative path are not host paths --
+    flagging them would make the lint fire on every `see also` string."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "docs": "see https://example.com/cli/drc.md for the contract",
+                "deck": "decks/sky130.py",
+                "token": "$PDK_ROOT/libs.ref/x.lib",
+                "home_token": "~/klayout-tools/x.gds",
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_flags_windows_paths():
+    findings = ep.find_absolute_path_fields({"out": "C:\\Users\\rob\\top.gds"})
+    assert findings[0]["field"] == "out"
+
+
+def test_lint_envelope_files_reports_status_and_recommendation(tmp_path):
+    dirty = _write_envelope(tmp_path / "dirty.json", {"def_path": "/Users/x/a.def"})
+    clean = _write_envelope(tmp_path / "clean.json", {"def_path": "build/a.def"})
+
+    report = ep.lint_envelope_files([clean])
+    assert report["status"] == "clean"
+    assert report["finding_count"] == 0
+    assert report["recommendation"] == ep.ENVELOPE_LINT_RECOMMENDATION
+
+    report = ep.lint_envelope_files([dirty])
+    assert report["status"] == "violations"
+    assert report["finding_count"] == 1
+    assert report["files"][0]["file"] == dirty
+
+
+def test_lint_envelope_files_rejects_a_non_json_file(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("not json", encoding="utf-8")
+    with pytest.raises(ep.EnvironmentProvenanceError, match="not valid JSON"):
+        ep.lint_envelope_files([str(path)])
+
+
+def test_lint_envelope_files_rejects_an_unreadable_file(tmp_path):
+    with pytest.raises(ep.EnvironmentProvenanceError, match="could not read"):
+        ep.lint_envelope_files([str(tmp_path / "missing.json")])
+
+
+def test_cli_lint_envelope_exits_three_and_names_the_field(tmp_path, capsys):
+    path = _write_envelope(tmp_path / "report.json", {"def_path": "/Users/x/a.def"})
+    assert main(["env-provenance", "lint-envelope", path, "--format", "json"]) == (
+        ep.LEAKS_FOUND_EXIT_CODE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "violations"
+    assert payload["files"][0]["findings"][0]["field"] == "def_path"
+
+
+def test_cli_lint_envelope_exits_zero_when_clean(tmp_path, capsys):
+    path = _write_envelope(
+        tmp_path / "report.json",
+        {"netlist_path": {"path": "build/a.v", "scope": "repo"}},
+    )
+    assert main(["env-provenance", "lint-envelope", path, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "clean"
+
+
+def test_cli_lint_envelope_allow_prefix(tmp_path, capsys):
+    path = _write_envelope(tmp_path / "report.json", {"lib": "/usr/share/pdk/x.lib"})
+    assert (
+        main(
+            [
+                "env-provenance",
+                "lint-envelope",
+                path,
+                "--allow-prefix",
+                "/usr/share/pdk",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "clean"
+
+
+def test_cli_lint_envelope_text_output_prints_the_recommendation(tmp_path, capsys):
+    path = _write_envelope(tmp_path / "report.json", {"def_path": "/Users/x/a.def"})
+    main(["env-provenance", "lint-envelope", path])
+    out = capsys.readouterr().out
+    assert "def_path: /Users/x/a.def" in out
+    assert "repo-relative" in out
+
+
+def test_cli_lint_envelope_missing_file_is_an_application_error(tmp_path, capsys):
+    assert main(["env-provenance", "lint-envelope", str(tmp_path / "no.json")]) == 1
+    assert "no.json" in capsys.readouterr().err

@@ -598,7 +598,16 @@ from ._paths import (
     validate_request_shape,
 )
 from ._paths import _tcl_net_list as _tcl_net_list
-from ._provenance import INPUT_ROLE_NETLIST, build_provenance
+from ._provenance import INPUT_ROLE_NETLIST, _content_hash, build_provenance
+from ._report_verify import (
+    VOLATILE_FLOW_PATHS,
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    load_committed_report,
+    strip_keys,
+)
 from .lef_header import read_lef_header
 from .pdk import lef_files
 from .pdk_cells import list_lib_corners, resolve_liberty_for_cell_library
@@ -4790,3 +4799,159 @@ __all__ = [
     "run_place_and_route",
     "def_pin_names",
 ]
+
+
+# --------------------------------------------------------------------------- #
+# --check / --rerun: verify a previously committed report (issue #2224)
+# --------------------------------------------------------------------------- #
+
+#: Run-scoped bookkeeping keys dropped from *both* sides of a ``--rerun``
+#: diff (issue #2224), via :func:`klayout_tools._report_verify.strip_keys`.
+#:
+#: ``engine_logs`` is the whole reason this exists: every entry is keyed by a
+#: fresh ``uuid4`` ``invocation_id`` (``_openroad_engine._run_openroad``) and
+#: its retained log ``directory``/``stdout_path``/``stderr_path``/
+#: ``metadata_path`` are named after that id, so two identical runs never
+#: agree on the block. The stage scripts' own ``script_sha256`` goes with it
+#: -- the script embeds those same per-invocation paths. Unlike ``klt
+#: synthesize``, the output artifacts (``def_path``/``gds_path``/
+#: ``verilog_path``) are *not* dropped: this verb writes them to a fixed
+#: ``.klt/place-and-route/`` directory, so they are stable across re-runs
+#: from the same request and a change in one is real drift.
+RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset({"engine_logs"})
+
+
+def _canonicalize_place_and_route_report_for_rerun_diff(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """``report`` with :data:`RERUN_BOOKKEEPING_KEYS` removed at every depth
+    -- the comparison view :func:`rerun_place_and_route_report` diffs, never
+    what it embeds as ``fresh``."""
+    return strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+
+
+def _place_and_route_provenance_hashes(
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Re-derive ``(input_content_hash, deck_content_hash)`` for the request
+    at ``request_path`` **without invoking OpenROAD** -- the cheap half of
+    :func:`check_place_and_route_report`.
+
+    Mirrors :func:`run_place_and_route`'s own hashing step for step: the
+    gate-level netlist resolves through the same :func:`_resolve_netlist` and
+    is hashed as ``provenance.input`` (role ``netlist``), and the liberty
+    resolves through the same :func:`_resolve_liberty` and is hashed as
+    ``provenance.deck``. Raises :class:`PlaceAndRouteError` for a request
+    that cannot be read, validated, or resolved -- never a traceback.
+    """
+    request = load_request(request_path)
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+    netlist_path = _resolve_netlist(request["netlist"], request_dir)
+
+    pdk_spec = request["pdk"]
+    if not isinstance(pdk_spec, dict):
+        raise PlaceAndRouteError("request.pdk must be a JSON object")
+    cell_library = pdk_spec.get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise PlaceAndRouteError("request.pdk.cell_library is required")
+    liberty_path, _corner, _pdk_info = _resolve_liberty(
+        cell_library,
+        pdk_spec.get("corner"),
+        variant=pdk_variant,
+        root=pdk_root,
+    )
+    return _content_hash(netlist_path), _content_hash(liberty_path)
+
+
+def check_place_and_route_report(
+    report_path: str,
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
+    """``klt place-and-route <request> --check <report>`` (cheap mode, issue
+    #2224): verify a previously committed ``klt place-and-route --format
+    json`` report at ``report_path`` still reproduces from the request at
+    ``request_path``, without invoking OpenROAD at all.
+
+    Re-resolves the request's gate-level netlist and standard-cell liberty
+    and re-hashes both (:func:`_place_and_route_provenance_hashes`),
+    comparing each against the ``sha256:``-prefixed digest the committed
+    report already recorded in ``provenance.input.content_hash``/
+    ``provenance.deck.content_hash``. Returns the shared ``--check`` payload
+    (:func:`klayout_tools._report_verify.build_check_result`): ``status:
+    "match"`` when both agree, ``"drifted"`` naming which one moved
+    otherwise -- the same contract ``klt drc --check`` established (issue
+    #1106). A recorded hash that is itself ``None`` never counts as a match.
+
+    Raises :class:`PlaceAndRouteError` for a missing/unparseable committed
+    report or an unresolvable request -- never a traceback.
+    """
+    committed = load_committed_report(report_path, PlaceAndRouteError)
+    input_hash, deck_hash = _place_and_route_provenance_hashes(
+        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+    )
+    checks = [
+        hash_check(
+            "provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            input_hash,
+        ),
+        hash_check(
+            "provenance.deck.content_hash",
+            get_path(committed, ("provenance", "deck", "content_hash")),
+            deck_hash,
+        ),
+    ]
+    return build_check_result(report_path=report_path, checks=checks)
+
+
+def rerun_place_and_route_report(
+    report_path: str,
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
+    """``klt place-and-route <request> --check <report> --rerun`` (full mode,
+    issue #2224): verify a committed report by actually re-running the
+    place-and-route flow the request declares and diffing the fresh report
+    against the committed one.
+
+    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
+    excluding :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS`
+    (``provenance.klt_version``/``klayout_version``/``pdk.version`` plus
+    ``engine_version``) and canonicalizing :data:`RERUN_BOOKKEEPING_KEYS`
+    out of both sides first. ``status: "drifted"`` names every other field
+    that changed -- a moved ``worst_slack_ns``/``wirelength_um``/
+    ``setup_violation_count``, a ``power.placed`` count that stopped being
+    reported, a changed ``provenance.input.content_hash``.
+
+    **Re-running overwrites this request's own artifacts.** Unlike ``klt
+    synthesize``'s retained per-``run_id`` directories, this verb writes to a
+    fixed ``.klt/place-and-route/`` next to the request, so a ``--rerun``
+    rewrites the DEF/GDS/Verilog the committed report names. That is the same
+    thing invoking the verb again would do, and is why ``--check`` (cheap
+    mode, which touches nothing) is the default.
+
+    Raises :class:`PlaceAndRouteError` for a missing/unparseable committed
+    report or any error the re-run itself raises -- never a traceback.
+    """
+    committed = load_committed_report(report_path, PlaceAndRouteError)
+    fresh = run_place_and_route(
+        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+    )
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_FLOW_PATHS,
+        committed_for_diff=_canonicalize_place_and_route_report_for_rerun_diff(
+            committed
+        ),
+        fresh_for_diff=_canonicalize_place_and_route_report_for_rerun_diff(fresh),
+    )

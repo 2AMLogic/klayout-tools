@@ -27,20 +27,52 @@ subcommand. A failed equivalence gate is folded into exit 1 rather than
 reusing `klt equiv`'s own 3/4 split -- `klt synthesize`'s own pass/fail
 concept is `structural.has_critical` above, see docs/cli/synthesize.md's
 "Equivalence gate" section for why a failed gate is still exit 1, not 3.)
+
+``--check <report>`` (issue #2224) switches this verb from running a fresh
+synthesis to *verifying a previously committed one* still reproduces from the
+request given positionally -- see ``docs/cli/synthesize.md``, "--check".
+Cheap mode (default): re-resolve and re-hash the request's RTL sources and
+liberty and compare against the recorded ``provenance`` digests, no Yosys
+run. Full mode (``--check <report> --rerun``): actually re-synthesize and
+diff verdict-bearing fields. Both report ``status: "match"`` (exit 0) or
+``"drifted"`` (exit 3); a report that cannot be verified at all is exit 1,
+never a false pass.
 """
 
 import argparse
 
 from ..env_provenance import render_path_field
-from ..synthesize import SynthesizeError, run_synthesize
-from .output import emit_error, emit_success, render_table
+from ..synthesize import (
+    SynthesizeError,
+    check_synthesize_report,
+    rerun_synthesize_report,
+    run_synthesize,
+)
+from .output import emit_error, emit_success, render_rerun_drift, render_table
 
 #: Returned when a successful run's `structural.has_critical` is `true` --
 #: see this module's docstring "Exit codes" and `docs/cli/synthesize.md`.
 EXIT_STRUCTURAL_CRITICAL = 3
 
+#: Aliases for the --check/--rerun outcome (issue #2224) -- the same 0/3
+#: split `klt drc --check` uses (`drc_cmd.EXIT_MATCH`/`EXIT_DRIFTED`), named
+#: for the "match"/"drifted" vocabulary those modes report under. Reusing
+#: exit 3 is deliberate: in both modes 3 means "the run succeeded and has a
+#: finding to report", and `--check` never produces a `structural` verdict of
+#: its own to confuse it with.
+EXIT_MATCH = 0
+EXIT_DRIFTED = 3
+
 
 def run(args: argparse.Namespace) -> int:
+    if args.check is not None:
+        return _run_check(args)
+
+    if args.rerun:
+        return emit_error(
+            "synthesize", "--rerun requires --check <report>", args.format
+        )
+
     try:
         report = run_synthesize(
             args.request,
@@ -59,6 +91,56 @@ def run(args: argparse.Namespace) -> int:
     if report["structural"]["has_critical"]:
         return EXIT_STRUCTURAL_CRITICAL
     return 0
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    """`--check <report>` (and `--rerun`): verify committed flow evidence
+    against the request still on disk (issue #2224).
+
+    Unlike `klt drc`/`klt lvs`, the positional `request` stays *required*
+    here -- a `klt synthesize` report echoes its outputs and its provenance
+    hashes but never the request that produced it, so there is nothing to
+    reconstruct the inputs from. See `_report_verify.py`'s module docstring.
+    """
+    try:
+        if args.rerun:
+            result = rerun_synthesize_report(
+                args.check,
+                args.request,
+                pdk_variant=args.pdk,
+                pdk_root=args.pdk_root,
+                verify_equivalence=args.verify_equivalence,
+                equiv_timeout_s=args.equiv_timeout_s,
+                restructure_timing=args.restructure_timing,
+                restructure_max_iterations=args.restructure_max_iterations,
+            )
+        else:
+            result = check_synthesize_report(
+                args.check,
+                args.request,
+                pdk_variant=args.pdk,
+                pdk_root=args.pdk_root,
+            )
+    except SynthesizeError as exc:
+        return emit_error("synthesize", str(exc), args.format)
+
+    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    emit_success(result, args.format, text_renderer)
+
+    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+
+
+def _print_check_text(result: dict) -> None:
+    """`--format text` rendering of a cheap-mode `--check` result -- the same
+    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            print(f"      actual:   {check['actual']}")
 
 
 def _print_text(report: dict) -> None:

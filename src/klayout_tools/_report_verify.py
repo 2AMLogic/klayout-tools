@@ -1,6 +1,7 @@
 """Shared "does a previously committed report still hold" verification --
-``klt drc --check``/``--rerun`` and ``klt lvs --check``/``--rerun`` (issue
-#1106).
+``klt drc``/``klt lvs``/``klt extract`` ``--check``/``--rerun`` (issues #1106,
+#1149) and, since issue #2224, the *flow* verbs ``klt synthesize``/``klt
+place-and-route`` too.
 
 A ``klt drc``/``klt lvs`` JSON report is often committed as evidence
 alongside a design (see ``klt signoff``'s manifest-evidence grading), but
@@ -21,10 +22,23 @@ Both modes report the same two-value ``status``:
 - ``"drifted"`` -- at least one check failed (cheap mode: names which hash
   moved; full mode: names which field(s) changed).
 
-``drc.py``/``lvs.py`` each supply the verb-specific pieces (which hashes to
-re-derive, how to re-run the analysis) via the small building blocks below;
-this module owns only the shape-agnostic mechanics (loading a committed
-report, comparing one hash, diffing two report dicts).
+``drc.py``/``lvs.py``/``extract.py``/``synthesize.py``/``place_and_route.py``
+each supply the verb-specific pieces (which hashes to re-derive, how to re-run
+the analysis) via the small building blocks below; this module owns only the
+shape-agnostic mechanics (loading a committed report, comparing one hash,
+diffing two report dicts, dropping run-scoped bookkeeping keys before that
+diff).
+
+**Flow verbs need the request back (issue #2224).** ``klt drc``/``klt lvs``/
+``klt extract`` echo their own inputs into the report (``file``/``deck``/
+``layout``/``reference``), so ``--check <report>`` is self-sufficient there. A
+``klt synthesize``/``klt place-and-route`` report echoes *outputs*
+(``netlist_path``, ``def_path``, ...) and its provenance hashes, but never the
+request document or the source/netlist paths it resolved -- so those two verbs
+take the request positionally alongside ``--check <report>``. That is not a
+weaker check: the question it answers is "does this committed record still
+reproduce *from this request*", which is precisely what a downstream repo
+committing flow evidence next to its request needs to know.
 """
 
 from __future__ import annotations
@@ -51,6 +65,19 @@ VOLATILE_PROVENANCE_PATHS: frozenset[tuple[str, ...]] = frozenset(
         ("provenance", "pdk", "version"),
     }
 )
+
+#: The flow verbs' (`klt synthesize`, `klt place-and-route`) exclusion set for
+#: `--rerun` (issue #2224): everything :data:`VOLATILE_PROVENANCE_PATHS`
+#: already covers, plus the *external engine's* own version string. `yosys`/
+#: `openroad` stand in exactly the relation to a flow verb that the `klayout`
+#: engine build stands in to `klt drc`/`klt lvs` -- a tool upgrade that
+#: produces a byte-identical result must not render as `"drifted"`, or the
+#: mode reports tool churn instead of evidence drift. The engine *identity*
+#: (`engine`, e.g. `"yosys"`) is deliberately NOT excluded: swapping engines
+#: is a different run, not the same run on a newer build.
+VOLATILE_FLOW_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
+    ("engine_version",)
+}
 
 #: Sentinel distinguishing "key absent" from a legitimate JSON `null` when
 #: diffing two report dicts (see :func:`_diff_json`) -- `None != None` would
@@ -166,6 +193,41 @@ def build_rerun_result(
         "drift": drift,
         "fresh": fresh,
     }
+
+
+def strip_keys(value: Any, keys: frozenset[str]) -> Any:
+    """``value`` with every mapping entry whose key is in ``keys`` removed,
+    recursively (issue #2224).
+
+    The canonicalization both flow verbs feed to
+    :func:`build_rerun_result`'s ``committed_for_diff``/``fresh_for_diff``:
+    a flow verb's response carries *run-scoped bookkeeping* -- ``klt
+    synthesize``'s per-run ``run_id`` and the artifact paths derived from it,
+    ``klt place-and-route``'s ``engine_logs[].invocation_id`` (a fresh
+    ``uuid4`` per OpenROAD invocation) and the log directory named after it --
+    which differs between *every* pair of runs, including two runs that
+    produced byte-identical designs. Left in the diff, those fields alone
+    would make ``--rerun`` report ``"drifted"`` unconditionally, i.e. make it
+    useless rather than strict.
+
+    Recursion is by key *name* rather than by path, deliberately: the same
+    bookkeeping key recurs at several nesting depths (``klt synthesize``
+    echoes ``netlist_path``/``script_path`` at the top level, under
+    ``arithmetic.candidates[].measured``, under ``equivalence.artifacts``, and
+    under ``restructuring``), so a path-keyed exclusion list would need
+    re-registering every time one of those blocks gains a sibling. A verb's
+    *verdict-bearing* fields are never named in ``keys`` -- see each caller's
+    own constant for the exact list and the reasoning per key.
+    """
+    if isinstance(value, Mapping):
+        return {
+            key: strip_keys(item, keys)
+            for key, item in value.items()
+            if key not in keys
+        }
+    if isinstance(value, list):
+        return [strip_keys(item, keys) for item in value]
+    return value
 
 
 def diff_verdict_fields(

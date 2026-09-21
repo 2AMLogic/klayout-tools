@@ -1320,6 +1320,78 @@ would assume a state probability with no vector data behind it, the same
 the total sums exactly those, and `leakage_by_type_nw` names which types
 were covered.
 
+## `--check` / `--rerun` (issue #2224)
+
+A `klt synthesize --format json` report is committed as evidence alongside a
+design (a `klt signoff` manifest citation, a block repo's flow record), but
+until issue #2224 nothing let a consumer verify that a committed report still
+reproduces — the affordance [`klt drc`](drc.md#--check----rerun) has had since
+issue #1106. `--check` closes that gap for the flow verbs:
+
+```
+klt synthesize request.json --check gcd.synth.json            # cheap mode (default)
+klt synthesize request.json --check gcd.synth.json --rerun     # full mode
+```
+
+**The positional `request` stays required**, unlike `klt drc --check` (which
+is mutually exclusive with its input). A `klt synthesize` report echoes its
+*outputs* (`netlist_path`, `script_path`) and its provenance hashes, but never
+the request document or the RTL source paths it resolved — there is nothing to
+reconstruct the inputs from. The question `--check` answers is therefore "does
+this committed record still reproduce **from this request**", which is exactly
+what a repo committing the record next to its request needs to know.
+
+### Cheap mode (default)
+
+Re-resolves the request's RTL sources and standard-cell liberty — through the
+same `_resolve_sources()`/`_resolve_liberty()` a real run uses, so the two can
+never disagree about what gets hashed — re-hashes both, and compares against
+`provenance.input.content_hash`/`provenance.deck.content_hash` as recorded.
+**No Yosys invocation.** Response shape is the shared `--check` payload
+(`schema_version`, `mode: "check"`, `report`, `status`, `checks[]`) documented
+under [`klt drc`](drc.md#cheap-mode-default).
+
+`status` is `"match"` only when every `checks[]` entry matches. A recorded
+hash that is itself `null` (a report predating the field) always renders
+`match: false` — a missing baseline is never a pass.
+
+Tool identity is deliberately **not** among the checks: a Yosys upgrade that
+leaves the synthesis result untouched is tool churn, not evidence drift, and
+reporting it as drift would train a consumer to ignore the verdict. Full mode
+excludes it from the diff for the same reason (`engine_version`, alongside
+`provenance.klt_version`/`klayout_version`/`pdk.version`).
+
+### Full mode (`--rerun`)
+
+Actually re-synthesizes from the request and diffs the fresh report against
+the committed one, field by field, reporting `status: "drifted"` with a
+`drift[]` list of `{field, committed, fresh}` entries. A moved
+`instance_count`/`area_um2`/`timing`, a newly inferred latch under
+`structural`, a changed `provenance.input.content_hash` — all drift.
+
+Run-scoped bookkeeping is dropped from **both** sides before the diff:
+`run_id`, `netlist_path`, `script_path`, `run_script_path`,
+`restructuring.restructured_netlist_path`,
+`arithmetic.candidates[].measured.{netlist_path,script_path}`, and
+`equivalence.artifacts.*`. Each is minted fresh per invocation (every run gets
+its own `.klt/synthesize/<run_id>/`), so leaving them in would make `--rerun`
+report `"drifted"` unconditionally. The embedded `fresh` report in the
+response is never canonicalized — read the real paths off it.
+
+**Known limitations.** `--verify-equivalence`/`--restructure-timing` and
+their tuning knobs are not echoed anywhere in the response, so they cannot be
+recovered from the committed report; the CLI passes whatever flags you give
+this invocation, and the corresponding blocks legitimately drift if they
+differ. A request pinning an explicit `run_id` cannot be re-run at all — the
+run directory is retained and never reused — and that refusal surfaces as a
+clean exit `1` ("could not verify"), never a false `"match"`.
+
+### Exit codes for `--check` / `--rerun`
+
+`0` when `status` is `"match"`, `3` when `"drifted"`, `1` for a missing or
+unparseable report or an unresolvable request. `--rerun` without `--check` is
+a clean exit `1`, not a usage error.
+
 ## Exit codes
 
 | Code | Meaning |

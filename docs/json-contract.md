@@ -778,6 +778,84 @@ per-field here too. There is no tool-wide signal for "which shape does field
 X use today" beyond this table; re-check it (and this table's own `git log`)
 before writing a consumer that assumes one shape tool-wide.
 
+### Repo-relative provenance in *committed* artifacts (issue #2224)
+
+The table above describes what `klt` **emits**. The rule for what a consumer
+**commits** is stricter, and it is one rule:
+
+> A committed artifact must contain no absolute host path. Reference an input
+> by repo-relative path (`{path, scope}`) or by content hash
+> (`provenance.input.content_hash` / `provenance.deck.content_hash`) — never
+> by where it happened to live on the machine that produced it.
+
+This is not style. A committed record embedding `/Users/<user>/…` regenerates
+to *different bytes* on every other checkout, so any CI job that re-derives
+the artifact and byte-compares it fails for a reason that has nothing to do
+with the design — the failure mode 2AMLogic/gf180-surge#39 hit, and again in
+a sibling repo the same week (SXT-013). A plain-string field from the table
+above is the usual carrier: it is absolute by construction, so a consumer that
+commits the envelope verbatim commits the absolute path with it.
+
+`klt env-provenance lint-envelope FILE…` enforces the rule mechanically — it
+walks a JSON envelope and fails (exit `3`) on any string field carrying an
+absolute host path, naming the offending field by dotted path, with
+`--allow-prefix` for genuinely machine-wide PDK/tool install roots. It is
+deliberately broader than `klt env-provenance scan`, which answers the
+*disclosure* question (home-shaped paths only): `/opt/build/out.def` names
+nobody and breaks reproduction just as thoroughly. See
+[`cli/env-provenance.md`](cli/env-provenance.md) → `lint-envelope` for the
+full rule set, the comparison table, and the recommended CI wiring (it is
+**not** wired into this repo's CI, for the same reason `scan` is not).
+
+## Verifying committed evidence: `--check` / `--rerun`
+
+Five verbs let a consumer verify that a previously committed `--format json`
+report still reproduces, built on one shared implementation
+(`src/klayout_tools/_report_verify.py`):
+
+| Verb | Invocation | Issue |
+|---|---|---|
+| `drc` | `klt drc --check REPORT [--rerun]` | #1106 |
+| `lvs` | `klt lvs --check REPORT [--rerun]` | #1106 |
+| `extract` | `klt extract --check REPORT [--rerun]` | #1149 |
+| `synthesize` | `klt synthesize REQUEST --check REPORT [--rerun]` | #2224 |
+| `place-and-route` | `klt place-and-route REQUEST --check REPORT [--rerun]` | #2224 |
+
+All five share one contract:
+
+- **Cheap mode (`--check`)** re-derives the recorded input/deck content hashes
+  and compares them. No engine runs.
+- **Full mode (`--check … --rerun`)** re-runs the analysis and diffs
+  verdict-bearing fields against the committed report.
+- **`status` is two-valued**: `"match"` (exit `0`) or `"drifted"` (exit `3`,
+  naming which hash moved or which fields changed). A report that cannot be
+  verified at all — missing, unparseable, missing the field needed to re-run —
+  is exit `1` with an error envelope. **A missing recorded value is never a
+  pass**: `hash_check()` renders `expected: null` as `match: false`, so a
+  report predating the field it would be checked against renders `"drifted"`,
+  never a false `"match"`.
+- **Tool identity is excluded from the diff**, and only tool identity:
+  `provenance.klt_version`, `provenance.klayout_version`,
+  `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
+  Yosys/OpenROAD build string, which stands in the same relation to a flow
+  verb that the KLayout engine build does to `klt drc`. The engine *identity*
+  (`engine`) is not excluded: swapping engines is a different run.
+
+**The flow verbs take the request back.** `drc`/`lvs`/`extract` echo their own
+inputs into the report, so `--check REPORT` is self-sufficient. A
+`synthesize`/`place-and-route` report echoes *outputs* and provenance hashes
+but never the request document or the source/netlist paths it resolved — so
+those two keep their positional `REQUEST` argument alongside `--check`, and
+the question answered becomes "does this committed record still reproduce
+*from this request*". Run-scoped bookkeeping is canonicalized out of the
+`--rerun` diff on both sides (`synthesize`'s per-run `run_id` and the artifact
+paths under it; `place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4`
+per OpenROAD invocation) — without that, `--rerun` would report `"drifted"`
+unconditionally. Per-verb detail: [`cli/drc.md`](cli/drc.md),
+[`cli/lvs.md`](cli/lvs.md), [`cli/extract.md`](cli/extract.md),
+[`cli/synthesize.md`](cli/synthesize.md),
+[`cli/place-and-route.md`](cli/place-and-route.md).
+
 ## Checked-work coverage (`coverage.schema_version: 1`)
 
 The [checked-work coverage contract](coverage-contract.md) defines required

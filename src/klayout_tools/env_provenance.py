@@ -39,6 +39,18 @@ record that leaks. :func:`find_leaks` is exported for the same reason -- a
 repo can run it over newly-added record files in CI (``klt env-provenance
 scan``) and catch a regression at PR time.
 
+**Two different questions, two scans (issue #2224).** :func:`find_leaks` /
+``klt env-provenance scan`` answer the *disclosure* question -- "does this
+record name a person or a machine?" -- and therefore match home-*shaped*
+paths and known identifiers, on arbitrary text.
+:func:`find_absolute_path_fields` / ``klt env-provenance lint-envelope``
+answer the *reproducibility* question -- "does every reference in this
+envelope still resolve on another checkout?" -- and therefore match **any**
+absolute host path (``/opt/build/out.def`` and ``/tmp/run-3/top.gds`` disclose
+nobody and still break byte comparison), walking a JSON envelope so a finding
+names the offending *field* rather than a line number. Neither subsumes the
+other; a repo hardening committed evidence wants both.
+
 Adopting this from a harness is two lines::
 
     from klayout_tools.env_provenance import environment_provenance, render_text_lines
@@ -54,6 +66,7 @@ the evidence is published at all. The fix belongs at the writer.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import platform
 import re
@@ -63,6 +76,7 @@ from typing import Any
 
 __all__ = [
     "DEFAULT_HOST_ID_SALT",
+    "ENVELOPE_LINT_RECOMMENDATION",
     "HOST_ID_PREFIX",
     "HOST_ID_SALT_ENV_VAR",
     "LEAKS_FOUND_EXIT_CODE",
@@ -70,8 +84,10 @@ __all__ = [
     "UNKNOWN_HOST_ID",
     "EnvironmentProvenanceError",
     "environment_provenance",
+    "find_absolute_path_fields",
     "find_leaks",
     "find_repo_root",
+    "lint_envelope_files",
     "opaque_host_id",
     "render_path_field",
     "render_text_lines",
@@ -325,6 +341,172 @@ def scan_files(paths: Iterable[str]) -> dict[str, Any]:
         "leak_count": total,
         "files": entries,
     }
+
+
+# --------------------------------------------------------------------------- #
+# the envelope lint (issue #2224)
+# --------------------------------------------------------------------------- #
+
+#: What a caller should do instead of committing an absolute host path --
+#: emitted once per :func:`lint_envelope_files` payload so a consumer reading
+#: only the JSON still gets the remedy, not just the complaint.
+ENVELOPE_LINT_RECOMMENDATION = (
+    "replace each absolute host path with a repo-relative reference (the "
+    "{path, scope} shape env_provenance.repo_relative_path() builds) or with "
+    "a content hash (provenance.input.content_hash) -- an absolute path is "
+    "not reproducible on another checkout. Declare a genuinely machine-wide "
+    "PDK/tool install prefix with --allow-prefix if it must appear."
+)
+
+#: Any absolute POSIX path with at least two components -- ``/Users/rob/x``,
+#: but equally ``/opt/build/out.def``, ``/tmp/run-3/top.gds``,
+#: ``/private/var/folders/...``. Deliberately broader than
+#: :data:`_POSIX_HOME_RE`, which this module's ``scan`` subcommand uses: the
+#: *disclosure* question ``scan`` answers is "does this name a person", and
+#: only home-shaped paths do; the *reproducibility* question this lint answers
+#: is "does this still resolve on another checkout", and no absolute host path
+#: does. Two components minimum keeps a bare ``/`` or a lone ``/VDD``-style
+#: hierarchical net name out of the findings.
+_ABSOLUTE_POSIX_PATH_RE = re.compile(r"(?<![\w~$.-])(?:/[A-Za-z0-9_.+@%-]+){2,}/?")
+
+#: The Windows equivalent: a drive-letter-rooted path in either separator
+#: style (``C:\Users\rob\x``, ``D:/builds/out``).
+_ABSOLUTE_WINDOWS_PATH_RE = re.compile(r"(?<![\w.-])[A-Za-z]:[\\/][^\s\"']+")
+
+#: A URL is excised from a value before the path scan: ``https://example.com/
+#: a/b``'s path component is not a host filesystem path, and flagging it would
+#: make the lint fire on every ``docs``/``see also`` string a report carries.
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S*", re.IGNORECASE)
+
+
+def _is_allowed_prefix(match: str, allow_prefixes: tuple[str, ...]) -> bool:
+    """Whether ``match`` lives under one of ``allow_prefixes`` -- the declared
+    PDK/tool install locations a project accepts as machine-wide constants.
+
+    Compared on a path-*component* boundary, so ``--allow-prefix /opt/pdk``
+    admits ``/opt/pdk/sky130A/...`` but not ``/opt/pdk-scratch/...``.
+    """
+    for prefix in allow_prefixes:
+        normalised = prefix.rstrip("/\\")
+        if not normalised:
+            continue
+        if match == normalised or match.startswith(normalised + "/"):
+            return True
+        if match.startswith(normalised + "\\"):
+            return True
+    return False
+
+
+def _absolute_paths_in(text: str, allow_prefixes: tuple[str, ...]) -> list[str]:
+    """Every absolute host path in ``text`` not covered by ``allow_prefixes``,
+    in order of appearance (empty list when clean)."""
+    scannable = _URL_RE.sub(" ", text)
+    found: list[str] = []
+    for pattern in (_ABSOLUTE_POSIX_PATH_RE, _ABSOLUTE_WINDOWS_PATH_RE):
+        for match in pattern.finditer(scannable):
+            value = match.group(0)
+            if not _is_allowed_prefix(value, allow_prefixes):
+                found.append(value)
+    return found
+
+
+def _walk_string_fields(value: Any, path: str) -> Iterable[tuple[str, str]]:
+    """Every string in a JSON-decoded ``value`` as ``(dotted_field, text)``.
+
+    Mapping *keys* are yielded too (a dict keyed by an absolute path leaks
+    just as thoroughly as one valued by it), and list elements are addressed
+    by index -- the same dotted-path convention ``_report_verify
+    .diff_verdict_fields`` reports drift under, so a field named by one tool
+    is findable with the other.
+    """
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            child = f"{path}.{key}" if path else str(key)
+            if isinstance(key, str):
+                yield child, key
+            yield from _walk_string_fields(item, child)
+        return
+    if isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            child = f"{path}.{index}" if path else str(index)
+            yield from _walk_string_fields(item, child)
+        return
+    if isinstance(value, str):
+        yield (path or "<root>"), value
+
+
+def find_absolute_path_fields(
+    payload: Any, *, allow_prefixes: Iterable[str] = ()
+) -> list[dict[str, Any]]:
+    """Every field of a JSON-decoded ``payload`` whose string value carries an
+    absolute host path, as ``{field, match}`` dicts (empty list when clean).
+
+    This is the reproducibility half of this module (issue #2224). A committed
+    artifact embedding ``/Users/<author>/work/design.gds`` regenerates to
+    *different bytes* on every other checkout, so a byte-comparison CI job
+    against it fails for a reason that has nothing to do with the design --
+    the exact failure 2AMLogic/gf180-surge#39 hit. :func:`find_leaks` does not
+    catch this class in general: it matches home-*shaped* paths only, by
+    design, because it answers the disclosure question. ``/opt/build/out.def``
+    discloses nobody and still breaks reproduction.
+
+    ``allow_prefixes`` declares install locations that are legitimately
+    machine-wide (a PDK root, a tool prefix) and therefore acceptable in a
+    record. It is deliberately explicit rather than read from ``$PDK_ROOT``:
+    a lint whose verdict depends on the linting machine's environment cannot
+    be trusted in CI.
+
+    ``field`` is a dotted path (``provenance.input.path``,
+    ``macros.0.lef``); a top-level bare string payload reports ``<root>``.
+    """
+    prefixes = tuple(allow_prefixes)
+    findings: list[dict[str, Any]] = []
+    for field, text in _walk_string_fields(payload, ""):
+        for match in _absolute_paths_in(text, prefixes):
+            findings.append({"field": field, "match": match})
+    return findings
+
+
+def lint_envelope_files(
+    paths: Iterable[str], *, allow_prefixes: Iterable[str] = ()
+) -> dict[str, Any]:
+    """Run :func:`find_absolute_path_fields` over each JSON file in ``paths``.
+
+    Returns ``{schema_version, status, finding_count, recommendation,
+    files[]}`` where ``status`` is ``"clean"`` or ``"violations"`` and each
+    ``files[]`` entry is ``{file, findings[]}``. Raises
+    :class:`EnvironmentProvenanceError` for a file that cannot be read or is
+    not valid JSON -- an unparseable envelope is an error, never a silent
+    "clean" verdict (the same discipline :func:`scan_files` applies to an
+    unreadable file, and the same one ``_report_verify.hash_check`` applies
+    to a missing hash).
+    """
+    prefixes = tuple(allow_prefixes)
+    entries: list[dict[str, Any]] = []
+    total = 0
+    for path in paths:
+        payload = _load_json_envelope(path)
+        findings = find_absolute_path_fields(payload, allow_prefixes=prefixes)
+        total += len(findings)
+        entries.append({"file": str(path), "findings": findings})
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "status": "violations" if total else "clean",
+        "finding_count": total,
+        "recommendation": ENVELOPE_LINT_RECOMMENDATION,
+        "files": entries,
+    }
+
+
+def _load_json_envelope(path: str) -> Any:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except OSError as exc:
+        raise EnvironmentProvenanceError(f"could not read {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise EnvironmentProvenanceError(f"{path} is not valid JSON: {exc}") from exc
 
 
 # --------------------------------------------------------------------------- #
