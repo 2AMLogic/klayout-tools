@@ -31,10 +31,13 @@ SUT="$SCRIPTS_DIR/check-promotion-landed.sh"
 # than hard-coding one (mirrors test-champion-critical-file-check.sh, #6725).
 if [[ -d "$SCRIPTS_DIR/../../.claude/commands/loom" ]]; then
     PROMPT_DIR="$(cd "$SCRIPTS_DIR/../../.claude/commands/loom" && pwd)"
+    REPO_ROOT="$(cd "$SCRIPTS_DIR/../.." && pwd)"
 else
     PROMPT_DIR="$(cd "$SCRIPTS_DIR/../.claude/commands/loom" && pwd)"
+    REPO_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 fi
 CHAMPION_MD="$PROMPT_DIR/champion-issue-promo.md"
+RESYNC_IGNORE="$REPO_ROOT/.loom/resync-ignore"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -373,9 +376,18 @@ assert_contains "$COMMENTS_POSTED" "302" "(h) an escalation comment is posted on
 #     escalated it (loom:operator-only is now present) must NOT post a second
 #     escalation comment or re-run the label edit -- DECISION=ALREADY_ESCALATED,
 #     exit 0, distinguishable from a fresh ESCALATED (exit 13).
+#
+#     The fixture stages BOTH durable side effects case (h) leaves behind: the
+#     `loom:operator-only` label AND this script's own
+#     `<!-- champion:promotion-landed-mismatch -->` marker comment (posted
+#     BEFORE the label edit, so the label can never be ours without it). Since
+#     #2193 that marker is what distinguishes "this script escalated it"
+#     (ALREADY_ESCALATED) from "somebody else escalated it" (OK, case (w)
+#     below) -- staging the label alone would model a live external escalation,
+#     not a repeat of case (h).
 reset_state
 issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator-only" "loom:operator-mechanical")" \
-  "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here")]" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "no tier info here"), $(self_generated_comment "2026-08-18T00:05:00Z" "mismatch")]" \
   > "$STUB_DIR/issue-302.json"
 run_sut --issue 302 --apply
 assert_eq "0" "$RC" "(h2) already loom:operator-only -> exit 0, not 13"
@@ -579,6 +591,75 @@ run_sut --issue 408
 assert_eq "0" "$RC" "(v) multi-label edit's loom:issue timeline event is found alongside a same-timestamp tier event -> exit 0"
 assert_eq "OK" "$(get_field "$OUT" DECISION)" "(v) DECISION=OK"
 
+# --- #2193: a LIVE loom:operator-only escalation must never be overwritten.
+# Incident (klayout-tools, 2026-09-20): issue #1779 was approved 2026-09-14
+# (loom:issue really was applied then -- not a lost write), cycled legitimately
+# through loom:blocked/loom:curated for weeks on a dependency, and once that
+# cleared was freshly re-evaluated and correctly escalated to
+# loom:operator-only,loom:operator-decision. ~15h later this script found the
+# OLD APPROVED comment, saw loom:issue absent with neither loom:building nor
+# loom:blocked to explain it, and re-added loom:issue + tier:goal-supporting
+# ON TOP OF the live escalation -- bypassing a pending human ruling.
+
+# (w) The exact incident shape, WITH --apply (what Pass 0c actually runs) and
+#     with a fully RECOVERABLE tier, so the old code would have taken the
+#     DECISION=COMPLETED branch and written loom:issue. No loom:building /
+#     loom:blocked, no timeline evidence, and no marker comment from this
+#     script -- the escalation is somebody else's, and live.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator-only" "loom:operator-decision")" \
+  "[$(approved_comment "2026-09-14T12:00:00Z" "**Goal Alignment**: Tier 2 (goal-supporting) - supports milestone infra")]" \
+  > "$STUB_DIR/issue-1779.json"
+run_sut --issue 1779 --apply
+assert_eq "0" "$RC" "(w) #1779 regression: live loom:operator-only with a recoverable tier -> exit 0, not 12"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(w) DECISION=OK (loom:operator-only is later-lifecycle evidence, same as loom:building/loom:blocked)"
+assert_eq "" "$EDITS" "(w) NO label edit issued -- loom:issue is never written over a live operator escalation"
+assert_eq "" "$COMMENTS_POSTED" "(w) no comment posted on an issue a human already owns"
+assert_contains "$OUT" "loom:operator-only" "(w) REASON names loom:operator-only as the reason for standing down"
+
+# (x) Same shape in report-only mode (no --apply): still OK, not MISMATCH --
+#     there is genuinely nothing to reconcile, so Pass 0c's report must not
+#     advertise one.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator-only" "loom:operator-decision")" \
+  "[$(approved_comment "2026-09-14T12:00:00Z" "**Goal Alignment**: Tier 2 (goal-supporting)")]" \
+  > "$STUB_DIR/issue-1780.json"
+run_sut --issue 1780
+assert_eq "0" "$RC" "(x) live loom:operator-only, report-only -> exit 0, not 11"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(x) DECISION=OK in report-only mode too"
+assert_eq "" "$EDITS" "(x) no label edit issued"
+
+# (y) The bare `loom:operator-only` shape (#5819's sub-kind label absent, e.g.
+#     an older escalation) is still a live escalation -- the guard keys on the
+#     base label, never on the sub-kind.
+reset_state
+issue_json "OPEN" "$(labels_json "loom:operator-only")" \
+  "[$(approved_comment "2026-09-14T12:00:00Z" "**Goal Alignment**: Tier 1 - directly implements the milestone")]" \
+  > "$STUB_DIR/issue-1781.json"
+run_sut --issue 1781 --apply
+assert_eq "0" "$RC" "(y) bare loom:operator-only (no sub-kind) -> exit 0"
+assert_eq "OK" "$(get_field "$OUT" DECISION)" "(y) DECISION=OK"
+assert_eq "" "$EDITS" "(y) no label edit issued"
+
+# (z) The self-escalated counterpart of (w): loom:operator-only IS present and
+#     this script's own mismatch marker comment is on the issue (a prior run
+#     escalated it), but a tier is NOW recoverable from the genuine verdict
+#     comment. The completing edit must STILL not run -- "never write
+#     loom:issue onto loom:operator-only" does not have a tier-recoverable
+#     exception -- and the outcome stays reported as ALREADY_ESCALATED rather
+#     than collapsing into OK, so the two escalation origins remain
+#     distinguishable in Pass 0c's output (#6942).
+reset_state
+issue_json "OPEN" "$(labels_json "loom:curated" "loom:operator-only" "loom:operator-mechanical")" \
+  "[$(approved_comment "2026-08-18T00:00:00Z" "**Goal Alignment**: Tier 3 (maintenance) - cleanup"), $(self_generated_comment "2026-08-18T00:05:00Z" "mismatch")]" \
+  > "$STUB_DIR/issue-409.json"
+stage_verify 409 "$(labels_json "loom:issue" "tier:maintenance")"
+run_sut --issue 409 --apply
+assert_eq "0" "$RC" "(z) self-escalated loom:operator-only with a recoverable tier -> exit 0, not 12"
+assert_eq "ALREADY_ESCALATED" "$(get_field "$OUT" DECISION)" "(z) DECISION=ALREADY_ESCALATED (own marker comment distinguishes it from a live external escalation)"
+assert_eq "" "$EDITS" "(z) the completing loom:issue edit is unreachable while loom:operator-only is present"
+assert_eq "" "$COMMENTS_POSTED" "(z) no duplicate escalation comment is posted"
+
 echo
 echo "--- Doc pins: champion-issue-promo.md ships the reordered write-then-verify Step 3b and the Pass 0c reconciliation loop (#6862) ---"
 
@@ -601,6 +682,26 @@ assert_doc_contains "$CHAMPION_MD" \
 assert_doc_contains "$CHAMPION_MD" \
     "#6862" \
     "champion-issue-promo.md documents the #6862 promotion-write-reliability fix"
+
+echo
+echo "--- Doc pins: resync-ignore pins the locally-fixed files (#2193) ---"
+
+# The #2193 fix lives in an INSTALLED Loom surface (.loom/scripts/), which the
+# routine `chore: resync installed Loom surfaces` commit overwrites from
+# upstream's template unless the path is pinned. Without these pins the guard
+# silently reverts and the #1779 incident recurs -- the same reversion pattern
+# already recorded for #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020.
+assert_doc_contains "$RESYNC_IGNORE" \
+    "scripts/check-promotion-landed.sh" \
+    "check-promotion-landed.sh is pinned in .loom/resync-ignore"
+
+assert_doc_contains "$RESYNC_IGNORE" \
+    "scripts/tests/test-check-promotion-landed.sh" \
+    "this test file is pinned in .loom/resync-ignore alongside its SUT"
+
+assert_doc_contains "$RESYNC_IGNORE" \
+    "#2193" \
+    ".loom/resync-ignore documents the #2193 rationale for these pins"
 
 echo
 echo "Results: $TESTS_PASSED/$TESTS_RUN passed, $TESTS_FAILED failed"
