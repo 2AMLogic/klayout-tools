@@ -75,6 +75,15 @@ change to the `layers_report()` schema:
 python tests/corpus/generate_golden.py
 ```
 
+The `file` field is repo-relative on purpose: a host-absolute path here would
+byte-compare clean only on the machine that generated it. CI's `Golden
+artifacts (hash seed + path varied)` job regenerates these fixtures from two
+checkouts at different filesystem paths under two different `PYTHONHASHSEED`
+values and byte-compares, so both that and any set-iteration ordering fail
+visibly -- see
+[`docs/guides/golden-artifact-determinism.md`](../../docs/guides/golden-artifact-determinism.md)
+(issue #2225).
+
 ## Machine-generated macro-scale fixture — `tests/corpus/place_and_route/`
 
 Unlike every corpus file above (a single hand-drawn-scale standard-cell view,

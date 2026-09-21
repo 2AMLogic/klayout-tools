@@ -64,6 +64,15 @@ Per job, in seconds:
 | Native engines (Rust) — technology mapping | 12 | 13 | 14 | 120 |
 | Lint (ruff) | 12 | 14 | 55 | 120 |
 | site/ (tsc + vitest) | 7 | 9 | 10 | 120 |
+| Golden artifacts (hash seed + path varied) | — | — | — | 300 † |
+
+† Added by issue #2225, after this baseline was measured, so its budget is an
+estimate rather than a derivation: two `actions/checkout` steps, one `uv
+sync`, and ~1.5 s of generators (see
+[`golden-artifact-determinism.md`](golden-artifact-determinism.md)). 300 s is
+deliberately conservative while still half the 600 s an unbudgeted job would
+inherit — re-derive it from real timings at the next re-measure, the same way
+every other row above was derived.
 
 Aggregates, in seconds:
 

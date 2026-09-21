@@ -1059,6 +1059,80 @@ jobs:
             exit 1
           }
 
+  artifact-determinism:
+    name: Golden artifacts (hash seed + path varied)
+    # Issue #2225. Every other job regenerates a golden artifact at most
+    # once, from one checkout, under whatever hash seed the runner happens to
+    # have. Two nondeterminism classes survive that indefinitely and were
+    # both caught downstream only when an environment finally differed
+    # (2AMLogic/gf180-surge PR #39; the SXT-013 slates):
+    #
+    #   1. set/dict-iteration-dependent ordering. `PYTHONHASHSEED` defaults
+    #      to random ONLY when unset, and a runner that fixes the environment
+    #      reproduces one ordering forever, so a count-tied list emitted in
+    #      set order byte-compares clean on every run until somebody
+    #      regenerates somewhere else.
+    #   2. host-absolute paths baked into a committed artifact, which
+    #      byte-compare clean on the machine that produced them and nowhere
+    #      else.
+    #
+    # This job makes the environment differ on purpose: it regenerates the
+    # same artifacts from TWO checkouts at different filesystem paths under
+    # TWO different explicitly-set PYTHONHASHSEED values, then byte-compares
+    # and names every differing artifact. See
+    # scripts/check_artifact_determinism.py (and tests/test_artifact_
+    # determinism.py, which pins its behaviour against synthetic generators
+    # carrying each bug class).
+    #
+    # Deliberately ubuntu-latest and deliberately NOT part of the `test`
+    # matrix: the three generators it drives need only the klayout wheel
+    # (~1.5 s of work between them), so queueing behind the heavy pool --
+    # four times over, once per Python version -- would cost far more than
+    # the check.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the primary copy
+        uses: actions/checkout@v7
+        with:
+          path: primary
+
+      - name: Check out a second copy at a different filesystem path
+        # A different prefix AND a different path length: a generator that
+        # embeds its own absolute path produces different bytes here, which
+        # is precisely what the byte-compare below is looking for.
+        uses: actions/checkout@v7
+        with:
+          path: second-checkout/nested/deeper-than-the-primary
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        # Only the primary checkout gets a venv. Each generator inserts its
+        # OWN repo's `src/` at the front of sys.path (and the check exports a
+        # matching PYTHONPATH), so the second checkout's generators import
+        # the second checkout's code while sharing this interpreter --
+        # a second `uv sync` would buy nothing but wall clock.
+        working-directory: primary
+        run: uv sync --locked --extra dev
+
+      - name: Regenerate golden artifacts twice and byte-compare
+        # The seeds are drawn randomly per run (distinct by construction) and
+        # echoed in the report, so a failure is reproducible: re-run the
+        # command locally with the two PYTHONHASHSEED values it printed.
+        # Exit 1 = an artifact differed (the failure this job exists for);
+        # exit 2 = the check could not run, which is also a red, never a
+        # silent pass.
+        working-directory: primary
+        run: |
+          uv run --frozen --extra dev python scripts/check_artifact_determinism.py \
+            --checkout "$GITHUB_WORKSPACE/primary" \
+            --checkout "$GITHUB_WORKSPACE/second-checkout/nested/deeper-than-the-primary" \
+            --annotate
+
   wall-clock-budget:
     name: CI wall-clock budget
     # Issue #1971 measured CI wall clock across the 2AM Logic repos and found
@@ -1086,6 +1160,7 @@ jobs:
       - site
       - test
       - action-smoke-test
+      - artifact-determinism
     if: always()
     # Deliberately ubuntu-latest, never the heavy pool: a ~20s check that
     # measures queue contention must not queue behind it.

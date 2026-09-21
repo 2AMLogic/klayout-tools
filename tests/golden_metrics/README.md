@@ -57,6 +57,14 @@ The regenerator preserves each metric's existing `tol_pct` band (only
 choice, not something a regeneration run should silently reset to
 exact-match.
 
+Regeneration is also checked for **reproducibility**: CI's `Golden artifacts
+(hash seed + path varied)` job runs this script from two checkouts at
+different filesystem paths under two different `PYTHONHASHSEED` values and
+byte-compares the results, so a set-iteration ordering or an absolute path
+reaching this file fails visibly -- see
+[`docs/guides/golden-artifact-determinism.md`](../../docs/guides/golden-artifact-determinism.md)
+(issue #2225).
+
 ## Fixtures
 
 - `sky130_5t_ota_gen_compose.json` -- the sky130 5T OTA `klt gen-compose` ->
