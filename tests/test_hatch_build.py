@@ -88,6 +88,46 @@ def test_git_identity_records_post_tag_and_dirty_state(tmp_path):
     assert identity["dirty"] is False
 
 
+def test_git_identity_ignores_untracked_files(tmp_path):
+    """A clean, pinned-sha checkout must not read as dirty just because a
+    package manager dropped bookkeeping files into the build root (issue
+    #2248). Reproduced against a real ``uv --from git+...@<sha>`` install:
+    ``uv`` writes its own ``.ok`` checkout-completion sentinel straight into
+    the git working tree right after cloning, before the build (and this
+    hook) ever runs -- an untracked file with no packaged content that
+    nonetheless made ``git status --porcelain`` (which reports untracked
+    files by default) flag an immutable revision as ``dirty: true``."""
+    module = _load_hatch_build()
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    _git(repo, "tag", "v9.9.9")
+    # Simulate the perturbation: an untracked file appears in the build root
+    # that was never part of the commit and is not staged for one either.
+    (repo / ".ok").write_text("")
+    (repo / "some-export-metadata.json").write_text("{}")
+
+    identity = module.git_identity(str(repo))
+    assert identity["tag"] == "v9.9.9"
+    assert identity["dirty"] is False
+
+
+def test_git_identity_still_dirty_for_modified_tracked_file_alongside_noise(
+    tmp_path,
+):
+    """Untracked noise must not mask a genuine modification -- a real edit to
+    a tracked file still reports ``dirty: true`` even when stray untracked
+    files are also present (issue #2248's third acceptance criterion: the
+    probe keeps its meaning where it has one)."""
+    module = _load_hatch_build()
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    (repo / ".ok").write_text("")
+    (repo / "tracked.py").write_text("x = 2\n")
+
+    identity = module.git_identity(str(repo))
+    assert identity["dirty"] is True
+
+
 def test_git_identity_is_none_outside_a_repo(tmp_path):
     """A build from an unpacked sdist has no repo -- the hook must then write
     nothing rather than overwrite the record the sdist already carries."""
