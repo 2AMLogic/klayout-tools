@@ -128,6 +128,22 @@ is, plus ``"source"``/``"superseded_by"`` fields distinguishing it -- see
 ``run_erc``. Omitting ``--deck`` (every caller before this issue) leaves
 every output byte-identical to before this feature existed.
 
+Findings-only runs (``--findings-only``, issue #2219): the per-gate
+per-level accumulation above is what ``klt erc`` spends nearly all of its
+time on -- one ``polygons_of_net(...).merged().area()`` for every gate net
+on every ``stackup`` role -- and a caller who only wants ``erc_findings``
+(the structural supply read: ``nets[]`` island/short checks plus ``ties[]``)
+pays it for verdicts that, without a ``--pdk`` antenna-limit table, grade
+nothing at all. ``--findings-only`` skips that walk. Every
+``erc_findings`` rule still runs and every finding is identical: the four
+``nets[]``/``ties[]``-driven rules never read the accumulated areas, and
+``erc.floating_gate`` -- the one rule that does -- is evaluated from the
+same connectivity graph by :func:`_gate_is_floating` instead, which stops
+at the first role carrying area rather than measuring every role. The
+antenna half then reports what it actually did: ``null`` accumulation
+fields, ``"unchecked"`` verdicts, every level in ``coverage.skipped`` with
+reason :data:`REASON_FINDINGS_ONLY`, and ``status: "not_checked"``.
+
 See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 """
 
@@ -187,14 +203,48 @@ from .extract import (
 #: `--deck` (every caller before this issue) produces byte-identical output,
 #: including `provenance.devices` entries with their pre-#2204 4-key shape
 #: -- so, as with every prior additive change above, no bump.
+#: Issue #2219 adds the opt-in `findings_only` mode (`--findings-only`) and
+#: the top-level `findings_only` echo of it -- additive, and inert unless
+#: the caller asks for it: every field of a run that does not pass the flag
+#: is byte-identical to before. Inside such a run the *already nullable*
+#: presentation is extended to `levels[].step_area_um2`/
+#: `cumulative_area_um2`/`antenna_ratio` (null == "not measured", the same
+#: thing `antenna_ratio_max: null` has always meant for the limit), which
+#: is why it is an opt-in flag rather than a default: no existing caller's
+#: report can acquire a null it did not ask for.
 SCHEMA_VERSION = 1
 
 
-def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str, Any]:
+#: The stable ``coverage`` skip reason for every non-gate antenna level of a
+#: ``findings_only`` run (issue #2219): the caller asked for the
+#: ``erc_findings`` read only, so the per-gate accumulation those verdicts
+#: are derived from was never performed. A *requested*-work skip in exactly
+#: the sense :data:`REASON_MISSING_ANTENNA_PDK` already is -- both are the
+#: caller declining to supply what the antenna half needs -- so it lands in
+#: ``skipped`` rather than ``inapplicable``. See :func:`run_erc`.
+REASON_FINDINGS_ONLY = "findings_only"
+
+#: The skip reason for a level that could have been graded had ``--pdk``
+#: named a PDK with an antenna-ratio table (or named one at all).
+REASON_MISSING_ANTENNA_PDK = "missing_antenna_pdk"
+
+
+def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
+    """Why a non-gate ``levels[]`` entry came back ungraded, as the stable
+    ``coverage.skipped[].reason`` token for it."""
+    if findings_only:
+        return REASON_FINDINGS_ONLY
+    return REASON_MISSING_ANTENNA_PDK if pdk is None else "missing_antenna_limit"
+
+
+def _antenna_coverage(
+    gates: list[dict[str, Any]], pdk: str | None, findings_only: bool = False
+) -> dict[str, Any]:
     """Grade coverage against actual non-gate antenna levels, not gate count."""
     checked = []
     skipped = []
     inapplicable = []
+    reason = _antenna_skip_reason(pdk, findings_only)
     for gate in gates:
         for index, level in enumerate(gate["levels"]):
             identity = work_id("antenna", gate["gate_id"], level["layer"])
@@ -203,14 +253,7 @@ def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str,
             elif level["verdict"] in {"pass", "violate"}:
                 checked.append(identity)
             else:
-                skipped.append(
-                    {
-                        "id": identity,
-                        "reason": "missing_antenna_pdk"
-                        if pdk is None
-                        else "missing_antenna_limit",
-                    }
-                )
+                skipped.append({"id": identity, "reason": reason})
     return {
         "scope": "antenna",
         **build_check_coverage(
@@ -1144,33 +1187,223 @@ def _antenna_remedy(
 
 
 def _floating_gate_findings(
-    gate_entries_and_regions: list[tuple[dict[str, Any], Any]], gate_role: str
+    floating_gates: list[tuple[dict[str, Any], Any, bool]], gate_role: str
 ) -> list[dict[str, Any]]:
     """``erc.floating_gate`` findings (issue #861): every gate whose
-    accumulation (``gates[].levels``) stops immediately after the gate role
-    -- zero connected area on every ``stackup`` role above it -- is an
-    uncontacted/floating gate. Computed directly from the already-built
-    ``gates[]`` model; needs no additional spec section."""
+    accumulation stops immediately after the gate role -- zero connected
+    area on every ``stackup`` role above it -- is an uncontacted/floating
+    gate. Needs no additional spec section.
+
+    ``floating_gates`` is one ``(gate_entry, gate_region, is_floating)``
+    triple per discovered gate, in ``gates[]`` order. The predicate is
+    passed in rather than re-derived from ``gate_entry["levels"]`` because
+    a ``findings_only`` run (issue #2219) never accumulates those per-level
+    areas -- it evaluates the same predicate directly off the connectivity
+    graph (:func:`_gate_is_floating`), so this rule's findings are identical
+    either way."""
     findings: list[dict[str, Any]] = []
-    for gate_entry, gate_region in gate_entries_and_regions:
-        levels = gate_entry["levels"]
-        if len(levels) <= 1:
+    for gate_entry, gate_region, is_floating in floating_gates:
+        if not is_floating:
             continue
-        if all(level["step_area_um2"] == 0.0 for level in levels[1:]):
-            findings.append(
-                _finding(
-                    "erc.floating_gate",
-                    (
-                        "gate net has no connected geometry above the gate "
-                        "layer (floating/uncontacted gate)"
-                    ),
-                    net=gate_entry["net"],
-                    gate_id=gate_entry["gate_id"],
-                    layer=gate_role,
-                    bbox=_bbox_dict(gate_region.bbox()),
-                )
+        findings.append(
+            _finding(
+                "erc.floating_gate",
+                (
+                    "gate net has no connected geometry above the gate "
+                    "layer (floating/uncontacted gate)"
+                ),
+                net=gate_entry["net"],
+                gate_id=gate_entry["gate_id"],
+                layer=gate_role,
+                bbox=_bbox_dict(gate_region.bbox()),
             )
+        )
     return findings
+
+
+def _levels_report_floating(levels: list[dict[str, Any]]) -> bool:
+    """:func:`_floating_gate_findings`'s predicate read off a fully
+    accumulated ``levels[]`` list: zero ``step_area_um2`` on every role
+    above the gate."""
+    if len(levels) <= 1:
+        return False
+    return all(level["step_area_um2"] == 0.0 for level in levels[1:])
+
+
+def _gate_is_floating(
+    l2n: Any,
+    net: Any,
+    stackup: list[dict[str, Any]],
+    layer_index: dict[str, int],
+    dbu2_um2: float,
+) -> bool:
+    """:func:`_levels_report_floating`'s predicate computed *without* the
+    per-level accumulation (issue #2219), for a ``findings_only`` run.
+
+    Identical answer -- each probe measures exactly the quantity
+    :func:`_accumulated_levels` would have stored as that level's
+    ``step_area_um2`` (``Region.area()`` applies merged semantics by
+    default, so an explicit ``.merged()`` would not change the number),
+    and the same ``round(..., 9)`` is applied, so the two paths cannot
+    disagree even on an area small enough to round to ``0.0``.
+
+    Cheaper because it **stops at the first role that carries any area**.
+    An ordinary strapped gate exits after one probe instead of walking the
+    whole stackup, and nothing beyond the predicate's own answer is
+    computed: no running cumulative, no ratio, no limit lookup, no remedy
+    pass. Only a genuinely floating gate -- the rare case, and the one the
+    rule exists to report -- still costs a probe per role."""
+    for entry in stackup[1:]:
+        region = l2n.polygons_of_net(net, layer_index[entry["name"]])
+        if round(region.area() * dbu2_um2, 9) != 0.0:
+            return False
+    return len(stackup) > 1
+
+
+def _accumulated_levels(
+    l2n: Any,
+    net: Any,
+    stackup: list[dict[str, Any]],
+    layer_index: dict[str, int],
+    gate_poly_region: Any,
+    gate_area_um2: float,
+    dbu2_um2: float,
+    antenna_limits: dict[str, tuple[float, str]] | None,
+    pdk: str | None,
+) -> list[dict[str, Any]]:
+    """One gate net's full ``levels[]``: the layer-by-layer accumulation of
+    connected conductor area (Phase 1a), each non-gate level's antenna-ratio
+    verdict against the resolved PDK limit (Phase 1b), and each violating
+    level's remedy (Phase 3).
+
+    This is ``klt erc``'s expensive inner loop -- one
+    ``polygons_of_net(...).merged().area()`` per ``stackup`` role per gate
+    net -- and the work a ``findings_only`` run skips entirely (issue
+    #2219, see :func:`_skipped_accumulation_levels`). ``gate_poly_region``
+    is the caller's already-merged gate-role region, reused as
+    ``stackup[0]``'s own step region rather than re-extracted: the two are
+    the same region by construction (same net, same layer index), so this
+    is a free level off the walk.
+    """
+    levels: list[dict[str, Any]] = []
+    cumulative_um2 = 0.0
+    for i, entry in enumerate(stackup):
+        if i == 0:
+            step_region = gate_poly_region
+        else:
+            step_region = l2n.polygons_of_net(net, layer_index[entry["name"]]).merged()
+        step_um2 = step_region.area() * dbu2_um2
+        cumulative_um2 += step_um2
+
+        # `cumulative_area_um2 / gate_area_um2` per docs/cli/erc.md's
+        # own Phase-1a "Phase scope" note on what 1b delivers. The gate
+        # role itself (i == 0) is never PDK-checked: its ratio is
+        # trivially 1.0 (cumulative == gate area at that level), and
+        # the source table's own poly rule measures a different
+        # quantity entirely (poly perimeter, not cumulative connected
+        # area) -- not something this area-only model computes.
+        antenna_ratio = round(cumulative_um2 / gate_area_um2, 6)
+        limit_entry = (
+            None
+            if i == 0 or antenna_limits is None
+            else antenna_limits.get(entry["name"])
+        )
+        if limit_entry is not None:
+            limit_value, rule_id = limit_entry
+            antenna_ratio_max: float | None = limit_value
+            antenna_ratio_source: str | None = (
+                f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
+                "'Max EA/A w/o diode' column"
+            )
+            verdict = "violate" if antenna_ratio > limit_value else "pass"
+        else:
+            antenna_ratio_max = None
+            antenna_ratio_source = None
+            verdict = "unchecked"
+
+        levels.append(
+            {
+                "layer": entry["name"],
+                "step_area_um2": round(step_um2, 9),
+                "cumulative_area_um2": round(cumulative_um2, 9),
+                "antenna_ratio": antenna_ratio,
+                "antenna_ratio_max": antenna_ratio_max,
+                "antenna_ratio_source": antenna_ratio_source,
+                "verdict": verdict,
+            }
+        )
+
+    # Fix guidance (issue #908, epic #713 Phase 3) -- a second pass over
+    # the now-complete `levels` list, since a remedy for level `i` may
+    # look at `levels[i + 1]` (see `_antenna_remedy`). `None` for every
+    # non-violating level (including every level when `pdk` was omitted,
+    # since `verdict` is then always "unchecked").
+    for i, level in enumerate(levels):
+        level["remedy"] = (
+            _antenna_remedy(levels, i, net.name or None)
+            if level["verdict"] == "violate"
+            else None
+        )
+    return levels
+
+
+def _skipped_accumulation_levels(
+    stackup: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One gate net's ``levels[]`` for a ``findings_only`` run (issue
+    #2219): every role still enumerated, in fabrication order, but with
+    every accumulated quantity ``null`` -- the accumulation those numbers
+    come from was never performed.
+
+    ``null`` rather than a plausible-looking ``0.0`` on purpose: a zero
+    area is a real, checkable measurement ("nothing connects here") and is
+    exactly the measurement ``erc.floating_gate`` keys off, so reporting it
+    for work that never ran would make an un-accumulated report
+    indistinguishable from a layout of entirely floating gates. Every
+    level's ``verdict`` is ``"unchecked"`` and every one lands in
+    ``coverage.skipped`` with reason :data:`REASON_FINDINGS_ONLY`, so the
+    envelope says which antenna work was declined and why.
+    """
+    return [
+        {
+            "layer": entry["name"],
+            "step_area_um2": None,
+            "cumulative_area_um2": None,
+            "antenna_ratio": None,
+            "antenna_ratio_max": None,
+            "antenna_ratio_source": None,
+            "verdict": "unchecked",
+            "remedy": None,
+        }
+        for entry in stackup
+    ]
+
+
+def _antenna_verdict(levels: list[dict[str, Any]]) -> str:
+    """One gate's aggregate ``antenna_verdict`` (issue #1997).
+
+    Only ``levels[1:]`` (the non-gate roles) count towards "graded"
+    coverage: ``levels[0]`` (the gate role itself) is *always*
+    ``"unchecked"`` by construction (see :func:`_accumulated_levels`), so
+    its presence must never, on its own, downgrade an otherwise
+    fully-graded gate to ``"pass_partial"``. Among the graded levels:
+    ``"violate"`` wins outright regardless of coverage; absent a violation,
+    ``"pass_partial"`` reports that at least one graded level passed but at
+    least one other graded level's own role wasn't in the selected PDK's
+    limit table (e.g. sky130's table has no met3-5 entries -- see "Sky130
+    antenna-ratio limits" in docs/cli/erc.md) or ``--pdk`` was omitted
+    entirely for some otherwise-checkable subset; plain ``"pass"`` only
+    when every graded level was actually compared against a limit and none
+    violated; ``"unchecked"`` when no graded level was ever compared at all
+    (e.g. ``--pdk`` omitted, a ``findings_only`` run, or a single-role
+    stackup).
+    """
+    graded_verdicts = {level["verdict"] for level in levels[1:]}
+    if "violate" in graded_verdicts:
+        return "violate"
+    if "pass" in graded_verdicts:
+        return "pass_partial" if "unchecked" in graded_verdicts else "pass"
+    return "unchecked"
 
 
 def _match_net_clusters(circuit: Any, name: str) -> list[Any]:
@@ -1598,6 +1831,7 @@ def run_erc(
     top: str | None = None,
     pdk: str | None = None,
     deck: str | None = None,
+    findings_only: bool = False,
 ) -> dict[str, Any]:
     """Run ``klt erc``'s connectivity-model extraction, antenna-ratio
     check, and core ERC finding checks end to end.
@@ -1681,6 +1915,30 @@ def run_erc(
     ratio, every finding, ``provenance.deck``, ``provenance.devices``) is
     byte-identical to a run before this feature existed.
 
+    ``findings_only`` (optional, default ``False``, issue #2219) asks for
+    the ``erc_findings`` half of this report only, and **skips the per-gate
+    per-level antenna accumulation** that dominates its runtime: one
+    ``polygons_of_net(...).merged().area()`` per gate net per ``stackup``
+    role, which on a dense layout (tens of thousands of gate nets) is
+    almost the entire wall clock. Every ``erc_findings`` rule is still
+    evaluated, and every finding is identical to the same run without the
+    flag -- the four ``nets[]``/``ties[]``-driven rules never read the
+    accumulated areas at all, and ``erc.floating_gate``'s predicate is
+    evaluated directly off the connectivity graph instead
+    (:func:`_gate_is_floating`). What changes is the *antenna* half:
+    ``gates[].levels[]`` still enumerates every role, but with
+    ``step_area_um2``/``cumulative_area_um2``/``antenna_ratio`` reported as
+    ``None`` (the measurement was not taken -- see
+    :func:`_skipped_accumulation_levels`), every ``verdict``
+    ``"unchecked"``, every level in ``coverage.skipped`` with reason
+    :data:`REASON_FINDINGS_ONLY`, and therefore ``status:
+    "not_checked"``/exit 4 -- exactly the antenna answer a ``--pdk``-less
+    run already gives. ``erc_status``/``erc_coverage`` are unaffected and
+    stay fully graded. Passing both ``findings_only`` and ``pdk`` is a
+    contradiction (a limit table with nothing to grade) and raises
+    :class:`ErcError` rather than silently returning an ungraded antenna
+    half to a caller who asked for one.
+
     Returns a dict matching the documented ``klt erc`` JSON schema (see
     ``docs/cli/erc.md``), including ``schema_version``, (issue #861)
     ``erc_findings``/``erc_finding_count``, (issue #908) each violating
@@ -1706,9 +1964,17 @@ def run_erc(
     :func:`_degenerate_tie_names`).
 
     Raises :class:`ErcError` for a malformed spec, an unknown ``pdk`` or
-    ``deck``, an unresolvable layout/top cell, or a layout in which no net
-    carries any geometry on the declared gate role at all.
+    ``deck``, a ``findings_only`` run that also names a ``pdk``, an
+    unresolvable layout/top cell, or a layout in which no net carries any
+    geometry on the declared gate role at all.
     """
+    if findings_only and pdk is not None:
+        raise ErcError(
+            "--findings-only skips the per-gate antenna accumulation "
+            f"entirely, so --pdk {pdk!r} would have nothing to grade -- "
+            "pass --findings-only for the erc_findings-only read, or --pdk "
+            "for the antenna verdict, but not both"
+        )
     antenna_limits = _resolve_antenna_limits(pdk)
     deck_obj = _resolve_deck(deck)
 
@@ -1814,6 +2080,11 @@ def run_erc(
     # region regardless of `active_layer` -- only the area used for
     # membership/the antenna-ratio denominator below changes with the fix.
     gate_regions: list[Any] = []
+    # Parallel to `gates` too -- the `erc.floating_gate` predicate for each
+    # gate, computed from the accumulated `levels[]` on the normal path and
+    # directly off the connectivity graph on the `findings_only` one (issue
+    # #2219). Same answer either way; see `_gate_is_floating`.
+    gate_floating: list[bool] = []
     for net in candidates:
         gate_poly_region = l2n.polygons_of_net(net, gate_layer_index).merged()
 
@@ -1831,98 +2102,41 @@ def run_erc(
         if gate_area_um2 <= 0:
             continue
 
-        levels: list[dict[str, Any]] = []
-        cumulative_um2 = 0.0
-        for i, entry in enumerate(stackup):
-            step_region = l2n.polygons_of_net(net, layer_index[entry["name"]])
-            step_um2 = step_region.merged().area() * dbu2_um2
-            cumulative_um2 += step_um2
-
-            # `cumulative_area_um2 / gate_area_um2` per docs/cli/erc.md's
-            # own Phase-1a "Phase scope" note on what 1b delivers. The gate
-            # role itself (i == 0) is never PDK-checked: its ratio is
-            # trivially 1.0 (cumulative == gate area at that level), and
-            # the source table's own poly rule measures a different
-            # quantity entirely (poly perimeter, not cumulative connected
-            # area) -- not something this area-only model computes.
-            antenna_ratio = round(cumulative_um2 / gate_area_um2, 6)
-            limit_entry = (
-                None
-                if i == 0 or antenna_limits is None
-                else antenna_limits.get(entry["name"])
-            )
-            if limit_entry is not None:
-                limit_value, rule_id = limit_entry
-                antenna_ratio_max: float | None = limit_value
-                antenna_ratio_source: str | None = (
-                    f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
-                    "'Max EA/A w/o diode' column"
-                )
-                verdict = "violate" if antenna_ratio > limit_value else "pass"
-            else:
-                antenna_ratio_max = None
-                antenna_ratio_source = None
-                verdict = "unchecked"
-
-            levels.append(
-                {
-                    "layer": entry["name"],
-                    "step_area_um2": round(step_um2, 9),
-                    "cumulative_area_um2": round(cumulative_um2, 9),
-                    "antenna_ratio": antenna_ratio,
-                    "antenna_ratio_max": antenna_ratio_max,
-                    "antenna_ratio_source": antenna_ratio_source,
-                    "verdict": verdict,
-                }
-            )
-
-        # Fix guidance (issue #908, epic #713 Phase 3) -- a second pass over
-        # the now-complete `levels` list, since a remedy for level `i` may
-        # look at `levels[i + 1]` (see `_antenna_remedy`). `None` for every
-        # non-violating level (including every level when `pdk` was omitted,
-        # since `verdict` is then always "unchecked").
-        for i, level in enumerate(levels):
-            level["remedy"] = (
-                _antenna_remedy(levels, i, net.name or None)
-                if level["verdict"] == "violate"
-                else None
-            )
-
-        # `antenna_verdict` rollup (issue #1997) -- only `levels[1:]` (the
-        # non-gate roles) count towards "graded" coverage: `levels[0]` (the
-        # gate role itself) is *always* `"unchecked"` by construction (see
-        # above), so its presence must never, on its own, downgrade an
-        # otherwise fully-graded gate to `"pass_partial"`. Among the graded
-        # levels: `"violate"` wins outright regardless of coverage; absent
-        # a violation, `"pass_partial"` reports that at least one graded
-        # level passed but at least one other graded level's own role
-        # wasn't in the selected PDK's limit table (e.g. sky130's table has
-        # no met3-5 entries -- see "Sky130 antenna-ratio limits" in
-        # docs/cli/erc.md) or `--pdk` was omitted entirely for some
-        # otherwise-checkable subset; plain `"pass"` only when every graded
-        # level was actually compared against a limit and none violated;
-        # `"unchecked"` when no graded level was ever compared at all (e.g.
-        # `--pdk` omitted, or a single-role stackup).
-        graded_verdicts = {level["verdict"] for level in levels[1:]}
-        if "violate" in graded_verdicts:
-            antenna_verdict = "violate"
-        elif "pass" in graded_verdicts:
-            antenna_verdict = (
-                "pass_partial" if "unchecked" in graded_verdicts else "pass"
-            )
+        # The expensive part (issue #2219): one
+        # `polygons_of_net(...).merged().area()` per stackup role per gate
+        # net. A `findings_only` run never needs those numbers -- none of
+        # the `nets[]`/`ties[]`-driven findings read them, and the one rule
+        # that does (`erc.floating_gate`) has a cheaper equivalent
+        # predicate -- so it is skipped outright rather than computed and
+        # then reported `"unchecked"`.
+        if findings_only:
+            levels = _skipped_accumulation_levels(stackup)
+            is_floating = _gate_is_floating(l2n, net, stackup, layer_index, dbu2_um2)
         else:
-            antenna_verdict = "unchecked"
+            levels = _accumulated_levels(
+                l2n,
+                net,
+                stackup,
+                layer_index,
+                gate_poly_region,
+                gate_area_um2,
+                dbu2_um2,
+                antenna_limits,
+                pdk,
+            )
+            is_floating = _levels_report_floating(levels)
 
         gates.append(
             {
                 "gate_id": f"gate{len(gates)}",
                 "net": net.name or None,
                 "gate_area_um2": round(gate_area_um2, 9),
-                "antenna_verdict": antenna_verdict,
+                "antenna_verdict": _antenna_verdict(levels),
                 "levels": levels,
             }
         )
         gate_regions.append(gate_poly_region)
+        gate_floating.append(is_floating)
 
     if not gates:
         raise ErcError(
@@ -1936,7 +2150,9 @@ def run_erc(
     # docstring, "ERC finding checks", for what each rule detects.
     erc_findings: list[dict[str, Any]] = []
     erc_findings.extend(
-        _floating_gate_findings(list(zip(gates, gate_regions, strict=True)), gate_role)
+        _floating_gate_findings(
+            list(zip(gates, gate_regions, gate_floating, strict=True)), gate_role
+        )
     )
     erc_findings.extend(
         _net_connectivity_findings(l2n, circuit, layer_index, nets_decl)
@@ -1980,7 +2196,7 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
-    coverage = _antenna_coverage(gates, pdk)
+    coverage = _antenna_coverage(gates, pdk, findings_only)
 
     # The common rollup rule (issue #2109, this adapter's own #2115) decides
     # `status` from `coverage` plus the two violation signals above, rather
@@ -2108,6 +2324,11 @@ def run_erc(
         "file": file,
         "spec": spec_path,
         "pdk": pdk,
+        # (issue #2219) Whether the per-gate antenna accumulation was
+        # skipped. A reader that finds `levels[].step_area_um2 == null`
+        # must be able to tell "this run declined to measure it" from a
+        # malformed report, without inferring it from `coverage.skipped`.
+        "findings_only": findings_only,
         "gate_role": gate_role,
         "gate_count": len(gates),
         "gates": gates,

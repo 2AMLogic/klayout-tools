@@ -2319,6 +2319,7 @@ def test_cli_json_contract(tmp_path, capsys):
         "file",
         "spec",
         "pdk",
+        "findings_only",
         "gate_role",
         "gate_count",
         "gates",
@@ -3657,3 +3658,310 @@ def test_cli_deck_selected_via_flag_reports_no_findings(tmp_path, capsys):
     assert out["erc_findings"] == []
     assert out["erc_status"] == "clean"
     assert out["provenance"]["deck"]["name"] == "gf180mcu"
+
+
+# --- --findings-only: skip the antenna accumulation (issue #2219) ------------
+
+
+class _CountingL2N:
+    """A thin recording proxy around ``klayout.db.LayoutToNetlist``.
+
+    ``polygons_of_net`` is *the* expensive call in `klt erc` -- one merged
+    region per gate net per stackup role -- so the issue-#2219 skip is only
+    real if it makes fewer of them. Counting is done here, on the object
+    `run_erc` actually calls, rather than by timing: a wall-clock assertion
+    on a tiny fixture would be noise, while a call count is exact.
+    """
+
+    def __init__(self, inner, layer_index):
+        self._inner = inner
+        self.layer_index = layer_index
+        self.layer_calls: list[int] = []
+
+    def calls_for(self, role: str) -> int:
+        """How many times this graph was asked for a net's geometry on the
+        `stackup` role named `role`."""
+        return self.layer_calls.count(self.layer_index[role])
+
+    def polygons_of_net(self, net, layer, *rest):
+        self.layer_calls.append(layer)
+        return self._inner.polygons_of_net(net, layer, *rest)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _record_polygons_of_net(monkeypatch):
+    """Wrap `_extract_connectivity` so every `LayoutToNetlist` `run_erc`
+    builds is a counting proxy. Returns the list the proxies land in, in
+    creation order (the primary graph first, the tie graph -- when the spec
+    declares `ties[]` -- second)."""
+    from klayout_tools import erc as erc_module
+
+    proxies: list[_CountingL2N] = []
+    real = erc_module._extract_connectivity
+
+    def counting(*args, **kwargs):
+        l2n, circuit, layer_index, tie_layers = real(*args, **kwargs)
+        proxy = _CountingL2N(l2n, layer_index)
+        proxies.append(proxy)
+        return proxy, circuit, layer_index, tie_layers
+
+    monkeypatch.setattr(erc_module, "_extract_connectivity", counting)
+    return proxies
+
+
+def _assert_findings_identical(gds, spec):
+    """The contract the whole flag rests on: a findings-only run's
+    `erc_findings` (and the connectivity roll-up over them) are identical,
+    field for field, to the full run's."""
+    full = run_erc(str(gds), str(spec))
+    lean = run_erc(str(gds), str(spec), findings_only=True)
+
+    assert json.dumps(lean["erc_findings"], sort_keys=True) == json.dumps(
+        full["erc_findings"], sort_keys=True
+    )
+    assert lean["erc_finding_count"] == full["erc_finding_count"]
+    assert lean["erc_status"] == full["erc_status"]
+    assert lean["erc_coverage"] == full["erc_coverage"]
+    assert lean["gate_count"] == full["gate_count"]
+    assert [g["gate_id"] for g in lean["gates"]] == [
+        g["gate_id"] for g in full["gates"]
+    ]
+    assert [g["gate_area_um2"] for g in lean["gates"]] == [
+        g["gate_area_um2"] for g in full["gates"]
+    ]
+    return full, lean
+
+
+def test_findings_only_keeps_floating_gate_findings_identical(tmp_path):
+    """`erc.floating_gate` is the one rule that reads the per-level model,
+    so it is the one the skip could plausibly break."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    full, lean = _assert_findings_identical(gds, spec)
+
+    floating = [f for f in lean["erc_findings"] if f["rule"] == "erc.floating_gate"]
+    assert len(floating) == 1
+    assert floating[0]["gate_id"] == "gate1"
+    assert floating[0]["bbox"] is not None
+
+
+def test_findings_only_keeps_supply_read_findings_identical(tmp_path):
+    """The T1 item-11 supply read: `erc.unconnected_net` (a declared supply
+    that matches nothing) plus `erc.missing_tie` (wells whose declared tap
+    layer draws nothing), on the same routed two-gate layout issue #2169's
+    tie tests use."""
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / "supply_read.gds"
+    layout.write(str(gds))
+    spec_doc = _routed_tie_spec(ties=_routed_tie_entries(tap_layer="99/0"))
+    spec_doc["nets"].append({"name": "VDDA", "kind": "supply"})
+    spec = tmp_path / "supply_read.erc.json"
+    _write_spec(spec, spec_doc)
+
+    _full, lean = _assert_findings_identical(gds, spec)
+
+    rules = {f["rule"] for f in lean["erc_findings"]}
+    assert "erc.missing_tie" in rules
+    assert "erc.unconnected_net" in rules
+    assert {
+        f["net"] for f in lean["erc_findings"] if f["rule"] == "erc.missing_tie"
+    } == {"VDD", "VSS"}
+
+
+def test_findings_only_keeps_supply_short_findings_identical(tmp_path):
+    layout, top, _poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(10), _um(0), _um(12), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(10.5), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(11.5), _um(0.5))))
+
+    gds = tmp_path / "shorted_supplies.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "shorted_supplies.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VSS", "kind": "supply"},
+            ]
+        ),
+    )
+
+    _full, lean = _assert_findings_identical(gds, spec)
+
+    shorts = [f for f in lean["erc_findings"] if f["rule"] == "erc.supply_short"]
+    assert len(shorts) == 1
+    assert {shorts[0]["net"], shorts[0]["other_net"]} == {"VDD", "VSS"}
+
+
+def test_findings_only_skips_the_per_level_accumulation(tmp_path, monkeypatch):
+    """The point of the flag: materially fewer `polygons_of_net` calls, and
+    *none at all* for the roles a strapped gate's accumulation would have
+    walked past its first connected level."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    proxies = _record_polygons_of_net(monkeypatch)
+    full = run_erc(str(gds), str(spec))
+    full_graph = proxies[0]
+
+    proxies.clear()
+    lean = run_erc(str(gds), str(spec), findings_only=True)
+    lean_graph = proxies[0]
+
+    assert len(lean_graph.layer_calls) < len(full_graph.layer_calls)
+
+    # Both gate nets are walked up the whole four-role stackup by the full
+    # run. The findings-only run stops at each gate's first connected role
+    # instead: gate A straps up through li1, so the roles above it are
+    # probed only for the floating gate B.
+    for role in ("li1", "met1", "met2"):
+        assert full_graph.calls_for(role) == 2, role
+    assert lean_graph.calls_for("li1") == 2
+    assert lean_graph.calls_for("met1") == 1
+    assert lean_graph.calls_for("met2") == 1
+
+    # And the skip is not achieved by dropping a gate on the floor.
+    assert lean["gate_count"] == full["gate_count"] == 2
+
+
+def test_findings_only_nulls_the_accumulation_and_says_so(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec), findings_only=True)
+
+    assert report["findings_only"] is True
+    assert report["pdk"] is None
+    for gate in report["gates"]:
+        assert gate["antenna_verdict"] == "unchecked"
+        assert [level["layer"] for level in gate["levels"]] == [
+            "poly",
+            "li1",
+            "met1",
+            "met2",
+        ]
+        for level in gate["levels"]:
+            assert level["step_area_um2"] is None
+            assert level["cumulative_area_um2"] is None
+            assert level["antenna_ratio"] is None
+            assert level["antenna_ratio_max"] is None
+            assert level["antenna_ratio_source"] is None
+            assert level["verdict"] == "unchecked"
+            assert level["remedy"] is None
+
+    # Nothing antenna-side was graded, and the envelope names why.
+    assert report["coverage"]["checked"] == []
+    assert {entry["reason"] for entry in report["coverage"]["skipped"]} == {
+        "findings_only"
+    }
+    # The connectivity half is untouched -- fully graded, with its own
+    # roll-up still reporting the floating gate this fixture carries.
+    assert report["erc_status"] == "violations"
+    assert report["status"] == "violations"
+
+
+def test_findings_only_clean_run_reports_not_checked(tmp_path):
+    """With no finding to report, a findings-only run's antenna answer is
+    `not_checked` -- the same answer a `--pdk`-less run already gives, not
+    a new status token."""
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / "clean.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "clean.erc.json"
+    ties = [{**entry, "tap_is_dedicated": True} for entry in _routed_tie_entries()]
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+
+    report = run_erc(str(gds), str(spec), findings_only=True)
+
+    assert report["erc_findings"] == []
+    assert report["erc_status"] == "clean"
+    assert report["status"] == "not_checked"
+
+
+def test_findings_only_with_pdk_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--findings-only"):
+        run_erc(str(gds), str(spec), pdk="sky130", findings_only=True)
+
+
+def test_default_run_is_unchanged_by_the_flag(tmp_path):
+    """The flag is opt-in: an invocation that does not pass it accumulates
+    exactly as before, nulls nowhere."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert report["findings_only"] is False
+    gate_a = next(g for g in report["gates"] if g["net"] == "GATE_A")
+    assert all(level["step_area_um2"] is not None for level in gate_a["levels"])
+    # `levels[0]` is the gate role's own merged region, reused rather than
+    # re-extracted (issue #2219) -- still exactly the gate area.
+    assert gate_a["levels"][0]["step_area_um2"] == pytest.approx(
+        gate_a["gate_area_um2"]
+    )
+    assert gate_a["levels"][0]["cumulative_area_um2"] == pytest.approx(
+        gate_a["gate_area_um2"]
+    )
+
+
+def test_cli_findings_only_json(tmp_path, capsys):
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / "clean.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "clean.erc.json"
+    ties = [{**entry, "tap_is_dedicated": True} for entry in _routed_tie_entries()]
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+
+    exit_code = main(
+        ["erc", str(gds), str(spec), "--findings-only", "--format", "json"]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 4
+    assert data["findings_only"] is True
+    assert data["erc_status"] == "clean"
+    assert data["status"] == "not_checked"
+
+
+def test_cli_findings_only_text_says_accumulation_skipped(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    assert main(["erc", str(gds), str(spec), "--findings-only"]) == 3
+    out = capsys.readouterr().out
+
+    assert "findings_only: True" in out
+    assert "met2: accumulation skipped (--findings-only)" in out
+    assert "step=" not in out
+    assert "[erc.floating_gate]" in out
+
+
+def test_cli_findings_only_with_pdk_exits_1(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    exit_code = main(["erc", str(gds), str(spec), "--findings-only", "--pdk", "sky130"])
+
+    assert exit_code == 1
+    assert "--findings-only" in capsys.readouterr().err
