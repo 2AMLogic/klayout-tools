@@ -4307,5 +4307,22 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "argparse's usage-error exit 2."
         ),
     )
+    erc_parser.add_argument(
+        "--findings-only",
+        action="store_true",
+        help=(
+            "report the erc_findings half only, skipping the per-gate "
+            "per-level antenna accumulation that dominates runtime on a "
+            "dense layout (issue #2219). Every ERC finding is identical "
+            "to a full run -- including erc.floating_gate, whose predicate "
+            "is evaluated directly off the connectivity graph -- while "
+            "gates[].levels[]'s accumulated areas/ratios come back null, "
+            "every antenna verdict 'unchecked', and status 'not_checked' "
+            "(exit 4), with every level in coverage.skipped for reason "
+            "'findings_only'. Gate on erc_status, as any --pdk-less run "
+            "already must. Mutually exclusive with --pdk (a limit table "
+            "with nothing to grade) -- passing both exits 1."
+        ),
+    )
     _add_format_arg(erc_parser)
     erc_parser.set_defaults(func=erc_cmd.run)

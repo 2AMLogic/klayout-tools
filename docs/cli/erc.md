@@ -10,7 +10,8 @@ the antenna + ERC signoff epic
 [#713](https://github.com/2AMLogic/klayout-tools/issues/713).
 
 ```
-klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>] [--format text|json]
+klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
+                      [--findings-only] [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -35,6 +36,13 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>] [--format te
   auto-detection" below. Optional and independent of `--pdk` (which selects
   only the antenna-ratio limit table). Not validated by argparse: an
   unrecognised name is a clean exit-1 error, same convention as `--pdk`.
+- `--findings-only` — report the `erc_findings` half only, skipping the
+  per-gate per-level antenna accumulation that dominates runtime on a dense
+  layout (issue
+  [#2219](https://github.com/2AMLogic/klayout-tools/issues/2219)). Every ERC
+  finding is identical to a full run; the antenna half reports `null`
+  accumulation fields and `"unchecked"` verdicts. Mutually exclusive with
+  `--pdk` (exit 1). See "Findings-only runs" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
@@ -720,7 +728,10 @@ level's own role `name`:
   in that case — `antenna_ratio` is still reported, just with nothing to
   compare it against) or because this role's `name` does not match any
   role the selected PDK's table defines (see "Sky130 antenna-ratio
-  limits" below for the exact names it recognises).
+  limits" below for the exact names it recognises). A `--findings-only`
+  run (issue #2219) is likewise `"unchecked"` everywhere, and there
+  `antenna_ratio` is `null` as well — the accumulation it would be derived
+  from was never performed. See "Findings-only runs" below.
 
 **The gate role itself (`stackup[0]`) is always `"unchecked"`.** Without
 `active_layer`, its `antenna_ratio` is trivially `1.0`
@@ -758,7 +769,8 @@ here):
   declared role's antenna ratio is otherwise fully graded).
 - **`antenna_verdict: "unchecked"`** — no graded level was ever compared
   against a limit at all (e.g. `--pdk` was omitted, so every level
-  including the graded ones comes back `"unchecked"`).
+  including the graded ones comes back `"unchecked"`, or `--findings-only`
+  skipped the accumulation outright).
 
 ### Sky130 antenna-ratio limits
 
@@ -888,6 +900,71 @@ roll-up, computed once, so every caller reads the same rule.
 `klt signoff`'s **envelope-aggregation** mode, which does grade an `erc`
 citation on the envelope's own verdict, reads `erc_status` when `status` is
 `not_checked`: see [`docs/cli/signoff.md`](signoff.md).
+
+## Findings-only runs (`--findings-only`, issue #2219)
+
+`klt erc`'s inner loop is the per-gate, per-level accumulation: for
+**every** gate net, on **every** `stackup` role, a merged connected-area
+measurement. It scales as *gate nets × stackup roles*, and on a dense
+layout (the issue measured 16,640 gate nets × a four-role stackup at ~26
+minutes single-threaded) it is the dominant per-gate cost.
+
+A caller who only wants the `erc_findings` half pays all of it for nothing.
+The structural supply read that
+[`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11
+grades — `nets[]` island/short checks plus `ties[]` — never reads an
+accumulated area, and without a `--pdk` limit table the accumulation grades
+nothing either: every level comes back `"unchecked"` and `status` is
+`not_checked` regardless. `--findings-only` skips the walk:
+
+```bash
+klt erc routed.gds supply.erc.json --findings-only --format json
+```
+
+**What is unchanged.** Every ERC finding. All five rules still run, and
+their output is identical field-for-field to the same run without the flag
+— including `erc.floating_gate`, the one rule that reads the per-level
+model. Its predicate ("no connected geometry on any role above the gate")
+is evaluated directly off the same connectivity graph instead, stopping at
+the first role that carries area rather than measuring every role, so the
+answer is the same and the work is strictly less. `erc_findings`,
+`erc_finding_count`, `erc_status`, and `erc_coverage` are therefore all
+byte-identical to a full run, as are `gate_count` and every
+`gates[].gate_id`/`gates[].gate_area_um2`.
+
+**What changes.** Only the antenna half, and only to say honestly that it
+did not run:
+
+- `gates[].levels[]` still enumerates every `stackup` role in fabrication
+  order, but `step_area_um2`, `cumulative_area_um2`, and `antenna_ratio` are
+  **`null`** — the measurement was not taken. `null` rather than `0.0` on
+  purpose: a zero area is itself a real, checkable measurement (it is
+  exactly what `erc.floating_gate` keys off), so reporting zeros for work
+  that never ran would make a skipped report indistinguishable from a
+  layout of entirely floating gates.
+- Every `levels[].verdict` is `"unchecked"` and every
+  `gates[].antenna_verdict` is `"unchecked"`.
+- Every non-gate level lands in `coverage.skipped` with reason
+  `findings_only`, so the envelope names which antenna work was declined
+  and why.
+- `status` is `"not_checked"` and the exit code `4` — exactly the antenna
+  answer a `--pdk`-less run already gives, not a new token. Gate on
+  `erc_status`, as any `--pdk`-less run already must (see "Two verdicts"
+  above).
+- The top-level `findings_only` field is `true`, so a reader that finds a
+  `null` accumulation can tell "this run declined to measure it" from a
+  malformed report without inferring it from `coverage`.
+
+**`--findings-only` and `--pdk` are mutually exclusive.** Passing both is a
+contradiction — a limit table with nothing to grade — and is a clean exit-1
+error rather than a silently ungraded antenna half returned to a caller who
+asked for one. (If a wrapper always passes `--pdk`, drop it for the
+findings-only invocation; that invocation's antenna answer was `not_checked`
+either way.)
+
+The flag is **opt-in and inert by default**: an invocation that does not
+pass it produces exactly the report it always did, `findings_only: false`
+included, with no field newly nullable.
 
 ## JSON schema (the contract)
 
@@ -1078,6 +1155,7 @@ forward regardless (a `diode_insertion` remedy):
 | `file`           | string          | The input layout path exactly as provided.                                                       |
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
+| `findings_only`  | boolean         | (issue #2219) Whether `--findings-only` was passed — i.e. whether the per-gate antenna accumulation was skipped. `false` for every ordinary run. When `true`, `levels[].step_area_um2`/`cumulative_area_um2`/`antenna_ratio` are `null` and every level is in `coverage.skipped` for reason `findings_only` — see "Findings-only runs" above. |
 | `gate_role`      | string          | The `stackup[0].name` value — the gate-role layer's own name.                                    |
 | `gate_count`     | integer         | `len(gates)`.                                                                                     |
 | `gates`          | array\<object\> | One entry per net with nonzero area on the gate-role layer — see below.                          |
@@ -1087,9 +1165,9 @@ forward regardless (a `diode_insertion` remedy):
 | `gates[].antenna_verdict` | string | `"violate"` if any *graded* `levels[1:]` entry (excludes `levels[0]`, the gate role, which is always `"unchecked"`) violates; else `"pass_partial"` if at least one graded level passed but at least one other graded level is `"unchecked"` (issue #1997 — a genuine coverage gap, e.g. met3-5 on a full sky130 stack); else `"pass"` if every graded level passed; else `"unchecked"`. |
 | `gates[].levels` | array\<object\> | One entry per `stackup` role, in fabrication order — see below.                                  |
 | `levels[].layer` | string          | The contributing `stackup` role's own `name`.                                                     |
-| `levels[].step_area_um2` | number   | This net's own merged area on this role's layer, in µm².                                         |
-| `levels[].cumulative_area_um2` | number | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm².     |
-| `levels[].antenna_ratio` | number   | `cumulative_area_um2 / gate_area_um2` for this level. `1.0` at `stackup[0]` (the gate level) when `active_layer` is omitted; otherwise reflects the raw-poly-vs-`poly ∩ diff` area difference (see "Gate area: `poly ∩ diff` vs. raw poly area" above) — always `"unchecked"` there regardless. |
+| `levels[].step_area_um2` | number \| null | This net's own merged area on this role's layer, in µm². `null` on a `--findings-only` run (issue #2219) — the accumulation was not performed. |
+| `levels[].cumulative_area_um2` | number \| null | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm². `null` on a `--findings-only` run. |
+| `levels[].antenna_ratio` | number \| null | `cumulative_area_um2 / gate_area_um2` for this level; `null` on a `--findings-only` run. `1.0` at `stackup[0]` (the gate level) when `active_layer` is omitted; otherwise reflects the raw-poly-vs-`poly ∩ diff` area difference (see "Gate area: `poly ∩ diff` vs. raw poly area" above) — always `"unchecked"` there regardless. |
 | `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
 | `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
 | `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
@@ -1125,8 +1203,11 @@ this command's existing envelope. This command reports **two** scopes,
 because it performs two independent bodies of checked work (issue #2179):
 
 `coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
-actually compared against a limit. Missing PDK or level limits are skipped;
-the gate reference level is inapplicable.
+actually compared against a limit. Missing PDK or level limits are skipped
+(`missing_antenna_pdk`/`missing_antenna_limit`), as is every non-gate level
+of a `--findings-only` run (`findings_only`, issue #2219 — the caller
+declined the accumulation, the same shape of caller-side skip as omitting
+`--pdk`); the gate reference level is inapplicable.
 
 `erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
 which need no `--pdk` at all. One checked ID per subject actually checked:
@@ -1178,10 +1259,10 @@ retain exit 1 and the stderr error envelope.
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
 | `0` | `status: "clean"` (at least one antenna level was graded, with no antenna or connectivity finding) or `status: "clean_partial"` (every graded level passed, but some requested antenna work was skipped — #2115). |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, `--findings-only` together with `--pdk`, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
 | `3` | Antenna or connectivity violations. |
-| `4` | No actual antenna checks; `status: "not_checked"`. |
+| `4` | No actual antenna checks; `status: "not_checked"` — including every `--findings-only` run, which skips them by request. |
 
 **Gate on `status`, not the exit code.** These codes are additive — a
 future release may add a new one above `4` — and the exit code is only a
@@ -1190,9 +1271,9 @@ authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
 "Exit codes" section.
 
 **The exit code answers the *antenna* question**, because `status` does. On
-a PDK with no antenna-ratio table — every PDK but sky130 today, and any run
-that omits `--pdk` — it is therefore `4` for every layout, however clean the
-design is. That is not a signal that the run failed or that nothing was
+a PDK with no antenna-ratio table — every PDK but sky130 today, any run
+that omits `--pdk`, and every `--findings-only` run — it is therefore `4`
+for every layout, however clean the design is. That is not a signal that the run failed or that nothing was
 checked: the connectivity rules ran, and their verdict is `erc_status` in
 the payload. A caller that wants only the structural/connectivity read gates
 on `erc_status` and ignores the exit code (see "Two verdicts" above); it
