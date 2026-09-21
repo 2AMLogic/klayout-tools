@@ -211,6 +211,21 @@ number is not actionable on a one-line JSON document.
   first names no user, the second is a token resolved at read time (the shape
   [`klt synthesize`](synthesize.md) already writes into generated `.ys`
   scripts).
+- **`<placeholder>/…` template roots are not flagged** (issue #2230).
+  `<path-to-your-checkout>/infra/aws/provision.sh` is an instruction to the
+  reader to substitute their own prefix, not a path that resolves anywhere —
+  the same reason `$PDK_ROOT/…` is exempt. The exemption is
+  *adjacency-scoped*: only the path rooted at the placeholder is skipped, so
+  `copy <your-checkout>/infra/run.sh to /Users/rob/bin/run.sh` still reports
+  `/Users/rob/bin/run.sh`. The placeholder body may not contain whitespace,
+  so an inequality (`a < b and c > d`) cannot swallow a real path between the
+  brackets.
+- **A `#/…` URI fragment is not flagged** (issue #2230).
+  `02-architecture.json#/blocks/ota_buffer` is a relative document reference
+  plus an [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901) JSON Pointer:
+  `/blocks/ota_buffer` addresses a node *inside* that document, not a
+  directory on the host. Only the fragment is excised — an absolute path on
+  the document side of the `#` is still a finding.
 - **Mapping keys are scanned too.** A dict *keyed* by an absolute path leaks
   exactly as thoroughly as one valued by it.
 - **`--allow-prefix` is explicit, never inferred from the environment.** Pass
@@ -225,12 +240,39 @@ valid JSON (never a silent "clean"), `2` argparse usage error.
 
 ### Wiring it into a repo's CI
 
-Not wired into this repo's CI — same reasoning as `scan` (see "Non-goals"),
-and for a concrete second reason: this repo's own `examples/` tree still
-contains committed artifacts with absolute paths from the worktrees that
-generated them, so a blanket gate would fail on pre-existing records rather
-than on new ones. A downstream repo committing flow evidence should gate its
-*newly-added* records:
+**Wired into this repo's CI since issue #2230** — a step in
+`.github/workflows/ci.yml`'s `Lint (ruff)` job runs the lint over every
+committed JSON artifact under `examples/`:
+
+```bash
+git ls-files 'examples/**/*.json' | xargs -r klt env-provenance lint-envelope
+```
+
+Note the **empty allow-list**. When #2224 shipped the lint it found 12
+findings across 7 committed example artifacts, which is why no gate existed
+at first; #2230 cleared all 12 without a single `--allow-prefix`, and keeping
+it that way is the property the gate is protecting. Each class was dispositioned
+on its own merits rather than blanket-allowed:
+
+| Artifact | Field(s) | Disposition |
+|---|---|---|
+| `examples/critical-net-mom-fidelity/phase{1,2a,2b}-*.json` | `file`, `netlist_path` | **Content fixed.** They carried the generating worktree's absolute path (`/Users/<author>/…/worktrees/issue-978/…`) — a real leak of the class this lint exists to catch. Rewritten repo-relative; `generate_and_measure.py`'s `_committable()` keeps a regeneration clean. Bonus: `klt extract --check` on those reports now resolves its input and matches, where before it reported `provenance.input.content_hash: null` on every machine but one. |
+| `examples/design-centering/{request,sized-device}.json` | `provenance.pdk.root`, `provenance.deck.path` | **Content fixed (placeholder re-spelled).** These are a hand-built, synthetic `klt size` response; the values were the docs placeholder `/abs/path/…`, which is constant across checkouts but indistinguishable from a real host path. Re-spelled `<abs-path>/…` — same meaning, now self-evidently a placeholder, and exempt by the template-root rule above. |
+| `examples/design-pipeline/03-blockspec.json` | `input_ref` | **Lint fixed (false positive).** `02-architecture.json#/blocks/ota_buffer` is a JSON Pointer into another document, never a directory. |
+| `examples/sim-batch/matrix-batch.request.json` | `batch.provision_script_path` | **Lint fixed (false positive).** `<path-to-your-2am-checkout>/infra/aws/…` is a template root the reader substitutes into, and the path is on a *remote* batch host besides. |
+
+The gate covers committed **JSON artifacts** only, not prose: the `/abs/path/…`
+placeholder this repo's docs use throughout (`docs/cli/techmap.md`,
+`docs/cli/synthesize.md`, and others, inside fenced response examples) is
+untouched and stays the convention there. Only a value that ships as a
+committed `examples/**/*.json` byte needs the `<abs-path>/…` spelling, because
+only those bytes are what the gate reads.
+
+The general lesson: reach for a content fix when the value really is this
+machine's path, for a lint fix when the value was never a host path at all,
+and for `--allow-prefix` only for a genuinely machine-wide install root. A
+downstream repo committing flow evidence that cannot clear its history the
+way this repo did should gate its *newly-added* records instead:
 
 ```bash
 git diff --name-only --diff-filter=A origin/main...HEAD -- '*.json' \
@@ -279,10 +321,12 @@ that formats its own records can use just the pieces it needs.
 - **Not a secret scanner.** `scan` looks for identifier-shaped paths in
   evidence records. It is not a credential scanner and is not a substitute for
   one.
-- **Not wired into this repo's CI.** `scan` and `lint-envelope` are tools a
-  repo points at its own newly-added records; deciding which paths to gate on
-  (and what to do about records that predate the rule) belongs to the repo
-  doing the gating.
+- **`scan` is not wired into this repo's CI.** It is a tool a repo points at
+  its own newly-added records; deciding which paths to gate on (and what to do
+  about records that predate the rule) belongs to the repo doing the gating.
+  (`lint-envelope` *is* wired in, over `examples/**/*.json` only — see "Wiring
+  it into a repo's CI" above. That is a decision this repo made for its own
+  tree, not a default the verb imposes on a consumer.)
 - **`lint-envelope` does not rewrite anything.** It reports the field; the fix
   (retype to `{path, scope}`, or drop the path for a content hash) is a
   per-field contract decision — see

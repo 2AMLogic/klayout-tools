@@ -403,11 +403,11 @@
       "klayout_version": "0.30.10",
       "pdk": {
         "variant": "sky130A",
-        "root": "/abs/path/sky130A"
+        "root": "<abs-path>/sky130A"
       },
       "deck": {
         "name": "sky130.lib.spice",
-        "path": "/abs/path/sky130.lib.spice"
+        "path": "<abs-path>/sky130.lib.spice"
       },
       "input": null
     },

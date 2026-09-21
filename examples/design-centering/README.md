@@ -67,6 +67,15 @@ Its geometry values are consistent with (though not identical to) the
 worked numbers `docs/cli/size.md`'s own "Coupled multi-device topology
 sizing" response example quotes.
 
+Because the response is synthetic, its `provenance.pdk.root` and
+`provenance.deck.path` cannot name a real install — they are placeholders
+the reader substitutes their own PDK location into, spelled
+`<abs-path>/sky130A` and `<abs-path>/sky130.lib.spice`. The angle brackets
+are deliberate (issue #2230): a bare `/abs/path/sky130A` is indistinguishable
+from a genuine host path, which is what `klt env-provenance lint-envelope`
+gates `examples/**/*.json` on in CI. Keep new placeholders in this shape
+rather than adding a `--allow-prefix` to that gate.
+
 ## Regenerating
 
 `generate.py` re-runs `klt yield-sensitivity` on the existing samples
