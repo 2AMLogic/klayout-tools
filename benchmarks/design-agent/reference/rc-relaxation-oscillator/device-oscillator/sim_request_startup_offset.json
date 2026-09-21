@@ -1,0 +1,212 @@
+{
+  "netlist": "oscillator_device.spice",
+  "engine": "ngspice",
+  "models": {
+    "pdk": "sky130A",
+    "lib": "libs.tech/ngspice/sky130.lib.spice"
+  },
+  "corners": {
+    "process": [
+      "tt",
+      "ss",
+      "ff"
+    ],
+    "supply_v": {
+      "vdd": [
+        1.62,
+        1.62,
+        1.62,
+        1.62,
+        1.62,
+        1.62,
+        1.62,
+        1.62,
+        1.62,
+        1.62,
+        1.62
+      ],
+      "voffhi": [
+        0.0,
+        0.01,
+        -0.01,
+        0.01,
+        -0.01,
+        0.025,
+        -0.025,
+        0.05,
+        -0.05,
+        0.05,
+        -0.05
+      ],
+      "vofflo": [
+        0.0,
+        -0.01,
+        0.01,
+        0.01,
+        -0.01,
+        -0.025,
+        0.025,
+        -0.05,
+        0.05,
+        0.05,
+        -0.05
+      ]
+    },
+    "temperature_c": [
+      -40,
+      27
+    ]
+  },
+  "exclude": [
+    {
+      "process": "tt",
+      "temperature_c": -40
+    },
+    {
+      "process": "ff",
+      "temperature_c": -40
+    }
+  ],
+  "analysis": {
+    "kind": "tran",
+    "args": "5n 26u"
+  },
+  "measurements": [
+    {
+      "name": "vo_t0_v",
+      "spice": ".meas tran vo_t0_v FIND v(vo) AT=0",
+      "unit": "V"
+    },
+    {
+      "name": "vth_hi_eff_t0_v",
+      "spice": ".meas tran vth_hi_eff_t0_v FIND v(vth_hi_in) AT=0",
+      "unit": "V"
+    },
+    {
+      "name": "vth_lo_eff_t0_v",
+      "spice": ".meas tran vth_lo_eff_t0_v FIND v(vth_lo_in) AT=0",
+      "unit": "V"
+    },
+    {
+      "name": "q_t0_v",
+      "spice": ".meas tran q_t0_v FIND v(q) AT=0",
+      "unit": "V"
+    },
+    {
+      "name": "startup_margin_mv",
+      "spice": ".meas tran startup_margin_mv param='1000*(vo_t0_v-vth_hi_eff_t0_v)'",
+      "unit": "mV"
+    },
+    {
+      "name": "q_first_edge",
+      "spice": ".meas tran q_first_edge WHEN v(q)=0.75 CROSS=1",
+      "unit": "s",
+      "limits": {
+        "max": 2e-06
+      }
+    },
+    {
+      "name": "t_startup",
+      "spice": ".meas tran t_startup WHEN v(vo)=0.8 CROSS=1",
+      "unit": "s",
+      "limits": {
+        "max": 3e-06
+      }
+    },
+    {
+      "name": "vth_lo_eff_v",
+      "spice": ".meas tran vth_lo_eff_v AVG v(vth_lo_in) FROM=12u TO=24u",
+      "unit": "V"
+    },
+    {
+      "name": "vth_hi_eff_v",
+      "spice": ".meas tran vth_hi_eff_v AVG v(vth_hi_in) FROM=12u TO=24u",
+      "unit": "V"
+    },
+    {
+      "name": "dv_eff_v",
+      "spice": ".meas tran dv_eff_v param='vth_hi_eff_v-vth_lo_eff_v'",
+      "unit": "V"
+    },
+    {
+      "name": "t_edge1",
+      "spice": ".meas tran t_edge1 WHEN v(vo)=0.8 RISE=1 TD=10u",
+      "unit": "s"
+    },
+    {
+      "name": "t_edge4",
+      "spice": ".meas tran t_edge4 WHEN v(vo)=0.8 RISE=4 TD=10u",
+      "unit": "s"
+    },
+    {
+      "name": "t_edge7",
+      "spice": ".meas tran t_edge7 WHEN v(vo)=0.8 RISE=7 TD=10u",
+      "unit": "s"
+    },
+    {
+      "name": "period_early",
+      "spice": ".meas tran period_early param='(t_edge4-t_edge1)/3'",
+      "unit": "s"
+    },
+    {
+      "name": "period_late",
+      "spice": ".meas tran period_late param='(t_edge7-t_edge4)/3'",
+      "unit": "s"
+    },
+    {
+      "name": "period_avg",
+      "spice": ".meas tran period_avg param='(t_edge7-t_edge1)/6'",
+      "unit": "s",
+      "limits": {
+        "min": 1.4e-06,
+        "max": 2.2e-06
+      }
+    },
+    {
+      "name": "period_drift_pct",
+      "spice": ".meas tran period_drift_pct param='100*(period_late-period_early)/period_late'",
+      "unit": "%",
+      "limits": {
+        "min": -2.0,
+        "max": 2.0
+      }
+    },
+    {
+      "name": "q_edge1",
+      "spice": ".meas tran q_edge1 WHEN v(q)=0.75 RISE=1 TD=10u",
+      "unit": "s"
+    },
+    {
+      "name": "q_edge4",
+      "spice": ".meas tran q_edge4 WHEN v(q)=0.75 RISE=4 TD=10u",
+      "unit": "s"
+    },
+    {
+      "name": "q_period_avg",
+      "spice": ".meas tran q_period_avg param='(q_edge4-q_edge1)/3'",
+      "unit": "s"
+    },
+    {
+      "name": "vo_high_v",
+      "spice": ".meas tran vo_high_v MAX v(vo) FROM=12u TO=24u",
+      "unit": "V",
+      "limits": {
+        "max": 1.55
+      }
+    },
+    {
+      "name": "vo_low_v",
+      "spice": ".meas tran vo_low_v MIN v(vo) FROM=12u TO=24u",
+      "unit": "V",
+      "limits": {
+        "min": 0.15
+      }
+    }
+  ],
+  "options": {
+    "timeout_s": 900,
+    "keep_artifacts": false,
+    "max_workers": 4
+  },
+  "backend": "local-parallel"
+}
