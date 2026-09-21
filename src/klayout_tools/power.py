@@ -91,13 +91,23 @@ Resistor-network model (MVP, stated plainly):
   plus a ``warnings`` entry. Refusing is honest; approximating would move
   the IR/EM verdict in the unsafe direction.
 - Each via layer's net geometry becomes **one via edge** per merged via
-  polygon, connecting the *nearest* existing node (by straight-line
-  distance) on each of the two metal layers the via spec declares it
-  bridges -- not a true T-junction split of the rail it taps. This is a
-  documented v1 simplification (see ``docs/cli/power.md``'s "Scope and
-  limitations"): precise enough to preserve every island's real connectivity
-  and rail resistance, at the cost of a small positional error in exactly
-  where along a rail a tap lands.
+  polygon. Each end is the node nearest the via's centre **on the merged
+  polygon the via actually lands on** for that role -- so a tap partway
+  along a rail snaps to one of *that rail's own* ends, not to a true
+  T-junction split at the via's position. This is a documented v1
+  simplification (see ``docs/cli/power.md``'s "Scope and limitations"):
+  it preserves every island's real connectivity and rail resistance, at the
+  cost of a small positional error in exactly where along a rail a tap
+  lands. Searching the whole net's nodes instead (the pre-#2259 behaviour)
+  was not a positional approximation but a connectivity error: on a
+  trunk-and-stub rail it orphaned the trunk and shorted unrelated segments
+  together. A via landing on no modelled segment of a role it declares is
+  skipped with a warning, never wired to a rail it does not touch.
+- The invariant that guards the above: an island's emitted network must be
+  **one connected component**, because the connectivity model already
+  decided its geometry is one island. More than one is reported as a
+  warning -- normally an undeclared via layer -- because orphaned nodes are
+  silently dropped from the droop and EM verdicts.
 """
 
 from __future__ import annotations
@@ -621,10 +631,15 @@ def _validate_current_model(
 def _nearest_endpoint(
     rails: list[dict[str, Any]], x_um: float, y_um: float
 ) -> str | None:
-    """The id of the node (among every rail endpoint recorded for one net on
-    one metal layer) nearest to ``(x_um, y_um)`` -- the via-tap
-    approximation this module's docstring documents. ``None`` when the net
-    has no rail geometry at all on that layer."""
+    """The id of the node nearest to ``(x_um, y_um)`` among the endpoints of
+    ``rails`` -- the via-tap approximation this module's docstring documents.
+    ``None`` when ``rails`` is empty.
+
+    ``rails`` must be the merged polygon(s) the via **physically lands on**
+    (:func:`_rails_under_via`), never every rail the net owns on that layer:
+    scoped to the tapped polygon this only moves the tap to one of that
+    polygon's own ends, but searched net-wide it rewires the via to an
+    unrelated segment that merely happens to be closer (issue #2259)."""
     best_id: str | None = None
     best_dist: float | None = None
     for rail in rails:
@@ -634,6 +649,101 @@ def _nearest_endpoint(
                 best_dist = dist
                 best_id = node_id
     return best_id
+
+
+def _rails_under_via(
+    rails: list[dict[str, Any]], via_region: kdb.Region, via_box: kdb.Box
+) -> list[dict[str, Any]]:
+    """The rails (merged polygons of one metal role, as recorded by
+    :func:`_build_island_network`) that the via shape actually lands on --
+    the scope a via tap's nearest-endpoint search is restricted to (issue
+    #2259).
+
+    Searching the whole net's rails instead is not a positional
+    approximation, it is a connectivity error: on any trunk-and-stub rail (a
+    PDN strap with drop-downs, a long rail with per-row risers) a via tapping
+    the trunk partway along is nearer some unrelated short stub's endpoint
+    than either of the trunk's own ends, so the tap is wired to the stub --
+    severing the trunk from everything it feeds and shorting two unrelated
+    segments together. The island then fragments into disconnected
+    components, and the IR solve reports ``no_pad`` on the orphans while
+    ``worst_case_droop_mv`` reads 0.
+
+    Merged polygons on one layer are disjoint, so this is normally exactly
+    one rail; a via shape spanning two of them physically bridges both, and
+    both is still the correct scope. Touching counts as landing on: a via
+    abutting a rail edge-to-edge is what joined them into this net."""
+    hits: list[dict[str, Any]] = []
+    for rail in rails:
+        if not rail["bbox"].touches(via_box):
+            continue
+        if not rail["region"].interacting(via_region).is_empty():
+            hits.append(rail)
+    return hits
+
+
+def _connected_component_count(
+    nodes: list[dict[str, Any]], edges: list[dict[str, Any]]
+) -> int:
+    """How many connected components one island's emitted resistor network
+    has, by union-find over its ``edges``.
+
+    The invariant this exists to check (issue #2259): the connectivity model
+    (``LayoutToNetlist``) already decided these nodes are **one** electrically
+    connected island, so the network built from it must be one component too.
+    More than one means the network lost connectivity the layout has -- which
+    is silent and one-directional toward "looks fine", because orphaned nodes
+    drop out of ``worst_case_droop_mv`` and carry no current for the EM
+    verdict."""
+    parent = {node["id"]: node["id"] for node in nodes}
+
+    def find(node_id: str) -> str:
+        root = node_id
+        while parent[root] != root:
+            root = parent[root]
+        while parent[node_id] != root:
+            parent[node_id], node_id = root, parent[node_id]
+        return root
+
+    components = len(parent)
+    for edge in edges:
+        a, b = find(edge["from"]), find(edge["to"])
+        if a != b:
+            parent[a] = b
+            components -= 1
+    return components
+
+
+def _warn_if_network_fragmented(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    net_name: str,
+    island_id: str,
+    warnings: list[str],
+) -> None:
+    """Report, in ``warnings``, an island whose emitted resistor network is
+    not one connected component (issue #2259).
+
+    This is the cheap invariant that catches the whole "the network lost
+    connectivity the layout has" class outright: the connectivity model
+    already decided this island's geometry is electrically one, so anything
+    built from it must be one component too. It is worth a warning rather
+    than being left implicit because nothing else in the report shows it --
+    ``island_count`` still reads 1, and the nodes that fall off the pad's
+    component are dropped from ``worst_case_droop_mv`` (making it go *down*)
+    and carry no current for the EM verdict."""
+    components = _connected_component_count(nodes, edges)
+    if components <= 1:
+        return
+    warnings.append(
+        f"power net {net_name!r} island {island_id!r}: the extracted "
+        f"resistor network has {components} disconnected components, but "
+        "the layout connects this island's geometry as one -- some "
+        "connection is not modelled (most often a via layer missing from "
+        "'vias', or one whose 'between' roles do not match the layers it "
+        "joins). Nodes on components with no pad cannot be solved, so the "
+        "reported droop understates the real one"
+    )
 
 
 def _polygon_cut_coordinates(polygon: kdb.Polygon) -> tuple[list[int], list[int]]:
@@ -941,6 +1051,8 @@ def _build_island_network(
     string -- with empty ``nodes``/``edges`` -- when some segment's geometry
     cannot be modelled exactly (issue #2171): the island is declared
     unsolved rather than approximated in the non-conservative direction."""
+    import klayout.db as kdb
+
     nodes: list[dict[str, Any]] = []
     edges: list[dict[str, Any]] = []
     rails_by_layer: dict[str, list[dict[str, Any]]] = {
@@ -1014,7 +1126,15 @@ def _build_island_network(
                 decomposed["cells"] += len(cells)
                 endpoints = _model_mesh_polygon(cells, entry, dbu, add_node, add_edge)
             if endpoints:
-                rails_by_layer[entry["name"]].append({"endpoints": endpoints})
+                # `region`/`bbox` scope each via tap's endpoint search to the
+                # polygon it lands on (issue #2259) -- see `_rails_under_via`.
+                rails_by_layer[entry["name"]].append(
+                    {
+                        "endpoints": endpoints,
+                        "region": kdb.Region(polygon),
+                        "bbox": polygon.bbox(),
+                    }
+                )
 
     if decomposed["segments"]:
         warnings.append(
@@ -1031,14 +1151,21 @@ def _build_island_network(
             cx = (box.left + box.right) / 2 * dbu
             cy = (box.bottom + box.top) / 2 * dbu
             layer_a, layer_b = via["between"]
-            node_a = _nearest_endpoint(rails_by_layer[layer_a], cx, cy)
-            node_b = _nearest_endpoint(rails_by_layer[layer_b], cx, cy)
+            # Scoped to the merged polygon this via actually lands on, per
+            # role -- never the whole net's rails (issue #2259).
+            via_region = kdb.Region(polygon)
+            node_a = _nearest_endpoint(
+                _rails_under_via(rails_by_layer[layer_a], via_region, box), cx, cy
+            )
+            node_b = _nearest_endpoint(
+                _rails_under_via(rails_by_layer[layer_b], via_region, box), cx, cy
+            )
             if node_a is None or node_b is None:
                 missing = layer_a if node_a is None else layer_b
                 warnings.append(
                     f"power net {net_name!r} island {island_id!r}: a "
-                    f"{via['name']!r} via at ({cx:.3f}, {cy:.3f}) um has no "
-                    f"matching {missing!r} rail on this net -- skipped"
+                    f"{via['name']!r} via at ({cx:.3f}, {cy:.3f}) um lands on no "
+                    f"modelled {missing!r} segment of this net -- skipped"
                 )
                 continue
             add_edge(
@@ -1050,6 +1177,10 @@ def _build_island_network(
                 via["current_limit_a"],
                 via["current_limit_source"],
             )
+
+    # The connectivity model already declared these nodes one island, so the
+    # network built from it must be one connected component (issue #2259).
+    _warn_if_network_fragmented(nodes, edges, net_name, island_id, warnings)
 
     return nodes, edges, None
 

@@ -204,6 +204,259 @@ def test_run_power_via_bridged_island_has_metal_and_via_edges(tmp_path):
     assert layers == {"met1", "met2"}
 
 
+# --- run_power: a via taps the polygon it lands on (issue #2259) -----------
+
+
+def _trunk_and_riser_fixture(path) -> None:
+    """The trunk-and-stub topology a whole-net nearest-node search gets
+    wrong (issue #2259) -- physically **one** net:
+
+    - one 40 x 0.5 um horizontal `Metal1` trunk at y = 0,
+    - three 10 um `Poly2` risers hanging off it at x = 5/20/35, each with a
+      `Contact` joining its top to the trunk,
+    - a short vertical `Metal1` stub at each riser's bottom, with its own
+      `Contact`.
+
+    The middle riser's trunk contact (20, 0) is 20 um from either trunk
+    *endpoint* but only 10 um from its own stub's node, so a search over
+    every `Metal1` rail on the net wires the trunk tap to the stub: the
+    trunk is orphaned from the risers it feeds, and the stub is shorted to
+    a rail it does not touch.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TRUNK_RISER")
+
+    poly2 = layout.layer(30, 0)
+    metal1 = layout.layer(34, 0)
+    contact = layout.layer(33, 0)
+    metal1_label = layout.layer(34, 10)
+
+    top.shapes(metal1).insert(kdb.Box.new(_um(0), _um(-0.25), _um(40), _um(0.25)))
+    for x in (5, 20, 35):
+        top.shapes(poly2).insert(
+            kdb.Box.new(_um(x - 0.2), _um(-10), _um(x + 0.2), _um(0))
+        )
+        top.shapes(contact).insert(
+            kdb.Box.new(_um(x - 0.11), _um(-0.11), _um(x + 0.11), _um(0.11))
+        )
+        top.shapes(metal1).insert(
+            kdb.Box.new(_um(x - 0.2), _um(-14), _um(x + 0.2), _um(-10))
+        )
+        top.shapes(contact).insert(
+            kdb.Box.new(_um(x - 0.11), _um(-10.11), _um(x + 0.11), _um(-9.89))
+        )
+    top.shapes(metal1_label).insert(kdb.Text("vdd", kdb.Trans(_um(2), _um(0))))
+
+    layout.write(str(path))
+
+
+def _trunk_and_riser_spec(path, *, ir: bool = False) -> None:
+    spec = {
+        "power_nets": ["vdd"],
+        "stackup": [
+            {
+                "name": "Poly2",
+                "layer": "30/0",
+                "sheet_resistance_ohm_per_sq": 7.3,
+            },
+            {
+                "name": "Metal1",
+                "layer": "34/0",
+                "label_layer": "34/10",
+                "sheet_resistance_ohm_per_sq": 0.09,
+            },
+        ],
+        "vias": [
+            {
+                "name": "Contact",
+                "layer": "33/0",
+                "between": ["Poly2", "Metal1"],
+                "resistance_ohm": 8.0,
+            }
+        ],
+    }
+    if ir:
+        # Pad on the trunk; load at the bottom of the *middle* riser -- the
+        # one whose trunk contact the whole-net search mis-attached.
+        spec["pads"] = [
+            {"name": "pad", "net": "vdd", "x_um": 2.0, "y_um": 0.0, "voltage_v": 3.3}
+        ]
+        spec["current_model"] = {
+            "supply_net": "vdd",
+            "instances": [
+                {"name": "load", "x_um": 20.0, "y_um": -12.0, "current_a": 1e-3}
+            ],
+        }
+    path.write_text(json.dumps(spec))
+
+
+def _component_count(island) -> int:
+    """How many connected components one island's emitted network has, by
+    breadth-first search -- deliberately an independent implementation of
+    `power._connected_component_count`, so this asserts the invariant rather
+    than re-running the code under test against itself."""
+    adjacency = {node["id"]: set() for node in island["nodes"]}
+    for edge in island["edges"]:
+        adjacency[edge["from"]].add(edge["to"])
+        adjacency[edge["to"]].add(edge["from"])
+    seen: set[str] = set()
+    components = 0
+    for start in adjacency:
+        if start in seen:
+            continue
+        components += 1
+        queue = [start]
+        seen.add(start)
+        while queue:
+            for neighbour in adjacency[queue.pop()]:
+                if neighbour not in seen:
+                    seen.add(neighbour)
+                    queue.append(neighbour)
+    return components
+
+
+def test_via_tap_attaches_to_the_polygon_it_lands_on(tmp_path):
+    """Each `Contact` is wired to an endpoint of the merged polygon it
+    physically lands on, not to whatever node happens to be nearest on the
+    whole net (issue #2259).
+
+    The discriminator is the middle riser's trunk contact at (20, 0): its
+    own polygon's endpoints are 20 um away (either end of the trunk), while
+    an unrelated stub's node is 10 um away. Scoped correctly it lands on the
+    trunk; searched net-wide it lands on the stub.
+    """
+    gds = tmp_path / "trunk_riser.gds"
+    spec = tmp_path / "trunk_riser.power.json"
+    _trunk_and_riser_fixture(gds)
+    _trunk_and_riser_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+
+    assert report["island_count"] == 1
+    island = report["networks"][0]["islands"][0]
+    nodes = {node["id"]: node for node in island["nodes"]}
+    vias = [edge for edge in island["edges"] if edge["kind"] == "via"]
+    assert len(vias) == 6
+
+    # The three contacts drawn on the trunk (y = 0) each reach a trunk
+    # endpoint -- x = 0 or x = 40, y = 0 -- never a stub node at y = -10.
+    trunk_taps = [
+        edge
+        for edge in vias
+        if nodes[edge["from"]]["y_um"] == pytest.approx(0.0)
+        or nodes[edge["to"]]["y_um"] == pytest.approx(0.0)
+    ]
+    assert len(trunk_taps) == 3
+    for edge in trunk_taps:
+        metal = next(
+            nodes[end]
+            for end in (edge["from"], edge["to"])
+            if nodes[end]["layer"] == "Metal1"
+        )
+        assert metal["y_um"] == pytest.approx(0.0)
+        assert metal["x_um"] in (pytest.approx(0.0), pytest.approx(40.0))
+
+    # ... and each stub contact reaches its *own* stub, not another riser's.
+    stub_taps = [edge for edge in vias if edge not in trunk_taps]
+    for edge in stub_taps:
+        poly, metal = (
+            nodes[edge["from"]],
+            nodes[edge["to"]],
+        )
+        if poly["layer"] != "Poly2":
+            poly, metal = metal, poly
+        assert metal["x_um"] == pytest.approx(poly["x_um"])
+        assert metal["y_um"] == pytest.approx(poly["y_um"])
+
+
+def test_extracted_network_has_one_component_per_island(tmp_path):
+    """The invariant that catches this whole class outright (issue #2259):
+    `LayoutToNetlist` already decided this geometry is **one** electrically
+    connected island, so the resistor network built from it must be one
+    connected component. Before the fix it was two -- one of them holding a
+    cycle (riser -> stub -> riser) that the layout does not contain."""
+    gds = tmp_path / "trunk_riser.gds"
+    spec = tmp_path / "trunk_riser.power.json"
+    _trunk_and_riser_fixture(gds)
+    _trunk_and_riser_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+
+    assert report["island_count"] == 1
+    assert [
+        _component_count(island) for island in report["networks"][0]["islands"]
+    ] == [1]
+    assert report["warnings"] == []
+
+
+def test_trunk_and_riser_ir_drop_reaches_the_loaded_riser(tmp_path):
+    """The end-to-end symptom: a load on a riser the pad's trunk really
+    feeds is solved, instead of being reported `no_pad` behind a headline
+    `worst_case_droop_mv` of 0.0 -- a false clean pass (issue #2259)."""
+    gds = tmp_path / "trunk_riser.gds"
+    spec = tmp_path / "trunk_riser.power.json"
+    _trunk_and_riser_fixture(gds)
+    _trunk_and_riser_spec(spec, ir=True)
+
+    report = run_power(str(gds), str(spec))
+
+    assert report["warnings"] == []
+    islands = report["ir_drop_map"]["nets"][0]["islands"]
+    assert [island["solved"] for island in islands] == [True]
+    assert all(node["voltage_v"] is not None for node in islands[0]["nodes"])
+    assert report["ir_drop_map"]["unsolved_current_a"] == pytest.approx(0.0)
+
+    # 1 mA through the trunk's left half (3.6 ohm), a Contact (8), the
+    # middle riser (182.5), a second Contact (8) and the stub (0.9): the
+    # deepest droop is at the far end of the riser, not 0 mV.
+    assert report["worst_case_droop_mv"] == pytest.approx(190.5, rel=1e-6)
+    worst = report["ir_drop_map"]["worst_case"]
+    assert (worst["x_um"], worst["y_um"]) == (pytest.approx(20.0), pytest.approx(-10.0))
+
+
+def test_via_landing_on_no_modelled_segment_is_skipped_with_a_warning(tmp_path):
+    """A via shape that lands on no polygon of one of the roles it claims to
+    bridge is skipped and named, rather than wired across to a rail it never
+    touches (issue #2259).
+
+    The fixture is the `_basic_fixture` island B topology plus a *stray* via
+    shape sitting on met1 alone, at the far end of the rail from the real
+    met1->met2 stack. It is still on the net (it touches met1), so it is
+    still returned by `polygons_of_net`; before the fix it invented a second
+    met1->met2 edge to the stub 4 um away.
+    """
+    gds = tmp_path / "stray_via.gds"
+    spec = tmp_path / "basic.power.json"
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    met1 = layout.layer(1, 0)
+    met1_label = layout.layer(1, 5)
+    met2 = layout.layer(2, 0)
+    via1 = layout.layer(3, 0)
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(5), _um(10), _um(6)))
+    top.shapes(met1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(5), _um(5.5))))
+    top.shapes(via1).insert(kdb.Box.new(_um(4), _um(5), _um(6), _um(6)))
+    top.shapes(met2).insert(kdb.Box.new(_um(4), _um(5), _um(6), _um(10)))
+    # The stray one: on met1, under no met2 at all.
+    top.shapes(via1).insert(kdb.Box.new(_um(9), _um(5), _um(10), _um(6)))
+    layout.write(str(gds))
+    _basic_spec(spec, power_nets=("VPWR",))
+
+    report = run_power(str(gds), str(spec))
+
+    island = report["networks"][0]["islands"][0]
+    assert [edge["kind"] for edge in island["edges"]].count("via") == 1
+    skipped = [w for w in report["warnings"] if "lands on no modelled" in w]
+    assert len(skipped) == 1
+    assert "'met2'" in skipped[0]
+    # Skipping the phantom via costs nothing real: the island is still one
+    # connected component, because the genuine via still bridges it.
+    assert _component_count(island) == 1
+
+
 def test_run_power_island_ids_are_scoped_per_net(tmp_path):
     gds = tmp_path / "basic.gds"
     spec = tmp_path / "basic.power.json"
@@ -1304,6 +1557,28 @@ def test_gcd_pdn_fixture_resolves_each_supply_to_one_island(tmp_path):
     partial_by_net = {entry["net"]: entry for entry in partial["networks"]}
     assert partial_by_net["VPWR"]["island_count"] == 17
     assert partial_by_net["VGND"]["island_count"] == 17
+
+
+def test_gcd_pdn_network_has_one_component_per_island(tmp_path):
+    """Issue #2259's invariant on real PDN geometry: the number of connected
+    components in the emitted resistor network equals the number of islands
+    the connectivity model found.
+
+    The hand-drawn fixture above pins the failing topology; this pins the
+    property on a real `klt par` PDN -- a met1-followpins mesh with met4/met5
+    straps and hundreds of via taps, exactly the trunk-and-stub shape a
+    whole-net nearest-node search silently fragments."""
+    spec = tmp_path / "gcd_pdn.power.json"
+    _sky130_pdn_stackup_spec(spec)
+
+    report = run_power(str(PLACE_AND_ROUTE_PDN_GDS), str(spec))
+
+    components = [
+        _component_count(island)
+        for entry in report["networks"]
+        for island in entry["islands"]
+    ]
+    assert components == [1] * report["island_count"]
 
 
 # --- Static IR-drop solve (issue #845, Phase 1b) ----------------------------
