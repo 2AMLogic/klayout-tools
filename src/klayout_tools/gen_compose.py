@@ -213,6 +213,7 @@ from .gen_compose_routing import (
     _min_width_um_for_layer,
     _pad_self_notch_violation_um,
     _polyline_midpoint_um,
+    _port_own_layer,
     _resolve_cross_block_route_layer,
     _resolve_label_layer,
     _resolve_landing_pad_sizes,
@@ -2418,6 +2419,77 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
             )
         return own_block_layer_geometry_cache[key]
 
+    # Post-route landing connectivity (issue #2210): every check above --
+    # #1057's route-vs-route collision, #1386's spacing-aware version of it,
+    # #1520's pad self-notch, #1527's own-block escape, #1904's own-block
+    # approach spacing -- compares a leg's *own drawn metal* against some
+    # *other* already-drawn geometry (another net's, or the same block's
+    # other pads). None of them ever asks the more basic question a
+    # caller-supplied ``ports[]`` coordinate quietly assumes: does the named
+    # block actually draw real conductor at that declared (x_um, y_um) at
+    # all? A `blocks[].cell` port tapped by coordinate in a frame that does
+    # not exactly match the block's own placed geometry (the caller's own
+    # bookkeeping, a placement offset applied twice, a stale response file)
+    # lands its leg -- and its via-drop/stub-widen landing pad -- on an empty
+    # patch of the composed layout: nothing else is there to overlap, so
+    # every geometric check above (all of which look for a *problem*, not
+    # for the *absence* of a legitimate landing) passes and the leg reports
+    # `routed: true` unconditionally, even though it never actually touches
+    # the block whose net it claims to join (a "floating pad" -- the gap
+    # #1527's overlap-only guard, by its own docstring, does not cover).
+    #
+    # `_leg_landed_on_block` closes that gap directly: for each of a drawn
+    # leg's own endpoint pins that reports a usable position and a physical
+    # `layer` (`_port_own_layer` -- the same field via-drop resolution
+    # already keys off), it tests whether the pin's own composed-frame
+    # coordinate actually sits on the named block's own drawn conductor on
+    # that layer (`_own_block_layer_geometry`, the same per-(block, layer)
+    # cache #1520's pad self-notch check and #1904's approach-spacing check
+    # already share -- so this reuses a read that is very often already
+    # warm, rather than paying for a second one). Two overlapping shapes on
+    # one layer are, by construction, one electrical node (the same
+    # same-layer-merge rule ``klayout.db.LayoutToNetlist.connect()`` applies
+    # -- see ``erc.py``'s own connectivity model, issue #859) -- so this is
+    # exactly the connectivity check the issue asks for, scoped to just the
+    # pins each leg actually lands on rather than a whole-layout
+    # re-extraction.
+    def _leg_landed_on_block(leg: dict[str, Any]) -> bool:
+        """``True`` iff every endpoint pin of a *drawn* leg with a usable
+        reported position and layer touches its own named block's real
+        drawn geometry on that layer -- see the block comment above this
+        function. A pin with no reported position/layer (the same
+        "nothing to check" case :func:`_port_own_layer`/route_two_pin's own
+        via-drop resolution already tolerates) is skipped, not failed, so a
+        leg with no checkable endpoints reports landed."""
+        import klayout.db as kdb
+
+        for pin in leg["pins"]:
+            block = blocks.get(pin["block"])
+            if block is None:
+                continue
+            port = (block.get("ports") or {}).get(pin["port"])
+            if not isinstance(port, dict):
+                continue
+            x_um, y_um = port.get("x_um"), port.get("y_um")
+            if isinstance(x_um, bool) or not isinstance(x_um, (int, float)):
+                continue
+            if isinstance(y_um, bool) or not isinstance(y_um, (int, float)):
+                continue
+            port_layer = _port_own_layer(port)
+            if port_layer is None:
+                continue
+            own_geometry = _own_block_layer_geometry(pin["block"], port_layer)
+            if own_geometry is None:
+                return False
+            offset = offsets_um[pin["block"]]
+            dbu = own_geometry["dbu"]
+            px = int(round((float(x_um) + offset["x"]) / dbu))
+            py = int(round((float(y_um) + offset["y"]) / dbu))
+            probe = kdb.Region(kdb.Box(px - 1, py - 1, px + 1, py + 1))
+            if own_geometry["region"].interacting(probe).is_empty():
+                return False
+        return True
+
     # --- Per-net/per-leg routing-plane override (#1655) ----------------------
     # `routing.layer_role` resolves ONE plane for the whole composition, so a
     # composition whose net-connectivity graph is non-planar (a K3,3-style
@@ -3151,6 +3223,26 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 explicit_legs=resolved_legs,
                 geometry_for_layer=_geometry_for_layer,
             )
+        # landed_on_block (issue #2210): computed once per leg here (not
+        # inline in the dict comprehension below) so the net-level aggregate
+        # and each leg's own reported value come from the identical call --
+        # `None` for a leg that never drew (nothing to check, the same
+        # "absent" convention `channel_track` already uses below).
+        legs_landed_on_block: list[bool | None] = [
+            _leg_landed_on_block(leg) if leg["routed"] else None
+            for leg in result["legs"]
+        ]
+        # `None` when the net drew no legs at all (declare-only, or every
+        # candidate leg was rejected) -- there is nothing to have landed
+        # anywhere yet, which is a distinct case from "landed, but on empty
+        # space". Otherwise the AND of every drawn leg's own verdict: one
+        # floating landing pad is enough to make the whole net's connectivity
+        # suspect, even if its other legs landed cleanly.
+        net_landed_on_block = (
+            all(flag for flag in legs_landed_on_block if flag is not None)
+            if any(flag is not None for flag in legs_landed_on_block)
+            else None
+        )
         nets.append(
             {
                 "net": net_label,
@@ -3161,6 +3253,19 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                 # drew some but not all of its legs from one that drew none
                 # at all, since both report `routed: false` above (#1169).
                 "status": result["status"],
+                # landed_on_block (#2210): `True` only when every drawn leg's
+                # own landing pin actually touches its named block's real
+                # drawn geometry (see `_leg_landed_on_block`'s own docstring)
+                # -- `routed`/`status` above are purely geometric ("was metal
+                # drawn, and did it clear every other drawn-metal check") and
+                # stay unchanged by this field; a net can be `routed: true`
+                # and still `landed_on_block: false` when a leg's landing pad
+                # sits on a coordinate the named block never actually drew
+                # anything at (a "floating pad", e.g. a `ports[]` frame
+                # mismatch -- see docs/cli/gen-compose.md's "Geometry is
+                # advisory" section for what `routed: true` does and does not
+                # guarantee). `None` when the net drew nothing to check.
+                "landed_on_block": net_landed_on_block,
                 "legs": [
                     {
                         "pins": leg["pins"],
@@ -3174,12 +3279,20 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
                         # same channel. Absent on an unrouted leg, matching
                         # route_two_pin's own "no width_um either" convention.
                         **(
-                            {"channel_track": leg["channel_track"]}
+                            {
+                                "channel_track": leg["channel_track"],
+                                # landed_on_block (#2210): this leg's own
+                                # verdict -- see the net-level field's
+                                # docstring above.
+                                "landed_on_block": landed,
+                            }
                             if leg["routed"]
                             else {}
                         ),
                     }
-                    for leg in result["legs"]
+                    for leg, landed in zip(
+                        result["legs"], legs_landed_on_block, strict=True
+                    )
                 ],
             }
         )
