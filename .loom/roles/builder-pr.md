@@ -867,7 +867,19 @@ externally-visible action of this whole Builder run — run the sweep-side
 fencing check:
 
 ```bash
-./.loom/scripts/sweep-lease-fence.sh check "$N"
+# `--sweep-id` is THIS dispatch's own sweep run id (Issue #2237) — the same
+# `$RUN_ID` (`sweep-run-registry.sh new`, sweep-backend-detection.md Step 0a)
+# already threaded into `sweep-lease-publish.sh publish "$N" --sweep-id
+# "$RUN_ID"` at pre-flight, so the fence compares against the identity that
+# actually wrote the lease. Without it the check can only compare `host=`,
+# and an abandoned lease left by a DIFFERENT, dead dispatch on this same host
+# reads as "MY OWN renewal loop died" → a permanent, false exit 3 on every
+# successor (issue #2226). Fall back to `$LOOM_SWEEP_RUN_ID` (the env var
+# `sweep-lease-publish.sh` itself defaults to); if neither is set, pass the
+# empty string — the script treats that exactly like omitting the flag
+# (host-only comparison, the pre-#2237 behavior), it does not guess.
+SWEEP_ID="${RUN_ID:-${LOOM_SWEEP_RUN_ID:-}}"
+./.loom/scripts/sweep-lease-fence.sh check "$N" --sweep-id "$SWEEP_ID"
 FENCE_RC=$?
 if [[ "$FENCE_RC" -eq 3 ]]; then
   echo "Lease fence: EXPIRED — MY OWN claim's lease record is stale on the forge's own clock (my renewal loop died). Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
@@ -876,14 +888,18 @@ if [[ "$FENCE_RC" -eq 3 ]]; then
   # as not-contributed-this-run, same as any other Builder failure marker.
   # (Issue #6783: exit 3 now means the EXPIRED lease is THIS sweep's own —
   # an expired lease owned by a DIFFERENT, abandoned host is no longer a
-  # fencing abort; that case is folded into FENCE_RC == 0 below.)
+  # fencing abort; that case is folded into FENCE_RC == 0 below. Issue
+  # #2237: with --sweep-id passed above, "own" additionally means the
+  # lease's own `sweep=` names THIS run — an expired lease from a different
+  # run on this same host is likewise folded into FENCE_RC == 0.)
 elif [[ "$FENCE_RC" -eq 4 ]]; then
   echo "Lease fence: SUPERSEDED — a different host's lease is now the freshest for issue $N. Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
   # Same stop-here handling as the EXPIRED branch above.
 else
-  # FENCE_RC == 0 (fresh & own host, OR no lease evidence to fence against —
-  # fail-open, see the script's own header doc — OR an EXPIRED lease owned
-  # by a DIFFERENT, abandoned host, Issue #6783) -> proceed exactly as
+  # FENCE_RC == 0 (fresh & own host/sweep, OR no lease evidence to fence
+  # against — fail-open, see the script's own header doc — OR an EXPIRED
+  # lease owned by a DIFFERENT, abandoned host, Issue #6783, OR any lease
+  # belonging to a DIFFERENT sweep run, Issue #2237) -> proceed exactly as
   # before.
   git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
   # ... then open the PR (see "Creating the PR" below) ...
@@ -897,10 +913,12 @@ keeps the lease alive for the whole run; Phase 2,
 before reclaiming a peer's claim). Reads the freshest
 `<!-- loom:lease host=… sweep=… -->` comment on issue `$N` and confirms BOTH:
 the comment is still fresh (`now - updated_at <= LEASE_TTL_MINUTES`, default
-15, override with `--ttl-minutes` or `LOOM_LEASE_TTL_MINUTES`) and its
-`host=` still names **this** host (`--host`, defaulting to this host's own
-identity — same `LOOM_HOST_ID` > `$HOSTNAME` > `hostname` precedence
-`sweep_registry::host_identity()` uses). It aborts (exit `3` = expired-and-
+15, override with `--ttl-minutes` or `LOOM_LEASE_TTL_MINUTES`) and that it is
+**this dispatch's own** — its `host=` still names **this** host (`--host`,
+defaulting to this host's own identity — same `LOOM_HOST_ID` > `$HOSTNAME` >
+`hostname` precedence `sweep_registry::host_identity()` uses) and, since
+#2237, its `sweep=` still names **this** run whenever `--sweep-id` is passed
+(as it is above). It aborts (exit `3` = expired-and-
 own-host, `4` = superseded — the two are logged distinctly so a
 post-incident read can tell them apart) **before doing anything
 externally-visible**: no push, no PR. It never contests or cleans up a peer's
@@ -925,6 +943,21 @@ never-renewed, never-yielded lease would otherwise fence out every successor
 dispatch forever (observed on issue #6694 / PR #6773). Exit `4` (SUPERSEDED
 — a *fresh* lease from a live peer) is unaffected: that case still means a
 live peer genuinely holds the claim.
+
+**Issue #2237: the same thing is true one identity component further in —
+an abandoned lease from a DIFFERENT sweep run on *this very host*.** #6783
+only reached the different-*host* case; the same-host case was unreachable
+because `check` had no way to know its own run id, so two sequential
+dispatches on one box were indistinguishable to it and a dead predecessor's
+expired record aborted every successor with the same false "my renewal loop
+died" premise (observed on issue #2226: the fenced-out dispatch had never
+published a lease of its own at all). Passing `--sweep-id "$SWEEP_ID"` above
+makes "own" a `(host, sweep)` pair, and it only ever *removes* aborts —
+an expired same-host/different-run lease becomes exit `0`, a fresh one stays
+exit `0` (reported as fail-open "no lease of my own", never promoted to a new
+exit `4`), and the different-host outcomes are untouched. Omit the flag —
+or pass an empty value — and the check falls back to the pre-#2237 host-only
+comparison byte for byte, so an un-updated caller is unaffected.
 
 ### Creating the PR
 

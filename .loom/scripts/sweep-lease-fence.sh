@@ -40,7 +40,9 @@
 #      overridable here via `--ttl-minutes` or `LOOM_LEASE_TTL_MINUTES`).
 #   2. OWNED: the freshest lease's `host=` field equals this sweep's own
 #      host identity (no other host's lease has superseded this one via a
-#      reclaim or a race).
+#      reclaim or a race) -- and, when `--sweep-id` is supplied, that its
+#      `sweep=` field names this dispatch's own sweep run too (Issue #2237,
+#      see "Ownership is a (host, sweep) pair" below).
 #
 # On failure of EITHER condition, `check` exits non-zero (distinct codes for
 # each failure reason, see below) and logs which condition failed plus the
@@ -103,13 +105,19 @@
 #   - The freshest lease comment is EXPIRED (older than ttl-minutes) AND
 #     belongs to a host OTHER THAN this sweep's own -> PASS (Issue #6783,
 #     see below).
+#   - `--sweep-id` was supplied and the freshest lease belongs to a
+#     DIFFERENT sweep run -- even on this very same host -> PASS, whether it
+#     is expired or fresh (Issue #2237, see below). This dispatch simply has
+#     no lease record of its own on this issue, which is "no evidence", not
+#     "not fresh".
 #
-# Only a lease that is either (a) expired AND owned by THIS sweep's own host,
-# or (b) fresh but held by a DIFFERENT host, causes an abort. This is
-# deliberate: a false abort (blocking a legitimately-owned sweep on a
-# transient `gh` hiccup, or on a dead peer's abandoned record) is a strictly
-# worse failure mode here than an occasional missed fence -- the fence is a
-# cost-bounding backstop for a rare race, not a correctness-critical lock.
+# Only a lease that is either (a) expired AND owned by THIS sweep's own host
+# (and, with --sweep-id, its own sweep run), or (b) fresh but held by a
+# DIFFERENT host, causes an abort. This is deliberate: a false abort
+# (blocking a legitimately-owned sweep on a transient `gh` hiccup, or on a
+# dead peer's abandoned record) is a strictly worse failure mode here than an
+# occasional missed fence -- the fence is a cost-bounding backstop for a rare
+# race, not a correctness-critical lock.
 #
 # ### Expired lease, different host (Issue #6783)
 #
@@ -138,9 +146,53 @@
 # unaffected by this change: that case still means a live peer genuinely
 # holds the claim, and aborting there remains unambiguously correct.
 #
+# ### Ownership is a (host, sweep) pair, not a host (Issue #2237)
+#
+# #6783 above fixed the abandoned-lease fence-out for a lease written by a
+# DIFFERENT host. The identical failure on the SAME host was simply not
+# reachable then, because `check` had no way to know its own sweep id: its
+# ownership tests compared only `host=`, so two independent dispatches on one
+# box -- two sequential Builder runs on the same machine, the ordinary shape
+# for a single-host fleet -- were indistinguishable to it. An abandoned lease
+# left behind by a dead predecessor on that host therefore aborted every
+# successor with exit `3` (EXPIRED), forever, on the false premise "my own
+# renewal loop died". Observed live on issue #2226 (2026-09-21): dispatch
+# `sweep-issue-2226-1789988240`, whose own renewal loop was alive and
+# watching the correct pid the whole time, was fenced out by the expired
+# lease of `sweep-issue-2226-1789985384` on the same host -- a dispatch that
+# had never published a lease of its own at all, so the record it aborted on
+# could not possibly have been "its own".
+#
+# `--sweep-id ID` closes that hole. When supplied, "this dispatch's own
+# lease" means `host=` AND `sweep=` both match -- the same (host, sweep)
+# identity `sweep-lease-publish.sh publish --sweep-id` writes, and the same
+# pair the #6485 yield-exclusion rule already matches on. The consequences
+# are deliberately asymmetric -- it only ever REMOVES aborts, never adds one:
+#
+#   - Expired, same host, DIFFERENT sweep -> PASS (exit `0`), where it used
+#     to ABORT `3`. This is the #2237 fix: an abandoned predecessor's record
+#     is not evidence about THIS dispatch's renewal loop.
+#   - Fresh, same host, DIFFERENT sweep -> still PASS (exit `0`), exactly as
+#     before, but reported as the fail-open "no lease of my own" case rather
+#     than as a verified own-lease match, so the log never claims an
+#     ownership check succeeded when it did not. Deliberately NOT promoted to
+#     an abort: this script's stated posture (see "Fail-open cases" above) is
+#     that a false abort is strictly worse than a missed fence, and turning a
+#     case that passes today into a new exit `4` would fence out same-host
+#     dispatches that currently succeed -- the very failure #2237 exists to
+#     end, reintroduced from the other side.
+#   - Expired or fresh, DIFFERENT host -> unchanged (#6783 PASS / exit `4`
+#     SUPERSEDED respectively). A different host is not this dispatch
+#     regardless of sweep id, so the sweep comparison adds nothing there.
+#
+# When `--sweep-id` is OMITTED the script cannot know its own run identity,
+# so it falls back to the pre-#2237 host-only comparison, byte for byte. Any
+# caller that has not been updated behaves exactly as it did before.
+#
 # ## Commands
 #
-#   sweep-lease-fence.sh check <issue> [--host HOST] [--ttl-minutes N]
+#   sweep-lease-fence.sh check <issue> [--host HOST] [--sweep-id ID]
+#                                      [--ttl-minutes N]
 #     Perform the fencing check for <issue>. --host defaults to the PUBLISHED
 #     form of this host's own identity (Issue #6322): the opaque id
 #     (`opaque_host_id`, mirroring `sweep_registry::opaque_host_id` byte for
@@ -150,27 +202,39 @@
 #     publishing, in which case the raw identity is used directly, matching
 #     `write_lease_comment`'s own opt-in. An explicit --host is used verbatim
 #     (no transform applied) -- it is the caller's job to pass whatever value
-#     was actually published. --ttl-minutes defaults to
+#     was actually published. --sweep-id is THIS dispatch's own sweep run id
+#     (Issue #2237) -- the same value the caller passed to
+#     `sweep-lease-publish.sh publish --sweep-id`, i.e. `/loom:sweep`'s own
+#     `$RUN_ID` (`sweep-run-registry.sh new`) or `$LOOM_SWEEP_RUN_ID`. When
+#     given, the ownership comparisons require the freshest lease's `sweep=`
+#     to match it as well as `host=`; when omitted (or empty) the comparison
+#     is host-only, exactly as it was before #2237. --ttl-minutes defaults to
 #     `LOOM_LEASE_TTL_MINUTES` or 15 (Phase 2's default,
 #     `DEFAULT_LEASE_TTL_MINUTES` in claim_reconciliation.rs).
 #
 #     Exit codes:
 #       0  PASS -- proceed with push / PR-open. Covers: fresh lease owned by
-#          this host; no lease comment found; a lease comment that failed to
-#          parse; a `gh` fetch failure; or an EXPIRED lease owned by a
-#          DIFFERENT host (all fail-open, see above and Issue #6783).
+#          this host (and, with --sweep-id, this sweep); no lease comment
+#          found; a lease comment that failed to parse; a `gh` fetch failure;
+#          an EXPIRED lease owned by a DIFFERENT host (fail-open, Issue
+#          #6783); or -- with --sweep-id -- any lease belonging to a
+#          DIFFERENT sweep run, including one on this very host (fail-open,
+#          Issue #2237).
 #       1  Usage error (bad issue number, unknown flag, non-numeric
 #          --ttl-minutes).
 #       3  ABORT: EXPIRED -- the freshest lease comment is older than
 #          ttl-minutes AND belongs to THIS sweep's own host (Issue #6783: an
 #          expired lease owned by a different host now PASSes instead, see
-#          above).
+#          above) AND, when --sweep-id is given, to THIS sweep's own run
+#          (Issue #2237: an expired lease from a different run on this same
+#          host now PASSes too).
 #       4  ABORT: SUPERSEDED -- the freshest lease comment is still FRESH but
 #          its host= differs from this sweep's own host.
 #
 # Usage:
 #   .loom/scripts/sweep-lease-fence.sh check 6309
 #   .loom/scripts/sweep-lease-fence.sh check 6309 --host studio-host --ttl-minutes 15
+#   .loom/scripts/sweep-lease-fence.sh check 6309 --sweep-id "$RUN_ID"
 
 set -euo pipefail
 
@@ -342,11 +406,23 @@ cmd_check() {
         exit 1
     }
 
-    local host="" ttl_minutes="$DEFAULT_TTL_MINUTES"
+    # `sweep_id` (Issue #2237) is deliberately OPTIONAL and defaults to the
+    # empty string -- NOT to `$LOOM_SWEEP_RUN_ID` or any generated id the way
+    # `sweep-lease-publish.sh` defaults its own --sweep-id. A publisher may
+    # invent an identity for the record it is about to write; a READER may
+    # not, because guessing wrong here would compare this dispatch's real
+    # lease against a fabricated id and manufacture the very "not mine"
+    # verdict this flag exists to prevent. Empty means "caller did not tell
+    # me my run id", which selects the pre-#2237 host-only comparison.
+    local host="" sweep_id="" ttl_minutes="$DEFAULT_TTL_MINUTES"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --host)
                 host="${2:-}"
+                shift 2
+                ;;
+            --sweep-id)
+                sweep_id="${2:-}"
                 shift 2
                 ;;
             --ttl-minutes)
@@ -478,6 +554,23 @@ cmd_check() {
     lease_host="${parsed%%$'\t'*}"
     lease_sweep="${parsed#*$'\t'}"
 
+    # Issue #2237: "this dispatch's own lease" is a (host, sweep) PAIR when
+    # the caller told us its sweep id, and a host alone when it did not. Both
+    # the EXPIRED and the SUPERSEDED decisions below key off this one
+    # predicate so they can never disagree about what "own" means.
+    #
+    # `lease_sweep_differs` is the narrower signal used to explain a PASS:
+    # true only when a sweep id WAS supplied and the freshest lease names a
+    # different run. With no sweep id supplied it is always false, which is
+    # what collapses every branch below back to the exact pre-#2237 behavior.
+    local lease_sweep_differs="0" lease_is_own="0"
+    if [[ -n "$sweep_id" && "$lease_sweep" != "$sweep_id" ]]; then
+        lease_sweep_differs="1"
+    fi
+    if [[ "$lease_host" == "$host" && "$lease_sweep_differs" == "0" ]]; then
+        lease_is_own="1"
+    fi
+
     local updated_epoch now_epoch
     if ! updated_epoch="$(iso_to_epoch "$updated_at")"; then
         echo "PASS: freshest lease comment on issue #${issue} has an unparseable updated_at ('${updated_at}') -- no evidence to fence against; proceeding with push/PR-open" >&2
@@ -492,9 +585,21 @@ cmd_check() {
     ttl_seconds="$(awk -v m="$ttl_minutes" 'BEGIN { printf "%d", m * 60 }')"
 
     if ((age_seconds > ttl_seconds)); then
-        if [[ "$lease_host" == "$host" ]]; then
-            echo "ABORT: EXPIRED -- lease fence failed for issue #${issue}. Freshest lease comment (host=${lease_host} sweep=${lease_sweep}) was last renewed at ${updated_at}, age ${age_minutes} min > ttl ${ttl_minutes} min. This sweep (host=${host}) is aborting BEFORE push/PR-open (Epic #6165 Phase 3, #6309) rather than proceed on a stale claim it can no longer trust as its own. Not contesting or cleaning up the peer/lease -- the loom:building label and claim are left alone." >&2
+        if [[ "$lease_is_own" == "1" ]]; then
+            echo "ABORT: EXPIRED -- lease fence failed for issue #${issue}. Freshest lease comment (host=${lease_host} sweep=${lease_sweep}) was last renewed at ${updated_at}, age ${age_minutes} min > ttl ${ttl_minutes} min. This sweep (host=${host}${sweep_id:+ sweep=$sweep_id}) is aborting BEFORE push/PR-open (Epic #6165 Phase 3, #6309) rather than proceed on a stale claim it can no longer trust as its own. Not contesting or cleaning up the peer/lease -- the loom:building label and claim are left alone." >&2
             exit 3
+        fi
+        # Issue #2237: an expired lease on THIS host that belongs to a
+        # DIFFERENT sweep run is an abandoned predecessor's record, not this
+        # dispatch's own. It says nothing about whether THIS dispatch's
+        # renewal loop is alive -- which is the entire premise of the EXPIRED
+        # abort above -- so aborting on it is a false positive that
+        # permanently fences out every successor dispatch on this issue (the
+        # #2226 incident). Same fail-open reasoning as #6783 immediately
+        # below, one identity component further in.
+        if [[ "$lease_sweep_differs" == "1" && "$lease_host" == "$host" ]]; then
+            echo "PASS: freshest lease comment on issue #${issue} (host=${lease_host} sweep=${lease_sweep}) is EXPIRED (last renewed at ${updated_at}, age ${age_minutes} min > ttl ${ttl_minutes} min) and belongs to a DIFFERENT sweep than this dispatch (sweep=${sweep_id}) even though it is on this same host (${host}) -- an abandoned predecessor's lease is not evidence about THIS dispatch's own renewal loop (#2237); proceeding with push/PR-open" >&2
+            exit 0
         fi
         # Issue #6783: an expired lease owned by a DIFFERENT host is an
         # abandoned record, not a live peer -- it is exactly the state
@@ -516,7 +621,21 @@ cmd_check() {
         exit 4
     fi
 
-    echo "PASS: lease fence OK for issue #${issue} -- freshest lease (host=${lease_host} sweep=${lease_sweep}) updated_at=${updated_at}, age ${age_minutes} min <= ttl ${ttl_minutes} min, host matches this sweep (${host}). Proceeding with push/PR-open." >&2
+    # Issue #2237: same host, FRESH, but a different sweep run. This stays a
+    # PASS -- exactly what it was before #2237, when the sweep id was invisible
+    # to this script -- but it is reported as the fail-open "no lease of my
+    # own to fence against" case rather than as a verified ownership match, so
+    # the log never claims an ownership check succeeded when it did not.
+    # Deliberately NOT promoted to an exit 4: per this script's own fail-open
+    # posture, a false abort is strictly worse than a missed fence, and a new
+    # abort here would fence out same-host dispatches that succeed today --
+    # reintroducing #2237's failure from the opposite side.
+    if [[ "$lease_is_own" != "1" ]]; then
+        echo "PASS: freshest lease comment on issue #${issue} (host=${lease_host} sweep=${lease_sweep}) is FRESH (last renewed at ${updated_at}, age ${age_minutes} min <= ttl ${ttl_minutes} min) and is on this sweep's own host (${host}), but belongs to a DIFFERENT sweep than this dispatch (sweep=${sweep_id}) -- this dispatch has no lease record of its own on this issue, which is 'no evidence', not 'not fresh' (#2237); proceeding with push/PR-open" >&2
+        exit 0
+    fi
+
+    echo "PASS: lease fence OK for issue #${issue} -- freshest lease (host=${lease_host} sweep=${lease_sweep}) updated_at=${updated_at}, age ${age_minutes} min <= ttl ${ttl_minutes} min, host matches this sweep (${host})${sweep_id:+ and sweep id matches (${sweep_id})}. Proceeding with push/PR-open." >&2
     exit 0
 }
 
