@@ -5803,9 +5803,12 @@ def test_cli_manifest_all_met_exits_zero(tmp_path, capsys):
 
 
 def test_cli_manifest_text_format_colors_unmet_items_red(tmp_path, capsys):
+    # `--color=always` because since issue #2227 colour follows stdout's
+    # isatty(), and capsys's replacement stdout is not a terminal. What is
+    # asserted here is unchanged: *when* colour is on, unmet items are red.
     manifest_path = _write(tmp_path, "manifest.json", _manifest())
 
-    exit_code = main(["signoff", "--manifest", manifest_path])
+    exit_code = main(["signoff", "--manifest", manifest_path, "--color", "always"])
 
     assert exit_code == 3
     out = capsys.readouterr().out
@@ -5819,7 +5822,7 @@ def test_cli_manifest_text_format_colors_met_items_green(tmp_path, capsys):
         tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
     )
 
-    main(["signoff", "--manifest", manifest_path])
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
 
     out = capsys.readouterr().out
     assert "\033[32m" in out  # met items render green
@@ -5853,13 +5856,181 @@ def test_cli_manifest_json_output_distinguishes_skipped_from_failed_check(
 def test_cli_manifest_text_format_shows_reason_for_unmet_items_in_red(tmp_path, capsys):
     manifest_path = _write(tmp_path, "manifest.json", _manifest())
 
-    main(["signoff", "--manifest", manifest_path])
+    # `--color=always`: see the note on
+    # test_cli_manifest_text_format_colors_unmet_items_red (issue #2227).
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
 
     out = capsys.readouterr().out
     assert "reason: no_evidence" in out
     # The reason line itself is rendered red, not just the UNMET marker --
     # a skipped check must read as loudly as a failed one, not blend in.
     assert "\033[31mreason: no_evidence\033[0m" in out
+
+
+# --------------------------------------------------------------------------- #
+# Colour policy (issue #2227): `--format text` is also a *committed* artifact
+# --------------------------------------------------------------------------- #
+
+
+def _fake_isatty(monkeypatch, is_tty: bool) -> None:
+    """Make the captured stdout report itself as a terminal (or not).
+
+    `signoff_cmd` resolves the palette from `sys.stdout` at call time, and
+    capsys has already replaced `sys.stdout` by then -- so this patches the
+    capture object's own `isatty`, which is exactly what the command reads.
+    """
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: is_tty, raising=False)
+
+
+def _no_ambient_no_color(monkeypatch) -> None:
+    """Drop any `$NO_COLOR` the developer's own shell exported, so a test
+    asserting the *tty default* is not silently passing/failing on it."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+
+def test_cli_manifest_text_omits_color_when_stdout_is_not_a_tty(
+    tmp_path, capsys, monkeypatch
+):
+    """The committed-artifact case this issue is about: redirected to a file
+    or piped, the tier report carries no escapes at all -- with no flag."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, False)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(["signoff", "--manifest", manifest_path])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "\033[" not in out
+    # Plain, but not *lossy*: the verdict markers a consumer greps survive.
+    assert "UNMET" in out
+    assert "reason: no_evidence" in out
+
+
+def test_cli_manifest_text_keeps_color_at_a_tty(tmp_path, capsys, monkeypatch):
+    """No regression to the terminal UX: at a tty, with no override, the
+    rendering is coloured exactly as it was before issue #2227."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert "\033[31m" in out
+
+
+def test_cli_manifest_text_honours_no_color_env_var(tmp_path, capsys, monkeypatch):
+    """`$NO_COLOR` (https://no-color.org/) wins over the tty default -- the
+    tty is faked on here precisely so this cannot pass by accident."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    assert "\033[" not in capsys.readouterr().out
+
+
+def test_cli_manifest_text_no_color_env_var_empty_is_not_set(
+    tmp_path, capsys, monkeypatch
+):
+    """An *empty* `$NO_COLOR` does not disable colour -- the standard's own
+    "present and not an empty string" rule."""
+    monkeypatch.setenv("NO_COLOR", "")
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    assert "\033[31m" in capsys.readouterr().out
+
+
+def test_cli_manifest_text_honours_no_color_flag(tmp_path, capsys, monkeypatch):
+    """`--no-color` forces escapes off even at a terminal."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--no-color"])
+
+    assert exit_code == 3
+    assert "\033[" not in capsys.readouterr().out
+
+
+def test_cli_manifest_text_honours_color_never(tmp_path, capsys, monkeypatch):
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--color", "never"])
+
+    assert "\033[" not in capsys.readouterr().out
+
+
+def test_cli_manifest_text_color_always_opts_back_in_through_a_pipe(
+    tmp_path, capsys, monkeypatch
+):
+    """The escape hatch the isatty() default owes a caller who *wants*
+    colour through `| less -R`."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, False)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
+
+    assert "\033[31m" in capsys.readouterr().out
+
+
+def test_cli_manifest_text_color_always_overrides_no_color_env(
+    tmp_path, capsys, monkeypatch
+):
+    """An option the caller typed beats an inherited environment variable --
+    `$NO_COLOR` governs the *default*, not an explicit request."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    _fake_isatty(monkeypatch, False)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
+
+    assert "\033[31m" in capsys.readouterr().out
+
+
+def test_cli_manifest_json_output_is_never_coloured(tmp_path, capsys, monkeypatch):
+    """The JSON contract is unaffected by any of this: `--format json` at a
+    tty, with `--color=always`, still carries no escapes."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--format",
+            "json",
+            "--color",
+            "always",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "\033[" not in out
+    assert json.loads(out)["t1_met_count"] == 0
+
+
+def test_cli_manifest_text_no_color_and_color_always_are_a_usage_conflict(
+    tmp_path, capsys
+):
+    """`--no-color` is the documented spelling of `--color=never`, so it wins
+    over a contradictory `--color=always` rather than being ignored -- the
+    suppressing option is the safe resolution for an artifact."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--no-color", "--color", "always"])
+
+    assert "\033[" not in capsys.readouterr().out
 
 
 def test_cli_manifest_and_files_together_is_an_error(tmp_path, capsys):
@@ -7423,6 +7594,30 @@ def test_cli_fleet_text_format_names_blocking_item(tmp_path, capsys):
     assert "canary-a" in out
     assert "blocking:" in out
     assert "no_evidence" in out
+    # Issue #2227: the roll-up shares the tier report's colour policy, so a
+    # non-tty stdout (what capsys is) gets the same escape-free rendering.
+    assert "\033[" not in out
+
+
+def test_cli_fleet_text_format_colour_follows_the_same_policy(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #2227: `--fleet` is the second renderer that colours, so it must
+    honour the same tty default and the same overrides -- not just
+    `--manifest`."""
+    fleet_path = _fleet_write(tmp_path, [_fleet_block_manifest("canary-a")])
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+
+    main(["signoff", "--fleet", fleet_path])
+    assert "\033[31m" in capsys.readouterr().out  # coloured at a tty
+
+    main(["signoff", "--fleet", fleet_path, "--no-color"])
+    assert "\033[" not in capsys.readouterr().out  # --no-color wins
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    main(["signoff", "--fleet", fleet_path])
+    assert "\033[" not in capsys.readouterr().out  # $NO_COLOR wins
 
 
 def test_cli_fleet_and_manifest_together_is_an_error(tmp_path, capsys):

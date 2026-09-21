@@ -40,9 +40,9 @@ Four modes, one verb:
    running any check. See "Identifying the grading build" below.
 
 ```
-klt signoff <file>... [--format text|json]
-klt signoff --manifest <manifest-file> [--tiers-doc <path>] [--format text|json]
-klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|json]
+klt signoff <file>... [--format text|json] [--color auto|always|never] [--no-color]
+klt signoff --manifest <manifest-file> [--tiers-doc <path>] [--format text|json] [--color auto|always|never] [--no-color]
+klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|json] [--color auto|always|never] [--no-color]
 klt signoff --describe-grader [--format text|json]
 ```
 
@@ -76,6 +76,53 @@ klt signoff --describe-grader [--format text|json]
   grading build" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
+- `--color` — when to colour `--format text` output: `auto` (default),
+  `always`, or `never`. See "Colour in `--format text`" immediately below.
+- `--no-color` — suppress ANSI colour in `--format text` output; the same
+  thing as `--color=never`, spelled the way most tools spell it.
+
+### Colour in `--format text` (issue #2227)
+
+The tier-verdict and fleet renderings colour their verdict markers — `MET`
+green, `UNMET`/`not-T1` red, and the `reason:`/`blocking:`/`scope:` lines
+red — so a scan of the printed skeleton shows what is missing at a glance.
+
+**Colour is on only when stdout is a terminal.** Redirect the rendering to a
+file or pipe it into another process and it comes out plain, with no escape
+sequences anywhere. This is what makes the rendering safe to **commit**: the
+whole point of `--manifest` is that a block repo can keep its tier verdict
+as an evidence record, and a committed file whose every verdict line carries
+`\033[31m` is unreadable in a pull-request diff and forces every consumer to
+strip ANSI before grepping it.
+
+```bash
+# Committed evidence record -- escape-free, byte-for-byte what the grader
+# emitted. No flag needed, and no `sed` on the way out.
+klt signoff --manifest manifest.json --format text > signoff.txt
+```
+
+The full precedence, highest first:
+
+| Condition | Colour |
+|---|---|
+| `--no-color`, or `--color=never` | off |
+| `--color=always` | on |
+| `$NO_COLOR` set to any non-empty value ([no-color.org](https://no-color.org/)) | off |
+| otherwise: `stdout.isatty()` | on at a terminal, off through a pipe/redirect |
+
+Two consequences worth stating outright:
+
+- `$NO_COLOR` turns colour off **even at a terminal** — that is the point of
+  the standard. Any non-empty value counts, including `NO_COLOR=0`; an
+  *empty* `NO_COLOR=` is treated as unset, per the standard's wording.
+- An explicit `--color=always` **outranks `$NO_COLOR`**, because the
+  standard governs the default behaviour, not an option the caller typed on
+  purpose. Use it to keep colour through a pager: `klt signoff --manifest
+  manifest.json --color=always | less -R`.
+
+`--format json` is never coloured under any combination of these — the JSON
+envelope is the contract (see [`../json-contract.md`](../json-contract.md)),
+and no terminal check applies to it.
 
 ## What it does
 

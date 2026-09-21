@@ -58,6 +58,7 @@ from . import (
     yield_cmd,
     yield_sensitivity_cmd,
 )
+from .color import add_color_args
 
 
 def _add_format_arg(
@@ -2459,6 +2460,12 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     _add_format_arg(signoff_parser)
+    # Issue #2227: `signoff` is the one verb that colours its `--format text`
+    # rendering, and the rendering it colours is also a *committed* artifact.
+    # `--color`/`--no-color` (plus $NO_COLOR and the isatty default) live in
+    # `.color` so a second colouring verb registers the same policy with one
+    # call rather than re-deriving it.
+    add_color_args(signoff_parser)
     signoff_parser.set_defaults(func=signoff_cmd.run)
 
 
