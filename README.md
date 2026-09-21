@@ -142,6 +142,7 @@ klt deck hash --deck sky130              # the deck content hash this build will
 klt deck info --deck gf180mcu            # this install's own deck hash, device coverage, release status -- no input layout needed
 klt env-provenance emit                  # committable environment provenance: repo-relative paths, pseudonymous host id, no login
 klt env-provenance scan records/*.md     # flag home-directory absolute paths leaked into committed evidence records
+klt env-provenance lint-envelope r.json  # flag ANY absolute host path in a committed JSON envelope, by field
 klt version --format json                # which build is this: version, commit, release or not
 ```
 

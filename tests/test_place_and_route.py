@@ -9501,3 +9501,255 @@ def test_integration_real_openroad_clockless_netlist_cts_does_not_segfault(
 # against a future refactor silently making the stubs a no-op).
 def test_place_and_route_uses_stdlib_subprocess():
     assert place_and_route.subprocess is subprocess
+
+
+# --------------------------------------------------------------------------- #
+# `klt place-and-route --check` / `--rerun` (issue #2224)
+# --------------------------------------------------------------------------- #
+
+
+def _write_report(path: Path, report: dict) -> str:
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return str(path)
+
+
+def _committed_pnr_report(tmp_path, monkeypatch, **stub_kwargs) -> tuple[str, str]:
+    """A stubbed full-route run, its response committed to disk -- returns
+    `(request_path, report_path)`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch, **stub_kwargs)
+    _stub_merge_def_to_gds(monkeypatch)
+    report = run_place_and_route(request_path)
+    return request_path, _write_report(tmp_path / "gcd.pnr.json", report)
+
+
+def test_check_place_and_route_report_clean_pass(tmp_path, monkeypatch):
+    """Cheap mode: an unmutated netlist/liberty re-hashes to the values the
+    committed report recorded -- `status: "match"`, and no OpenROAD
+    invocation at all."""
+    request_path, report_path = _committed_pnr_report(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        place_and_route.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("--check must not invoke OpenROAD"),
+    )
+    result = place_and_route.check_place_and_route_report(report_path, request_path)
+
+    assert result["schema_version"] == 1
+    assert result["mode"] == "check"
+    assert result["status"] == "match"
+    assert len(result["checks"]) == 2
+    assert all(check["match"] for check in result["checks"])
+
+
+def test_check_place_and_route_report_detects_moved_netlist_hash(tmp_path, monkeypatch):
+    request_path, report_path = _committed_pnr_report(tmp_path, monkeypatch)
+
+    _write(tmp_path / "gcd_synth.v", "// a different mapped netlist\n")
+    result = place_and_route.check_place_and_route_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.deck.content_hash"]["match"] is True
+
+
+def test_check_place_and_route_report_doctored_record_is_never_a_false_pass(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    report = run_place_and_route(request_path)
+    report["provenance"]["input"]["content_hash"] = "sha256:" + "0" * 64
+    report_path = _write_report(tmp_path / "doctored.pnr.json", report)
+
+    result = place_and_route.check_place_and_route_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+
+
+def test_check_place_and_route_report_missing_hash_is_never_a_false_pass(
+    tmp_path, monkeypatch
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    report = run_place_and_route(request_path)
+    report["provenance"]["input"] = None
+    report_path = _write_report(tmp_path / "old.pnr.json", report)
+
+    result = place_and_route.check_place_and_route_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["expected"] is None
+
+
+def test_check_place_and_route_report_missing_file_raises(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    with pytest.raises(PlaceAndRouteError, match="not found"):
+        place_and_route.check_place_and_route_report(
+            str(tmp_path / "nope.pnr.json"), request_path
+        )
+
+
+def test_check_place_and_route_report_malformed_json_raises(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    report_path = _write(tmp_path / "bad.pnr.json", "not json")
+    with pytest.raises(PlaceAndRouteError, match="not valid JSON"):
+        place_and_route.check_place_and_route_report(report_path, request_path)
+
+
+def test_rerun_place_and_route_report_clean_pass(tmp_path, monkeypatch):
+    """Full mode: re-running unchanged inputs matches, even though every
+    `engine_logs[].invocation_id` is a fresh uuid (dropped from the diff by
+    `RERUN_BOOKKEEPING_KEYS`)."""
+    request_path, report_path = _committed_pnr_report(tmp_path, monkeypatch)
+    committed = json.loads(Path(report_path).read_text())
+
+    result = place_and_route.rerun_place_and_route_report(report_path, request_path)
+
+    assert result["mode"] == "rerun"
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert (
+        result["fresh"]["engine_logs"][0]["invocation_id"]
+        != committed["engine_logs"][0]["invocation_id"]
+    )
+
+
+def test_rerun_place_and_route_report_detects_a_changed_result(tmp_path, monkeypatch):
+    """A re-run whose timing outcome moved drifts, naming
+    `setup_violation_count` among the drifted fields."""
+    request_path, report_path = _committed_pnr_report(
+        tmp_path, monkeypatch, setup_violations={"route": 1}
+    )
+
+    _stub_openroad_success(monkeypatch, setup_violations={"route": 4})
+    _stub_merge_def_to_gds(monkeypatch)
+    result = place_and_route.rerun_place_and_route_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    assert "setup_violation_count" in {entry["field"] for entry in result["drift"]}
+
+
+def test_rerun_place_and_route_report_ignores_an_engine_upgrade(tmp_path, monkeypatch):
+    """An OpenROAD upgrade that leaves the result untouched is tool churn,
+    not evidence drift -- `engine_version` is in `VOLATILE_FLOW_PATHS`."""
+    request_path, report_path = _committed_pnr_report(
+        tmp_path, monkeypatch, version="26Q3-771-gdeadbeef"
+    )
+
+    _stub_openroad_success(monkeypatch, version="27Q1-001-gfeedface")
+    _stub_merge_def_to_gds(monkeypatch)
+    result = place_and_route.rerun_place_and_route_report(report_path, request_path)
+
+    assert result["status"] == "match"
+    assert result["fresh"]["engine_version"] == "27Q1-001-gfeedface"
+
+
+def test_rerun_place_and_route_report_detects_a_doctored_record(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    committed = run_place_and_route(request_path)
+    committed["wirelength_um"] = 1
+    report_path = _write_report(tmp_path / "doctored.pnr.json", committed)
+
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    result = place_and_route.rerun_place_and_route_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    assert "wirelength_um" in {entry["field"] for entry in result["drift"]}
+
+
+def test_cli_place_and_route_check_exits_zero_on_match(tmp_path, monkeypatch, capsys):
+    request_path, report_path = _committed_pnr_report(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "place-and-route",
+                request_path,
+                "--check",
+                report_path,
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+def test_cli_place_and_route_check_exits_three_on_drift(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    report = run_place_and_route(request_path)
+    report["provenance"]["deck"]["content_hash"] = "sha256:" + "1" * 64
+    report_path = _write_report(tmp_path / "gcd.pnr.json", report)
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "place-and-route",
+                request_path,
+                "--check",
+                report_path,
+                "--format",
+                "json",
+            ]
+        )
+        == 3
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "drifted"
+
+
+def test_cli_place_and_route_rerun_without_check_is_a_clean_error(
+    tmp_path, monkeypatch, capsys
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    assert main(["place-and-route", request_path, "--rerun", "--format", "json"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "requires --check" in err["error"]["message"]
+
+
+def test_cli_place_and_route_check_text_output(tmp_path, monkeypatch, capsys):
+    request_path, report_path = _committed_pnr_report(tmp_path, monkeypatch)
+    capsys.readouterr()
+
+    assert main(["place-and-route", request_path, "--check", report_path]) == 0
+    out = capsys.readouterr().out
+    assert "status: match" in out
+    assert "[OK] provenance.deck.content_hash" in out
+
+
+def test_envelope_lint_finds_the_plain_string_path_fields(tmp_path, monkeypatch):
+    """The other half of issue #2224, against a real envelope.
+
+    `def_path`/`gds_path`/`verilog_path` are the *plain-string* path fields
+    `docs/json-contract.md`'s "Output-artifact path fields" table documents
+    for this verb -- absolute, with no `{path, scope}` envelope to make them
+    committable. Retyping them is explicitly out of scope here (it is a
+    breaking change to each field); what this pins is that
+    `klt env-provenance lint-envelope` *sees* them, so a repo committing this
+    response as evidence gets told before a cross-checkout byte comparison
+    fails on it.
+    """
+    from klayout_tools import env_provenance
+
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+    report = run_place_and_route(request_path)
+
+    flagged = {
+        finding["field"] for finding in env_provenance.find_absolute_path_fields(report)
+    }
+    assert {"def_path", "gds_path", "verilog_path"} <= flagged

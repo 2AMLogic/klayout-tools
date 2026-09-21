@@ -14,6 +14,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2224, additive — **no** `schema_version` bump on `klt
+  synthesize` or `klt place-and-route`; the `--check`/`--rerun` payloads are
+  their own `schema_version: 1` documents, not a change to either verb's
+  report shape): the two *flow* verbs now have the committed-evidence
+  verification `klt drc`/`klt lvs`/`klt extract` have had since #1106/#1149 —
+  `klt synthesize REQUEST --check REPORT [--rerun]` and `klt place-and-route
+  REQUEST --check REPORT [--rerun]`, built on the same
+  `_report_verify.py` building blocks and reporting the same two-valued
+  `status: "match"`/`"drifted"` (exit `0`/`3`; a report that cannot be
+  verified at all is exit `1`, never a false pass). Unlike the three existing
+  consumers, the positional `REQUEST` stays required: a flow-verb report
+  echoes its outputs and provenance hashes but never the request that
+  produced it. `engine_version` (the Yosys/OpenROAD build string) joins
+  `provenance.klt_version`/`klayout_version`/`pdk.version` in the `--rerun`
+  exclusion set, and run-scoped bookkeeping (`synthesize`'s per-run
+  `run_id`/artifact paths, `place-and-route`'s `uuid4`-keyed `engine_logs[]`)
+  is canonicalized out of both sides of the diff. `klt place-and-route` gains
+  exit `3`, used *only* by `--check`. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s and
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s
+  "`--check` / `--rerun`" sections.
+
+- **Added** (#2224): `klt env-provenance lint-envelope FILE…` — walks a
+  committed JSON envelope and fails (exit `3`) on any string field carrying
+  an **absolute host path**, naming the offending field by dotted path, with
+  `--allow-prefix` for genuinely machine-wide PDK/tool install roots.
+  Deliberately broader than the existing `klt env-provenance scan`, which
+  answers the *disclosure* question (home-shaped paths only): `/opt/build/
+  out.def` names nobody and still makes a regenerated artifact byte-differ on
+  another checkout, which is how a downstream repo's committed corpus
+  artifact broke cross-checkout byte comparison (2AMLogic/gf180-surge#39).
+  Not wired into CI here. `docs/json-contract.md` now states the
+  repo-relative-provenance rule for committed artifacts alongside the
+  existing "Output-artifact path fields" table.
+
 - **Added** (#2223, additive — **no** `schema_version` bump on `klt equiv`):
   an optional Verilator fast-path backend for `klt equiv`'s
   counterexample/vector replay, selected by `request.sim_backend` (or

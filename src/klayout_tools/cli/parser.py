@@ -2863,6 +2863,13 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
             "`--restructure-timing` is given."
         ),
     )
+    _add_flow_verify_args(
+        synthesize_parser,
+        verb="synthesize",
+        inputs="RTL sources and standard-cell liberty",
+        engine="Yosys",
+        docs="docs/cli/synthesize.md",
+    )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
@@ -2962,8 +2969,62 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         "request", help="path to a klt place-and-route request JSON file"
     )
     _add_pdk_args(place_and_route_parser)
+    _add_flow_verify_args(
+        place_and_route_parser,
+        verb="place-and-route",
+        inputs="gate-level netlist and standard-cell liberty",
+        engine="OpenROAD",
+        docs="docs/cli/place-and-route.md",
+    )
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
+
+
+def _add_flow_verify_args(
+    parser: argparse.ArgumentParser,
+    *,
+    verb: str,
+    inputs: str,
+    engine: str,
+    docs: str,
+) -> None:
+    """Register the shared ``--check``/``--rerun`` committed-evidence
+    verification flags on a *flow* verb (issue #2224).
+
+    Deliberately **not** the mutually-exclusive-with-the-input group ``klt
+    drc``/``klt lvs``/``klt extract`` use: those reports echo their own
+    inputs, so ``--check REPORT`` is self-sufficient there. A flow verb's
+    report echoes outputs and provenance hashes only, so the positional
+    ``request`` stays required and supplies the inputs to re-hash/re-run
+    against. See ``_report_verify.py``'s module docstring.
+    """
+    parser.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            f"verify a previously committed 'klt {verb} --format json' "
+            "report (REPORT) instead of running a fresh flow, against the "
+            "request given positionally (issue #2224). Cheap mode "
+            f"(default): re-resolve and re-hash the request's {inputs} and "
+            "compare against REPORT's recorded provenance.input.content_hash"
+            f"/provenance.deck.content_hash -- no {engine} run. Combine with "
+            "--rerun for full mode. Exits 0 if still consistent, 3 if "
+            f"drifted -- see {docs}, '--check'"
+        ),
+    )
+    parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            f"full mode for --check (issue #2224): re-run the {verb} flow "
+            "the positional request declares and diff verdict-bearing "
+            "fields against the committed report, excluding "
+            "provenance.klt_version/klayout_version/pdk.version, "
+            "engine_version, and run-scoped bookkeeping (see "
+            f"{docs}). Requires --check; a clean error (exit 1) otherwise"
+        ),
+    )
 
 
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -3440,16 +3501,18 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``env-provenance`` verb with nested ``emit``/``scan``
-    subcommands (issue #1254), mirroring ``deck``/``pdk``'s grouped-verb
-    pattern -- the two are one subject (what an evidence record may say about
-    the machine that produced it) approached from opposite ends: write it
-    safely, or check that what was written is safe.
+    """Register the ``env-provenance`` verb with nested ``emit``/``scan``/
+    ``lint-envelope`` subcommands (issues #1254, #2224), mirroring
+    ``deck``/``pdk``'s grouped-verb pattern -- all three are one subject (what
+    a committed record may say about the machine that produced it) approached
+    from different ends: write it safely, check that what was written names
+    nobody, or check that what was written still resolves elsewhere.
     """
     env_parser = subparsers.add_parser(
         "env-provenance",
         help="emit committable environment provenance for an evidence "
-        "record, or scan records for leaked home paths",
+        "record, scan records for leaked home paths, or lint committed "
+        "JSON envelopes for absolute host paths",
         description=(
             "Environment provenance an evidence record can carry in public "
             "forever: repo-relative paths only, a stable pseudonymous "
@@ -3517,6 +3580,49 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(scan_parser)
     scan_parser.set_defaults(func=env_provenance_cmd.run_scan)
+
+    lint_parser = env_sub.add_parser(
+        "lint-envelope",
+        help="lint committed JSON envelopes for absolute host paths",
+        description=(
+            "Lint committed `klt --format json` envelopes (or any JSON "
+            "artifact) for absolute host paths, reporting the offending "
+            "field by dotted path (issue #2224). Distinct from `scan`: that "
+            "asks 'does this record name a person' and matches home-shaped "
+            "paths in arbitrary text; this asks 'does every reference still "
+            "resolve on another checkout' and matches ANY absolute path -- "
+            "/opt/build/out.def and /tmp/run-3/top.gds name nobody and still "
+            "make a regenerated artifact byte-differ, which is how a "
+            "committed corpus artifact broke cross-checkout comparison "
+            "downstream. Declare genuinely machine-wide PDK/tool install "
+            "locations with --allow-prefix; nothing is allowed by default "
+            "(a lint whose verdict depends on the linting machine's "
+            "environment cannot be trusted in CI). Exits 3 when findings "
+            "exist, 0 when clean, 1 if a file cannot be read or is not "
+            "valid JSON."
+        ),
+    )
+    lint_parser.add_argument(
+        "files",
+        nargs="+",
+        metavar="FILE",
+        help="JSON envelope files to lint",
+    )
+    lint_parser.add_argument(
+        "--allow-prefix",
+        dest="allow_prefixes",
+        action="append",
+        metavar="PREFIX",
+        default=None,
+        help=(
+            "an absolute install prefix that may legitimately appear (e.g. "
+            "--allow-prefix /usr/share/pdk). Matched on a path-component "
+            "boundary, so /opt/pdk admits /opt/pdk/sky130A/... but not "
+            "/opt/pdk-scratch/... Repeatable."
+        ),
+    )
+    _add_format_arg(lint_parser)
+    lint_parser.set_defaults(func=env_provenance_cmd.run_lint_envelope)
 
 
 def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
