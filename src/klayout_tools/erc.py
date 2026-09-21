@@ -111,18 +111,28 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   was given"), and an assertion matching no drawn geometry at all produces
   an honest "no tap" finding rather than a silent pass.
 
-  **Disclosed-unexpressible taps** (top-level ``ties_disclosure``, issue
-  #2234): a stream that genuinely has no way to express a tap -- no
-  narrowing marker, no dedicated tap layer, no distinguishable assertion --
-  can say so explicitly instead of simply omitting ``ties``, via a
-  top-level ``{"reason": "<why>"}`` spec key. This changes no finding and no
-  geometry; it only changes the ``erc_coverage.inapplicable`` reason
-  recorded for the undeclared ``erc.missing_tie`` work
-  (``"ties_disclosed_unexpressible"`` instead of ``"no_ties_declared"``), so
-  a consumer (``klt signoff``'s T1 item 11, see ``docs/design-evidence-tiers.md``)
-  can distinguish "this stream disclosed it cannot express a tap" from
-  "nobody declared ties at all" -- two states that previously rendered
-  identically.
+  **Disclosed non-declaration** (top-level ``ties_disclosure``, issues
+  #2234 and #2247): a run that deliberately declares no tap can say so
+  explicitly, and say *why*, instead of simply omitting ``ties`` -- via a
+  top-level ``{"reason": "<why>", "kind": "<which obstacle>"}`` spec key.
+  This changes no finding and no geometry; it only changes the
+  ``erc_coverage.inapplicable`` reason recorded for the undeclared
+  ``erc.missing_tie`` work, so a consumer (``klt signoff``'s T1 item 11, see
+  ``docs/design-evidence-tiers.md``) can tell a considered, disclosed
+  omission from "nobody declared ties at all" -- states that previously
+  rendered identically. Two obstacles are expressible, because they have
+  different remedies: ``"unexpressible"`` (the default, issue #2234 --
+  nothing drawn to narrow, affirm, or bound, so there is no tap to name;
+  reason ``"ties_disclosed_unexpressible"``) and ``"tool_limitation"``
+  (issue #2247 -- the tap is nameable, but the `klt` build this evidence
+  must be produced on cannot grade a declared tie safely, the reported
+  instance being issue #2169's unisolated tie extraction turning a correct
+  ``ties[]`` into a false ``erc.supply_short``; reason
+  ``"ties_disclosed_tool_limitation"``). Neither is verified by this run --
+  a disclosure is the caller's word, which is why it never moves a finding
+  and why item 11 stays unmet on both -- but the report's own
+  ``provenance.klt_version`` pins the build, so a reader can check whether a
+  disclosed tool limitation applies to the run in front of them.
 
 Device bodies (``devices``, issue #2183): a conductor role carries
 *geometry*, and nothing in the model above distinguishes a wire from a
@@ -254,6 +264,15 @@ from .extract import (
 #: ``ties_disclosure`` echo field and the new (empty-when-unused)
 #: ``erc_coverage.checked_by_assertion`` list -- so, as with every prior
 #: additive change above, no bump.
+#: Issue #2247 adds one optional *sub*-key to that disclosure,
+#: ``ties_disclosure.kind``, and one new
+#: ``erc_coverage.inapplicable[].reason`` token it can record
+#: (:data:`REASON_TIES_DISCLOSED_TOOL_LIMITATION`). Additive in the same
+#: sense: the key defaults to the only meaning #2234 had
+#: (:data:`DISCLOSURE_KIND_UNEXPRESSIBLE`), is echoed only when the spec
+#: declared it, and the new reason token can only appear for a spec that
+#: asked for it -- so every existing spec's report is byte-identical. No
+#: bump.
 SCHEMA_VERSION = 1
 
 
@@ -322,11 +341,62 @@ REASON_DEGENERATE_TAP_DECLARATION = "degenerate_tap_declaration"
 REASON_TIES_DISCLOSED_UNEXPRESSIBLE = "ties_disclosed_unexpressible"
 
 #: The stable ``erc_coverage.inapplicable`` reason for the undeclared
+#: ``erc.missing_tie`` work when the spec's top-level ``ties_disclosure``
+#: declared ``"kind": "tool_limitation"`` (issue #2247) -- the *second*
+#: disclosed shape, beside :data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE`.
+#: Same "zero ties declared, deliberately, and here is why" fact; what
+#: differs is **where the obstacle lives, and therefore what would clear
+#: it**. An unexpressible stream has no tap to name (nothing drawn to
+#: narrow, affirm, or bound) -- only different *geometry* clears it. A
+#: tool-limitation stream can name its tap perfectly well, but declaring it
+#: against the `klt` build the caller is pinned to produces a result they
+#: have documented reason to distrust (the issue #2169 class of defect: a
+#: build whose tie extraction is not isolated from the primary connectivity
+#: graph turns a correct ``ties[]`` declaration into a false
+#: ``erc.supply_short``) -- only a different *build* clears it. Collapsing
+#: the two would tell a reader to go redraw a layout that is already
+#: correct.
+REASON_TIES_DISCLOSED_TOOL_LIMITATION = "ties_disclosed_tool_limitation"
+
+#: The stable ``erc_coverage.inapplicable`` reason for the undeclared
 #: ``erc.missing_tie`` work when ``ties`` is omitted/empty and no
 #: ``ties_disclosure`` was given -- the pre-#2234 behaviour, named as a
 #: constant so :data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` has a documented
 #: counterpart rather than a bare string literal to contrast with.
 REASON_NO_TIES_DECLARED = "no_ties_declared"
+
+#: ``ties_disclosure.kind`` (issue #2247): *why* this stream declares no
+#: ``ties[]``. Default when the key is omitted, so every pre-#2247 spec
+#: keeps the exact meaning it had.
+DISCLOSURE_KIND_UNEXPRESSIBLE = "unexpressible"
+
+#: ``ties_disclosure.kind`` (issue #2247): the tap is expressible, but the
+#: `klt` build this evidence must be produced on cannot grade a declared tie
+#: safely -- see :data:`REASON_TIES_DISCLOSED_TOOL_LIMITATION`.
+DISCLOSURE_KIND_TOOL_LIMITATION = "tool_limitation"
+
+#: Every accepted ``ties_disclosure.kind``, mapped to the
+#: ``erc_coverage.inapplicable`` reason it records for the undeclared
+#: ``erc.missing_tie`` work. A ``kind`` outside this table is a spec error
+#: rather than a silent fallback to the default: a typo that quietly
+#: downgraded a tool-limitation disclosure to an unexpressible one would
+#: misdirect the reader of the report of record, which is the exact
+#: conflation these reasons exist to end.
+_TIES_DISCLOSURE_COVERAGE_REASON: dict[str, str] = {
+    DISCLOSURE_KIND_UNEXPRESSIBLE: REASON_TIES_DISCLOSED_UNEXPRESSIBLE,
+    DISCLOSURE_KIND_TOOL_LIMITATION: REASON_TIES_DISCLOSED_TOOL_LIMITATION,
+}
+
+
+def _ties_disclosure_reason(ties_disclosure: dict[str, str] | None) -> str:
+    """The ``erc_coverage.inapplicable`` reason for undeclared
+    ``erc.missing_tie`` work, given the spec's ``ties_disclosure`` (or its
+    absence) -- see :func:`_connectivity_coverage`."""
+    if not ties_disclosure:
+        return REASON_NO_TIES_DECLARED
+    return _TIES_DISCLOSURE_COVERAGE_REASON[
+        ties_disclosure.get("kind", DISCLOSURE_KIND_UNEXPRESSIBLE)
+    ]
 
 
 def _connectivity_coverage(
@@ -394,7 +464,12 @@ def _connectivity_coverage(
     carried a top-level ``ties_disclosure`` (issue #2234), the recorded
     reason is :data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` instead of
     :data:`REASON_NO_TIES_DECLARED` -- same "zero declared" fact, but now
-    distinguishable from an omission nobody considered.
+    distinguishable from an omission nobody considered -- or
+    :data:`REASON_TIES_DISCLOSED_TOOL_LIMITATION` when that disclosure
+    declared ``"kind": "tool_limitation"`` (issue #2247), which distinguishes
+    "this stream has no tap to name" from "this stream has a tap, but the
+    build that must produce this evidence cannot grade a declared tie
+    safely". See :func:`_ties_disclosure_reason`.
     """
     degenerate = degenerate_ties or set()
     asserted = asserted_ties or set()
@@ -423,11 +498,7 @@ def _connectivity_coverage(
         inapplicable.append(
             {
                 "id": work_id("erc.missing_tie"),
-                "reason": (
-                    REASON_TIES_DISCLOSED_UNEXPRESSIBLE
-                    if ties_disclosure
-                    else REASON_NO_TIES_DECLARED
-                ),
+                "reason": _ties_disclosure_reason(ties_disclosure),
             }
         )
 
@@ -917,28 +988,54 @@ def _validate_ties_disclosure(
     spec: dict[str, Any], spec_path: str
 ) -> dict[str, str] | None:
     """The optional top-level ``ties_disclosure`` spec key (issue #2234): a
-    caller's explicit statement that this stream has no expressible tap, and
-    why -- ``{"reason": "<non-empty string>"}``. Omitted/``null`` -> ``None``
-    (pre-#2234 behaviour, unchanged).
+    caller's explicit statement that this run declares no tap, and why --
+    ``{"reason": "<non-empty string>", "kind": "<kind>"}``. Omitted/``null``
+    -> ``None`` (pre-#2234 behaviour, unchanged).
 
     This changes no geometry and no finding: :func:`run_erc` computes
     exactly the same ``erc_findings`` whether or not it is given. What it
     changes is the ``erc_coverage.inapplicable`` reason recorded for the
     undeclared ``erc.missing_tie`` work when ``ties`` is empty
-    (:data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` in place of
+    (:func:`_ties_disclosure_reason`, in place of
     :data:`REASON_NO_TIES_DECLARED`, see :func:`_connectivity_coverage`), so
     a consumer -- `klt signoff`'s T1 item 11 in particular, see
-    `docs/design-evidence-tiers.md` -- can distinguish "disclosed as
-    unexpressible" from "nobody declared ties", which previously rendered
-    identically. A non-empty ``ties`` declaration alongside a disclosure is
-    not rejected (a spec may express some taps and disclose the rest), but
-    the disclosure only ever affects the *undeclared* work's reason.
+    `docs/design-evidence-tiers.md` -- can distinguish a considered,
+    disclosed omission from "nobody declared ties", which previously
+    rendered identically. A non-empty ``ties`` declaration alongside a
+    disclosure is not rejected (a spec may express some taps and disclose
+    the rest), but the disclosure only ever affects the *undeclared* work's
+    reason.
+
+    ``kind`` (optional, issue #2247) says which obstacle is being disclosed,
+    because the two have different remedies and a reader of the report of
+    record should not have to guess which one to go fix:
+
+    - :data:`DISCLOSURE_KIND_UNEXPRESSIBLE` (the default, and the only
+      meaning #2234 had) -- there is no tap to name: no narrowing marker, no
+      dedicated tap layer, no nameable tap geometry. Cleared by drawing
+      something, not by a newer `klt`.
+    - :data:`DISCLOSURE_KIND_TOOL_LIMITATION` -- the tap *is* expressible,
+      but on the `klt` build this evidence has to be produced with, a
+      declared tie is not safely gradeable (issue #2169's unisolated tie
+      extraction turning a correct ``ties[]`` into a false
+      ``erc.supply_short`` is the reported instance). Cleared by a different
+      build, not by different geometry.
+
+    **Neither kind is verified by this run, and neither can be.** A
+    disclosure is the caller's word about their own stream or their own
+    toolchain; that is exactly why it never moves a finding and why item 11
+    stays ``"unmet"`` on both. What the report *does* pin down is the build
+    that produced it -- ``provenance.klt_version`` -- so a reader can check
+    for themselves whether a disclosed tool limitation applies to the run in
+    front of them.
 
     Validated the same strict way every other optional boolean/string spec
     key in this module is (:func:`_parse_tap_is_dedicated`): present but
     malformed is a spec error, not silently coerced or ignored -- an empty
-    or missing ``reason`` would be exactly the unfalsifiable "disclosed
-    nothing" shape this key exists to rule out.
+    or missing ``reason``, or a ``kind`` outside the two above, would be
+    exactly the unfalsifiable "disclosed nothing" shape this key exists to
+    rule out. ``kind`` is echoed only when the spec actually declared it, so
+    every pre-#2247 spec's report stays byte-identical.
     """
     raw = spec.get("ties_disclosure")
     if raw is None:
@@ -950,7 +1047,17 @@ def _validate_ties_disclosure(
         raise ErcError(
             f"spec '{spec_path}': ties_disclosure.reason must be a non-empty string"
         )
-    return {"reason": reason.strip()}
+    disclosure = {"reason": reason.strip()}
+    if "kind" in raw and raw["kind"] is not None:
+        kind = raw["kind"]
+        if not isinstance(kind, str) or kind not in _TIES_DISCLOSURE_COVERAGE_REASON:
+            allowed = ", ".join(sorted(_TIES_DISCLOSURE_COVERAGE_REASON))
+            raise ErcError(
+                f"spec '{spec_path}': ties_disclosure.kind must be one of "
+                f"{allowed} (got {kind!r})"
+            )
+        disclosure["kind"] = kind
+    return disclosure
 
 
 def _validate_device_entry(
@@ -2636,9 +2743,10 @@ def run_erc(
         "status": status,
         "coverage": coverage,
         "erc_coverage": erc_coverage,
-        # (issue #2234) The spec's top-level `ties_disclosure`, echoed
-        # verbatim -- `None` when the spec did not declare one, matching
-        # every other optional-spec-key echo's conditional population. See
+        # (issues #2234, #2247) The spec's top-level `ties_disclosure`,
+        # echoed verbatim -- `None` when the spec did not declare one,
+        # matching every other optional-spec-key echo's conditional
+        # population, and carrying `kind` only when the spec itself did. See
         # `_validate_ties_disclosure` and this module's docstring, "Missing
         # substrate/well tie".
         "ties_disclosure": ties_disclosure,

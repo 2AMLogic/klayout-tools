@@ -411,9 +411,10 @@ that. So this phase adds three things:
 - **A dedicated grading path**, :func:`_grade_power_delivery`: the cited set
   must contain a `klt erc` supply-spec run and the LVS report item 4 grades,
   plus -- for an RTL-flow digital block -- the `klt place-and-route` response
-  that says a PDN was built at all. Its five item-specific reasons
+  that says a PDN was built at all. Its six item-specific reasons
   (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
   :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`,
+  :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION`,
   :data:`_REASON_SUPPLY_NOT_CONTINUOUS`, :data:`_REASON_LVS_SUPPLY_UNPROVEN`)
   keep "no grid was ever built" distinguishable from "the grid is built but
   a rail is split in two", per issue #826's invariant.
@@ -1601,7 +1602,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
     "power": "pass_partial",
 }
 
-#: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Five
+#: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Six
 #: reasons, not one, for the same reason :data:`_REASON_NOT_POST_LAYOUT` is
 #: distinct from :data:`_REASON_WRONG_KIND`: item 11 is a *compound* claim,
 #: and a report that collapsed "no grid was ever built" into the same
@@ -1637,6 +1638,21 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   Fix: express the tap (``tap_boxes``, ``tap_requires``, or
 #:   ``tap_is_dedicated``) and re-run `klt erc`, or accept this item stays
 #:   unmet for this stream.
+#: - :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION` -- the same zero
+#:   ``ties[]`` fact once more, disclosed once more, but naming a different
+#:   obstacle (``ties_disclosure.kind: "tool_limitation"``, issue #2247):
+#:   the tap *is* expressible, and the reason no tie was declared is that
+#:   the `klt` build this evidence had to be produced on cannot grade a
+#:   declared tie safely (issue #2169's unisolated tie extraction turning a
+#:   correct ``ties[]`` into a false ``erc.supply_short`` is the reported
+#:   instance). Still ``"unmet"``, for exactly the reason
+#:   :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` is -- a disclosure
+#:   is the caller's word, never a computed ``erc.missing_tie`` result --
+#:   but kept distinct from it because the *remedy* differs: that one says
+#:   "this stream has no tap to name", this one says "this layout has a tap;
+#:   the build could not be trusted to grade it". Fix: re-run against a
+#:   `klt` build whose tie extraction is isolated (#2169) and declare the
+#:   tie, not a redrawn layout.
 #: - :data:`_REASON_SUPPLY_NOT_CONTINUOUS` -- the ERC run *did* ask, and the
 #:   answer is no: a declared supply resolved to zero or several islands
 #:   (``erc.unconnected_net``), two declared supplies resolved to the same
@@ -1651,6 +1667,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 _REASON_NO_PDN = "no_pdn"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
 _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
+_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION = "supply_spec_disclosed_tool_limitation"
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 
@@ -4146,7 +4163,14 @@ def build_tier_report(
       explicitly disclosed why no tap can be expressed on this stream
       (``ties_disclosure``). Still unmet -- a disclosure proves nothing
       about the tap's actual connectivity -- but distinguishable from
-      "nobody declared ties at all".
+      "nobody declared ties at all". Fix: draw/name a tap.
+    - ``"supply_spec_disclosed_tool_limitation"`` (issue #2247, item 11
+      only) -- the same disclosed zero-``ties[]`` state, naming the other
+      obstacle (``ties_disclosure.kind: "tool_limitation"``): the tap is
+      expressible, but the `klt` build the evidence had to be produced on
+      cannot grade a declared tie safely (issue #2169). Unmet on the same
+      principle, and kept distinct from the reason above because the fix is
+      a different *build*, not a different *layout*.
     - ``"supply_not_continuous"`` (issue #2025, item 11 only) -- the ERC run
       did ask, and the answer is no: a declared supply resolved to zero or
       several islands, two declared supplies resolved to one island, or a
@@ -5067,9 +5091,9 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
     - ``ties_disclosure_reason`` -- the spec's top-level
       ``ties_disclosure.reason`` (issue #2234), if it declared one, else
       ``None``. Purely a human-readable detail: the actual
-      disclosed-vs-omitted *gate* reads the envelope's own
-      ``erc_coverage``, not this field -- see
-      :func:`_erc_missing_tie_disclosed`.
+      disclosed-vs-omitted *gate*, and *which* disclosure was made (issue
+      #2247's ``kind``), both read the envelope's own ``erc_coverage``, not
+      this field -- see :func:`_erc_missing_tie_disclosed`.
 
     **Why this reads a second document at all.** `klt erc`'s envelope
     (``docs/cli/erc.md``'s JSON schema) echoes the spec's *path* but not its
@@ -5126,12 +5150,14 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
         },
         "tie_count": len(ties) if isinstance(ties, list) else 0,
         # Issue #2234: the spec's own `ties_disclosure.reason`, read purely
-        # for a human-readable `detail` when item 11 renders
-        # `supply_spec_disclosed_unexpressible` -- see
-        # :func:`_resolve_erc_supply_spec`. The disclosure gate itself reads
-        # the *envelope*'s own `erc_coverage` (:func:`_erc_missing_tie_disclosed`),
-        # not this field, so a deleted/edited spec document never flips a
-        # rendered reason -- only degrades the detail text.
+        # for a human-readable `detail` when item 11 renders one of the
+        # disclosed reasons -- see :func:`_resolve_erc_supply_spec`. The
+        # disclosure gate itself reads the *envelope*'s own `erc_coverage`
+        # (:func:`_erc_missing_tie_disclosed`), not this field, so a
+        # deleted/edited spec document never flips a rendered reason -- only
+        # degrades the detail text. Same for #2247's `kind`: which
+        # disclosure was made is decided by the envelope's own recorded
+        # coverage reason, never by re-reading the spec.
         "ties_disclosure_reason": disclosure_reason,
     }
 
@@ -5350,42 +5376,63 @@ def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
     )
 
 
-def _erc_missing_tie_disclosed(envelope: dict[str, Any]) -> bool:
-    """Whether the cited `klt erc` run declares zero ``ties[]`` *and*
-    explicitly disclosed why no tap can be expressed (issue #2234).
+#: The item-11 reason each of `klt erc`'s *disclosed* zero-ties coverage
+#: reasons renders (issues #2234, #2247). A reason token outside this table
+#: -- ``"no_ties_declared"``, or anything a future `klt erc` invents -- is
+#: not a disclosure this build knows how to render, and falls through to the
+#: plain :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`: an unrecognised token must
+#: never be read as "something was disclosed", which would let an
+#: unfamiliar string soften the verdict of record.
+_DISCLOSED_TIE_REASONS: dict[str, str] = {
+    "ties_disclosed_unexpressible": _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE,
+    "ties_disclosed_tool_limitation": _REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION,
+}
+
+
+def _erc_missing_tie_disclosed(envelope: dict[str, Any]) -> str | None:
+    """The item-11 reason constant for a cited `klt erc` run that declares
+    zero ``ties[]`` *and* explicitly disclosed why (issues #2234, #2247) --
+    ``None`` when it disclosed nothing this build recognises.
 
     `klt erc` records the undeclared ``erc.missing_tie`` work in
-    ``erc_coverage.inapplicable`` with a reason of either
-    ``"no_ties_declared"`` (``ties`` simply omitted/empty, no explanation)
-    or ``"ties_disclosed_unexpressible"`` (the spec's top-level
-    ``ties_disclosure`` was given) -- see ``docs/cli/erc.md``. Both describe
-    the identical "zero ties" fact reported by :func:`_erc_supply_spec`'s
-    ``tie_count == 0``; this function is what lets
-    :func:`_resolve_erc_supply_spec` tell them apart and render
-    :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` instead of the plain
-    :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` for the disclosed case --
-    :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` is still returned either way (a
-    disclosure proves nothing about the tap's actual connectivity, so item
-    11 stays ``"unmet"`` regardless); only the *reason* differs.
+    ``erc_coverage.inapplicable`` with a reason of ``"no_ties_declared"``
+    (``ties`` simply omitted/empty, no explanation),
+    ``"ties_disclosed_unexpressible"`` (the spec's top-level
+    ``ties_disclosure`` was given, and this stream has no tap to name), or
+    ``"ties_disclosed_tool_limitation"`` (that disclosure named
+    ``"kind": "tool_limitation"``: the tap is nameable, but the build the
+    evidence had to be produced on cannot grade a declared tie safely) --
+    see ``docs/cli/erc.md``. All three describe the identical "zero ties"
+    fact reported by :func:`_erc_supply_spec`'s ``tie_count == 0``; this
+    function is what lets :func:`_resolve_erc_supply_spec` tell them apart
+    and render :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` or
+    :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION` instead of the
+    plain :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`. The *status* is
+    ``"unmet"`` in all three cases -- a disclosure is the caller's word, not
+    a computed ``erc.missing_tie`` result, so it can never substitute for
+    one; only the *reason* differs, and it differs because the three name
+    different things to go fix.
 
     Matched on ``erc_coverage.inapplicable`` (not ``skipped`` --
     :func:`_erc_missing_tie_skipped` covers a *declared but degenerate* tie,
     a different case) and on the reason string itself, since presence alone
-    does not distinguish disclosed from undisclosed here -- both render an
-    ``erc.missing_tie:`` entry in ``inapplicable`` regardless. An envelope
-    with no ``erc_coverage`` block (every report before #2179) discloses
-    nothing and is graded exactly as it was.
+    does not distinguish disclosed from undisclosed here -- all three render
+    an ``erc.missing_tie:`` entry in ``inapplicable`` regardless. An
+    envelope with no ``erc_coverage`` block (every report before #2179)
+    discloses nothing and is graded exactly as it was.
     """
     block = envelope.get("erc_coverage")
     if not isinstance(block, dict):
-        return False
-    return any(
-        isinstance(record, dict)
-        and isinstance(record.get("id"), str)
-        and record["id"].startswith("erc.missing_tie:")
-        and record.get("reason") == "ties_disclosed_unexpressible"
-        for record in block.get("inapplicable") or []
-    )
+        return None
+    for record in block.get("inapplicable") or []:
+        if (
+            isinstance(record, dict)
+            and isinstance(record.get("id"), str)
+            and record["id"].startswith("erc.missing_tie:")
+            and record.get("reason") in _DISCLOSED_TIE_REASONS
+        ):
+            return _DISCLOSED_TIE_REASONS[record["reason"]]
+    return None
 
 
 def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
@@ -5440,12 +5487,16 @@ def _resolve_erc_supply_spec(
     if supply_spec is None or not supply_spec["supply_nets"]:
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if supply_spec["tie_count"] == 0:
-        # Issue #2234: same "zero ties" fact either way, but a disclosed
-        # stream gets its own reason -- see `_erc_missing_tie_disclosed`.
-        if _erc_missing_tie_disclosed(erc["envelope"]):
+        # Issues #2234/#2247: same "zero ties" fact however it got here, but
+        # a *disclosed* non-declaration gets its own reason, one per
+        # disclosed obstacle -- see `_erc_missing_tie_disclosed`. Unmet
+        # either way; what differs is what the report tells a reader to go
+        # fix.
+        disclosed_reason = _erc_missing_tie_disclosed(erc["envelope"])
+        if disclosed_reason is not None:
             return (
                 None,
-                _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE,
+                disclosed_reason,
                 {"ties_disclosure_reason": supply_spec["ties_disclosure_reason"]},
             )
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
@@ -5510,6 +5561,7 @@ def _grade_power_delivery(
     power-delivery-specific one. Item-specific
     reasons (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
     :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`,
+    :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.

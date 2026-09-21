@@ -14,6 +14,48 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2247, `klt erc` + `klt signoff`, additive — **no**
+  `schema_version` bump on either verb: one new optional spec sub-key, one
+  new coverage reason token it can record, and one new item-11 reason
+  constant; a spec that does not use the new key produces a byte-identical
+  report): `ties_disclosure.kind` distinguishes **why** a spec deliberately
+  declares zero `ties[]`, because the two reasons have different remedies
+  and previously collapsed into one. `"unexpressible"` (the default, and
+  the only meaning #2234's disclosure had) means there is no tap to name —
+  no narrowing marker, no dedicated tap layer, no nameable tap geometry;
+  cleared by drawing something. `"tool_limitation"` (new) means the tap
+  *is* expressible, but the `klt` build the evidence has to be produced on
+  cannot grade a declared tie safely — the reported instance being #2169,
+  where a declared tie on an affected build joins the well/tap regions into
+  the primary connectivity graph and reports a false `erc.supply_short` on
+  any routed design, so a release-pinned flow's only honest option is to
+  declare no tie and say so; cleared by a different *build*, not a redrawn
+  layout. `klt erc` records `ties_disclosed_tool_limitation` (beside the
+  existing `ties_disclosed_unexpressible`/`no_ties_declared`) as the
+  `erc_coverage.inapplicable` reason for the undeclared `erc.missing_tie`
+  work, echoes `kind` back only when the spec declared it, and rejects any
+  other value rather than falling back to the default — a typo that quietly
+  downgraded one disclosure to the other would misdirect the reader of the
+  report of record. `klt signoff`'s T1 item 11 renders that as the distinct
+  reason `supply_spec_disclosed_tool_limitation`, so the three
+  zero-`ties[]` states are now mechanically distinguishable:
+  `supply_spec_incomplete` (nobody asked the question),
+  `supply_spec_disclosed_unexpressible` (#2234, no tap to name), and
+  `supply_spec_disclosed_tool_limitation` (a tap, and a build that cannot
+  be trusted to grade it). **All three remain `unmet`** — a disclosure is
+  the caller's word, never a computed `erc.missing_tie` result — and an
+  `erc_coverage` reason token `klt signoff` does not recognise still falls
+  through to the plain `supply_spec_incomplete`, so an unfamiliar string
+  can never soften the verdict of record. A reader checks the report's own
+  `provenance.klt_version` to see whether a disclosed tool limitation
+  applies to the run in front of them. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "When the obstacle is the build,
+  not the stream" and
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) item 11.
+  The separate native-substrate gap (a `ties[]` entry still requires a
+  *drawn* `well_layer`, so a block with no drawn pwell cannot declare its
+  substrate tie at all) is **not** closed by this and is tracked in #2255,
+  now cross-referenced from both docs.
 - **Added** (#2249, `klt signoff`, no `schema_version` bump — a new flag and
   a new response shape for it, no change to the tier/fleet report's own
   fields): `klt signoff --manifest|--fleet M --check REPORT` verifies that a

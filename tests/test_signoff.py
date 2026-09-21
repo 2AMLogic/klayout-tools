@@ -8705,6 +8705,146 @@ def test_item_11_unmet_but_distinct_reason_when_ties_disclosed_unexpressible(tmp
     }
 
 
+def _disclosed_zero_ties_envelope(coverage_reason):
+    """An `ERC_CLEAN_ENVELOPE` whose undeclared `erc.missing_tie` work
+    carries `coverage_reason` -- the one field item 11's disclosure gate
+    reads (issues #2234, #2247)."""
+    return {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": [
+                'erc.net_connectivity:["VPWR"]',
+                'erc.net_connectivity:["VGND"]',
+            ],
+            "skipped": [],
+            "inapplicable": [{"id": "erc.missing_tie:[]", "reason": coverage_reason}],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": [],
+        },
+    }
+
+
+def _item_11_zero_ties_reason(tmp_path, *, stem, disclosure, coverage_reason):
+    """Grade a block whose ERC spec declares zero `ties[]` with `disclosure`
+    and whose cited run recorded `coverage_reason`, and return the rendered
+    item-11 entry."""
+    spec = {key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"}
+    if disclosure is not None:
+        spec["ties_disclosure"] = disclosure
+    envelope_kwargs = (
+        {}
+        if coverage_reason is None
+        else {"erc_envelope": _disclosed_zero_ties_envelope(coverage_reason)}
+    )
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    erc_spec=spec,
+                    prefix=f"pd-{stem}",
+                    **envelope_kwargs,
+                )
+            },
+        )
+    )
+    return _item_11(result)
+
+
+def test_item_11_unmet_but_distinct_reason_when_ties_disclosed_tool_limitation(
+    tmp_path,
+):
+    """Issue #2247: a block that declares zero `ties[]` because the `klt`
+    build its evidence must be produced on cannot grade a declared tie
+    safely (#2169) is a third state, not a rerun of either existing one. It
+    stays unmet -- a disclosure is the caller's word about their toolchain,
+    never a computed `erc.missing_tie` result -- but the reason must say
+    which obstacle was disclosed, because the remedy differs: a different
+    build, not a redrawn layout."""
+    item = _item_11_zero_ties_reason(
+        tmp_path,
+        stem="tool_limited",
+        disclosure={
+            "kind": "tool_limitation",
+            "reason": (
+                "klayout-tools#2169: ties[] on the pinned release reports a "
+                "false erc.supply_short; well-tie continuity is evidenced by "
+                "the cited device-aware LVS match instead"
+            ),
+        },
+        coverage_reason="ties_disclosed_tool_limitation",
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_disclosed_tool_limitation"
+    assert item["detail"] == {
+        "ties_disclosure_reason": (
+            "klayout-tools#2169: ties[] on the pinned release reports a "
+            "false erc.supply_short; well-tie continuity is evidenced by "
+            "the cited device-aware LVS match instead"
+        )
+    }
+
+
+def test_item_11_three_zero_tie_states_render_three_distinct_reasons(tmp_path):
+    """The whole point of #2247, asserted as one table: "nobody considered
+    the question", "this stream has no tap to name", and "this build cannot
+    grade a declared tie" must be three mechanically distinguishable
+    reasons. All three are unmet -- none of them is a computed tie result --
+    but a reader of the report of record must be able to tell which one
+    they are looking at without re-opening the cited ERC spec."""
+    cases = {
+        "undisclosed": (None, None),
+        "unexpressible": (
+            {"reason": "no implant layers are drawn on this stream"},
+            "ties_disclosed_unexpressible",
+        ),
+        "tool_limitation": (
+            {"kind": "tool_limitation", "reason": "see klayout-tools#2169"},
+            "ties_disclosed_tool_limitation",
+        ),
+    }
+    rendered = {}
+    for stem, (disclosure, coverage_reason) in cases.items():
+        item = _item_11_zero_ties_reason(
+            tmp_path,
+            stem=stem,
+            disclosure=disclosure,
+            coverage_reason=coverage_reason,
+        )
+        assert item["status"] == "unmet"
+        rendered[stem] = item["reason"]
+
+    assert rendered == {
+        "undisclosed": "supply_spec_incomplete",
+        "unexpressible": "supply_spec_disclosed_unexpressible",
+        "tool_limitation": "supply_spec_disclosed_tool_limitation",
+    }
+    assert len(set(rendered.values())) == 3
+
+
+def test_item_11_unrecognized_disclosure_reason_is_still_plain_incomplete(tmp_path):
+    """An `erc_coverage` reason token this build does not know is not a
+    disclosure: an unfamiliar string must never soften the verdict of
+    record into one of the disclosed reasons."""
+    item = _item_11_zero_ties_reason(
+        tmp_path,
+        stem="unknown_token",
+        disclosure={"kind": "tool_limitation", "reason": "see klayout-tools#2169"},
+        coverage_reason="ties_disclosed_something_this_build_never_heard_of",
+    )
+
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+
+
 def test_item_11_disclosure_without_the_matching_coverage_reason_is_still_incomplete(
     tmp_path,
 ):
@@ -8712,7 +8852,8 @@ def test_item_11_disclosure_without_the_matching_coverage_reason_is_still_incomp
     (`_erc_missing_tie_disclosed`), not the spec document alone -- a spec
     that declares `ties_disclosure` but whose cited ERC run reports the
     ordinary `no_ties_declared` reason (an older `klt erc`, or a hand-edited
-    envelope) still renders the plain incomplete reason."""
+    envelope) still renders the plain incomplete reason. True of every
+    disclosure `kind` (issue #2247), not only #2234's original one."""
     spec = {
         **{key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"},
         "ties_disclosure": {"reason": "no implant layers are drawn on this stream"},
