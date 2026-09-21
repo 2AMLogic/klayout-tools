@@ -37,6 +37,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   change behind it, per
   [`docs/json-contract.md`](docs/json-contract.md).
 
+- **Changed** (#2203, `schema_version` 2 → **3** for `klt signoff --fleet`'s
+  report only): the fleet roll-up's `blocks[].blocking_item` now names an
+  unmet T1 item **this build has no grading rules for** (`graded_by_build:
+  false` — an item id only a `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc
+  lists, #2176) in preference to every other unmet item, where #2178's rule
+  demoted it below any gradeable one. That demotion was incidental, not
+  intended: such an id is in neither grading table, so it satisfied the
+  "structurally ungradeable" predicate written for items 1/2/9/10 and was
+  swept up with them. The two are opposites for this purpose. Items 1/2/9/10
+  are demoted because they are unmet *by construction* for every honestly
+  authored manifest — background noise, and a weak answer to "why isn't this
+  block T1 yet". A `graded_by_build: false` row is never expected and is the
+  sharpest answer available: the roll-up could not evaluate that item at
+  all, so every other explanation it prints is conditional on a completeness
+  the verdict does not have — and it is the only blocker class a manifest
+  edit cannot clear, since such an item can never render `"met"` on this
+  build. The class is read from `graded_by_build`, so it covers both the
+  cited form (`reason: "ungradeable_by_build"`) and the uncited one
+  (`reason: "no_evidence"`). `blocks[].ungraded_items` is unchanged — it
+  lists both ungradeable classes exactly as it did before — and no field is
+  added, removed or retyped; the bump is solely because an already-shipped
+  field's *meaning* moved, the same rule that took this report to `2` in
+  #2178. A fleet graded against the shipped doc is byte-identical: no item
+  is ever `graded_by_build: false` there, so the new rule is unreachable.
+  `--manifest` and envelope-aggregation mode are untouched, and no item's
+  grading changes. See [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Which
+  unmet item the blocker names".
+
 - **Changed** (#2199): `klt erc` no longer reports a **degenerate** `ties[]`
   declaration as a passing `erc.missing_tie` check. A tie whose declared tap
   region is indistinguishable from an ordinary source/drain contact — no

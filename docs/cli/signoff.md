@@ -849,8 +849,8 @@ that follows the paragraph above, `klt signoff --fleet`'s `blocking_item`
 deliberately steps over them and names the first unmet item that actually
 has a check behind it — reporting the four separately as that row's
 `ungraded_items`, and falling back to naming one of them only when there is
-no gradeable gap left. See ["The blocker is a gradeable item, not the first
-unmet one"](#the-blocker-is-a-gradeable-item-not-the-first-unmet-one-issue-2178).
+no gradeable gap left. See ["Which unmet item the blocker
+names"](#which-unmet-item-the-blocker-names-issues-2178-2203).
 Nothing about how the four are *graded* changes: they are still `unmet` when
 uncited, and a block still reaches `tier: "T1"` only once every T1 item —
 these four included — is `"met"`.
@@ -910,6 +910,12 @@ command-backed entry for such an item is never executed: this build could
 not interpret the answer. The fix for one is a newer `klt` (or grading
 against the doc this one ships) — not a different citation, which is why it
 is its own `reason` rather than a shade of `wrong_kind`.
+
+In the fleet roll-up, a `graded_by_build: false` item is what
+`blocking_item` names **in preference to every other unmet item** (issue
+#2203): the roll-up could not evaluate it at all, and no edit to the
+manifest can clear it. See ["Which unmet item the blocker
+names"](#which-unmet-item-the-blocker-names-issues-2178-2203).
 
 A released build handed a doc from `main` that has grown an item 12, with a
 manifest that cites it:
@@ -1783,7 +1789,7 @@ verification", bound to `klt pex` in #871) is named as the `blocking_item`
 exactly like any other unmet item — and resolves to `tier: "T1"` once real
 `klt yield`/`klt pex` evidence backs it, the same as every other T1 item.
 
-### The blocker is a gradeable item, not the first unmet one (issue #2178)
+### Which unmet item the blocker names (issues #2178, #2203)
 
 **`blocking_item` skips items 1, 2, 9 and 10 whenever any other T1 item is
 also unmet.** Those four have no `klt` verb behind them, and this page's
@@ -1798,33 +1804,71 @@ whole fleet at once, and the only ways to avoid it were to cite a topically
 unrelated envelope for those items (dishonest) or to cite 2/9/10 but not 1
 (gaming the reduction).
 
+**But an item this build cannot grade at all outranks everything** (issue
+#2203). `--tiers-doc`/`$KLT_TIERS_DOC` lets the parsed item list run ahead of
+the running build's grading rules (see ["An overridden doc can outrun the
+build"](#an-overridden-doc-can-outrun-the-build-graded_by_build) above), and
+such an item — `graded_by_build: false` — is in neither grading table, so
+#2178's skip swept it up *incidentally*, as if it were a fifth item 1. It is
+the opposite kind of thing:
+
+|                          | Items 1, 2, 9, 10          | `graded_by_build: false`  |
+| ------------------------ | -------------------------- | ------------------------- |
+| What is missing          | a `klt` verb, repo-wide    | **this build's** rules    |
+| Expected?                | yes — for every honest manifest | no — never          |
+| How you clear it         | cite the artifact          | a newer `klt` (or grade against the doc this one ships) |
+| As an answer to "why isn't this block T1?" | weak — it is the background noise every manifest has | the sharpest one available — the roll-up could not evaluate this item at all |
+
+So it is named *first*, not demoted. Two reasons, and the second is the
+decisive one:
+
+- Every other explanation `blocking_item` could print is conditional on this
+  build being able to grade the checklist it was handed. When it cannot,
+  naming some other item implies a completeness the verdict does not have —
+  in the case that motivated #2176, pointing the reader at their manifest
+  when the gap is their `klt`.
+- It is the only class of blocker a manifest edit cannot clear. A
+  `graded_by_build: false` item can never render `"met"` on this build, so
+  "blocked on item 4 — run `klt lvs`" would send the reader after work that
+  cannot get this block to T1 no matter how it goes.
+
+The class is read from `graded_by_build`, not from `reason`, so it covers
+both forms: a *cited* such item (`reason: "ungradeable_by_build"`) and an
+*uncited* one (`reason: "no_evidence"`). The build is the gap either way.
+
 The selection rule is therefore:
 
-1. the first rendered unmet T1 item **that has a check behind it** — items
+1. the first rendered unmet T1 item **this build has no grading rules for**
+   (`graded_by_build: false`), if any — issue #2203;
+2. otherwise the first unmet T1 item **that has a check behind it** — items
    3-8 and 11, the ones named in a `_ITEM_ALLOWED_KINDS`-style binding to a
-   `klt` verb — if any;
-2. otherwise the first unmet **structurally ungradeable** item (1, 2, 9, 10);
-3. otherwise `null`, i.e. `tier: "T1"`.
+   `klt` verb;
+3. otherwise the first unmet **structurally ungradeable** item (1, 2, 9, 10);
+4. otherwise `null`, i.e. `tier: "T1"`.
 
-Rule 2 matters as much as rule 1: a block whose *only* gaps are those four is
+Rule 3 matters as much as rule 2: a block whose *only* gaps are those four is
 still not T1, so the roll-up still names one of them rather than reporting
-`null` and implying it is clean. And every skipped item is reported beside
-the blocker as [`ungraded_items`](#blocks-entries) — demoted, never dropped.
+`null` and implying it is clean. And every item either rule skipped — both
+ungradeable classes — is reported beside the blocker as
+[`ungraded_items`](#blocks-entries), demoted, never dropped. When rule 1 or
+rule 3 fires, the named blocker is itself one of those rows.
 
 Nothing here re-grades anything. The four items are still graded exactly as
 before (an uncited one is still `unmet`, a cited-and-passing one still
 `met`), a block's `tier` still requires **every** T1 item including those
 four to be `"met"`, and each reported row is copied verbatim from that
 block's own tier report. Only *which* unmet item gets named first changed —
-which is why this bumped the fleet report's `schema_version` to `2` (see
+which is why #2178 bumped the fleet report's `schema_version` to `2` and
+#2203 bumped it again to `3` (see
 [`../json-contract.md`](../json-contract.md)'s rule on redefining what an
-already-shipped field means).
+already-shipped field means). `ungraded_items` lists exactly the same rows
+under `3` as it did under `2`; only `blocking_item` moved.
 
 ### Fleet-report JSON schema
 
 ```json
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "block_count": 3,
   "t1_count": 1,
   "not_t1_count": 2,
@@ -1897,13 +1941,13 @@ already-shipped field means).
 
 | Field           | Type              | Description                                                                          |
 | --------------- | ------------------ | ---------------------------------------------------------------------------------------- |
-| `schema_version`| integer             | Version of this report's own JSON shape (`2` since issue #2178 redefined which unmet item `blocking_item` names; independent of the other two modes' `schema_version`s). |
+| `schema_version`| integer             | Version of this report's own JSON shape (`3` since issue #2203 re-ranked which unmet item `blocking_item` names, as #2178 did for `2`; independent of the other two modes' `schema_version`s). |
 | `block_count`   | integer             | Number of `blocks[]` entries graded.                                                     |
 | `t1_count`      | integer             | Number of those blocks with `tier: "T1"`.                                                |
 | `not_t1_count`  | integer             | `block_count - t1_count`.                                                                 |
 | `source_doc`    | string               | As in tier-report mode: `"docs/design-evidence-tiers.md"`, or the `--tiers-doc`/`$KLT_TIERS_DOC` override path. |
 | `source_doc_content_hash` | string \| null | As in tier-report mode (issue #2175): the resolved doc's `sha256:`-prefixed content hash. Since `tiers_doc` is forwarded verbatim to every per-block grading call, this is the shared value every `blocks[]` row's own copy also carries within one roll-up — the direct answer to "were these N verdicts taken against the same checklist". |
-| `build`         | object               | As in tier-report mode (issue #2176): which build graded the fleet. Reported once for the whole roll-up rather than per block — one process grades every block. Per-item `graded_by_build` lives in each block's own `--manifest` report; here an item this build cannot grade surfaces like any other item with no check behind it (it is `ungraded_items`-eligible, and `blocking_item` names it with `reason: "ungradeable_by_build"` when it is the only gap). |
+| `build`         | object               | As in tier-report mode (issue #2176): which build graded the fleet. Reported once for the whole roll-up rather than per block — one process grades every block. Per-item `graded_by_build` lives in each block's own `--manifest` report; here an item this build cannot grade is both an `ungraded_items` row and, since issue #2203, the `blocking_item` in preference to every other unmet item (`reason: "ungradeable_by_build"` when it was cited, `"no_evidence"` when it was not). |
 | `blocks`        | array\<object\>      | One entry per fleet manifest `blocks[]` entry, in order.                                 |
 
 #### `blocks[]` entries
@@ -1918,8 +1962,8 @@ already-shipped field means).
 | `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
-| `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker — the first unmet *gradeable* one, falling back to an ungradeable one only when nothing gradeable is unmet (issue #2178). See below. |
-| `ungraded_items`| array\<object\>      | Every unmet **structurally ungradeable** T1 item (1, 2, 9, 10 — the ones with no `klt` verb behind them), in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issue #2178). These are exactly the rows `blocking_item` steps over: demoted so an honestly-uncited item 1 never masks a real gap, listed so that demotion never silently hides them. `[]` for a block that cites all four, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — those four items still have to be `"met"` for `tier: "T1"`. |
+| `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker: an item this build cannot grade at all (`graded_by_build: false`) if there is one (issue #2203), else the first unmet *gradeable* one, else a structurally ungradeable one (issue #2178). See below. |
+| `ungraded_items`| array\<object\>      | Every unmet T1 item with **no runnable check behind it** — the structurally ungradeable 1, 2, 9, 10 (no `klt` verb at all) *and* any `graded_by_build: false` item (no rules in this build) — in render order, each in `blocking_item`'s own `{"id", "title", "partition", "reason"}` shape (issues #2178, #2203). These are the rows the blocker reduction ranks separately: listed so that ranking them never silently hides them, and so that demoting an honestly-uncited item 1 never masks a real gap. The named `blocking_item` is itself one of these rows whenever it came from either ungradeable class. `[]` for a block that cites all four and that this build grades fully, and for a block at `tier: "T1"`. Reduced from this block's own tier report, never re-graded; it changes no block's `tier` — every T1 item, these included, still has to be `"met"` for `tier: "T1"`. |
 | `drc_coverage`  | array\<object\>      | What this block's DRC evidence reported it did *not* check (issue #2002): one entry per `"met"` `drc`-kind citation whose envelope carries a `coverage` block, shaped `{"item", "partition", "layers_in_stream_without_rules", "rules_skipped", "deck_scope"}`. `[]` when no such citation exists — an unmet item 3, a pre-`coverage` envelope, or a block whose evidence is not DRC — so `[]` means "nothing reported", never "no gaps". Reduced from this block's own tier report, never re-graded; it changes no block's `tier`. |
 
 #### `blocking_item` / `ungraded_items[]` fields
@@ -1937,9 +1981,10 @@ tier-report item:
 `blocking_item` names **one** unmet T1 item — the single next thing to fix,
 not a re-rendering of the whole item list. Candidates are taken in the same
 order the tier-verdict report renders items (item id, then partition for a
-mixed-signal block), and a structurally ungradeable item (1, 2, 9, 10) wins
-only when no gradeable item is unmet — see ["The blocker is a gradeable
-item, not the first unmet one"](#the-blocker-is-a-gradeable-item-not-the-first-unmet-one-issue-2178)
+mixed-signal block), ranked in three classes: an item this build cannot
+grade at all wins outright, then the first unmet gradeable item, then a
+structurally ungradeable one (1, 2, 9, 10) — see ["Which unmet item the
+blocker names"](#which-unmet-item-the-blocker-names-issues-2178-2203)
 above for the full rule and why. Open that block's own `--manifest` report
 for the full item-by-item detail.
 

@@ -6470,8 +6470,11 @@ def test_fleet_rows_carry_the_shortfall_beside_their_item_count(tmp_path):
     # Per-row, not per-roll-up: a mixed-signal row's counts both double.
     assert mixed["t1_item_count"] == 6
     assert mixed["build_t1_item_count"] == 2 * _shipped_t1_item_count()
-    # Still additive -- the fleet schema is unchanged by this field.
-    assert result["schema_version"] == 2
+    # Still additive -- the fleet schema is unchanged by *this* field. The
+    # version it is pinned at moved to 3 for an unrelated reason (issue
+    # #2203 re-ranked `blocking_item`), not because `build_t1_item_count`
+    # was added.
+    assert result["schema_version"] == 3
 
 
 def test_cli_text_output_discloses_the_shortfall(tmp_path, capsys):
@@ -6540,7 +6543,8 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
 
     result = build_fleet_report({"blocks": [block_a, block_b, block_c]})
 
-    assert result["schema_version"] == 2
+    # 3 since issue #2203 re-ranked `blocking_item` again (2 was #2178's).
+    assert result["schema_version"] == 3
     assert result["block_count"] == 3
     assert result["t1_count"] == 1
     assert result["not_t1_count"] == 2
@@ -6805,6 +6809,183 @@ def test_cli_fleet_text_format_shows_demoted_ungraded_items(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "blocking: #3" in out
     assert "ungraded (no klt verb, uncited): #1, #2, #9, #10" in out
+
+
+# --------------------------------------------------------------------------- #
+# An `ungradeable_by_build` row OUTRANKS every other blocker -- issue #2203.
+#
+# Issue #2178 (above) demoted the four structurally-ungradeable items out of
+# `blocking_item` because they are unmet *by construction* for every honestly
+# authored manifest -- universal noise, and a weak answer to "why isn't this
+# block T1 yet".
+#
+# Issue #2176 then created a second population that `_is_structurally_
+# ungradeable_item()` also answers True for, incidentally: an item id only a
+# `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc lists, which this build has
+# no grading rules for at all (`graded_by_build: false`). It is in neither
+# grading table either, so the #2178 demotion swept it up too.
+#
+# The two are opposites for this purpose, so the priority is now explicit
+# (issue #2203): an `ungradeable_by_build` row is named FIRST. It is not
+# "one more unmet row" -- it is the report saying it could not evaluate this
+# item at all, which no other explanation can outrank, and which no edit to
+# the manifest can fix.
+# --------------------------------------------------------------------------- #
+
+#: A tier doc a newer release might ship, carrying BOTH kinds of ungradeable
+#: item: item 1 (Design sources -- no `klt` verb repo-wide, but this build's
+#: own doc lists it, so `graded_by_build: true`) and `_FUTURE_ITEM_ID` (only
+#: this doc knows it -- `graded_by_build: false`). Item 3 is the gradeable
+#: control.
+_FUTURE_TIERS_DOC_WITH_STRUCTURAL_ITEM = f"""\
+# Design-evidence tiers
+
+## The ladder
+
+| Tier | Claim | Demonstrated by |
+|---|---|---|
+| **T1 — sim-validated** | Designed and simulation-validated | Open-source evidence |
+| **T2 — signoff-validated** | Validated on commercial tools | T1, plus commercial |
+| **T3 — silicon-validated** | Fabricated and measured | T2, plus a tapeout |
+| **T4 — production-validated** | Proven in silicon | An external project |
+
+## T1 checklist — what "sim-validated" requires
+
+1. **Design sources** — the schematic/generator sources are in the repo.
+3. **DRC clean** — latest `klt drc` JSON report: `status: clean`.
+{_FUTURE_ITEM_ID}. **Formal equivalence** — an item this doc gained after the
+   running build shipped.
+
+## Verification rules
+
+- **Staleness is failure.**
+"""
+
+
+def _write_future_tiers_doc_with_structural_item(tmp_path) -> str:
+    path = tmp_path / "future-tiers-with-structural.md"
+    path.write_text(_FUTURE_TIERS_DOC_WITH_STRUCTURAL_ITEM, encoding="utf-8")
+    return str(path)
+
+
+def test_the_two_ungradeable_predicates_are_separate(tmp_path):
+    """AC: `_is_structurally_ungradeable_item()` keeps meaning exactly what
+    its docstring says (no `klt` verb behind the id, repo-wide), and the
+    build-coverage case is answered by its own check reading the rendered
+    item's `graded_by_build` field -- not derived a second time."""
+    assert signoff_module._is_structurally_ungradeable_item(1) is True
+    assert signoff_module._is_structurally_ungradeable_item(3) is False
+    assert signoff_module._is_structurally_ungradeable_item(11) is False
+
+    result = build_tier_report(
+        _manifest(), tiers_doc=_write_future_tiers_doc_with_structural_item(tmp_path)
+    )
+    structural = _item(result, 1)
+    by_build = _item(result, _FUTURE_ITEM_ID)
+    gradeable = _item(result, 3)
+
+    # Item 1 is structurally ungradeable but this build *does* grade it.
+    assert signoff_module._is_structurally_ungradeable_item(structural["id"]) is True
+    assert signoff_module._is_ungradeable_by_build(structural) is False
+    # The future item is the other population -- and, today, a subset of the
+    # structural one, which is exactly why the reduction cannot key on the
+    # structural predicate alone.
+    assert signoff_module._is_ungradeable_by_build(by_build) is True
+    # A gradeable item is neither.
+    assert signoff_module._is_structurally_ungradeable_item(gradeable["id"]) is False
+    assert signoff_module._is_ungradeable_by_build(gradeable) is False
+
+
+def test_fleet_blocking_item_prefers_an_ungradeable_by_build_row_over_a_real_gap(
+    tmp_path,
+):
+    """The decision this issue asked for: with an uncited item 3 (a genuine,
+    runnable gap) and an item this build cannot grade at all, the roll-up
+    names the one it could not evaluate. Naming item 3 would tell the reader
+    "run `klt drc`" when running it could never get this block to T1 on this
+    build."""
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("skewed-canary")]},
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )["blocks"][0]
+
+    assert row["tier"] is None
+    assert row["blocking_item"] == {
+        "id": _FUTURE_ITEM_ID,
+        "title": "Formal equivalence",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+
+
+def test_fleet_blocking_item_prefers_a_cited_ungradeable_by_build_row(tmp_path):
+    """Same rule for the *cited* form of the same gap, where the row carries
+    `reason: "ungradeable_by_build"` rather than `no_evidence` -- the
+    reduction keys on `graded_by_build`, which covers both."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    row = build_fleet_report(
+        {
+            "blocks": [
+                _fleet_block_manifest(
+                    "skewed-canary", evidence={str(_FUTURE_ITEM_ID): drc_path}
+                )
+            ]
+        },
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )["blocks"][0]
+
+    assert row["blocking_item"]["id"] == _FUTURE_ITEM_ID
+    assert row["blocking_item"]["reason"] == "ungradeable_by_build"
+
+
+def test_fleet_blocking_item_prefers_it_over_a_structurally_ungradeable_one(tmp_path):
+    """AC: with both kinds of ungradeable row unmet and nothing else to pick,
+    the build-coverage one wins -- and the structural one is still listed."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("skewed-canary", evidence={"3": drc_path})]},
+        tiers_doc=_write_future_tiers_doc_with_structural_item(tmp_path),
+    )["blocks"][0]
+
+    assert row["t1_met_count"] == 1
+    assert row["blocking_item"]["id"] == _FUTURE_ITEM_ID
+    assert [item["id"] for item in row["ungraded_items"]] == [1, _FUTURE_ITEM_ID]
+
+
+def test_fleet_ungraded_items_lists_both_populations(tmp_path):
+    """Option 3 of the issue, not in question: `ungraded_items` keeps listing
+    both kinds of row. It is "every unmet T1 item with no runnable check
+    behind it", which stays true of both whichever one `blocking_item`
+    names."""
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("skewed-canary")]},
+        tiers_doc=_write_future_tiers_doc_with_structural_item(tmp_path),
+    )["blocks"][0]
+
+    assert [item["id"] for item in row["ungraded_items"]] == [1, _FUTURE_ITEM_ID]
+    # The blocker is one of the listed rows, exactly as it already was when
+    # the roll-up fell back to a structurally-ungradeable item (issue #2178):
+    # `ungraded_items` demotes rows, it does not exclude the named one.
+    assert row["blocking_item"] in row["ungraded_items"]
+
+
+def test_fleet_blocking_item_rule_is_unchanged_when_the_build_grades_everything(
+    tmp_path,
+):
+    """Regression guard for #2178's own rule: with the shipped doc, no item
+    is ever `graded_by_build: false`, so the new branch is unreachable and a
+    gradeable unmet item still outranks the structural four."""
+    full_evidence = _full_t1_evidence(tmp_path)
+    evidence = {item_id: full_evidence[item_id] for item_id in ("3", "4", "8")}
+
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("analog-canary", evidence=evidence)]}
+    )["blocks"][0]
+
+    assert row["blocking_item"]["id"] == 5
+    assert [item["id"] for item in row["ungraded_items"]] == [1, 2, 9, 10]
 
 
 # --------------------------------------------------------------------------- #

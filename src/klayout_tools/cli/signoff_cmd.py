@@ -506,6 +506,13 @@ def _print_fleet_report_text(result: dict) -> None:
         # Demoted to one summary line rather than dropped: they are still
         # part of why this block is not T1, they are just not something a
         # reader can go and *run*. The JSON carries them in full.
+        #
+        # Since issue #2203 this list also carries any `graded_by_build:
+        # false` row (an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy of
+        # the doc lists) -- as it already did, but now by an explicit union
+        # rather than as a side effect of a shared predicate. Such a row is
+        # *also* what `blocking:` above names, in preference to every other
+        # unmet item, so it is never only visible here.
         ungraded_items = block.get("ungraded_items") or []
         if ungraded_items:
             ids = ", ".join(
