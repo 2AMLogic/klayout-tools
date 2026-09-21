@@ -4445,6 +4445,46 @@ def _resolve_black_box_regions(
 # --------------------------------------------------------------------------- #
 
 
+def _resistor_body_region(
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    resistor: ResistorDevice,
+    base: kdb.Region | None = None,
+) -> kdb.Region:
+    """The recognised device-body region for one :class:`ResistorDevice`
+    entry against this layout: ``body & marker``, narrowed by ``requires``
+    (every layer must also cover it) and ``excludes`` (each subtracted) --
+    see :class:`ResistorDevice`'s own docstring.
+
+    Factored out of :func:`_resolve_resistors`'s own inline computation
+    (issue #2204) so ``erc.py``'s deck-driven device-body auto-detection
+    computes the *exact same* region this deck's own extraction recognises
+    a resistor body as, rather than a second, potentially drifting
+    reimplementation -- the issue's own "Marker-to-role mapping" design
+    note's explicit requirement ("the same one `klt extract` uses").
+
+    ``base`` is the conductor region to intersect the marker against.
+    :func:`_resolve_resistors` passes its own (possibly black-box-masked)
+    ``poly``/``active``/metal region here, so this refactor changes nothing
+    about its result. Omitted (the default, every caller outside the main
+    extraction pipeline), this recomputes ``resistor.body`` fresh via
+    :func:`_region` -- there is no black-box masking to inherit outside
+    ``run_extract``'s own pipeline.
+
+    Empty when the resistor's ``marker`` (or any ``requires`` layer) is not
+    drawn anywhere on this layout -- matching :func:`_capacitor_plate_regions`'s
+    own "no PDK marker drawn" convention.
+    """
+    if base is None:
+        base = _region(layout, top_cell, resistor.body)
+    body = base & _region(layout, top_cell, resistor.marker)
+    for layer in resistor.requires:
+        body = body & _region(layout, top_cell, layer)
+    for layer in resistor.excludes:
+        body = body - _region(layout, top_cell, layer)
+    return body
+
+
 def _resolve_resistors(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -4534,11 +4574,7 @@ def _resolve_resistors(
         terminal_layer = spec.terminal if spec.terminal is not None else spec.body
         _conductor(terminal_layer, "terminal", spec.name)
 
-        body = base & _region(layout, top_cell, spec.marker)
-        for layer in spec.requires:
-            body = body & _region(layout, top_cell, layer)
-        for layer in spec.excludes:
-            body = body - _region(layout, top_cell, layer)
+        body = _resistor_body_region(layout, top_cell, spec, base=base)
         if body.is_empty():
             continue
         if spec.body == deck.poly:
@@ -4661,6 +4697,46 @@ def _diode_terminal_region(
     return region
 
 
+def _capacitor_top_via_overlap_region(
+    layout: kdb.Layout, top_cell: kdb.Cell, capacitor: CapacitorDevice
+) -> kdb.Region:
+    """The geometric overlap between one :class:`CapacitorDevice` entry's
+    own ``top_plate_via`` footprint and its recognised bottom plate (issue
+    #364) -- the region :func:`_exclude_capacitor_top_via_overlap` cuts from
+    the deck's generic ``vias[]`` connectivity so a MiM/MOM cap's DRM-legal
+    via-to-bottom-plate overlap does not extract as an ordinary via shorting
+    the two plates together. See that function's own docstring for the full
+    "why" (issue #364/#1388).
+
+    Factored out (issue #2204) so ``erc.py``'s deck-driven device-body
+    auto-detection subtracts the *same* region from a matching ``vias``
+    role that this deck's own extraction excludes from its generic via
+    connectivity, rather than a second, potentially drifting
+    reimplementation.
+
+    Empty when ``capacitor.top_plate_via`` is unset, when no shape is drawn
+    on that layer anywhere in this layout, or when this capacitor's own
+    plates are not drawn (``top_region``/the top-plate-scoped bottom region
+    empty) -- matching :func:`_capacitor_plate_regions`'s own "no PDK marker
+    drawn" convention.
+    """
+    import klayout.db as kdb
+
+    if capacitor.top_plate_via is None:
+        return kdb.Region()
+    top_via_region = _region(layout, top_cell, capacitor.top_plate_via)
+    if top_via_region.is_empty():
+        return top_via_region
+    top_region, bottom_region = _capacitor_plate_regions(layout, top_cell, capacitor)
+    # See `_exclude_capacitor_top_via_overlap`'s own docstring (issue #1388)
+    # for why `bottom_region` must be narrowed to `interacting(top_region)`
+    # before intersecting it with the via footprint.
+    scoped_bottom_region = bottom_region.interacting(top_region)
+    if top_region.is_empty() or scoped_bottom_region.is_empty():
+        return kdb.Region()
+    return top_via_region & scoped_bottom_region
+
+
 def _exclude_capacitor_top_via_overlap(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
@@ -4722,39 +4798,30 @@ def _exclude_capacitor_top_via_overlap(
             # capacitor loop's job, not this helper's).
             continue
         via_index = deck.vias.index(capacitor.top_plate_via)
-        top_via_region = _region(layout, top_cell, capacitor.top_plate_via)
-        if top_via_region.is_empty():
-            continue
-        top_region, bottom_region = _capacitor_plate_regions(
-            layout, top_cell, capacitor
-        )
         # For a deck whose `bottom_plate` is *not* clipped to the top
         # plate's own footprint (`bottom_plate_oversize_um == 0`, e.g.
         # sky130's MiM stacks), `_capacitor_plate_regions`'s zero-oversize
         # branch returns the bottom conductor's *entire* drawn region --
         # every shape on that metal layer anywhere in the layout, not just
-        # this capacitor's own plate. Narrowing to `interacting(top_region)`
-        # here (issue #1388) keeps only the bottom-plate shape(s) that
-        # actually sit under *this* capacitor's top-plate marker, the same
-        # scoping the nonzero-oversize branch above already applies when it
-        # derives `bottom_region` itself. This both restores the issue #775
-        # guard (an empty `top_region` -- no cap marker drawn anywhere --
-        # makes `scoped_bottom_region` empty too, so a digital/macro layout
-        # that only routes on the declared `bottom_plate` metal is
-        # untouched) *and* fixes the case #775 didn't cover: a layout that
-        # draws both a real capacitor and ordinary routing between the
-        # bottom-plate metal and the metal above elsewhere on the chip.
-        # Without this narrowing, `top_via_region` (every shape on the
-        # declared `top_plate_via` layer, e.g. sky130's real `via3`/`via4`
-        # routing vias used throughout ordinary signal routing) intersected
-        # against the unscoped, chip-wide `bottom_region` excludes every
-        # legitimate via on that layer from the deck's generic `vias[]`
-        # connectivity -- a false disconnect across the whole design, not
-        # the narrow false-short exclusion this function exists to apply.
-        scoped_bottom_region = bottom_region.interacting(top_region)
-        if top_region.is_empty() or scoped_bottom_region.is_empty():
-            continue
-        overlap = top_via_region & scoped_bottom_region
+        # this capacitor's own plate. `_capacitor_top_via_overlap_region`
+        # narrows to `interacting(top_region)` (issue #1388) before
+        # intersecting it with the via footprint, keeping only the
+        # bottom-plate shape(s) that actually sit under *this* capacitor's
+        # top-plate marker. This both restores the issue #775 guard (an
+        # empty `top_region` -- no cap marker drawn anywhere -- makes the
+        # scoped bottom region empty too, so a digital/macro layout that
+        # only routes on the declared `bottom_plate` metal is untouched)
+        # *and* fixes the case #775 didn't cover: a layout that draws both a
+        # real capacitor and ordinary routing between the bottom-plate metal
+        # and the metal above elsewhere on the chip. Without this
+        # narrowing, `top_via_region` (every shape on the declared
+        # `top_plate_via` layer, e.g. sky130's real `via3`/`via4` routing
+        # vias used throughout ordinary signal routing) intersected against
+        # the unscoped, chip-wide bottom region excludes every legitimate
+        # via on that layer from the deck's generic `vias[]` connectivity --
+        # a false disconnect across the whole design, not the narrow
+        # false-short exclusion this function exists to apply.
+        overlap = _capacitor_top_via_overlap_region(layout, top_cell, capacitor)
         if overlap.is_empty():
             continue
         exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + overlap

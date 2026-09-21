@@ -3188,3 +3188,472 @@ def test_two_devices_on_the_same_role_are_unioned(tmp_path):
         "poly_resistor",
         "poly_fuse",
     ]
+
+
+# --- --deck: auto-apply a curated deck's own device-marker layers (issue #2204) ----
+#
+# Fixtures below are redrawn on gf180mcu's *real* curated-deck device layers
+# (`src/klayout_tools/decks/gf180mcu.py`'s `EXTRACTION_DECK`), not the
+# `62/0`/`63/0` stand-in markers the #2183 fixtures above use -- the whole
+# point of this feature is that `--deck` reads the *actual* deck
+# declarations, so a test against invented layer numbers would not exercise
+# the real matching rule at all.
+
+# `ppolyf_u`: body=Poly2 (30/0, also this deck's gate role), marker=RES_MK
+# (110/5), requires=(Pplus 31/0, SAB 49/0).
+_GF180MCU_POLY = "30/0"
+_GF180MCU_CONTACT = "33/0"
+_GF180MCU_MET1 = "34/0"
+_GF180MCU_MET1_LABEL = "34/10"
+
+# `cap_mim_2f0_m4m5_noshield`: top_plate=FuseTop (75/0, requires CAP_MK
+# 117/5 + MIM_L_MK 117/10), bottom_plate=Metal4 (46/0), top_plate_via=Via4
+# (41/0, gf180mcu's *own* ordinary Metal4<->Metal5 routing via layer too),
+# top_plate_via_metal=Metal5 (81/0).
+_GF180MCU_MET4 = "46/0"
+_GF180MCU_MET4_LABEL = "46/10"
+_GF180MCU_MET5 = "81/0"
+_GF180MCU_MET5_LABEL = "81/10"
+_GF180MCU_VIA4 = "41/0"
+
+
+def _gf180mcu_resistor_divider_fixture(path, *, narrow_requires=True) -> None:
+    """The #2183 rail-to-rail poly-resistor fixture (`_resistor_divider_
+    fixture`), redrawn on gf180mcu's *real* `ppolyf_u` resistor layers so
+    `--deck gf180mcu` auto-detects it with no `devices[]` declaration at
+    all: body=Poly2 (30/0, doubling as this deck's own gate layer, exactly
+    as real silicon draws it), marker=RES_MK (110/5), narrowed by Pplus
+    (31/0) + SAB (49/0).
+
+    `narrow_requires=False` (issue #2204's own edge-case test) omits the
+    Pplus/SAB narrowing entirely, so `ppolyf_u`'s own `requires` never see
+    a marker to narrow: the auto-detected candidate region comes out empty
+    (`body & marker & Pplus & SAB == body & marker & {} & {}`), and nothing
+    is subtracted -- exactly the same "no PDK device recognised here"
+    outcome as a layout that draws no resistor marker at all.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(30, 0)
+    contact = layout.layer(33, 0)
+    met1 = layout.layer(34, 0)
+    label = layout.layer(34, 5)
+    res_mk = layout.layer(110, 5)
+    pplus = layout.layer(31, 0)
+    sab = layout.layer(49, 0)
+
+    # Two labelled supply rails, 6 um apart -- no metal runs between them.
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(2), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5))))
+    top.shapes(met1).insert(kdb.Box.new(_um(8), _um(0), _um(10), _um(1)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(9), _um(0.5))))
+
+    # The resistor: one Poly2 bar from rail to rail, contacted at each head.
+    top.shapes(poly).insert(kdb.Box.new(_um(1), _um(0.2), _um(9), _um(0.8)))
+    top.shapes(contact).insert(kdb.Box.new(_um(1.2), _um(0.3), _um(1.4), _um(0.5)))
+    top.shapes(contact).insert(kdb.Box.new(_um(8.6), _um(0.3), _um(8.8), _um(0.5)))
+
+    # The PDK's own RES_MK marker over the resistor body (not the heads):
+    # 6 um x 0.8 um = 4.8 um^2.
+    top.shapes(res_mk).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+    if narrow_requires:
+        top.shapes(pplus).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+        top.shapes(sab).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+
+    layout.write(str(path))
+
+
+def _gf180mcu_resistor_divider_spec(devices=None):
+    spec = {
+        "stackup": [
+            {"name": "poly", "layer": _GF180MCU_POLY, "role": "gate"},
+            {
+                "name": "met1",
+                "layer": _GF180MCU_MET1,
+                "label_layer": "34/5",
+            },
+        ],
+        "vias": [
+            {"name": "contact", "layer": _GF180MCU_CONTACT, "between": ["poly", "met1"]}
+        ],
+        "nets": [
+            {"name": "VDD", "kind": "supply"},
+            {"name": "VSS", "kind": "supply"},
+        ],
+    }
+    if devices is not None:
+        spec["devices"] = devices
+    return spec
+
+
+def _run_gf180mcu_resistor_divider(
+    tmp_path, *, deck=None, devices=None, narrow_requires=True, name="gf_divider"
+):
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds, narrow_requires=narrow_requires)
+    _write_spec(spec, _gf180mcu_resistor_divider_spec(devices))
+    return run_erc(str(gds), str(spec), deck=deck)
+
+
+def test_no_deck_still_reports_the_false_supply_short_on_a_real_deck_layout(tmp_path):
+    """Without `--deck`, this module's own auto-detection never runs -- the
+    #2183 baseline behaviour (a false `erc.supply_short`) is unchanged, even
+    though the drawn resistor happens to use a real curated deck's own
+    layers."""
+    report = _run_gf180mcu_resistor_divider(tmp_path)
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+    assert report["provenance"]["devices"] == []
+    assert report["provenance"]["deck"] is None
+
+
+def test_deck_auto_detects_resistor_body_and_breaks_the_rail_to_rail_string(tmp_path):
+    """`--deck gf180mcu` with no `devices[]` at all auto-carves the
+    recognised `ppolyf_u` body out of `poly`, clearing the false short."""
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    assert report["erc_findings"] == []
+    assert report["erc_finding_count"] == 0
+    assert report["erc_status"] == "clean"
+
+
+def test_deck_auto_detected_resistor_reported_in_provenance(tmp_path):
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    assert report["provenance"]["devices"] == [
+        {
+            "name": "ppolyf_u",
+            "body_layer": _GF180MCU_POLY,
+            "on": "poly",
+            # `poly & RES_MK & Pplus & SAB`, not the marker's own raw area
+            # (unlike a hand-declared `devices[]` entry, which subtracts
+            # its `body_layer` region directly -- see `_device_body_cuts`):
+            # poly spans x=[1,9]/y=[0.2,0.8] (8 x 0.6 um), the requires-
+            # narrowed marker spans x=[2,8]/y=[0.1,0.9] (6 x 0.8 um), so
+            # the overlap is 6 x 0.6 = 3.6 um^2.
+            "body_area_um2": 3.6,
+            "source": "deck",
+            "superseded_by": None,
+        }
+    ]
+
+
+def test_deck_selected_populates_provenance_deck(tmp_path):
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    deck_provenance = report["provenance"]["deck"]
+    assert deck_provenance["name"] == "gf180mcu"
+    assert deck_provenance["content_hash"].startswith("sha256:")
+
+
+def test_deck_selected_does_not_change_schema_version(tmp_path):
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    assert report["schema_version"] == 1
+
+
+def test_explicit_devices_entry_wins_over_deck_auto_detection(tmp_path):
+    """An explicit `devices[]` entry for `poly` wins: it is the one that
+    actually cuts, and the deck's own `ppolyf_u` match for the same role is
+    listed but not applied (`body_area_um2: 0.0`, `superseded_by` naming
+    the declared entry that won)."""
+    report = _run_gf180mcu_resistor_divider(
+        tmp_path,
+        deck="gf180mcu",
+        devices=[{"name": "my_resistor", "body_layer": "110/5", "on": "poly"}],
+    )
+
+    assert report["erc_findings"] == []
+    devices_by_name = {d["name"]: d for d in report["provenance"]["devices"]}
+    assert devices_by_name["my_resistor"]["source"] == "declared"
+    assert devices_by_name["my_resistor"]["body_area_um2"] == 4.8
+    assert devices_by_name["my_resistor"]["superseded_by"] is None
+    assert devices_by_name["ppolyf_u"]["source"] == "deck"
+    assert devices_by_name["ppolyf_u"]["body_area_um2"] == 0.0
+    assert devices_by_name["ppolyf_u"]["superseded_by"] == "my_resistor"
+
+
+def test_requires_narrowed_resistor_removes_only_the_narrowed_region(tmp_path):
+    """gf180mcu's `ppolyf_u` requires *both* Pplus and SAB. With neither
+    drawn, the candidate body (`body & marker & Pplus & SAB`) is empty, so
+    nothing is subtracted and the false short survives -- the deck's own
+    `requires` narrowing is honoured, not just its `body`/`marker` pair."""
+    report = _run_gf180mcu_resistor_divider(
+        tmp_path, deck="gf180mcu", narrow_requires=False
+    )
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+    # Nothing was recognised at all -- no entry to list (this deck ships
+    # over a dozen resistor/capacitor flavours; listing every one that
+    # matches no geometry on every `--deck`-selected run would bury the
+    # signal AC4 exists to surface -- see `_deck_device_cuts`'s docstring).
+    assert report["provenance"]["devices"] == []
+
+
+def _gf180mcu_mim_cap_fixture(path) -> None:
+    """A MiM cap drawn on gf180mcu's *real* layers: bottom plate on Metal4
+    (VDD), top plate (FuseTop, CAP_MK/MIM_L_MK-narrowed) bridged to Metal5
+    (VSS) through Via4 -- the *same* physical layer gf180mcu also uses for
+    ordinary Metal4<->Metal5 routing vias (`ExtractionDeck.vias[3]`), so a
+    spec that declares a `via4` role bridging `met4`/`met5` reads the cap's
+    own via as an ordinary short between the two plates without
+    auto-detection -- issue #2204's own worked "MiM cap on a via role"
+    example, now against the real deck rather than the #2183 fixture's
+    invented `4/0`/`63/0` stand-ins.
+
+    Also draws an unrelated, properly strapped gate (so `run_erc` has a
+    gate net) and a *second*, unrelated Metal4<->Metal5 Via4 stack far from
+    the cap, labelled `ROUTE` -- the regression guard for issue #364/#1388's
+    "not the whole via layer" guarantee, reused here by issue #2204's own
+    auto-detection (see `test_deck_auto_detection_does_not_disconnect_
+    ordinary_vias_on_the_same_layer`).
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(30, 0)
+    contact = layout.layer(33, 0)
+    met4 = layout.layer(46, 0)
+    met4_label = layout.layer(46, 5)
+    met5 = layout.layer(81, 0)
+    met5_label = layout.layer(81, 5)
+    via4 = layout.layer(41, 0)
+    fusetop = layout.layer(75, 0)
+    cap_mk = layout.layer(117, 5)
+    mim_l_mk = layout.layer(117, 10)
+
+    # Bottom plate on met4 (VDD), top-plate stack (FuseTop+Via4+Met5, VSS).
+    top.shapes(met4).insert(kdb.Box.new(_um(0), _um(0), _um(3), _um(2)))
+    top.shapes(met4_label).insert(kdb.Text("VDD", kdb.Trans(_um(0.5), _um(1))))
+
+    top.shapes(fusetop).insert(kdb.Box.new(_um(1), _um(0.5), _um(2), _um(1.5)))
+    top.shapes(cap_mk).insert(kdb.Box.new(_um(0.8), _um(0.3), _um(2.2), _um(1.7)))
+    top.shapes(mim_l_mk).insert(kdb.Box.new(_um(0.8), _um(0.3), _um(2.2), _um(1.7)))
+    top.shapes(via4).insert(kdb.Box.new(_um(1.2), _um(0.7), _um(1.8), _um(1.3)))
+    top.shapes(met5).insert(kdb.Box.new(_um(1), _um(0.5), _um(2), _um(1.5)))
+    top.shapes(met5_label).insert(kdb.Text("VSS", kdb.Trans(_um(1.5), _um(1))))
+
+    # An unrelated, properly strapped gate.
+    top.shapes(poly).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(contact).insert(kdb.Box.new(_um(20.2), _um(0.2), _um(20.4), _um(0.4)))
+    top.shapes(met4).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+
+    # An unrelated, ordinary Via4 stack -- no cap marker anywhere near it.
+    top.shapes(met4).insert(kdb.Box.new(_um(30), _um(0), _um(32), _um(1)))
+    top.shapes(via4).insert(kdb.Box.new(_um(30.4), _um(0.2), _um(30.6), _um(0.4)))
+    top.shapes(met5).insert(kdb.Box.new(_um(30), _um(0), _um(32), _um(1)))
+    top.shapes(met5_label).insert(kdb.Text("ROUTE", kdb.Trans(_um(31), _um(0.5))))
+
+    layout.write(str(path))
+
+
+def _gf180mcu_mim_cap_spec(devices=None, extra_nets=None):
+    spec = {
+        "stackup": [
+            {"name": "poly", "layer": _GF180MCU_POLY, "role": "gate"},
+            {"name": "met4", "layer": _GF180MCU_MET4, "label_layer": "46/5"},
+            {"name": "met5", "layer": _GF180MCU_MET5, "label_layer": "81/5"},
+        ],
+        "vias": [
+            {
+                "name": "contact",
+                "layer": _GF180MCU_CONTACT,
+                "between": ["poly", "met4"],
+            },
+            {"name": "via4", "layer": _GF180MCU_VIA4, "between": ["met4", "met5"]},
+        ],
+        "nets": [
+            {"name": "VDD", "kind": "supply"},
+            {"name": "VSS", "kind": "supply"},
+            *(extra_nets or []),
+        ],
+    }
+    if devices is not None:
+        spec["devices"] = devices
+    return spec
+
+
+def _run_gf180mcu_mim_cap(
+    tmp_path, *, deck=None, devices=None, extra_nets=None, name="gf_mimcap"
+):
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _gf180mcu_mim_cap_fixture(gds)
+    _write_spec(spec, _gf180mcu_mim_cap_spec(devices, extra_nets))
+    return run_erc(str(gds), str(spec), deck=deck)
+
+
+def test_no_deck_reports_a_false_supply_short_through_the_ordinary_via_role(tmp_path):
+    report = _run_gf180mcu_mim_cap(tmp_path)
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+
+
+def test_deck_auto_detects_cap_via_overlap_and_breaks_the_plate_to_plate_bridge(
+    tmp_path,
+):
+    report = _run_gf180mcu_mim_cap(tmp_path, deck="gf180mcu")
+
+    assert report["erc_findings"] == []
+
+
+def test_deck_auto_detected_cap_reported_in_provenance(tmp_path):
+    report = _run_gf180mcu_mim_cap(tmp_path, deck="gf180mcu")
+
+    devices_by_layer = {d["body_layer"]: d for d in report["provenance"]["devices"]}
+    # FuseTop (the cap's own `top_plate`) matches no declared role in this
+    # spec -- listed, not silently dropped (issue #2204's own AC4).
+    fusetop_entry = devices_by_layer["75/0"]
+    assert fusetop_entry["name"] == "cap_mim_2f0_m4m5_noshield"
+    assert fusetop_entry["on"] is None
+    assert fusetop_entry["body_area_um2"] == 0.0
+    assert fusetop_entry["source"] == "deck"
+    # Via4 matches the declared `via4` role -- only the cap's own
+    # via-to-bottom-plate overlap is cut, not the whole via layer.
+    via4_entry = devices_by_layer[_GF180MCU_VIA4]
+    assert via4_entry["name"] == "cap_mim_2f0_m4m5_noshield"
+    assert via4_entry["on"] == "via4"
+    assert via4_entry["body_area_um2"] > 0.0
+    assert via4_entry["superseded_by"] is None
+
+
+def test_deck_auto_detection_does_not_disconnect_ordinary_vias_on_the_same_layer(
+    tmp_path,
+):
+    """The cut is the cap's own via-to-bottom-plate *overlap* only (issue
+    #364/#1388's own derivation, reused here) -- an ordinary Metal4<->
+    Metal5 via elsewhere on the same physical Via4 layer, unrelated to any
+    capacitor, must still connect normally."""
+    report = _run_gf180mcu_mim_cap(
+        tmp_path, deck="gf180mcu", extra_nets=[{"name": "ROUTE", "kind": "signal"}]
+    )
+
+    assert not any(f["net"] == "ROUTE" for f in report["erc_findings"])
+
+
+def _gf180mcu_real_short_fixture(path) -> None:
+    """Two supply rails joined by a plain metal wire -- a genuine short,
+    with no device-marker geometry anywhere. `--deck`'s auto-detection
+    (issue #2204) must not touch this: it only ever cuts where a curated
+    device's own conducting-body layer matches a declared role *and* that
+    device's own region is actually drawn, neither of which applies here."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(30, 0)
+    contact = layout.layer(33, 0)
+    met1 = layout.layer(34, 0)
+    label = layout.layer(34, 5)
+
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(10), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(9), _um(0.5))))
+
+    top.shapes(poly).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(contact).insert(kdb.Box.new(_um(20.2), _um(0.2), _um(20.4), _um(0.4)))
+    top.shapes(met1).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+
+    layout.write(str(path))
+
+
+def test_deck_selected_still_reports_a_genuine_short(tmp_path):
+    """A real rail-to-rail metal short -- no device body involved at all --
+    must still be reported with `--deck` selected: the auto carve-out only
+    ever removes a curated device's own recognised body/via-overlap region,
+    never ordinary routing (issue #2204's own regression guard against an
+    over-broad carve-out silently hiding a real short)."""
+    gds = tmp_path / "gf_real_short.gds"
+    spec = tmp_path / "gf_real_short.erc.json"
+    _gf180mcu_real_short_fixture(gds)
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": _GF180MCU_POLY, "role": "gate"},
+                {"name": "met1", "layer": _GF180MCU_MET1, "label_layer": "34/5"},
+            ],
+            "vias": [
+                {
+                    "name": "contact",
+                    "layer": _GF180MCU_CONTACT,
+                    "between": ["poly", "met1"],
+                }
+            ],
+            "nets": [
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VSS", "kind": "supply"},
+            ],
+        },
+    )
+
+    report = run_erc(str(gds), str(spec), deck="gf180mcu")
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+
+
+def test_unknown_deck_name_is_a_clean_error(tmp_path):
+    gds = tmp_path / "divider.gds"
+    spec = tmp_path / "divider.erc.json"
+    _resistor_divider_fixture(gds)
+    _write_spec(spec, _resistor_divider_spec())
+
+    with pytest.raises(ErcError, match="unknown deck 'not_a_real_deck'"):
+        run_erc(str(gds), str(spec), deck="not_a_real_deck")
+
+
+def test_cli_unknown_deck_exits_one_with_clean_message(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    assert main(["erc", str(gds), str(spec), "--deck", "not_a_real_deck"]) == 1
+    err = capsys.readouterr().err
+    assert "unknown deck" in err
+    assert "Traceback" not in err
+
+
+def test_deck_omitted_is_byte_identical_to_pre_2204_output(tmp_path):
+    """AC5: with no `--deck`, output is byte-identical to before this
+    feature existed -- `provenance.devices` entries keep their pre-#2204
+    4-key shape (no `source`/`superseded_by`), and `provenance.deck` stays
+    `None`, exactly as `test_device_body_subtraction_is_reported_in_
+    provenance` above (the #2183 baseline) already asserts."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+
+    assert report["provenance"]["deck"] is None
+    assert report["provenance"]["devices"] == [
+        {
+            "name": "poly_resistor",
+            "body_layer": "62/0",
+            "on": "poly",
+            "body_area_um2": 4.8,
+        }
+    ]
+
+
+def test_cli_deck_selected_via_flag_reports_no_findings(tmp_path, capsys):
+    """The `--deck` CLI flag itself plumbs through to `run_erc` (not just
+    the library function) -- no findings on the same gf180mcu resistor
+    fixture the library-level tests above exercise. No `--pdk` is given, so
+    the exit code (which follows the *antenna* question, per
+    `erc_cmd.py`'s own docstring) is `4` (`not_checked`), not `0` -- read
+    `erc_status`, the connectivity-only roll-up, for this check instead."""
+    gds = tmp_path / "gf_divider_cli.gds"
+    spec = tmp_path / "gf_divider_cli.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds)
+    _write_spec(spec, _gf180mcu_resistor_divider_spec())
+
+    assert (
+        main(["erc", str(gds), str(spec), "--deck", "gf180mcu", "--format", "json"])
+        == 4
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["erc_findings"] == []
+    assert out["erc_status"] == "clean"
+    assert out["provenance"]["deck"]["name"] == "gf180mcu"

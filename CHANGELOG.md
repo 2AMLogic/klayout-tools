@@ -87,6 +87,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   grading changes. See [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Which
   unmet item the blocker names".
 
+- **Added** (#2204): `klt erc` gained a new `--deck <name>` flag (currently:
+  `gf180mcu`, `sg13cmos5l`, `sg13g2`, `sky130` — the same curated-registry
+  lookup `klt extract --deck`/`klt lvs --deck` resolve, no PDK install
+  needed) that auto-detects a curated deck's own device-body marker layers
+  and carves them out of the matching `stackup`/`vias` role — the deck-driven
+  alternative to hand-transcribing a `devices[]` entry (#2183). A deck
+  device applies to a role only when its conducting-body layer equals that
+  role's own layer/datatype exactly (`ResistorDevice.body`, or
+  `CapacitorDevice.top_plate`/`top_plate_via`, the latter narrowed to only
+  the via's overlap with the recognised bottom plate — never the whole via
+  layer, which is typically also the deck's own ordinary inter-metal via).
+  An explicit `devices[]` entry for a role still wins over the deck's own
+  detection for that role. Every auto-applied carve-out is echoed in
+  `provenance.devices` exactly as a hand-declared entry is, plus new
+  `source` (`"declared"` vs `"deck"`) and `superseded_by` fields; a deck
+  device matching no declared role is still listed (`"on": null`) rather
+  than silently dropped. `provenance.deck` — previously always `null` for
+  `klt erc` — is now populated when `--deck` is given. Both additions are
+  conditional on `--deck`: a run that omits it (every caller before this
+  issue) produces byte-identical output, so `schema_version` stays `1`. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "Deck-driven device-marker
+  auto-detection".
+
 - **Changed** (#2199): `klt erc` no longer reports a **degenerate** `ties[]`
   declaration as a passing `erc.missing_tie` check. A tie whose declared tap
   region is indistinguishable from an ordinary source/drain contact — no

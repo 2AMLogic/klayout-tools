@@ -49,7 +49,9 @@ _EXIT_CODE_BY_STATUS = {
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_erc(args.file, args.spec, top=args.top, pdk=args.pdk)
+        report = run_erc(
+            args.file, args.spec, top=args.top, pdk=args.pdk, deck=args.deck
+        )
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
 
@@ -61,6 +63,13 @@ def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
     print(f"pdk: {report['pdk']}")
+    # `--deck` (issue #2204): omitted entirely when no deck was selected, so
+    # a caller who never opts into deck-driven device-marker auto-detection
+    # sees byte-identical text output to before this issue -- matching
+    # `provenance.devices`' own conditional-field convention in JSON mode.
+    deck_provenance = (report.get("provenance") or {}).get("deck")
+    if deck_provenance is not None:
+        print(f"deck: {deck_provenance['name']}")
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
     print(f"gates: {report['gate_count']}")
