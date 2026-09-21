@@ -142,6 +142,13 @@ annotation, the same "refresh the derived value, keep the human-authored
 band" split `tests/golden_metrics/generate_golden_metrics.py` uses for its
 own `tol_pct`.
 
+"Deterministic" above is enforced, not just asserted: CI's `Golden artifacts
+(hash seed + path varied)` job regenerates this manifest from two checkouts
+at different filesystem paths under two different `PYTHONHASHSEED` values and
+byte-compares -- see
+[`docs/guides/golden-artifact-determinism.md`](../../docs/guides/golden-artifact-determinism.md)
+(issue #2225).
+
 ## Test coverage (`tests/test_golden_deck.py`)
 
 Three tiers:
