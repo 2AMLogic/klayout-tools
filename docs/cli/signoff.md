@@ -1398,6 +1398,31 @@ both for the citation and for the `content_hash` staleness pin. A future
 picked up automatically and takes precedence, with no manifest change
 required.
 
+**The named samples document is resolved relative to the report, not to
+`klt signoff`'s own cwd (issue #2197).** `klt yield` records `samples`
+exactly as it was invoked — a normal `klt yield mc-samples.json` run made
+from inside its own evidence directory records `"samples":
+"mc-samples.json"`, a path that only resolves from that directory. For a
+**file-backed** evidence entry, `klt signoff` now tries that path relative
+to the report file's own directory first — the way a reader opening the
+report and following its reference would, regardless of which directory
+`klt signoff` itself was invoked from — and falls back to its own current
+working directory only if that fails, for compatibility with a samples
+document that genuinely lives elsewhere. A **command-backed** entry was
+never affected by this: its `samples` path is already resolved relative to
+the entry's own `cwd`, the same directory the subprocess that produced it
+ran in.
+
+If the named samples document cannot be found in *either* place, the
+citation's `content_hash` is `null` — exactly as it always was for a
+missing document — but the citation also carries a `content_hash_unresolved`
+object naming what was named and where this looked, so that case stays
+distinguishable from "no samples document was ever named" (see
+"`citation` fields" below). An unpinned manifest entry still renders
+`"met"` either way; a pinned one already renders `"unmet"`/
+`unverifiable_provenance` when the actual hash is `null`, per the
+`content_hash` mismatch rule above.
+
 ### Tier-report JSON schema
 
 ```json
@@ -1496,7 +1521,7 @@ required.
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, and `body_bias` for a `pex` citation whose envelope reports one (issue #1983), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
 
@@ -1507,6 +1532,7 @@ required.
 | `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
+| `content_hash_unresolved` | object | **`yield` citations only**, and only when the report names a samples document (`report["samples"]`) that could not be found in either place `klt signoff` looked (report-relative, then cwd-relative — issue #2197): `{"samples", "searched"}`, the named path and the candidate paths tried, in order. **Absent** whenever `content_hash` was successfully computed, and whenever the report names no samples document at all — an absent key never means "the input was verified", only that this particular failure mode did not occur; it distinguishes "this input could not be located" from any other reason `content_hash` might be `null`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
 | `parts`         | array\<object\> | **Item 11 citations only** (issue #2025): every artifact of the compound cited set, each in this same citation shape (minus `parts`/`power_delivery`), in `erc`/`lvs`/`place-and-route` order. The top-level fields above describe the *leading* (`erc`) part, so a consumer written before item 11 existed still reads a well-formed citation; nothing a reader needs is reachable only through `parts`. **Absent** for every other item. |

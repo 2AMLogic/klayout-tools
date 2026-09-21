@@ -4292,7 +4292,164 @@ def test_yield_evidence_missing_samples_file_leaves_content_hash_none(tmp_path):
 
     item_6 = next(item for item in result["items"] if item["id"] == 6)
     assert item_6["status"] == "met"
-    assert item_6["citation"]["content_hash"] is None
+    citation = item_6["citation"]
+    assert citation["content_hash"] is None
+    # Issue #2197: an absolute samples path that genuinely does not exist
+    # anywhere is exactly the "unresolvable input" case -- the citation
+    # names what was named and where this looked, rather than leaving
+    # `content_hash: null` indistinguishable from any other benign reason.
+    assert citation["content_hash_unresolved"] == {
+        "samples": "/nonexistent/mc-samples.json",
+        "searched": ["/nonexistent/mc-samples.json"],
+    }
+
+
+def test_file_backed_yield_hashes_samples_relative_to_report_directory(tmp_path):
+    """Issue #2197 repro: a `klt yield` report is normally run from inside
+    its own evidence directory, so it records a samples path -- here
+    `"mc-samples.json"` -- that only resolves from that directory. Grading
+    the manifest from a *different* process cwd (the repro's "repo root",
+    stood in for here by pytest's own invocation directory -- never
+    `evidence_dir`) must not silently drop the input hash: the samples
+    document is resolved relative to the report file's own directory, not
+    to this process's cwd."""
+    evidence_dir = tmp_path / "block" / "yield"
+    evidence_dir.mkdir(parents=True)
+    samples_path = evidence_dir / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "mc-samples.json"}
+    yield_path = evidence_dir / "yield-report.json"
+    yield_path.write_text(json.dumps(envelope))
+
+    assert os.getcwd() != str(evidence_dir)
+    result = build_tier_report(_manifest(evidence={"6": str(yield_path)}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    citation = item_6["citation"]
+    expected_hash = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    assert citation["content_hash"] == expected_hash
+    assert "content_hash_unresolved" not in citation
+
+
+def test_file_backed_yield_still_hashes_samples_when_graded_from_report_directory(
+    tmp_path, monkeypatch
+):
+    """Grading from inside the report's own directory -- the way `klt
+    signoff` was always able to -- must keep working exactly as before."""
+    evidence_dir = tmp_path / "yield"
+    evidence_dir.mkdir()
+    samples_path = evidence_dir / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "mc-samples.json"}
+    (evidence_dir / "yield-report.json").write_text(json.dumps(envelope))
+    monkeypatch.chdir(evidence_dir)
+
+    result = build_tier_report(_manifest(evidence={"6": "yield-report.json"}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    citation = item_6["citation"]
+    expected_hash = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    assert citation["content_hash"] == expected_hash
+    assert "content_hash_unresolved" not in citation
+
+
+def test_file_backed_yield_falls_back_to_cwd_when_samples_only_found_there(
+    tmp_path, monkeypatch
+):
+    """Compatibility fallback: a samples document that does not sit beside
+    the report -- e.g. a manifest naming the report from a different
+    directory tree than the one `klt yield` originally used -- is still
+    found via the pre-#2197 cwd-relative resolution."""
+    report_dir = tmp_path / "report-dir"
+    report_dir.mkdir()
+    cwd_dir = tmp_path / "cwd-dir"
+    cwd_dir.mkdir()
+    samples_path = cwd_dir / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "mc-samples.json"}
+    (report_dir / "yield-report.json").write_text(json.dumps(envelope))
+    monkeypatch.chdir(cwd_dir)
+
+    result = build_tier_report(
+        _manifest(evidence={"6": str(report_dir / "yield-report.json")})
+    )
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    citation = item_6["citation"]
+    expected_hash = "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+    assert citation["content_hash"] == expected_hash
+    assert "content_hash_unresolved" not in citation
+
+
+def test_file_backed_yield_unresolvable_samples_flags_content_hash_unresolved(
+    tmp_path, monkeypatch
+):
+    """When the named samples document cannot be found relative to the
+    report's own directory *or* to this process's cwd, the failure is
+    legible: `content_hash` stays `null`, but the citation names what was
+    looked for and where -- never silently indistinguishable from "no hash
+    was ever recorded" (issue #2197)."""
+    report_dir = tmp_path / "report-dir"
+    report_dir.mkdir()
+    cwd_dir = tmp_path / "cwd-dir"
+    cwd_dir.mkdir()
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "mc-samples.json"}
+    report_path = report_dir / "yield-report.json"
+    report_path.write_text(json.dumps(envelope))
+    monkeypatch.chdir(cwd_dir)
+
+    result = build_tier_report(_manifest(evidence={"6": str(report_path)}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    citation = item_6["citation"]
+    assert citation["content_hash"] is None
+    assert citation["content_hash_unresolved"] == {
+        "samples": "mc-samples.json",
+        "searched": [
+            str(report_dir / "mc-samples.json"),
+            "mc-samples.json",
+        ],
+    }
+
+
+def test_file_backed_yield_pinned_content_hash_unresolvable_renders_unverifiable(
+    tmp_path, monkeypatch
+):
+    """A manifest that pins `content_hash` for item 6 against a samples
+    document `klt signoff` cannot resolve at all renders
+    `unverifiable_provenance`, not a false `stale_evidence` -- the same
+    distinction issue #2182 draws between "nothing was ever recorded to
+    compare" and "a genuine, mismatched hash". Guards against the honest
+    action (pinning) reading as *worse* than leaving the pin off, per issue
+    #2197's "why it matters" #2."""
+    report_dir = tmp_path / "report-dir"
+    report_dir.mkdir()
+    cwd_dir = tmp_path / "cwd-dir"
+    cwd_dir.mkdir()
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "mc-samples.json"}
+    report_path = report_dir / "yield-report.json"
+    report_path.write_text(json.dumps(envelope))
+    monkeypatch.chdir(cwd_dir)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "6": {
+                    "file": str(report_path),
+                    "content_hash": "sha256:pinned-but-unverifiable",
+                }
+            }
+        )
+    )
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "unverifiable_provenance"
+    assert item_6["citation"] is None
 
 
 def test_yield_matching_pinned_content_hash_renders_met(tmp_path):
@@ -6528,6 +6685,60 @@ def test_fleet_blocking_item_walks_through_statistical_then_post_layout_items(
     assert row["tier"] == "T1"
     assert row["t1_met_count"] == 11
     assert row["blocking_item"] is None
+
+
+def test_fleet_roll_up_resolves_each_block_yield_samples_relative_to_its_own_report(
+    tmp_path,
+):
+    """Issue #2197's "invisible in the fleet roll-up" concern: `--fleet`
+    grades every block from the same process cwd, so a fix scoped to only
+    the single-manifest `build_tier_report` path would leave the fleet
+    roll-up broken. Two blocks, each in a different directory tree, each
+    citing a file-backed `klt yield` report that names a report-relative
+    samples path -- both must resolve their own content hash independently
+    in the one `build_fleet_report` call."""
+    base_evidence = {k: v for k, v in _full_t1_evidence(tmp_path).items() if k != "6"}
+
+    def _block_with_yield_report(name: str) -> tuple[dict, str]:
+        block_dir = tmp_path / name / "yield"
+        block_dir.mkdir(parents=True)
+        samples_path = block_dir / "mc-samples.json"
+        # Distinct per-block content (not just per-block path) so the
+        # assertion below actually proves each block's citation was hashed
+        # from its *own* samples document rather than coincidentally
+        # matching because both were empty.
+        samples_path.write_text(json.dumps({"measurements": [], "canary": name}))
+        envelope = {**YIELD_PASS_ENVELOPE, "samples": "mc-samples.json"}
+        report_path = block_dir / "yield-report.json"
+        report_path.write_text(json.dumps(envelope))
+        evidence = dict(base_evidence, **{"6": str(report_path)})
+        expected_hash = (
+            "sha256:" + hashlib.sha256(samples_path.read_bytes()).hexdigest()
+        )
+        return _fleet_block_manifest(name, evidence=evidence), expected_hash
+
+    block_a, expected_hash_a = _block_with_yield_report("canary-a")
+    block_b, expected_hash_b = _block_with_yield_report("canary-b")
+    assert expected_hash_a != expected_hash_b
+
+    result = build_fleet_report({"blocks": [block_a, block_b]})
+
+    assert result["block_count"] == 2
+    for row in result["blocks"]:
+        assert row["tier"] == "T1"
+        assert row["blocking_item"] is None
+
+    # Confirm item 6's own citation on each block independently, through the
+    # single-manifest path so each block's hash is checked against exactly
+    # its own samples document.
+    for name, expected_hash, evidence in [
+        ("canary-a", expected_hash_a, block_a["evidence"]),
+        ("canary-b", expected_hash_b, block_b["evidence"]),
+    ]:
+        tier_report = build_tier_report(_manifest(block=name, evidence=evidence))
+        item_6 = next(item for item in tier_report["items"] if item["id"] == 6)
+        assert item_6["status"] == "met"
+        assert item_6["citation"]["content_hash"] == expected_hash
 
 
 @requires_native_yield
