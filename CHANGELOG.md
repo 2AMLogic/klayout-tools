@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2244, `klt lvs`, no `schema_version` bump — the `side` field
+  already documented `"layout"`/`"reference"`/`"both"` as valid values;
+  this changes when each is emitted, not the shape): a
+  `reference.form: "gate-level-verilog"` reference that itself
+  instantiates a power-only master (filler/tap/endcap — the shape a
+  DEF-derived `write_verilog` reference produces, with an empty connection
+  list per instance, unlike `klt place-and-route`'s own `verilog_path`
+  writer) is now pruned from the reference side too, not just the layout
+  side (issue #1622's original `topology.power_only_pruned` prune).
+  Previously only the layout-side copy was removed, leaving the
+  reference-side master and its instances with no counterpart at all — a
+  `topology` "circuit could not be matched to a counterpart" error cascade
+  (one per reference type, one per reference instance) around an
+  otherwise-clean `power_connectivity: "match"` verdict, misreading an
+  equivalent design as a signal-side `mismatch`. The prune now runs
+  symmetrically: a qualifying master's type and every instance of it are
+  removed from whichever side(s) actually instantiate it, disclosed once
+  as a single `topology.power_only_pruned` entry (`side: "layout"` when
+  only the layout side had one, `"reference"` when only the reference
+  side did, `"both"` when each side did). See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s `topology.power_only_pruned`
+  section for the corrected contract.
+
 - **Added** (#2234, additive — **no** `schema_version` bump on `klt erc` or
   `klt signoff`; every field below is new, and a spec that uses neither new
   key produces the same report it did before, except for the

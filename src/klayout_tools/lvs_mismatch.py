@@ -685,7 +685,7 @@ def _build_mismatches(
     # `status` is always derived from `compare()`'s own boolean result (see
     # this module's docstring), so a suppressed finding would still leave
     # `status: "mismatch"`; the fix has to remove the circuit *before* the
-    # compare, which `_prune_power_only_layout_circuits` does. And (b) the
+    # compare, which `_prune_power_only_circuits` does. And (b) the
     # "power-only" classification is only sound against a
     # `reference.form: "gate-level-verilog"` reference, whose conversion
     # never carries power pins -- `_build_mismatches` runs for every
