@@ -2447,6 +2447,24 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     signoff_parser.add_argument(
+        "--check",
+        metavar="REPORT",
+        help=(
+            "path to a previously committed --manifest/--fleet report JSON "
+            "file -- re-grades the manifest and reports whether that report "
+            "still reproduces (status: 'match'/'drifted') instead of "
+            "rendering a fresh one. Exits 0 if it still holds, 3 if drifted, "
+            "1 if the committed report is missing/unparseable or was "
+            "produced by the other mode. The `build` block is excluded from "
+            "the comparison: it names how this install was provisioned, not "
+            "only which commit it came from, so two byte-legitimate installs "
+            "of the same pinned commit report different ones (issue #2249). "
+            "Use this rather than byte-comparing the committed file against "
+            "a fresh render. Only meaningful with --manifest/--fleet; see "
+            "docs/cli/signoff.md's '--check' section."
+        ),
+    )
+    signoff_parser.add_argument(
         "--describe-grader",
         action="store_true",
         help=(

@@ -24,6 +24,18 @@ The four modes are mutually exclusive: ``--manifest``/``--fleet``/
 ``--describe-grader`` each replace the positional ``<file>...`` arguments and
 each other.
 
+``--check REPORT`` (issue #2249) is a *modifier* on the two doc-parsing
+modes, not a fifth mode: it re-grades the same manifest and, instead of
+rendering the report, diffs the result against a previously committed one --
+excluding the ``build`` block, which states how the running install was
+provisioned rather than which commit it came from (see
+:data:`..signoff.VOLATILE_REPORT_PATHS`). It exists so a gate script asking
+"does this committed evidence still hold" no longer has to byte-compare the
+committed file against a fresh render: that comparison fails between two
+byte-legitimate installs of the *same pinned commit*, purely on provisioning
+route. Refused (exit 1) with the envelope-aggregation and
+``--describe-grader`` modes, neither of which renders such a report.
+
 The two doc-parsing modes read ``design-evidence-tiers.md`` from
 ``--tiers-doc``, else ``$KLT_TIERS_DOC``, else the copy bundled inside the
 installed package, else the source checkout's ``docs/`` (issue #1050 --
@@ -51,15 +63,21 @@ Exit codes (see ``docs/cli/signoff.md`` for the full table):
         provenance agreed. Tier-report mode: every T1 item is ``"met"``
         (``tier: "T1"``). Fleet mode: every block's tier is ``"T1"``.
         ``--describe-grader`` mode: always (it is informational only and
-        cannot fail once argument validation passes).
+        cannot fail once argument validation passes). Under ``--check``:
+        ``status: "match"`` -- the committed report still reproduces.
     1 - failed to run (missing/unreadable/malformed input file, an envelope
-        with an unrecognized shape, or an invalid manifest/fleet manifest)
-        -- returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
+        with an unrecognized shape, or an invalid manifest/fleet manifest,
+        or -- under ``--check`` -- a missing/unparseable committed report or
+        one the requested mode could not have produced) -- returned by
+        ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - envelope-aggregation mode: ran successfully, provenance was
         consistent, but at least one check failed. Tier-report mode: ran
         successfully, but at least one T1 item is ``"unmet"``
         (``tier: null``). Fleet mode: ran successfully, but at least one
-        block's tier is not ``"T1"``.
+        block's tier is not ``"T1"``. Under ``--check``: ``status:
+        "drifted"`` -- at least one field outside ``build`` moved (the tier
+        verdict itself does not decide this mode's exit code; a report of a
+        not-yet-T1 block that still reproduces exactly is ``0``).
     4 - envelope-aggregation mode only: refused -- two or more inputs'
         provenance blocks disagree (see docs/cli/signoff.md's "Provenance
         consistency" section) -- no pass/fail verdict is produced
@@ -78,16 +96,26 @@ from ..signoff import (
     build_fleet_report,
     build_signoff,
     build_tier_report,
+    check_fleet_report,
+    check_tier_report,
     describe_grader,
 )
 from .color import Palette, resolve_palette
-from .output import emit_error, emit_success
+from .output import emit_error, emit_success, render_rerun_drift
 
 EXIT_PASS = 0
 EXIT_FAIL = 3
 EXIT_REFUSED = 4
 
 _EXIT_CODES = {"pass": EXIT_PASS, "fail": EXIT_FAIL, "refused": EXIT_REFUSED}
+
+#: ``--check``'s two outcomes, mapped onto the same numeric codes every
+#: other verb's ``--check`` uses (issue #2249): ``0`` still reproduces, ``3``
+#: drifted. Deliberately the same two codes this verb already spends on
+#: pass/fail, because the question is the same shape -- "is the committed
+#: evidence still good" -- and a caller does not need to know which mode
+#: produced a ``3`` to know it must look.
+_CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 
 
 def run(args: argparse.Namespace) -> int:
@@ -106,6 +134,14 @@ def run(args: argparse.Namespace) -> int:
             "signoff",
             "--tiers-doc only applies to --manifest/--fleet (envelope "
             "aggregation does not read the design-evidence-tiers doc)",
+            args.format,
+        )
+    if getattr(args, "check", None) and not (manifest_source or fleet_source):
+        return emit_error(
+            "signoff",
+            "--check only applies to --manifest/--fleet (it verifies a "
+            "committed tier/fleet report still reproduces from its manifest; "
+            "envelope aggregation produces no such report)",
             args.format,
         )
     if fleet_source:
@@ -133,6 +169,13 @@ def _run_describe_grader(
             "--tiers-doc is not meaningful with --describe-grader -- it "
             "always reports this build's own shipped grading rules, never "
             "an overridden doc's item list",
+            args.format,
+        )
+    if getattr(args, "check", None):
+        return emit_error(
+            "signoff",
+            "--check is not meaningful with --describe-grader -- it verifies "
+            "a committed tier/fleet report, and this mode renders none",
             args.format,
         )
     result = describe_grader()
@@ -168,6 +211,7 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
             args.format,
         )
 
+    committed = getattr(args, "check", None)
     try:
         manifest = _read_manifest(manifest_source)
         if not isinstance(manifest, dict):
@@ -175,9 +219,18 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
                 f"manifest '{manifest_source}' must be a JSON object, got "
                 f"{type(manifest).__name__}"
             )
-        result = build_tier_report(manifest, tiers_doc=getattr(args, "tiers_doc", None))
+        tiers_doc = getattr(args, "tiers_doc", None)
+        result = (
+            build_tier_report(manifest, tiers_doc=tiers_doc)
+            if committed is None
+            else check_tier_report(committed, manifest, tiers_doc=tiers_doc)
+        )
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
+
+    if committed is not None:
+        emit_success(result, args.format, render_rerun_drift)
+        return _CHECK_EXIT_CODES[result["status"]]
 
     palette = resolve_palette(args)
     emit_success(
@@ -195,6 +248,7 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
             args.format,
         )
 
+    committed = getattr(args, "check", None)
     try:
         fleet = _read_manifest(fleet_source, description="fleet manifest")
         if not isinstance(fleet, dict):
@@ -202,9 +256,18 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
                 f"fleet manifest '{fleet_source}' must be a JSON object, got "
                 f"{type(fleet).__name__}"
             )
-        result = build_fleet_report(fleet, tiers_doc=getattr(args, "tiers_doc", None))
+        tiers_doc = getattr(args, "tiers_doc", None)
+        result = (
+            build_fleet_report(fleet, tiers_doc=tiers_doc)
+            if committed is None
+            else check_fleet_report(committed, fleet, tiers_doc=tiers_doc)
+        )
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
+
+    if committed is not None:
+        emit_success(result, args.format, render_rerun_drift)
+        return _CHECK_EXIT_CODES[result["status"]]
 
     palette = resolve_palette(args)
     emit_success(

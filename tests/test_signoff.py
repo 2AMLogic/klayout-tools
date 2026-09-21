@@ -37,6 +37,8 @@ from klayout_tools.signoff import (
     build_fleet_report,
     build_signoff,
     build_tier_report,
+    check_fleet_report,
+    check_tier_report,
 )
 
 # Since issue #2176 a tier/fleet report carries the running build's identity
@@ -9569,3 +9571,296 @@ def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
         line for line in out.splitlines() if line.strip().startswith("input:")
     )
     assert "not re-hashed" in input_line
+
+
+# --------------------------------------------------------------------------- #
+# `--check` (issue #2249): verify a committed tier/fleet report still
+# reproduces, without byte-comparing a surface that encodes how the running
+# install was provisioned.
+# --------------------------------------------------------------------------- #
+
+#: A `build` block for the *same commit* as the running build, provisioned the
+#: other documented way: built from a source tarball with no `.git` (a GitHub
+#: `/archive/<sha>.tar.gz`, a vendored copy), so `hatch_build.py` recorded no
+#: git facts at all and `build_identity` reports the honest `+unknown` /
+#: `is_release: null` identity. Nothing about `dirty` can collapse this case
+#: -- the facts were never present to record -- which is why the report-side
+#: exclusion, not a `dirty` fix alone, is what makes a committed report
+#: comparable across provisioning routes.
+_TARBALL_ROUTE_BUILD_BLOCK = {
+    "version": "0.5.0+unknown",
+    "package_version": "0.5.0",
+    "git_commit": None,
+    "git_tag": None,
+    "dirty": None,
+    "is_release": None,
+    "grading_ruleset_id": "sha256:whatever-this-install-reads",
+}
+
+
+def _committed_from_other_provisioning_route(tmp_path, report: dict, name: str) -> str:
+    """``report`` as it would have been committed by an install of the *same
+    commit* provisioned differently: identical grading, a different `build`
+    block (issue #2249)."""
+    return _write(tmp_path, name, {**report, "build": _TARBALL_ROUTE_BUILD_BLOCK})
+
+
+def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path):
+    """The regression this mode exists for: a committed report whose `build`
+    block differs *only* because the install that rendered it was provisioned
+    differently still verifies as `"match"` -- where a byte-comparison of the
+    two files fails (issue #2249)."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    fresh = build_tier_report(manifest)
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, fresh, "committed.json"
+    )
+
+    # The premise: these two files are NOT byte-identical, so the documented
+    # "re-render and byte-compare" gate would fail between them.
+    assert json.loads(Path(committed_path).read_text()) != fresh
+    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result == {
+        "schema_version": 1,
+        "mode": "check",
+        "report": committed_path,
+        "status": "match",
+        "drift": [],
+        "fresh": fresh,
+    }
+
+
+def test_check_reports_drift_in_a_graded_field(tmp_path):
+    """Excluding `build` must not make the mode toothless: a verdict-bearing
+    field that moved is named, with both values, and nothing else is."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    stale = build_tier_report(manifest)
+    stale["t1_met_count"] = 11
+    stale["tier"] = "T1"
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, stale, "committed.json"
+    )
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert result["drift"] == [
+        {"field": "t1_met_count", "committed": 11, "fresh": 1},
+        {"field": "tier", "committed": "T1", "fresh": None},
+    ]
+
+
+def test_check_reports_drift_when_the_cited_evidence_itself_changed(tmp_path):
+    """The gate's actual purpose -- evidence drift, not tool churn: the same
+    manifest cites an envelope whose verdict has since changed, and the
+    committed report no longer reproduces."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest = _manifest(evidence={"3": drc_path})
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, build_tier_report(manifest), "committed.json"
+    )
+    # The cited artifact is re-run and now fails.
+    Path(drc_path).write_text(json.dumps(DRC_VIOLATIONS_ENVELOPE))
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    drifted_fields = {entry["field"] for entry in result["drift"]}
+    assert "t1_met_count" in drifted_fields
+    assert any(field.startswith("items.2.") for field in drifted_fields)
+
+
+def test_check_verifies_a_report_predating_the_build_block(tmp_path):
+    """A report committed before issue #2176 (no `build` key at all) still
+    verifies on its graded content -- an excluded path is skipped whether or
+    not either side carries it, so its absence is not one spurious drift
+    entry."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    legacy = {
+        key: value
+        for key, value in build_tier_report(manifest).items()
+        if key != "build"
+    }
+    committed_path = _write(tmp_path, "committed.json", legacy)
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_check_fleet_matches_across_provisioning_routes_and_names_real_drift(
+    tmp_path,
+):
+    """`--fleet --check` inherits the whole contract: one top-level `build`
+    block, the same one-path exclusion, and a real block-level change still
+    reported."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    fleet = {"blocks": [{"block": "b1", "kind": "analog", "evidence": {"3": drc_path}}]}
+    fresh = build_fleet_report(fleet)
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, fresh, "fleet-committed.json"
+    )
+
+    assert check_fleet_report(committed_path, fleet)["status"] == "match"
+
+    drifted = {**fresh, "build": _TARBALL_ROUTE_BUILD_BLOCK}
+    drifted["blocks"] = [{**fresh["blocks"][0], "t1_met_count": 11}]
+    drifted_path = _write(tmp_path, "fleet-drifted.json", drifted)
+
+    result = check_fleet_report(drifted_path, fleet)
+    assert result["status"] == "drifted"
+    assert [entry["field"] for entry in result["drift"]] == ["blocks.0.t1_met_count"]
+
+
+def test_check_refuses_a_report_the_other_mode_produced(tmp_path):
+    """Pointing `--manifest --check` at a fleet roll-up (or the reverse) is a
+    failure to verify, not a "drifted" verdict listing every field of both
+    shapes -- the fault is the path, not the evidence."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest = _manifest(evidence={"3": drc_path})
+    fleet = {"blocks": [{"block": "b1", "kind": "analog", "evidence": {}}]}
+    tier_path = _write(tmp_path, "tier.json", build_tier_report(manifest))
+    fleet_path = _write(tmp_path, "fleet.json", build_fleet_report(fleet))
+
+    with pytest.raises(SignoffError, match="carries no 'items' key"):
+        check_tier_report(fleet_path, manifest)
+    with pytest.raises(SignoffError, match="carries no 'blocks' key"):
+        check_fleet_report(tier_path, fleet)
+
+
+def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
+    """Both refusals come from the shared loader -- a clean message, never a
+    traceback."""
+    manifest = _manifest()
+    with pytest.raises(SignoffError, match="committed report not found"):
+        check_tier_report(str(tmp_path / "nope.json"), manifest)
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(SignoffError, match="not valid JSON"):
+        check_tier_report(str(bad), manifest)
+
+
+def test_cli_check_exits_zero_for_a_match_and_three_for_drift(tmp_path, capsys):
+    """AC: the gate is usable as a gate -- 0 when the committed report still
+    holds, 3 when it drifted, and the tier verdict itself does not decide it
+    (this block is *not* at T1, and a faithful report of that is still `0`)."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest = _manifest(evidence={"3": drc_path})
+    manifest_path = _write(tmp_path, "manifest.json", manifest)
+    fresh = build_tier_report(manifest)
+    assert fresh["tier"] is None  # rendering this manifest exits 3
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, fresh, "committed.json"
+    )
+
+    exit_code = main(
+        ["signoff", "--manifest", manifest_path, "--check", committed_path]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "status: match" in out
+
+    drifted_path = _write(
+        tmp_path,
+        "drifted.json",
+        {**fresh, "build": _TARBALL_ROUTE_BUILD_BLOCK, "t1_met_count": 11},
+    )
+    exit_code = main(["signoff", "--manifest", manifest_path, "--check", drifted_path])
+    out = capsys.readouterr().out
+    assert exit_code == 3
+    assert "status: drifted" in out
+    assert "t1_met_count" in out
+
+
+def test_cli_check_json_output_carries_the_shared_drift_shape(tmp_path, capsys):
+    """The JSON is the contract: the same `{schema_version, mode, report,
+    status, drift, fresh}` shape every other verb's `--check` emits, so a
+    consumer already reading one reads this."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, build_tier_report(_manifest()), "committed.json"
+    )
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--check",
+            committed_path,
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["schema_version"] == 1
+    assert payload["mode"] == "check"
+    assert payload["report"] == committed_path
+    assert payload["status"] == "match"
+    assert payload["drift"] == []
+    # `fresh` is the full up-to-date report, so a drifted gate can show what
+    # the current answer is without a second invocation.
+    assert payload["fresh"] == build_tier_report(_manifest())
+
+
+def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, capsys):
+    """`--check` is a modifier on the two doc-parsing modes, not a fifth
+    mode: envelope aggregation and `--describe-grader` refuse it cleanly
+    (exit 1) rather than silently ignoring it."""
+    committed_path = _write(tmp_path, "committed.json", build_tier_report(_manifest()))
+    envelope_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    exit_code = main(
+        ["signoff", envelope_path, "--check", committed_path, "--format", "json"]
+    )
+    assert exit_code == 1
+    assert (
+        "--check only applies to --manifest/--fleet"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+    exit_code = main(
+        [
+            "signoff",
+            "--describe-grader",
+            "--check",
+            committed_path,
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    assert (
+        "--check is not meaningful with --describe-grader"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_check_excludes_build_identity_and_nothing_else(tmp_path):
+    """The exclusion is exactly one path (issue #2249): every *other*
+    top-level field of a tier report is compared, so a future field cannot
+    quietly join the unchecked set. Guards against widening
+    `VOLATILE_REPORT_PATHS` by accident."""
+    assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+
+    manifest = _manifest()
+    fresh = build_tier_report(manifest)
+    for field in fresh:
+        if field == "build":
+            continue
+        tampered = _write(
+            tmp_path, f"tampered-{field}.json", {**fresh, field: "tampered"}
+        )
+        result = check_tier_report(tampered, manifest)
+        assert result["status"] == "drifted", field
+        assert any(entry["field"].startswith(field) for entry in result["drift"]), field

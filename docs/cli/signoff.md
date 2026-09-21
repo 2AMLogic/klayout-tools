@@ -39,10 +39,20 @@ Four modes, one verb:
    identifying the grading code itself, without reading a manifest or
    running any check. See "Identifying the grading build" below.
 
+Plus one modifier on modes 2 and 3: **`--check <committed-report>`** (issue
+#2249) re-grades the manifest and reports whether a previously committed
+report still reproduces (`status: "match"`/`"drifted"`), excluding the
+`build` block — which states how the running install was *provisioned*, not
+only which commit it came from. It is what a gate script should use in place
+of byte-comparing a committed report against a fresh render. See "Verifying a
+committed report: `--check`" below.
+
 ```
 klt signoff <file>... [--format text|json] [--color auto|always|never] [--no-color]
 klt signoff --manifest <manifest-file> [--tiers-doc <path>] [--format text|json] [--color auto|always|never] [--no-color]
 klt signoff --fleet <fleet-manifest-file> [--tiers-doc <path>] [--format text|json] [--color auto|always|never] [--no-color]
+klt signoff --manifest <manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
+klt signoff --fleet <fleet-manifest-file> --check <committed-report> [--tiers-doc <path>] [--format text|json]
 klt signoff --describe-grader [--format text|json]
 ```
 
@@ -70,10 +80,18 @@ klt signoff --describe-grader [--format text|json]
   overridden doc — see "Where the tier doc comes from" below, and "An
   overridden doc can outrun the build" for what the report says when the doc
   lists an item this build has no rules for).
+- `--check` — path to a previously committed `--manifest`/`--fleet` report
+  JSON file (issue #2249): re-grades the manifest and reports whether that
+  report **still reproduces** (`status: "match"`/`"drifted"`) instead of
+  rendering a fresh one. A *modifier* on the two doc-parsing modes, not a
+  fifth mode; refused (exit `1`) in envelope-aggregation and
+  `--describe-grader` modes, neither of which renders such a report. Use
+  this instead of byte-comparing a committed report against a fresh render —
+  see "Verifying a committed report: `--check`" below.
 - `--describe-grader` — print which T1 item ids this build has grading rules
   for, plus its grading-code content hash. Mutually exclusive with
-  `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`. See "Identifying the
-  grading build" below.
+  `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. See
+  "Identifying the grading build" below.
 - `--format` — `text` (default, a human-readable pass/fail summary) or
   `json` (this command's own JSON envelope, see below).
 - `--color` — when to colour `--format text` output: `auto` (default),
@@ -1085,6 +1103,94 @@ each cited envelope already records the engine *its own* run used in its
 `build` also carries `grading_ruleset_id` (issue #2216) — see "Identifying
 the grading build" immediately below for what it means and why it exists.
 
+#### `build` describes the *install*, not only the commit (issue #2249)
+
+**`build.dirty`, `build.version`, `build.git_commit`, `build.git_tag` and
+`build.is_release` all report the checkout state of the tree the running
+install was *built from*, at the time it was built — not a property of the
+commit alone.** Two byte-legitimate installs of the **same pinned commit**
+can therefore report different `build` blocks while grading every item
+identically:
+
+| How the pinned commit `<sha>` was provisioned | What the `build` block says |
+| --- | --- |
+| `uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>"` | real git facts recorded by `hatch_build.py` from the package manager's own scratch checkout: `git_commit: "<sha>"`, `version: "X.Y.Z+g<sha>"`. Before issue #2248 that checkout's untracked build residue (`uv` drops a checkout-completion sentinel into the tree) also made `dirty: true` and `version: "X.Y.Z+g<sha>.dirty"`. |
+| A clean `git worktree add <sha>` / `git clone` + local `uv build` | the same commit, `dirty: false` |
+| `pip install` of a source **tarball** of `<sha>` (a GitHub `/archive/<sha>.tar.gz`, a vendored copy) | no `.git` exists at build time, so no facts are recorded at all: `git_commit: null`, `version: "X.Y.Z+unknown"`, `is_release: null` |
+
+Every row is honest about the build it names — that is exactly why issue
+#2176 put the block in the report — and the last row is **not fixable**: the
+facts were never present to record.
+
+**Consequence for gate scripts: do not byte-compare a committed report
+against a fresh re-render.** That comparison fails between two correct
+installs of the same pinned commit, on nothing but provisioning route, and
+no amount of tightening `dirty` closes the tarball case. `klt signoff
+--check` is the supported way to ask the question that gate actually means —
+see immediately below.
+
+If you nonetheless want a **byte-stable committed file** (a report you
+regenerate in CI and `git diff --exit-code`), the byte-canonical shape is the
+report with its build identity removed — `jq 'del(.build)'` on both sides —
+and the byte-canonical *provisioning route* for reproducing the rest is a
+`git+…@<sha>` install (or a clean checkout build of `<sha>`), which is the
+only route that records the commit at all. Removing `build` removes the
+evidence #2176 exists to carry, so prefer `--check`, which keeps it.
+
+### Verifying a committed report: `--check` (issue #2249)
+
+`klt signoff --manifest M --check REPORT` (and the `--fleet` form) answers
+**"does this committed tier/fleet report still reproduce?"** — it re-grades
+`M` exactly as rendering would (including running any command-backed
+evidence it cites) and diffs the result against `REPORT`, **excluding the
+`build` block and nothing else**:
+
+```bash
+# Evidence-drift gate. 0 = the committed report still holds, 3 = it drifted.
+klt signoff --manifest manifest.json --check reports/block.signoff.json \
+  --format json
+```
+
+```json
+{
+  "schema_version": 1,
+  "mode": "check",
+  "report": "reports/block.signoff.json",
+  "status": "drifted",
+  "drift": [
+    { "field": "items.2.status", "committed": "met", "fresh": "unmet" },
+    { "field": "t1_met_count", "committed": 11, "fresh": 10 }
+  ],
+  "fresh": { "…": "the full freshly-graded report" }
+}
+```
+
+- **`status` is two-valued**: `"match"` (exit `0`) or `"drifted"` (exit `3`,
+  naming every field that moved, with both values). This is the same shape,
+  the same field names and the same exit codes as the five verbs that
+  already have `--check` (`drc`, `lvs`, `extract`, `synthesize`,
+  `place-and-route` — see
+  [`../json-contract.md`](../json-contract.md)'s "Verifying committed
+  evidence"), and it renders through the same `--format text` drift report.
+- **The tier verdict does not decide this mode's exit code.** A faithful
+  report of a block that is *not* yet at T1 is `"match"`/exit `0` — the
+  question is drift, not tier. Gate on `status`.
+- **Only build identity is excluded.** `source_doc_content_hash` (the
+  checklist itself changed), every `items[]` `status`/`reason`, every
+  citation `content_hash`/`input_verified`, `t1_met_count`,
+  `build_t1_item_count`, `graded_by_build` — all compared. This mirrors
+  "tool identity is excluded from the diff, and only tool identity" for the
+  other five verbs.
+- **A report predating the `build` block verifies normally.** An excluded
+  path is skipped whether or not either side carries it, so a report
+  committed before issue #2176 still verifies on its graded content instead
+  of reporting one spurious whole-block drift.
+- **Exit `1` is a failure to verify, never a pass**: a missing/unparseable
+  committed report, or one the requested mode could not have produced
+  (`--manifest --check` pointed at a fleet roll-up, or the reverse) — the
+  fault there is the path, so it is refused rather than diffed into a
+  "drifted" verdict listing every field of both shapes.
+
 ### Identifying the grading build
 
 **A `klt` version string alone does not identify the grading build.** Three
@@ -1821,7 +1927,7 @@ distinguishable from "no samples document was ever named" (see
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
-| `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release", "grading_ruleset_id"}`, exactly as `klt version --format json` reports them — see "Which build graded this" and "Identifying the grading build" above. `grading_ruleset_id` (issue #2216) is a content hash identifying the grading code, distinct from `git_commit`/`git_tag`. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
+| `build`         | object               | Which build produced this report (issue #2176): `{"version", "package_version", "git_commit", "git_tag", "dirty", "is_release", "grading_ruleset_id"}`, exactly as `klt version --format json` reports them — see "Which build graded this" and "Identifying the grading build" above. `grading_ruleset_id` (issue #2216) is a content hash identifying the grading code, distinct from `git_commit`/`git_tag`. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). **Route-dependent** (issue #2249): it describes the install, not only the commit, so two byte-legitimate installs of the same pinned commit can carry different blocks — never byte-compare a report across installs; use `--check`, which excludes exactly this block. |
 | `items`         | array\<object\>      | One entry per T1 checklist item (per partition, for `mixed-signal`), then one entry per T2-T4 ladder row. |
 
 #### `items[]` entries
@@ -2251,12 +2357,21 @@ Fleet roll-up mode (`--fleet`):
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 | `3`       | `not_t1_count > 0` — ran successfully, but at least one block's tier is not `"T1"`. |
 
+`--check` (on either doc-parsing mode):
+
+| Exit code | Meaning                                                                 |
+| --------- | ------------------------------------------------------------------------ |
+| `0`       | `status: "match"` — the committed report still reproduces (build identity excluded). Independent of the tier verdict: a faithful report of a not-yet-T1 block is `0`. |
+| `1`       | The committed report was missing/unreadable/not valid JSON/not a JSON object, or was one the requested mode could not have produced (no `items` key under `--manifest`, no `blocks` key under `--fleet`); plus every mode-1 reason above (the manifest itself is still read and graded). `--check` given without `--manifest`/`--fleet`, or with `--describe-grader`. |
+| `2`       | Usage error (bad `--format` value) — from argparse.                      |
+| `3`       | `status: "drifted"` — at least one field outside `build` moved.           |
+
 `--describe-grader` mode:
 
 | Exit code | Meaning                                                                 |
 | --------- | ------------------------------------------------------------------------ |
 | `0`       | Always, once argument validation passes — purely informational, cannot fail. |
-| `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`. |
+| `1`       | `--describe-grader` was combined with `<file>...`/`--manifest`/`--fleet`/`--tiers-doc`/`--check`. |
 | `2`       | Usage error (bad `--format` value) — from argparse.                      |
 
 **Gate on `status`/`tier`/`not_t1_count`, not the exit code, in every mode

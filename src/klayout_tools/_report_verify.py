@@ -1,7 +1,8 @@
 """Shared "does a previously committed report still hold" verification --
 ``klt drc``/``klt lvs``/``klt extract`` ``--check``/``--rerun`` (issues #1106,
-#1149) and, since issue #2224, the *flow* verbs ``klt synthesize``/``klt
-place-and-route`` too.
+#1149), since issue #2224 the *flow* verbs ``klt synthesize``/``klt
+place-and-route``, and since issue #2249 ``klt signoff --manifest``/
+``--fleet`` ``--check`` too.
 
 A ``klt drc``/``klt lvs`` JSON report is often committed as evidence
 alongside a design (see ``klt signoff``'s manifest-evidence grading), but
@@ -163,6 +164,7 @@ def build_rerun_result(
     exclude: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS,
     committed_for_diff: dict[str, Any] | None = None,
     fresh_for_diff: dict[str, Any] | None = None,
+    mode: str = "rerun",
 ) -> dict[str, Any]:
     """Assemble the ``--rerun`` (full mode) JSON payload: diff ``committed``
     against a freshly produced ``fresh`` report (from actually re-running the
@@ -179,6 +181,15 @@ def build_rerun_result(
     what ``fresh`` this response embeds. Default to ``committed``/``fresh``
     themselves, so an unmodified caller (``klt drc``/``klt lvs``) behaves
     exactly as before this parameter existed.
+
+    ``mode`` (issue #2249) names the mode in the payload, defaulting to
+    ``"rerun"`` so every pre-existing caller emits exactly the bytes it did
+    before. ``klt signoff --check`` passes ``"check"``: that verb has no
+    cheap/full split to make -- re-grading the manifest *is* the whole
+    verification, there is no engine run to hold back -- so its single mode
+    reports this same ``{status, drift, fresh}`` shape (and renders through
+    the same :func:`klayout_tools.cli.output.render_rerun_drift`) rather
+    than inventing a second drift-report shape.
     """
     drift = diff_verdict_fields(
         committed if committed_for_diff is None else committed_for_diff,
@@ -187,7 +198,7 @@ def build_rerun_result(
     )
     return {
         "schema_version": 1,
-        "mode": "rerun",
+        "mode": mode,
         "report": report_path,
         "status": "drifted" if drift else "match",
         "drift": drift,
