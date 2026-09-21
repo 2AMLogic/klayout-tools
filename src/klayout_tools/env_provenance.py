@@ -378,6 +378,32 @@ _ABSOLUTE_WINDOWS_PATH_RE = re.compile(r"(?<![\w.-])[A-Za-z]:[\\/][^\s\"']+")
 #: make the lint fire on every ``docs``/``see also`` string a report carries.
 _URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://\S*", re.IGNORECASE)
 
+#: An angle-bracket template placeholder -- ``<pdk-root>``,
+#: ``<path-to-your-2am-checkout>``, ``<your-batch-jobs-bucket>``. A path
+#: *rooted* at one of these (``<path-to-your-checkout>/infra/aws/run.sh``) is
+#: an instruction to the reader to substitute their own prefix, not a path
+#: that resolves on this or any other host, so it is not the
+#: non-reproducibility this lint exists to catch (issue #2230). Whitespace is
+#: excluded from the placeholder body so an inequality (``a < b and c > d``)
+#: or a stray angle bracket in prose cannot swallow a real path between them.
+_TEMPLATE_PLACEHOLDER_RE = re.compile(r"<[^<>\s]+>")
+
+#: What a placeholder is replaced with before the path scan: a single word
+#: character, so the path immediately following it fails
+#: :data:`_ABSOLUTE_POSIX_PATH_RE`'s ``(?<![\w~$.-])`` root test exactly the
+#: way ``$PDK_ROOT/libs.ref/x.lib`` already does. Deliberately *not* a space:
+#: the exemption is adjacency-scoped, so a genuine absolute path elsewhere in
+#: the same string is still reported.
+_TEMPLATE_PLACEHOLDER_STANDIN = "_"
+
+#: A URI fragment holding an RFC 6901 JSON Pointer --
+#: ``02-architecture.json#/blocks/ota_buffer``. The ``/blocks/ota_buffer``
+#: half addresses a node *inside* the referenced document, not a directory on
+#: the host, and it is checkout-independent by construction (issue #2230).
+#: Only the fragment is excised: an absolute host path on the document side
+#: of the ``#`` is still a finding.
+_URI_FRAGMENT_POINTER_RE = re.compile(r"#/\S*")
+
 
 def _is_allowed_prefix(match: str, allow_prefixes: tuple[str, ...]) -> bool:
     """Whether ``match`` lives under one of ``allow_prefixes`` -- the declared
@@ -399,8 +425,17 @@ def _is_allowed_prefix(match: str, allow_prefixes: tuple[str, ...]) -> bool:
 
 def _absolute_paths_in(text: str, allow_prefixes: tuple[str, ...]) -> list[str]:
     """Every absolute host path in ``text`` not covered by ``allow_prefixes``,
-    in order of appearance (empty list when clean)."""
+    in order of appearance (empty list when clean).
+
+    Three shapes are excised before the scan because none of them is a host
+    path: a URL, a ``<placeholder>``-rooted template, and a JSON-Pointer URI
+    fragment (see the three regexes above). Each is excised *in place* rather
+    than skipping the whole value, so a real absolute path sitting beside one
+    in the same string is still reported.
+    """
     scannable = _URL_RE.sub(" ", text)
+    scannable = _TEMPLATE_PLACEHOLDER_RE.sub(_TEMPLATE_PLACEHOLDER_STANDIN, scannable)
+    scannable = _URI_FRAGMENT_POINTER_RE.sub(" ", scannable)
     found: list[str] = []
     for pattern in (_ABSOLUTE_POSIX_PATH_RE, _ABSOLUTE_WINDOWS_PATH_RE):
         for match in pattern.finditer(scannable):

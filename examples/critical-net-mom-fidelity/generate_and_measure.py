@@ -100,7 +100,9 @@ it):
 - `lateral-coupling.gds` -- the fixture itself.
 - `phase1-baseline.json` / `.spice`, `phase2a-critical-net.json` / `.spice`,
   `phase2b-distributed-rc.json` / `.spice` -- the three `klt extract` runs'
-  full JSON reports and written netlists.
+  full JSON reports and written netlists. The reports' `file`/`netlist_path`
+  are rewritten repo-relative before being committed (`_committable()`), so
+  regenerating them on a different checkout produces the same bytes.
 - `../../evidence/sim/sky130-critical-net-fixture/mom-coupling-fidelity/
   <recorded_at>-<script_sha>.json` -- the quantified comparison, wrapped in
   this repo's `evidence-record/1` shape
@@ -128,6 +130,7 @@ from klayout_tools.extract import run_extract
 from klayout_tools.mom import solve_capacitance_matrix
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(HERE))
 EVIDENCE_DIR = os.path.join(
     HERE,
     "..",
@@ -261,6 +264,33 @@ def _assert_distributed_rc_preserves_capacitance() -> dict:
     }
 
 
+def _committable(report: dict) -> dict:
+    """``report`` with its two absolute path fields rewritten repo-relative.
+
+    `run_extract` echoes back the `file` it was handed and the `netlist_path`
+    it wrote, both of which are absolute here (the calls below pass absolute
+    paths so the script runs from any cwd). Committing them verbatim embedded
+    *this* machine's checkout path in the artifact -- e.g.
+    `/Users/<author>/.../worktrees/issue-978/examples/.../lateral-coupling.gds`
+    -- which resolves nowhere else, makes a regeneration on another checkout
+    byte-differ for a reason unrelated to the design, and discloses an author
+    path in a public repo (issue #2230; `docs/json-contract.md` ->
+    "Repo-relative provenance in *committed* artifacts").
+
+    Repo-relative is the shape the rest of this repo's committed examples
+    already use (`examples/design-centering/generate.py`'s `_SAMPLES`), and it
+    keeps `klt extract --check <report>` / `--rerun` working when run from the
+    repo root -- which the absolute paths did not, anywhere but one machine.
+    The field *shape* is untouched (still a plain string, per
+    `docs/json-contract.md`'s "plain-string fields" table).
+    """
+    return {
+        **report,
+        "file": os.path.relpath(report["file"], REPO_ROOT),
+        "netlist_path": os.path.relpath(report["netlist_path"], REPO_ROOT),
+    }
+
+
 def main() -> None:
     layout_path = os.path.join(HERE, "lateral-coupling.gds")
     layout = _make_lateral_coupling_layout()
@@ -293,7 +323,7 @@ def main() -> None:
         ("phase2b-distributed-rc", phase2b),
     ):
         with open(os.path.join(HERE, f"{label_}.json"), "w", encoding="utf-8") as fh:
-            json.dump(report, fh, indent=2, sort_keys=True)
+            json.dump(_committable(report), fh, indent=2, sort_keys=True)
 
     by_net_1 = {e["net"]: e for e in phase1["parasitics"]["nets"]}
     by_net_2a = {e["net"]: e for e in phase2a["parasitics"]["nets"]}

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 
 import pytest
 
@@ -514,6 +515,61 @@ def test_lint_envelope_ignores_urls_and_relative_paths():
     )
 
 
+def test_lint_envelope_ignores_an_angle_bracket_template_root():
+    """`<path-to-your-checkout>/infra/aws/x.sh` is a template a reader
+    substitutes into, not a path that resolves on this or any other host
+    (issue #2230: `examples/sim-batch/matrix-batch.request.json`'s
+    `batch.provision_script_path`). Flagging it would demand a content edit
+    that makes the example *less* honest."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "provision_script_path": (
+                    "<path-to-your-2am-checkout>/infra/aws/batch-fleet-provision.sh"
+                ),
+                "pdk_root": "<pdk-root>/sky130A/libs.tech/ngspice/sky130.lib.spice",
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_still_flags_a_real_path_beside_a_template_root():
+    """The template exemption is adjacency-scoped: a genuine absolute path
+    elsewhere in the same string is still a finding."""
+    findings = ep.find_absolute_path_fields(
+        {"note": "copy <your-checkout>/infra/run.sh to /Users/rob/bin/run.sh"}
+    )
+    assert [finding["match"] for finding in findings] == ["/Users/rob/bin/run.sh"]
+
+
+def test_lint_envelope_ignores_a_json_pointer_uri_fragment():
+    """`02-architecture.json#/blocks/ota_buffer` is a relative document
+    reference plus an RFC 6901 JSON Pointer -- `/blocks/ota_buffer` addresses
+    a node *inside* that document, not a directory on this host (issue #2230:
+    `examples/design-pipeline/03-blockspec.json`'s `input_ref`)."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "input_ref": "02-architecture.json#/blocks/ota_buffer",
+                "bare_pointer": "#/definitions/corner/properties/vdd_v",
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_still_flags_the_document_half_of_a_fragment_ref():
+    """Only the fragment is exempt -- an absolute host path on the document
+    side of the `#` is still a finding."""
+    findings = ep.find_absolute_path_fields(
+        {"input_ref": "/Users/rob/design/02-architecture.json#/blocks/ota_buffer"}
+    )
+    assert [finding["match"] for finding in findings] == [
+        "/Users/rob/design/02-architecture.json"
+    ]
+
+
 def test_lint_envelope_flags_windows_paths():
     findings = ep.find_absolute_path_fields({"out": "C:\\Users\\rob\\top.gds"})
     assert findings[0]["field"] == "out"
@@ -595,3 +651,76 @@ def test_cli_lint_envelope_text_output_prints_the_recommendation(tmp_path, capsy
 def test_cli_lint_envelope_missing_file_is_an_application_error(tmp_path, capsys):
     assert main(["env-provenance", "lint-envelope", str(tmp_path / "no.json")]) == 1
     assert "no.json" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# this repository's own committed examples/ tree (issue #2230)
+# --------------------------------------------------------------------------- #
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _committed_example_envelopes() -> list[str]:
+    """Every committed JSON artifact under `examples/`, via `git ls-files`.
+
+    `git ls-files` rather than a filesystem walk so the set is exactly what is
+    committed -- a scratch report a developer left in `examples/` is not this
+    gate's business, and a walk would fail the suite on it.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "examples/**/*.json"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("not a git checkout (or git unavailable)")
+    return [name for name in result.stdout.split("\0") if name]
+
+
+def test_committed_example_envelopes_carry_no_absolute_host_paths():
+    """The acceptance criterion of issue #2230, asserted in-suite so it fails
+    locally before CI does.
+
+    Three `examples/critical-net-mom-fidelity/*.json` `klt extract` reports
+    shipped with the generating worktree's absolute path in
+    `file`/`netlist_path` -- a record that resolves nowhere else, byte-differs
+    on every regeneration elsewhere, and discloses an author path in a public
+    repo. Note the **empty** allow-list: every finding was dispositioned on
+    its own merits (content fix or lint fix), none blanket-allowed, and
+    keeping the allow-list empty is the property worth protecting.
+    """
+    paths = _committed_example_envelopes()
+    assert paths, "expected committed JSON artifacts under examples/"
+    report = ep.lint_envelope_files([os.path.join(_REPO_ROOT, name) for name in paths])
+    assert report["status"] == "clean", [
+        entry for entry in report["files"] if entry["findings"]
+    ]
+
+
+def test_ci_gates_the_committed_example_envelopes():
+    """The lint is only a gate if CI runs it -- a test asserting the tree is
+    clean would otherwise be the whole enforcement, and a future PR touching
+    only `.github/workflows/ci.yml` could drop the step silently. Mirrors the
+    same wiring assertion `test_check_complexity_baseline.py` makes for the
+    C901 ratchet.
+    """
+    workflow = os.path.join(_REPO_ROOT, ".github", "workflows", "ci.yml")
+    with open(workflow, encoding="utf-8") as handle:
+        text = handle.read()
+    lint_job = text.split("\n  native:", 1)[0]
+    # Comments stripped before the assertions below: the step's own comment
+    # names `--allow-prefix` (to tell a future reader not to reach for it),
+    # which must not be mistaken for the step actually passing one.
+    commands = "\n".join(
+        line for line in lint_job.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "env-provenance lint-envelope" in commands, (
+        "the examples/ envelope lint must stay wired into the CI lint job"
+    )
+    assert "git ls-files 'examples/**/*.json'" in commands
+    assert "--allow-prefix" not in commands, (
+        "the examples/ tree passes with an empty allow-list -- adding one here "
+        "would hide exactly the class of finding this gate exists to catch"
+    )

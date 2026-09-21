@@ -807,8 +807,10 @@ deliberately broader than `klt env-provenance scan`, which answers the
 *disclosure* question (home-shaped paths only): `/opt/build/out.def` names
 nobody and breaks reproduction just as thoroughly. See
 [`cli/env-provenance.md`](cli/env-provenance.md) → `lint-envelope` for the
-full rule set, the comparison table, and the recommended CI wiring (it is
-**not** wired into this repo's CI, for the same reason `scan` is not).
+full rule set, the comparison table, and the CI wiring. Since #2230 this
+repo gates its own tree with it — `git ls-files 'examples/**/*.json' | xargs
+klt env-provenance lint-envelope`, with an **empty** allow-list, in
+`.github/workflows/ci.yml`'s `Lint (ruff)` job.
 
 ## Verifying committed evidence: `--check` / `--rerun`
 

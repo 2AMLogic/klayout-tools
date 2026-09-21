@@ -142,8 +142,8 @@
   "provenance": {
     "klt_version": "0.2.0",
     "klayout_version": "0.30.10",
-    "pdk": { "variant": "sky130A", "root": "/abs/path/sky130A" },
-    "deck": { "name": "sky130.lib.spice", "path": "/abs/path/sky130.lib.spice" },
+    "pdk": { "variant": "sky130A", "root": "<abs-path>/sky130A" },
+    "deck": { "name": "sky130.lib.spice", "path": "<abs-path>/sky130.lib.spice" },
     "input": null
   },
   "_note": "Hand-built, synthetic 'klt size' topology-mode response for this worked example -- representative of the documented schema (docs/cli/size.md's 'Response' section under 'Coupled multi-device topology sizing'), not an actual ngspice run. See this directory's README.md for why."

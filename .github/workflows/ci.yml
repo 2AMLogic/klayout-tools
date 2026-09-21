@@ -71,6 +71,37 @@ jobs:
         # review cycle.
         run: uv run --frozen --extra dev python scripts/check_complexity_baseline.py
 
+      - name: Committed examples/ carry no absolute host paths
+        # `klt env-provenance lint-envelope` (issue #2224) over every
+        # committed JSON artifact under examples/. GATES -- exit 3 means a
+        # committed example embeds an absolute host path, which resolves
+        # nowhere but the machine that produced it: regenerating the artifact
+        # on another checkout byte-differs for a reason unrelated to the
+        # design, and on a public repo an author path gets disclosed along
+        # with it (docs/json-contract.md -> "Repo-relative provenance in
+        # *committed* artifacts"). That is not hypothetical here: three
+        # examples/critical-net-mom-fidelity/*.json reports shipped with the
+        # generating worktree's absolute path in `file`/`netlist_path` until
+        # issue #2230 fixed them and added this step.
+        #
+        # To fix a failure: make the path repo-relative (what
+        # examples/critical-net-mom-fidelity/generate_and_measure.py's
+        # `_committable()` does), drop it in favour of the record's own
+        # `provenance.input.content_hash`, or -- for a placeholder a reader
+        # substitutes into -- spell it with an angle-bracket template root
+        # (`<abs-path>/sky130A`), which the lint exempts by design. Do NOT
+        # reach for `--allow-prefix`: the tree passes today with an EMPTY
+        # allow-list, and that is the property worth keeping.
+        #
+        # `git ls-files` (not a shell glob) so the set is exactly what is
+        # committed, and `xargs -r` so a tree with no matches is a no-op
+        # rather than a usage error. No `-0`/NUL handling: this repo has no
+        # example paths with spaces, and a filename that needed it would be
+        # its own problem.
+        run: |
+          git ls-files 'examples/**/*.json' \
+            | xargs -r uv run --frozen --extra dev klt env-provenance lint-envelope
+
   native:
     name: ${{ matrix.job_name }}
     # `native/mom/` (issue #718), `native/congestion/` (issue #785, Epic

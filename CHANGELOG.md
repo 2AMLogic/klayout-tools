@@ -49,6 +49,32 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/erc.md`](docs/cli/erc.md)'s "A tie with no distinguishing
   marker layer at all".
 
+- **Changed** (#2230, additive — **no** `schema_version` bump on any verb; no
+  `klt` payload *shape* changes, only which strings `lint-envelope` reports
+  and what three committed example artifacts contain): `klt env-provenance
+  lint-envelope` no longer flags two shapes that were never host paths —
+  an angle-bracket **template root** (`<path-to-your-checkout>/infra/run.sh`,
+  exempt for the same reason `$PDK_ROOT/…` already was; adjacency-scoped, so
+  a real absolute path elsewhere in the same string is still reported) and a
+  **URI fragment holding an RFC 6901 JSON Pointer**
+  (`02-architecture.json#/blocks/ota_buffer`; only the fragment is excised,
+  so an absolute path on the document side of the `#` is still a finding).
+  Alongside it, the three committed `examples/critical-net-mom-fidelity/
+  phase*.json` `klt extract` reports had the generating worktree's absolute
+  path in `file`/`netlist_path` rewritten repo-relative (field *shape*
+  unchanged — still plain strings), which also makes `klt extract --check` on
+  them resolve their input on any checkout instead of reporting
+  `provenance.input.content_hash: null` everywhere but one machine, and
+  `examples/design-centering/{request,sized-device}.json`'s `/abs/path/…`
+  documentation placeholder was re-spelled `<abs-path>/…`. With the tree
+  clean at **zero `--allow-prefix`**, `git ls-files 'examples/**/*.json' |
+  xargs klt env-provenance lint-envelope` is now a CI step so it cannot
+  regress — plus two in-suite regression tests, one asserting the committed
+  tree lints clean (so a bad artifact fails `pytest` before CI) and one
+  asserting the CI step stays wired with an empty allow-list. See
+  [`docs/cli/env-provenance.md`](docs/cli/env-provenance.md)'s "Rules" and
+  "Wiring it into a repo's CI" sections.
+
 - **Changed** (#2227, `--format text` only — **no** `schema_version` bump and
   no change to any `--format json` payload): `klt signoff`'s text rendering
   no longer emits ANSI colour unconditionally. Colour now follows
@@ -98,7 +124,8 @@ not `klt --version`, if you need to detect this kind of drift. See
   out.def` names nobody and still makes a regenerated artifact byte-differ on
   another checkout, which is how a downstream repo's committed corpus
   artifact broke cross-checkout byte comparison (2AMLogic/gf180-surge#39).
-  Not wired into CI here. `docs/json-contract.md` now states the
+  Not wired into CI here at the time — #2230 (below) cleared the tree and
+  wired it in. `docs/json-contract.md` now states the
   repo-relative-provenance rule for committed artifacts alongside the
   existing "Output-artifact path fields" table.
 

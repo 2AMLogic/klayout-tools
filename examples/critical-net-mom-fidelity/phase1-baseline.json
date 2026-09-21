@@ -17,11 +17,11 @@
   "device_recognition_only_layers": [],
   "devices": [],
   "dummy_devices_dropped": 0,
-  "file": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-978/examples/critical-net-mom-fidelity/lateral-coupling.gds",
+  "file": "examples/critical-net-mom-fidelity/lateral-coupling.gds",
   "ignored_layers": [],
   "merged_net_labels": [],
   "net_count": 3,
-  "netlist_path": "/Users/rwalters/GitHub/klayout-tools/.loom/worktrees/issue-978/examples/critical-net-mom-fidelity/phase1-baseline.spice",
+  "netlist_path": "examples/critical-net-mom-fidelity/phase1-baseline.spice",
   "netlist_sha256": "0eac629d8061bb660a788da4dc5b33dc0f192c655ba70ba1da4033944a553fdf",
   "nets": [
     {
