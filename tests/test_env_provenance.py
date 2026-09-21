@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 
 import pytest
 
@@ -415,3 +416,311 @@ def test_cli_scan_missing_file_is_an_application_error(tmp_path, capsys):
 
 def test_cli_group_without_a_subcommand_reports_usage(capsys):
     assert main(["env-provenance"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# `klt env-provenance lint-envelope` (issue #2224): the reproducibility scan
+# --------------------------------------------------------------------------- #
+
+
+def _write_envelope(path, payload) -> str:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return str(path)
+
+
+def test_lint_envelope_flags_an_injected_home_path_and_names_the_field():
+    """The negative control from issue #2224: an envelope carrying an
+    absolute `/Users/...` path fails the lint, and the finding names the
+    offending field, not just a line number."""
+    findings = ep.find_absolute_path_fields(
+        {
+            "schema_version": 1,
+            "def_path": "/Users/someone/work/gcd.def",
+            "gds_path": "build/gcd.gds",
+        }
+    )
+    assert [finding["field"] for finding in findings] == ["def_path"]
+    assert findings[0]["match"] == "/Users/someone/work/gcd.def"
+
+
+def test_lint_envelope_passes_a_clean_envelope():
+    """A record using the repo-relative `{path, scope}` shape (and hashes)
+    has nothing to flag."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "schema_version": 1,
+                "netlist_path": {"path": "build/gcd_synth.v", "scope": "repo"},
+                "liberty": {"path": None, "scope": "external"},
+                "provenance": {"input": {"content_hash": "sha256:abc123"}},
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_flags_non_home_absolute_paths_scan_would_miss():
+    """The distinction that justifies a second scan: `/opt/build/...` and
+    `/tmp/...` name nobody -- `find_leaks` (the disclosure scan) correctly
+    ignores them -- yet they break byte comparison on another checkout just
+    as thoroughly as a home path does."""
+    payload = {"def_path": "/opt/build/out.def", "gds_path": "/tmp/run-3/top.gds"}
+    assert ep.find_leaks(json.dumps(payload)) == []
+    assert sorted(
+        finding["field"] for finding in ep.find_absolute_path_fields(payload)
+    ) == ["def_path", "gds_path"]
+
+
+def test_lint_envelope_names_nested_and_indexed_fields():
+    findings = ep.find_absolute_path_fields(
+        {"macros": [{"lef": "lef/sram.lef"}, {"lef": "/Users/x/sram.lef"}]}
+    )
+    assert [finding["field"] for finding in findings] == ["macros.1.lef"]
+
+
+def test_lint_envelope_flags_a_leaking_mapping_key():
+    """A dict *keyed* by an absolute path leaks exactly as thoroughly as one
+    valued by it."""
+    findings = ep.find_absolute_path_fields({"per_file": {"/Users/x/a.gds": 3}})
+    assert findings == [{"field": "per_file./Users/x/a.gds", "match": "/Users/x/a.gds"}]
+
+
+def test_lint_envelope_allows_a_declared_install_prefix():
+    payload = {"liberty": "/usr/share/pdk/sky130A/libs.ref/x.lib"}
+    assert ep.find_absolute_path_fields(payload) != []
+    assert (
+        ep.find_absolute_path_fields(payload, allow_prefixes=["/usr/share/pdk"]) == []
+    )
+
+
+def test_lint_envelope_allow_prefix_respects_component_boundaries():
+    """`--allow-prefix /opt/pdk` must not admit `/opt/pdk-scratch/...`."""
+    payload = {"liberty": "/opt/pdk-scratch/x.lib"}
+    assert ep.find_absolute_path_fields(payload, allow_prefixes=["/opt/pdk"]) != []
+
+
+def test_lint_envelope_ignores_urls_and_relative_paths():
+    """A `https://` reference and a repo-relative path are not host paths --
+    flagging them would make the lint fire on every `see also` string."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "docs": "see https://example.com/cli/drc.md for the contract",
+                "deck": "decks/sky130.py",
+                "token": "$PDK_ROOT/libs.ref/x.lib",
+                "home_token": "~/klayout-tools/x.gds",
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_ignores_an_angle_bracket_template_root():
+    """`<path-to-your-checkout>/infra/aws/x.sh` is a template a reader
+    substitutes into, not a path that resolves on this or any other host
+    (issue #2230: `examples/sim-batch/matrix-batch.request.json`'s
+    `batch.provision_script_path`). Flagging it would demand a content edit
+    that makes the example *less* honest."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "provision_script_path": (
+                    "<path-to-your-2am-checkout>/infra/aws/batch-fleet-provision.sh"
+                ),
+                "pdk_root": "<pdk-root>/sky130A/libs.tech/ngspice/sky130.lib.spice",
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_still_flags_a_real_path_beside_a_template_root():
+    """The template exemption is adjacency-scoped: a genuine absolute path
+    elsewhere in the same string is still a finding."""
+    findings = ep.find_absolute_path_fields(
+        {"note": "copy <your-checkout>/infra/run.sh to /Users/rob/bin/run.sh"}
+    )
+    assert [finding["match"] for finding in findings] == ["/Users/rob/bin/run.sh"]
+
+
+def test_lint_envelope_ignores_a_json_pointer_uri_fragment():
+    """`02-architecture.json#/blocks/ota_buffer` is a relative document
+    reference plus an RFC 6901 JSON Pointer -- `/blocks/ota_buffer` addresses
+    a node *inside* that document, not a directory on this host (issue #2230:
+    `examples/design-pipeline/03-blockspec.json`'s `input_ref`)."""
+    assert (
+        ep.find_absolute_path_fields(
+            {
+                "input_ref": "02-architecture.json#/blocks/ota_buffer",
+                "bare_pointer": "#/definitions/corner/properties/vdd_v",
+            }
+        )
+        == []
+    )
+
+
+def test_lint_envelope_still_flags_the_document_half_of_a_fragment_ref():
+    """Only the fragment is exempt -- an absolute host path on the document
+    side of the `#` is still a finding."""
+    findings = ep.find_absolute_path_fields(
+        {"input_ref": "/Users/rob/design/02-architecture.json#/blocks/ota_buffer"}
+    )
+    assert [finding["match"] for finding in findings] == [
+        "/Users/rob/design/02-architecture.json"
+    ]
+
+
+def test_lint_envelope_flags_windows_paths():
+    findings = ep.find_absolute_path_fields({"out": "C:\\Users\\rob\\top.gds"})
+    assert findings[0]["field"] == "out"
+
+
+def test_lint_envelope_files_reports_status_and_recommendation(tmp_path):
+    dirty = _write_envelope(tmp_path / "dirty.json", {"def_path": "/Users/x/a.def"})
+    clean = _write_envelope(tmp_path / "clean.json", {"def_path": "build/a.def"})
+
+    report = ep.lint_envelope_files([clean])
+    assert report["status"] == "clean"
+    assert report["finding_count"] == 0
+    assert report["recommendation"] == ep.ENVELOPE_LINT_RECOMMENDATION
+
+    report = ep.lint_envelope_files([dirty])
+    assert report["status"] == "violations"
+    assert report["finding_count"] == 1
+    assert report["files"][0]["file"] == dirty
+
+
+def test_lint_envelope_files_rejects_a_non_json_file(tmp_path):
+    path = tmp_path / "bad.json"
+    path.write_text("not json", encoding="utf-8")
+    with pytest.raises(ep.EnvironmentProvenanceError, match="not valid JSON"):
+        ep.lint_envelope_files([str(path)])
+
+
+def test_lint_envelope_files_rejects_an_unreadable_file(tmp_path):
+    with pytest.raises(ep.EnvironmentProvenanceError, match="could not read"):
+        ep.lint_envelope_files([str(tmp_path / "missing.json")])
+
+
+def test_cli_lint_envelope_exits_three_and_names_the_field(tmp_path, capsys):
+    path = _write_envelope(tmp_path / "report.json", {"def_path": "/Users/x/a.def"})
+    assert main(["env-provenance", "lint-envelope", path, "--format", "json"]) == (
+        ep.LEAKS_FOUND_EXIT_CODE
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "violations"
+    assert payload["files"][0]["findings"][0]["field"] == "def_path"
+
+
+def test_cli_lint_envelope_exits_zero_when_clean(tmp_path, capsys):
+    path = _write_envelope(
+        tmp_path / "report.json",
+        {"netlist_path": {"path": "build/a.v", "scope": "repo"}},
+    )
+    assert main(["env-provenance", "lint-envelope", path, "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "clean"
+
+
+def test_cli_lint_envelope_allow_prefix(tmp_path, capsys):
+    path = _write_envelope(tmp_path / "report.json", {"lib": "/usr/share/pdk/x.lib"})
+    assert (
+        main(
+            [
+                "env-provenance",
+                "lint-envelope",
+                path,
+                "--allow-prefix",
+                "/usr/share/pdk",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "clean"
+
+
+def test_cli_lint_envelope_text_output_prints_the_recommendation(tmp_path, capsys):
+    path = _write_envelope(tmp_path / "report.json", {"def_path": "/Users/x/a.def"})
+    main(["env-provenance", "lint-envelope", path])
+    out = capsys.readouterr().out
+    assert "def_path: /Users/x/a.def" in out
+    assert "repo-relative" in out
+
+
+def test_cli_lint_envelope_missing_file_is_an_application_error(tmp_path, capsys):
+    assert main(["env-provenance", "lint-envelope", str(tmp_path / "no.json")]) == 1
+    assert "no.json" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# this repository's own committed examples/ tree (issue #2230)
+# --------------------------------------------------------------------------- #
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _committed_example_envelopes() -> list[str]:
+    """Every committed JSON artifact under `examples/`, via `git ls-files`.
+
+    `git ls-files` rather than a filesystem walk so the set is exactly what is
+    committed -- a scratch report a developer left in `examples/` is not this
+    gate's business, and a walk would fail the suite on it.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "-z", "examples/**/*.json"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("not a git checkout (or git unavailable)")
+    return [name for name in result.stdout.split("\0") if name]
+
+
+def test_committed_example_envelopes_carry_no_absolute_host_paths():
+    """The acceptance criterion of issue #2230, asserted in-suite so it fails
+    locally before CI does.
+
+    Three `examples/critical-net-mom-fidelity/*.json` `klt extract` reports
+    shipped with the generating worktree's absolute path in
+    `file`/`netlist_path` -- a record that resolves nowhere else, byte-differs
+    on every regeneration elsewhere, and discloses an author path in a public
+    repo. Note the **empty** allow-list: every finding was dispositioned on
+    its own merits (content fix or lint fix), none blanket-allowed, and
+    keeping the allow-list empty is the property worth protecting.
+    """
+    paths = _committed_example_envelopes()
+    assert paths, "expected committed JSON artifacts under examples/"
+    report = ep.lint_envelope_files([os.path.join(_REPO_ROOT, name) for name in paths])
+    assert report["status"] == "clean", [
+        entry for entry in report["files"] if entry["findings"]
+    ]
+
+
+def test_ci_gates_the_committed_example_envelopes():
+    """The lint is only a gate if CI runs it -- a test asserting the tree is
+    clean would otherwise be the whole enforcement, and a future PR touching
+    only `.github/workflows/ci.yml` could drop the step silently. Mirrors the
+    same wiring assertion `test_check_complexity_baseline.py` makes for the
+    C901 ratchet.
+    """
+    workflow = os.path.join(_REPO_ROOT, ".github", "workflows", "ci.yml")
+    with open(workflow, encoding="utf-8") as handle:
+        text = handle.read()
+    lint_job = text.split("\n  native:", 1)[0]
+    # Comments stripped before the assertions below: the step's own comment
+    # names `--allow-prefix` (to tell a future reader not to reach for it),
+    # which must not be mistaken for the step actually passing one.
+    commands = "\n".join(
+        line for line in lint_job.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "env-provenance lint-envelope" in commands, (
+        "the examples/ envelope lint must stay wired into the CI lint job"
+    )
+    assert "git ls-files 'examples/**/*.json'" in commands
+    assert "--allow-prefix" not in commands, (
+        "the examples/ tree passes with an empty allow-list -- adding one here "
+        "would hide exactly the class of finding this gate exists to catch"
+    )

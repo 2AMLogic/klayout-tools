@@ -1,4 +1,4 @@
-"""``klt signoff`` command: three modes sharing one verb.
+"""``klt signoff`` command: four modes sharing one verb.
 
 1. **Envelope aggregation** (the original mode, issue #309): combine
    ``klt drc``/``klt lvs``/``klt extract``/``klt sim`` JSON envelope files
@@ -15,32 +15,69 @@
    grade every block named in a fleet manifest (one call to tier-verdict
    mode per block) and reduce each block's result down to its current tier
    and, for any block not yet at T1, the single T1 item still blocking it.
+4. **Describe the grading build** (``--describe-grader``, issue #2216):
+   print which T1 item ids this build has grading rules for, plus the
+   content hash identifying the grading code itself -- purely informational,
+   reads no manifest and runs no check. See :func:`..signoff.describe_grader`.
 
-The three modes are mutually exclusive: ``--manifest``/``--fleet`` each
-replace the positional ``<file>...`` arguments and each other.
+The four modes are mutually exclusive: ``--manifest``/``--fleet``/
+``--describe-grader`` each replace the positional ``<file>...`` arguments and
+each other.
+
+``--check REPORT`` (issue #2249) is a *modifier* on the two doc-parsing
+modes, not a fifth mode: it re-grades the same manifest and, instead of
+rendering the report, diffs the result against a previously committed one --
+excluding the ``build`` block, which states how the running install was
+provisioned rather than which commit it came from (see
+:data:`..signoff.VOLATILE_REPORT_PATHS`). It exists so a gate script asking
+"does this committed evidence still hold" no longer has to byte-compare the
+committed file against a fresh render: that comparison fails between two
+byte-legitimate installs of the *same pinned commit*, purely on provisioning
+route. Refused (exit 1) with the envelope-aggregation and
+``--describe-grader`` modes, neither of which renders such a report.
 
 The two doc-parsing modes read ``design-evidence-tiers.md`` from
 ``--tiers-doc``, else ``$KLT_TIERS_DOC``, else the copy bundled inside the
 installed package, else the source checkout's ``docs/`` (issue #1050 --
 :func:`klayout_tools.design_evidence_tiers.default_doc_path`), so they work
 from a wheel/``uv tool`` install with no repo checkout. ``--tiers-doc`` is
-refused in envelope-aggregation mode, which never reads the doc.
+refused in envelope-aggregation mode, which never reads the doc, and in
+``--describe-grader`` mode, which always reports this build's own shipped
+grading rules rather than an overridden doc's item list.
 
 Output goes through the shared envelope helpers in :mod:`.output`, as with
 every other ``klt`` subcommand -- see ``docs/json-contract.md``.
+
+The two doc-parsing modes' ``--format text`` rendering colours its verdict
+markers -- "met" green, "unmet" red -- so a scan of the printed skeleton
+shows what is missing at a glance. **Whether** those escapes are emitted is
+decided once per invocation by :func:`.color.resolve_palette` and handed to
+the renderers as a :class:`.color.Palette`: colour at a terminal, plain text
+through a pipe or redirect, and off outright under ``--no-color`` /
+``--color=never`` / ``$NO_COLOR`` (issue #2227). The committed tier report
+``--manifest`` exists to produce is therefore escape-free by default,
+without the caller stripping ANSI on the way out.
 
 Exit codes (see ``docs/cli/signoff.md`` for the full table):
     0 - envelope-aggregation mode: every check passed and every input's
         provenance agreed. Tier-report mode: every T1 item is ``"met"``
         (``tier: "T1"``). Fleet mode: every block's tier is ``"T1"``.
+        ``--describe-grader`` mode: always (it is informational only and
+        cannot fail once argument validation passes). Under ``--check``:
+        ``status: "match"`` -- the committed report still reproduces.
     1 - failed to run (missing/unreadable/malformed input file, an envelope
-        with an unrecognized shape, or an invalid manifest/fleet manifest)
-        -- returned by ``emit_error`` as ``output.ERROR_EXIT_CODE``
+        with an unrecognized shape, or an invalid manifest/fleet manifest,
+        or -- under ``--check`` -- a missing/unparseable committed report or
+        one the requested mode could not have produced) -- returned by
+        ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - envelope-aggregation mode: ran successfully, provenance was
         consistent, but at least one check failed. Tier-report mode: ran
         successfully, but at least one T1 item is ``"unmet"``
         (``tier: null``). Fleet mode: ran successfully, but at least one
-        block's tier is not ``"T1"``.
+        block's tier is not ``"T1"``. Under ``--check``: ``status:
+        "drifted"`` -- at least one field outside ``build`` moved (the tier
+        verdict itself does not decide this mode's exit code; a report of a
+        not-yet-T1 block that still reproduces exactly is ``0``).
     4 - envelope-aggregation mode only: refused -- two or more inputs'
         provenance blocks disagree (see docs/cli/signoff.md's "Provenance
         consistency" section) -- no pass/fail verdict is produced
@@ -59,8 +96,12 @@ from ..signoff import (
     build_fleet_report,
     build_signoff,
     build_tier_report,
+    check_fleet_report,
+    check_tier_report,
+    describe_grader,
 )
-from .output import emit_error, emit_success
+from .color import Palette, resolve_palette
+from .output import emit_error, emit_success, render_rerun_drift
 
 EXIT_PASS = 0
 EXIT_FAIL = 3
@@ -68,21 +109,20 @@ EXIT_REFUSED = 4
 
 _EXIT_CODES = {"pass": EXIT_PASS, "fail": EXIT_FAIL, "refused": EXIT_REFUSED}
 
-#: ANSI colour codes for the tier-report text rendering -- "unmet" items
-#: render red, "met" items render green, so a scan of the printed skeleton
-#: shows what's missing at a glance. Always emitted (not gated on
-#: ``isatty()``): this command's text output is a terminal-first courtesy
-#: rendering, like every other ``klt`` verb's, and an agent piping it
-#: through a pager/log still gets a machine-greppable ``\033[3Nm`` marker
-#: per line.
-_RED = "\033[31m"
-_GREEN = "\033[32m"
-_RESET = "\033[0m"
+#: ``--check``'s two outcomes, mapped onto the same numeric codes every
+#: other verb's ``--check`` uses (issue #2249): ``0`` still reproduces, ``3``
+#: drifted. Deliberately the same two codes this verb already spends on
+#: pass/fail, because the question is the same shape -- "is the committed
+#: evidence still good" -- and a caller does not need to know which mode
+#: produced a ``3`` to know it must look.
+_CHECK_EXIT_CODES = {"match": EXIT_PASS, "drifted": EXIT_FAIL}
 
 
 def run(args: argparse.Namespace) -> int:
     manifest_source = getattr(args, "manifest", None)
     fleet_source = getattr(args, "fleet", None)
+    if getattr(args, "describe_grader", False):
+        return _run_describe_grader(args, manifest_source, fleet_source)
     if manifest_source and fleet_source:
         return emit_error(
             "signoff",
@@ -96,11 +136,51 @@ def run(args: argparse.Namespace) -> int:
             "aggregation does not read the design-evidence-tiers doc)",
             args.format,
         )
+    if getattr(args, "check", None) and not (manifest_source or fleet_source):
+        return emit_error(
+            "signoff",
+            "--check only applies to --manifest/--fleet (it verifies a "
+            "committed tier/fleet report still reproduces from its manifest; "
+            "envelope aggregation produces no such report)",
+            args.format,
+        )
     if fleet_source:
         return _run_fleet_report(args, fleet_source)
     if manifest_source:
         return _run_tier_report(args, manifest_source)
     return _run_envelope_aggregation(args)
+
+
+def _run_describe_grader(
+    args: argparse.Namespace,
+    manifest_source: str | None,
+    fleet_source: str | None,
+) -> int:
+    if args.files or manifest_source or fleet_source:
+        return emit_error(
+            "signoff",
+            "--describe-grader cannot be combined with <file> arguments, "
+            "--manifest, or --fleet",
+            args.format,
+        )
+    if getattr(args, "tiers_doc", None):
+        return emit_error(
+            "signoff",
+            "--tiers-doc is not meaningful with --describe-grader -- it "
+            "always reports this build's own shipped grading rules, never "
+            "an overridden doc's item list",
+            args.format,
+        )
+    if getattr(args, "check", None):
+        return emit_error(
+            "signoff",
+            "--check is not meaningful with --describe-grader -- it verifies "
+            "a committed tier/fleet report, and this mode renders none",
+            args.format,
+        )
+    result = describe_grader()
+    emit_success(result, args.format, _print_describe_grader_text)
+    return EXIT_PASS
 
 
 def _run_envelope_aggregation(args: argparse.Namespace) -> int:
@@ -131,6 +211,7 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
             args.format,
         )
 
+    committed = getattr(args, "check", None)
     try:
         manifest = _read_manifest(manifest_source)
         if not isinstance(manifest, dict):
@@ -138,11 +219,23 @@ def _run_tier_report(args: argparse.Namespace, manifest_source: str) -> int:
                 f"manifest '{manifest_source}' must be a JSON object, got "
                 f"{type(manifest).__name__}"
             )
-        result = build_tier_report(manifest, tiers_doc=getattr(args, "tiers_doc", None))
+        tiers_doc = getattr(args, "tiers_doc", None)
+        result = (
+            build_tier_report(manifest, tiers_doc=tiers_doc)
+            if committed is None
+            else check_tier_report(committed, manifest, tiers_doc=tiers_doc)
+        )
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
-    emit_success(result, args.format, _print_tier_report_text)
+    if committed is not None:
+        emit_success(result, args.format, render_rerun_drift)
+        return _CHECK_EXIT_CODES[result["status"]]
+
+    palette = resolve_palette(args)
+    emit_success(
+        result, args.format, lambda payload: _print_tier_report_text(payload, palette)
+    )
 
     return EXIT_PASS if result["tier"] == "T1" else EXIT_FAIL
 
@@ -155,6 +248,7 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
             args.format,
         )
 
+    committed = getattr(args, "check", None)
     try:
         fleet = _read_manifest(fleet_source, description="fleet manifest")
         if not isinstance(fleet, dict):
@@ -162,11 +256,23 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
                 f"fleet manifest '{fleet_source}' must be a JSON object, got "
                 f"{type(fleet).__name__}"
             )
-        result = build_fleet_report(fleet, tiers_doc=getattr(args, "tiers_doc", None))
+        tiers_doc = getattr(args, "tiers_doc", None)
+        result = (
+            build_fleet_report(fleet, tiers_doc=tiers_doc)
+            if committed is None
+            else check_fleet_report(committed, fleet, tiers_doc=tiers_doc)
+        )
     except (SignoffError, DesignEvidenceTiersError) as exc:
         return emit_error("signoff", str(exc), args.format)
 
-    emit_success(result, args.format, _print_fleet_report_text)
+    if committed is not None:
+        emit_success(result, args.format, render_rerun_drift)
+        return _CHECK_EXIT_CODES[result["status"]]
+
+    palette = resolve_palette(args)
+    emit_success(
+        result, args.format, lambda payload: _print_fleet_report_text(payload, palette)
+    )
 
     return EXIT_PASS if result["not_t1_count"] == 0 else EXIT_FAIL
 
@@ -174,6 +280,20 @@ def _run_fleet_report(args: argparse.Namespace, fleet_source: str) -> int:
 def _read_manifest(source: str, *, description: str = "manifest") -> Any:
     """Use the same strict JSON reader for manifest, fleet, and evidence."""
     return _read_json_source(source, description)
+
+
+def _print_describe_grader_text(result: dict) -> None:
+    print(f"klt {result['version']}")
+    print(f"grading_ruleset_id: {result['grading_ruleset_id']}")
+    item_ids = result["graded_t1_item_ids"]
+    if item_ids is None:
+        print(
+            f"graded T1 items: unknown ({result['source_doc']} could not be "
+            "read by this build)"
+        )
+    else:
+        joined = ", ".join(str(item_id) for item_id in item_ids)
+        print(f"graded T1 items ({result['source_doc']}): {joined}")
 
 
 def _print_text(result: dict) -> None:
@@ -233,6 +353,78 @@ def _print_text(result: dict) -> None:
 _COVERAGE_PREVIEW = 4
 
 
+def _print_input_verified(citation: dict) -> None:
+    """Print one line stating whether a citation's ``content_hash`` was
+    verified against the **input artifact** the cited envelope names, or
+    only against the envelope's own claim about it (issue #2196) -- or
+    nothing at all, when there is nothing to say.
+
+    Its own function (rather than an ``if`` in the already-dense caller)
+    so the "nothing to say" branch does not land in
+    :func:`_print_tier_report_text`'s complexity budget.
+
+    Nothing to say means the envelope recorded no input hash at all *and*
+    none could be re-derived: the citation already renders ``content_hash:
+    None``, and a second line repeating that adds no information. Every
+    other case prints, including the unverified one -- a freshness claim
+    checked against a file and one checked only against another claim being
+    indistinguishable in the output is the exact gap this discloses.
+    """
+    verified = citation.get("input_verified")
+    if verified is None and citation.get("content_hash") is None:
+        return
+    if verified is True:
+        statement = "re-hashed the artifact this envelope names -- matches"
+    elif verified is False:
+        statement = (
+            "CHANGED -- the artifact this envelope names no longer matches "
+            "the content_hash it recorded"
+        )
+    else:
+        statement = (
+            "not re-hashed (content_hash compared against this envelope's own "
+            "claim only -- the artifact itself was not read)"
+        )
+    print(f"        input: {statement}")
+
+
+def _print_power_delivery(citation: dict) -> None:
+    """Print T1 item 11's compound-citation summary (issue #2025), or
+    nothing at all for every other item's single-artifact citation.
+
+    Its own function for the same reason :func:`_print_input_verified` is
+    (and since issue #2234's extra line, the same C901 budget reason):
+    the caller, :func:`_print_tier_report_text`, is already at the
+    complexity ratchet's limit.
+
+    The second line (issue #2234) names the ties whose tap geometry rested
+    on a caller **assertion** (``ties[].tap_boxes``) rather than on a drawn
+    PDK marker. It is disclosure only -- such a tie is graded ``met``
+    exactly as a marker-derived one, and `klt erc` has already rejected a
+    degenerate or unmatched assertion before the citation could reach here
+    -- but leaving that provenance reachable only through the JSON would
+    make the two indistinguishable in the rendering a reviewer actually
+    reads. Printed only when non-empty, so a purely marker-derived report
+    (and every report produced before the field existed) renders exactly as
+    it did before.
+    """
+    power_delivery = citation.get("power_delivery")
+    if not power_delivery:
+        return
+    print(
+        "        power delivery: supplies="
+        f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
+        f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
+        f"power_connectivity={power_delivery['power_connectivity_status']}"
+    )
+    asserted = power_delivery.get("ties_checked_by_assertion") or []
+    if asserted:
+        print(
+            f"        taps asserted by the caller: {len(asserted)} "
+            f"({', '.join(asserted)})"
+        )
+
+
 def _format_coverage(coverage: dict) -> str:
     """One line summarising a `drc` citation's three disclosed `coverage`
     fields (issue #2002): each field's entry count, plus the first few
@@ -288,20 +480,56 @@ def _format_body_bias(body_bias: dict) -> str:
     )
 
 
-def _print_tier_report_text(result: dict) -> None:
+def _print_t1_scope_shortfall(row: dict, source_doc: str, palette: Palette) -> None:
+    """Print the one-line disclosure for a checklist shorter than what this
+    build grades (issue #2202), or nothing when there is none to make.
+
+    ``row`` is a tier report or one ``--fleet`` ``blocks[]`` entry -- both
+    carry the ``t1_item_count``/``build_t1_item_count`` pair, and the
+    shortfall is a property of that pair, not of the mode. Both callers
+    therefore delegate the *whole* decision here (rather than testing a
+    returned line themselves) so neither grows a branch for it.
+
+    Printed only for a genuine shortfall (this build grades *more* than the
+    parsed doc lists). The opposite skew -- a doc listing items this build
+    has no rules for -- is already loud per row (``graded_by_build: false``),
+    and ``None`` (this build cannot read its own doc) claims nothing at all,
+    matching the JSON field's own rule.
+    """
+    build_count = row.get("build_t1_item_count")
+    doc_count = row["t1_item_count"]
+    if build_count is None or build_count <= doc_count:
+        return
+    print(
+        f"        {palette.red}scope: {build_count - doc_count} more T1 item(s) "
+        f"this build grades are not in {source_doc}{palette.reset} "
+        f"(this build's own doc lists {build_count})"
+    )
+
+
+def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
     print(f"tier: {result['tier'] or 'none'}")
     print(f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met")
+    # Issue #2202: the reverse of the per-row `graded_by_build` note below.
+    # A `--tiers-doc`/`$KLT_TIERS_DOC` copy listing *fewer* T1 items than
+    # this build grades renders a shorter checklist, so `11/11 items met`
+    # and `9/9 items met` read identically though the second is a weaker
+    # claim. No per-row note can say this -- the missing items are not rows
+    # -- so it is said beside the count it qualifies. Absent (as before)
+    # whenever the two counts agree, and when this build cannot read its own
+    # doc to compare against.
+    _print_t1_scope_shortfall(result, result["source_doc"], palette)
     print()
 
     for item in result["items"]:
         marker = "MET  " if item["status"] == "met" else "UNMET"
-        color = _GREEN if item["status"] == "met" else _RED
+        color = palette.green if item["status"] == "met" else palette.red
         item_id = str(item["id"]) if item["id"] is not None else "-"
         partition = f" [{item['partition']}]" if item["partition"] else ""
         print(
-            f"[{color}{marker}{_RESET}] {item['tier']} #{item_id}{partition} "
+            f"[{color}{marker}{palette.reset}] {item['tier']} #{item_id}{partition} "
             f"{item['title']}"
         )
         # Issue #2176: a row this build has no grading rules for at all --
@@ -312,7 +540,7 @@ def _print_tier_report_text(result: dict) -> None:
         # shipped doc, which renders exactly as before.
         if item.get("graded_by_build") is False:
             print(
-                f"        {_RED}not graded by this build{_RESET} "
+                f"        {palette.red}not graded by this build{palette.reset} "
                 f"(no rules for item #{item_id} in klt {result['build']['version']}"
                 f"; it is in {result['source_doc']}, not this build's own doc)"
             )
@@ -333,6 +561,13 @@ def _print_tier_report_text(result: dict) -> None:
                 f"content_hash={citation['content_hash']}, "
                 f"exit_status={citation['exit_status']})"
             )
+            # Issue #2196: whether that `content_hash` was checked against
+            # the input artifact itself or only against the envelope's own
+            # claim about it. Shown beside the hash it qualifies, because a
+            # freshness claim verified against a file and one verified
+            # against another claim are otherwise indistinguishable to a
+            # reader. Disclosure only -- the verdict above is unaffected.
+            _print_input_verified(citation)
             # Issue #2002: a `drc` citation's own coverage statement, shown
             # beside the "clean" it qualifies -- item 3's doc text requires
             # the claim to disclose these, and `klt signoff` does not grade
@@ -366,21 +601,13 @@ def _print_tier_report_text(result: dict) -> None:
                     f"        also: {part_source} "
                     f"(kind={part['kind']}, status={part['check_status']})"
                 )
-            power_delivery = citation.get("power_delivery")
-            if power_delivery:
-                print(
-                    "        power delivery: supplies="
-                    f"{', '.join(power_delivery['supply_nets']) or 'none'}, "
-                    f"pdn={'yes' if power_delivery['pdn'] else 'no (no P&R cited)'}, "
-                    "power_connectivity="
-                    f"{power_delivery['power_connectivity_status']}"
-                )
+            _print_power_delivery(citation)
         elif item["reason"]:
             # Loud, not silent: an unmet item always names *why* -- "no
             # runnable check exists" (e.g. no_evidence) reads distinctly
             # from "a check ran and did not pass" (e.g. check_failed) even
             # in the terminal-first text rendering, not just the JSON.
-            print(f"        {_RED}reason: {item['reason']}{_RESET}")
+            print(f"        {palette.red}reason: {item['reason']}{palette.reset}")
 
     print()
     print(
@@ -393,7 +620,7 @@ def _print_tier_report_text(result: dict) -> None:
     print(f"build: klt {result['build']['version']}")
 
 
-def _print_fleet_report_text(result: dict) -> None:
+def _print_fleet_report_text(result: dict, palette: Palette) -> None:
     print(
         f"fleet: {result['t1_count']}/{result['block_count']} blocks at T1 "
         f"({result['not_t1_count']} not yet)"
@@ -402,20 +629,26 @@ def _print_fleet_report_text(result: dict) -> None:
 
     for block in result["blocks"]:
         marker = "T1   " if block["tier"] == "T1" else "not-T1"
-        color = _GREEN if block["tier"] == "T1" else _RED
+        color = palette.green if block["tier"] == "T1" else palette.red
         print(
-            f"[{color}{marker}{_RESET}] {block['block']} ({block['kind']})  "
+            f"[{color}{marker}{palette.reset}] {block['block']} "
+            f"({block['kind']})  "
             f"T1: {block['t1_met_count']}/{block['t1_item_count']} items met"
         )
+        # Issue #2202: same disclosure as tier-report mode, for the same
+        # reason -- this row renders `t1_item_count`, so it must also render
+        # what that count is short of. `source_doc` is the roll-up's one
+        # shared doc (forwarded verbatim to every block).
+        _print_t1_scope_shortfall(block, result["source_doc"], palette)
         blocking_item = block["blocking_item"]
         if blocking_item:
             partition = (
                 f" [{blocking_item['partition']}]" if blocking_item["partition"] else ""
             )
             print(
-                f"        {_RED}blocking: #{blocking_item['id']}{partition} "
+                f"        {palette.red}blocking: #{blocking_item['id']}{partition} "
                 f"{blocking_item['title']} (reason: {blocking_item['reason']})"
-                f"{_RESET}"
+                f"{palette.reset}"
             )
         # Issue #2178: the unmet T1 items with no `klt` verb behind them
         # (1, 2, 9, 10) -- the rows `blocking_item` deliberately steps over
@@ -423,6 +656,13 @@ def _print_fleet_report_text(result: dict) -> None:
         # Demoted to one summary line rather than dropped: they are still
         # part of why this block is not T1, they are just not something a
         # reader can go and *run*. The JSON carries them in full.
+        #
+        # Since issue #2203 this list also carries any `graded_by_build:
+        # false` row (an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy of
+        # the doc lists) -- as it already did, but now by an explicit union
+        # rather than as a side effect of a shared predicate. Such a row is
+        # *also* what `blocking:` above names, in preference to every other
+        # unmet item, so it is never only visible here.
         ungraded_items = block.get("ungraded_items") or []
         if ungraded_items:
             ids = ", ".join(

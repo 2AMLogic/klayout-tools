@@ -14,6 +14,329 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2249, `klt signoff`, no `schema_version` bump — a new flag and
+  a new response shape for it, no change to the tier/fleet report's own
+  fields): `klt signoff --manifest|--fleet M --check REPORT` verifies that a
+  previously committed tier/fleet report still reproduces, re-grading `M` and
+  diffing the result against `REPORT` **excluding the `build` block** —
+  `status: "match"` (exit `0`) / `"drifted"` (exit `3`, naming every field
+  that moved), the same `{schema_version, mode, report, status, drift,
+  fresh}` shape and exit codes the five existing `--check` verbs use
+  (`docs/json-contract.md` → "Verifying committed evidence"). This replaces
+  byte-comparing a committed report against a fresh re-render: a report's
+  `build` block states the checkout state of the tree the running install was
+  *built* from, so two byte-legitimate installs of the **same pinned commit**
+  can emit different bytes for identical evidence (a `git+…@<sha>` install
+  records `+g<sha>`; a `pip install` of a source tarball of that same `<sha>`
+  has no `.git` at build time and honestly records `+unknown`, which no fix
+  to `dirty` can collapse). Documented in `docs/cli/signoff.md`
+  ("`build` describes the *install*, not only the commit", "Verifying a
+  committed report: `--check`") and `docs/cli/version.md` ("These fields
+  describe the install, not only the commit"), which also now names the
+  byte-canonical provisioning route for a gate script.
+- **Fixed** (#2244, `klt lvs`, no `schema_version` bump — the `side` field
+  already documented `"layout"`/`"reference"`/`"both"` as valid values;
+  this changes when each is emitted, not the shape): a
+  `reference.form: "gate-level-verilog"` reference that itself
+  instantiates a power-only master (filler/tap/endcap — the shape a
+  DEF-derived `write_verilog` reference produces, with an empty connection
+  list per instance, unlike `klt place-and-route`'s own `verilog_path`
+  writer) is now pruned from the reference side too, not just the layout
+  side (issue #1622's original `topology.power_only_pruned` prune).
+  Previously only the layout-side copy was removed, leaving the
+  reference-side master and its instances with no counterpart at all — a
+  `topology` "circuit could not be matched to a counterpart" error cascade
+  (one per reference type, one per reference instance) around an
+  otherwise-clean `power_connectivity: "match"` verdict, misreading an
+  equivalent design as a signal-side `mismatch`. The prune now runs
+  symmetrically: a qualifying master's type and every instance of it are
+  removed from whichever side(s) actually instantiate it, disclosed once
+  as a single `topology.power_only_pruned` entry (`side: "layout"` when
+  only the layout side had one, `"reference"` when only the reference
+  side did, `"both"` when each side did). See
+  [`docs/cli/lvs.md`](docs/cli/lvs.md)'s `topology.power_only_pruned`
+  section for the corrected contract.
+- **Documented** (#2246): `docs/cli/gen.md`'s "Semantics and guarantees"
+  section now states plainly that generator *geometry* output is not
+  guaranteed stable across `klt` releases before `1.0` — only the JSON
+  envelope shape carries the existing additive-fields guarantee — citing the
+  `0.5.0` gf180mcu implant-ring coverage fixes (#1577, #1580) and the
+  per-PDK output-dbu-grid change (#1496) as concrete precedents. A
+  byte-reproduction-based consumer is told to key drift detection off
+  `provenance.klt_version`/`provenance.klayout_version` (already shipped,
+  unreleased, via #2035/PR #2066) rather than a bare `klt --version`, and to
+  consult this file to see whether a version difference is
+  geometry-affecting before assuming a byte diff means an operator edit.
+  `docs/json-contract.md`'s shared `provenance` block section cross-links
+  the new caveat. No functional change: the existing
+  `provenance.klt_version`/`klayout_version` fields are judged sufficient
+  granularity for this use case, so no dedicated per-generator
+  geometry-revision field was added.
+
+- **Added** (#2234, additive — **no** `schema_version` bump on `klt erc` or
+  `klt signoff`; every field below is new, and a spec that uses neither new
+  key produces the same report it did before, except for the
+  always-present-but-`null` `ties_disclosure` echo and an empty
+  `erc_coverage.checked_by_assertion`): two ways for a stream whose taps
+  carry **no distinguishing implant/marker layer at all** to declare them —
+  the implant-free full-custom case where neither `ties[].tap_requires` (no
+  implant is drawn to intersect) nor `ties[].tap_is_dedicated` (the PDK ships
+  no tap-only layer) has anything true to say, so every tie declaration
+  lands *degenerate* (#2199) and
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) item 11's
+  zero-`erc.missing_tie` condition is unreachable by construction.
+  `ties[].tap_boxes` (array of `[left, bottom, right, top]` micrometre
+  boxes) **asserts** where the tap geometry is, intersected into `tap_layer`
+  and composable with `tap_requires`; because it rests on the caller's word
+  rather than on a drawn marker it is graded under its own coverage
+  classification, `erc_coverage.checked_by_assertion` (a subset of
+  `checked`, additive to the four common-contract lists), and it is held to
+  exactly the falsifiability bar #2199 set: an assertion that removes
+  nothing from the drawn `tap_layer` inside the well is still
+  `degenerate_tap_declaration`, and one matching no drawn geometry produces
+  the same honest "no tap drawn" finding a genuinely absent tap would. The
+  top-level `ties_disclosure` (`{"reason": <non-empty string>}`) is for a
+  stream that cannot express a tap at all: it changes no geometry and no
+  finding, only the `erc_coverage.inapplicable` reason recorded for the
+  undeclared `erc.missing_tie` work (`ties_disclosed_unexpressible` in place
+  of `no_ties_declared`), which `klt signoff`'s T1 item 11 renders as the
+  distinct reason `supply_spec_disclosed_unexpressible` — still **unmet**, a
+  disclosure proves nothing about the tap's actual connectivity, but no
+  longer indistinguishable from a spec that never considered the question.
+  A `met` item 11 citation's `power_delivery` block additionally carries
+  `ties_checked_by_assertion`. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "A tie with no distinguishing
+  marker layer at all".
+
+- **Changed** (#2230, additive — **no** `schema_version` bump on any verb; no
+  `klt` payload *shape* changes, only which strings `lint-envelope` reports
+  and what three committed example artifacts contain): `klt env-provenance
+  lint-envelope` no longer flags two shapes that were never host paths —
+  an angle-bracket **template root** (`<path-to-your-checkout>/infra/run.sh`,
+  exempt for the same reason `$PDK_ROOT/…` already was; adjacency-scoped, so
+  a real absolute path elsewhere in the same string is still reported) and a
+  **URI fragment holding an RFC 6901 JSON Pointer**
+  (`02-architecture.json#/blocks/ota_buffer`; only the fragment is excised,
+  so an absolute path on the document side of the `#` is still a finding).
+  Alongside it, the three committed `examples/critical-net-mom-fidelity/
+  phase*.json` `klt extract` reports had the generating worktree's absolute
+  path in `file`/`netlist_path` rewritten repo-relative (field *shape*
+  unchanged — still plain strings), which also makes `klt extract --check` on
+  them resolve their input on any checkout instead of reporting
+  `provenance.input.content_hash: null` everywhere but one machine, and
+  `examples/design-centering/{request,sized-device}.json`'s `/abs/path/…`
+  documentation placeholder was re-spelled `<abs-path>/…`. With the tree
+  clean at **zero `--allow-prefix`**, `git ls-files 'examples/**/*.json' |
+  xargs klt env-provenance lint-envelope` is now a CI step so it cannot
+  regress — plus two in-suite regression tests, one asserting the committed
+  tree lints clean (so a bad artifact fails `pytest` before CI) and one
+  asserting the CI step stays wired with an empty allow-list. See
+  [`docs/cli/env-provenance.md`](docs/cli/env-provenance.md)'s "Rules" and
+  "Wiring it into a repo's CI" sections.
+
+- **Changed** (#2227, `--format text` only — **no** `schema_version` bump and
+  no change to any `--format json` payload): `klt signoff`'s text rendering
+  no longer emits ANSI colour unconditionally. Colour now follows
+  `stdout.isatty()` — on at a terminal, off when redirected to a file or
+  piped — and is suppressed outright by `--no-color`, the new
+  `--color=never`, or `$NO_COLOR` (any non-empty value,
+  [no-color.org](https://no-color.org/)). `--color=always` opts back in
+  through a pipe and outranks `$NO_COLOR`. The motivating case is the
+  committed tier report `--manifest` exists to produce: `klt signoff
+  --manifest m.json --format text > signoff.txt` is now escape-free by
+  default, readable in a pull-request diff, and greppable without stripping
+  ANSI first — so the committed file can stay byte-identical to what the
+  grader emitted. Terminal output is unchanged. **Callers that relied on the
+  escapes being present in redirected/piped output must now pass
+  `--color=always`.** See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Colour in `--format text`"
+  section.
+
+- **Added** (#2224, additive — **no** `schema_version` bump on `klt
+  synthesize` or `klt place-and-route`; the `--check`/`--rerun` payloads are
+  their own `schema_version: 1` documents, not a change to either verb's
+  report shape): the two *flow* verbs now have the committed-evidence
+  verification `klt drc`/`klt lvs`/`klt extract` have had since #1106/#1149 —
+  `klt synthesize REQUEST --check REPORT [--rerun]` and `klt place-and-route
+  REQUEST --check REPORT [--rerun]`, built on the same
+  `_report_verify.py` building blocks and reporting the same two-valued
+  `status: "match"`/`"drifted"` (exit `0`/`3`; a report that cannot be
+  verified at all is exit `1`, never a false pass). Unlike the three existing
+  consumers, the positional `REQUEST` stays required: a flow-verb report
+  echoes its outputs and provenance hashes but never the request that
+  produced it. `engine_version` (the Yosys/OpenROAD build string) joins
+  `provenance.klt_version`/`klayout_version`/`pdk.version` in the `--rerun`
+  exclusion set, and run-scoped bookkeeping (`synthesize`'s per-run
+  `run_id`/artifact paths, `place-and-route`'s `uuid4`-keyed `engine_logs[]`)
+  is canonicalized out of both sides of the diff. `klt place-and-route` gains
+  exit `3`, used *only* by `--check`. See
+  [`docs/cli/synthesize.md`](docs/cli/synthesize.md)'s and
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s
+  "`--check` / `--rerun`" sections.
+
+- **Added** (#2224): `klt env-provenance lint-envelope FILE…` — walks a
+  committed JSON envelope and fails (exit `3`) on any string field carrying
+  an **absolute host path**, naming the offending field by dotted path, with
+  `--allow-prefix` for genuinely machine-wide PDK/tool install roots.
+  Deliberately broader than the existing `klt env-provenance scan`, which
+  answers the *disclosure* question (home-shaped paths only): `/opt/build/
+  out.def` names nobody and still makes a regenerated artifact byte-differ on
+  another checkout, which is how a downstream repo's committed corpus
+  artifact broke cross-checkout byte comparison (2AMLogic/gf180-surge#39).
+  Not wired into CI here at the time — #2230 (below) cleared the tree and
+  wired it in. `docs/json-contract.md` now states the
+  repo-relative-provenance rule for committed artifacts alongside the
+  existing "Output-artifact path fields" table.
+
+- **Added** (#2223, additive — **no** `schema_version` bump on `klt equiv`):
+  an optional Verilator fast-path backend for `klt equiv`'s
+  counterexample/vector replay, selected by `request.sim_backend` (or
+  `--sim-backend`): `"iverilog"` (default, **canonical for evidence**,
+  unchanged), `"verilator"` (replays via `verilator --binary` — an
+  interpreted event loop replaced by compiled C++, ~6.4× faster on a
+  downstream long-vector bring-up and widening with vector length), or
+  `"both"`. Under `"both"` the two backends **must agree**: a differing
+  confirmation verdict, or a replayed-output difference the declared
+  2-state/4-state modelling gap does not explain, is reported as an
+  error-severity `sim_backend_disagreement` diagnostic with
+  `confirmed_by_simulation` reset to `null` and `status` downgraded to
+  `"inconclusive"` (exit `4`) — never a pass, and never silently resolved
+  in favour of one backend. New additive response fields: top-level
+  `sim_backend`, `counterexample.simulation.four_state`, and
+  `counterexample.simulation_cross_check` (the second backend's own run
+  plus `agreement` and per-signal `output_mismatches`). With no `verilator`
+  installed nothing is fabricated: the Verilator-only backend degrades to
+  the same `simulation_unavailable` warning a missing `iverilog` already
+  produces (it never silently runs `iverilog` and labels the result
+  Verilator's), and `"both"` records `agreement: "unavailable"` while the
+  canonical evidence stays exactly what `sim_backend: "iverilog"` produces.
+  See [`docs/cli/equiv.md`](docs/cli/equiv.md)'s "Replay backend" section.
+
+- **Fixed** (#2226, `klt erc`, no `schema_version` bump — this is a
+  *conformance* fix, not the semantics redefinition
+  [`docs/json-contract.md`](docs/json-contract.md)'s "value sets within an
+  unchanged shape" caveat requires a bump for: the field's documented
+  meaning is the same before and after, and only the implementation moves
+  to match it. The `klt precheck` precedent that did earn a bump, issue
+  #452, is the opposite direction — docs and code agreed, and the
+  *definition* itself changed):
+  `provenance.devices[].body_area_um2` now reports the area the
+  declaration **actually** subtracted from its `on` role — the marker
+  layer intersected with that role's own drawn conductor region — instead
+  of the marker layer's own area. Both the field table in
+  [`docs/cli/erc.md`](docs/cli/erc.md) and the implementation's docstring
+  already described it that way; the computation did not. Two consequences
+  for readers of committed ERC reports: a well-formed declaration no longer
+  over-states its carve-out (device-body markers are conventionally drawn
+  with enclosure past the conductor they mark, so `area(marker)` exceeded
+  the real cut for essentially every correct declaration), and a
+  declaration whose `on` names a role its marker never touches now reports
+  `0.0` instead of the same large number a correct declaration reports —
+  restoring the wrong-`on` cross-check the field exists to perform. Such a
+  declaration (marker drawn on the stream, zero overlap with its declared
+  role) additionally emits a one-line warning on stderr; `--format json`
+  goes to stdout only, so a piped report is unaffected. Connectivity, net
+  extraction, and every finding are byte-identical — the region subtracted
+  from the role was already `region - marker`, which equals
+  `region - (marker ∩ region)`. `--deck`-detected entries are unaffected:
+  their regions are derived from the role's own layer by construction.
+
+- **Added** (#2216, additive — **no** `schema_version` bump on `klt version`
+  or either `klt signoff` doc-parsing mode): `klt version --format json` now
+  reports `grading_ruleset_id`, a `sha256:`-prefixed content hash of the
+  shipped `signoff.py` grading module -- the missing half `git_commit`/
+  `git_tag` could not answer, since those identify the *source checkout* a
+  build was made from, not the *grading rules* actually compiled into it. A
+  registry wheel built from a release tag and a `pip install git+...@<tag>`
+  snapshot of that same tag now report the identical id (byte-identical
+  grading code, no shared `.git` history required to prove it), while a
+  full-repo checkout that has moved past the tag on `main` reports a
+  different one whenever `signoff.py`'s grading logic actually changed.
+  Echoed into every `klt signoff --manifest`/`--fleet` report's own `build`
+  block, so a committed tier-verdict report names the grading rules that
+  produced it. Also new: `klt signoff --describe-grader`, which enumerates
+  -- at runtime, without reading source -- which T1 checklist item ids this
+  build has grading rules for, alongside the same `grading_ruleset_id`,
+  built on the existing `_build_t1_item_ids()`/`_is_graded_by_build()`
+  machinery (#2176) that already computed this internally to populate each
+  tier-report row's `graded_by_build` field. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Identifying the grading
+  build" section.
+
+- **Added** (#2202, additive — **no** `schema_version` bump on either mode):
+  `klt signoff --manifest`/`--fleet` now report `build_t1_item_count` beside
+  the existing `t1_item_count` — how many T1 rows **this build's own shipped
+  doc** would have rendered, against how many the parsed doc did. This is the
+  reverse of #2176's `graded_by_build`: a `--tiers-doc`/`$KLT_TIERS_DOC` copy
+  *older* than the running build produces no wrong verdict (every rendered
+  row is correctly graded), but the report says nothing about the items it
+  never listed, so a build that grades 11 T1 items pointed at a 9-item doc
+  awards `tier: "T1"` on 9/9 and reads exactly like a full-checklist claim —
+  a strictly weaker claim, previously distinguishable only by a reader who
+  already knew which build produced which report. The field is a **row**
+  count like `t1_item_count` (so a `mixed-signal` block's pair doubles
+  together), is carried on each `--fleet` `blocks[]` row as well as on the
+  tier report — unlike per-item `graded_by_build`, because those rows carry
+  `t1_item_count` too — and is surfaced in the text rendering as a `scope:`
+  line whenever the two differ. It is `null`, never a fabricated number, when
+  this build cannot read its own shipped doc, the same rule `graded_by_build`
+  follows when it cannot prove divergence. The missing items are deliberately
+  *not* rendered as rows: the report is the parsed doc's skeleton by design.
+  No `schema_version` bump — a new key on an unchanged shape, with no grading
+  change behind it, per
+  [`docs/json-contract.md`](docs/json-contract.md).
+
+- **Changed** (#2203, `schema_version` 2 → **3** for `klt signoff --fleet`'s
+  report only): the fleet roll-up's `blocks[].blocking_item` now names an
+  unmet T1 item **this build has no grading rules for** (`graded_by_build:
+  false` — an item id only a `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc
+  lists, #2176) in preference to every other unmet item, where #2178's rule
+  demoted it below any gradeable one. That demotion was incidental, not
+  intended: such an id is in neither grading table, so it satisfied the
+  "structurally ungradeable" predicate written for items 1/2/9/10 and was
+  swept up with them. The two are opposites for this purpose. Items 1/2/9/10
+  are demoted because they are unmet *by construction* for every honestly
+  authored manifest — background noise, and a weak answer to "why isn't this
+  block T1 yet". A `graded_by_build: false` row is never expected and is the
+  sharpest answer available: the roll-up could not evaluate that item at
+  all, so every other explanation it prints is conditional on a completeness
+  the verdict does not have — and it is the only blocker class a manifest
+  edit cannot clear, since such an item can never render `"met"` on this
+  build. The class is read from `graded_by_build`, so it covers both the
+  cited form (`reason: "ungradeable_by_build"`) and the uncited one
+  (`reason: "no_evidence"`). `blocks[].ungraded_items` is unchanged — it
+  lists both ungradeable classes exactly as it did before — and no field is
+  added, removed or retyped; the bump is solely because an already-shipped
+  field's *meaning* moved, the same rule that took this report to `2` in
+  #2178. A fleet graded against the shipped doc is byte-identical: no item
+  is ever `graded_by_build: false` there, so the new rule is unreachable.
+  `--manifest` and envelope-aggregation mode are untouched, and no item's
+  grading changes. See [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Which
+  unmet item the blocker names".
+
+- **Added** (#2204): `klt erc` gained a new `--deck <name>` flag (currently:
+  `gf180mcu`, `sg13cmos5l`, `sg13g2`, `sky130` — the same curated-registry
+  lookup `klt extract --deck`/`klt lvs --deck` resolve, no PDK install
+  needed) that auto-detects a curated deck's own device-body marker layers
+  and carves them out of the matching `stackup`/`vias` role — the deck-driven
+  alternative to hand-transcribing a `devices[]` entry (#2183). A deck
+  device applies to a role only when its conducting-body layer equals that
+  role's own layer/datatype exactly (`ResistorDevice.body`, or
+  `CapacitorDevice.top_plate`/`top_plate_via`, the latter narrowed to only
+  the via's overlap with the recognised bottom plate — never the whole via
+  layer, which is typically also the deck's own ordinary inter-metal via).
+  An explicit `devices[]` entry for a role still wins over the deck's own
+  detection for that role. Every auto-applied carve-out is echoed in
+  `provenance.devices` exactly as a hand-declared entry is, plus new
+  `source` (`"declared"` vs `"deck"`) and `superseded_by` fields; a deck
+  device matching no declared role is still listed (`"on": null`) rather
+  than silently dropped. `provenance.deck` — previously always `null` for
+  `klt erc` — is now populated when `--deck` is given. Both additions are
+  conditional on `--deck`: a run that omits it (every caller before this
+  issue) produces byte-identical output, so `schema_version` stays `1`. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "Deck-driven device-marker
+  auto-detection".
+
 - **Changed** (#2199): `klt erc` no longer reports a **degenerate** `ties[]`
   declaration as a passing `erc.missing_tie` check. A tie whose declared tap
   region is indistinguishable from an ordinary source/drain contact — no
@@ -59,6 +382,55 @@ not `klt --version`, if you need to detect this kind of drift. See
   `schema_version` bump — the `reason` enum gains a value, none changed
   meaning. See
   [`docs/cli/signoff.md`](docs/cli/signoff.md)'s `reason` values table.
+
+- **Added** (#2196, additive — **no** `schema_version` bump, per
+  [`docs/json-contract.md`](docs/json-contract.md)): every `"met"` citation
+  in `klt signoff --manifest`'s tier report now carries `input_verified`
+  — whether the cited envelope's own recorded
+  `provenance.input.content_hash` was checked against the **input artifact
+  the envelope names**, or only against the envelope's claim about it.
+  `--manifest`'s freshness gate compares a manifest's pinned `content_hash`
+  against that self-report; both sides are statements *about* a revision,
+  and neither is the revision, so a manifest and an envelope could go on
+  agreeing with each other indefinitely while the GDS/netlist/record they
+  describe was rewritten underneath them — the item stayed `met`, with a
+  pinned hash, and nothing anywhere had read the file. `klt signoff` now
+  re-hashes the artifact the envelope names (`drc`/`extract`/`erc`'s `file`,
+  `lvs`'s `layout` — the layout side `provenance.input` actually pins —
+  `sim`'s `netlist`, `pex`'s `layout`, `sta`'s `def_path`/`verilog_path`;
+  `yield` already re-hashed its samples document since #870) and reports
+  `true` (re-hashed, matches), `false` (re-hashed, disagrees) or `null`
+  (nothing was re-hashed — no recorded hash, no resolvable input path for
+  that kind, or a path that does not resolve to a readable file from the
+  grading context). The key is always present, `null` included: an omitted
+  key would leave the unverified case exactly as silent as it was before.
+  `--format text` prints the same statement under the `cite:` line it
+  qualifies. **Disclosure only**, matching #2002 (`coverage`) and #1983
+  (`body_bias`): no grading rule consults it, so no item's `met`/`unmet`
+  verdict moves — a citation that is `met` today stays `met` with
+  `input_verified: false` beside it. A verdict-changing remedy (a distinct
+  `input_changed` reason) is a deliberate follow-up. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "A pinned hash is checked
+  against the artifact, not only against the envelope".
+
+- **Added** (#2194): a multi-island `erc.unconnected_net` finding from `klt
+  erc` now says **where** the islands are, not only how many there are. Each
+  such finding carries a new `islands[]` array — one
+  `{"bbox", "layer", "shape_count"}` entry per disconnected electrical
+  island, in ascending cluster-id order — and its previously always-`null`
+  top-level `bbox` is now the box spanning every island. `bbox` values are
+  raw database units, the same `{"left", "bottom", "right", "top"}`
+  convention as `klt drc`'s `violations[].bbox`. Previously the only
+  actionable content ("which island is which, and where") required a caller
+  to rebuild `klt erc`'s own `LayoutToNetlist` connectivity model by hand.
+  The `islands` key is present on **every** finding for a uniform key set,
+  but is `null` for every rule other than multi-island
+  `erc.unconnected_net` — including the zero-match `erc.unconnected_net`
+  case, which has no geometry to point at. `klt erc --format text` prints
+  one `island N: (left,bottom)-(right,top) layer=… shapes=…` line per
+  island. Additive: no `schema_version` bump. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "Locating the islands of a
+  multi-island `erc.unconnected_net`".
 
 - **Documented** (#2180): `klt erc`'s "Connectivity model" section in
   [`docs/cli/erc.md`](docs/cli/erc.md) now states a false-positive risk that

@@ -227,3 +227,43 @@ scripts/pr-worktree.sh
 # files resynced normally.
 scripts/check-promotion-landed.sh
 scripts/tests/test-check-promotion-landed.sh
+
+# #2237 (2026-09-21): sweep-lease-fence.sh's `check` subcommand (and its test
+# suite, and the pre-push call site in builder-pr.md) carry a local-only
+# `--sweep-id ID` parameter. Upstream's `cmd_check` has NO sweep-id parameter
+# at all: its EXPIRED-ownership test is `[[ "$lease_host" == "$host" ]]` and
+# its SUPERSEDED test is `[[ "$lease_host" != "$host" ]]` -- host only, never
+# the freshest lease's own `sweep=` field. So two independent dispatches on
+# the SAME host are indistinguishable to the fence, and an abandoned
+# same-host lease record left behind by a dead predecessor sweep permanently
+# aborts (exit 3, EXPIRED) every successor dispatch on that issue, forever --
+# a dead sweep's never-renewed, never-yielded record can never stop being the
+# freshest lease comment on its own. Observed live on issue #2226
+# (2026-09-21): dispatch `sweep-issue-2226-1789988240`, whose own renewal
+# loop was alive and healthy the whole time, was fenced out by the expired
+# lease of `sweep-issue-2226-1789985384` on the same host; the Builder had to
+# hand-publish a real lease with `sweep-lease-publish.sh` to get unstuck.
+# This is the same failure #6783 already fixed for the DIFFERENT-host case
+# upstream -- the same-host/different-sweep case was simply never reachable
+# there, because `check` cannot know its own sweep id. `--sweep-id` closes
+# that hole by making "this dispatch's own lease" a (host, sweep) pair, the
+# identity `sweep-lease-publish.sh --sweep-id` (which DOES take one) already
+# publishes. Omitting the flag keeps the exact pre-#2237 host-only behavior,
+# so an un-updated caller is unaffected.
+#
+# The fix was not upstreamed into rjwalters/loom's own sweep-lease-fence.sh
+# template, so an unpinned resync would silently revert it -- the same
+# reversion pattern as #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020/
+# #2193. `roles/builder-pr.md` is pinned here too because `.loom/roles/` is
+# resynced from upstream's own `defaults/roles/` tree, NOT regenerated from
+# this repo's `.claude/commands/loom/` copy -- an unpinned `roles/` file is
+# reverted independently of its `commands/loom/` twin (the two have already
+# drifted apart on this repo for exactly that reason). Its `commands/loom/`
+# twin needs no new entry: `commands/loom/builder-pr.md` is ALREADY pinned by
+# the #1674 entry above -- do not drop that pin without moving its path here,
+# or this fix's call-site half goes back to upstream's sweep-id-less form.
+# If the upstream Loom project ever adopts an equivalent `--sweep-id`
+# parameter, these pins can be dropped and the files resynced normally.
+scripts/sweep-lease-fence.sh
+scripts/tests/test-sweep-lease-fence.sh
+roles/builder-pr.md

@@ -37,6 +37,8 @@ from klayout_tools.signoff import (
     build_fleet_report,
     build_signoff,
     build_tier_report,
+    check_fleet_report,
+    check_tier_report,
 )
 
 # Since issue #2176 a tier/fleet report carries the running build's identity
@@ -1753,6 +1755,10 @@ def test_tier_report_item_3_citation_omits_coverage_for_legacy_evidence(tmp_path
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
+        # Issue #2196: this fixture's envelope names a `file` that does not
+        # exist beside the evidence, so nothing was re-hashed -- the pinned
+        # hash was compared only against the envelope's own claim.
+        "input_verified": None,
         "exit_status": 0,
     }
 
@@ -4063,6 +4069,9 @@ def test_met_item_carries_a_citation_with_file_hash_and_exit_status(tmp_path):
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
+        # Issue #2196: nothing was re-hashed (this fixture's `file` names no
+        # artifact reachable from the grading context).
+        "input_verified": None,
         "exit_status": 0,
         # Issue #2002: item 3's citation also quotes the three `coverage`
         # fields docs/design-evidence-tiers.md requires the claim to
@@ -4592,6 +4601,8 @@ def test_pex_evidence_satisfies_item_7(tmp_path):
         "kind": "pex",
         "check_status": "pass",
         "content_hash": "sha256:extractedpex",
+        # Issue #2196: nothing was re-hashed.
+        "input_verified": None,
         "exit_status": 0,
     }
 
@@ -4923,6 +4934,9 @@ def test_generic_evidence_satisfies_item_8(tmp_path):
         "kind": "generic",
         "check_status": "pass",
         "content_hash": None,
+        # Issue #2196: a `generic` envelope with no recorded input hash has
+        # nothing to verify against an artifact either.
+        "input_verified": None,
         "exit_status": 0,
     }
 
@@ -5272,6 +5286,8 @@ def test_command_evidence_runs_and_grades_met(monkeypatch):
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
+        # Issue #2196: nothing was re-hashed.
+        "input_verified": None,
         "exit_status": 0,
         # Issue #2002: a command-backed `drc` citation quotes the coverage
         # block off the envelope the command actually printed, exactly like
@@ -5789,9 +5805,12 @@ def test_cli_manifest_all_met_exits_zero(tmp_path, capsys):
 
 
 def test_cli_manifest_text_format_colors_unmet_items_red(tmp_path, capsys):
+    # `--color=always` because since issue #2227 colour follows stdout's
+    # isatty(), and capsys's replacement stdout is not a terminal. What is
+    # asserted here is unchanged: *when* colour is on, unmet items are red.
     manifest_path = _write(tmp_path, "manifest.json", _manifest())
 
-    exit_code = main(["signoff", "--manifest", manifest_path])
+    exit_code = main(["signoff", "--manifest", manifest_path, "--color", "always"])
 
     assert exit_code == 3
     out = capsys.readouterr().out
@@ -5805,7 +5824,7 @@ def test_cli_manifest_text_format_colors_met_items_green(tmp_path, capsys):
         tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
     )
 
-    main(["signoff", "--manifest", manifest_path])
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
 
     out = capsys.readouterr().out
     assert "\033[32m" in out  # met items render green
@@ -5839,13 +5858,181 @@ def test_cli_manifest_json_output_distinguishes_skipped_from_failed_check(
 def test_cli_manifest_text_format_shows_reason_for_unmet_items_in_red(tmp_path, capsys):
     manifest_path = _write(tmp_path, "manifest.json", _manifest())
 
-    main(["signoff", "--manifest", manifest_path])
+    # `--color=always`: see the note on
+    # test_cli_manifest_text_format_colors_unmet_items_red (issue #2227).
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
 
     out = capsys.readouterr().out
     assert "reason: no_evidence" in out
     # The reason line itself is rendered red, not just the UNMET marker --
     # a skipped check must read as loudly as a failed one, not blend in.
     assert "\033[31mreason: no_evidence\033[0m" in out
+
+
+# --------------------------------------------------------------------------- #
+# Colour policy (issue #2227): `--format text` is also a *committed* artifact
+# --------------------------------------------------------------------------- #
+
+
+def _fake_isatty(monkeypatch, is_tty: bool) -> None:
+    """Make the captured stdout report itself as a terminal (or not).
+
+    `signoff_cmd` resolves the palette from `sys.stdout` at call time, and
+    capsys has already replaced `sys.stdout` by then -- so this patches the
+    capture object's own `isatty`, which is exactly what the command reads.
+    """
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: is_tty, raising=False)
+
+
+def _no_ambient_no_color(monkeypatch) -> None:
+    """Drop any `$NO_COLOR` the developer's own shell exported, so a test
+    asserting the *tty default* is not silently passing/failing on it."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+
+def test_cli_manifest_text_omits_color_when_stdout_is_not_a_tty(
+    tmp_path, capsys, monkeypatch
+):
+    """The committed-artifact case this issue is about: redirected to a file
+    or piped, the tier report carries no escapes at all -- with no flag."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, False)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(["signoff", "--manifest", manifest_path])
+
+    assert exit_code == 3
+    out = capsys.readouterr().out
+    assert "\033[" not in out
+    # Plain, but not *lossy*: the verdict markers a consumer greps survive.
+    assert "UNMET" in out
+    assert "reason: no_evidence" in out
+
+
+def test_cli_manifest_text_keeps_color_at_a_tty(tmp_path, capsys, monkeypatch):
+    """No regression to the terminal UX: at a tty, with no override, the
+    rendering is coloured exactly as it was before issue #2227."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert "\033[31m" in out
+
+
+def test_cli_manifest_text_honours_no_color_env_var(tmp_path, capsys, monkeypatch):
+    """`$NO_COLOR` (https://no-color.org/) wins over the tty default -- the
+    tty is faked on here precisely so this cannot pass by accident."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    assert "\033[" not in capsys.readouterr().out
+
+
+def test_cli_manifest_text_no_color_env_var_empty_is_not_set(
+    tmp_path, capsys, monkeypatch
+):
+    """An *empty* `$NO_COLOR` does not disable colour -- the standard's own
+    "present and not an empty string" rule."""
+    monkeypatch.setenv("NO_COLOR", "")
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    assert "\033[31m" in capsys.readouterr().out
+
+
+def test_cli_manifest_text_honours_no_color_flag(tmp_path, capsys, monkeypatch):
+    """`--no-color` forces escapes off even at a terminal."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--no-color"])
+
+    assert exit_code == 3
+    assert "\033[" not in capsys.readouterr().out
+
+
+def test_cli_manifest_text_honours_color_never(tmp_path, capsys, monkeypatch):
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--color", "never"])
+
+    assert "\033[" not in capsys.readouterr().out
+
+
+def test_cli_manifest_text_color_always_opts_back_in_through_a_pipe(
+    tmp_path, capsys, monkeypatch
+):
+    """The escape hatch the isatty() default owes a caller who *wants*
+    colour through `| less -R`."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, False)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
+
+    assert "\033[31m" in capsys.readouterr().out
+
+
+def test_cli_manifest_text_color_always_overrides_no_color_env(
+    tmp_path, capsys, monkeypatch
+):
+    """An option the caller typed beats an inherited environment variable --
+    `$NO_COLOR` governs the *default*, not an explicit request."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    _fake_isatty(monkeypatch, False)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--color", "always"])
+
+    assert "\033[31m" in capsys.readouterr().out
+
+
+def test_cli_manifest_json_output_is_never_coloured(tmp_path, capsys, monkeypatch):
+    """The JSON contract is unaffected by any of this: `--format json` at a
+    tty, with `--color=always`, still carries no escapes."""
+    _no_ambient_no_color(monkeypatch)
+    _fake_isatty(monkeypatch, True)
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--format",
+            "json",
+            "--color",
+            "always",
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert "\033[" not in out
+    assert json.loads(out)["t1_met_count"] == 0
+
+
+def test_cli_manifest_text_no_color_and_color_always_are_a_usage_conflict(
+    tmp_path, capsys
+):
+    """`--no-color` is the documented spelling of `--color=never`, so it wins
+    over a contradictory `--color=always` rather than being ignored -- the
+    suppressing option is the safe resolution for an artifact."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--no-color", "--color", "always"])
+
+    assert "\033[" not in capsys.readouterr().out
 
 
 def test_cli_manifest_and_files_together_is_an_error(tmp_path, capsys):
@@ -6253,12 +6440,17 @@ def test_tier_report_build_block_matches_klt_version(capsys):
             "git_tag",
             "dirty",
             "is_release",
+            "grading_ruleset_id",
         )
     }
     # `klt version`'s own schema_version and the KLayout-engine fields are
     # deliberately not echoed -- see signoff._BUILD_IDENTITY_FIELDS.
     assert "schema_version" not in result["build"]
     assert "klayout_version" not in result["build"]
+    # Issue #2216: unlike the KLayout-engine fields, this one *is* echoed --
+    # it identifies the grading rules that produced this report.
+    assert result["build"]["grading_ruleset_id"] == version_json["grading_ruleset_id"]
+    assert result["build"]["grading_ruleset_id"].startswith("sha256:")
 
 
 def test_fleet_report_carries_the_same_build_block_and_inherits_the_refusal(
@@ -6319,6 +6511,279 @@ def test_cli_text_output_names_the_build_and_the_ungradeable_rows(tmp_path, caps
 
 
 # --------------------------------------------------------------------------- #
+# `--describe-grader` (issue #2216): enumerate which T1 item ids this build
+# has grading rules for, and its grading-code content hash, without reading
+# a manifest or running any check.
+# --------------------------------------------------------------------------- #
+
+
+def test_describe_grader_enumerates_what_the_build_actually_grades():
+    """AC: the enumerated ids match what `_is_graded_by_build` actually
+    reports per item on a real tier report."""
+    result = signoff_module.describe_grader()
+
+    build_item_ids = signoff_module._build_t1_item_ids()
+    assert result["graded_t1_item_ids"] == sorted(build_item_ids)
+
+    tier_report = build_tier_report(_manifest())
+    graded_by_report = {
+        item["id"]
+        for item in tier_report["items"]
+        if item["id"] is not None and item.get("graded_by_build", True)
+    }
+    assert graded_by_report == set(result["graded_t1_item_ids"])
+
+
+def test_describe_grader_shape():
+    result = signoff_module.describe_grader()
+    assert set(result) == {
+        "schema_version",
+        "version",
+        "grading_ruleset_id",
+        "source_doc",
+        "graded_t1_item_ids",
+    }
+    assert result["schema_version"] == signoff_module.DESCRIBE_GRADER_SCHEMA_VERSION
+    assert result["grading_ruleset_id"].startswith("sha256:")
+    assert result["source_doc"] == "docs/design-evidence-tiers.md"
+    assert result["graded_t1_item_ids"] == sorted(result["graded_t1_item_ids"])
+
+
+def test_describe_grader_reports_none_when_the_shipped_doc_is_unreadable(
+    monkeypatch,
+):
+    """Never fabricate a claim this build cannot substantiate -- mirrors
+    `_is_graded_by_build`'s own "unreadable shipped doc" fallback."""
+    monkeypatch.setattr(signoff_module, "_build_t1_item_ids", lambda: None)
+    result = signoff_module.describe_grader()
+    assert result["graded_t1_item_ids"] is None
+
+
+def test_describe_grader_matches_klt_versions_grading_ruleset_id(capsys):
+    """The two entry points (`klt version --format json` and `klt signoff
+    --describe-grader`) must never disagree about which build is running."""
+    assert main(["version", "--format", "json"]) == 0
+    version_json = json.loads(capsys.readouterr().out)
+
+    result = signoff_module.describe_grader()
+    assert result["grading_ruleset_id"] == version_json["grading_ruleset_id"]
+    assert result["version"] == version_json["version"]
+
+
+def test_cli_describe_grader_json(capsys):
+    assert main(["signoff", "--describe-grader", "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == signoff_module.describe_grader()
+
+
+def test_cli_describe_grader_text(capsys):
+    assert main(["signoff", "--describe-grader"]) == 0
+    out = capsys.readouterr().out
+    result = signoff_module.describe_grader()
+    assert f"klt {result['version']}" in out
+    assert result["grading_ruleset_id"] in out
+    assert "11" in out  # a shipped item id must appear somewhere in the list
+
+
+def test_cli_describe_grader_refuses_manifest():
+    assert main(["signoff", "--describe-grader", "--manifest", "manifest.json"]) == 1
+
+
+def test_cli_describe_grader_refuses_fleet():
+    assert main(["signoff", "--describe-grader", "--fleet", "fleet.json"]) == 1
+
+
+def test_cli_describe_grader_refuses_files(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    assert main(["signoff", "--describe-grader", drc_path]) == 1
+
+
+def test_cli_describe_grader_refuses_tiers_doc(tmp_path):
+    doc_copy = tmp_path / "vendored.md"
+    doc_copy.write_text(
+        signoff_module.DEFAULT_DOC_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    assert main(["signoff", "--describe-grader", "--tiers-doc", str(doc_copy)]) == 1
+
+
+# --------------------------------------------------------------------------- #
+# A doc *older* than the build: `build_t1_item_count` (issue #2202) -- the
+# reverse of `graded_by_build`. No verdict is wrong here; the checklist is
+# just shorter than what this build could have checked, and without this
+# field nothing in the artifact says so.
+# --------------------------------------------------------------------------- #
+
+
+def _shipped_t1_item_count() -> int:
+    """How many T1 items the shipped doc lists -- derived, never a literal,
+    so this file's expectations track the doc the way the command does."""
+    return len(signoff_module._build_t1_item_ids())
+
+
+def test_shipped_doc_reports_equal_doc_and_build_item_counts():
+    """AC: with no override the two counts agree, so the common case reads
+    exactly as it did before this field existed (issue #2202)."""
+    result = build_tier_report(_manifest())
+
+    assert result["t1_item_count"] == _shipped_t1_item_count()
+    assert result["build_t1_item_count"] == result["t1_item_count"]
+    # Purely additive: no schema bump rides with the new key.
+    assert result["schema_version"] == 1
+
+
+def test_an_override_with_the_same_item_list_is_not_a_shortfall(tmp_path):
+    """A vendored *copy* of the shipped doc is the ordinary `--tiers-doc`
+    use, and must not read as a scope gap."""
+    copied = tmp_path / "vendored-design-evidence-tiers.md"
+    copied.write_text(
+        signoff_module.DEFAULT_DOC_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    result = build_tier_report(_manifest(), tiers_doc=str(copied))
+
+    assert result["build_t1_item_count"] == result["t1_item_count"]
+
+
+def test_mixed_signal_counts_both_partitions_on_both_sides():
+    """`t1_item_count` doubles for a mixed-signal block (each item renders
+    once per partition), so the build-side count must double too -- an
+    unmultiplied one would report a shortfall on every mixed-signal report
+    that has none."""
+    result = build_tier_report(_manifest(kind="mixed-signal"))
+
+    assert result["t1_item_count"] == 2 * _shipped_t1_item_count()
+    assert result["build_t1_item_count"] == result["t1_item_count"]
+
+
+def test_a_doc_shorter_than_this_build_discloses_the_shortfall(tmp_path):
+    """The gap this issue is about: a T1 claim awarded on a 3-item checklist
+    by a build that grades 11 is a strictly weaker claim, and used to be
+    indistinguishable from the full one (issue #2202)."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(evidence={"1": drc_path, "2": drc_path, "3": drc_path}),
+        tiers_doc=_write_tiers_doc(tmp_path),
+    )
+
+    # A full-looking T1 claim...
+    assert result["tier"] == "T1"
+    assert result["t1_met_count"] == 3
+    assert result["t1_item_count"] == 3
+    # ...that now says what it was *not* measured against.
+    assert result["build_t1_item_count"] == _shipped_t1_item_count()
+    assert result["build_t1_item_count"] > result["t1_item_count"]
+
+
+def test_the_shortfall_scales_with_partitions_too(tmp_path):
+    """Both counts are row counts, so a mixed-signal block's shortfall is
+    reported in rows as well -- 6 rendered against 22 gradeable."""
+    result = build_tier_report(
+        _manifest(kind="mixed-signal"), tiers_doc=_write_tiers_doc(tmp_path)
+    )
+
+    assert result["t1_item_count"] == 6
+    assert result["build_t1_item_count"] == 2 * _shipped_t1_item_count()
+
+
+def test_an_unresolvable_shipped_doc_reports_no_count_rather_than_a_wrong_one(
+    tmp_path, monkeypatch
+):
+    """AC: a build that cannot read its *own* doc has no substantiated count
+    to report, so it reports `null` -- never a fabricated number, which
+    would be read either as a shortfall or as the absence of one."""
+    monkeypatch.setattr(
+        signoff_module, "DEFAULT_DOC_PATH", tmp_path / "no-such-shipped-doc.md"
+    )
+
+    result = build_tier_report(_manifest(), tiers_doc=_write_tiers_doc(tmp_path))
+
+    assert result["build_t1_item_count"] is None
+    # The doc-side count is unaffected: it comes from the parsed doc, which
+    # is readable here.
+    assert result["t1_item_count"] == 3
+
+
+def test_both_divergence_directions_are_reported_independently(tmp_path):
+    """A doc can simultaneously omit items this build grades and add items
+    it does not. The two fields answer different questions and neither is
+    derived from the other (issue #2202)."""
+    result = build_tier_report(_manifest(), tiers_doc=_write_future_tiers_doc(tmp_path))
+
+    # The future doc lists two items (3 and the future one)...
+    assert result["t1_item_count"] == 2
+    # ...one of which this build cannot grade (the #2176 direction)...
+    assert _item(result, _FUTURE_ITEM_ID)["graded_by_build"] is False
+    # ...while this build's own doc lists far more (the #2202 direction).
+    assert result["build_t1_item_count"] == _shipped_t1_item_count()
+
+
+def test_fleet_rows_carry_the_shortfall_beside_their_item_count(tmp_path):
+    """Scope decision (issue #2202): unlike per-item `graded_by_build`, this
+    field *is* carried into `--fleet` rows -- because `t1_item_count`, the
+    count whose shortfall it discloses, is carried there too."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_fleet_report(
+        {
+            "blocks": [
+                {
+                    "block": "b1",
+                    "kind": "analog",
+                    "evidence": {"1": drc_path, "2": drc_path, "3": drc_path},
+                },
+                {"block": "b2", "kind": "mixed-signal", "evidence": {}},
+            ]
+        },
+        tiers_doc=_write_tiers_doc(tmp_path),
+    )
+
+    analog, mixed = result["blocks"]
+    assert analog["t1_item_count"] == 3
+    assert analog["build_t1_item_count"] == _shipped_t1_item_count()
+    # Per-row, not per-roll-up: a mixed-signal row's counts both double.
+    assert mixed["t1_item_count"] == 6
+    assert mixed["build_t1_item_count"] == 2 * _shipped_t1_item_count()
+    # Still additive -- the fleet schema is unchanged by *this* field. The
+    # version it is pinned at moved to 3 for an unrelated reason (issue
+    # #2203 re-ranked `blocking_item`), not because `build_t1_item_count`
+    # was added.
+    assert result["schema_version"] == 3
+
+
+def test_cli_text_output_discloses_the_shortfall(tmp_path, capsys):
+    """The disclosure is in the terminal-first rendering too: a reader of
+    `T1: 3/3 items met` must not have to open the JSON to learn the
+    checklist was a third of what this build grades."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(evidence={"1": drc_path, "2": drc_path, "3": drc_path}),
+    )
+    tiers_doc = _write_tiers_doc(tmp_path)
+
+    exit_code = main(["signoff", "--manifest", manifest_path, "--tiers-doc", tiers_doc])
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "T1: 3/3 items met" in out
+    missing = _shipped_t1_item_count() - 3
+    assert f"scope: {missing} more T1 item(s) this build grades are not in" in out
+    assert f"this build's own doc lists {_shipped_t1_item_count()}" in out
+
+
+def test_cli_text_output_says_nothing_when_the_counts_agree(tmp_path, capsys):
+    """No line for the common case -- a report against the shipped doc reads
+    exactly as it did before (issue #2202)."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+
+    main(["signoff", "--manifest", manifest_path])
+
+    assert "scope:" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
 # build_fleet_report(): fleet-wide tier roll-up (issue #827, Phase 1c of
 # epic #706)
 # --------------------------------------------------------------------------- #
@@ -6352,7 +6817,8 @@ def test_fleet_report_covers_a_mixed_fleet_with_different_blockers(tmp_path):
 
     result = build_fleet_report({"blocks": [block_a, block_b, block_c]})
 
-    assert result["schema_version"] == 2
+    # 3 since issue #2203 re-ranked `blocking_item` again (2 was #2178's).
+    assert result["schema_version"] == 3
     assert result["block_count"] == 3
     assert result["t1_count"] == 1
     assert result["not_t1_count"] == 2
@@ -6617,6 +7083,183 @@ def test_cli_fleet_text_format_shows_demoted_ungraded_items(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "blocking: #3" in out
     assert "ungraded (no klt verb, uncited): #1, #2, #9, #10" in out
+
+
+# --------------------------------------------------------------------------- #
+# An `ungradeable_by_build` row OUTRANKS every other blocker -- issue #2203.
+#
+# Issue #2178 (above) demoted the four structurally-ungradeable items out of
+# `blocking_item` because they are unmet *by construction* for every honestly
+# authored manifest -- universal noise, and a weak answer to "why isn't this
+# block T1 yet".
+#
+# Issue #2176 then created a second population that `_is_structurally_
+# ungradeable_item()` also answers True for, incidentally: an item id only a
+# `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc lists, which this build has
+# no grading rules for at all (`graded_by_build: false`). It is in neither
+# grading table either, so the #2178 demotion swept it up too.
+#
+# The two are opposites for this purpose, so the priority is now explicit
+# (issue #2203): an `ungradeable_by_build` row is named FIRST. It is not
+# "one more unmet row" -- it is the report saying it could not evaluate this
+# item at all, which no other explanation can outrank, and which no edit to
+# the manifest can fix.
+# --------------------------------------------------------------------------- #
+
+#: A tier doc a newer release might ship, carrying BOTH kinds of ungradeable
+#: item: item 1 (Design sources -- no `klt` verb repo-wide, but this build's
+#: own doc lists it, so `graded_by_build: true`) and `_FUTURE_ITEM_ID` (only
+#: this doc knows it -- `graded_by_build: false`). Item 3 is the gradeable
+#: control.
+_FUTURE_TIERS_DOC_WITH_STRUCTURAL_ITEM = f"""\
+# Design-evidence tiers
+
+## The ladder
+
+| Tier | Claim | Demonstrated by |
+|---|---|---|
+| **T1 — sim-validated** | Designed and simulation-validated | Open-source evidence |
+| **T2 — signoff-validated** | Validated on commercial tools | T1, plus commercial |
+| **T3 — silicon-validated** | Fabricated and measured | T2, plus a tapeout |
+| **T4 — production-validated** | Proven in silicon | An external project |
+
+## T1 checklist — what "sim-validated" requires
+
+1. **Design sources** — the schematic/generator sources are in the repo.
+3. **DRC clean** — latest `klt drc` JSON report: `status: clean`.
+{_FUTURE_ITEM_ID}. **Formal equivalence** — an item this doc gained after the
+   running build shipped.
+
+## Verification rules
+
+- **Staleness is failure.**
+"""
+
+
+def _write_future_tiers_doc_with_structural_item(tmp_path) -> str:
+    path = tmp_path / "future-tiers-with-structural.md"
+    path.write_text(_FUTURE_TIERS_DOC_WITH_STRUCTURAL_ITEM, encoding="utf-8")
+    return str(path)
+
+
+def test_the_two_ungradeable_predicates_are_separate(tmp_path):
+    """AC: `_is_structurally_ungradeable_item()` keeps meaning exactly what
+    its docstring says (no `klt` verb behind the id, repo-wide), and the
+    build-coverage case is answered by its own check reading the rendered
+    item's `graded_by_build` field -- not derived a second time."""
+    assert signoff_module._is_structurally_ungradeable_item(1) is True
+    assert signoff_module._is_structurally_ungradeable_item(3) is False
+    assert signoff_module._is_structurally_ungradeable_item(11) is False
+
+    result = build_tier_report(
+        _manifest(), tiers_doc=_write_future_tiers_doc_with_structural_item(tmp_path)
+    )
+    structural = _item(result, 1)
+    by_build = _item(result, _FUTURE_ITEM_ID)
+    gradeable = _item(result, 3)
+
+    # Item 1 is structurally ungradeable but this build *does* grade it.
+    assert signoff_module._is_structurally_ungradeable_item(structural["id"]) is True
+    assert signoff_module._is_ungradeable_by_build(structural) is False
+    # The future item is the other population -- and, today, a subset of the
+    # structural one, which is exactly why the reduction cannot key on the
+    # structural predicate alone.
+    assert signoff_module._is_ungradeable_by_build(by_build) is True
+    # A gradeable item is neither.
+    assert signoff_module._is_structurally_ungradeable_item(gradeable["id"]) is False
+    assert signoff_module._is_ungradeable_by_build(gradeable) is False
+
+
+def test_fleet_blocking_item_prefers_an_ungradeable_by_build_row_over_a_real_gap(
+    tmp_path,
+):
+    """The decision this issue asked for: with an uncited item 3 (a genuine,
+    runnable gap) and an item this build cannot grade at all, the roll-up
+    names the one it could not evaluate. Naming item 3 would tell the reader
+    "run `klt drc`" when running it could never get this block to T1 on this
+    build."""
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("skewed-canary")]},
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )["blocks"][0]
+
+    assert row["tier"] is None
+    assert row["blocking_item"] == {
+        "id": _FUTURE_ITEM_ID,
+        "title": "Formal equivalence",
+        "partition": None,
+        "reason": "no_evidence",
+    }
+
+
+def test_fleet_blocking_item_prefers_a_cited_ungradeable_by_build_row(tmp_path):
+    """Same rule for the *cited* form of the same gap, where the row carries
+    `reason: "ungradeable_by_build"` rather than `no_evidence` -- the
+    reduction keys on `graded_by_build`, which covers both."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    row = build_fleet_report(
+        {
+            "blocks": [
+                _fleet_block_manifest(
+                    "skewed-canary", evidence={str(_FUTURE_ITEM_ID): drc_path}
+                )
+            ]
+        },
+        tiers_doc=_write_future_tiers_doc(tmp_path),
+    )["blocks"][0]
+
+    assert row["blocking_item"]["id"] == _FUTURE_ITEM_ID
+    assert row["blocking_item"]["reason"] == "ungradeable_by_build"
+
+
+def test_fleet_blocking_item_prefers_it_over_a_structurally_ungradeable_one(tmp_path):
+    """AC: with both kinds of ungradeable row unmet and nothing else to pick,
+    the build-coverage one wins -- and the structural one is still listed."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("skewed-canary", evidence={"3": drc_path})]},
+        tiers_doc=_write_future_tiers_doc_with_structural_item(tmp_path),
+    )["blocks"][0]
+
+    assert row["t1_met_count"] == 1
+    assert row["blocking_item"]["id"] == _FUTURE_ITEM_ID
+    assert [item["id"] for item in row["ungraded_items"]] == [1, _FUTURE_ITEM_ID]
+
+
+def test_fleet_ungraded_items_lists_both_populations(tmp_path):
+    """Option 3 of the issue, not in question: `ungraded_items` keeps listing
+    both kinds of row. It is "every unmet T1 item with no runnable check
+    behind it", which stays true of both whichever one `blocking_item`
+    names."""
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("skewed-canary")]},
+        tiers_doc=_write_future_tiers_doc_with_structural_item(tmp_path),
+    )["blocks"][0]
+
+    assert [item["id"] for item in row["ungraded_items"]] == [1, _FUTURE_ITEM_ID]
+    # The blocker is one of the listed rows, exactly as it already was when
+    # the roll-up fell back to a structurally-ungradeable item (issue #2178):
+    # `ungraded_items` demotes rows, it does not exclude the named one.
+    assert row["blocking_item"] in row["ungraded_items"]
+
+
+def test_fleet_blocking_item_rule_is_unchanged_when_the_build_grades_everything(
+    tmp_path,
+):
+    """Regression guard for #2178's own rule: with the shipped doc, no item
+    is ever `graded_by_build: false`, so the new branch is unreachable and a
+    gradeable unmet item still outranks the structural four."""
+    full_evidence = _full_t1_evidence(tmp_path)
+    evidence = {item_id: full_evidence[item_id] for item_id in ("3", "4", "8")}
+
+    row = build_fleet_report(
+        {"blocks": [_fleet_block_manifest("analog-canary", evidence=evidence)]}
+    )["blocks"][0]
+
+    assert row["blocking_item"]["id"] == 5
+    assert [item["id"] for item in row["ungraded_items"]] == [1, 2, 9, 10]
 
 
 # --------------------------------------------------------------------------- #
@@ -6953,6 +7596,30 @@ def test_cli_fleet_text_format_names_blocking_item(tmp_path, capsys):
     assert "canary-a" in out
     assert "blocking:" in out
     assert "no_evidence" in out
+    # Issue #2227: the roll-up shares the tier report's colour policy, so a
+    # non-tty stdout (what capsys is) gets the same escape-free rendering.
+    assert "\033[" not in out
+
+
+def test_cli_fleet_text_format_colour_follows_the_same_policy(
+    tmp_path, capsys, monkeypatch
+):
+    """Issue #2227: `--fleet` is the second renderer that colours, so it must
+    honour the same tty default and the same overrides -- not just
+    `--manifest`."""
+    fleet_path = _fleet_write(tmp_path, [_fleet_block_manifest("canary-a")])
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
+
+    main(["signoff", "--fleet", fleet_path])
+    assert "\033[31m" in capsys.readouterr().out  # coloured at a tty
+
+    main(["signoff", "--fleet", fleet_path, "--no-color"])
+    assert "\033[" not in capsys.readouterr().out  # --no-color wins
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    main(["signoff", "--fleet", fleet_path])
+    assert "\033[" not in capsys.readouterr().out  # $NO_COLOR wins
 
 
 def test_cli_fleet_and_manifest_together_is_an_error(tmp_path, capsys):
@@ -7656,6 +8323,9 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
         "strap_layers": ["met1", "met4"],
         "tapcell_master": "sky130_fd_sc_hd__tapvpwrvgnd_1",
         "power_connectivity_status": "match",
+        # Issue #2234: this fixture's ERC envelope carries no
+        # `erc_coverage` at all, so no tie rested on a caller assertion.
+        "ties_checked_by_assertion": [],
     }
 
 
@@ -7674,6 +8344,47 @@ def test_item_11_analog_met_with_supply_net_correspondence(tmp_path):
     assert item["citation"]["power_delivery"]["power_connectivity_status"] == (
         "unchecked"
     )
+
+
+def test_item_11_met_names_the_ties_that_rested_on_a_caller_assertion(tmp_path):
+    """Issue #2234: an asserted tie (`ties[].tap_boxes`) is graded `met`
+    exactly as a marker-derived one -- `klt erc` already rejected a
+    degenerate or unmatched assertion before it could get here -- but the
+    verdict of record says *which* taps rested on the caller's word, quoting
+    the cited run's own `erc_coverage.checked_by_assertion`, so the
+    distinction survives into the signoff report rather than being reachable
+    only by re-opening the ERC envelope."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
+            "skipped": [],
+            "inapplicable": [],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": ['erc.missing_tie:["nwell_tie"]'],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["ties_checked_by_assertion"] == [
+        'erc.missing_tie:["nwell_tie"]'
+    ]
 
 
 def test_item_11_digital_unmet_when_no_pdn_was_built(tmp_path):
@@ -7930,6 +8641,82 @@ def test_item_11_unmet_when_the_erc_spec_declared_no_ties(tmp_path):
     """Same rule, other half: `erc.missing_tie` is never computed when the
     spec omits `ties[]`, so zero tie findings proves nothing."""
     spec = {key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(tmp_path, kind="digital", erc_spec=spec)
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_unmet_but_distinct_reason_when_ties_disclosed_unexpressible(tmp_path):
+    """Issue #2234: the same "zero ties" fact as the test above, but the
+    spec explicitly disclosed why -- distinguishable in the rendered reason
+    and detail, even though the item stays unmet either way (a disclosure
+    proves nothing about the tap's actual connectivity, so it can never
+    substitute for a computed `erc.missing_tie` result)."""
+    spec = {
+        **{key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"},
+        "ties_disclosure": {"reason": "no implant layers are drawn on this stream"},
+    }
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": [
+                'erc.net_connectivity:["VPWR"]',
+                'erc.net_connectivity:["VGND"]',
+            ],
+            "skipped": [],
+            "inapplicable": [
+                {
+                    "id": "erc.missing_tie:[]",
+                    "reason": "ties_disclosed_unexpressible",
+                }
+            ],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": [],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_spec=spec, erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_disclosed_unexpressible"
+    assert item["detail"] == {
+        "ties_disclosure_reason": "no implant layers are drawn on this stream"
+    }
+
+
+def test_item_11_disclosure_without_the_matching_coverage_reason_is_still_incomplete(
+    tmp_path,
+):
+    """The gate reads the envelope's own `erc_coverage`
+    (`_erc_missing_tie_disclosed`), not the spec document alone -- a spec
+    that declares `ties_disclosure` but whose cited ERC run reports the
+    ordinary `no_ties_declared` reason (an older `klt erc`, or a hand-edited
+    envelope) still renders the plain incomplete reason."""
+    spec = {
+        **{key: value for key, value in ERC_SUPPLY_SPEC.items() if key != "ties"},
+        "ties_disclosure": {"reason": "no implant layers are drawn on this stream"},
+    }
     result = build_tier_report(
         _manifest(
             kind="digital",
@@ -8424,3 +9211,656 @@ def test_cli_item_11_text_output_names_every_cited_part(tmp_path, capsys):
     assert "kind=place-and-route" in out
     assert "power delivery: supplies=VPWR, VGND" in out
     assert "power_connectivity=match" in out
+    # Issue #2234: nothing rested on a caller assertion here, so the
+    # marker-derived rendering is byte-for-byte what it was before.
+    assert "taps asserted by the caller" not in out
+
+
+def test_cli_item_11_text_output_names_caller_asserted_taps(tmp_path, capsys):
+    """Issue #2234: a tie whose tap geometry the caller asserted is still a
+    `met` item -- but the text rendering says which taps rested on the
+    caller's word, rather than leaving that only in the JSON."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": ['erc.missing_tie:["nwell_tie"]'],
+            "skipped": [],
+            "inapplicable": [],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+            "checked_by_assertion": ['erc.missing_tie:["nwell_tie"]'],
+        },
+    }
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", erc_envelope=envelope
+                )
+            },
+        ),
+    )
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert 'taps asserted by the caller: 1 (erc.missing_tie:["nwell_tie"])' in out
+
+
+# --------------------------------------------------------------------------- #
+# Input-artifact verification (issue #2196): `--manifest`'s freshness gate
+# compares the manifest's pinned `content_hash` against the cited envelope's
+# own *self-reported* `provenance.input.content_hash` -- two statements about
+# a revision, neither of which is the revision. Every `"met"` citation now
+# also carries `input_verified`: whether that self-reported hash was itself
+# checked against the artifact the envelope names (`True`), found to disagree
+# with it (`False`), or never re-hashed at all (`None`). Disclosure only --
+# no verdict anywhere moves because of it.
+# --------------------------------------------------------------------------- #
+
+
+def _hash_of(path) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _drc_evidence_beside_its_layout(
+    tmp_path, *, layout_bytes: bytes = b"GDS-A", recorded_hash: str | None = None
+) -> tuple[str, Path]:
+    """A `klt drc` envelope written beside the layout stream it names --
+    the shape committed evidence actually takes in a block repo (see
+    `examples/signoff/`). Returns `(envelope path, layout path)`.
+
+    `recorded_hash` defaults to the layout's real digest (an honest,
+    unmodified report); pass a different value to simulate the artifact
+    having been rewritten under a report that still claims the old one.
+    """
+    layout_path = tmp_path / "block.gds"
+    layout_path.write_bytes(layout_bytes)
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "block.gds",
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": recorded_hash or _hash_of(layout_path),
+                "role": "layout",
+            },
+        },
+    }
+    return _write(tmp_path, "drc.json", envelope), layout_path
+
+
+def test_citation_input_verified_true_when_the_named_artifact_matches(tmp_path):
+    """The gap this closes: the pinned hash is now checked against the
+    layout stream itself, not only against the envelope's claim about it."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is True
+
+
+def test_citation_input_verified_false_when_the_named_artifact_changed(tmp_path):
+    """A manifest and an envelope agreeing with each other while the layout
+    was rewritten underneath them -- the exact silent case #2196 reports.
+    The verdict is deliberately unchanged: the item is still `met` (both
+    hashes still agree), and only `input_verified` says otherwise."""
+    drc_path, layout_path = _drc_evidence_beside_its_layout(tmp_path)
+    recorded = _hash_of(layout_path)
+    layout_path.write_bytes(b"GDS-B -- rewritten after the report was made")
+
+    result = build_tier_report(
+        # The manifest pins exactly what the envelope self-reports, so the
+        # existing staleness gate is satisfied -- as it is today.
+        _manifest(evidence={"3": {"file": drc_path, "content_hash": recorded}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    assert item_3["citation"]["content_hash"] == recorded
+    assert item_3["citation"]["input_verified"] is False
+
+
+def test_citation_input_verified_null_for_an_unresolvable_path(tmp_path):
+    """An absolute, scratch-local path that does not exist here: nothing is
+    re-hashed, nothing raises, and the citation says so rather than passing
+    an unverified claim off as a verified one."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "/nonexistent/scratch/run-1234/block.gds",
+    }
+    drc_path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["content_hash"] == "sha256:layoutA"
+    assert item_3["citation"]["input_verified"] is None
+
+
+def test_citation_input_verified_null_when_the_envelope_records_no_hash(tmp_path):
+    """Nothing to verify: a `generic` envelope whose author pinned no
+    `provenance.input.content_hash` reports `None`, never `False`."""
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"8": generic_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["content_hash"] is None
+    assert item_8["citation"]["input_verified"] is None
+
+
+def test_citation_input_verified_never_moves_a_verdict(tmp_path):
+    """The disclosure-only guarantee, stated as a test: an item graded with
+    a changed artifact renders byte-identically to one graded with an
+    unchanged artifact, apart from `input_verified` itself."""
+    unchanged_dir = tmp_path / "unchanged"
+    unchanged_dir.mkdir()
+    changed_dir = tmp_path / "changed"
+    changed_dir.mkdir()
+    unchanged_path, _ = _drc_evidence_beside_its_layout(unchanged_dir)
+    changed_path, layout_path = _drc_evidence_beside_its_layout(changed_dir)
+    layout_path.write_bytes(b"rewritten")
+
+    unchanged = build_tier_report(_manifest(evidence={"3": unchanged_path}))
+    changed = build_tier_report(_manifest(evidence={"3": changed_path}))
+
+    def item_3(result):
+        return next(item for item in result["items"] if item["id"] == 3)
+
+    assert unchanged["t1_met_count"] == changed["t1_met_count"]
+    assert item_3(unchanged)["status"] == item_3(changed)["status"] == "met"
+    assert item_3(unchanged)["reason"] == item_3(changed)["reason"] is None
+    unchanged_citation = dict(item_3(unchanged)["citation"], file=None)
+    changed_citation = dict(item_3(changed)["citation"], file=None)
+    assert unchanged_citation.pop("input_verified") is True
+    assert changed_citation.pop("input_verified") is False
+    assert unchanged_citation == changed_citation
+
+
+def test_lvs_citation_verifies_the_layout_side_only(tmp_path):
+    """`provenance.input` pins the *layout* side of an LVS compare (issue
+    #1969); the reference netlist is pinned separately under
+    `environment.reference_sha256`. Re-hashing the reference against the
+    input hash would report a mismatch that is not one, so the reference is
+    deliberately never consulted here."""
+    layout_path = tmp_path / "design.spice"
+    layout_path.write_bytes(b"* extracted layout netlist\n")
+    reference_path = tmp_path / "golden.spice"
+    reference_path.write_bytes(b"* an entirely different schematic netlist\n")
+    envelope = {
+        **LVS_MATCH_ENVELOPE,
+        "provenance": {
+            **LVS_MATCH_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(layout_path), "role": "netlist"},
+        },
+    }
+    lvs_path = _write(tmp_path, "lvs.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"4": lvs_path}))
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["status"] == "met"
+    assert item_4["citation"]["input_verified"] is True
+
+
+def test_sim_citation_resolves_the_repo_relative_path_shape(tmp_path):
+    """`klt sim`/`klt pex` echo their input path as `{path, scope}` (issue
+    #1261), not as a bare string -- a `"repo"`-scoped entry is resolved
+    against the repo root the evidence itself lives in."""
+    (tmp_path / ".git").mkdir()
+    netlist_path = tmp_path / "netlists" / "design.spice"
+    netlist_path.parent.mkdir()
+    netlist_path.write_bytes(b"* schematic netlist\n")
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": "netlists/design.spice", "scope": "repo"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(netlist_path), "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"5": sim_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is True
+
+
+def test_sim_citation_external_scope_is_not_verifiable(tmp_path):
+    """`scope: "external"` carries `path: null` on purpose (the absolute
+    path is never committed), so there is nothing to re-hash -- `None`,
+    not a guessed answer."""
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": None, "scope": "external"},
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"5": sim_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is None
+
+
+def test_command_backed_entry_verifies_against_the_command_cwd(tmp_path, monkeypatch):
+    """A command-backed entry has no evidence file to resolve beside, so the
+    envelope's relative path resolves against the `cwd` the command ran in
+    -- the same convention `klt yield`'s samples document already uses."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    layout_path = run_dir / "block.gds"
+    layout_path.write_bytes(b"GDS-A")
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "block.gds",
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(layout_path), "role": "layout"},
+        },
+    }
+
+    def fake_run(command, **kwargs):
+        return fake_completed(stdout=json.dumps(envelope))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {
+                    "command": ["klt", "drc", "block.gds", "--deck", "sky130"],
+                    "cwd": str(run_dir),
+                }
+            }
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is True
+
+
+def test_yield_citation_is_verified_by_construction(tmp_path):
+    """`klt yield` carries no `provenance` block, so its citation's
+    `content_hash` *is* a live re-hash of the samples document (issue
+    #870) -- the guarantee #2196 adds for every other kind."""
+    samples_path = tmp_path / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": str(samples_path)}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["content_hash"] == _hash_of(samples_path)
+    assert item_6["citation"]["input_verified"] is True
+
+
+def test_yield_citation_unhashable_samples_reports_null_not_false(tmp_path):
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "/nonexistent/mc-samples.json"}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["content_hash"] is None
+    assert item_6["citation"]["input_verified"] is None
+
+
+def test_input_artifact_fields_name_only_recognised_kinds_and_fields():
+    """Drift guard: every kind in the table is one `_classify` can return,
+    and every field it names is one that kind's declared envelope shape
+    actually carries -- a typo here would silently disable verification for
+    that kind rather than fail."""
+    for kind, fields in signoff_module._INPUT_ARTIFACT_FIELDS.items():
+        shape = signoff_module._ENVELOPE_SHAPES[kind]
+        declared = set(shape.__required_keys__) | set(shape.__optional_keys__)
+        assert fields, kind
+        assert set(fields) <= declared, kind
+
+
+def test_cli_manifest_text_names_a_changed_input_artifact(tmp_path, capsys):
+    """The text rendering discloses it too -- a reviewer reading the
+    terminal output sees the same thing the JSON says."""
+    drc_path, layout_path = _drc_evidence_beside_its_layout(tmp_path)
+    layout_path.write_bytes(b"rewritten after the report was made")
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    input_line = next(
+        line for line in out.splitlines() if line.strip().startswith("input:")
+    )
+    assert "CHANGED" in input_line
+
+
+def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
+    """The silent case is the one this exists for: an envelope whose named
+    path does not resolve here still prints a line saying the hash was
+    compared against a claim only."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    input_line = next(
+        line for line in out.splitlines() if line.strip().startswith("input:")
+    )
+    assert "not re-hashed" in input_line
+
+
+# --------------------------------------------------------------------------- #
+# `--check` (issue #2249): verify a committed tier/fleet report still
+# reproduces, without byte-comparing a surface that encodes how the running
+# install was provisioned.
+# --------------------------------------------------------------------------- #
+
+#: A `build` block for the *same commit* as the running build, provisioned the
+#: other documented way: built from a source tarball with no `.git` (a GitHub
+#: `/archive/<sha>.tar.gz`, a vendored copy), so `hatch_build.py` recorded no
+#: git facts at all and `build_identity` reports the honest `+unknown` /
+#: `is_release: null` identity. Nothing about `dirty` can collapse this case
+#: -- the facts were never present to record -- which is why the report-side
+#: exclusion, not a `dirty` fix alone, is what makes a committed report
+#: comparable across provisioning routes.
+_TARBALL_ROUTE_BUILD_BLOCK = {
+    "version": "0.5.0+unknown",
+    "package_version": "0.5.0",
+    "git_commit": None,
+    "git_tag": None,
+    "dirty": None,
+    "is_release": None,
+    "grading_ruleset_id": "sha256:whatever-this-install-reads",
+}
+
+
+def _committed_from_other_provisioning_route(tmp_path, report: dict, name: str) -> str:
+    """``report`` as it would have been committed by an install of the *same
+    commit* provisioned differently: identical grading, a different `build`
+    block (issue #2249)."""
+    return _write(tmp_path, name, {**report, "build": _TARBALL_ROUTE_BUILD_BLOCK})
+
+
+def test_check_matches_a_report_committed_by_another_provisioning_route(tmp_path):
+    """The regression this mode exists for: a committed report whose `build`
+    block differs *only* because the install that rendered it was provisioned
+    differently still verifies as `"match"` -- where a byte-comparison of the
+    two files fails (issue #2249)."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    fresh = build_tier_report(manifest)
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, fresh, "committed.json"
+    )
+
+    # The premise: these two files are NOT byte-identical, so the documented
+    # "re-render and byte-compare" gate would fail between them.
+    assert json.loads(Path(committed_path).read_text()) != fresh
+    assert json.loads(Path(committed_path).read_text())["build"] != fresh["build"]
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result == {
+        "schema_version": 1,
+        "mode": "check",
+        "report": committed_path,
+        "status": "match",
+        "drift": [],
+        "fresh": fresh,
+    }
+
+
+def test_check_reports_drift_in_a_graded_field(tmp_path):
+    """Excluding `build` must not make the mode toothless: a verdict-bearing
+    field that moved is named, with both values, and nothing else is."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    stale = build_tier_report(manifest)
+    stale["t1_met_count"] = 11
+    stale["tier"] = "T1"
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, stale, "committed.json"
+    )
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    assert result["drift"] == [
+        {"field": "t1_met_count", "committed": 11, "fresh": 1},
+        {"field": "tier", "committed": "T1", "fresh": None},
+    ]
+
+
+def test_check_reports_drift_when_the_cited_evidence_itself_changed(tmp_path):
+    """The gate's actual purpose -- evidence drift, not tool churn: the same
+    manifest cites an envelope whose verdict has since changed, and the
+    committed report no longer reproduces."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest = _manifest(evidence={"3": drc_path})
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, build_tier_report(manifest), "committed.json"
+    )
+    # The cited artifact is re-run and now fails.
+    Path(drc_path).write_text(json.dumps(DRC_VIOLATIONS_ENVELOPE))
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "drifted"
+    drifted_fields = {entry["field"] for entry in result["drift"]}
+    assert "t1_met_count" in drifted_fields
+    assert any(field.startswith("items.2.") for field in drifted_fields)
+
+
+def test_check_verifies_a_report_predating_the_build_block(tmp_path):
+    """A report committed before issue #2176 (no `build` key at all) still
+    verifies on its graded content -- an excluded path is skipped whether or
+    not either side carries it, so its absence is not one spurious drift
+    entry."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+    manifest = _manifest(evidence={"3": drc_path})
+    legacy = {
+        key: value
+        for key, value in build_tier_report(manifest).items()
+        if key != "build"
+    }
+    committed_path = _write(tmp_path, "committed.json", legacy)
+
+    result = check_tier_report(committed_path, manifest)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_check_fleet_matches_across_provisioning_routes_and_names_real_drift(
+    tmp_path,
+):
+    """`--fleet --check` inherits the whole contract: one top-level `build`
+    block, the same one-path exclusion, and a real block-level change still
+    reported."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    fleet = {"blocks": [{"block": "b1", "kind": "analog", "evidence": {"3": drc_path}}]}
+    fresh = build_fleet_report(fleet)
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, fresh, "fleet-committed.json"
+    )
+
+    assert check_fleet_report(committed_path, fleet)["status"] == "match"
+
+    drifted = {**fresh, "build": _TARBALL_ROUTE_BUILD_BLOCK}
+    drifted["blocks"] = [{**fresh["blocks"][0], "t1_met_count": 11}]
+    drifted_path = _write(tmp_path, "fleet-drifted.json", drifted)
+
+    result = check_fleet_report(drifted_path, fleet)
+    assert result["status"] == "drifted"
+    assert [entry["field"] for entry in result["drift"]] == ["blocks.0.t1_met_count"]
+
+
+def test_check_refuses_a_report_the_other_mode_produced(tmp_path):
+    """Pointing `--manifest --check` at a fleet roll-up (or the reverse) is a
+    failure to verify, not a "drifted" verdict listing every field of both
+    shapes -- the fault is the path, not the evidence."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest = _manifest(evidence={"3": drc_path})
+    fleet = {"blocks": [{"block": "b1", "kind": "analog", "evidence": {}}]}
+    tier_path = _write(tmp_path, "tier.json", build_tier_report(manifest))
+    fleet_path = _write(tmp_path, "fleet.json", build_fleet_report(fleet))
+
+    with pytest.raises(SignoffError, match="carries no 'items' key"):
+        check_tier_report(fleet_path, manifest)
+    with pytest.raises(SignoffError, match="carries no 'blocks' key"):
+        check_fleet_report(tier_path, fleet)
+
+
+def test_check_refuses_a_missing_or_unparseable_committed_report(tmp_path):
+    """Both refusals come from the shared loader -- a clean message, never a
+    traceback."""
+    manifest = _manifest()
+    with pytest.raises(SignoffError, match="committed report not found"):
+        check_tier_report(str(tmp_path / "nope.json"), manifest)
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json")
+    with pytest.raises(SignoffError, match="not valid JSON"):
+        check_tier_report(str(bad), manifest)
+
+
+def test_cli_check_exits_zero_for_a_match_and_three_for_drift(tmp_path, capsys):
+    """AC: the gate is usable as a gate -- 0 when the committed report still
+    holds, 3 when it drifted, and the tier verdict itself does not decide it
+    (this block is *not* at T1, and a faithful report of that is still `0`)."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest = _manifest(evidence={"3": drc_path})
+    manifest_path = _write(tmp_path, "manifest.json", manifest)
+    fresh = build_tier_report(manifest)
+    assert fresh["tier"] is None  # rendering this manifest exits 3
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, fresh, "committed.json"
+    )
+
+    exit_code = main(
+        ["signoff", "--manifest", manifest_path, "--check", committed_path]
+    )
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "status: match" in out
+
+    drifted_path = _write(
+        tmp_path,
+        "drifted.json",
+        {**fresh, "build": _TARBALL_ROUTE_BUILD_BLOCK, "t1_met_count": 11},
+    )
+    exit_code = main(["signoff", "--manifest", manifest_path, "--check", drifted_path])
+    out = capsys.readouterr().out
+    assert exit_code == 3
+    assert "status: drifted" in out
+    assert "t1_met_count" in out
+
+
+def test_cli_check_json_output_carries_the_shared_drift_shape(tmp_path, capsys):
+    """The JSON is the contract: the same `{schema_version, mode, report,
+    status, drift, fresh}` shape every other verb's `--check` emits, so a
+    consumer already reading one reads this."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest())
+    committed_path = _committed_from_other_provisioning_route(
+        tmp_path, build_tier_report(_manifest()), "committed.json"
+    )
+
+    exit_code = main(
+        [
+            "signoff",
+            "--manifest",
+            manifest_path,
+            "--check",
+            committed_path,
+            "--format",
+            "json",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["schema_version"] == 1
+    assert payload["mode"] == "check"
+    assert payload["report"] == committed_path
+    assert payload["status"] == "match"
+    assert payload["drift"] == []
+    # `fresh` is the full up-to-date report, so a drifted gate can show what
+    # the current answer is without a second invocation.
+    assert payload["fresh"] == build_tier_report(_manifest())
+
+
+def test_cli_check_is_refused_by_the_modes_that_render_no_such_report(tmp_path, capsys):
+    """`--check` is a modifier on the two doc-parsing modes, not a fifth
+    mode: envelope aggregation and `--describe-grader` refuse it cleanly
+    (exit 1) rather than silently ignoring it."""
+    committed_path = _write(tmp_path, "committed.json", build_tier_report(_manifest()))
+    envelope_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    exit_code = main(
+        ["signoff", envelope_path, "--check", committed_path, "--format", "json"]
+    )
+    assert exit_code == 1
+    assert (
+        "--check only applies to --manifest/--fleet"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+    exit_code = main(
+        [
+            "signoff",
+            "--describe-grader",
+            "--check",
+            committed_path,
+            "--format",
+            "json",
+        ]
+    )
+    assert exit_code == 1
+    assert (
+        "--check is not meaningful with --describe-grader"
+        in json.loads(capsys.readouterr().err)["error"]["message"]
+    )
+
+
+def test_check_excludes_build_identity_and_nothing_else(tmp_path):
+    """The exclusion is exactly one path (issue #2249): every *other*
+    top-level field of a tier report is compared, so a future field cannot
+    quietly join the unchecked set. Guards against widening
+    `VOLATILE_REPORT_PATHS` by accident."""
+    assert signoff_module.VOLATILE_REPORT_PATHS == frozenset({("build",)})
+
+    manifest = _manifest()
+    fresh = build_tier_report(manifest)
+    for field in fresh:
+        if field == "build":
+            continue
+        tampered = _write(
+            tmp_path, f"tampered-{field}.json", {**fresh, field: "tampered"}
+        )
+        result = check_tier_report(tampered, manifest)
+        assert result["status"] == "drifted", field
+        assert any(entry["field"].startswith(field) for entry in result["drift"]), field

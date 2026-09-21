@@ -4569,3 +4569,261 @@ def test_cli_restructure_timing_not_given_defaults_false(tmp_path, monkeypatch, 
 # against a future refactor silently making the stubs a no-op).
 def test_synthesize_uses_stdlib_subprocess():
     assert synthesize.subprocess is subprocess
+
+
+# --------------------------------------------------------------------------- #
+# `klt synthesize --check` / `--rerun` (issue #2224): verify committed evidence
+# --------------------------------------------------------------------------- #
+
+
+def _write_report(path: Path, report: dict) -> str:
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return str(path)
+
+
+def test_check_synthesize_report_clean_pass(tmp_path, monkeypatch):
+    """Cheap mode: unmutated RTL sources and liberty re-hash to the same
+    values the committed report already recorded -- `status: "match"`, every
+    check `match: True`, and no Yosys invocation at all (the stub is removed
+    before `--check` runs, so any engine call would raise)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    monkeypatch.setattr(
+        synthesize.subprocess,
+        "run",
+        lambda *a, **k: pytest.fail("--check must not invoke Yosys"),
+    )
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["schema_version"] == 1
+    assert result["mode"] == "check"
+    assert result["report"] == report_path
+    assert result["status"] == "match"
+    assert len(result["checks"]) == 2
+    assert all(check["match"] for check in result["checks"])
+
+
+def test_check_synthesize_report_detects_moved_source_hash(tmp_path, monkeypatch):
+    """RTL edited after the report was committed is caught -- only the
+    `provenance.input.content_hash` check fails; the liberty still matches."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    _write(tmp_path / "gcd.v", _GCD_RTL + "\n// an edit after the fact\n")
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+    assert by_field["provenance.deck.content_hash"]["match"] is True
+
+
+def test_check_synthesize_report_detects_a_doctored_record(tmp_path, monkeypatch):
+    """A record hand-edited to claim a hash it never had renders as
+    `"drifted"` -- a failure to verify, never a false pass."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report = run_synthesize(request_path)
+    report["provenance"]["input"]["content_hash"] = "sha256:" + "0" * 64
+    report_path = _write_report(tmp_path / "doctored.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def test_check_synthesize_report_missing_hash_is_never_a_false_pass(
+    tmp_path, monkeypatch
+):
+    """A report predating `provenance.input` renders `"drifted"`, never a
+    false `"match"` -- `_report_verify.hash_check`'s discipline."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report = run_synthesize(request_path)
+    report["provenance"]["input"] = None
+    report_path = _write_report(tmp_path / "old.synth.json", report)
+
+    result = synthesize.check_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    by_field = {check["field"]: check for check in result["checks"]}
+    assert by_field["provenance.input.content_hash"]["expected"] is None
+    assert by_field["provenance.input.content_hash"]["match"] is False
+
+
+def test_check_synthesize_report_missing_file_raises(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    with pytest.raises(SynthesizeError, match="not found"):
+        synthesize.check_synthesize_report(
+            str(tmp_path / "nope.synth.json"), request_path
+        )
+
+
+def test_check_synthesize_report_malformed_json_raises(tmp_path, monkeypatch):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    report_path = _write(tmp_path / "bad.synth.json", "not json")
+    with pytest.raises(SynthesizeError, match="not valid JSON"):
+        synthesize.check_synthesize_report(report_path, request_path)
+
+
+def test_rerun_synthesize_report_clean_pass(tmp_path, monkeypatch):
+    """Full mode: re-synthesizing unchanged inputs produces an
+    identical-modulo-run-bookkeeping report -- `status: "match"`, empty
+    `drift`, even though `run_id`/`netlist_path` genuinely differ."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    report_path = _write_report(tmp_path / "gcd.synth.json", committed)
+
+    result = synthesize.rerun_synthesize_report(report_path, request_path)
+
+    assert result["mode"] == "rerun"
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["run_id"] != committed["run_id"]
+
+
+def test_rerun_synthesize_report_detects_a_changed_result(tmp_path, monkeypatch):
+    """A synthesis whose outcome moved (a bigger mapped netlist) drifts under
+    full mode, naming `instance_count` among the drifted fields."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    bigger = dict(_GCD_MODULE_STATS)
+    bigger["num_cells"] = _GCD_MODULE_STATS["num_cells"] + 7
+    _stub_yosys_success(monkeypatch, module_stats=bigger)
+
+    result = synthesize.rerun_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    drifted = {entry["field"] for entry in result["drift"]}
+    assert "instance_count" in drifted
+
+
+def test_rerun_synthesize_report_ignores_an_engine_upgrade(tmp_path, monkeypatch):
+    """A Yosys upgrade that leaves the result untouched is tool churn, not
+    evidence drift -- `engine_version` is in `VOLATILE_FLOW_PATHS`, exactly
+    as `klayout_version` is for `klt drc --rerun`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, version="0.67+post")
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    _stub_yosys_success(monkeypatch, version="0.99+later")
+    result = synthesize.rerun_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "match"
+    assert result["fresh"]["engine_version"] == "0.99+later"
+
+
+def test_rerun_synthesize_report_detects_a_doctored_record(tmp_path, monkeypatch):
+    """A committed record hand-edited to overstate its result fails to
+    verify under `--rerun`, naming the doctored field -- never a false
+    `"match"`."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    committed = run_synthesize(request_path)
+    committed["area_um2"] = 1.0
+    report_path = _write_report(tmp_path / "doctored.synth.json", committed)
+
+    result = synthesize.rerun_synthesize_report(report_path, request_path)
+
+    assert result["status"] == "drifted"
+    drifted = {entry["field"] for entry in result["drift"]}
+    assert "area_um2" in drifted
+
+
+def test_cli_synthesize_check_exits_zero_on_match(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    assert (
+        main(["synthesize", request_path, "--check", report_path, "--format", "json"])
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+def test_cli_synthesize_check_exits_three_on_drift(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report = run_synthesize(request_path)
+    report["provenance"]["deck"]["content_hash"] = "sha256:" + "1" * 64
+    report_path = _write_report(tmp_path / "gcd.synth.json", report)
+
+    assert (
+        main(["synthesize", request_path, "--check", report_path, "--format", "json"])
+        == 3
+    )
+    assert json.loads(capsys.readouterr().out)["status"] == "drifted"
+
+
+def test_cli_synthesize_rerun_without_check_is_a_clean_error(
+    tmp_path, monkeypatch, capsys
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    assert main(["synthesize", request_path, "--rerun", "--format", "json"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "requires --check" in err["error"]["message"]
+
+
+def test_cli_synthesize_check_missing_report_is_a_clean_error(
+    tmp_path, monkeypatch, capsys
+):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    assert (
+        main(
+            [
+                "synthesize",
+                request_path,
+                "--check",
+                str(tmp_path / "missing.json"),
+                "--format",
+                "json",
+            ]
+        )
+        == 1
+    )
+    assert "missing.json" in json.loads(capsys.readouterr().err)["error"]["message"]
+
+
+def test_cli_synthesize_check_text_output(tmp_path, monkeypatch, capsys):
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report_path = _write_report(
+        tmp_path / "gcd.synth.json", run_synthesize(request_path)
+    )
+
+    assert main(["synthesize", request_path, "--check", report_path]) == 0
+    out = capsys.readouterr().out
+    assert "status: match" in out
+    assert "[OK] provenance.input.content_hash" in out
+
+
+def test_synthesize_report_survives_the_envelope_lint(tmp_path, monkeypatch):
+    """The other half of issue #2224: a `klt synthesize` report is committed
+    as evidence, so it must carry no absolute host path for a cross-checkout
+    byte comparison to break on. `netlist_path`/`script_path` are already the
+    repo-relative `{path, scope}` shape (issue #1844); this pins that the
+    whole envelope is clean, not just those two fields."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+    report = run_synthesize(request_path)
+
+    assert env_provenance.find_absolute_path_fields(report) == []

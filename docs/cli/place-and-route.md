@@ -2524,6 +2524,67 @@ On application failure the JSON error goes to stderr, exit status is `1`,
 and stdout is empty. The shell may create an empty `pnr.json` through the
 redirection above; klt does not control caller-created output files.
 
+## `--check` / `--rerun` (issue #2224)
+
+A `klt place-and-route --format json` report is committed as evidence
+alongside a design, but until issue #2224 nothing let a consumer verify that
+a committed report still reproduces — the affordance
+[`klt drc`](drc.md#--check----rerun) has had since issue #1106:
+
+```
+klt place-and-route request.json --check gcd.pnr.json            # cheap mode
+klt place-and-route request.json --check gcd.pnr.json --rerun     # full mode
+```
+
+**The positional `request` stays required**, unlike `klt drc --check`. This
+report echoes its *output* artifacts (`def_path`, `gds_path`,
+`verilog_path`) and its provenance hashes, but never the request document or
+the gate-level netlist path it resolved. The question `--check` answers is
+therefore "does this committed record still reproduce **from this
+request**". See [`docs/cli/synthesize.md`](synthesize.md)'s `--check` section
+for the shared rationale — the two flow verbs behave identically.
+
+### Cheap mode (default)
+
+Re-resolves the request's gate-level netlist and standard-cell liberty
+(through the same `_resolve_netlist()`/`_resolve_liberty()` a real run uses),
+re-hashes both, and compares against
+`provenance.input.content_hash`/`provenance.deck.content_hash` as recorded.
+**No OpenROAD invocation.** Response shape is the shared `--check` payload
+documented under [`klt drc`](drc.md#cheap-mode-default). A recorded hash that
+is itself `null` always renders `match: false` — a missing baseline is never
+a pass.
+
+### Full mode (`--rerun`)
+
+Re-runs the flow from the request and diffs the fresh report against the
+committed one, reporting `status: "drifted"` with a `drift[]` list of
+`{field, committed, fresh}` entries — a moved `worst_slack_ns`,
+`wirelength_um`, `setup_violation_count`, a `power.placed` count that stopped
+being reported, a changed `provenance.input.content_hash`.
+
+Excluded from the diff: `provenance.klt_version`/`klayout_version`/
+`pdk.version` and `engine_version` (an OpenROAD upgrade that leaves the result
+untouched is tool churn, not evidence drift), plus the whole `engine_logs[]`
+block — every entry is keyed by a fresh `uuid4` `invocation_id` with its
+retained log directory named after it, so leaving it in would make `--rerun`
+report `"drifted"` unconditionally. The output artifact paths
+(`def_path`/`gds_path`/`verilog_path`) are **not** excluded: this verb writes
+to a fixed `.klt/place-and-route/` directory, so they are stable across
+re-runs from the same request and a change in one is real drift.
+
+**`--rerun` overwrites this request's own artifacts.** Unlike `klt
+synthesize`'s retained per-`run_id` directories, the output directory is
+fixed, so a re-run rewrites the DEF/GDS/Verilog the committed report names —
+the same thing invoking the verb again would do. Cheap mode touches nothing,
+which is why it is the default.
+
+### Exit codes for `--check` / `--rerun`
+
+`0` when `status` is `"match"`, `3` when `"drifted"`, `1` for a missing or
+unparseable report or an unresolvable request. `--rerun` without `--check` is
+a clean exit `1`, not a usage error.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -2531,10 +2592,13 @@ redirection above; klt does not control caller-created output files.
 | `0` | Place-and-route reached (at least) the requested `target_stage`. |
 | `1` | Failed to run — bad request, unresolvable netlist/PDK/LEF, a floorplan spec with more than one method set, or an OpenROAD engine error that stops the run before reaching the requested `target_stage`. |
 | `2` | Usage error (missing argument, bad `--format` value) — from argparse. |
+| `3` | `--check` only: the committed report no longer reproduces (`status: "drifted"`). |
 
-**No exit code `3`.** Timing slack and violation counts are data, not a
-built-in pass/fail gate — a negative `worst_slack_ns` is an expected,
-correctly-reported number, not a contract-level failure. A caller wanting
+**A fresh run never exits `3`.** Timing slack and violation counts are data,
+not a built-in pass/fail gate — a negative `worst_slack_ns` is an expected,
+correctly-reported number, not a contract-level failure. Exit `3` belongs
+exclusively to `--check`/`--rerun` above, where it means, and only means,
+"the committed report no longer reproduces". A caller wanting
 "did timing close" as a pass/fail gate composes this contract into `klt
 eval`'s descriptor with an explicit threshold, the same mechanism
 `docs/cli/eval.md`'s own example already uses for `layout-metrics`'s

@@ -13,7 +13,7 @@ This hook closes that by writing a tiny generated module,
 
     GIT_COMMIT = "<40-hex sha>"   # or None
     GIT_TAG = "v0.2.0"            # exact-match tag, or None
-    GIT_DIRTY = False             # uncommitted changes at build time
+    GIT_DIRTY = False             # uncommitted changes to *tracked* files at build time
     KLAYOUT_VERSION_EXPECTED = "0.30.10"  # or None
 
 ``KLAYOUT_VERSION_EXPECTED`` (issue #1490) records the ``klayout`` engine
@@ -51,6 +51,14 @@ Design notes:
 - **Never fails the build.** Any git problem degrades to "no record", which
   ``build_identity`` reports as ``+unknown`` -- honest, and never mistakable
   for a release.
+- **Untracked files never count as dirty (issue #2248).** ``git_identity()``'s
+  ``dirty`` probe ignores untracked files on purpose -- a package manager
+  building a ``git+...@<sha>`` install clones into a scratch checkout that it
+  can itself litter with bookkeeping files (observed: ``uv`` drops its own
+  ``.ok`` checkout-completion sentinel into the tree before the build even
+  starts), which previously made a clean, immutable, sha-pinned revision
+  render as ``dirty: true``. See that function's docstring for the full
+  mechanism.
 """
 
 from __future__ import annotations
@@ -125,13 +133,32 @@ def _git(root: str, *args: str) -> str | None:
 
 def git_identity(root: str) -> dict[str, Any] | None:
     """``{commit, tag, dirty}`` for the checkout at ``root``, or ``None`` when
-    ``root`` is not a git working tree (a build from an unpacked sdist)."""
+    ``root`` is not a git working tree (a build from an unpacked sdist).
+
+    ``dirty`` is computed from ``git status --porcelain --untracked-files=no``
+    -- deliberately excluding *untracked* files (issue #2248). A build root
+    is not necessarily the user's own working copy: ``uv``/``pip`` building a
+    ``git+https://...@<sha>`` install clone the repo into a scratch checkout
+    and can themselves drop bookkeeping files into it before invoking this
+    hook (reproduced: ``uv`` writes its own ``.ok`` checkout-completion
+    sentinel straight into the git working tree immediately after cloning,
+    strictly before the build backend -- and this hook -- ever runs, so no
+    reordering of this probe can outrun it). Such stray untracked files carry
+    no packaged content and say nothing about whether the *pinned revision*
+    was modified, so counting them as "dirty" mislabels an immutable,
+    sha-pinned install as locally modified. Restricting the probe to tracked
+    content (modified/added/deleted/renamed files already known to git)
+    keeps ``dirty`` meaningful -- a real edit to an existing tracked file
+    still trips it -- while no longer reacting to build-tool noise outside
+    git's own bookkeeping. This mirrors the convention ``git describe
+    --dirty`` and ``setuptools_scm`` already use.
+    """
     if _git(root, "rev-parse", "--is-inside-work-tree") != "true":
         return None
     commit = _git(root, "rev-parse", "HEAD")
     if not commit:
         return None
-    status = _git(root, "status", "--porcelain")
+    status = _git(root, "status", "--porcelain", "--untracked-files=no")
     return {
         "commit": commit,
         "tag": _git(root, "describe", "--exact-match", "--tags", "HEAD") or None,

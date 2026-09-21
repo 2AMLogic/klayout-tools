@@ -267,6 +267,16 @@ is always `null` (no `SOURCES` stamp to read); `provenance.pdk` itself is
 still `null` when `--pdk` was omitted, matching every other verb's
 conditional population.
 
+`klt erc`'s `provenance.deck` (issue #2204) is, by contrast, populated
+exactly the way every other `--deck`-taking verb below populates it (the
+same `{name, content_hash, released}` shape) once `--deck` selects a curated
+deck — see "Deck-driven device-marker auto-detection" in
+[`docs/cli/erc.md`](cli/erc.md). Before that issue this field was always
+`null` for `klt erc` (it applied no rule/model deck at all); `--deck` is
+optional and independent of `--pdk`, and `provenance.deck` stays `null`
+when it is omitted, matching this field's own conditional-population
+convention everywhere else.
+
 `klt erc` also carries one **extra** key no other verb emits (issue #2036):
 `provenance.spec`, shaped `{content_hash}` exactly like `input` below and
 likewise `sha256:`-prefixed. An ERC run is validated against *two* inputs,
@@ -299,17 +309,47 @@ and earned no `schema_version` bump on either mode. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "An overridden doc can outrun the
 build" and "Which build graded this".
 
+Issue #2202 closes the reverse direction of the same skew with one more
+additive key, `build_t1_item_count` (top-level in `--manifest`, per
+`blocks[]` row in `--fleet`): how many T1 rows this build's *own* shipped
+doc would have rendered, beside `t1_item_count`'s how many the parsed doc
+did. A doc *older* than the build produces no wrong verdict — every
+rendered row is correctly graded — but the report is silent about the items
+it never listed, so `tier: "T1"` on a 9-item checklist reads exactly like
+`tier: "T1"` on an 11-item one. `null`, never a fabricated number, when this
+build cannot read its own doc, for the same reason `graded_by_build` claims
+no divergence it cannot prove. A new key on an unchanged shape: no
+`schema_version` bump on either mode. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "A doc the build has outrun".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
 `devices[]` entry subtracts a drawn device body's region from a declared
 conductor role before connectivity is registered — it changes which nets
 exist, and so which findings are reachable — and `body_area_um2` reports
-the area each declaration *actually* removed, so a declaration that
-matched no geometry is distinguishable from one that bit. Same rationale
+the area each declaration *actually* removed — the marker intersected
+with the declared role's own conductor region, not the marker layer's own
+area (issue #2226) — so a declaration that subtracted nothing is
+distinguishable from one that bit, whether it named the wrong role or
+matched no geometry at all. Same rationale
 as `provenance.spec` above: a report whose verdict depends on a
 transformation of its input has to say what the transformation did. See
 [`docs/cli/erc.md`](cli/erc.md)'s "Device bodies are not wires".
+
+When `--deck` selects a curated deck (issue #2204), every
+`provenance.devices` entry — both hand-declared and deck-detected — gains
+two additional keys: `source` (`"declared"` vs `"deck"`) and
+`superseded_by` (the hand-declared device name that pre-empted a
+deck-detected carve-out for the same role, `null` otherwise). A
+deck-detected device whose conducting-body layer matches no declared role
+is still listed (`"on": null`), so a mis-scoped spec is visible rather than
+silently invisible. Both new keys are **additive and conditional**: a run
+that omits `--deck` produces `provenance.devices` entries with the pre-#2204
+4-key shape, byte-identical to before this issue — no `schema_version`
+bump, matching this block's own additive-envelope convention. See
+[`docs/cli/erc.md`](cli/erc.md)'s "Deck-driven device-marker
+auto-detection".
 
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
@@ -332,8 +372,11 @@ and mirrors the identity the report's own top-level `pdk` field carries.
 `klt_version` and `klayout_version` are what these two verbs gained the
 block for: a consumer that commits generated geometry plus its report as
 evidence and re-runs the generator later can otherwise not tell a real
-geometry change from a klt/KLayout upgrade. See
-[`docs/cli/gen.md`](cli/gen.md) and
+geometry change from a klt/KLayout upgrade. **Generator geometry itself is
+not guaranteed stable across releases before `1.0`** — only this block's
+shape is covered by the additive-envelope guarantee above; see
+[`docs/cli/gen.md`](cli/gen.md)'s "Semantics and guarantees" section for the
+stability statement, concrete precedents, and drift-detection guidance, and
 [`docs/cli/gen-compose.md`](cli/gen-compose.md).
 
 ```json
@@ -450,6 +493,22 @@ geometry change from a klt/KLayout upgrade. See
   otherwise-consistent `drc` + `sim` bundle); #2039 closes that gap now that
   roles scope the comparison. `input` is still `null` for a verb with no
   single input artifact to pin this way.
+
+  **A consumer may verify this hash against the artifact, not only against
+  another claim** (issue #2196). `content_hash` is a *self-report*: it says
+  what the producing run hashed, and comparing it against a manifest's
+  pinned copy compares two statements about a revision, neither of which is
+  the revision. Every verb that populates `input` also echoes the artifact
+  it hashed under a top-level field of its own — `drc`/`extract`/`erc`'s
+  `file`, `lvs`'s `layout` (the layout side; the reference netlist is pinned
+  separately under `environment.reference_sha256`), `sim`'s `netlist`,
+  `pex`'s `layout`, `sta`'s `def_path`/`verilog_path` — so the loop is
+  closeable with no schema change: re-hash that file and compare. `klt
+  signoff --manifest` does exactly this and reports the answer per citation
+  as `input_verified: true | false | null` (see
+  [`cli/signoff.md`](cli/signoff.md)); a verb that pins an `input` hash
+  without echoing the path it covers leaves its consumers with `null` there,
+  so **new verbs should echo the artifact path they hashed**.
   - `role` (issue #2027) — **which kind of artifact `content_hash` covers**.
     One of:
 
@@ -724,6 +783,114 @@ envelope, not a wrapping envelope" states for the top-level envelope applies
 per-field here too. There is no tool-wide signal for "which shape does field
 X use today" beyond this table; re-check it (and this table's own `git log`)
 before writing a consumer that assumes one shape tool-wide.
+
+### Repo-relative provenance in *committed* artifacts (issue #2224)
+
+The table above describes what `klt` **emits**. The rule for what a consumer
+**commits** is stricter, and it is one rule:
+
+> A committed artifact must contain no absolute host path. Reference an input
+> by repo-relative path (`{path, scope}`) or by content hash
+> (`provenance.input.content_hash` / `provenance.deck.content_hash`) — never
+> by where it happened to live on the machine that produced it.
+
+This is not style. A committed record embedding `/Users/<user>/…` regenerates
+to *different bytes* on every other checkout, so any CI job that re-derives
+the artifact and byte-compares it fails for a reason that has nothing to do
+with the design — the failure mode 2AMLogic/gf180-surge#39 hit, and again in
+a sibling repo the same week (SXT-013). A plain-string field from the table
+above is the usual carrier: it is absolute by construction, so a consumer that
+commits the envelope verbatim commits the absolute path with it.
+
+`klt env-provenance lint-envelope FILE…` enforces the rule mechanically — it
+walks a JSON envelope and fails (exit `3`) on any string field carrying an
+absolute host path, naming the offending field by dotted path, with
+`--allow-prefix` for genuinely machine-wide PDK/tool install roots. It is
+deliberately broader than `klt env-provenance scan`, which answers the
+*disclosure* question (home-shaped paths only): `/opt/build/out.def` names
+nobody and breaks reproduction just as thoroughly. See
+[`cli/env-provenance.md`](cli/env-provenance.md) → `lint-envelope` for the
+full rule set, the comparison table, and the CI wiring. Since #2230 this
+repo gates its own tree with it — `git ls-files 'examples/**/*.json' | xargs
+klt env-provenance lint-envelope`, with an **empty** allow-list, in
+`.github/workflows/ci.yml`'s `Lint (ruff)` job.
+
+## Verifying committed evidence: `--check` / `--rerun`
+
+Six verbs let a consumer verify that a previously committed `--format json`
+report still reproduces, built on one shared implementation
+(`src/klayout_tools/_report_verify.py`):
+
+| Verb | Invocation | Issue |
+|---|---|---|
+| `drc` | `klt drc --check REPORT [--rerun]` | #1106 |
+| `lvs` | `klt lvs --check REPORT [--rerun]` | #1106 |
+| `extract` | `klt extract --check REPORT [--rerun]` | #1149 |
+| `synthesize` | `klt synthesize REQUEST --check REPORT [--rerun]` | #2224 |
+| `place-and-route` | `klt place-and-route REQUEST --check REPORT [--rerun]` | #2224 |
+| `signoff` | `klt signoff --manifest\|--fleet M --check REPORT` | #2249 |
+
+All six share one contract:
+
+- **Cheap mode (`--check`)** re-derives the recorded input/deck content hashes
+  and compares them. No engine runs.
+- **Full mode (`--check … --rerun`)** re-runs the analysis and diffs
+  verdict-bearing fields against the committed report.
+- **`klt signoff` has one mode, not two** (issue #2249): re-grading the
+  manifest *is* the whole verification — there is no engine run to hold back
+  — so `--check` alone produces the full-mode `{status, drift, fresh}` shape
+  under `mode: "check"`, and it takes its manifest the way the flow verbs
+  take their request (a tier report echoes verdicts, not the manifest).
+- **`status` is two-valued**: `"match"` (exit `0`) or `"drifted"` (exit `3`,
+  naming which hash moved or which fields changed). A report that cannot be
+  verified at all — missing, unparseable, missing the field needed to re-run —
+  is exit `1` with an error envelope. **A missing recorded value is never a
+  pass**: `hash_check()` renders `expected: null` as `match: false`, so a
+  report predating the field it would be checked against renders `"drifted"`,
+  never a false `"match"`.
+- **Tool identity is excluded from the diff**, and only tool identity:
+  `provenance.klt_version`, `provenance.klayout_version`,
+  `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
+  Yosys/OpenROAD build string, which stands in the same relation to a flow
+  verb that the KLayout engine build does to `klt drc`. The engine *identity*
+  (`engine`) is not excluded: swapping engines is a different run. For
+  `signoff` the same rule lands on the field *its* reports carry tool
+  identity in — the whole `build` block (issue #2249), and nothing else.
+
+**Build identity is route-dependent, so committed reports must not be
+byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`
+block (and `provenance.klt_version` elsewhere) records the state of the tree
+the running install was *built from*, at build time — not a property of the
+commit. Two byte-legitimate installs of the **same pinned commit** can
+therefore emit different bytes for identical evidence: a
+`git+https://…@<sha>` install records real git facts (`+g<sha>`), while a
+`pip install` of a source tarball of that same `<sha>` has no `.git` at build
+time and honestly records none (`+unknown`, `git_commit: null`, `is_release:
+null`). The second case cannot be fixed by tightening `dirty` (issue #2248) —
+the facts were never present to record. So "does this committed evidence
+still hold" is answered by `--check`, which excludes exactly the identity
+surface, **not** by `diff`-ing a committed report against a fresh render. See
+[`cli/signoff.md`](cli/signoff.md)'s "`build` describes the *install*, not
+only the commit".
+
+**The flow verbs take the request back.** `drc`/`lvs`/`extract` echo their own
+inputs into the report, so `--check REPORT` is self-sufficient. A
+`synthesize`/`place-and-route` report echoes *outputs* and provenance hashes
+but never the request document or the source/netlist paths it resolved — so
+those two keep their positional `REQUEST` argument alongside `--check`, and
+the question answered becomes "does this committed record still reproduce
+*from this request*". Run-scoped bookkeeping is canonicalized out of the
+`--rerun` diff on both sides (`synthesize`'s per-run `run_id` and the artifact
+paths under it; `place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4`
+per OpenROAD invocation) — without that, `--rerun` would report `"drifted"`
+unconditionally. `klt signoff` is the same shape one level up: a tier/fleet
+report echoes graded verdicts, never the manifest, so `--check` sits beside
+the `--manifest`/`--fleet` argument it re-grades. Per-verb detail:
+[`cli/drc.md`](cli/drc.md), [`cli/lvs.md`](cli/lvs.md),
+[`cli/extract.md`](cli/extract.md),
+[`cli/synthesize.md`](cli/synthesize.md),
+[`cli/place-and-route.md`](cli/place-and-route.md),
+[`cli/signoff.md`](cli/signoff.md).
 
 ## Checked-work coverage (`coverage.schema_version: 1`)
 

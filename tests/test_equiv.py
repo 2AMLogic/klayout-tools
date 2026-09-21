@@ -743,7 +743,7 @@ def test_unconfirmed_combinational_counterexample_downgrades_to_inconclusive(
     )
 
     def _fake_confirm_not_reproduced(
-        *, counterexample, netlist_path, output_dir, diagnostics
+        *, counterexample, netlist_path, output_dir, diagnostics, sim_backend
     ):
         # Mirrors the real `_confirm_counterexample`'s own "not reproduced"
         # outcome shape (a simulation that ran, but found no divergence).
@@ -802,7 +802,7 @@ def test_confirmed_by_simulation_none_keeps_combinational_counterexample_status(
     )
 
     def _fake_confirm_unavailable(
-        *, counterexample, netlist_path, output_dir, diagnostics
+        *, counterexample, netlist_path, output_dir, diagnostics, sim_backend
     ):
         counterexample["confirmed_by_simulation"] = None
         diagnostics.append(
@@ -1611,7 +1611,7 @@ def test_unconfirmed_sequential_counterexample_downgrades_to_inconclusive(
     )
 
     def _fake_confirm_not_reproduced(
-        *, counterexample, ports, netlist_path, output_dir, diagnostics
+        *, counterexample, ports, netlist_path, output_dir, diagnostics, sim_backend
     ):
         counterexample["simulation"] = {
             "engine": "icarus",
@@ -1684,7 +1684,7 @@ def test_confirmed_by_simulation_none_keeps_sequential_counterexample_status(
     )
 
     def _fake_confirm_unavailable(
-        *, counterexample, ports, netlist_path, output_dir, diagnostics
+        *, counterexample, ports, netlist_path, output_dir, diagnostics, sim_backend
     ):
         counterexample["confirmed_by_simulation"] = None
         diagnostics.append(
@@ -2781,3 +2781,641 @@ def test_corpus_rtl_vs_real_synthesized_gates(tmp_path, monkeypatch):
 # silently making that stub a no-op).
 def test_equiv_uses_stdlib_subprocess():
     assert equiv.subprocess is subprocess
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2223: optional Verilator fast-path replay backend
+# --------------------------------------------------------------------------- #
+#
+# `request.sim_backend` / `--sim-backend` selects which simulator *replays*
+# a counterexample (an axis orthogonal to `request.engine`, which selects
+# the proof engine). Three tiers here, mirroring this module's own
+# structure:
+#
+# - Pure unit tests for the backend-pairing and agreement helpers (no
+#   subprocess at all).
+# - Deterministic full-pipeline tests with `subprocess.run` mocked, so the
+#   agreement policy -- including the *negative control*, an injected
+#   backend disagreement -- runs in any CI environment, with or without a
+#   real `verilator` install.
+# - Real-toolchain integration tests (skipif) proving the two backends
+#   actually agree, byte for byte, on a real counterexample replay.
+
+HAVE_VERILATOR = shutil.which("verilator") is not None
+
+#: The replay stdout a diverging (`gold != gate`) single-vector run emits --
+#: exactly the shape `_SAT_FAIL_TEXT`'s own counterexample testbench
+#: produces.
+_REPLAY_DIVERGES = "EQUIV_SIM gold y 0\nEQUIV_SIM gate y 1\n"
+
+#: The same replay, but *not* diverging -- the "counterexample did not
+#: reproduce" outcome.
+_REPLAY_AGREES = "EQUIV_SIM gold y 0\nEQUIV_SIM gate y 0\n"
+
+#: A diverging replay whose `gold` value is undefined on one bit -- what a
+#: 4-state engine (Icarus) reports where a 2-state engine (Verilator)
+#: reports a defined `0`.
+_REPLAY_DIVERGES_4STATE = "EQUIV_SIM gold y x\nEQUIV_SIM gate y 1\n"
+_REPLAY_DIVERGES_2STATE = "EQUIV_SIM gold y 0\nEQUIV_SIM gate y 1\n"
+
+
+def _mock_replay_run(
+    *,
+    sat_stdout: str = _SAT_FAIL_TEXT,
+    iverilog_stdout: str = _REPLAY_DIVERGES,
+    verilator_stdout: str = _REPLAY_DIVERGES,
+    verilator_missing: bool = False,
+):
+    """A `subprocess.run` stand-in answering *every* call `run_equiv` makes
+    on the counterexample path -- the yosys proof and version probe, plus
+    each replay backend's compile/run/version-probe calls -- from canned
+    data, so the backend-agreement policy is exercised deterministically
+    with no real `yosys`/`iverilog`/`verilator` install.
+
+    `verilator_missing=True` reproduces a machine with no `verilator` on
+    `$PATH` (a `FileNotFoundError` from every `verilator` invocation), which
+    is what the "behavior is exactly today's when Verilator is absent"
+    regression tests below assert against.
+    """
+
+    # `(argv[0], argv[1])` -> canned result, so one lookup answers every
+    # call instead of a branch per tool (keeps this helper under the
+    # repository's own max-complexity gate).
+    replies = {
+        ("yosys", "-s"): fake_completed(stdout=sat_stdout, returncode=0),
+        ("yosys", "-V"): fake_completed(stdout="Yosys 0.67 (git sha1 deadbeef)\n"),
+        ("iverilog", "-V"): fake_completed(
+            stdout="Icarus Verilog version 12.0 (stable)\n"
+        ),
+        ("iverilog", "-g2012"): fake_completed(returncode=0),
+        ("verilator", "--version"): fake_completed(
+            stdout="Verilator 5.050 2025-01-01 rev v5.050\n"
+        ),
+        ("verilator", "--binary"): fake_completed(returncode=0),
+    }
+
+    def _run(cmd, **kwargs):
+        if cmd[0] == "verilator" and verilator_missing:
+            raise FileNotFoundError("verilator: not found")
+        if cmd[0] == "vvp":
+            return fake_completed(stdout=iverilog_stdout)
+        if cmd[0].endswith("_verilator_bin"):
+            return fake_completed(stdout=verilator_stdout)
+        reply = replies.get(tuple(cmd[:2]))
+        if reply is None:
+            raise AssertionError(f"unexpected subprocess.run call in mock: {cmd!r}")
+        return reply
+
+    return _run
+
+
+def _broken_pair_request(tmp_path) -> str:
+    """A minimal seeded-broken request (AND vs. OR) whose proof the mocked
+    `subprocess.run` above answers with `_SAT_FAIL_TEXT`."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GATE_OR_BROKEN)
+    return _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+
+# --- pure unit tests (no subprocess) --------------------------------------- #
+
+
+def test_supported_sim_backends_and_default():
+    """`iverilog` stays the default *and* the canonical backend for
+    evidence -- Verilator is additive, never a replacement."""
+    assert equiv.SUPPORTED_SIM_BACKENDS == ("iverilog", "verilator", "both")
+    assert equiv.DEFAULT_SIM_BACKEND == "iverilog"
+    assert equiv.CANONICAL_SIM_BACKEND == "iverilog"
+
+
+@pytest.mark.parametrize(
+    ("sim_backend", "expected"),
+    [
+        ("iverilog", ("iverilog", None)),
+        ("verilator", ("verilator", None)),
+        ("both", ("iverilog", "verilator")),
+    ],
+)
+def test_replay_backends_pairing(sim_backend, expected):
+    assert equiv._replay_backends(sim_backend) == expected
+
+
+def test_unsupported_sim_backend_is_error(tmp_path):
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "sim_backend": "modelsim",
+        },
+    )
+    with pytest.raises(EquivError, match="unsupported sim_backend 'modelsim'"):
+        run_equiv(request_path)
+
+
+@pytest.mark.parametrize(
+    ("canonical", "cross", "explained"),
+    [
+        # Differs only where the 4-state run is undefined -> explained by
+        # the declared 2-state/4-state modelling gap.
+        ("x", "0", True),
+        ("x", "1", True),
+        ("1x0", "110", True),
+        ("z", "0", True),
+        # A differing *defined* bit is a real disagreement, never explained.
+        ("0", "1", False),
+        ("110", "100", False),
+        # Differing widths / a signal one backend never reported.
+        ("10", "0", False),
+        (None, "0", False),
+        ("0", None, False),
+    ],
+)
+def test_explains_two_state(canonical, cross, explained):
+    assert equiv._explains_two_state(canonical, cross) is explained
+
+
+def test_compare_replay_outputs_classifies_each_difference():
+    mismatches = equiv._compare_replay_outputs(
+        canonical={"gold": {"q": "x", "y": "1"}, "gate": {"q": "0", "y": "1"}},
+        cross={"gold": {"q": "0", "y": "0"}, "gate": {"q": "0", "y": "1"}},
+        cross_four_state=False,
+    )
+    assert mismatches == [
+        {
+            "side": "gold",
+            "name": "q",
+            "canonical": "x",
+            "cross_check": "0",
+            "explained_by": "two_state_backend",
+        },
+        {
+            "side": "gold",
+            "name": "y",
+            "canonical": "1",
+            "cross_check": "0",
+            "explained_by": None,
+        },
+    ]
+
+
+def test_compare_replay_outputs_never_explains_for_a_four_state_cross_check():
+    """The `explained_by: "two_state_backend"` escape hatch is keyed on the
+    cross-check backend's *declared* value modelling -- it is never applied
+    to a 4-state backend, which has no such excuse."""
+    mismatches = equiv._compare_replay_outputs(
+        canonical={"gold": {"q": "x"}, "gate": {}},
+        cross={"gold": {"q": "0"}, "gate": {}},
+        cross_four_state=True,
+    )
+    assert [entry["explained_by"] for entry in mismatches] == [None]
+
+
+# --- deterministic full-pipeline tests (mocked subprocess) ------------------ #
+
+
+def test_default_sim_backend_is_echoed_and_runs_iverilog_only(tmp_path, monkeypatch):
+    """Omitting `sim_backend` reproduces the pre-#2223 behavior exactly: the
+    canonical `iverilog` replay, no cross-check, no Verilator invocation of
+    any kind (the mock raises `AssertionError` on an unexpected call)."""
+    request_path = _broken_pair_request(tmp_path)
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_replay_run(verilator_missing=True)
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["sim_backend"] == "iverilog"
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    assert counterexample["simulation"]["engine"] == "icarus"
+    assert counterexample["simulation"]["four_state"] is True
+    assert counterexample["simulation_cross_check"] is None
+    assert report["diagnostics"] == []
+
+
+def test_both_backends_agreeing_confirms_the_counterexample(tmp_path, monkeypatch):
+    """Acceptance criterion 1: with both backends reaching the same verdict
+    on the same replayed bytes, the verdict stands and the agreement is
+    reported explicitly."""
+    request_path = _broken_pair_request(tmp_path)
+    monkeypatch.setattr(equiv.subprocess, "run", _mock_replay_run())
+
+    report = run_equiv(request_path, sim_backend="both")
+
+    assert report["sim_backend"] == "both"
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    cross_check = counterexample["simulation_cross_check"]
+    assert cross_check["engine"] == "verilator"
+    assert cross_check["engine_version"] == "5.050"
+    assert cross_check["four_state"] is False
+    assert cross_check["agreement"] == "agree"
+    assert cross_check["confirmed_by_simulation"] is True
+    assert cross_check["output_mismatches"] == []
+    # Byte-for-byte identical replayed values, not merely the same verdict.
+    assert cross_check["gold_outputs"] == counterexample["simulation"]["gold_outputs"]
+    assert cross_check["gate_outputs"] == counterexample["simulation"]["gate_outputs"]
+    assert report["diagnostics"] == []
+
+
+def test_backend_disagreement_is_an_explicit_error_never_a_pass(tmp_path, monkeypatch):
+    """Acceptance criterion 2 (negative control): an injected backend
+    disagreement -- `iverilog` reproduces the divergence, `verilator` does
+    not -- is surfaced as an error-severity diagnostic and an
+    `"inconclusive"` verdict. Neither backend is silently preferred, so
+    `confirmed_by_simulation` is reset to `None` rather than adopting the
+    canonical run's own `True`."""
+    request_path = _broken_pair_request(tmp_path)
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_replay_run(
+            iverilog_stdout=_REPLAY_DIVERGES,
+            verilator_stdout=_REPLAY_AGREES,
+        ),
+    )
+
+    report = run_equiv(request_path, sim_backend="both")
+
+    assert report["status"] == "inconclusive"
+    assert report["status"] != "counterexample"
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is None
+    cross_check = counterexample["simulation_cross_check"]
+    assert cross_check["agreement"] == "disagree"
+    assert cross_check["confirmed_by_simulation"] is False
+    # Neither backend's raw evidence is discarded -- both runs are still
+    # reported in full, so the disagreement is auditable.
+    assert counterexample["simulation"]["gate_outputs"] == {"y": "1"}
+    assert cross_check["gate_outputs"] == {"y": "0"}
+
+    disagreements = [
+        diag
+        for diag in report["diagnostics"]
+        if diag["code"] == "sim_backend_disagreement"
+    ]
+    assert len(disagreements) == 1
+    assert disagreements[0]["severity"] == "error"
+    assert "iverilog" in disagreements[0]["message"]
+    assert "verilator" in disagreements[0]["message"]
+
+
+def test_backend_disagreement_exits_four_never_zero(tmp_path, monkeypatch, capsys):
+    """The same negative control through the CLI: a backend disagreement
+    never exits `0` (and never exits `3`, the "proven non-equivalent"
+    code) -- it takes the `4`/"ran, but the result isn't trustworthy" exit
+    every other untrustworthy outcome takes."""
+    request_path = _broken_pair_request(tmp_path)
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_replay_run(verilator_stdout=_REPLAY_AGREES),
+    )
+
+    exit_code = main(
+        ["equiv", request_path, "--sim-backend", "both", "--format", "json"]
+    )
+
+    assert exit_code == 4
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "inconclusive"
+    assert out["sim_backend"] == "both"
+
+
+def test_two_state_only_difference_is_explained_not_a_disagreement(
+    tmp_path, monkeypatch
+):
+    """A bit that differs *only* where the 4-state canonical run reported
+    `x` is the one declared backend-specific difference between the two
+    engines -- explained by `explained_by: "two_state_backend"`, reported as
+    an `info` diagnostic, and never escalated into a disagreement."""
+    request_path = _broken_pair_request(tmp_path)
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_replay_run(
+            iverilog_stdout=_REPLAY_DIVERGES_4STATE,
+            verilator_stdout=_REPLAY_DIVERGES_2STATE,
+        ),
+    )
+
+    report = run_equiv(request_path, sim_backend="both")
+
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    cross_check = counterexample["simulation_cross_check"]
+    assert cross_check["agreement"] == "agree"
+    assert [entry["explained_by"] for entry in cross_check["output_mismatches"]] == [
+        "two_state_backend"
+    ]
+    codes = [diag["code"] for diag in report["diagnostics"]]
+    assert codes == ["sim_backend_output_difference"]
+    assert "sim_backend_disagreement" not in codes
+
+
+def test_verilator_absent_leaves_canonical_evidence_byte_identical(
+    tmp_path, monkeypatch
+):
+    """Acceptance criterion 3: with no `verilator` on `$PATH`, asking for
+    `"both"` produces exactly the canonical `iverilog` run's own evidence --
+    same verdict, same replayed bytes, same `status` -- plus an explicit
+    "the cross-check could not run" record. Absence is reported, never
+    fabricated and never silently swapped for the canonical backend's own
+    numbers."""
+    request_path = _broken_pair_request(tmp_path)
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_replay_run(verilator_missing=True)
+    )
+    canonical_report = run_equiv(request_path, sim_backend="iverilog")
+
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_replay_run(verilator_missing=True)
+    )
+    both_report = run_equiv(request_path, sim_backend="both")
+
+    assert both_report["status"] == canonical_report["status"] == "counterexample"
+    canonical_ce = canonical_report["counterexample"]
+    both_ce = both_report["counterexample"]
+    assert both_ce["confirmed_by_simulation"] is True
+    assert both_ce["simulation"] == canonical_ce["simulation"]
+    # Everything except the two additive cross-check surfaces is unchanged.
+    assert {
+        key: value for key, value in both_ce.items() if key != "simulation_cross_check"
+    } == {
+        key: value
+        for key, value in canonical_ce.items()
+        if key != "simulation_cross_check"
+    }
+
+    cross_check = both_ce["simulation_cross_check"]
+    assert cross_check["agreement"] == "unavailable"
+    assert cross_check["confirmed_by_simulation"] is None
+    assert cross_check["gold_outputs"] is None
+    assert cross_check["gate_outputs"] is None
+    codes = [diag["code"] for diag in both_report["diagnostics"]]
+    assert codes == ["sim_backend_cross_check_unavailable"]
+    assert canonical_report["diagnostics"] == []
+
+
+def test_verilator_backend_absent_never_falls_back_to_iverilog(tmp_path, monkeypatch):
+    """`sim_backend: "verilator"` with no `verilator` installed degrades to
+    the same "could not confirm" outcome a missing `iverilog` already
+    produces -- it must never quietly run `iverilog` instead and report the
+    result as Verilator's."""
+    request_path = _broken_pair_request(tmp_path)
+    monkeypatch.setattr(
+        equiv.subprocess, "run", _mock_replay_run(verilator_missing=True)
+    )
+
+    report = run_equiv(request_path, sim_backend="verilator")
+
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is None
+    assert counterexample["simulation"] is None
+    assert counterexample["simulation_cross_check"] is None
+    diagnostic = report["diagnostics"][0]
+    assert diagnostic["code"] == "simulation_unavailable"
+    assert diagnostic["message"].startswith("verilator not found on $PATH")
+    # The solver's own verdict stands -- no simulation evidence either way.
+    assert report["status"] == "counterexample"
+
+
+def test_cli_sim_backend_flag_overrides_the_request_field(tmp_path, monkeypatch):
+    """`--sim-backend` overrides `request.sim_backend`, the same
+    override-the-request-field precedence `--timeout-s` already has."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GATE_OR_BROKEN)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "sim_backend": "verilator",
+        },
+    )
+    monkeypatch.setattr(equiv.subprocess, "run", _mock_replay_run())
+
+    from_request = run_equiv(request_path)
+    assert from_request["sim_backend"] == "verilator"
+    assert from_request["counterexample"]["simulation"]["engine"] == "verilator"
+
+    monkeypatch.setattr(equiv.subprocess, "run", _mock_replay_run())
+    overridden = run_equiv(request_path, sim_backend="iverilog")
+    assert overridden["sim_backend"] == "iverilog"
+    assert overridden["counterexample"]["simulation"]["engine"] == "icarus"
+
+
+def test_sequential_replay_backend_disagreement_is_flagged(tmp_path, monkeypatch):
+    """The multi-cycle replay path applies the identical agreement policy:
+    a cross-check backend that does not reproduce the reported divergence
+    anywhere in the trace is a disagreement, so the caller downgrades the
+    verdict."""
+    counterexample = {
+        "cycles": [],
+        "diverging_outputs": ["q"],
+        "first_diverging_cycle": 2,
+        "confirmed_by_simulation": None,
+        "simulation": None,
+        "simulation_cross_check": None,
+    }
+    replies = {
+        "iverilog": "EQUIV_SIM_CYCLE 2 gold q 1\nEQUIV_SIM_CYCLE 2 gate q 0\n",
+        "verilator": "EQUIV_SIM_CYCLE 2 gold q 0\nEQUIV_SIM_CYCLE 2 gate q 0\n",
+    }
+
+    def _fake_replay(*, backend, netlist_path, tb_path, output_dir, stem):
+        return (replies[backend], None)
+
+    monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv, "_sim_backend_version", lambda backend: "0.0")
+
+    diagnostics: list[dict] = []
+    equiv._confirm_sequential_counterexample(
+        counterexample=counterexample,
+        ports={"q": "output"},
+        netlist_path=str(tmp_path / "netlist.v"),
+        output_dir=str(tmp_path),
+        diagnostics=diagnostics,
+        sim_backend="both",
+    )
+
+    assert counterexample["confirmed_by_simulation"] is None
+    assert equiv._replay_backends_disagreed(counterexample) is True
+    assert counterexample["simulation_cross_check"]["agreement"] == "disagree"
+    assert [diag["code"] for diag in diagnostics] == ["sim_backend_disagreement"]
+    assert diagnostics[0]["severity"] == "error"
+
+
+def test_sequential_replay_two_state_start_state_is_explained(tmp_path, monkeypatch):
+    """The sequential replay's one *expected* cross-backend difference: a
+    real 4-state simulation starts its registers at `x`, a 2-state one at
+    `0`. Same verdict, explained bits, no disagreement."""
+    counterexample = {
+        "cycles": [],
+        "diverging_outputs": ["q"],
+        "first_diverging_cycle": 2,
+        "confirmed_by_simulation": None,
+        "simulation": None,
+        "simulation_cross_check": None,
+    }
+    replies = {
+        "iverilog": (
+            "EQUIV_SIM_CYCLE 1 gold q x\nEQUIV_SIM_CYCLE 1 gate q x\n"
+            "EQUIV_SIM_CYCLE 2 gold q 1\nEQUIV_SIM_CYCLE 2 gate q 0\n"
+        ),
+        "verilator": (
+            "EQUIV_SIM_CYCLE 1 gold q 0\nEQUIV_SIM_CYCLE 1 gate q 0\n"
+            "EQUIV_SIM_CYCLE 2 gold q 1\nEQUIV_SIM_CYCLE 2 gate q 0\n"
+        ),
+    }
+
+    def _fake_replay(*, backend, netlist_path, tb_path, output_dir, stem):
+        return (replies[backend], None)
+
+    monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
+    monkeypatch.setattr(equiv, "_sim_backend_version", lambda backend: "0.0")
+
+    diagnostics: list[dict] = []
+    equiv._confirm_sequential_counterexample(
+        counterexample=counterexample,
+        ports={"q": "output"},
+        netlist_path=str(tmp_path / "netlist.v"),
+        output_dir=str(tmp_path),
+        diagnostics=diagnostics,
+        sim_backend="both",
+    )
+
+    assert counterexample["confirmed_by_simulation"] is True
+    cross_check = counterexample["simulation_cross_check"]
+    assert cross_check["agreement"] == "agree"
+    assert equiv._replay_backends_disagreed(counterexample) is False
+    assert {entry["cycle"] for entry in cross_check["output_mismatches"]} == {1}
+    assert all(
+        entry["explained_by"] == "two_state_backend"
+        for entry in cross_check["output_mismatches"]
+    )
+
+
+# --- real-toolchain integration (skipif) ----------------------------------- #
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+@pytest.mark.skipif(
+    not HAVE_VERILATOR, reason="verilator is not installed on this machine"
+)
+def test_real_backends_agree_on_a_real_counterexample_replay(tmp_path):
+    """Acceptance criterion 1, against the real toolchain: the same
+    counterexample replayed through a real `iverilog`/`vvp` and a real
+    `verilator --binary` reaches the same verdict on byte-identical
+    replayed values."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GATE_OR_BROKEN)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    report = run_equiv(request_path, sim_backend="both")
+
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    simulation = counterexample["simulation"]
+    cross_check = counterexample["simulation_cross_check"]
+    assert simulation["engine"] == "icarus"
+    assert cross_check["engine"] == "verilator"
+    assert cross_check["engine_version"] is not None
+    assert cross_check["agreement"] == "agree"
+    assert cross_check["output_mismatches"] == []
+    assert cross_check["gold_outputs"] == simulation["gold_outputs"]
+    assert cross_check["gate_outputs"] == simulation["gate_outputs"]
+    assert cross_check["diverging_outputs"] == simulation["diverging_outputs"] == ["y"]
+    assert not [
+        diag
+        for diag in report["diagnostics"]
+        if diag["code"] == "sim_backend_disagreement"
+    ]
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+@pytest.mark.skipif(
+    not HAVE_VERILATOR, reason="verilator is not installed on this machine"
+)
+def test_real_verilator_only_backend_matches_the_iverilog_backend(tmp_path):
+    """Running the replay under `verilator` alone reaches the same verdict
+    and the same replayed bytes as running it under `iverilog` alone -- the
+    property that makes the fast path substitutable at all."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GATE_OR_BROKEN)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+
+    icarus = run_equiv(request_path, sim_backend="iverilog")["counterexample"]
+    verilator = run_equiv(request_path, sim_backend="verilator")["counterexample"]
+
+    assert icarus["confirmed_by_simulation"] == verilator["confirmed_by_simulation"]
+    assert verilator["simulation"]["engine"] == "verilator"
+    assert verilator["simulation"]["four_state"] is False
+    for field in ("gold_outputs", "gate_outputs", "diverging_outputs"):
+        assert verilator["simulation"][field] == icarus["simulation"][field]
+
+
+@pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_IVERILOG, reason="iverilog is not installed on this machine"
+)
+@pytest.mark.skipif(
+    not HAVE_VERILATOR, reason="verilator is not installed on this machine"
+)
+def test_real_sequential_backends_agree_with_explained_start_state_difference(
+    tmp_path,
+):
+    """The real multi-cycle replay under both backends: same verdict, and
+    every replayed-bit difference confined to the declared 2-state/4-state
+    start-state gap (`explained_by: "two_state_backend"`) -- never an
+    unexplained disagreement."""
+    _write(tmp_path / "gold.v", _SEQ_GOLD_SIMPLE_DFF_RTL)
+    _write(tmp_path / "gate.v", _SEQ_GATE_SIMPLE_DFF_RTL_INVERTED)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "engine": "yosys-sequential",
+            "sim_backend": "both",
+        },
+    )
+
+    report = run_equiv(request_path)
+
+    assert report["sim_backend"] == "both"
+    assert report["status"] == "counterexample"
+    counterexample = report["counterexample"]
+    assert counterexample["confirmed_by_simulation"] is True
+    cross_check = counterexample["simulation_cross_check"]
+    assert cross_check["engine"] == "verilator"
+    assert cross_check["agreement"] == "agree"
+    assert all(
+        entry["explained_by"] == "two_state_backend"
+        for entry in cross_check["output_mismatches"]
+    )
+    assert not [
+        diag
+        for diag in report["diagnostics"]
+        if diag["code"] == "sim_backend_disagreement"
+    ]

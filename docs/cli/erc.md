@@ -10,7 +10,8 @@ the antenna + ERC signoff epic
 [#713](https://github.com/2AMLogic/klayout-tools/issues/713).
 
 ```
-klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--format text|json]
+klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--deck <name>]
+                      [--findings-only] [--format text|json]
 ```
 
 - `<file>` — path to a routed GDSII (`.gds`) or OASIS (`.oas`) layout, e.g.
@@ -27,6 +28,21 @@ klt erc <file> <spec> [--top <cell>] [--pdk <name>] [--format text|json]
   "Antenna-ratio verdict" below for what happens when it's omitted. Not
   validated by argparse: an unrecognised name is a clean exit-1 error, like
   `klt drc`'s own `--deck`.
+- `--deck` (issue #2204) — a curated extraction deck (currently: `gf180mcu`,
+  `sg13cmos5l`, `sg13g2`, `sky130` — the same registry `klt extract
+  --deck`/`klt lvs --deck` resolve, no PDK install needed) whose own
+  device-body marker declarations are auto-detected and carved out of the
+  matching `stackup`/`vias` role — see "Deck-driven device-marker
+  auto-detection" below. Optional and independent of `--pdk` (which selects
+  only the antenna-ratio limit table). Not validated by argparse: an
+  unrecognised name is a clean exit-1 error, same convention as `--pdk`.
+- `--findings-only` — report the `erc_findings` half only, skipping the
+  per-gate per-level antenna accumulation that dominates runtime on a dense
+  layout (issue
+  [#2219](https://github.com/2AMLogic/klayout-tools/issues/2219)). Every ERC
+  finding is identical to a full run; the antenna half reports `null`
+  accumulation fields and `"unchecked"` verdicts. Mutually exclusive with
+  `--pdk` (exit 1). See "Findings-only runs" below.
 - `--format` — `text` (default, a human-readable summary) or `json`.
 
 The command is headless (`klayout.db` batch API only, no GUI) and safe to
@@ -254,11 +270,40 @@ use) — matching `klt power`'s own convention.
     is an error rather than a coercion — a truthy `"false"` string quietly
     asserting the opposite of what it reads is the exact silent-pass shape
     this key exists to close.
+  - `tap_boxes` (optional array of `[left, bottom, right, top]` micrometre
+    boxes, default `[]`, issue #2234) — a caller **assertion** of exactly
+    where the tap geometry is, intersected into `tap_layer` (composes with
+    `tap_requires`, which narrows the same region). Unlike `tap_requires`/
+    `tap_is_dedicated`, this needs no PDK marker layer to exist at all —
+    the escape hatch for a stream whose taps are genuinely drawn but carry
+    no distinguishing implant/marker layer at all (see "A tie with no
+    distinguishing marker layer at all" below). Graded under its own
+    coverage classification (`erc_coverage.checked_by_assertion`) rather
+    than folded into an ordinary geometrically-derived pass, and held to
+    the same degenerate/falsifiability test as every other narrowing form
+    (see "A degenerate tie is reported as skipped, not as a pass" below):
+    an assertion that removes nothing from the drawn `tap_layer` inside the
+    well is exactly as degenerate as an omitted `tap_requires`. Each box's
+    `left`/`bottom`/`right`/`top` must satisfy `left < right` and
+    `bottom < top`.
   - `connect_to` (string, required) — the `stackup` role name the tap is
     wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
   - `net` (string, required) — the net name (matched the same way as
     `nets[].name` above) the tap must ultimately reach.
   - Omitted entirely -> `erc.missing_tie` is never computed.
+- `ties_disclosure` (optional object, default `null`, issue #2234) — a
+  top-level statement that this stream has no expressible tap, and why:
+  - `reason` (string, required, non-empty) — free-text explanation, e.g.
+    `"no implant layers are drawn on this stream"`.
+  - Changes no geometry and no finding. What it changes is the
+    `erc_coverage.inapplicable` reason recorded for the undeclared
+    `erc.missing_tie` work when `ties` is empty —
+    `"ties_disclosed_unexpressible"` instead of `"no_ties_declared"` — so a
+    consumer (`klt signoff`'s T1 item 11, `docs/design-evidence-tiers.md`)
+    can distinguish "this stream disclosed it cannot express a tap" from
+    "nobody declared ties at all", which previously rendered identically.
+    Echoed verbatim as the top-level `ties_disclosure` field; `null` when
+    omitted.
 - `devices` (optional array, default `[]`, issue #2183) — where a drawn
   **device body** sits on an already-declared conductor role, so the
   connectivity model stops reading it as a wire (see "Device bodies are
@@ -271,7 +316,12 @@ use) — matching `klt power`'s own convention.
     same markers the curated decks already use for device recognition and
     `klt extract` already consults. A `body_layer` absent from the given
     layout is not an error (matching `stackup`/`vias`' own convention); it
-    subtracts nothing and reports `body_area_um2: 0.0`.
+    subtracts nothing and reports `body_area_um2: 0.0`. A `body_layer`
+    that *is* drawn here but does not overlap its declared `on` role
+    reports the same `0.0` — that field is the intersection with the role,
+    not the marker's own area (issue #2226) — plus a one-line warning on
+    stderr, since that combination is a spec bug rather than an unused
+    layer.
   - `on` (string, required) — which declared role that body's geometry is
     drawn on: either a `stackup` `name` (a poly resistor body, a fuse, a
     capacitor plate) **or** a `vias` `name` (a MiM/MOM cap whose whole
@@ -281,6 +331,9 @@ use) — matching `klt power`'s own convention.
     unioned, not last-one-wins.
   - Omitted entirely -> no carve-out at all, i.e. the pre-#2183 behaviour
     (`gates[]`, the antenna verdicts, and every finding are unchanged).
+  - An explicit entry always wins over a `--deck`-detected carve-out for the
+    same role (issue #2204) — see "Deck-driven device-marker auto-detection"
+    below.
 
 ## Connectivity model
 
@@ -326,7 +379,12 @@ LVS run reported the identical net as **one**, zero-mismatch electrical
 node. **Do not treat a multi-island `erc.unconnected_net` finding as a
 confirmed design defect by itself** — cross-check against a real,
 device-aware LVS run before acting on it (see also `docs/design-evidence-
-tiers.md`'s item 11).
+tiers.md`'s item 11). The finding's `islands[]` array (issue #2194, see
+"Locating the islands of a multi-island `erc.unconnected_net`" below) is
+what makes that triage possible per island rather than per net: one
+finding can cover a genuine floating-supply defect *and* a well-continuity
+false positive on the same net, and only the per-island boxes let you tell
+which is which.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
@@ -438,6 +496,84 @@ not be performed instead of letting a clean verdict stand for it. To clear
 the skip, narrow the tap with `tap_requires`, or affirm `tap_is_dedicated`
 when the layer really is tap-only.
 
+#### A tie with no distinguishing marker layer at all (`tap_boxes`, `ties_disclosure`, issue #2234)
+
+`tap_requires` and `tap_is_dedicated` both need *something drawn* to lean
+on — a PDK implant layer to intersect, or a tap-only marker layer to
+affirm. Neither exists for every stream: a stream whose taps are genuinely
+drawn but carry **no distinguishing mark at all** (the implant-free
+full-custom case the degenerate-tie section above describes) has nothing
+true to narrow or affirm, so every `ties[]` entry for it lands degenerate.
+
+Two ways to close that gap, each with a different cost:
+
+- **`tap_boxes`** — a caller **assertion** of exactly where the tap
+  geometry is, as a list of `[left, bottom, right, top]` micrometre boxes
+  intersected into `tap_layer` (composes with `tap_requires`, which
+  narrows the same region, but needs no PDK marker layer at all). This is
+  caller assertion rather than layer-derived narrowing, so a non-degenerate
+  asserted tie is graded under its own coverage classification —
+  `erc_coverage.checked_by_assertion`, a list of the same `erc.missing_tie`
+  work identities that also appear in `checked` — rather than folded into
+  an ordinary geometrically-derived pass. It is held to the exact same
+  falsifiability test as every other narrowing form: an assertion that
+  removes nothing from the drawn `tap_layer` inside the well is exactly as
+  degenerate as an omitted `tap_requires` (the test in "A degenerate tie is
+  reported as skipped" above is geometric, not "which key was given"), and
+  an assertion matching no drawn geometry at all is not a silent pass
+  either — it produces the same honest "no tap drawn inside it"
+  `erc.missing_tie` finding a real absent tap would.
+- **`ties_disclosure`** — a top-level statement that this stream has no
+  expressible tap, and why, when even `tap_boxes` cannot name real
+  geometry. This changes no finding and no geometry; it only changes the
+  `erc_coverage.inapplicable` reason recorded for the undeclared
+  `erc.missing_tie` work when `ties` is empty
+  (`"ties_disclosed_unexpressible"` instead of `"no_ties_declared"`), so
+  `klt signoff`'s T1 item 11 can render a distinct
+  `supply_spec_disclosed_unexpressible` reason instead of the plain
+  `supply_spec_incomplete` it gives an omission nobody considered — see
+  [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11.
+  Item 11 still reports **unmet** either way: a disclosure proves nothing
+  about the tap's actual connectivity, it only makes the reason honest.
+
+A worked `tap_boxes` declaration — a tap ring drawn on the transistor
+active layer, with no implant anywhere in the stream, named one ring edge
+at a time (a single box spanning the whole ring would also span everything
+the ring encloses):
+
+```json
+{
+  "ties": [
+    {
+      "name": "substrate_tie",
+      "well_layer": "21/0",
+      "tap_layer": "22/0",
+      "tap_boxes": [
+        [-10.7, -74.5, 191.3, -73.1],
+        [-10.7, -33.1, 191.3, -31.7],
+        [-10.7, -73.1, -9.3, -33.1],
+        [189.9, -73.1, 191.3, -33.1]
+      ],
+      "connect_to": "metal1",
+      "net": "vss"
+    }
+  ],
+  "ties_disclosure": null
+}
+```
+
+**Why boxes rather than cell names.** A `tap_cells` form (naming the cells
+whose geometry is the tap) was considered alongside this one and is not
+implemented, because it answers strictly fewer streams: a tap ring is
+routinely drawn as *top-cell geometry* rather than as an instance — that is
+exactly how the stream this feature was reported from draws both of its
+rings — and a cell-name assertion has nothing to name there, while a box
+assertion covers the hierarchical case too (a placement's own window is a
+box). Nothing here forecloses adding one later: it would be another
+narrowing input to the same tap region, graded by the same
+`checked_by_assertion` classification and the same geometric degeneracy
+test.
+
 ### Device bodies are not wires (`devices[]`, issue #2183)
 
 A conductor role carries *geometry*, and the model above has no way to tell
@@ -473,11 +609,16 @@ committed layout, defeating the point of a content-hash-pinned artifact.
 Three properties, all deliberate:
 
 - **The carve-out is visible in the report.** `provenance.devices` echoes
-  every declaration with the area it actually removed (`body_area_um2`),
-  so a declaration that silently matched nothing — wrong datatype, marker
-  layer absent from this stream — is distinguishable from one that bit,
-  and two runs of the same layout that disagree about `erc.supply_short`
-  carry the reason in the payload.
+  every declaration with the area it actually removed (`body_area_um2` —
+  the marker **intersected with the `on` role's own conductor region**,
+  issue #2226, not the marker layer's own area), so a declaration that
+  silently matched nothing — wrong datatype, wrong `on` role, marker layer
+  absent from this stream — is distinguishable from one that bit, and two
+  runs of the same layout that disagree about `erc.supply_short` carry the
+  reason in the payload. A marker that is drawn on the stream but misses
+  its declared role (`body_area_um2: 0.0` with geometry elsewhere) also
+  warns on stderr; JSON goes to stdout only, so a piped report is
+  unaffected.
 - **It applies to both graphs.** The `ties[]` extraction (above) sees the
   same carve-out: a drawn resistor body is not a wire there either.
 - **It cuts, so declare it where the device is.** Subtraction is purely
@@ -494,6 +635,78 @@ wire graph. A real device-aware read of the same layout is `klt extract` /
 `klt lvs`'s job, and the two are complementary: LVS confirms the divider
 exists and matches the schematic, `klt erc` confirms nothing *else* joins
 the rails.
+
+### Deck-driven device-marker auto-detection (`--deck`, issue #2204)
+
+`devices[]` requires the caller to know, and correctly transcribe, the PDK's
+device-body marker layer/datatype — `62/0` for gf180mcu's `Resistor`,
+`RES_MK`/`SAB`, `CAP_MK`/`MIM_L_MK`/`FuseTop` for its MiM caps. That
+information already exists in this repo's curated extraction decks, and a
+mis-transcription fails *silently*: it subtracts nothing, and the only
+signal is `provenance.devices[].body_area_um2 == 0.0`. `--deck <name>`
+(currently: `gf180mcu`, `sg13cmos5l`, `sg13g2`, `sky130`) resolves one of
+those curated decks — the same name-keyed registry `klt extract --deck`/`klt
+lvs --deck` use, needing no PDK install — and reads its own device-marker
+declarations directly, instead of asking the spec author to transcribe them.
+
+**The matching rule.** A deck names its device-recognition layers as
+`(layer, datatype)` pairs on `ResistorDevice`/`CapacitorDevice` entries (see
+`src/klayout_tools/decks/extraction.py`), and this command's own `stackup`/
+`vias` roles carry `(layer, datatype)` too. A deck device applies to a
+declared role **only when the device's conducting-body layer equals that
+role's layer/datatype exactly** — no name-guessing, no partial-overlap
+heuristics:
+
+- **`ResistorDevice`** — the conducting-body layer is `body` (e.g. Poly2 for
+  gf180mcu's `ppolyf_u`, which is also that deck's own gate role). The
+  subtracted region is `body & marker`, narrowed by `requires` (every layer
+  must also cover it) and `excludes` (each subtracted) — the *same* region
+  `klt extract`'s own resistor recognition computes, not a second,
+  potentially drifting derivation.
+- **`CapacitorDevice`** — two independent conducting-body layers, each
+  checked separately:
+  - `top_plate` (e.g. gf180mcu's `FuseTop`) — the recognised top-plate
+    region, narrowed by `top_plate_requires`/`top_plate_excludes`.
+  - `top_plate_via`, when the deck declares one (e.g. gf180mcu's `Via4`) —
+    **only** the geometric overlap between that via's own footprint and the
+    capacitor's recognised bottom plate, exactly the region issue #364/#1388
+    already exclude from `klt extract`'s own generic via connectivity — not
+    the whole via layer. A capacitor's `top_plate_via` is typically *also*
+    the deck's ordinary inter-metal via layer (gf180mcu's `Via4` both lands
+    a MiM cap's top plate on Metal5 and routes ordinary Metal4↔Metal5 vias
+    everywhere else), so cutting the entire layer would silently disconnect
+    every legitimate via on it, not just the ones under a capacitor.
+  - `bottom_plate` is **not** a matched layer: unlike a resistor body or a
+    MiM top plate, a capacitor's bottom plate is ordinary conductor that
+    genuinely carries the same net's real routing (`klt extract` ties it
+    into the metal's own connectivity node rather than cutting it out) —
+    subtracting it here would introduce a false disconnect, not fix one.
+
+Only `ResistorDevice`/`CapacitorDevice` are matched today — `BipolarDevice`/
+`DiodeDevice`/`MomCapacitorDevice` are a candidate follow-on, not a silent
+omission.
+
+**Visibility, both ways.** A deck device whose conducting-body layer matches
+no declared role is still listed in `provenance.devices` (`"on": null`)
+whenever that layer actually carries geometry on this layout — so a spec
+that omits, or misnames, the role a real device sits on is visible rather
+than silently invisible. A device whose layer carries *no* geometry at all
+here is omitted outright: a curated deck ships dozens of resistor/capacitor
+flavours a given design never draws, and listing every one of them on every
+`--deck`-selected run would bury the signal this guarantee exists to
+surface.
+
+**Precedence.** An explicit `devices[]` entry for a role always wins over
+this deck's own auto-detection for that role: the declared entry is the one
+that actually cuts, and the deck-detected match for the same role is still
+listed (`"body_area_um2": 0.0`, `"superseded_by"` naming the declared entry
+that won) rather than silently dropped.
+
+**Byte-identical when unused.** Omitting `--deck` (every caller before this
+issue) leaves `gates[]`, every antenna ratio, every finding,
+`provenance.deck`, and every `provenance.devices` entry's shape
+byte-identical to a run before this feature existed — see "JSON schema"
+below for exactly which fields are conditional on `--deck`.
 
 For every net the extraction discovers whose geometry includes the declared
 gate-role layer (`stackup[0]`):
@@ -538,6 +751,11 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   or more than one, disconnected electrical island. Zero matches means
   nothing in the layout carries that net's label at all; more than one
   means the intended net is split into pieces that never actually touch.
+  A multi-island finding says **where** each island is, not just how many
+  there are (issue #2194): `islands[]` carries one
+  `{"bbox", "layer", "shape_count"}` entry per island, and the finding's
+  own `bbox` spans all of them — see "Locating the islands of a
+  multi-island `erc.unconnected_net`" below.
 - **`erc.multiply_driven_net`** / **`erc.supply_short`** — two *different*
   declared `nets[]` names whose matched geometry resolves to the very same
   electrical island (a short), reported per unordered pair. When both
@@ -562,6 +780,56 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   passes as soon as *one* of them reaches the net; see "Well/tap
   connectivity" above for what this check does and does not model.
 
+### Locating the islands of a multi-island `erc.unconnected_net` (issue #2194)
+
+"This net resolves to 3 islands" is the alarm, not the answer: the islands
+are not interchangeable, and one finding can cover both a genuine
+floating-supply defect and a false positive (see "Known false-positive:
+diffusion/well continuity is not modeled" above) on the same net. So a
+multi-island finding carries the islands themselves:
+
+```json
+{
+  "rule": "erc.unconnected_net",
+  "description": "declared net 'VDD' resolves to 3 disconnected electrical islands (expected exactly one)",
+  "net": "VDD",
+  "other_net": null,
+  "gate_id": null,
+  "layer": null,
+  "bbox": {"left": 5000, "bottom": 0, "right": 21000, "top": 1000},
+  "islands": [
+    {"bbox": {"left": 5000, "bottom": 0, "right": 6000, "top": 1000}, "layer": "li1", "shape_count": 1},
+    {"bbox": {"left": 8000, "bottom": 0, "right": 11000, "top": 1000}, "layer": "poly", "shape_count": 2},
+    {"bbox": {"left": 20000, "bottom": 0, "right": 21000, "top": 1000}, "layer": "li1", "shape_count": 1}
+  ]
+}
+```
+
+- `islands[]` has one entry per island, in the same order `klt erc` walks
+  them internally (ascending KLayout cluster id) — deterministic for a
+  given layout and spec, so two runs of the same input list them the same
+  way.
+- `islands[].bbox` is the island's whole extent, unioned across every
+  `stackup` role it has geometry on, in the same raw-database-unit
+  `{"left", "bottom", "right", "top"}` convention as `klt drc`'s
+  `violations[].bbox`. It is what you point a layout viewer at.
+- `islands[].layer` names the `stackup` role carrying the most of that
+  island's area (ties broken by stackup order) — the single most useful
+  layer to open first, not an exhaustive list of the roles it touches.
+- `islands[].shape_count` is the number of merged polygons across those
+  roles, which separates a one-shape orphan stub from a whole sub-block
+  that failed to strap up.
+- The finding's own top-level `bbox` is the box spanning every island, so a
+  caller that only reads `bbox` still lands in the right part of the block.
+
+`islands` is `null` for every other finding — including the *zero*-match
+`erc.unconnected_net` case, which has no geometry to point at at all.
+
+Because each island is located, two reports of the same net can be diffed:
+going from 3 islands to 2 now says *which* island was resolved, instead of
+leaving "the fix worked" and "the fix broke something else and merged a
+different pair" indistinguishable.
+
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 
 For every non-gate `stackup` level (`stackup[1:]` — the gate role itself,
@@ -577,7 +845,10 @@ level's own role `name`:
   in that case — `antenna_ratio` is still reported, just with nothing to
   compare it against) or because this role's `name` does not match any
   role the selected PDK's table defines (see "Sky130 antenna-ratio
-  limits" below for the exact names it recognises).
+  limits" below for the exact names it recognises). A `--findings-only`
+  run (issue #2219) is likewise `"unchecked"` everywhere, and there
+  `antenna_ratio` is `null` as well — the accumulation it would be derived
+  from was never performed. See "Findings-only runs" below.
 
 **The gate role itself (`stackup[0]`) is always `"unchecked"`.** Without
 `active_layer`, its `antenna_ratio` is trivially `1.0`
@@ -615,7 +886,8 @@ here):
   declared role's antenna ratio is otherwise fully graded).
 - **`antenna_verdict: "unchecked"`** — no graded level was ever compared
   against a limit at all (e.g. `--pdk` was omitted, so every level
-  including the graded ones comes back `"unchecked"`).
+  including the graded ones comes back `"unchecked"`, or `--findings-only`
+  skipped the accumulation outright).
 
 ### Sky130 antenna-ratio limits
 
@@ -746,6 +1018,71 @@ roll-up, computed once, so every caller reads the same rule.
 citation on the envelope's own verdict, reads `erc_status` when `status` is
 `not_checked`: see [`docs/cli/signoff.md`](signoff.md).
 
+## Findings-only runs (`--findings-only`, issue #2219)
+
+`klt erc`'s inner loop is the per-gate, per-level accumulation: for
+**every** gate net, on **every** `stackup` role, a merged connected-area
+measurement. It scales as *gate nets × stackup roles*, and on a dense
+layout (the issue measured 16,640 gate nets × a four-role stackup at ~26
+minutes single-threaded) it is the dominant per-gate cost.
+
+A caller who only wants the `erc_findings` half pays all of it for nothing.
+The structural supply read that
+[`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11
+grades — `nets[]` island/short checks plus `ties[]` — never reads an
+accumulated area, and without a `--pdk` limit table the accumulation grades
+nothing either: every level comes back `"unchecked"` and `status` is
+`not_checked` regardless. `--findings-only` skips the walk:
+
+```bash
+klt erc routed.gds supply.erc.json --findings-only --format json
+```
+
+**What is unchanged.** Every ERC finding. All five rules still run, and
+their output is identical field-for-field to the same run without the flag
+— including `erc.floating_gate`, the one rule that reads the per-level
+model. Its predicate ("no connected geometry on any role above the gate")
+is evaluated directly off the same connectivity graph instead, stopping at
+the first role that carries area rather than measuring every role, so the
+answer is the same and the work is strictly less. `erc_findings`,
+`erc_finding_count`, `erc_status`, and `erc_coverage` are therefore all
+byte-identical to a full run, as are `gate_count` and every
+`gates[].gate_id`/`gates[].gate_area_um2`.
+
+**What changes.** Only the antenna half, and only to say honestly that it
+did not run:
+
+- `gates[].levels[]` still enumerates every `stackup` role in fabrication
+  order, but `step_area_um2`, `cumulative_area_um2`, and `antenna_ratio` are
+  **`null`** — the measurement was not taken. `null` rather than `0.0` on
+  purpose: a zero area is itself a real, checkable measurement (it is
+  exactly what `erc.floating_gate` keys off), so reporting zeros for work
+  that never ran would make a skipped report indistinguishable from a
+  layout of entirely floating gates.
+- Every `levels[].verdict` is `"unchecked"` and every
+  `gates[].antenna_verdict` is `"unchecked"`.
+- Every non-gate level lands in `coverage.skipped` with reason
+  `findings_only`, so the envelope names which antenna work was declined
+  and why.
+- `status` is `"not_checked"` and the exit code `4` — exactly the antenna
+  answer a `--pdk`-less run already gives, not a new token. Gate on
+  `erc_status`, as any `--pdk`-less run already must (see "Two verdicts"
+  above).
+- The top-level `findings_only` field is `true`, so a reader that finds a
+  `null` accumulation can tell "this run declined to measure it" from a
+  malformed report without inferring it from `coverage`.
+
+**`--findings-only` and `--pdk` are mutually exclusive.** Passing both is a
+contradiction — a limit table with nothing to grade — and is a clean exit-1
+error rather than a silently ungraded antenna half returned to a caller who
+asked for one. (If a wrapper always passes `--pdk`, drop it for the
+findings-only invocation; that invocation's antenna answer was `not_checked`
+either way.)
+
+The flag is **opt-in and inert by default**: an invocation that does not
+pass it produces exactly the report it always did, `findings_only: false`
+included, with no field newly nullable.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for
@@ -844,9 +1181,43 @@ removed from the connectivity graph:
     "name": "poly_resistor",
     "body_layer": "62/0",
     "on": "poly",
-    "body_area_um2": 4.8
+    "body_area_um2": 3.6
   }
 ]
+```
+
+A run that additionally selects `--deck <name>` (issue #2204) populates
+`provenance.deck` and adds `source`/`superseded_by` to every
+`provenance.devices` entry — both hand-declared and deck-detected. Here an
+explicit `devices[]` entry for `poly` wins over the deck's own
+auto-detected `ppolyf_u` match for the same role:
+
+```json
+"provenance": {
+  "deck": {
+    "name": "gf180mcu",
+    "content_hash": "sha256:<hex>",
+    "released": true
+  },
+  "devices": [
+    {
+      "name": "my_resistor",
+      "body_layer": "110/5",
+      "on": "poly",
+      "body_area_um2": 3.6,
+      "source": "declared",
+      "superseded_by": null
+    },
+    {
+      "name": "ppolyf_u",
+      "body_layer": "30/0",
+      "on": "poly",
+      "body_area_um2": 0.0,
+      "source": "deck",
+      "superseded_by": "my_resistor"
+    }
+  ]
+}
 ```
 
 A violating `levels[]` entry's `remedy` is populated instead of `null` —
@@ -901,6 +1272,7 @@ forward regardless (a `diode_insertion` remedy):
 | `file`           | string          | The input layout path exactly as provided.                                                       |
 | `spec`           | string          | The spec file path exactly as provided.                                                          |
 | `pdk`            | string \| null  | The `--pdk` value exactly as provided; `null` if omitted.                                        |
+| `findings_only`  | boolean         | (issue #2219) Whether `--findings-only` was passed — i.e. whether the per-gate antenna accumulation was skipped. `false` for every ordinary run. When `true`, `levels[].step_area_um2`/`cumulative_area_um2`/`antenna_ratio` are `null` and every level is in `coverage.skipped` for reason `findings_only` — see "Findings-only runs" above. |
 | `gate_role`      | string          | The `stackup[0].name` value — the gate-role layer's own name.                                    |
 | `gate_count`     | integer         | `len(gates)`.                                                                                     |
 | `gates`          | array\<object\> | One entry per net with nonzero area on the gate-role layer — see below.                          |
@@ -910,9 +1282,9 @@ forward regardless (a `diode_insertion` remedy):
 | `gates[].antenna_verdict` | string | `"violate"` if any *graded* `levels[1:]` entry (excludes `levels[0]`, the gate role, which is always `"unchecked"`) violates; else `"pass_partial"` if at least one graded level passed but at least one other graded level is `"unchecked"` (issue #1997 — a genuine coverage gap, e.g. met3-5 on a full sky130 stack); else `"pass"` if every graded level passed; else `"unchecked"`. |
 | `gates[].levels` | array\<object\> | One entry per `stackup` role, in fabrication order — see below.                                  |
 | `levels[].layer` | string          | The contributing `stackup` role's own `name`.                                                     |
-| `levels[].step_area_um2` | number   | This net's own merged area on this role's layer, in µm².                                         |
-| `levels[].cumulative_area_um2` | number | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm².     |
-| `levels[].antenna_ratio` | number   | `cumulative_area_um2 / gate_area_um2` for this level. `1.0` at `stackup[0]` (the gate level) when `active_layer` is omitted; otherwise reflects the raw-poly-vs-`poly ∩ diff` area difference (see "Gate area: `poly ∩ diff` vs. raw poly area" above) — always `"unchecked"` there regardless. |
+| `levels[].step_area_um2` | number \| null | This net's own merged area on this role's layer, in µm². `null` on a `--findings-only` run (issue #2219) — the accumulation was not performed. |
+| `levels[].cumulative_area_um2` | number \| null | Running sum of `step_area_um2` from `stackup[0]` through this role, inclusive, in µm². `null` on a `--findings-only` run. |
+| `levels[].antenna_ratio` | number \| null | `cumulative_area_um2 / gate_area_um2` for this level; `null` on a `--findings-only` run. `1.0` at `stackup[0]` (the gate level) when `active_layer` is omitted; otherwise reflects the raw-poly-vs-`poly ∩ diff` area difference (see "Gate area: `poly ∩ diff` vs. raw poly area" above) — always `"unchecked"` there regardless. |
 | `levels[].antenna_ratio_max` | number \| null | The resolved PDK limit for this role, or `null` when unchecked (no `--pdk`, the gate level, or an unrecognised role name). |
 | `levels[].antenna_ratio_source` | string \| null | A citation for `antenna_ratio_max` (source URL + rule id + column), or `null` when unchecked. |
 | `levels[].verdict` | string        | `"pass"`, `"violate"`, or `"unchecked"` — see "Antenna-ratio verdict" above.                      |
@@ -929,13 +1301,18 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].other_net` | string \| null | The second net name implicated, for `erc.multiply_driven_net`/`erc.supply_short` only; `null` otherwise. |
 | `erc_findings[].gate_id` | string \| null | The `gates[].gate_id` implicated, for `erc.floating_gate` only; `null` otherwise.           |
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
-| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
+| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. |
+| `erc_findings[].islands` | array\<object\> \| null | (issue #2194) One entry per disconnected electrical island, populated **only** for a multi-island `erc.unconnected_net`; `null` for every other finding (including the zero-match one). Entries are in ascending KLayout cluster-id order — deterministic for a given layout+spec. See "Locating the islands of a multi-island `erc.unconnected_net`" above. |
+| `erc_findings[].islands[].bbox` | object \| null | That island's whole extent, unioned across every `stackup` role it has geometry on, in the same raw-database-unit convention as `erc_findings[].bbox`. Populated for every island of a net that resolved to geometry (a labelled net always has `stackup` geometry by construction). |
+| `erc_findings[].islands[].layer` | string \| null | The `stackup` role carrying the most of this island's area (ties broken by stackup order) — the most useful layer to open a viewer on, not an exhaustive list of the roles it touches. |
+| `erc_findings[].islands[].shape_count` | integer | Number of merged polygons this island has across the `stackup` roles — separates a one-shape orphan stub from a whole sub-block that failed to strap up. |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration, issue #2199), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
+| `ties_disclosure` | object \| null | (issue #2234) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" above. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
-| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
-| `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region (`0.0` when its marker layer carries no geometry in this layout). `[]` when the spec declares no `devices`. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. |
+| `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
+| `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
 
 ## Checked-work coverage
 
@@ -944,8 +1321,11 @@ this command's existing envelope. This command reports **two** scopes,
 because it performs two independent bodies of checked work (issue #2179):
 
 `coverage.scope` is `antenna`. Checked IDs name each gate/non-gate level
-actually compared against a limit. Missing PDK or level limits are skipped;
-the gate reference level is inapplicable.
+actually compared against a limit. Missing PDK or level limits are skipped
+(`missing_antenna_pdk`/`missing_antenna_limit`), as is every non-gate level
+of a `--findings-only` run (`findings_only`, issue #2219 — the caller
+declined the accumulation, the same shape of caller-side skip as omitting
+`--pdk`); the gate reference level is inapplicable.
 
 `erc_coverage.scope` is `connectivity`, and grades the `erc_findings` rules,
 which need no `--pdk` at all. One checked ID per subject actually checked:
@@ -954,12 +1334,14 @@ per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
 `erc.multiply_driven_net`/`erc.supply_short` rules all key off the same
 declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
 that declares no `nets`/`ties` asked for none of that work, so those rules
-are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`),
-never skipped — an undeclared rule must not make this scope partial, and the
-distinction is what lets a consumer tell "no supply was declared, so
-`erc.supply_short` was never computed" from "the declared supplies came back
-clean" off the envelope alone. The gate scope is never empty: a run in which
-no net carries gate-role geometry is exit 1, not a zero-coverage report.
+are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`,
+or `ties_disclosed_unexpressible` in place of `no_ties_declared` when the
+spec's top-level `ties_disclosure` was given, issue #2234), never skipped —
+an undeclared rule must not make this scope partial, and the distinction is
+what lets a consumer tell "no supply was declared, so `erc.supply_short`
+was never computed" from "the declared supplies came back clean" off the
+envelope alone. The gate scope is never empty: a run in which no net
+carries gate-role geometry is exit 1, not a zero-coverage report.
 
 A declared `ties[]` entry is the one case this scope records as **skipped**
 (`degenerate_tap_declaration`, issue #2199): work that was requested and
@@ -967,6 +1349,14 @@ could not be performed, because the declared tap region is
 indistinguishable from an ordinary source/drain contact. That is a
 requested skip, so it does make the scope partial — see "A degenerate tie
 is reported as skipped, not as a pass" above.
+
+`erc_coverage` additionally carries `checked_by_assertion` (array\<string\>,
+issue #2234): the subset of `checked` work identities whose tap region was
+derived (at least in part) from a caller assertion (`ties[].tap_boxes`)
+rather than pure PDK-marker narrowing — `[]` when no tie used it. This is
+purely informational, additive to the four common-contract lists: a
+consumer that only reads `checked`/`skipped`/`inapplicable` sees an
+asserted tie exactly as it sees any other checked, non-degenerate tie.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as
@@ -997,10 +1387,10 @@ retain exit 1 and the stderr error envelope.
 | Exit code | Meaning                                                                                              |
 | --------- | ------------------------------------------------------------------------------------------------------ |
 | `0` | `status: "clean"` (at least one antenna level was graded, with no antenna or connectivity finding) or `status: "clean_partial"` (every graded level passed, but some requested antenna work was skipped — #2115). |
-| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
+| `1`       | Failed to run: layout/spec file not found or unreadable, a malformed `stackup`/`vias`/`nets`/`ties` declaration, an unrecognised `--pdk` name, `--findings-only` together with `--pdk`, an ambiguous top cell (pass `--top`), or no net in the layout carries any geometry on the declared gate role at all. |
 | `2`       | Usage error (argparse) — missing/invalid arguments.                                                    |
 | `3` | Antenna or connectivity violations. |
-| `4` | No actual antenna checks; `status: "not_checked"`. |
+| `4` | No actual antenna checks; `status: "not_checked"` — including every `--findings-only` run, which skips them by request. |
 
 **Gate on `status`, not the exit code.** These codes are additive — a
 future release may add a new one above `4` — and the exit code is only a
@@ -1009,9 +1399,9 @@ authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
 "Exit codes" section.
 
 **The exit code answers the *antenna* question**, because `status` does. On
-a PDK with no antenna-ratio table — every PDK but sky130 today, and any run
-that omits `--pdk` — it is therefore `4` for every layout, however clean the
-design is. That is not a signal that the run failed or that nothing was
+a PDK with no antenna-ratio table — every PDK but sky130 today, any run
+that omits `--pdk`, and every `--findings-only` run — it is therefore `4`
+for every layout, however clean the design is. That is not a signal that the run failed or that nothing was
 checked: the connectivity rules ran, and their verdict is `erc_status` in
 the payload. A caller that wants only the structural/connectivity read gates
 on `erc_status` and ignores the exit code (see "Two verdicts" above); it

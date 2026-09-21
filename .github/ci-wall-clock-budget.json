@@ -15,7 +15,14 @@
     "ordinary runner noise does not.",
     "",
     "Raising a budget is a legitimate change -- say why in the PR. Silently",
-    "raising it to make a red run green is the drift this file exists to stop."
+    "raising it to make a red run green is the drift this file exists to stop.",
+    "",
+    "'Golden artifacts (hash seed + path varied)' (issue #2225) is the one",
+    "row NOT derived from the baseline below -- that job did not exist when",
+    "the baseline was measured. 300s is a deliberately conservative first",
+    "estimate for two checkouts + one uv sync + ~1.5s of generators (still",
+    "half the 600s an unbudgeted job would inherit); re-derive it from real",
+    "timings at the next re-measure."
   ],
   "exclude_jobs": [
     "CI wall-clock budget"
@@ -36,7 +43,8 @@
     "Tests (Python 3.11)": 360,
     "Tests (Python 3.12)": 360,
     "Tests (Python 3.13)": 360,
-    "klt verify Action smoke test": 120
+    "klt verify Action smoke test": 120,
+    "Golden artifacts (hash seed + path varied)": 300
   },
   "baseline": {
     "measured_on": "2026-09-17",

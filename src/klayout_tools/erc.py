@@ -72,7 +72,9 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   ``erc.multiply_driven_net``): driven by the new optional ``nets`` spec
   section (named nets to check, mirroring ``klt power``'s ``power_nets``
   but with an added ``kind``). A declared net matching zero or more than
-  one disconnected electrical island is "unconnected"; two *different*
+  one disconnected electrical island is "unconnected" -- and when it is
+  more than one, the finding carries an ``islands[]`` entry locating each
+  island (issue #2194, see :func:`_island_entry`); two *different*
   declared net names that resolve to the same electrical island are
   "multiply-driven" (shorted together) -- or, when both are declared
   ``"kind": "supply"``, a **supply short** (``erc.supply_short``) instead.
@@ -93,6 +95,35 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   reported as *skipped* work rather than as a passing check (issue #2199,
   see :func:`_degenerate_tie_names`).
 
+  **Caller-asserted taps** (``ties[].tap_boxes``, issue #2234): a stream
+  whose taps are genuinely drawn but carry no distinguishing implant/marker
+  layer at all -- so neither ``tap_requires`` nor ``tap_is_dedicated`` has
+  anything true to narrow or affirm -- can instead name the tap geometry
+  directly, as a list of ``[left, bottom, right, top]`` micrometre boxes
+  intersected into ``tap_layer``. This is caller *assertion* rather than
+  layer-derived narrowing, so it is graded under its own coverage
+  classification (``erc_coverage.checked_by_assertion``, see
+  :func:`_connectivity_coverage`) instead of being folded into an ordinary
+  geometrically-derived pass -- and it is held to the same falsifiability
+  bar as every other narrowing form: an assertion that removes nothing from
+  the drawn ``tap_layer`` inside the well is exactly as degenerate as an
+  omitted ``tap_requires`` (issue #2199's test is geometric, not "which key
+  was given"), and an assertion matching no drawn geometry at all produces
+  an honest "no tap" finding rather than a silent pass.
+
+  **Disclosed-unexpressible taps** (top-level ``ties_disclosure``, issue
+  #2234): a stream that genuinely has no way to express a tap -- no
+  narrowing marker, no dedicated tap layer, no distinguishable assertion --
+  can say so explicitly instead of simply omitting ``ties``, via a
+  top-level ``{"reason": "<why>"}`` spec key. This changes no finding and no
+  geometry; it only changes the ``erc_coverage.inapplicable`` reason
+  recorded for the undeclared ``erc.missing_tie`` work
+  (``"ties_disclosed_unexpressible"`` instead of ``"no_ties_declared"``), so
+  a consumer (``klt signoff``'s T1 item 11, see ``docs/design-evidence-tiers.md``)
+  can distinguish "this stream disclosed it cannot express a tap" from
+  "nobody declared ties at all" -- two states that previously rendered
+  identically.
+
 Device bodies (``devices``, issue #2183): a conductor role carries
 *geometry*, and nothing in the model above distinguishes a wire from a
 drawn device body sitting on the same layer -- a poly resistor, a poly
@@ -109,11 +140,47 @@ on, and that region is **subtracted** from the role's conductor region
 before it is registered -- so the body breaks the net instead of bridging
 it. See :func:`_device_body_cuts`.
 
+Deck-driven device-marker auto-detection (``--deck``, issue #2204): hand-
+transcribing a PDK's device-body marker layer/datatype into ``devices[]``
+is a silent-failure risk -- a mis-transcription subtracts nothing, and the
+only signal is ``provenance.devices[].body_area_um2 == 0.0`` (plus, since
+issue #2226, a stderr warning whenever the mis-transcribed marker layer is
+nonetheless drawn somewhere on this layout). When
+``--deck`` names a curated extraction deck (the same name-keyed registry
+``klt extract``/``klt lvs`` resolve, no PDK install needed), that deck's own
+``ResistorDevice``/``CapacitorDevice`` declarations are matched against the
+declared ``stackup``/``vias`` roles by *exact* conducting-body-layer
+equality and auto-carved out the same way an explicit ``devices[]`` entry
+would be -- see :func:`_deck_device_cuts` for the matching rule and
+:func:`_resolve_deck`. An explicit ``devices[]`` entry for a role still
+wins over the deck's own auto-detection for that role. Every auto-applied
+carve-out is echoed in ``provenance.devices`` exactly as a hand-declared one
+is, plus ``"source"``/``"superseded_by"`` fields distinguishing it -- see
+``run_erc``. Omitting ``--deck`` (every caller before this issue) leaves
+every output byte-identical to before this feature existed.
+
+Findings-only runs (``--findings-only``, issue #2219): the per-gate
+per-level accumulation above is what ``klt erc`` spends nearly all of its
+time on -- one ``polygons_of_net(...).merged().area()`` for every gate net
+on every ``stackup`` role -- and a caller who only wants ``erc_findings``
+(the structural supply read: ``nets[]`` island/short checks plus ``ties[]``)
+pays it for verdicts that, without a ``--pdk`` antenna-limit table, grade
+nothing at all. ``--findings-only`` skips that walk. Every
+``erc_findings`` rule still runs and every finding is identical: the four
+``nets[]``/``ties[]``-driven rules never read the accumulated areas, and
+``erc.floating_gate`` -- the one rule that does -- is evaluated from the
+same connectivity graph by :func:`_gate_is_floating` instead, which stops
+at the first role carrying area rather than measuring every role. The
+antenna half then reports what it actually did: ``null`` accumulation
+fields, ``"unchecked"`` verdicts, every level in ``coverage.skipped`` with
+reason :data:`REASON_FINDINGS_ONLY`, and ``status: "not_checked"``.
+
 See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 """
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from ._layout import load_layout, select_top_cells
@@ -122,6 +189,13 @@ from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
 from ._provenance import _content_hash, build_provenance
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
+from .decks import ExtractionDeck, UnknownExtractionDeckError, deck_source_path
+from .decks import get_extraction_deck as _get_extraction_deck
+from .extract import (
+    _capacitor_plate_regions,
+    _capacitor_top_via_overlap_region,
+    _resistor_body_region,
+)
 
 #: `1` -- unchanged since issue #859 (Phase 1a). Phase 1b (#860), Phase 1c
 #: (#861), Phase 3 (#908), issue #1968, and issue #1979 all add fields/
@@ -154,14 +228,65 @@ from .coverage import build_check_coverage, coverage_rollup, rollup_status, work
 #: work in `erc_coverage` (see `_degenerate_tie_names`). No field is added,
 #: removed, or retyped: the change is which coverage list an existing
 #: identity lands in, and the `erc_status` token that follows from it.
+#: Issue #2204 adds the optional `--deck` CLI flag (no new spec key):
+#: `provenance.deck` is populated (previously always `null`) and every
+#: `provenance.devices[]` entry additionally carries `"source"`/
+#: `"superseded_by"` -- but *only* when `--deck` is given. A run that omits
+#: `--deck` (every caller before this issue) produces byte-identical output,
+#: including `provenance.devices` entries with their pre-#2204 4-key shape
+#: -- so, as with every prior additive change above, no bump.
+#: Issue #2219 adds the opt-in `findings_only` mode (`--findings-only`) and
+#: the top-level `findings_only` echo of it -- additive, and inert unless
+#: the caller asks for it: every field of a run that does not pass the flag
+#: is byte-identical to before. Inside such a run the *already nullable*
+#: presentation is extended to `levels[].step_area_um2`/
+#: `cumulative_area_um2`/`antenna_ratio` (null == "not measured", the same
+#: thing `antenna_ratio_max: null` has always meant for the limit), which
+#: is why it is an opt-in flag rather than a default: no existing caller's
+#: report can acquire a null it did not ask for.
+#: Issue #2234 adds two more optional spec keys, both additive and inert
+#: unless used: ``ties[].tap_boxes`` (a caller-asserted list of tap-geometry
+#: boxes, an alternative to ``tap_requires``/``tap_is_dedicated`` -- see
+#: :func:`_extract_connectivity`) and top-level ``ties_disclosure`` (a
+#: caller's explicit "no expressible tap, here is why" statement -- see
+#: :func:`_validate_ties_disclosure`). A spec that gives neither produces
+#: byte-identical output except for the new (``null``-when-absent)
+#: ``ties_disclosure`` echo field and the new (empty-when-unused)
+#: ``erc_coverage.checked_by_assertion`` list -- so, as with every prior
+#: additive change above, no bump.
 SCHEMA_VERSION = 1
 
 
-def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str, Any]:
+#: The stable ``coverage`` skip reason for every non-gate antenna level of a
+#: ``findings_only`` run (issue #2219): the caller asked for the
+#: ``erc_findings`` read only, so the per-gate accumulation those verdicts
+#: are derived from was never performed. A *requested*-work skip in exactly
+#: the sense :data:`REASON_MISSING_ANTENNA_PDK` already is -- both are the
+#: caller declining to supply what the antenna half needs -- so it lands in
+#: ``skipped`` rather than ``inapplicable``. See :func:`run_erc`.
+REASON_FINDINGS_ONLY = "findings_only"
+
+#: The skip reason for a level that could have been graded had ``--pdk``
+#: named a PDK with an antenna-ratio table (or named one at all).
+REASON_MISSING_ANTENNA_PDK = "missing_antenna_pdk"
+
+
+def _antenna_skip_reason(pdk: str | None, findings_only: bool) -> str:
+    """Why a non-gate ``levels[]`` entry came back ungraded, as the stable
+    ``coverage.skipped[].reason`` token for it."""
+    if findings_only:
+        return REASON_FINDINGS_ONLY
+    return REASON_MISSING_ANTENNA_PDK if pdk is None else "missing_antenna_limit"
+
+
+def _antenna_coverage(
+    gates: list[dict[str, Any]], pdk: str | None, findings_only: bool = False
+) -> dict[str, Any]:
     """Grade coverage against actual non-gate antenna levels, not gate count."""
     checked = []
     skipped = []
     inapplicable = []
+    reason = _antenna_skip_reason(pdk, findings_only)
     for gate in gates:
         for index, level in enumerate(gate["levels"]):
             identity = work_id("antenna", gate["gate_id"], level["layer"])
@@ -170,14 +295,7 @@ def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str,
             elif level["verdict"] in {"pass", "violate"}:
                 checked.append(identity)
             else:
-                skipped.append(
-                    {
-                        "id": identity,
-                        "reason": "missing_antenna_pdk"
-                        if pdk is None
-                        else "missing_antenna_limit",
-                    }
-                )
+                skipped.append({"id": identity, "reason": reason})
     return {
         "scope": "antenna",
         **build_check_coverage(
@@ -192,12 +310,32 @@ def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str,
 #: when it applies and `docs/cli/erc.md` for how a spec clears it.
 REASON_DEGENERATE_TAP_DECLARATION = "degenerate_tap_declaration"
 
+#: The stable ``erc_coverage.inapplicable`` reason for the undeclared
+#: ``erc.missing_tie`` work when the spec's top-level ``ties_disclosure``
+#: (issue #2234) is present -- in place of the default
+#: :data:`REASON_NO_TIES_DECLARED` used when ``ties`` is simply omitted with
+#: no disclosure at all. Both reasons describe the same "zero ties
+#: declared" fact; only this one tells a reader the omission was a
+#: considered, disclosed choice rather than an oversight -- see
+#: :func:`_validate_ties_disclosure` and `docs/design-evidence-tiers.md`
+#: item 11.
+REASON_TIES_DISCLOSED_UNEXPRESSIBLE = "ties_disclosed_unexpressible"
+
+#: The stable ``erc_coverage.inapplicable`` reason for the undeclared
+#: ``erc.missing_tie`` work when ``ties`` is omitted/empty and no
+#: ``ties_disclosure`` was given -- the pre-#2234 behaviour, named as a
+#: constant so :data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` has a documented
+#: counterpart rather than a bare string literal to contrast with.
+REASON_NO_TIES_DECLARED = "no_ties_declared"
+
 
 def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
     ties: list[dict[str, Any]],
     degenerate_ties: set[str] | None = None,
+    asserted_ties: set[str] | None = None,
+    ties_disclosure: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -236,7 +374,14 @@ def _connectivity_coverage(
       Without that, the one rule ``docs/design-evidence-tiers.md`` item 11
       requires to be zero can be satisfied by a declaration that never
       looked at a tap at all -- an unfalsifiable pass, indistinguishable in
-      the envelope from a real one.
+      the envelope from a real one. A tie whose tap region was instead
+      derived from a caller *assertion* (``tap_boxes``, issue #2234) rather
+      than PDK-marker narrowing is, when not itself degenerate, both
+      ``checked`` (it is real, evaluated work -- see :func:`_tie_findings`)
+      *and* named again in the additional ``checked_by_assertion`` list this
+      block carries (``asserted_ties``), so a consumer can tell it apart
+      from a tie a bare ``tap_requires``/``tap_is_dedicated`` graded without
+      re-reading the spec document.
 
     A spec that declares no ``nets``/``ties`` asked for none of that work,
     so those rules are recorded as **inapplicable**, never skipped: a skip
@@ -245,12 +390,18 @@ def _connectivity_coverage(
     distinction is what lets a consumer tell "no supply was declared, so
     ``erc.supply_short`` was never computed" apart from "supplies were
     declared and came back clean" -- reading the envelope alone, without
-    re-opening the spec document.
+    re-opening the spec document. When ``ties`` is empty *and* the spec
+    carried a top-level ``ties_disclosure`` (issue #2234), the recorded
+    reason is :data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` instead of
+    :data:`REASON_NO_TIES_DECLARED` -- same "zero declared" fact, but now
+    distinguishable from an omission nobody considered.
     """
     degenerate = degenerate_ties or set()
+    asserted = asserted_ties or set()
     checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
     inapplicable: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
+    checked_by_assertion: list[str] = []
 
     checked.extend(work_id("erc.net_connectivity", decl["name"]) for decl in nets_decl)
     if not nets_decl:
@@ -266,9 +417,18 @@ def _connectivity_coverage(
             )
         else:
             checked.append(identity)
+            if tie["name"] in asserted:
+                checked_by_assertion.append(identity)
     if not ties:
         inapplicable.append(
-            {"id": work_id("erc.missing_tie"), "reason": "no_ties_declared"}
+            {
+                "id": work_id("erc.missing_tie"),
+                "reason": (
+                    REASON_TIES_DISCLOSED_UNEXPRESSIBLE
+                    if ties_disclosure
+                    else REASON_NO_TIES_DECLARED
+                ),
+            }
         )
 
     return {
@@ -276,6 +436,7 @@ def _connectivity_coverage(
         **build_check_coverage(
             checked=checked, skipped=skipped, inapplicable=inapplicable
         ),
+        "checked_by_assertion": sorted(checked_by_assertion),
     }
 
 
@@ -369,6 +530,44 @@ def _resolve_antenna_limits(pdk: str | None) -> dict[str, tuple[float, str]] | N
             f"{', '.join(sorted(_ANTENNA_LIMITS_BY_PDK))})"
         )
     return limits
+
+
+def _resolve_deck(deck: str | None) -> ExtractionDeck | None:
+    """Resolve ``--deck`` to its curated :class:`~klayout_tools.decks.ExtractionDeck`
+    (issue #2204) -- the deck-driven device-marker auto-detection this
+    module's own ``devices[]`` carve-out (#2183) otherwise requires a caller
+    to hand-transcribe.
+
+    Deliberately the *same* curated, name-keyed registry lookup ``klt
+    extract --deck``/``klt lvs --deck`` use
+    (:func:`~klayout_tools.decks.get_extraction_deck`), not an installed PDK
+    resolved via ``--pdk-root`` -- see this module's own docstring
+    ("Device bodies", "Deck-driven device-marker auto-detection") for why
+    that is enough: the curated deck already names every device-recognition
+    marker layer a spec author would otherwise transcribe by hand, and
+    needs no filesystem PDK install to read. Deliberately a *separate* flag
+    from ``--pdk`` (which selects only the built-in antenna-ratio limit
+    table, see :func:`_resolve_antenna_limits`) -- the two answer unrelated
+    questions and ``--pdk`` has no ``gf180mcu`` entry today, while the
+    extraction-deck registry does.
+
+    Returns ``None`` when ``deck`` is ``None`` -- no auto-detection is
+    attempted, and every device-related output (``gates[]``, every antenna
+    ratio, every finding, ``provenance.deck``, ``provenance.devices``) is
+    byte-identical to a run before this feature existed (issue #2204's own
+    acceptance criteria).
+
+    Raises :class:`ErcError` for an unrecognised deck name, matching
+    :func:`_resolve_antenna_limits`'s own convention for an unrecognised
+    ``--pdk``: a clean exit-1 error, not an argparse usage error, checked
+    eagerly before any layout is even loaded.
+    """
+    if deck is None:
+        return None
+    try:
+        return _get_extraction_deck(deck)
+    except UnknownExtractionDeckError as exc:
+        raise ErcError(str(exc)) from exc
 
 
 def _validate_stackup(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]:
@@ -571,6 +770,53 @@ def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -
     return raw
 
 
+def _parse_tap_boxes(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[float, float, float, float]]:
+    """``ties[].tap_boxes`` (optional, issue #2234): a caller *assertion* of
+    where the tap geometry is, as a list of ``[left, bottom, right, top]``
+    micrometre boxes intersected into ``tap_layer`` -- the same
+    ``(left, bottom, right, top)`` shape :func:`~klayout_tools._layout.clip_box`
+    already converts for ``klt clip``/``components.py``. Composes with
+    ``tap_requires`` (both narrow the same region) but, unlike it, needs no
+    PDK marker layer to exist at all: a stream whose taps are genuinely
+    drawn but carry no distinguishing implant/marker layer can point
+    directly at them instead. Omitted/``null`` -> ``[]`` (no assertion,
+    pre-#2234 behaviour, byte-identical). Split out of :func:`_validate_ties`
+    to keep that function under the repo's C901 complexity ratchet, as
+    :func:`_parse_tap_requires` is.
+    """
+    raw = entry.get("tap_boxes", [])
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].tap_boxes must be an array of "
+            "[left, bottom, right, top] micrometre boxes"
+        )
+    boxes: list[tuple[float, float, float, float]] = []
+    for j, value in enumerate(raw):
+        field = f"ties[{index}].tap_boxes[{j}]"
+        if (
+            not isinstance(value, list)
+            or len(value) != 4
+            or not all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) for v in value
+            )
+        ):
+            raise ErcError(
+                f"spec '{spec_path}': {field} must be a 4-number "
+                "[left, bottom, right, top] array"
+            )
+        left, bottom, right, top = (float(v) for v in value)
+        if left >= right or bottom >= top:
+            raise ErcError(
+                f"spec '{spec_path}': {field} must have left < right and bottom < top"
+            )
+        boxes.append((left, bottom, right, top))
+    return boxes
+
+
 def _validate_ties(
     spec: dict[str, Any], spec_path: str, stackup_names: list[str]
 ) -> list[dict[str, Any]]:
@@ -596,7 +842,20 @@ def _validate_ties(
     nothing needs narrowing because the layer is already tap-only. A tie
     that declares neither is *degenerate* -- see
     :func:`_degenerate_tie_names` -- and is graded as skipped rather than
-    checked work."""
+    checked work.
+
+    ``tap_boxes`` (optional array of ``[left, bottom, right, top]``
+    micrometre boxes, issue #2234) is a third, caller-*asserted* way: rather
+    than narrowing ``tap_layer`` by a PDK marker layer's boolean, the spec
+    names the tap geometry directly. For a stream that draws taps with no
+    distinguishing marker at all -- neither ``tap_requires`` nor
+    ``tap_is_dedicated`` has anything true to narrow or affirm -- this is
+    the only way to declare a tie that is not degenerate. Graded under its
+    own coverage classification (:func:`_connectivity_coverage`'s
+    ``checked_by_assertion``) rather than folded into an ordinary
+    geometrically-derived pass, and held to the same falsifiability test as
+    every other narrowing form (:func:`_degenerate_tie_names`): an assertion
+    that removes nothing from the drawn ``tap_layer`` is still degenerate."""
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -626,6 +885,7 @@ def _validate_ties(
 
         tap_requires = _parse_tap_requires(entry, spec_path, i)
         tap_is_dedicated = _parse_tap_is_dedicated(entry, spec_path, i)
+        tap_boxes = _parse_tap_boxes(entry, spec_path, i)
 
         connect_to = str(entry["connect_to"])
         if connect_to not in stackup_names:
@@ -645,11 +905,52 @@ def _validate_ties(
                 "tap_layer": tap_layer,
                 "tap_requires": tap_requires,
                 "tap_is_dedicated": tap_is_dedicated,
+                "tap_boxes": tap_boxes,
                 "connect_to": connect_to,
                 "net": net,
             }
         )
     return entries
+
+
+def _validate_ties_disclosure(
+    spec: dict[str, Any], spec_path: str
+) -> dict[str, str] | None:
+    """The optional top-level ``ties_disclosure`` spec key (issue #2234): a
+    caller's explicit statement that this stream has no expressible tap, and
+    why -- ``{"reason": "<non-empty string>"}``. Omitted/``null`` -> ``None``
+    (pre-#2234 behaviour, unchanged).
+
+    This changes no geometry and no finding: :func:`run_erc` computes
+    exactly the same ``erc_findings`` whether or not it is given. What it
+    changes is the ``erc_coverage.inapplicable`` reason recorded for the
+    undeclared ``erc.missing_tie`` work when ``ties`` is empty
+    (:data:`REASON_TIES_DISCLOSED_UNEXPRESSIBLE` in place of
+    :data:`REASON_NO_TIES_DECLARED`, see :func:`_connectivity_coverage`), so
+    a consumer -- `klt signoff`'s T1 item 11 in particular, see
+    `docs/design-evidence-tiers.md` -- can distinguish "disclosed as
+    unexpressible" from "nobody declared ties", which previously rendered
+    identically. A non-empty ``ties`` declaration alongside a disclosure is
+    not rejected (a spec may express some taps and disclose the rest), but
+    the disclosure only ever affects the *undeclared* work's reason.
+
+    Validated the same strict way every other optional boolean/string spec
+    key in this module is (:func:`_parse_tap_is_dedicated`): present but
+    malformed is a spec error, not silently coerced or ignored -- an empty
+    or missing ``reason`` would be exactly the unfalsifiable "disclosed
+    nothing" shape this key exists to rule out.
+    """
+    raw = spec.get("ties_disclosure")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ErcError(f"spec '{spec_path}': 'ties_disclosure' must be a JSON object")
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ErcError(
+            f"spec '{spec_path}': ties_disclosure.reason must be a non-empty string"
+        )
+    return {"reason": reason.strip()}
 
 
 def _validate_device_entry(
@@ -708,7 +1009,11 @@ def _validate_devices(
     subtracts nothing, and is reported with ``body_area_um2: 0.0`` in
     ``provenance.devices`` so a caller can see the declaration matched no
     geometry -- matching the same convention ``stackup``/``vias`` already
-    follow for a layer a particular fixture doesn't use."""
+    follow for a layer a particular fixture doesn't use. A ``body_layer``
+    that *is* drawn here but nowhere near its declared ``on`` role reports
+    the same ``0.0`` (issue #2226) -- that number is the intersection with
+    the role, not the marker's own area -- plus a stderr warning, since
+    that case is a spec bug rather than an unused layer."""
     raw = spec.get("devices", [])
     if raw is None:
         raw = []
@@ -729,8 +1034,34 @@ def _validate_devices(
     return entries
 
 
+def _warn_device_body_missed_role(name: str, body_layer: str, role: str) -> None:
+    """The stderr warning printed once per ``devices[]`` declaration whose
+    marker layer *is* drawn on this layout but does not touch the role it
+    was declared ``on`` (issue #2226) -- so it subtracts nothing at all.
+
+    That combination is almost always a spec bug (the wrong ``on`` role, or
+    a marker drawn on a different datatype than the one declared) rather
+    than a deliberate no-op, and the report alone makes it quiet: a
+    ``body_area_um2`` of ``0.0`` is only visible to a caller who thinks to
+    look. Printed to stderr, following
+    :func:`klayout_tools._provenance._warn_klayout_version_mismatch`'s
+    precedent, so a caller piping ``--format json`` to a file still sees it
+    (JSON goes to stdout only -- ``docs/json-contract.md``)."""
+    print(
+        f"klt erc: warning: devices[] entry {name!r} declares body_layer "
+        f"{body_layer} on role {role!r}, but that marker layer carries "
+        f"geometry which does not overlap the region drawn for {role!r} -- "
+        "the carve-out subtracted nothing (body_area_um2: 0.0). Check the "
+        "'on' role and the marker's layer/datatype.",
+        file=sys.stderr,
+    )
+
+
 def _device_body_cuts(
-    layout: Any, top_cell: Any, devices: list[dict[str, Any]]
+    layout: Any,
+    top_cell: Any,
+    devices: list[dict[str, Any]],
+    role_layers: dict[str, tuple[int, int]],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Resolve ``devices[]`` into ``(cuts, applied)`` (issue #2183).
 
@@ -742,27 +1073,228 @@ def _device_body_cuts(
 
     ``applied`` is the per-declaration echo for ``provenance.devices``:
     name, the ``"<layer>/<datatype>"`` string as declared, the role, and
-    the **actual** subtracted area in µm². That last field is the honest
-    part -- a declaration whose marker layer is absent from this layout
-    (or drawn on a different datatype) reports ``0.0`` and silently
-    changes nothing, which is exactly what a caller re-reading a committed
-    report needs to be able to tell apart from a carve-out that bit."""
+    the **actual** subtracted area in µm².
+
+    That last field is the honest part, and honest means *intersected*
+    (issue #2226). It is ``area(marker ∩ the role's own drawn conductor
+    region)``, not ``area(marker)``: a device-body marker is conventionally
+    drawn with enclosure past the conductor it marks, so the marker's own
+    area over-states the carve-out for a well-formed declaration -- and,
+    worse, is identically non-zero for a declaration whose ``on`` names a
+    role the marker never touches, which is the one failure the field
+    exists to expose. Intersected, ``0.0`` means what the docs say it
+    means: *this declaration changed nothing* -- whether because its marker
+    layer is absent from this layout, drawn on a different datatype, or
+    declared ``on`` the wrong role.
+
+    ``role_layers`` (from :func:`_deck_role_layers`) supplies each declared
+    role's own ``(layer, datatype)`` so that conductor region can be
+    resolved here; it is read once per role that a declaration actually
+    names. The intersection is computed per declaration against the role's
+    *pre-cut* drawn region -- never against the accumulating ``cuts[role]``
+    union -- so two declarations sharing one ``on`` each report their own
+    subtracted area rather than the union's.
+
+    ``cuts`` still carries the raw marker region: ``region - marker`` and
+    ``region - (marker ∩ region)`` are the same set, so connectivity is
+    byte-identical to before this issue. Only the reported area changes.
+
+    A declaration that subtracts nothing *while its marker layer is drawn
+    somewhere on this layout* additionally gets a one-line stderr warning
+    (:func:`_warn_device_body_missed_role`) -- the wrong-``on`` case the
+    report alone renders too quietly."""
     dbu2_um2 = layout.dbu * layout.dbu
     cuts: dict[str, Any] = {}
     applied: list[dict[str, Any]] = []
+    conductors: dict[str, Any] = {}
     for device in devices:
         body = _region(layout, top_cell, device["body_layer"]).merged()
         role = device["on"]
+        if role not in conductors:
+            conductors[role] = _region(layout, top_cell, role_layers.get(role))
+        subtracted = (body & conductors[role]).merged()
         cuts[role] = (cuts[role] + body).merged() if role in cuts else body
         layer, datatype = device["body_layer"]
+        body_layer = f"{layer}/{datatype}"
+        if subtracted.is_empty() and not body.is_empty():
+            _warn_device_body_missed_role(device["name"], body_layer, role)
         applied.append(
             {
                 "name": device["name"],
-                "body_layer": f"{layer}/{datatype}",
+                "body_layer": body_layer,
                 "on": role,
-                "body_area_um2": round(body.area() * dbu2_um2, 9),
+                "body_area_um2": round(subtracted.area() * dbu2_um2, 9),
             }
         )
+    return cuts, applied
+
+
+def _deck_role_layers(
+    stackup: list[dict[str, Any]], vias: list[dict[str, Any]]
+) -> dict[str, tuple[int, int]]:
+    """``stackup``/``vias`` role name -> declared ``(layer, datatype)``, in
+    declaration order (issue #2204) -- the map :func:`_deck_device_cuts`
+    matches a curated deck's own device-conductor layers against, and (issue
+    #2226) the map :func:`_device_body_cuts` resolves each declared role's
+    own conductor region from so it can report the area a ``devices[]``
+    entry *actually* subtracted. Built unconditionally by ``run_erc``, not
+    only when ``--deck`` is given, since the second caller always runs."""
+    layers: dict[str, tuple[int, int]] = {
+        entry["name"]: entry["layer"] for entry in stackup
+    }
+    layers.update({via["name"]: via["layer"] for via in vias})
+    return layers
+
+
+def _deck_device_cuts(
+    layout: Any,
+    top_cell: Any,
+    deck: ExtractionDeck,
+    role_layers: dict[str, tuple[int, int]],
+    declared_roles: dict[str, str],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Resolve a curated extraction ``deck``'s own device-marker
+    declarations into ``(cuts, applied)`` -- the deck-driven analogue of
+    :func:`_device_body_cuts` (issue #2204, built on #2183's hand-declared
+    ``devices[]``).
+
+    **The mapping rule** (this issue's own "Marker-to-role mapping" design
+    note): a deck device applies to a declared ``stackup``/``vias`` role
+    *only when the device's conducting-body layer equals that role's
+    ``(layer, datatype)`` exactly* -- no name-guessing, no partial-overlap
+    heuristics. The subtracted region is computed the *same* way ``klt
+    extract``'s own device recognition computes it, factored out of
+    ``extract.py`` for exactly this reuse (issue #2204):
+
+    - :class:`~klayout_tools.decks.ResistorDevice` -- conducting-body layer
+      is ``body``; region is ``body & marker`` narrowed by ``requires``/
+      ``excludes`` (:func:`~klayout_tools.extract._resistor_body_region`).
+    - :class:`~klayout_tools.decks.CapacitorDevice` -- two independent
+      conducting-body layers, each checked separately:
+
+      - ``top_plate`` -- region is the recognised top-plate region itself
+        (:func:`~klayout_tools.extract._capacitor_plate_regions`'s first
+        return value), narrowed by ``top_plate_requires``/
+        ``top_plate_excludes``.
+      - ``top_plate_via`` (when the deck declares one) -- region is *only*
+        the geometric overlap between that via's own footprint and this
+        capacitor's recognised bottom plate
+        (:func:`~klayout_tools.extract._capacitor_top_via_overlap_region`,
+        issue #364/#1388's own derivation) -- **not** the whole via layer,
+        which is typically also this deck's ordinary inter-metal via role
+        (e.g. gf180mcu's Via4 both lands a MiM cap's top plate on Metal5
+        *and* routes ordinary Metal4-Metal5 vias everywhere else): cutting
+        the entire layer from a matching ``vias`` role would silently
+        disconnect every legitimate via on it, not just the ones under a
+        capacitor.
+      - ``bottom_plate`` is deliberately **not** a matched layer: unlike a
+        resistor body or a MiM top plate, a capacitor's bottom plate is
+        ordinary conductor that genuinely carries the same net's real
+        routing (``klt extract`` ties it into the metal's own connectivity
+        node rather than cutting it out) -- subtracting it here would
+        introduce a false disconnect, not fix one.
+
+    Only `~klayout_tools.decks.ResistorDevice`/`CapacitorDevice` entries are
+    matched -- `BipolarDevice`/`DiodeDevice`/`MomCapacitorDevice` are a
+    candidate follow-on, not a silent omission (matching this repo's own
+    "name every deliberately-uncovered case" convention).
+
+    **A device whose conducting-body layer matches no declared role is
+    still listed** (``on: None``, ``body_area_um2: 0.0``) whenever that
+    layer actually carries geometry on this layout -- so a spec that
+    declares the wrong role name, or omits the role a real device sits on
+    entirely, is visible rather than silently invisible (issue #2204's own
+    acceptance criterion). A device whose layer carries *no* geometry at
+    all here is omitted outright: every curated deck carries dozens of
+    resistor/capacitor flavours a given design never draws, and listing
+    every one of them on every ``--deck``-selected run would bury the
+    signal this criterion exists to surface.
+
+    **An explicit ``devices[]`` entry wins** (this issue's own acceptance
+    criterion): ``declared_roles`` (role name -> the hand-declared device
+    name that already covers it, built by the caller from the *validated*
+    ``devices[]`` list) marks a role as already spoken for. A deck device
+    that would otherwise apply there is still listed, with
+    ``body_area_um2: 0.0`` and ``superseded_by`` naming the declared entry
+    that won -- so the precedence is visible in the report, not just
+    implied by its absence from ``cuts``.
+
+    Every entry additionally carries ``"source": "deck"``, distinguishing
+    it from a hand-declared entry's own ``"source": "declared"`` (added by
+    ``run_erc`` only when a deck is selected -- see that function for why
+    the field is conditional).
+    """
+    dbu2_um2 = layout.dbu * layout.dbu
+    roles_by_layer: dict[tuple[int, int], list[str]] = {}
+    for role, layer in role_layers.items():
+        roles_by_layer.setdefault(layer, []).append(role)
+
+    cuts: dict[str, Any] = {}
+    applied: list[dict[str, Any]] = []
+
+    def _record(name: str, layer: tuple[int, int], region: Any) -> None:
+        region = region.merged()
+        if region.is_empty():
+            return
+        layer_str = f"{layer[0]}/{layer[1]}"
+        matched_roles = roles_by_layer.get(layer, [])
+        if not matched_roles:
+            applied.append(
+                {
+                    "name": name,
+                    "body_layer": layer_str,
+                    "on": None,
+                    "body_area_um2": 0.0,
+                    "source": "deck",
+                    "superseded_by": None,
+                }
+            )
+            return
+        for role in matched_roles:
+            declared_name = declared_roles.get(role)
+            if declared_name is not None:
+                applied.append(
+                    {
+                        "name": name,
+                        "body_layer": layer_str,
+                        "on": role,
+                        "body_area_um2": 0.0,
+                        "source": "deck",
+                        "superseded_by": declared_name,
+                    }
+                )
+                continue
+            cuts[role] = (cuts[role] + region).merged() if role in cuts else region
+            applied.append(
+                {
+                    "name": name,
+                    "body_layer": layer_str,
+                    "on": role,
+                    "body_area_um2": round(region.area() * dbu2_um2, 9),
+                    "source": "deck",
+                    "superseded_by": None,
+                }
+            )
+
+    for resistor in deck.resistors:
+        _record(
+            resistor.name,
+            resistor.body,
+            _resistor_body_region(layout, top_cell, resistor),
+        )
+
+    for capacitor in deck.capacitors:
+        top_region, _bottom_region = _capacitor_plate_regions(
+            layout, top_cell, capacitor
+        )
+        _record(capacitor.name, capacitor.top_plate, top_region)
+        if capacitor.top_plate_via is not None:
+            _record(
+                capacitor.name,
+                capacitor.top_plate_via,
+                _capacitor_top_via_overlap_region(layout, top_cell, capacitor),
+            )
+
     return cuts, applied
 
 
@@ -790,16 +1322,22 @@ def _finding(
     gate_id: str | None = None,
     layer: str | None = None,
     bbox: dict[str, int] | None = None,
+    islands: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One ``erc_findings[]`` entry (issue #861's finding shape, see this
-    module's docstring "ERC finding checks"): the 7-key dict shared
+    module's docstring "ERC finding checks"): the 8-key dict shared
     verbatim by every rule id (``erc.floating_gate``,
     ``erc.unconnected_net``, ``erc.multiply_driven_net``,
     ``erc.supply_short``, ``erc.missing_tie``) -- only which of
-    ``net``/``other_net``/``gate_id``/``layer``/``bbox`` are populated vs.
-    left ``None`` varies per call site. Mirrors ``ring_check.py``'s own
-    keyword-only ``_violation()`` helper for the equivalent ``klt drc``-
-    shaped violation dict."""
+    ``net``/``other_net``/``gate_id``/``layer``/``bbox``/``islands`` are
+    populated vs. left ``None`` varies per call site. Mirrors
+    ``ring_check.py``'s own keyword-only ``_violation()`` helper for the
+    equivalent ``klt drc``-shaped violation dict.
+
+    ``islands`` (issue #2194) is populated only by the multi-island
+    ``erc.unconnected_net`` call site -- the one rule whose subject is
+    several distinct places in the layout rather than one -- and is
+    ``None`` everywhere else, so the key set stays uniform across rules."""
     return {
         "rule": rule,
         "description": description,
@@ -808,6 +1346,7 @@ def _finding(
         "gate_id": gate_id,
         "layer": layer,
         "bbox": bbox,
+        "islands": islands,
     }
 
 
@@ -901,33 +1440,223 @@ def _antenna_remedy(
 
 
 def _floating_gate_findings(
-    gate_entries_and_regions: list[tuple[dict[str, Any], Any]], gate_role: str
+    floating_gates: list[tuple[dict[str, Any], Any, bool]], gate_role: str
 ) -> list[dict[str, Any]]:
     """``erc.floating_gate`` findings (issue #861): every gate whose
-    accumulation (``gates[].levels``) stops immediately after the gate role
-    -- zero connected area on every ``stackup`` role above it -- is an
-    uncontacted/floating gate. Computed directly from the already-built
-    ``gates[]`` model; needs no additional spec section."""
+    accumulation stops immediately after the gate role -- zero connected
+    area on every ``stackup`` role above it -- is an uncontacted/floating
+    gate. Needs no additional spec section.
+
+    ``floating_gates`` is one ``(gate_entry, gate_region, is_floating)``
+    triple per discovered gate, in ``gates[]`` order. The predicate is
+    passed in rather than re-derived from ``gate_entry["levels"]`` because
+    a ``findings_only`` run (issue #2219) never accumulates those per-level
+    areas -- it evaluates the same predicate directly off the connectivity
+    graph (:func:`_gate_is_floating`), so this rule's findings are identical
+    either way."""
     findings: list[dict[str, Any]] = []
-    for gate_entry, gate_region in gate_entries_and_regions:
-        levels = gate_entry["levels"]
-        if len(levels) <= 1:
+    for gate_entry, gate_region, is_floating in floating_gates:
+        if not is_floating:
             continue
-        if all(level["step_area_um2"] == 0.0 for level in levels[1:]):
-            findings.append(
-                _finding(
-                    "erc.floating_gate",
-                    (
-                        "gate net has no connected geometry above the gate "
-                        "layer (floating/uncontacted gate)"
-                    ),
-                    net=gate_entry["net"],
-                    gate_id=gate_entry["gate_id"],
-                    layer=gate_role,
-                    bbox=_bbox_dict(gate_region.bbox()),
-                )
+        findings.append(
+            _finding(
+                "erc.floating_gate",
+                (
+                    "gate net has no connected geometry above the gate "
+                    "layer (floating/uncontacted gate)"
+                ),
+                net=gate_entry["net"],
+                gate_id=gate_entry["gate_id"],
+                layer=gate_role,
+                bbox=_bbox_dict(gate_region.bbox()),
             )
+        )
     return findings
+
+
+def _levels_report_floating(levels: list[dict[str, Any]]) -> bool:
+    """:func:`_floating_gate_findings`'s predicate read off a fully
+    accumulated ``levels[]`` list: zero ``step_area_um2`` on every role
+    above the gate."""
+    if len(levels) <= 1:
+        return False
+    return all(level["step_area_um2"] == 0.0 for level in levels[1:])
+
+
+def _gate_is_floating(
+    l2n: Any,
+    net: Any,
+    stackup: list[dict[str, Any]],
+    layer_index: dict[str, int],
+    dbu2_um2: float,
+) -> bool:
+    """:func:`_levels_report_floating`'s predicate computed *without* the
+    per-level accumulation (issue #2219), for a ``findings_only`` run.
+
+    Identical answer -- each probe measures exactly the quantity
+    :func:`_accumulated_levels` would have stored as that level's
+    ``step_area_um2`` (``Region.area()`` applies merged semantics by
+    default, so an explicit ``.merged()`` would not change the number),
+    and the same ``round(..., 9)`` is applied, so the two paths cannot
+    disagree even on an area small enough to round to ``0.0``.
+
+    Cheaper because it **stops at the first role that carries any area**.
+    An ordinary strapped gate exits after one probe instead of walking the
+    whole stackup, and nothing beyond the predicate's own answer is
+    computed: no running cumulative, no ratio, no limit lookup, no remedy
+    pass. Only a genuinely floating gate -- the rare case, and the one the
+    rule exists to report -- still costs a probe per role."""
+    for entry in stackup[1:]:
+        region = l2n.polygons_of_net(net, layer_index[entry["name"]])
+        if round(region.area() * dbu2_um2, 9) != 0.0:
+            return False
+    return len(stackup) > 1
+
+
+def _accumulated_levels(
+    l2n: Any,
+    net: Any,
+    stackup: list[dict[str, Any]],
+    layer_index: dict[str, int],
+    gate_poly_region: Any,
+    gate_area_um2: float,
+    dbu2_um2: float,
+    antenna_limits: dict[str, tuple[float, str]] | None,
+    pdk: str | None,
+) -> list[dict[str, Any]]:
+    """One gate net's full ``levels[]``: the layer-by-layer accumulation of
+    connected conductor area (Phase 1a), each non-gate level's antenna-ratio
+    verdict against the resolved PDK limit (Phase 1b), and each violating
+    level's remedy (Phase 3).
+
+    This is ``klt erc``'s expensive inner loop -- one
+    ``polygons_of_net(...).merged().area()`` per ``stackup`` role per gate
+    net -- and the work a ``findings_only`` run skips entirely (issue
+    #2219, see :func:`_skipped_accumulation_levels`). ``gate_poly_region``
+    is the caller's already-merged gate-role region, reused as
+    ``stackup[0]``'s own step region rather than re-extracted: the two are
+    the same region by construction (same net, same layer index), so this
+    is a free level off the walk.
+    """
+    levels: list[dict[str, Any]] = []
+    cumulative_um2 = 0.0
+    for i, entry in enumerate(stackup):
+        if i == 0:
+            step_region = gate_poly_region
+        else:
+            step_region = l2n.polygons_of_net(net, layer_index[entry["name"]]).merged()
+        step_um2 = step_region.area() * dbu2_um2
+        cumulative_um2 += step_um2
+
+        # `cumulative_area_um2 / gate_area_um2` per docs/cli/erc.md's
+        # own Phase-1a "Phase scope" note on what 1b delivers. The gate
+        # role itself (i == 0) is never PDK-checked: its ratio is
+        # trivially 1.0 (cumulative == gate area at that level), and
+        # the source table's own poly rule measures a different
+        # quantity entirely (poly perimeter, not cumulative connected
+        # area) -- not something this area-only model computes.
+        antenna_ratio = round(cumulative_um2 / gate_area_um2, 6)
+        limit_entry = (
+            None
+            if i == 0 or antenna_limits is None
+            else antenna_limits.get(entry["name"])
+        )
+        if limit_entry is not None:
+            limit_value, rule_id = limit_entry
+            antenna_ratio_max: float | None = limit_value
+            antenna_ratio_source: str | None = (
+                f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
+                "'Max EA/A w/o diode' column"
+            )
+            verdict = "violate" if antenna_ratio > limit_value else "pass"
+        else:
+            antenna_ratio_max = None
+            antenna_ratio_source = None
+            verdict = "unchecked"
+
+        levels.append(
+            {
+                "layer": entry["name"],
+                "step_area_um2": round(step_um2, 9),
+                "cumulative_area_um2": round(cumulative_um2, 9),
+                "antenna_ratio": antenna_ratio,
+                "antenna_ratio_max": antenna_ratio_max,
+                "antenna_ratio_source": antenna_ratio_source,
+                "verdict": verdict,
+            }
+        )
+
+    # Fix guidance (issue #908, epic #713 Phase 3) -- a second pass over
+    # the now-complete `levels` list, since a remedy for level `i` may
+    # look at `levels[i + 1]` (see `_antenna_remedy`). `None` for every
+    # non-violating level (including every level when `pdk` was omitted,
+    # since `verdict` is then always "unchecked").
+    for i, level in enumerate(levels):
+        level["remedy"] = (
+            _antenna_remedy(levels, i, net.name or None)
+            if level["verdict"] == "violate"
+            else None
+        )
+    return levels
+
+
+def _skipped_accumulation_levels(
+    stackup: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One gate net's ``levels[]`` for a ``findings_only`` run (issue
+    #2219): every role still enumerated, in fabrication order, but with
+    every accumulated quantity ``null`` -- the accumulation those numbers
+    come from was never performed.
+
+    ``null`` rather than a plausible-looking ``0.0`` on purpose: a zero
+    area is a real, checkable measurement ("nothing connects here") and is
+    exactly the measurement ``erc.floating_gate`` keys off, so reporting it
+    for work that never ran would make an un-accumulated report
+    indistinguishable from a layout of entirely floating gates. Every
+    level's ``verdict`` is ``"unchecked"`` and every one lands in
+    ``coverage.skipped`` with reason :data:`REASON_FINDINGS_ONLY`, so the
+    envelope says which antenna work was declined and why.
+    """
+    return [
+        {
+            "layer": entry["name"],
+            "step_area_um2": None,
+            "cumulative_area_um2": None,
+            "antenna_ratio": None,
+            "antenna_ratio_max": None,
+            "antenna_ratio_source": None,
+            "verdict": "unchecked",
+            "remedy": None,
+        }
+        for entry in stackup
+    ]
+
+
+def _antenna_verdict(levels: list[dict[str, Any]]) -> str:
+    """One gate's aggregate ``antenna_verdict`` (issue #1997).
+
+    Only ``levels[1:]`` (the non-gate roles) count towards "graded"
+    coverage: ``levels[0]`` (the gate role itself) is *always*
+    ``"unchecked"`` by construction (see :func:`_accumulated_levels`), so
+    its presence must never, on its own, downgrade an otherwise
+    fully-graded gate to ``"pass_partial"``. Among the graded levels:
+    ``"violate"`` wins outright regardless of coverage; absent a violation,
+    ``"pass_partial"`` reports that at least one graded level passed but at
+    least one other graded level's own role wasn't in the selected PDK's
+    limit table (e.g. sky130's table has no met3-5 entries -- see "Sky130
+    antenna-ratio limits" in docs/cli/erc.md) or ``--pdk`` was omitted
+    entirely for some otherwise-checkable subset; plain ``"pass"`` only
+    when every graded level was actually compared against a limit and none
+    violated; ``"unchecked"`` when no graded level was ever compared at all
+    (e.g. ``--pdk`` omitted, a ``findings_only`` run, or a single-role
+    stackup).
+    """
+    graded_verdicts = {level["verdict"] for level in levels[1:]}
+    if "violate" in graded_verdicts:
+        return "violate"
+    if "pass" in graded_verdicts:
+        return "pass_partial" if "unchecked" in graded_verdicts else "pass"
+    return "unchecked"
 
 
 def _match_net_clusters(circuit: Any, name: str) -> list[Any]:
@@ -955,8 +1684,71 @@ def _match_net_clusters(circuit: Any, name: str) -> list[Any]:
     )
 
 
+def _island_entry(l2n: Any, layer_index: dict[str, int], net: Any) -> dict[str, Any]:
+    """One ``erc.unconnected_net`` ``islands[]`` entry (issue #2194): where
+    a single disconnected electrical island of a declared net actually is.
+
+    ``bbox`` is the island's whole extent (raw database units, the
+    ``_bbox_dict`` convention) unioned across every ``stackup`` role it has
+    geometry on; ``layer`` names the role carrying the most of that island's
+    area (ties broken by stackup order, so the answer is deterministic), as
+    the single most useful layer to open a viewer on; ``shape_count`` is the
+    number of merged polygons across those roles -- enough to tell a
+    one-shape orphan stub apart from a whole sub-block that failed to
+    strap up.
+
+    Only ``stackup`` roles are measured: ``vias`` conductors are registered
+    without their index being kept (see :func:`_extract_connectivity`), and
+    a via sits inside the two stackup shapes it joins anyway, so it can
+    neither extend the bbox nor be an island's only geometry in practice.
+    A labelled net always has stackup geometry by construction -- labels are
+    connected to a ``stackup`` conductor region, never to anything else --
+    so ``bbox``/``layer`` are never ``None`` for a net this function is
+    reached for; the guard exists so a degenerate graph degrades rather
+    than raising."""
+    bbox: Any = None
+    layer: str | None = None
+    best_area = 0
+    shape_count = 0
+    for role, index in layer_index.items():
+        region = l2n.polygons_of_net(net, index).merged()
+        if region.is_empty():
+            continue
+        shape_count += region.count()
+        role_bbox = region.bbox()
+        bbox = role_bbox if bbox is None else bbox + role_bbox
+        area = region.area()
+        if area > best_area:
+            best_area = area
+            layer = role
+    return {
+        "bbox": _bbox_dict(bbox) if bbox is not None else None,
+        "layer": layer,
+        "shape_count": shape_count,
+    }
+
+
+def _union_bbox(boxes: list[dict[str, int] | None]) -> dict[str, int] | None:
+    """The single bbox spanning every non-``None`` entry of ``boxes``, or
+    ``None`` when there is none -- used for the multi-island
+    ``erc.unconnected_net`` finding's own top-level ``bbox`` (issue #2194),
+    which is the extent the split net covers as a whole."""
+    present = [box for box in boxes if box is not None]
+    if not present:
+        return None
+    return {
+        "left": min(box["left"] for box in present),
+        "bottom": min(box["bottom"] for box in present),
+        "right": max(box["right"] for box in present),
+        "top": max(box["top"] for box in present),
+    }
+
+
 def _net_connectivity_findings(
-    circuit: Any, nets_decl: list[dict[str, Any]]
+    l2n: Any,
+    circuit: Any,
+    layer_index: dict[str, int],
+    nets_decl: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """``erc.unconnected_net`` / ``erc.multiply_driven_net`` /
     ``erc.supply_short`` findings (issue #861), driven by the optional
@@ -965,6 +1757,17 @@ def _net_connectivity_findings(
     A declared net matching zero, or more than one, disconnected electrical
     island is ``erc.unconnected_net`` (nothing carries that name at all, or
     the intended net is split into pieces that never actually touch).
+
+    A multi-island finding carries **where** each island is (issue #2194):
+    an ``islands[]`` entry per island in the same ``cluster_id`` order
+    :func:`_match_net_clusters` returns (see :func:`_island_entry` for the
+    per-island shape), plus a top-level ``bbox`` spanning all of them. The
+    count alone is only the alarm -- without per-island locations a caller
+    has to rebuild this module's own connectivity graph by hand just to find
+    out which piece of a multi-hundred-micron block to look at, and two
+    reports of the same net cannot be diffed to see *which* island a fix
+    resolved. The zero-match case has no geometry to point at and is
+    unchanged (``islands`` stays ``None``).
 
     Two *different* declared net names whose matched nets share a
     ``cluster_id`` are electrically the very same net regardless of their
@@ -992,6 +1795,7 @@ def _net_connectivity_findings(
                 )
             )
         elif len(matched) > 1:
+            islands = [_island_entry(l2n, layer_index, net) for net in matched]
             findings.append(
                 _finding(
                     "erc.unconnected_net",
@@ -1001,6 +1805,8 @@ def _net_connectivity_findings(
                         "(expected exactly one)"
                     ),
                     net=decl["name"],
+                    bbox=_union_bbox([island["bbox"] for island in islands]),
+                    islands=islands,
                 )
             )
 
@@ -1195,16 +2001,20 @@ def _extract_connectivity(
 
     Instead, a tie contributes exactly one conductor: its **tap sites** --
     ``tap_layer`` intersected with every ``tap_requires`` layer (the
-    ``Comp ∩ Nplus``-style boolean a real PDK tap is drawn as) and then
-    clipped to the well itself, since a tap is by definition inside the
-    well it taps. Those sites are wired up to ``connect_to``'s ``stackup``
-    region exactly as before, so a tap still reaches (or fails to reach)
-    the declared supply net through real routing. The well contributes only
-    *where the taps are*, never across its own extent, and taps in the same
-    well are not shorted to each other through it.
+    ``Comp ∩ Nplus``-style boolean a real PDK tap is drawn as), further
+    intersected with the union of ``tap_boxes`` when the spec asserts them
+    (issue #2234), and then clipped to the well itself, since a tap is by
+    definition inside the well it taps. Those sites are wired up to
+    ``connect_to``'s ``stackup`` region exactly as before, so a tap still
+    reaches (or fails to reach) the declared supply net through real
+    routing. The well contributes only *where the taps are*, never across
+    its own extent, and taps in the same well are not shorted to each other
+    through it.
     """
     # Imported lazily, matching `load_layout`'s lazy `klayout.db` import.
     import klayout.db as kdb
+
+    from ._layout import clip_box as _clip_box
 
     l2n = kdb.LayoutToNetlist(top_cell.name, layout.dbu)
 
@@ -1239,6 +2049,15 @@ def _extract_connectivity(
         tap_region = drawn_tap
         for required in tie["tap_requires"]:
             tap_region = tap_region & _region(layout, top_cell, required)
+        # `tap_boxes` (issue #2234): a caller assertion of exactly where the
+        # tap sites are, as literal micrometre boxes -- composes with
+        # `tap_requires` (both narrow the same region) but needs no drawn
+        # PDK marker layer to exist at all.
+        if tie["tap_boxes"]:
+            asserted_region = kdb.Region()
+            for box_um in tie["tap_boxes"]:
+                asserted_region += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
+            tap_region = tap_region & asserted_region.merged()
         tap_sites = (tap_region & well_region).merged()
         tap_index = l2n.register(tap_sites, f"{tie['name']}__tap")
         l2n.connect(tap_sites)
@@ -1251,10 +2070,19 @@ def _extract_connectivity(
                 "tap_index": tap_index,
                 # Issue #2199: measured here, where both regions exist,
                 # rather than re-derived later from the spec alone -- see
-                # `_degenerate_tie_names`.
+                # `_degenerate_tie_names`. `tap_boxes` narrowing feeds the
+                # same measurement as `tap_requires` -- an assertion that
+                # removes nothing from the drawn `tap_layer` inside the well
+                # is exactly as degenerate as omitting it (issue #2234).
                 "tap_narrowed": not (
                     (drawn_tap & well_region).merged() - tap_sites
                 ).is_empty(),
+                # Whether this tie's tap region was derived (at least in
+                # part) from a caller assertion rather than pure PDK-marker
+                # narrowing -- read by `_connectivity_coverage` to grade a
+                # non-degenerate asserted tie as `checked_by_assertion`
+                # (issue #2234).
+                "tap_asserted": bool(tie["tap_boxes"]),
             }
         )
 
@@ -1277,6 +2105,8 @@ def run_erc(
     *,
     top: str | None = None,
     pdk: str | None = None,
+    deck: str | None = None,
+    findings_only: bool = False,
 ) -> dict[str, Any]:
     """Run ``klt erc``'s connectivity-model extraction, antenna-ratio
     check, and core ERC finding checks end to end.
@@ -1330,6 +2160,8 @@ def run_erc(
       between the two supplies it spans. Omitted entirely -> no carve-out,
       today's behaviour exactly. What was applied (and the area each
       declaration actually removed) is echoed in ``provenance.devices``.
+      An explicit entry always wins over a ``deck``-detected carve-out for
+      the same role (issue #2204, see below).
 
     ``top`` selects the top cell to analyse when the stream has more than
     one (required in that case, matching ``select_top_cells``'s convention
@@ -1340,6 +2172,47 @@ def run_erc(
     against -- see :data:`_SKY130_ANTENNA_RATIO_MAX_EGAR`. Omit it to still
     get every level's derived ``antenna_ratio``, just with ``verdict``
     ``"unchecked"`` everywhere (no PDK limit to compare against).
+
+    ``deck`` (optional, e.g. ``"gf180mcu"``, issue #2204) selects a curated
+    extraction deck (:func:`~klayout_tools.decks.get_extraction_deck` --
+    the same registry ``klt extract --deck``/``klt lvs --deck`` resolve,
+    needing no PDK install) whose own ``ResistorDevice``/``CapacitorDevice``
+    declarations are matched against the declared ``stackup``/``vias``
+    roles and auto-carved out exactly where ``devices[]`` would otherwise
+    have to name them by hand -- see :func:`_deck_device_cuts` for the
+    matching rule and precedence, and ``docs/cli/erc.md``'s "Deck-driven
+    device-marker auto-detection" for the full picture. Deliberately
+    independent of ``pdk``: ``pdk`` selects only the antenna-ratio limit
+    table, has no ``gf180mcu`` entry, and resolves nothing when a deck name
+    would be valid for extraction but not for the antenna table (or vice
+    versa). Omitted (the default) -> no auto-detection is attempted, and
+    every output this feature could touch (``gates[]``, every antenna
+    ratio, every finding, ``provenance.deck``, ``provenance.devices``) is
+    byte-identical to a run before this feature existed.
+
+    ``findings_only`` (optional, default ``False``, issue #2219) asks for
+    the ``erc_findings`` half of this report only, and **skips the per-gate
+    per-level antenna accumulation** that dominates its runtime: one
+    ``polygons_of_net(...).merged().area()`` per gate net per ``stackup``
+    role, which on a dense layout (tens of thousands of gate nets) is
+    almost the entire wall clock. Every ``erc_findings`` rule is still
+    evaluated, and every finding is identical to the same run without the
+    flag -- the four ``nets[]``/``ties[]``-driven rules never read the
+    accumulated areas at all, and ``erc.floating_gate``'s predicate is
+    evaluated directly off the connectivity graph instead
+    (:func:`_gate_is_floating`). What changes is the *antenna* half:
+    ``gates[].levels[]`` still enumerates every role, but with
+    ``step_area_um2``/``cumulative_area_um2``/``antenna_ratio`` reported as
+    ``None`` (the measurement was not taken -- see
+    :func:`_skipped_accumulation_levels`), every ``verdict``
+    ``"unchecked"``, every level in ``coverage.skipped`` with reason
+    :data:`REASON_FINDINGS_ONLY`, and therefore ``status:
+    "not_checked"``/exit 4 -- exactly the antenna answer a ``--pdk``-less
+    run already gives. ``erc_status``/``erc_coverage`` are unaffected and
+    stay fully graded. Passing both ``findings_only`` and ``pdk`` is a
+    contradiction (a limit table with nothing to grade) and raises
+    :class:`ErcError` rather than silently returning an ungraded antenna
+    half to a caller who asked for one.
 
     Returns a dict matching the documented ``klt erc`` JSON schema (see
     ``docs/cli/erc.md``), including ``schema_version``, (issue #861)
@@ -1365,11 +2238,20 @@ def run_erc(
     roll-up ``"clean_partial"`` rather than ``"clean"`` (issue #2199, see
     :func:`_degenerate_tie_names`).
 
-    Raises :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
+    Raises :class:`ErcError` for a malformed spec, an unknown ``pdk`` or
+    ``deck``, a ``findings_only`` run that also names a ``pdk``, an
     unresolvable layout/top cell, or a layout in which no net carries any
     geometry on the declared gate role at all.
     """
+    if findings_only and pdk is not None:
+        raise ErcError(
+            "--findings-only skips the per-gate antenna accumulation "
+            f"entirely, so --pdk {pdk!r} would have nothing to grade -- "
+            "pass --findings-only for the erc_findings-only read, or --pdk "
+            "for the antenna verdict, but not both"
+        )
     antenna_limits = _resolve_antenna_limits(pdk)
+    deck_obj = _resolve_deck(deck)
 
     spec = _load_spec_json(spec_path, ErcError)
     stackup = _validate_stackup(spec, spec_path)
@@ -1377,6 +2259,7 @@ def run_erc(
     vias = _validate_vias(spec, spec_path, stackup_names)
     nets_decl = _validate_nets(spec, spec_path)
     ties = _validate_ties(spec, spec_path, stackup_names)
+    ties_disclosure = _validate_ties_disclosure(spec, spec_path)
     devices = _validate_devices(spec, spec_path, stackup_names, vias)
 
     layout = load_layout(file, ErcError)
@@ -1402,7 +2285,41 @@ def run_erc(
     # and subtracted from their own role in *both* graphs below -- a drawn
     # resistor body is not a wire in the tie graph either. Empty (and so a
     # no-op) whenever the spec declares no `devices`.
-    device_cuts, devices_applied = _device_body_cuts(layout, top_cell, devices)
+    # `role_layers` (role name -> its declared `(layer, datatype)`) is what
+    # lets `_device_body_cuts` report the area each declaration *actually*
+    # subtracted -- `marker ∩ that role's own drawn region` -- rather than
+    # the marker layer's own area (issue #2226). `--deck` reuses the same
+    # map below for its exact-layer-equality matching rule.
+    role_layers = _deck_role_layers(stackup, vias)
+    device_cuts, devices_applied = _device_body_cuts(
+        layout, top_cell, devices, role_layers
+    )
+
+    # `--deck` (issue #2204): a curated deck's own device-marker
+    # declarations, auto-carved out wherever a marker's conducting-body
+    # layer matches a declared role's own layer exactly -- see
+    # `_deck_device_cuts` for the matching rule. An explicit `devices[]`
+    # entry for a role always wins (that role is passed in `declared_roles`
+    # below, so `_deck_device_cuts` never computes a cut for it, only a
+    # `superseded_by`-marked provenance echo). No-op when `--deck` was
+    # omitted -- `deck_obj` is `None`, and neither `device_cuts` nor
+    # `devices_applied` is touched, matching this feature's own
+    # byte-identical-when-unused acceptance criterion.
+    if deck_obj is not None:
+        declared_roles: dict[str, str] = {}
+        for device in devices:
+            declared_roles.setdefault(device["on"], device["name"])
+        deck_cuts, deck_devices_applied = _deck_device_cuts(
+            layout, top_cell, deck_obj, role_layers, declared_roles
+        )
+        for role, region in deck_cuts.items():
+            device_cuts[role] = (
+                (device_cuts[role] + region).merged() if role in device_cuts else region
+            )
+        devices_applied = [
+            {**entry, "source": "declared", "superseded_by": None}
+            for entry in devices_applied
+        ] + deck_devices_applied
 
     l2n, circuit, layer_index, _ = _extract_connectivity(
         layout, top_cell, stackup, vias, [], device_cuts
@@ -1446,6 +2363,11 @@ def run_erc(
     # region regardless of `active_layer` -- only the area used for
     # membership/the antenna-ratio denominator below changes with the fix.
     gate_regions: list[Any] = []
+    # Parallel to `gates` too -- the `erc.floating_gate` predicate for each
+    # gate, computed from the accumulated `levels[]` on the normal path and
+    # directly off the connectivity graph on the `findings_only` one (issue
+    # #2219). Same answer either way; see `_gate_is_floating`.
+    gate_floating: list[bool] = []
     for net in candidates:
         gate_poly_region = l2n.polygons_of_net(net, gate_layer_index).merged()
 
@@ -1463,98 +2385,41 @@ def run_erc(
         if gate_area_um2 <= 0:
             continue
 
-        levels: list[dict[str, Any]] = []
-        cumulative_um2 = 0.0
-        for i, entry in enumerate(stackup):
-            step_region = l2n.polygons_of_net(net, layer_index[entry["name"]])
-            step_um2 = step_region.merged().area() * dbu2_um2
-            cumulative_um2 += step_um2
-
-            # `cumulative_area_um2 / gate_area_um2` per docs/cli/erc.md's
-            # own Phase-1a "Phase scope" note on what 1b delivers. The gate
-            # role itself (i == 0) is never PDK-checked: its ratio is
-            # trivially 1.0 (cumulative == gate area at that level), and
-            # the source table's own poly rule measures a different
-            # quantity entirely (poly perimeter, not cumulative connected
-            # area) -- not something this area-only model computes.
-            antenna_ratio = round(cumulative_um2 / gate_area_um2, 6)
-            limit_entry = (
-                None
-                if i == 0 or antenna_limits is None
-                else antenna_limits.get(entry["name"])
-            )
-            if limit_entry is not None:
-                limit_value, rule_id = limit_entry
-                antenna_ratio_max: float | None = limit_value
-                antenna_ratio_source: str | None = (
-                    f"{_ANTENNA_SOURCE_URL_BY_PDK[pdk]} rule {rule_id!r}, "
-                    "'Max EA/A w/o diode' column"
-                )
-                verdict = "violate" if antenna_ratio > limit_value else "pass"
-            else:
-                antenna_ratio_max = None
-                antenna_ratio_source = None
-                verdict = "unchecked"
-
-            levels.append(
-                {
-                    "layer": entry["name"],
-                    "step_area_um2": round(step_um2, 9),
-                    "cumulative_area_um2": round(cumulative_um2, 9),
-                    "antenna_ratio": antenna_ratio,
-                    "antenna_ratio_max": antenna_ratio_max,
-                    "antenna_ratio_source": antenna_ratio_source,
-                    "verdict": verdict,
-                }
-            )
-
-        # Fix guidance (issue #908, epic #713 Phase 3) -- a second pass over
-        # the now-complete `levels` list, since a remedy for level `i` may
-        # look at `levels[i + 1]` (see `_antenna_remedy`). `None` for every
-        # non-violating level (including every level when `pdk` was omitted,
-        # since `verdict` is then always "unchecked").
-        for i, level in enumerate(levels):
-            level["remedy"] = (
-                _antenna_remedy(levels, i, net.name or None)
-                if level["verdict"] == "violate"
-                else None
-            )
-
-        # `antenna_verdict` rollup (issue #1997) -- only `levels[1:]` (the
-        # non-gate roles) count towards "graded" coverage: `levels[0]` (the
-        # gate role itself) is *always* `"unchecked"` by construction (see
-        # above), so its presence must never, on its own, downgrade an
-        # otherwise fully-graded gate to `"pass_partial"`. Among the graded
-        # levels: `"violate"` wins outright regardless of coverage; absent
-        # a violation, `"pass_partial"` reports that at least one graded
-        # level passed but at least one other graded level's own role
-        # wasn't in the selected PDK's limit table (e.g. sky130's table has
-        # no met3-5 entries -- see "Sky130 antenna-ratio limits" in
-        # docs/cli/erc.md) or `--pdk` was omitted entirely for some
-        # otherwise-checkable subset; plain `"pass"` only when every graded
-        # level was actually compared against a limit and none violated;
-        # `"unchecked"` when no graded level was ever compared at all (e.g.
-        # `--pdk` omitted, or a single-role stackup).
-        graded_verdicts = {level["verdict"] for level in levels[1:]}
-        if "violate" in graded_verdicts:
-            antenna_verdict = "violate"
-        elif "pass" in graded_verdicts:
-            antenna_verdict = (
-                "pass_partial" if "unchecked" in graded_verdicts else "pass"
-            )
+        # The expensive part (issue #2219): one
+        # `polygons_of_net(...).merged().area()` per stackup role per gate
+        # net. A `findings_only` run never needs those numbers -- none of
+        # the `nets[]`/`ties[]`-driven findings read them, and the one rule
+        # that does (`erc.floating_gate`) has a cheaper equivalent
+        # predicate -- so it is skipped outright rather than computed and
+        # then reported `"unchecked"`.
+        if findings_only:
+            levels = _skipped_accumulation_levels(stackup)
+            is_floating = _gate_is_floating(l2n, net, stackup, layer_index, dbu2_um2)
         else:
-            antenna_verdict = "unchecked"
+            levels = _accumulated_levels(
+                l2n,
+                net,
+                stackup,
+                layer_index,
+                gate_poly_region,
+                gate_area_um2,
+                dbu2_um2,
+                antenna_limits,
+                pdk,
+            )
+            is_floating = _levels_report_floating(levels)
 
         gates.append(
             {
                 "gate_id": f"gate{len(gates)}",
                 "net": net.name or None,
                 "gate_area_um2": round(gate_area_um2, 9),
-                "antenna_verdict": antenna_verdict,
+                "antenna_verdict": _antenna_verdict(levels),
                 "levels": levels,
             }
         )
         gate_regions.append(gate_poly_region)
+        gate_floating.append(is_floating)
 
     if not gates:
         raise ErcError(
@@ -1568,9 +2433,13 @@ def run_erc(
     # docstring, "ERC finding checks", for what each rule detects.
     erc_findings: list[dict[str, Any]] = []
     erc_findings.extend(
-        _floating_gate_findings(list(zip(gates, gate_regions, strict=True)), gate_role)
+        _floating_gate_findings(
+            list(zip(gates, gate_regions, gate_floating, strict=True)), gate_role
+        )
     )
-    erc_findings.extend(_net_connectivity_findings(circuit, nets_decl))
+    erc_findings.extend(
+        _net_connectivity_findings(l2n, circuit, layer_index, nets_decl)
+    )
 
     # The tie graph (issue #2169): a second extraction, built only when the
     # spec actually declares `ties[]`, that adds each tie's derived tap
@@ -1580,12 +2449,23 @@ def run_erc(
     # outright wrong -- being able to reach `gates[]`, the antenna ratios,
     # or the `nets[]` findings already computed.
     degenerate_ties: set[str] = set()
+    asserted_ties: set[str] = set()
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
         degenerate_ties = _degenerate_tie_names(tie_layers)
+        # Issue #2234: a non-degenerate tie whose tap region was derived (at
+        # least in part) from a caller assertion (`tap_boxes`) rather than
+        # pure PDK-marker narrowing -- graded `checked_by_assertion` by
+        # `_connectivity_coverage` below, distinct from a bare
+        # `tap_requires`/`tap_is_dedicated` pass.
+        asserted_ties = {
+            tie["name"]
+            for tie in tie_layers
+            if tie["tap_asserted"] and tie["name"] not in degenerate_ties
+        }
     erc_findings.sort(
         key=lambda f: (
             f["rule"],
@@ -1610,7 +2490,7 @@ def run_erc(
     any_antenna_violation = any(
         level["verdict"] == "violate" for gate in gates for level in gate["levels"]
     )
-    coverage = _antenna_coverage(gates, pdk)
+    coverage = _antenna_coverage(gates, pdk, findings_only)
 
     # The common rollup rule (issue #2109, this adapter's own #2115) decides
     # `status` from `coverage` plus the two violation signals above, rather
@@ -1659,7 +2539,9 @@ def run_erc(
     # `"clean_partial"` for it: an `erc.missing_tie` check that cannot tell
     # a tap from a source/drain contact must not be readable as the clean
     # missing-tie verdict `docs/design-evidence-tiers.md` item 11 asks for.
-    erc_coverage = _connectivity_coverage(gates, nets_decl, ties, degenerate_ties)
+    erc_coverage = _connectivity_coverage(
+        gates, nets_decl, ties, degenerate_ties, asserted_ties, ties_disclosure
+    )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
     )
@@ -1682,7 +2564,20 @@ def run_erc(
         else None
     )
 
-    provenance = build_provenance(pdk=provenance_pdk, input_path=file)
+    # `provenance.deck` (issue #2204): `--deck` names a curated extraction
+    # deck (see `_resolve_deck`), so this is populated exactly the way every
+    # other `--deck`-taking verb populates it (`deck_name`/`deck_path` -->
+    # `build_provenance`'s own `_deck_block`), unlike `provenance.pdk`
+    # above, which is hand-built because `klt erc` resolves no filesystem
+    # PDK at all. `None` when `--deck` was omitted, matching every other
+    # verb's conditional `deck` population -- and this module's own
+    # byte-identical-when-unused guarantee for this feature.
+    provenance = build_provenance(
+        deck_name=deck,
+        deck_path=deck_source_path(deck) if deck is not None else None,
+        pdk=provenance_pdk,
+        input_path=file,
+    )
 
     # `provenance.spec` (issue #2036): `klt erc` is validated against *two*
     # inputs, not one -- the layout (`provenance.input`) and the stackup/
@@ -1704,10 +2599,22 @@ def run_erc(
     # the report -- otherwise two runs of the same layout, one with a
     # `devices[]` declaration and one without, disagree about
     # `erc.supply_short` with nothing in either payload to say why. Each
-    # entry carries the *measured* `body_area_um2`, so a declaration that
-    # silently matched no geometry (wrong datatype, marker layer absent
-    # from this stream) is distinguishable from one that bit. Always
-    # present; `[]` when no `devices` were declared.
+    # entry carries the *measured* `body_area_um2` -- the marker
+    # intersected with its role's own conductor region (issue #2226), not
+    # the marker layer's own area -- so a declaration that silently
+    # subtracted nothing (wrong datatype, wrong `on` role, marker layer
+    # absent from this stream) is distinguishable from one that bit. Always
+    # present; `[]` when no `devices` were declared and no `--deck` was
+    # selected.
+    #
+    # Issue #2204: when `--deck` selects a curated deck, every entry
+    # (hand-declared and deck-detected alike) additionally carries
+    # `"source"` (`"declared"` vs `"deck"`) and `"superseded_by"` (the
+    # declared device name that pre-empted a deck-detected carve-out for the
+    # same role, `None` otherwise) -- see `_deck_device_cuts`. Both keys are
+    # omitted entirely when no `--deck` was given, so a caller who never
+    # opts into this feature sees byte-identical `provenance.devices`
+    # entries to before this issue.
     provenance["devices"] = devices_applied
 
     return {
@@ -1715,6 +2622,11 @@ def run_erc(
         "file": file,
         "spec": spec_path,
         "pdk": pdk,
+        # (issue #2219) Whether the per-gate antenna accumulation was
+        # skipped. A reader that finds `levels[].step_area_um2 == null`
+        # must be able to tell "this run declined to measure it" from a
+        # malformed report, without inferring it from `coverage.skipped`.
+        "findings_only": findings_only,
         "gate_role": gate_role,
         "gate_count": len(gates),
         "gates": gates,
@@ -1724,5 +2636,11 @@ def run_erc(
         "status": status,
         "coverage": coverage,
         "erc_coverage": erc_coverage,
+        # (issue #2234) The spec's top-level `ties_disclosure`, echoed
+        # verbatim -- `None` when the spec did not declare one, matching
+        # every other optional-spec-key echo's conditional population. See
+        # `_validate_ties_disclosure` and this module's docstring, "Missing
+        # substrate/well tie".
+        "ties_disclosure": ties_disclosure,
         "provenance": provenance,
     }

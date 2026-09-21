@@ -17,7 +17,9 @@ one-command version of the "synthesize, then check" flow this document
 describes standalone.
 
 ```
-klt equiv <request> [--timeout-s <seconds>] [--format text|json]
+klt equiv <request> [--timeout-s <seconds>]
+                    [--sim-backend iverilog|verilator|both]
+                    [--format text|json]
 ```
 
 Like `klt lvs`/`klt sim`/`klt synthesize`, `klt equiv` takes a **request
@@ -41,6 +43,9 @@ cleanly.
   overrides the request field when given. A run that does not finish
   within this budget is reported `"inconclusive"` — **never**
   `"equivalent"`. See "Timeout and the inconclusive verdict" below.
+- `--sim-backend` — which simulator **replays** a counterexample
+  (`iverilog`, default; `verilator`; or `both`), overriding the request's
+  own `sim_backend` field when given. See "Replay backend" below.
 - `--format` — `text` (default) or `json`.
 
 ## Scope
@@ -151,6 +156,71 @@ settling details even for a fully accurate replay.
 overrides both stage 1's `equiv_induct -seq` depth and stage 2's `sat -seq`
 bound. `4` matches `equiv_induct`'s own Yosys-internal default.
 
+## Replay backend (`request.sim_backend` / `--sim-backend`, #2223)
+
+An axis **orthogonal to `engine`**: `engine` selects the *proof* engine
+(Yosys), `sim_backend` selects which simulator runs the independent
+*replay* of a counterexample vector/trace through the flattened
+`gold`/`gate` netlists. Both engines above use it; it has no effect on a
+run that never produces a counterexample.
+
+| Value | Behavior |
+| --- | --- |
+| `"iverilog"` | **Default, and the canonical backend for evidence.** The `iverilog`/`vvp` replay this command has always done — unchanged, byte for byte. |
+| `"verilator"` | Replays the same generated testbench via `verilator --binary` instead. Icarus interprets the design event by event; Verilator compiles it to C++ — on a long vector/trace the compiled path is dramatically faster (a downstream RTL bring-up measured 8:56 vs. 1:22, ~6.4×, and the gap widens with vector length). The upfront C++ build cost is what that speedup pays back. |
+| `"both"` | Runs **both**, and **requires them to agree** — see "Backend agreement policy" below. |
+
+**`iverilog` is canonical for evidence.** When you cite a
+`confirmed_by_simulation: true` in a sign-off artifact, cite the
+`iverilog` run: `counterexample.simulation` is always the canonical
+backend's own result, and the Verilator run is reported separately in
+`counterexample.simulation_cross_check`. `"verilator"` alone is a
+**speed** setting for iteration loops, not a substitute for canonical
+evidence.
+
+### Backend agreement policy
+
+Under `"both"`, the two backends must reach the same conclusion. Agreement
+requires **both** of:
+
+1. The same confirmation verdict (did the reported divergence reproduce?).
+2. No *unexplained* difference in the replayed output bits.
+
+If either fails, the disagreement is reported as an **error-severity
+`sim_backend_disagreement` diagnostic**, `confirmed_by_simulation` is reset
+to `null` (neither backend's verdict is adopted — a disagreement is never
+silently resolved in favour of one backend), and the top-level `status` is
+downgraded to `"inconclusive"` (exit `4`). Both backends' raw replayed
+values are still reported in full, so the disagreement is auditable rather
+than merely announced. **A backend disagreement is never a pass.**
+
+### The one declared backend-specific difference: 2-state vs. 4-state
+
+Icarus models 4-state values (`0`/`1`/`x`/`z`); Verilator is 2-state, so an
+undriven register reads `0` where Icarus reads `x`. Each replay declares
+which it is in its own `four_state` field. A bit difference that occurs
+**only** where the 4-state canonical run reported `x`/`z` is classified
+`explained_by: "two_state_backend"` and reported as an `info`
+`sim_backend_output_difference` diagnostic — it is *not* a disagreement.
+Any other difference (a differing *defined* bit, a differing width, a
+signal one backend never reported) is unexplained, and therefore a
+disagreement. This is the expected outcome on a sequential replay, where
+the first cycle or two legitimately differ on start-state bits.
+
+### When `verilator` is not installed
+
+Nothing is fabricated and nothing silently substitutes for it:
+
+- `"verilator"` alone degrades exactly the way a missing `iverilog` already
+  does — a `simulation_unavailable` warning naming `verilator`,
+  `confirmed_by_simulation: null`, and the solver's own verdict left
+  standing. It never quietly runs `iverilog` instead and reports the result
+  as Verilator's.
+- `"both"` records `simulation_cross_check.agreement: "unavailable"` plus a
+  `sim_backend_cross_check_unavailable` warning, and the canonical
+  `iverilog` evidence — verdict, replayed bytes, `status` — is exactly what
+  the same run produces with `sim_backend: "iverilog"`.
+
 ## Request
 
 ```json
@@ -166,6 +236,7 @@ bound. `4` matches `equiv_induct`'s own Yosys-internal default.
   },
   "port_map": null,
   "engine": "yosys",
+  "sim_backend": "iverilog",
   "timeout_s": 60
 }
 ```
@@ -178,6 +249,7 @@ bound. `4` matches `equiv_induct`'s own Yosys-internal default.
 | `gold.liberty` / `gate.liberty` | string \| omitted | A standard-cell liberty file, read via `read_liberty -ignore_miss_func` (no `-lib`, so each cell's liberty `function` string becomes real logic, not a blackbox) before that side's `sources`. **Required for a post-synthesis gate-level netlist** (e.g. `klt synthesize`'s own `netlist_path` output) — without it, the netlist's standard-cell instances have no logic definition and elaboration fails outright. Omit for self-contained RTL. |
 | `port_map` | object\<string,string\> \| null | The **I/O mapping** between the two sides, `{"<gate_port_name>": "<gold_port_name>"}` — only needed when a port was renamed between the two representations (e.g. by a synthesis or netlist-rewriting step that does not preserve top-level port names). Ports not listed are assumed identically named on both sides. Omit (or `null`) when both sides already share the same port names — the common case. |
 | `engine` | string | `"yosys"` (default, combinational) or `"yosys-sequential"` (register-correspondence sequential, #1313). |
+| `sim_backend` | string | Which simulator replays a counterexample: `"iverilog"` (default, canonical), `"verilator"` (compiled fast path), or `"both"` (run both, require agreement). Overridden by `--sim-backend` when given. See "Replay backend" above. |
 | `timeout_s` | number | Overall wall-clock timeout in seconds (default `60`). Overridden by `--timeout-s` when given. Must be positive. Applied independently to *each* stage of the `"yosys-sequential"` engine's two-stage run — a worst-case run may take up to 2x this budget. |
 | `induction_depth` | integer | **`"yosys-sequential"` only.** `equiv_induct -seq`/stage-2 `sat -seq` depth (default `4`, matching `equiv_induct`'s own Yosys-internal default). Must be a positive integer. Ignored (no effect) for the `"yosys"` engine. |
 
@@ -198,6 +270,7 @@ before `equiv_make` runs.
   "schema_version": 1,
   "engine": "yosys",
   "engine_version": "0.33",
+  "sim_backend": "iverilog",
   "status": "counterexample",
   "gold": { "top": "adder4", "sources": ["/abs/adder4.v"], "liberty": null },
   "gate": { "top": "adder4", "sources": ["/abs/adder4_synth.v"], "liberty": "/abs/lib.lib" },
@@ -213,10 +286,12 @@ before `equiv_make` runs.
     "simulation": {
       "engine": "icarus",
       "engine_version": "12.0",
+      "four_state": true,
       "gold_outputs": { "sum": "1011" },
       "gate_outputs": { "sum": "1010" },
       "diverging_outputs": ["sum"]
-    }
+    },
+    "simulation_cross_check": null
   },
   "diagnostics": [],
   "artifacts": {
@@ -238,13 +313,14 @@ before `equiv_make` runs.
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
 | `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`). `engine_version` is `null` if unresolvable. |
-| `status` | string | `"equivalent"`, `"counterexample"` (proven non-equivalent **and** independently reproduced by simulation), or `"inconclusive"` (solver/process timeout, or a solver-reported counterexample that simulation did *not* reproduce — **never** `"equivalent"`). See "Timeout and the inconclusive verdict" below and "Counterexample shape" for the simulation-confirmation downgrade. |
+| `sim_backend` | string | Echo of the effective counterexample-replay backend (`"iverilog"`, `"verilator"`, or `"both"`) — the request field, or `--sim-backend`, or the `"iverilog"` default. Always present; which backend actually produced a replay is never left implicit. See "Replay backend" above. |
+| `status` | string | `"equivalent"`, `"counterexample"` (proven non-equivalent **and** independently reproduced by simulation), or `"inconclusive"` (solver/process timeout, a solver-reported counterexample that simulation did *not* reproduce, or — under `sim_backend: "both"` — a disagreement between the two replay backends; **never** `"equivalent"`). See "Timeout and the inconclusive verdict" below, "Backend agreement policy" above, and "Counterexample shape" for the simulation-confirmation downgrade. |
 | `gold` / `gate` | object | Echo of the resolved request side: `{top, sources, liberty}` (absolute paths; `liberty` is `null` when not given). |
 | `port_map` | object \| null | Echo of the request field. |
 | `timeout_s` | number | The effective timeout used (request field, or `--timeout-s`, or the `60` default). |
 | `elapsed_s` | number | Wall-clock time the Yosys subprocess actually ran, in seconds. |
 | `counterexample` | object \| null | Present when `status == "counterexample"`, and also (issue #1349) when a solver-reported counterexample was downgraded to `status: "inconclusive"` because `counterexample.confirmed_by_simulation` came back `false` — the object itself is unchanged either way, it is only the top-level `status` that reflects whether the divergence was actually demonstrated. `null` for every other `"inconclusive"` cause (timeout, unproven-by-induction) and for `"equivalent"`. See "Counterexample shape" below. |
-| `diagnostics` | array\<object\> | `{severity, code, message}` entries — a timeout's own explanation, or a degraded (but non-fatal) counterexample-confirmation outcome (e.g. `iverilog` unavailable). Empty on a clean `"equivalent"`/`"counterexample"` run. |
+| `diagnostics` | array\<object\> | `{severity, code, message}` entries — a timeout's own explanation, a degraded (but non-fatal) counterexample-confirmation outcome (e.g. `iverilog` unavailable), or a replay-backend cross-check outcome (`sim_backend_disagreement`, severity `error`; `sim_backend_cross_check_unavailable`, `warning`; `sim_backend_output_difference`, `info`). Empty on a clean `"equivalent"`/`"counterexample"` run. |
 | `artifacts` | object | `{script_path, netlist_path, log_path}` — the generated `.ys` script, the flattened combined `gold`/`gate` Verilog netlist, and the raw Yosys log, all absolute paths under `.klt/equiv/` next to the request file. `netlist_path`/`log_path` are `null` when the run timed out before they were written. Never deleted — kept as debuggable artifacts, the same convention `klt synthesize`'s `.klt/synthesize/` uses. |
 | `provenance` | object | The shared envelope block (`docs/json-contract.md`). `pdk`/`deck` are always `null` (no PDK/deck resolution — a liberty file, when given, is a plain input file, not a "deck"); `input` is the content hash of every `sources` file across both sides (a combined, order-independent hash when more than one file is given), with `input.role: "source"` (issue #2027 — these are HDL sources, not a layout stream or a netlist). |
 
@@ -256,7 +332,8 @@ before `equiv_make` runs.
 | `gold_outputs` / `gate_outputs` | object\<string, object\> | Same `{bin, width, value}` shape, per output port, as reported by the SAT solver for `gold`/`gate` respectively under `inputs`. |
 | `diverging_outputs` | array\<string\> | Output port names where `gold_outputs`/`gate_outputs` actually differ (a bus can legally share some bits and diverge on others). |
 | `confirmed_by_simulation` | boolean \| null | `true` when `iverilog`/`vvp` independently reproduced the divergence (top-level `status` stays `"counterexample"`); `false` when the re-simulation ran but did **not** reproduce it — the top-level `status` is downgraded to `"inconclusive"` in this case (issue #1349: an unproven-`$equiv`/miter artifact is not a demonstrated functional difference), and `diagnostics` carries the `counterexample_not_reproduced` explanation; `null` when confirmation could not be attempted at all (e.g. `iverilog` not installed — see `diagnostics`), in which case `status` is left as the solver's own `"counterexample"` verdict since there is no simulation evidence either way. |
-| `simulation` | object \| null | `{engine, engine_version, gold_outputs, gate_outputs, diverging_outputs}` from the independent `iverilog`/`vvp` run — `gold_outputs`/`gate_outputs` here are raw `{name: bin_string}`, not the richer `{bin, width, value}` shape above. `null` when confirmation could not be attempted. |
+| `simulation` | object \| null | `{engine, engine_version, four_state, gold_outputs, gate_outputs, diverging_outputs}` from the independent **canonical** replay run (`iverilog`/`vvp` unless `sim_backend` says otherwise) — `gold_outputs`/`gate_outputs` here are raw `{name: bin_string}`, not the richer `{bin, width, value}` shape above. `four_state` declares whether that backend models `x`/`z` at all (`true` for Icarus, `false` for Verilator). `null` when confirmation could not be attempted. |
+| `simulation_cross_check` | object \| null | **`sim_backend: "both"` only** (`null` otherwise, #2223). The second (Verilator) replay's own `{engine, engine_version, four_state, gold_outputs, gate_outputs, diverging_outputs, confirmed_by_simulation}`, plus `agreement` (`"agree"` / `"disagree"` / `"unavailable"`) and `output_mismatches` — one `{side, name, canonical, cross_check, explained_by}` entry per differing signal (`explained_by: "two_state_backend"` for a difference the declared 2-state/4-state gap accounts for, `null` for a real disagreement). On `"unavailable"` (no `verilator` installed) every result field is `null`; the canonical evidence above is unaffected. See "Backend agreement policy" above. |
 
 ### Response additions for `"yosys-sequential"`
 
@@ -343,12 +420,14 @@ one, generalising it for a genuinely sequential trace:
   "simulation": {
     "engine": "icarus",
     "engine_version": "12.0",
+    "four_state": true,
     "cycles": [
       { "time": 1, "gold_outputs": {"q": "x"}, "gate_outputs": {"q": "x"}, "diverging_outputs": [] },
       { "time": 2, "gold_outputs": {"q": "1"}, "gate_outputs": {"q": "0"}, "diverging_outputs": ["q"] }
     ],
     "diverging_outputs": ["q"]
-  }
+  },
+  "simulation_cross_check": null
 }
 ```
 
@@ -360,6 +439,7 @@ one, generalising it for a genuinely sequential trace:
 | `confirmed_by_simulation` | boolean \| null | Same meaning (and same `status`-downgrade-to-`"inconclusive"`-on-`false` behavior, issue #1349) as the combinational shape, but "confirmed" means the reported divergence reproduces on *some* replayed cycle, not necessarily the identical cycle index — see the `"yosys-sequential"` engine's own "Engine" section above for why (a real Verilog simulation's registers start at `x`, unlike the solver's own `-set-init-zero` assumption). |
 | `simulation.cycles` | array\<object\> | The independent `iverilog`/`vvp` run's own per-cycle `{time, gold_outputs, gate_outputs, diverging_outputs}` (raw `{name: bin_string}` values, not the richer `{bin, width, value}` shape). |
 | `simulation.diverging_outputs` | array\<string\> | The union of every simulated cycle's own divergence. |
+| `simulation_cross_check` | object \| null | **`sim_backend: "both"` only** (#2223). The same shape as the combinational cross-check block, with `cycles` in place of `gold_outputs`/`gate_outputs`, and each `output_mismatches` entry carrying an extra `cycle` field. The start-state cycles are exactly where the declared 2-state/4-state difference shows up — `explained_by: "two_state_backend"` — because Verilator starts registers at `0` where Icarus starts them at `x`. |
 
 ## Timeout and the inconclusive verdict
 
@@ -384,7 +464,7 @@ caller should rely on.
 | `1` | Failed to run at all — bad request, unresolvable/unreadable RTL or liberty source, unsupported engine, a sequential design given to the `"yosys"` engine (out of its combinational-only scope), a Yosys elaboration/miter-construction error, or a missing `yosys` binary. |
 | `2` | Usage error (missing argument, bad `--format`/`--timeout-s` value) — from argparse. |
 | `3` | Ran successfully, proven non-equivalent (`status: "counterexample"`). |
-| `4` | Ran, but the proof is inconclusive — solver/process timeout, an induction-bound proof with no confirming or refuting counterexample, or a solver-reported counterexample that simulation did not reproduce (`status: "inconclusive"`, issue #1349). Never `0`. |
+| `4` | Ran, but the proof is inconclusive — solver/process timeout, an induction-bound proof with no confirming or refuting counterexample, a solver-reported counterexample that simulation did not reproduce (issue #1349), or a `sim_backend: "both"` run whose two replay backends disagreed (issue #2223). `status: "inconclusive"`. Never `0`. |
 
 This is `klt sim`'s 0/1/2/3/4 precedent: a formal equivalence proof has the
 same third "ran, but the result isn't trustworthy" outcome a PVT corner sweep

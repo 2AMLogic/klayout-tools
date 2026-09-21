@@ -80,6 +80,43 @@ Two subprocesses are actually run:
    alone -- there is no simulation evidence either way in that case, so the
    solver's own verdict stands.
 
+## Replay backend: ``request.sim_backend`` (issue #2223)
+
+Which simulator runs step 2's counterexample/vector *replay* -- an
+orthogonal axis to ``request.engine``, which selects the *proof* engine:
+
+- ``"iverilog"`` (default, and the **canonical** backend for evidence):
+  exactly the ``iverilog``/``vvp`` path described above, unchanged.
+- ``"verilator"``: replays the same generated testbench through
+  ``verilator --binary`` instead. Icarus is an event-driven interpreter
+  while Verilator compiles to C++, so on a long vector/trace the compiled
+  path is dramatically faster (a downstream RTL bring-up measured 8:56 vs.
+  1:22, ~6.4x, and the gap grows with vector length).
+- ``"both"``: runs *both*, adopts neither silently. The canonical
+  (``iverilog``) run populates ``counterexample.simulation`` exactly as
+  today; the Verilator run populates the additive
+  ``counterexample.simulation_cross_check``. **The two must agree**: if
+  they reach different confirmation verdicts -- or differ on replayed
+  output bits in a way the declared backend-specific fields do not explain
+  -- the disagreement is reported as an error-severity
+  ``sim_backend_disagreement`` diagnostic, ``confirmed_by_simulation`` is
+  reset to ``None`` (neither backend's verdict is adopted), and the
+  reported ``status`` is downgraded to ``"inconclusive"``. A backend
+  disagreement is never a pass and never a silently-preferred fast path.
+
+The one declared backend-specific difference is **value modelling**:
+Icarus is 4-state (an undriven register reads ``x``), Verilator is 2-state
+(it reads ``0``). Each replay records its own ``four_state`` flag, and a
+bit difference that occurs *only* where the 4-state canonical run reported
+``x``/``z`` is classified ``explained_by: "two_state_backend"`` rather than
+counted as a disagreement.
+
+When ``verilator`` is not installed, nothing is fabricated: the
+Verilator-only backend degrades to the same ``simulation_unavailable``
+diagnostic a missing ``iverilog`` already produces, and ``"both"`` records
+``agreement: "unavailable"`` and leaves the canonical verdict standing --
+byte-for-byte the behavior this module had before the backend existed.
+
 ## Engine: ``"yosys-sequential"`` -- register-correspondence sequential
 equivalence (Phase 2, #1313)
 
@@ -250,6 +287,65 @@ SCHEMA_VERSION = 1
 #: docstring, "Engine" sections.
 SUPPORTED_ENGINES = ("yosys", "yosys-sequential")
 
+#: Counterexample/vector *replay* backends -- an axis orthogonal to
+#: :data:`SUPPORTED_ENGINES` (which selects the *proof* engine). See this
+#: module's docstring, "Replay backend" section (issue #2223).
+SUPPORTED_SIM_BACKENDS = ("iverilog", "verilator", "both")
+
+#: The default replay backend: unchanged from before the backend selector
+#: existed, so omitting ``request.sim_backend`` reproduces the historical
+#: behavior exactly.
+DEFAULT_SIM_BACKEND = "iverilog"
+
+#: The backend whose replay is **canonical for evidence** -- it is the one
+#: that populates ``counterexample.simulation``/``confirmed_by_simulation``
+#: under ``"both"``. Verilator is a cross-check/fast path, never a silent
+#: replacement for it.
+CANONICAL_SIM_BACKEND = "iverilog"
+
+#: The cross-check backend ``"both"`` pairs :data:`CANONICAL_SIM_BACKEND`
+#: with.
+CROSS_CHECK_SIM_BACKEND = "verilator"
+
+#: Per-backend ``(version command, version regex)`` -- mirrors
+#: ``functional_verification.py``'s own ``_ENGINE_VERSION_COMMANDS`` table
+#: rather than inventing a parallel convention.
+_SIM_BACKEND_VERSION_COMMANDS = {
+    "iverilog": (["iverilog", "-V"], re.compile(r"Icarus Verilog version (\S+)")),
+    "verilator": (["verilator", "--version"], re.compile(r"Verilator (\S+)")),
+}
+
+#: On-the-wire ``simulation.engine`` label per replay backend. ``"icarus"``
+#: is the value this command has always emitted for the ``iverilog``/``vvp``
+#: path -- kept verbatim (it is the same name
+#: ``functional_verification.py``'s own engine axis uses), so no existing
+#: consumer sees a changed value.
+_SIM_ENGINE_LABEL = {"iverilog": "icarus", "verilator": "verilator"}
+
+#: Human-readable tool label used in this module's own diagnostics.
+_SIM_BACKEND_LABEL = {"iverilog": "iverilog/vvp", "verilator": "verilator"}
+
+#: Whether a backend models 4-state (``0``/``1``/``x``/``z``) values.
+#: Verilator is 2-state: an undriven register reads ``0`` where Icarus
+#: reads ``x``. Declared per-run in ``simulation.four_state`` so a
+#: cross-backend bit difference can be *explained* rather than silently
+#: tolerated -- see :func:`_compare_replay_outputs`.
+_SIM_BACKEND_FOUR_STATE = {"iverilog": True, "verilator": False}
+
+#: Compile-step budget for the ``iverilog`` replay backend. Unchanged
+#: (30s); named only so the diagnostic text stays in sync with it.
+_IVERILOG_COMPILE_TIMEOUT_S = 30
+
+#: Compile-step budget for the ``verilator`` replay backend. Verilator
+#: front-ends *and then C++-compiles* the design, so its one-off build cost
+#: is much larger than Icarus's parse -- that upfront cost is exactly what
+#: the per-vector speedup pays back on a long run. Generous enough for a
+#: real netlist's C++ build, still bounded.
+_VERILATOR_COMPILE_TIMEOUT_S = 300
+
+#: Run-step budget, shared by both replay backends.
+_REPLAY_RUN_TIMEOUT_S = 30
+
 #: Default per-run wall-clock timeout, overridable via ``request.timeout_s``
 #: or the CLI's ``--timeout-s``. Generous enough for a real corpus design's
 #: proof, tight enough that an accidentally-hard SAT instance doesn't hang
@@ -279,8 +375,6 @@ _SEQUENTIAL_CELL_GLOBS = (
     "$mem*",
     "$fsm*",
 )
-
-_ICARUS_VERSION_RE = re.compile(r"Icarus Verilog version (\S+)")
 
 _SAT_SUCCESS_RE = re.compile(r"SAT proof finished - no model found: SUCCESS!")
 _SAT_FAIL_RE = re.compile(r"SAT proof finished - model found: FAIL!")
@@ -404,7 +498,12 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
     )
 
 
-def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]:
+def run_equiv(
+    request: str,
+    *,
+    timeout_s: float | None = None,
+    sim_backend: str | None = None,
+) -> dict[str, Any]:
     """Run the ``klt equiv`` equivalence check declared by ``request`` (a
     path, ``-`` for stdin, or an inline JSON object string -- see
     :func:`load_request_arg`), via ``request.engine`` (``"yosys"``,
@@ -415,6 +514,12 @@ def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]
     ``timeout_s`` field when given; the request field is used when
     ``timeout_s`` is ``None``; :data:`DEFAULT_TIMEOUT_S` is used when
     neither is given.
+
+    ``sim_backend`` (the CLI's ``--sim-backend``) overrides the request's
+    own ``sim_backend`` field the same way, selecting which simulator
+    replays a counterexample: ``"iverilog"`` (default/canonical),
+    ``"verilator"`` (compiled fast path), or ``"both"`` (run both and
+    require agreement) -- see this module's docstring, "Replay backend".
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/equiv.md``). Raises :class:`EquivError` for anything that
@@ -439,6 +544,8 @@ def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]
         raise EquivError(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
+
+    effective_sim_backend = _resolve_sim_backend(sim_backend, request_doc)
 
     effective_timeout_s = timeout_s
     if effective_timeout_s is None:
@@ -488,6 +595,7 @@ def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]
             effective_timeout_s=effective_timeout_s,
             induction_depth=induction_depth,
             engine=engine,
+            sim_backend=effective_sim_backend,
         )
 
     # engine == "yosys" (combinational, Phase 0/1) continues below, unchanged.
@@ -545,6 +653,7 @@ def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]
         return _build_report(
             engine=engine,
             engine_version=engine_version,
+            sim_backend=effective_sim_backend,
             status="inconclusive",
             gold=gold,
             gate=gate,
@@ -585,25 +694,28 @@ def run_equiv(request: str, *, timeout_s: float | None = None) -> dict[str, Any]
             netlist_path=netlist_path,
             output_dir=output_dir,
             diagnostics=diagnostics,
+            sim_backend=effective_sim_backend,
         )
-        if counterexample["confirmed_by_simulation"] is False:
-            # The solver reported a counterexample, but re-running its own
-            # trace through the flattened netlists via iverilog/vvp did not
-            # reproduce a diverging output (`counterexample_not_reproduced`,
-            # appended above) -- an unsound `$equiv`/miter artifact, not a
-            # demonstrated functional difference. "inconclusive" is the
-            # honest verdict here, matching the downgrade the sequential
-            # engine's own stage-2 path already applies for its analogous
-            # "unproven, no counterexample either" case below. Never
-            # reported when `confirmed_by_simulation` is `None` (simulation
-            # could not be attempted at all, e.g. no `iverilog` on $PATH) --
-            # that case has no evidence either way, so the solver's own
-            # verdict stands.
+        if _replay_evidence_is_untrustworthy(counterexample):
+            # Either the solver reported a counterexample whose own replay
+            # through the flattened netlists did not reproduce a diverging
+            # output (`counterexample_not_reproduced`, appended above) -- an
+            # unsound `$equiv`/miter artifact, not a demonstrated functional
+            # difference -- or (`sim_backend: "both"`) the two replay
+            # backends disagreed. Either way "inconclusive" is the honest
+            # verdict, matching the downgrade the sequential engine's own
+            # stage-2 path already applies for its analogous "unproven, no
+            # counterexample either" case below. Never reported when
+            # `confirmed_by_simulation` is `None` *because* simulation could
+            # not be attempted at all (e.g. no `iverilog` on $PATH) -- that
+            # case has no evidence either way, so the solver's own verdict
+            # stands.
             status = "inconclusive"
 
     return _build_report(
         engine=engine,
         engine_version=engine_version,
+        sim_backend=effective_sim_backend,
         status=status,
         gold=gold,
         gate=gate,
@@ -971,7 +1083,341 @@ def _build_counterexample(signals: dict[str, str]) -> dict[str, Any]:
         "diverging_outputs": diverging,
         "confirmed_by_simulation": None,
         "simulation": None,
+        "simulation_cross_check": None,
     }
+
+
+def _resolve_sim_backend(sim_backend: str | None, request_doc: dict[str, Any]) -> str:
+    """The effective replay backend: the explicit ``sim_backend`` argument
+    (the CLI's ``--sim-backend``) when given, else ``request.sim_backend``,
+    else :data:`DEFAULT_SIM_BACKEND` -- the same override-the-request-field
+    precedence ``timeout_s`` already has.
+
+    Raises :class:`EquivError` for an unsupported value, exactly as an
+    unsupported ``engine`` does.
+    """
+    effective = sim_backend
+    if effective is None:
+        effective = request_doc.get("sim_backend", DEFAULT_SIM_BACKEND)
+    if effective not in SUPPORTED_SIM_BACKENDS:
+        raise EquivError(
+            f"unsupported sim_backend '{effective}' "
+            f"(supported: {', '.join(SUPPORTED_SIM_BACKENDS)})"
+        )
+    return effective
+
+
+def _replay_backends(sim_backend: str) -> tuple[str, str | None]:
+    """``(canonical, cross_check)`` replay backends for ``sim_backend``.
+
+    ``"both"`` pairs the canonical ``iverilog`` replay with a ``verilator``
+    cross-check; every other value runs that one backend alone (no
+    cross-check, and -- importantly -- no silent fallback to the other).
+    """
+    if sim_backend == "both":
+        return (CANONICAL_SIM_BACKEND, CROSS_CHECK_SIM_BACKEND)
+    return (sim_backend, None)
+
+
+def _run_replay_backend(
+    *,
+    backend: str,
+    netlist_path: str,
+    tb_path: str,
+    output_dir: str,
+    stem: str,
+) -> tuple[str | None, str | None]:
+    """Compile and run the generated replay testbench ``tb_path`` against
+    the flattened ``netlist_path`` under ``backend``.
+
+    Returns ``(stdout, None)`` on a completed run, or ``(None, message)``
+    naming exactly why the replay could not be completed (missing binary,
+    compile timeout, compile error, run failure). Never raises and never
+    falls back to the other backend -- an unavailable backend is reported
+    as unavailable, never fabricated, per this repo's own convention.
+    """
+    if backend == "verilator":
+        mdir = os.path.join(output_dir, f"{stem}_verilator")
+        exe_name = f"{stem}_verilator_bin"
+        compile_cmd = [
+            "verilator",
+            "--binary",
+            # Yosys-written netlists routinely trip Verilator *lint*
+            # warnings (module name vs. file name, unused signals) that say
+            # nothing about the replayed values; the replay is a value
+            # check, not a lint gate. Real errors still fail the compile.
+            "-Wno-fatal",
+            "--top-module",
+            "equiv_tb",
+            "--Mdir",
+            mdir,
+            "-o",
+            exe_name,
+            netlist_path,
+            tb_path,
+        ]
+        compile_tool = "verilator"
+        compile_timeout_s = _VERILATOR_COMPILE_TIMEOUT_S
+        run_cmd = [os.path.join(mdir, exe_name)]
+        run_tool = "the verilator --binary executable"
+    else:
+        vvp_path = os.path.join(output_dir, f"{stem}.vvp")
+        compile_cmd = ["iverilog", "-g2012", "-o", vvp_path, netlist_path, tb_path]
+        compile_tool = "iverilog"
+        compile_timeout_s = _IVERILOG_COMPILE_TIMEOUT_S
+        run_cmd = ["vvp", vvp_path]
+        run_tool = "vvp"
+
+    try:
+        compiled = subprocess.run(
+            compile_cmd,
+            capture_output=True,
+            text=True,
+            timeout=compile_timeout_s,
+        )
+    except FileNotFoundError:
+        return (
+            None,
+            f"{compile_tool} not found on $PATH -- counterexample "
+            "reported by the solver only, not independently confirmed "
+            "by simulation",
+        )
+    except subprocess.TimeoutExpired:
+        return (
+            None,
+            f"{compile_tool} did not complete within {compile_timeout_s}s "
+            "while compiling the counterexample-confirmation testbench",
+        )
+
+    if compiled.returncode != 0:
+        tail = (compiled.stderr or compiled.stdout).strip()[-500:]
+        return (
+            None,
+            f"{compile_tool} failed to compile the counterexample-"
+            f"confirmation testbench: {tail}",
+        )
+
+    try:
+        ran = subprocess.run(
+            run_cmd, capture_output=True, text=True, timeout=_REPLAY_RUN_TIMEOUT_S
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        return (
+            None,
+            f"could not run confirmation testbench with {run_tool}: {exc}",
+        )
+
+    return (ran.stdout or "", None)
+
+
+def _parse_replay_outputs(stdout: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Split a single-vector replay run's ``stdout`` into
+    ``({gold outputs}, {gate outputs})`` raw ``{name: bit string}`` maps."""
+    sim_gold: dict[str, str] = {}
+    sim_gate: dict[str, str] = {}
+    for line in stdout.splitlines():
+        match = _SIM_DISPLAY_RE.match(line.strip())
+        if not match:
+            continue
+        side, name, bits = match.groups()
+        (sim_gold if side == "gold" else sim_gate)[name] = bits
+    return sim_gold, sim_gate
+
+
+def _diverging_names(gold: dict[str, str], gate: dict[str, str]) -> list[str]:
+    """Output names present on both sides whose replayed bits differ."""
+    return sorted(name for name in gold if name in gate and gold[name] != gate[name])
+
+
+def _explains_two_state(canonical: str | None, cross: str | None) -> bool:
+    """Whether a 2-state backend's ``cross`` value differs from the 4-state
+    canonical value ``canonical`` *only* where the canonical value is
+    undefined (``x``/``z``).
+
+    This is the single declared backend-specific difference between the two
+    replay backends (see this module's docstring): Verilator reads ``0``
+    where Icarus reads ``x``. Any other difference -- a differing *defined*
+    bit, a differing width, a signal one backend did not report at all --
+    is a real disagreement, never explained away.
+    """
+    if canonical is None or cross is None:
+        return False
+    if len(canonical) != len(cross):
+        return False
+    return all(
+        canonical_bit == cross_bit or canonical_bit in "xzXZ"
+        for canonical_bit, cross_bit in zip(canonical, cross, strict=True)
+    )
+
+
+def _compare_replay_outputs(
+    *,
+    canonical: dict[str, dict[str, str]],
+    cross: dict[str, dict[str, str]],
+    cross_four_state: bool,
+    cycle: int | None = None,
+) -> list[dict[str, Any]]:
+    """Per-signal differences between two backends' replayed outputs.
+
+    ``canonical``/``cross`` are ``{"gold": {name: bits}, "gate": {...}}``.
+    Each returned entry is ``{side, name, canonical, cross_check,
+    explained_by}`` (plus ``cycle`` for a multi-cycle replay), where
+    ``explained_by`` is ``"two_state_backend"`` for a difference the
+    declared 2-state/4-state modelling gap accounts for and ``None`` for a
+    genuine disagreement.
+    """
+    mismatches: list[dict[str, Any]] = []
+    for side in ("gold", "gate"):
+        canonical_side = canonical.get(side, {})
+        cross_side = cross.get(side, {})
+        for name in sorted(set(canonical_side) | set(cross_side)):
+            canonical_bits = canonical_side.get(name)
+            cross_bits = cross_side.get(name)
+            if canonical_bits == cross_bits:
+                continue
+            explained = (
+                "two_state_backend"
+                if not cross_four_state
+                and _explains_two_state(canonical_bits, cross_bits)
+                else None
+            )
+            entry: dict[str, Any] = {
+                "side": side,
+                "name": name,
+                "canonical": canonical_bits,
+                "cross_check": cross_bits,
+                "explained_by": explained,
+            }
+            if cycle is not None:
+                entry["cycle"] = cycle
+            mismatches.append(entry)
+    return mismatches
+
+
+def _cross_check_block(backend: str, *, sequential: bool) -> dict[str, Any]:
+    """A ``simulation_cross_check`` block pre-filled for a cross-check that
+    has not run (yet, or at all): every result field ``None``,
+    ``agreement: "unavailable"``.
+
+    A cross-check backend that could not be run is reported as absent, never
+    fabricated and never silently replaced by the canonical backend's own
+    numbers -- the caller fills the result fields in only when the run
+    actually completed.
+    """
+    block: dict[str, Any] = {
+        "engine": _SIM_ENGINE_LABEL[backend],
+        "engine_version": _sim_backend_version(backend),
+        "four_state": _SIM_BACKEND_FOUR_STATE[backend],
+        "confirmed_by_simulation": None,
+        "agreement": "unavailable",
+        "output_mismatches": [],
+    }
+    if sequential:
+        block["cycles"] = None
+        block["diverging_outputs"] = None
+    else:
+        block["gold_outputs"] = None
+        block["gate_outputs"] = None
+        block["diverging_outputs"] = None
+    return block
+
+
+def _record_cross_check_agreement(
+    *,
+    counterexample: dict[str, Any],
+    cross_check: dict[str, Any],
+    canonical_backend: str,
+    cross_backend: str,
+    canonical_confirmed: bool,
+    cross_confirmed: bool,
+    mismatches: list[dict[str, Any]],
+    diagnostics: list[dict[str, str]],
+) -> None:
+    """Apply this module's backend-agreement policy to a completed
+    cross-check run, mutating ``counterexample`` and ``diagnostics``.
+
+    Agreement requires **both** the same confirmation verdict and no
+    unexplained replayed-output difference. On a disagreement the canonical
+    verdict is *not* silently preferred: ``confirmed_by_simulation`` is
+    reset to ``None`` and an error-severity ``sim_backend_disagreement``
+    diagnostic is appended (the caller downgrades ``status`` to
+    ``"inconclusive"``).
+    """
+    unexplained = [entry for entry in mismatches if entry["explained_by"] is None]
+    verdicts_agree = cross_confirmed == canonical_confirmed
+    agree = verdicts_agree and not unexplained
+
+    cross_check["confirmed_by_simulation"] = cross_confirmed
+    cross_check["agreement"] = "agree" if agree else "disagree"
+    cross_check["output_mismatches"] = mismatches
+    counterexample["simulation_cross_check"] = cross_check
+
+    if not agree:
+        reasons = []
+        if not verdicts_agree:
+            reasons.append(
+                f"{canonical_backend} reported "
+                f"confirmed_by_simulation={canonical_confirmed} but "
+                f"{cross_backend} reported {cross_confirmed}"
+            )
+        if unexplained:
+            differing = ", ".join(
+                f"{entry['side']}.{entry['name']} "
+                f"({canonical_backend}={entry['canonical']!r}, "
+                f"{cross_backend}={entry['cross_check']!r})"
+                for entry in unexplained[:5]
+            )
+            reasons.append(f"replayed outputs differ on {differing}")
+        counterexample["confirmed_by_simulation"] = None
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": "sim_backend_disagreement",
+                "message": "the two counterexample-replay backends "
+                f"disagreed: {'; '.join(reasons)} -- neither verdict is "
+                "adopted (a backend disagreement is never silently "
+                "resolved in favour of one backend), so the replay "
+                "evidence is not trustworthy and the proof is reported "
+                "inconclusive",
+            }
+        )
+    elif mismatches:
+        differing = ", ".join(
+            f"{entry['side']}.{entry['name']}" for entry in mismatches[:5]
+        )
+        diagnostics.append(
+            {
+                "severity": "info",
+                "code": "sim_backend_output_difference",
+                "message": f"{cross_backend}'s replay agreed with "
+                f"{canonical_backend}'s verdict; the replayed bits differ "
+                f"on {differing}, entirely where the 4-state "
+                f"{canonical_backend} run reported x/z and the 2-state "
+                f"{cross_backend} run reported a defined value "
+                "(explained_by: two_state_backend)",
+            }
+        )
+
+
+def _replay_backends_disagreed(counterexample: dict[str, Any]) -> bool:
+    """Whether a ``sim_backend: "both"`` run's two replay backends
+    disagreed -- the caller's signal to downgrade ``status``."""
+    cross_check = counterexample.get("simulation_cross_check")
+    return bool(cross_check) and cross_check.get("agreement") == "disagree"
+
+
+def _replay_evidence_is_untrustworthy(counterexample: dict[str, Any]) -> bool:
+    """Whether the replay evidence for ``counterexample`` forbids reporting
+    ``status: "counterexample"``: either the replay ran and did *not*
+    reproduce the divergence, or the two replay backends disagreed.
+
+    ``confirmed_by_simulation is None`` *because the replay could not be
+    attempted at all* is deliberately not included -- that case has no
+    evidence either way, so the solver's own verdict stands (a disagreement
+    also sets the field to ``None``, and is caught by the second clause)."""
+    return counterexample[
+        "confirmed_by_simulation"
+    ] is False or _replay_backends_disagreed(counterexample)
 
 
 def _confirm_counterexample(
@@ -980,22 +1426,23 @@ def _confirm_counterexample(
     netlist_path: str,
     output_dir: str,
     diagnostics: list[dict[str, str]],
+    sim_backend: str = DEFAULT_SIM_BACKEND,
 ) -> None:
     """Independently confirm ``counterexample`` by actually running it
     through the flattened ``gold``/``gate`` netlists Yosys wrote to
-    ``netlist_path``, via ``iverilog``/``vvp`` -- never trusting the SAT
-    solver's own reported values uncritically (this module's own "the
-    counterexample is executable" discipline).
+    ``netlist_path``, via the selected replay backend (``iverilog``/``vvp``
+    by default) -- never trusting the SAT solver's own reported values
+    uncritically (this module's own "the counterexample is executable"
+    discipline).
 
     Mutates ``counterexample`` in place (``confirmed_by_simulation``,
-    ``simulation``); appends to ``diagnostics`` on any degradation (a
-    missing ``iverilog`` binary, a compile error, or -- most importantly --
-    a re-simulation that does *not* reproduce the divergence the solver
-    reported, which would mean the solver's own counterexample was not
-    trustworthy).
+    ``simulation``, and -- under ``sim_backend: "both"`` --
+    ``simulation_cross_check``); appends to ``diagnostics`` on any
+    degradation (a missing simulator binary, a compile error, a
+    re-simulation that does *not* reproduce the divergence the solver
+    reported, or a disagreement between the two replay backends).
     """
     tb_path = os.path.join(output_dir, "equiv_tb.v")
-    vvp_path = os.path.join(output_dir, "equiv_tb.vvp")
 
     tb_source = _build_testbench(counterexample)
     try:
@@ -1011,79 +1458,32 @@ def _confirm_counterexample(
         )
         return
 
-    try:
-        compiled = subprocess.run(
-            ["iverilog", "-g2012", "-o", vvp_path, netlist_path, tb_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except FileNotFoundError:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": "iverilog not found on $PATH -- counterexample "
-                "reported by the solver only, not independently confirmed "
-                "by simulation",
-            }
-        )
-        return
-    except subprocess.TimeoutExpired:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": "iverilog did not complete within 30s while "
-                "compiling the counterexample-confirmation testbench",
-            }
-        )
-        return
+    canonical_backend, cross_backend = _replay_backends(sim_backend)
 
-    if compiled.returncode != 0:
-        tail = (compiled.stderr or compiled.stdout).strip()[-500:]
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": "iverilog failed to compile the counterexample-"
-                f"confirmation testbench: {tail}",
-            }
-        )
-        return
-
-    try:
-        ran = subprocess.run(
-            ["vvp", vvp_path], capture_output=True, text=True, timeout=30
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": f"could not run confirmation testbench with vvp: {exc}",
-            }
-        )
-        return
-
-    sim_gold: dict[str, str] = {}
-    sim_gate: dict[str, str] = {}
-    for line in (ran.stdout or "").splitlines():
-        match = _SIM_DISPLAY_RE.match(line.strip())
-        if not match:
-            continue
-        side, name, bits = match.groups()
-        (sim_gold if side == "gold" else sim_gate)[name] = bits
-
-    sim_diverging = sorted(
-        name
-        for name in sim_gold
-        if name in sim_gate and sim_gold[name] != sim_gate[name]
+    stdout, failure = _run_replay_backend(
+        backend=canonical_backend,
+        netlist_path=netlist_path,
+        tb_path=tb_path,
+        output_dir=output_dir,
+        stem="equiv_tb",
     )
+    if stdout is None:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "simulation_unavailable",
+                "message": failure or "counterexample replay did not run",
+            }
+        )
+        return
+
+    sim_gold, sim_gate = _parse_replay_outputs(stdout)
+    sim_diverging = _diverging_names(sim_gold, sim_gate)
 
     counterexample["simulation"] = {
-        "engine": "icarus",
-        "engine_version": _icarus_version(),
+        "engine": _SIM_ENGINE_LABEL[canonical_backend],
+        "engine_version": _sim_backend_version(canonical_backend),
+        "four_state": _SIM_BACKEND_FOUR_STATE[canonical_backend],
         "gold_outputs": sim_gold,
         "gate_outputs": sim_gate,
         "diverging_outputs": sim_diverging,
@@ -1096,11 +1496,57 @@ def _confirm_counterexample(
                 "severity": "warning",
                 "code": "counterexample_not_reproduced",
                 "message": "re-running the solver's counterexample through "
-                "the flattened netlists via iverilog/vvp did not reproduce "
+                "the flattened netlists via "
+                f"{_SIM_BACKEND_LABEL[canonical_backend]} did not reproduce "
                 "a diverging output -- treat this counterexample with "
                 "suspicion",
             }
         )
+
+    if cross_backend is None:
+        return
+
+    cross_stdout, cross_failure = _run_replay_backend(
+        backend=cross_backend,
+        netlist_path=netlist_path,
+        tb_path=tb_path,
+        output_dir=output_dir,
+        stem="equiv_tb",
+    )
+    if cross_stdout is None:
+        counterexample["simulation_cross_check"] = _cross_check_block(
+            cross_backend, sequential=False
+        )
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "sim_backend_cross_check_unavailable",
+                "message": f"{cross_failure} -- the canonical "
+                f"{canonical_backend} replay above stands unchanged",
+            }
+        )
+        return
+
+    cross_gold, cross_gate = _parse_replay_outputs(cross_stdout)
+    cross_check = _cross_check_block(cross_backend, sequential=False)
+    cross_check["gold_outputs"] = cross_gold
+    cross_check["gate_outputs"] = cross_gate
+    cross_check["diverging_outputs"] = _diverging_names(cross_gold, cross_gate)
+
+    _record_cross_check_agreement(
+        counterexample=counterexample,
+        cross_check=cross_check,
+        canonical_backend=canonical_backend,
+        cross_backend=cross_backend,
+        canonical_confirmed=confirmed,
+        cross_confirmed=bool(cross_check["diverging_outputs"]),
+        mismatches=_compare_replay_outputs(
+            canonical={"gold": sim_gold, "gate": sim_gate},
+            cross={"gold": cross_gold, "gate": cross_gate},
+            cross_four_state=_SIM_BACKEND_FOUR_STATE[cross_backend],
+        ),
+        diagnostics=diagnostics,
+    )
 
 
 def _build_testbench(counterexample: dict[str, Any]) -> str:
@@ -1150,17 +1596,18 @@ def _build_testbench(counterexample: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _icarus_version() -> str | None:
-    """``iverilog -V``'s reported version string, or ``None`` -- mirrors
-    ``functional_verification.py``'s own engine-version probe."""
+def _sim_backend_version(backend: str) -> str | None:
+    """The replay ``backend``'s own reported version string, or ``None``
+    when it is not installed / does not report one -- the per-backend
+    generalisation of the old ``iverilog -V``-only probe, mirroring
+    ``functional_verification.py``'s ``_ENGINE_VERSION_COMMANDS`` table."""
+    command, pattern = _SIM_BACKEND_VERSION_COMMANDS[backend]
     try:
-        completed = subprocess.run(
-            ["iverilog", "-V"], capture_output=True, text=True, timeout=10
-        )
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         return None
     text = (completed.stdout or "") + (completed.stderr or "")
-    match = _ICARUS_VERSION_RE.search(text)
+    match = pattern.search(text)
     return match.group(1) if match else None
 
 
@@ -1168,6 +1615,7 @@ def _build_report(
     *,
     engine: str,
     engine_version: str | None,
+    sim_backend: str,
     status: str,
     gold: dict[str, Any],
     gate: dict[str, Any],
@@ -1199,6 +1647,7 @@ def _build_report(
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
+        "sim_backend": sim_backend,
         "status": status,
         "gold": gold,
         "gate": gate,
@@ -1616,6 +2065,7 @@ def _build_sequential_counterexample(
         "first_diverging_cycle": first_diverging_cycle,
         "confirmed_by_simulation": None,
         "simulation": None,
+        "simulation_cross_check": None,
     }
 
 
@@ -1709,10 +2159,13 @@ def _confirm_sequential_counterexample(
     netlist_path: str,
     output_dir: str,
     diagnostics: list[dict[str, str]],
+    sim_backend: str = DEFAULT_SIM_BACKEND,
 ) -> None:
     """Multi-cycle counterpart of :func:`_confirm_counterexample`:
     independently re-runs ``counterexample``'s entire captured trace through
-    the flattened ``gold``/``gate`` netlists via ``iverilog``/``vvp``.
+    the flattened ``gold``/``gate`` netlists via the selected replay backend
+    (``iverilog``/``vvp`` by default -- see this module's docstring,
+    "Replay backend").
 
     Mutates ``counterexample`` in place (``confirmed_by_simulation``,
     ``simulation``); appends to ``diagnostics`` on any degradation, exactly
@@ -1743,7 +2196,6 @@ def _confirm_sequential_counterexample(
         return
 
     tb_path = os.path.join(output_dir, "equiv_seq_tb.v")
-    vvp_path = os.path.join(output_dir, "equiv_seq_tb.vvp")
 
     tb_source = _build_sequential_testbench(counterexample, ports)
     try:
@@ -1759,63 +2211,123 @@ def _confirm_sequential_counterexample(
         )
         return
 
-    try:
-        compiled = subprocess.run(
-            ["iverilog", "-g2012", "-o", vvp_path, netlist_path, tb_path],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except FileNotFoundError:
+    canonical_backend, cross_backend = _replay_backends(sim_backend)
+
+    stdout, failure = _run_replay_backend(
+        backend=canonical_backend,
+        netlist_path=netlist_path,
+        tb_path=tb_path,
+        output_dir=output_dir,
+        stem="equiv_seq_tb",
+    )
+    if stdout is None:
         diagnostics.append(
             {
                 "severity": "warning",
                 "code": "simulation_unavailable",
-                "message": "iverilog not found on $PATH -- counterexample "
-                "reported by the solver only, not independently confirmed "
-                "by simulation",
-            }
-        )
-        return
-    except subprocess.TimeoutExpired:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": "iverilog did not complete within 30s while "
-                "compiling the counterexample-confirmation testbench",
+                "message": failure or "counterexample replay did not run",
             }
         )
         return
 
-    if compiled.returncode != 0:
-        tail = (compiled.stderr or compiled.stdout).strip()[-500:]
+    sim_cycle_entries, sim_diverging_union = _parse_sequential_replay_outputs(stdout)
+
+    counterexample["simulation"] = {
+        "engine": _SIM_ENGINE_LABEL[canonical_backend],
+        "engine_version": _sim_backend_version(canonical_backend),
+        "four_state": _SIM_BACKEND_FOUR_STATE[canonical_backend],
+        "cycles": sim_cycle_entries,
+        "diverging_outputs": sorted(sim_diverging_union),
+    }
+
+    reported_diverging = set(counterexample["diverging_outputs"])
+    confirmed = bool(sim_diverging_union & reported_diverging)
+    counterexample["confirmed_by_simulation"] = confirmed
+    if not confirmed:
         diagnostics.append(
             {
                 "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": "iverilog failed to compile the counterexample-"
-                f"confirmation testbench: {tail}",
+                "code": "counterexample_not_reproduced",
+                "message": "re-running the solver's counterexample trace "
+                "through the flattened netlists via "
+                f"{_SIM_BACKEND_LABEL[canonical_backend]} did not "
+                "reproduce a diverging output on any replayed cycle -- "
+                "treat this counterexample with suspicion",
+            }
+        )
+
+    if cross_backend is None:
+        return
+
+    cross_stdout, cross_failure = _run_replay_backend(
+        backend=cross_backend,
+        netlist_path=netlist_path,
+        tb_path=tb_path,
+        output_dir=output_dir,
+        stem="equiv_seq_tb",
+    )
+    if cross_stdout is None:
+        counterexample["simulation_cross_check"] = _cross_check_block(
+            cross_backend, sequential=True
+        )
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": "sim_backend_cross_check_unavailable",
+                "message": f"{cross_failure} -- the canonical "
+                f"{canonical_backend} replay above stands unchanged",
             }
         )
         return
 
-    try:
-        ran = subprocess.run(
-            ["vvp", vvp_path], capture_output=True, text=True, timeout=30
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "simulation_unavailable",
-                "message": f"could not run confirmation testbench with vvp: {exc}",
-            }
-        )
-        return
+    cross_cycle_entries, cross_diverging_union = _parse_sequential_replay_outputs(
+        cross_stdout
+    )
+    cross_check = _cross_check_block(cross_backend, sequential=True)
+    cross_check["cycles"] = cross_cycle_entries
+    cross_check["diverging_outputs"] = sorted(cross_diverging_union)
 
+    canonical_by_time = {entry["time"]: entry for entry in sim_cycle_entries}
+    cross_by_time = {entry["time"]: entry for entry in cross_cycle_entries}
+    mismatches: list[dict[str, Any]] = []
+    for time_value in sorted(set(canonical_by_time) | set(cross_by_time)):
+        canonical_cycle = canonical_by_time.get(time_value, {})
+        cross_cycle = cross_by_time.get(time_value, {})
+        mismatches.extend(
+            _compare_replay_outputs(
+                canonical={
+                    "gold": canonical_cycle.get("gold_outputs", {}),
+                    "gate": canonical_cycle.get("gate_outputs", {}),
+                },
+                cross={
+                    "gold": cross_cycle.get("gold_outputs", {}),
+                    "gate": cross_cycle.get("gate_outputs", {}),
+                },
+                cross_four_state=_SIM_BACKEND_FOUR_STATE[cross_backend],
+                cycle=time_value,
+            )
+        )
+
+    _record_cross_check_agreement(
+        counterexample=counterexample,
+        cross_check=cross_check,
+        canonical_backend=canonical_backend,
+        cross_backend=cross_backend,
+        canonical_confirmed=confirmed,
+        cross_confirmed=bool(cross_diverging_union & reported_diverging),
+        mismatches=mismatches,
+        diagnostics=diagnostics,
+    )
+
+
+def _parse_sequential_replay_outputs(
+    stdout: str,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Split a multi-cycle replay run's ``stdout`` into its per-cycle
+    ``{time, gold_outputs, gate_outputs, diverging_outputs}`` entries plus
+    the union of every cycle's own diverging output names."""
     sim_cycles: dict[int, dict[str, dict[str, str]]] = {}
-    for line in (ran.stdout or "").splitlines():
+    for line in stdout.splitlines():
         match = _SEQ_SIM_DISPLAY_RE.match(line.strip())
         if not match:
             continue
@@ -1828,11 +2340,7 @@ def _confirm_sequential_counterexample(
     for time_value in sorted(sim_cycles):
         gold_outputs = sim_cycles[time_value]["gold"]
         gate_outputs = sim_cycles[time_value]["gate"]
-        diverging = sorted(
-            name
-            for name in gold_outputs
-            if name in gate_outputs and gold_outputs[name] != gate_outputs[name]
-        )
+        diverging = _diverging_names(gold_outputs, gate_outputs)
         sim_diverging_union.update(diverging)
         sim_cycle_entries.append(
             {
@@ -1842,33 +2350,14 @@ def _confirm_sequential_counterexample(
                 "diverging_outputs": diverging,
             }
         )
-
-    counterexample["simulation"] = {
-        "engine": "icarus",
-        "engine_version": _icarus_version(),
-        "cycles": sim_cycle_entries,
-        "diverging_outputs": sorted(sim_diverging_union),
-    }
-
-    confirmed = bool(sim_diverging_union & set(counterexample["diverging_outputs"]))
-    counterexample["confirmed_by_simulation"] = confirmed
-    if not confirmed:
-        diagnostics.append(
-            {
-                "severity": "warning",
-                "code": "counterexample_not_reproduced",
-                "message": "re-running the solver's counterexample trace "
-                "through the flattened netlists via iverilog/vvp did not "
-                "reproduce a diverging output on any replayed cycle -- "
-                "treat this counterexample with suspicion",
-            }
-        )
+    return sim_cycle_entries, sim_diverging_union
 
 
 def _build_sequential_report(
     *,
     engine: str,
     engine_version: str | None,
+    sim_backend: str,
     status: str,
     gold: dict[str, Any],
     gate: dict[str, Any],
@@ -1922,6 +2411,7 @@ def _build_sequential_report(
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
+        "sim_backend": sim_backend,
         "status": status,
         "gold": gold,
         "gate": gate,
@@ -1961,6 +2451,7 @@ def _run_sequential(
     effective_timeout_s: float,
     induction_depth: int,
     engine: str,
+    sim_backend: str = DEFAULT_SIM_BACKEND,
 ) -> dict[str, Any]:
     """The ``"yosys-sequential"`` engine's own top-level driver, called from
     ``run_equiv`` once ``gold``/``gate``/``port_map``/``output_dir`` are
@@ -2062,6 +2553,7 @@ def _run_sequential(
         return _build_sequential_report(
             engine=engine,
             engine_version=engine_version,
+            sim_backend=sim_backend,
             status="inconclusive",
             gold=gold,
             gate=gate,
@@ -2111,6 +2603,7 @@ def _run_sequential(
         return _build_sequential_report(
             engine=engine,
             engine_version=engine_version,
+            sim_backend=sim_backend,
             status="equivalent",
             gold=gold,
             gate=gate,
@@ -2163,6 +2656,7 @@ def _run_sequential(
         return _build_sequential_report(
             engine=engine,
             engine_version=engine_version,
+            sim_backend=sim_backend,
             status="inconclusive",
             gold=gold,
             gate=gate,
@@ -2223,6 +2717,7 @@ def _run_sequential(
         return _build_sequential_report(
             engine=engine,
             engine_version=engine_version,
+            sim_backend=sim_backend,
             status="inconclusive",
             gold=gold,
             gate=gate,
@@ -2248,6 +2743,7 @@ def _run_sequential(
         netlist_path=netlist_path,
         output_dir=output_dir,
         diagnostics=diagnostics2,
+        sim_backend=sim_backend,
     )
 
     # Mirrors the combinational engine's own downgrade (see `run_equiv`
@@ -2260,15 +2756,21 @@ def _run_sequential(
     # is None` (simulation could not be attempted at all) is left alone --
     # that case has no evidence either way, so the solver's own verdict
     # stands, exactly as the combinational path does.
+    #
+    # A `sim_backend: "both"` run whose two replay backends *disagreed*
+    # (issue #2223) is downgraded the same way, for the same reason: the
+    # replay evidence is not trustworthy, and neither backend's verdict is
+    # silently preferred over the other's.
     status3 = (
         "inconclusive"
-        if counterexample["confirmed_by_simulation"] is False
+        if _replay_evidence_is_untrustworthy(counterexample)
         else "counterexample"
     )
 
     return _build_sequential_report(
         engine=engine,
         engine_version=engine_version,
+        sim_backend=sim_backend,
         status=status3,
         gold=gold,
         gate=gate,

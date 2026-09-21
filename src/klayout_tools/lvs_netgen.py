@@ -85,11 +85,12 @@ def _strip_ansi(text: str) -> str:
     ``test_netgen_engine_text_format_emits_no_ansi_to_non_tty_stdout``.
 
     Sanitizing here, at the fold-in boundary, is deliberately *not* an
-    ``isatty()`` gate in ``lvs_cmd.py``: gating output on a TTY would
-    contradict ``signoff_cmd.py``'s documented always-emit convention, and
-    would leave the escapes in the JSON contract's own string fields, where
-    no terminal check applies at all. The text is foreign input; it is
-    cleaned on the way in, once, for every consumer.
+    ``isatty()`` gate in ``lvs_cmd.py``. ``signoff_cmd.py`` does gate its
+    *own* colour on a TTY (issue #2227, via ``cli/color.py``), but that only
+    governs escapes ``klt`` itself emits: a TTY gate here would still leave
+    netgen's escapes in the JSON contract's own string fields, where no
+    terminal check applies at all. The text is foreign input; it is cleaned
+    on the way in, once, for every consumer and every ``--format``.
 
     No known netgen build colourises ``comp.out`` today (netgen 1.5.323 and
     1.5.133 both write plain text), so this is a defence against foreign

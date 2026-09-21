@@ -11,9 +11,9 @@ Exit codes (see ``docs/cli/erc.md`` for the full table):
         skipped, e.g. a full sky130 stack whose met3-5 roles have no
         antenna-ratio limit)
     1 - failed to run (bad file/spec, malformed stackup/via declaration,
-        unknown --pdk, ambiguous top cell, or no net carries any gate-role
-        geometry at all) -- returned by ``emit_error`` as
-        ``output.ERROR_EXIT_CODE``
+        unknown --pdk, --findings-only together with --pdk, ambiguous top
+        cell, or no net carries any gate-role geometry at all) -- returned
+        by ``emit_error`` as ``output.ERROR_EXIT_CODE``
     3 - an actual finding/limit failure
     4 - no relevant checks (not_checked)
 (2 is reserved for argparse usage errors, as with every other ``klt``
@@ -21,8 +21,10 @@ subcommand.)
 
 The exit code answers the *antenna* question, because ``status`` does (see
 ``_EXIT_CODE_BY_STATUS`` below). On a PDK with no antenna-ratio table --
-every PDK but sky130 today, and any run that omits ``--pdk`` -- that answer
-is permanently ``4``, however clean the design is. A caller that wants only
+every PDK but sky130 today, any run that omits ``--pdk``, and every
+``--findings-only`` run (issue #2219, which skips the antenna accumulation
+outright) -- that answer is permanently ``4``, however clean the design is.
+A caller that wants only
 the connectivity/structural read reads the payload's own ``erc_status``
 (issue #2179) instead of the exit code; it is ``"clean"``/``"violations"``
 regardless of whether an antenna table exists.
@@ -49,7 +51,14 @@ _EXIT_CODE_BY_STATUS = {
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_erc(args.file, args.spec, top=args.top, pdk=args.pdk)
+        report = run_erc(
+            args.file,
+            args.spec,
+            top=args.top,
+            pdk=args.pdk,
+            deck=args.deck,
+            findings_only=args.findings_only,
+        )
     except ErcError as exc:
         return emit_error("erc", str(exc), args.format)
 
@@ -61,6 +70,14 @@ def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
     print(f"pdk: {report['pdk']}")
+    # `--deck` (issue #2204): omitted entirely when no deck was selected, so
+    # a caller who never opts into deck-driven device-marker auto-detection
+    # sees byte-identical text output to before this issue -- matching
+    # `provenance.devices`' own conditional-field convention in JSON mode.
+    deck_provenance = (report.get("provenance") or {}).get("deck")
+    if deck_provenance is not None:
+        print(f"deck: {deck_provenance['name']}")
+    print(f"findings_only: {report['findings_only']}")
     print(f"status: {report['status']}")
     print(f"gate_role: {report['gate_role']}")
     print(f"gates: {report['gate_count']}")
@@ -73,6 +90,15 @@ def _print_text(report: dict) -> None:
             f"antenna_verdict={gate['antenna_verdict']}"
         )
         for level in gate["levels"]:
+            if level["step_area_um2"] is None:
+                # `--findings-only` (issue #2219): the accumulation was
+                # never performed, so say that rather than rendering the
+                # nulls as if they were measurements.
+                print(
+                    f"  {level['layer']}: accumulation skipped "
+                    "(--findings-only)  verdict=unchecked"
+                )
+                continue
             print(
                 f"  {level['layer']}: step={level['step_area_um2']} um^2  "
                 f"cumulative={level['cumulative_area_um2']} um^2  "
@@ -88,7 +114,32 @@ def _print_text(report: dict) -> None:
 
     print()
     print(f"erc_status: {report['erc_status']}")
+    # The spec's own "no expressible tap, here is why" statement (issue
+    # #2234), when it declared one. The JSON payload carries it as
+    # `ties_disclosure`; surfacing it here keeps the courtesy view from
+    # rendering a disclosed-unexpressible stream identically to one that
+    # never declared `ties` at all -- the exact conflation the disclosure
+    # form exists to end. `.get` because this renderer is also pointed at
+    # stored payloads produced before the field existed.
+    disclosure = report.get("ties_disclosure")
+    if disclosure is not None:
+        print(f"ties_disclosure: {disclosure['reason']}")
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"
         print(f"  [{finding['rule']}] {subject}: {finding['description']}")
+        # Per-island locations for a multi-island `erc.unconnected_net`
+        # (issue #2194) -- the count alone says nothing about where to
+        # look. Raw-database-unit boxes, same `(left,bottom)-(right,top)`
+        # rendering `klt drc`'s own text violations use.
+        for i, island in enumerate(finding["islands"] or []):
+            bbox = island["bbox"]
+            where = (
+                f"({bbox['left']},{bbox['bottom']})-({bbox['right']},{bbox['top']})"
+                if bbox is not None
+                else "?"
+            )
+            print(
+                f"    island {i + 1}: {where}  layer={island['layer']}  "
+                f"shapes={island['shape_count']}"
+            )

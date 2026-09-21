@@ -9,6 +9,7 @@ import argparse
 import sys
 
 from .. import arith_gen, pdk_stackup
+from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
@@ -57,6 +58,7 @@ from . import (
     yield_cmd,
     yield_sensitivity_cmd,
 )
+from .color import add_color_args
 
 
 def _add_format_arg(
@@ -2130,6 +2132,24 @@ def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
             "`equivalent` -- see docs/cli/equiv.md."
         ),
     )
+    equiv_parser.add_argument(
+        "--sim-backend",
+        dest="sim_backend",
+        choices=SUPPORTED_SIM_BACKENDS,
+        default=None,
+        help=(
+            "simulator used to replay a counterexample vector/trace "
+            "(default: iverilog, or the request's own `sim_backend` field); "
+            "overrides the request field when given. `verilator` compiles "
+            "the replay via `verilator --binary` instead of interpreting it "
+            "-- much faster on long vectors, but `iverilog` stays the "
+            "canonical backend for evidence. `both` runs both and requires "
+            "them to agree: a disagreement is reported as an error-severity "
+            "`sim_backend_disagreement` diagnostic and `inconclusive`, never "
+            "silently resolved in favour of one backend. See "
+            "docs/cli/equiv.md."
+        ),
+    )
     _add_format_arg(equiv_parser)
     equiv_parser.set_defaults(func=equiv_cmd.run)
 
@@ -2426,7 +2446,44 @@ def _add_signoff_parser(subparsers: argparse._SubParsersAction) -> None:
             "'Where the tier doc comes from' section."
         ),
     )
+    signoff_parser.add_argument(
+        "--check",
+        metavar="REPORT",
+        help=(
+            "path to a previously committed --manifest/--fleet report JSON "
+            "file -- re-grades the manifest and reports whether that report "
+            "still reproduces (status: 'match'/'drifted') instead of "
+            "rendering a fresh one. Exits 0 if it still holds, 3 if drifted, "
+            "1 if the committed report is missing/unparseable or was "
+            "produced by the other mode. The `build` block is excluded from "
+            "the comparison: it names how this install was provisioned, not "
+            "only which commit it came from, so two byte-legitimate installs "
+            "of the same pinned commit report different ones (issue #2249). "
+            "Use this rather than byte-comparing the committed file against "
+            "a fresh render. Only meaningful with --manifest/--fleet; see "
+            "docs/cli/signoff.md's '--check' section."
+        ),
+    )
+    signoff_parser.add_argument(
+        "--describe-grader",
+        action="store_true",
+        help=(
+            "print which T1 checklist item ids this build has grading "
+            "rules for, plus the content hash identifying the grading code "
+            "itself, without reading source or running any check -- "
+            "mutually exclusive with <file>/--manifest/--fleet/--tiers-doc "
+            "(this always reports the build's own shipped grading rules, "
+            "never an overridden doc's item list). See docs/cli/signoff.md's "
+            "'Identifying the grading build' section."
+        ),
+    )
     _add_format_arg(signoff_parser)
+    # Issue #2227: `signoff` is the one verb that colours its `--format text`
+    # rendering, and the rendering it colours is also a *committed* artifact.
+    # `--color`/`--no-color` (plus $NO_COLOR and the isatty default) live in
+    # `.color` so a second colouring verb registers the same policy with one
+    # call rather than re-deriving it.
+    add_color_args(signoff_parser)
     signoff_parser.set_defaults(func=signoff_cmd.run)
 
 
@@ -2831,6 +2888,13 @@ def _add_synthesize_parser(subparsers: argparse._SubParsersAction) -> None:
             "`--restructure-timing` is given."
         ),
     )
+    _add_flow_verify_args(
+        synthesize_parser,
+        verb="synthesize",
+        inputs="RTL sources and standard-cell liberty",
+        engine="Yosys",
+        docs="docs/cli/synthesize.md",
+    )
     _add_format_arg(synthesize_parser)
     synthesize_parser.set_defaults(func=synthesize_cmd.run)
 
@@ -2930,8 +2994,62 @@ def _add_place_and_route_parser(subparsers: argparse._SubParsersAction) -> None:
         "request", help="path to a klt place-and-route request JSON file"
     )
     _add_pdk_args(place_and_route_parser)
+    _add_flow_verify_args(
+        place_and_route_parser,
+        verb="place-and-route",
+        inputs="gate-level netlist and standard-cell liberty",
+        engine="OpenROAD",
+        docs="docs/cli/place-and-route.md",
+    )
     _add_format_arg(place_and_route_parser)
     place_and_route_parser.set_defaults(func=place_and_route_cmd.run)
+
+
+def _add_flow_verify_args(
+    parser: argparse.ArgumentParser,
+    *,
+    verb: str,
+    inputs: str,
+    engine: str,
+    docs: str,
+) -> None:
+    """Register the shared ``--check``/``--rerun`` committed-evidence
+    verification flags on a *flow* verb (issue #2224).
+
+    Deliberately **not** the mutually-exclusive-with-the-input group ``klt
+    drc``/``klt lvs``/``klt extract`` use: those reports echo their own
+    inputs, so ``--check REPORT`` is self-sufficient there. A flow verb's
+    report echoes outputs and provenance hashes only, so the positional
+    ``request`` stays required and supplies the inputs to re-hash/re-run
+    against. See ``_report_verify.py``'s module docstring.
+    """
+    parser.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            f"verify a previously committed 'klt {verb} --format json' "
+            "report (REPORT) instead of running a fresh flow, against the "
+            "request given positionally (issue #2224). Cheap mode "
+            f"(default): re-resolve and re-hash the request's {inputs} and "
+            "compare against REPORT's recorded provenance.input.content_hash"
+            f"/provenance.deck.content_hash -- no {engine} run. Combine with "
+            "--rerun for full mode. Exits 0 if still consistent, 3 if "
+            f"drifted -- see {docs}, '--check'"
+        ),
+    )
+    parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            f"full mode for --check (issue #2224): re-run the {verb} flow "
+            "the positional request declares and diff verdict-bearing "
+            "fields against the committed report, excluding "
+            "provenance.klt_version/klayout_version/pdk.version, "
+            "engine_version, and run-scoped bookkeeping (see "
+            f"{docs}). Requires --check; a clean error (exit 1) otherwise"
+        ),
+    )
 
 
 def _add_wave_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -3408,16 +3526,18 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
 
 
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
-    """Register the ``env-provenance`` verb with nested ``emit``/``scan``
-    subcommands (issue #1254), mirroring ``deck``/``pdk``'s grouped-verb
-    pattern -- the two are one subject (what an evidence record may say about
-    the machine that produced it) approached from opposite ends: write it
-    safely, or check that what was written is safe.
+    """Register the ``env-provenance`` verb with nested ``emit``/``scan``/
+    ``lint-envelope`` subcommands (issues #1254, #2224), mirroring
+    ``deck``/``pdk``'s grouped-verb pattern -- all three are one subject (what
+    a committed record may say about the machine that produced it) approached
+    from different ends: write it safely, check that what was written names
+    nobody, or check that what was written still resolves elsewhere.
     """
     env_parser = subparsers.add_parser(
         "env-provenance",
         help="emit committable environment provenance for an evidence "
-        "record, or scan records for leaked home paths",
+        "record, scan records for leaked home paths, or lint committed "
+        "JSON envelopes for absolute host paths",
         description=(
             "Environment provenance an evidence record can carry in public "
             "forever: repo-relative paths only, a stable pseudonymous "
@@ -3485,6 +3605,49 @@ def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
     )
     _add_format_arg(scan_parser)
     scan_parser.set_defaults(func=env_provenance_cmd.run_scan)
+
+    lint_parser = env_sub.add_parser(
+        "lint-envelope",
+        help="lint committed JSON envelopes for absolute host paths",
+        description=(
+            "Lint committed `klt --format json` envelopes (or any JSON "
+            "artifact) for absolute host paths, reporting the offending "
+            "field by dotted path (issue #2224). Distinct from `scan`: that "
+            "asks 'does this record name a person' and matches home-shaped "
+            "paths in arbitrary text; this asks 'does every reference still "
+            "resolve on another checkout' and matches ANY absolute path -- "
+            "/opt/build/out.def and /tmp/run-3/top.gds name nobody and still "
+            "make a regenerated artifact byte-differ, which is how a "
+            "committed corpus artifact broke cross-checkout comparison "
+            "downstream. Declare genuinely machine-wide PDK/tool install "
+            "locations with --allow-prefix; nothing is allowed by default "
+            "(a lint whose verdict depends on the linting machine's "
+            "environment cannot be trusted in CI). Exits 3 when findings "
+            "exist, 0 when clean, 1 if a file cannot be read or is not "
+            "valid JSON."
+        ),
+    )
+    lint_parser.add_argument(
+        "files",
+        nargs="+",
+        metavar="FILE",
+        help="JSON envelope files to lint",
+    )
+    lint_parser.add_argument(
+        "--allow-prefix",
+        dest="allow_prefixes",
+        action="append",
+        metavar="PREFIX",
+        default=None,
+        help=(
+            "an absolute install prefix that may legitimately appear (e.g. "
+            "--allow-prefix /usr/share/pdk). Matched on a path-component "
+            "boundary, so /opt/pdk admits /opt/pdk/sky130A/... but not "
+            "/opt/pdk-scratch/... Repeatable."
+        ),
+    )
+    _add_format_arg(lint_parser)
+    lint_parser.set_defaults(func=env_provenance_cmd.run_lint_envelope)
 
 
 def _add_version_parser(subparsers: argparse._SubParsersAction) -> None:
@@ -4269,6 +4432,46 @@ def _add_erc_parser(subparsers: argparse._SubParsersAction) -> None:
             "an unknown name exits 1 with a clean error, per "
             "docs/cli/erc.md's exit-code contract, rather than argparse's "
             "usage-error exit 2."
+        ),
+    )
+    erc_parser.add_argument(
+        "--deck",
+        default=None,
+        help=(
+            "curated extraction deck (currently: "
+            f"{_deck_names_str()}) whose own device-body marker "
+            "declarations (poly resistors, MiM/MOM caps) are auto-"
+            "detected and carved out of the matching 'stackup'/'vias' "
+            "role wherever a marker's conducting-body layer equals that "
+            "role's own layer exactly -- the deck-driven alternative to "
+            "hand-transcribing a 'devices[]' entry (issue #2183). "
+            "Independent of --pdk (which selects only the antenna-ratio "
+            "limit table) -- needs no PDK install, the same curated "
+            "registry 'klt extract --deck'/'klt lvs --deck' resolve. An "
+            "explicit 'devices[]' entry for a role still wins over this "
+            "deck's own detection for that role. Optional -- omitted, no "
+            "auto-detection is attempted and every output is byte-"
+            "identical to a run before this flag existed. Not validated "
+            "by argparse -- an unknown name exits 1 with a clean error, "
+            "per docs/cli/erc.md's exit-code contract, rather than "
+            "argparse's usage-error exit 2."
+        ),
+    )
+    erc_parser.add_argument(
+        "--findings-only",
+        action="store_true",
+        help=(
+            "report the erc_findings half only, skipping the per-gate "
+            "per-level antenna accumulation that dominates runtime on a "
+            "dense layout (issue #2219). Every ERC finding is identical "
+            "to a full run -- including erc.floating_gate, whose predicate "
+            "is evaluated directly off the connectivity graph -- while "
+            "gates[].levels[]'s accumulated areas/ratios come back null, "
+            "every antenna verdict 'unchecked', and status 'not_checked' "
+            "(exit 4), with every level in coverage.skipped for reason "
+            "'findings_only'. Gate on erc_status, as any --pdk-less run "
+            "already must. Mutually exclusive with --pdk (a limit table "
+            "with nothing to grade) -- passing both exits 1."
         ),
     )
     _add_format_arg(erc_parser)

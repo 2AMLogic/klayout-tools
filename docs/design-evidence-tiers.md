@@ -365,7 +365,20 @@ written to every block.
       reason `degenerate_tap_declaration`, issue #2199) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
-      already rejects a spec declaring no `ties[]` at all. Those are the
+      already rejects a spec declaring no `ties[]` at all. **A stream with
+      no distinguishing implant/marker layer at all** — common for
+      generated/full-custom analog whose implants are derived downstream,
+      see `docs/cli/erc.md`'s #2199 section — can still declare a checked
+      tie via `ties[].tap_boxes` (issue #2234): a caller-asserted list of
+      tap-geometry boxes, graded under its own
+      `erc_coverage.checked_by_assertion` classification and held to the
+      same degenerate/falsifiability test as every other narrowing form.
+      When a stream genuinely cannot express a tap at all, a top-level
+      `ties_disclosure` declares that explicitly; the item still renders
+      `supply_spec_disclosed_unexpressible` rather than a met item — a
+      disclosure proves nothing about the tap's actual connectivity — but
+      that reason is distinguishable from a spec that omitted `ties[]`
+      without ever considering the question. Those are the
       rules this item grades, not the
       report's overall `status`: an antenna verdict or a floating-gate
       finding is a real defect, but it is not this item's subject and does
@@ -398,7 +411,21 @@ written to every block.
       grader seeing an `erc.supply_short` on a supply-sensing analog block
       should check the cited report's `provenance.devices` (empty, or
       missing the bodies on the conducting path) before reading the finding
-      as a real short.
+      as a real short. **`--deck` (issue #2204) removes the need for
+      hand-declaration for a device a curated extraction deck already knows
+      about**: running the same supply-spec check with `--deck <name>`
+      (e.g. `gf180mcu`/`sky130`) auto-carves out every deck-recognised
+      `ResistorDevice`/`CapacitorDevice` body whose conducting-body layer
+      matches a declared `stackup`/`vias` role, echoed in
+      `provenance.devices` exactly as a hand-declared entry is (plus
+      `source: "deck"`) — see `docs/cli/erc.md`'s "Deck-driven
+      device-marker auto-detection". A run without `--deck`, or whose
+      device is not yet covered by any curated deck's `resistors`/
+      `capacitors` tables, still needs the explicit `devices[]` declaration
+      above; a grader should check `provenance.deck` alongside
+      `provenance.devices` before treating a clean `erc.supply_short` read
+      as covered by auto-detection rather than a hand-declaration that
+      happens to be present.
 
 ## Power/IR-drop + EM evidence (not yet a T1 item)
 
@@ -650,7 +677,17 @@ than the disclosure. The rule binds the writer, from now on.
 
 - **Staleness is failure.** Every report is checked against current source
   revisions/hashes before it counts. Provenance blocks in klt JSON output
-  (#335) exist for this.
+  (#335) exist for this. `klt signoff --manifest` applies the rule in two
+  steps, and discloses how far it got: the manifest's pinned `content_hash`
+  is *gated* against the cited envelope's self-reported
+  `provenance.input.content_hash` (a mismatch renders the item `unmet`),
+  and that self-report is then checked against the **artifact itself** by
+  re-hashing the input the envelope names — reported per citation as
+  `input_verified: true | false | null` (issue #2196), never graded on. A
+  `null` there means the freshness claim was only ever compared to another
+  claim: two statements about a revision, neither of which is the revision.
+  Committing evidence beside the artifact it names (so the path resolves
+  from the repo) is what turns that `null` into a real check.
 - **Coverage honesty.** A verdict's blind spots (deck holes, warning-level
   mismatches, uncombined evidence legs) are part of the claim and travel
   with it.

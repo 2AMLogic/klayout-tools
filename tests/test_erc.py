@@ -1336,6 +1336,148 @@ def test_unconnected_net_flags_split_island(tmp_path):
     assert findings[0]["net"] == "VDD"
     assert "2 disconnected electrical islands" in findings[0]["description"]
 
+    # Issue #2194: the finding says *where* each island is, not just how
+    # many there are. Both li1 bars, in ascending-x order (the islands are
+    # emitted in `cluster_id` order, which follows the insertion order of
+    # the geometry above).
+    islands = findings[0]["islands"]
+    assert [island["bbox"] for island in islands] == [
+        {"left": _um(5), "bottom": _um(0), "right": _um(6), "top": _um(1)},
+        {"left": _um(8), "bottom": _um(0), "right": _um(9), "top": _um(1)},
+    ]
+    assert [island["layer"] for island in islands] == ["li1", "li1"]
+    assert [island["shape_count"] for island in islands] == [1, 1]
+    # The per-net `bbox` spans every island, so a caller who only reads the
+    # top-level box still lands on the right part of the layout.
+    assert findings[0]["bbox"] == {
+        "left": _um(5),
+        "bottom": _um(0),
+        "right": _um(9),
+        "top": _um(1),
+    }
+
+
+def test_unconnected_net_islands_locate_each_of_three_islands(tmp_path):
+    """Issue #2194: one `islands[]` entry per island for N > 2 as well --
+    the motivating real case was a supply net resolving to three islands,
+    where "which island did my fix resolve?" is unanswerable from a count.
+    Each island here sits on a different role (li1-only, poly+li1, li1-only)
+    so `layer`/`shape_count` are exercised too, not just `bbox`."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    licon = layout.layer(2, 0)
+    # Island 1: a lone li1 bar.
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    # Island 2: an li1 bar strapped down to a poly bar through a licon
+    # via -- two roles on one island, and a bbox wider than either shape.
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(poly).insert(kdb.Box.new(_um(8.5), _um(0), _um(11), _um(1)))
+    top.shapes(licon).insert(kdb.Box.new(_um(8.6), _um(0.2), _um(8.8), _um(0.4)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.2), _um(0.5))))
+    # Island 3: another lone li1 bar, far away.
+    top.shapes(li1).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(20.5), _um(0.5))))
+
+    gds = tmp_path / "three_islands.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "three_islands.erc.json"
+    spec_dict = _nets_spec(nets=[{"name": "VDD", "kind": "supply"}])
+    spec_dict["vias"] = [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}]
+    _write_spec(spec, spec_dict)
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+
+    assert len(findings) == 1
+    assert "3 disconnected electrical islands" in findings[0]["description"]
+
+    islands = findings[0]["islands"]
+    assert len(islands) == 3
+    # Every island is locatable, and no two of them point at the same place
+    # (a count-shaped finding repeated N times would not be actionable).
+    assert all(island["bbox"] is not None for island in islands)
+    boxes = [tuple(sorted(island["bbox"].items())) for island in islands]
+    assert len(set(boxes)) == 3
+
+    by_left = sorted(islands, key=lambda island: island["bbox"]["left"])
+    assert by_left[0]["bbox"] == {
+        "left": _um(5),
+        "bottom": _um(0),
+        "right": _um(6),
+        "top": _um(1),
+    }
+    # The poly+li1 island's bbox covers both roles; `layer` names the role
+    # carrying the most of its area (poly: 2 um^2 vs. li1: 1 um^2).
+    assert by_left[1]["bbox"] == {
+        "left": _um(8),
+        "bottom": _um(0),
+        "right": _um(11),
+        "top": _um(1),
+    }
+    assert by_left[1]["layer"] == "poly"
+    assert by_left[1]["shape_count"] == 2
+    assert by_left[2]["bbox"] == {
+        "left": _um(20),
+        "bottom": _um(0),
+        "right": _um(21),
+        "top": _um(1),
+    }
+
+
+def test_unconnected_net_finding_keys_are_uniform_across_rules(tmp_path):
+    """Issue #2194 adds `islands` to the finding shape; it must be present
+    (as `null`) on every other rule too, so the `erc_findings[]` key set
+    stays identical for every rule id -- `islands` is populated only by the
+    multi-island `erc.unconnected_net` call site."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    # A split "VDD" (two islands -> populated `islands`) plus a shorted
+    # A/B pair and an unmatched name (both -> `islands is None`).
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(12), _um(0), _um(14), _um(1)))
+    top.shapes(label).insert(kdb.Text("A", kdb.Trans(_um(12.5), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("B", kdb.Trans(_um(13.5), _um(0.5))))
+
+    gds = tmp_path / "mixed.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "mixed.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "A"},
+                {"name": "B"},
+                {"name": "MISSING"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    findings = report["erc_findings"]
+    assert findings
+    for finding in findings:
+        assert set(finding) == {
+            "rule",
+            "description",
+            "net",
+            "other_net",
+            "gate_id",
+            "layer",
+            "bbox",
+            "islands",
+        }
+
+    populated = [f for f in findings if f["islands"] is not None]
+    assert [f["net"] for f in populated] == ["VDD"]
+    # The zero-match `erc.unconnected_net` case has no geometry to point at
+    # and is unchanged in shape.
+    unmatched = next(f for f in findings if f["net"] == "MISSING")
+    assert unmatched["islands"] is None
+    assert unmatched["bbox"] is None
+
 
 def test_unconnected_net_flags_unmatched_name(tmp_path):
     layout, top, poly, li1, label = _nets_fixture_layout()
@@ -1943,6 +2085,285 @@ def test_a_tie_whose_tap_matches_no_geometry_is_not_called_degenerate(tmp_path):
     assert report["erc_status"] == "violations"
 
 
+# --- ties: caller-asserted taps (issue #2234) ---------------------------
+#
+# The gap the tests above cannot close: `tap_requires` needs a PDK implant
+# layer to actually be *drawn* (an implant-free full-custom stream draws
+# none at all), and `tap_is_dedicated` needs a tap-only marker layer to
+# exist (many PDKs, including gf180mcu, have none). `tap_boxes` is the
+# third way -- naming the tap geometry directly -- and it is held to the
+# same falsifiability bar #2199 already established for the other two.
+
+
+def _routed_tie_entries_with_tap_boxes(vdd_box, vss_box):
+    """Two tie declarations against `_routed_tie_layout`'s fixture, each
+    asserting its tap directly via `tap_boxes` -- no `tap_requires`
+    narrowing, no `tap_is_dedicated` affirmation, matching the reproduction
+    this issue names: a stream with no distinguishing marker layer at
+    all."""
+    return [
+        {
+            "name": "nwell_tie",
+            "well_layer": "10/0",
+            "tap_layer": "11/0",
+            "tap_boxes": [list(vdd_box)],
+            "connect_to": "li1",
+            "net": "VDD",
+        },
+        {
+            "name": "pwell_tie",
+            "well_layer": "13/0",
+            "tap_layer": "11/0",
+            "tap_boxes": [list(vss_box)],
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    ]
+
+
+# `_routed_tie_layout`'s real tap contacts (see that fixture's docstring):
+# VDD's is `Box(2, 10.2, 2.6, 10.8)`, VSS's is `Box(2, 1.2, 2.6, 1.8)`.
+# These windows contain each real tap and nothing else on the same layer --
+# in particular, neither of the ordinary source/drain contacts at
+# x in {7.1..7.5, 13.1..13.5} falls inside either box.
+_VDD_TAP_BOX = (1.5, 10.0, 3.0, 11.0)
+_VSS_TAP_BOX = (1.5, 1.0, 3.0, 2.0)
+
+
+def test_tap_boxes_resolves_real_taps_without_any_narrowing_marker(tmp_path):
+    """Issue #2234's own fifth reproduction case: no `tap_requires`
+    narrowing at all (the implant-free full-custom case the issue is about)
+    and no `tap_is_dedicated` affirmation (no tap-only marker layer either)
+    -- `tap_boxes` names the two contacted tap rings directly and resolves
+    both cleanly, with zero `erc.missing_tie` findings."""
+    ties = _routed_tie_entries_with_tap_boxes(_VDD_TAP_BOX, _VSS_TAP_BOX)
+    report = _run_routed_tie(tmp_path, "tap_boxes_clean", ties)
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert report["erc_coverage"]["skipped"] == []
+    assert set(report["erc_coverage"]["checked_by_assertion"]) == {
+        'erc.missing_tie:["nwell_tie"]',
+        'erc.missing_tie:["pwell_tie"]',
+    }
+    # `checked_by_assertion` names a subset of `checked`, never a parallel,
+    # disjoint list -- an asserted tie is still real, evaluated work.
+    assert set(report["erc_coverage"]["checked_by_assertion"]) <= set(
+        report["erc_coverage"]["checked"]
+    )
+    assert report["erc_status"] == "clean"
+    assert report["gate_count"] == 2
+
+
+def test_tap_boxes_checked_by_assertion_is_per_tie_not_blanket(tmp_path):
+    """`checked_by_assertion` names only the ties that actually used
+    `tap_boxes` -- a sibling tie graded through ordinary `tap_requires`
+    narrowing in the same run must not be swept in."""
+    ties = [
+        {
+            "name": "nwell_tie",
+            "well_layer": "10/0",
+            "tap_layer": "11/0",
+            "tap_boxes": [list(_VDD_TAP_BOX)],
+            "connect_to": "li1",
+            "net": "VDD",
+        },
+        {
+            "name": "pwell_tie",
+            "well_layer": "13/0",
+            "tap_layer": "11/0",
+            "tap_requires": ["12/0"],
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    ]
+    report = _run_routed_tie(tmp_path, "tap_boxes_mixed", ties)
+
+    assert report["erc_coverage"]["checked_by_assertion"] == [
+        'erc.missing_tie:["nwell_tie"]'
+    ]
+    assert {
+        'erc.missing_tie:["nwell_tie"]',
+        'erc.missing_tie:["pwell_tie"]',
+    } <= set(report["erc_coverage"]["checked"])
+
+
+def test_tap_boxes_that_narrow_nothing_are_still_degenerate(tmp_path):
+    """The falsifiability test is geometric (issue #2199), not "which
+    narrowing key was given": a `tap_boxes` assertion spanning the whole
+    well removes nothing from the drawn tap layer inside it, and is exactly
+    as unfalsifiable as omitting `tap_requires` altogether."""
+    ties = _routed_tie_entries_with_tap_boxes((0, 8, 20, 12), (0, 0, 20, 4))
+    report = _run_routed_tie(tmp_path, "tap_boxes_degenerate", ties)
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["nwell_tie"]': "degenerate_tap_declaration",
+        'erc.missing_tie:["pwell_tie"]': "degenerate_tap_declaration",
+    }
+    assert report["erc_coverage"]["checked_by_assertion"] == []
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_tap_boxes_matching_no_geometry_is_an_honest_finding_not_a_silent_pass(
+    tmp_path,
+):
+    """An assertion that names geometry the layout never drew is not a
+    silent pass either: the well is honestly reported as untied, and the
+    tie stays checked (asserted) work rather than being excused as
+    degenerate."""
+    empty_box = (15.0, 8.0, 16.0, 9.0)  # inside the n-well, no contact there
+    ties = _routed_tie_entries_with_tap_boxes(empty_box, _VSS_TAP_BOX)
+    report = _run_routed_tie(tmp_path, "tap_boxes_empty", ties)
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert [f["net"] for f in missing] == ["VDD"]
+    assert "no 'nwell_tie' tap contact drawn" in missing[0]["description"]
+    assert report["erc_coverage"]["skipped"] == []
+    assert (
+        'erc.missing_tie:["nwell_tie"]'
+        in report["erc_coverage"]["checked_by_assertion"]
+    )
+    assert report["erc_status"] == "violations"
+
+
+def test_tap_boxes_rejects_a_malformed_entry(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_boxes": [[1.0, 2.0, 3.0]],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match=r"tap_boxes\[0\]"):
+        run_erc(str(gds), str(spec))
+
+
+def test_tap_boxes_rejects_an_inverted_box(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_boxes": [[3.0, 2.0, 1.0, 4.0]],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match="left < right and bottom < top"):
+        run_erc(str(gds), str(spec))
+
+
+# --- ties: disclosed-unexpressible taps (issue #2234) --------------------
+
+
+def _run_routed_tie_with_spec_overrides(tmp_path, stem, spec_overrides):
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, {**_routed_tie_spec(ties=None), **spec_overrides})
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def test_ties_disclosure_distinguishes_disclosed_from_plain_omission(tmp_path):
+    """Two runs that both declare zero `ties[]` must not render
+    identically once one of them discloses why it cannot express a tap --
+    the whole point of the disclosure form."""
+    omitted = _run_routed_tie(tmp_path, "omitted")
+    disclosed = _run_routed_tie_with_spec_overrides(
+        tmp_path,
+        "disclosed",
+        {"ties_disclosure": {"reason": "no implant layers are drawn on this stream"}},
+    )
+
+    omitted_reasons = {
+        r["id"]: r["reason"] for r in omitted["erc_coverage"]["inapplicable"]
+    }
+    disclosed_reasons = {
+        r["id"]: r["reason"] for r in disclosed["erc_coverage"]["inapplicable"]
+    }
+    assert omitted_reasons["erc.missing_tie:[]"] == "no_ties_declared"
+    assert disclosed_reasons["erc.missing_tie:[]"] == "ties_disclosed_unexpressible"
+
+    # Purely a coverage-reason distinction -- findings and status are
+    # unaffected either way.
+    assert omitted["erc_findings"] == disclosed["erc_findings"] == []
+    assert omitted["erc_status"] == disclosed["erc_status"] == "clean"
+
+    assert omitted["ties_disclosure"] is None
+    assert disclosed["ties_disclosure"] == {
+        "reason": "no implant layers are drawn on this stream"
+    }
+
+
+def test_ties_disclosure_omitted_is_none(tmp_path):
+    report = _run_routed_tie(tmp_path, "no_disclosure")
+    assert report["ties_disclosure"] is None
+
+
+def test_ties_disclosure_rejects_missing_reason(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": {},
+        },
+    )
+    with pytest.raises(
+        ErcError, match="ties_disclosure.reason must be a non-empty string"
+    ):
+        run_erc(str(gds), str(spec))
+
+
+def test_ties_disclosure_rejects_non_object(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": "no taps on this stream",
+        },
+    )
+    with pytest.raises(ErcError, match="'ties_disclosure' must be a JSON object"):
+        run_erc(str(gds), str(spec))
+
+
 def test_ties_rejects_a_non_boolean_tap_is_dedicated(tmp_path):
     gds = tmp_path / "basic.gds"
     _basic_fixture(gds)
@@ -2177,6 +2598,7 @@ def test_cli_json_contract(tmp_path, capsys):
         "file",
         "spec",
         "pdk",
+        "findings_only",
         "gate_role",
         "gate_count",
         "gates",
@@ -2185,10 +2607,12 @@ def test_cli_json_contract(tmp_path, capsys):
         "erc_status",
         "status",
         "provenance",
+        "ties_disclosure",
     }
     assert data["schema_version"] == 1
     assert data["pdk"] is None
     assert data["gate_count"] == 2
+    assert data["ties_disclosure"] is None
 
 
 def test_cli_text_output(tmp_path, capsys):
@@ -2202,6 +2626,57 @@ def test_cli_text_output(tmp_path, capsys):
     assert "gates: 2" in out
     assert "GATE_A" in out
     assert "met2: step=" in out
+
+
+def test_cli_text_output_prints_the_ties_disclosure(tmp_path, capsys):
+    """Issue #2234: the courtesy view must not render a stream that
+    disclosed why it cannot express a tap identically to one that never
+    declared `ties` at all -- which is the whole point of the disclosure
+    form, and would be lost if it lived only in the JSON payload."""
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "basic.erc.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties_disclosure": {"reason": "no implant layers are drawn"},
+        },
+    )
+
+    assert main(["erc", str(gds), str(spec)]) == 3
+    out = capsys.readouterr().out
+    assert "ties_disclosure: no implant layers are drawn" in out
+
+    # ... and a spec that declared none prints no such line at all.
+    plain = tmp_path / "plain.erc.json"
+    _basic_spec(plain)
+    assert main(["erc", str(gds), str(plain)]) == 3
+    assert "ties_disclosure:" not in capsys.readouterr().out
+
+
+def test_cli_text_output_prints_island_locations(tmp_path, capsys):
+    """Issue #2194: the text courtesy view carries the per-island boxes
+    too, so a human reading the terminal output does not have to re-run
+    with `--format json` just to find out where to look."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+
+    gds = tmp_path / "split.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "split.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    assert main(["erc", str(gds), str(spec)]) == 3
+    out = capsys.readouterr().out
+    assert "island 1: (5000,0)-(6000,1000)  layer=li1  shapes=1" in out
+    assert "island 2: (8000,0)-(9000,1000)  layer=li1  shapes=1" in out
 
 
 def test_cli_pdk_json_contract(tmp_path, capsys):
@@ -2714,7 +3189,10 @@ def _resistor_divider_fixture(path) -> None:
     top.shapes(contact).insert(kdb.Box.new(_um(8.6), _um(0.3), _um(8.8), _um(0.5)))
 
     # The PDK's own device-body marker over the resistor body (not the
-    # heads): 6 um x 0.8 um = 4.8 um^2.
+    # heads): 6 um x 0.8 um = 4.8 um^2, drawn with the 0.1 um top/bottom
+    # enclosure past the 0.6 um-tall poly bar that a PDK device marker
+    # conventionally carries -- so only 6 um x 0.6 um = 3.6 um^2 of it is
+    # actually subtracted from `poly` (issue #2226).
     top.shapes(res_marker).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
 
     layout.write(str(path))
@@ -2722,6 +3200,22 @@ def _resistor_divider_fixture(path) -> None:
 
 #: The `devices[]` declaration matching `_resistor_divider_fixture`.
 _RESISTOR_DEVICES = [{"name": "poly_resistor", "body_layer": "62/0", "on": "poly"}]
+
+#: What `_RESISTOR_DEVICES` actually subtracts from `poly`: the 6 um x 0.8 um
+#: marker (4.8 um^2 of its own) intersected with the 0.6 um-tall poly bar it
+#: is drawn over -> 6 um x 0.6 um. The gap between the two numbers is
+#: ordinary marker overhang, and reporting the *intersection* is the point of
+#: issue #2226 -- see `test_device_body_area_is_the_intersection_with_its_role`.
+_RESISTOR_SUBTRACTED_UM2 = 3.6
+
+#: `_RESISTOR_DEVICES` with the same marker layer additionally declared `on` a
+#: role it never touches (the `contact` via role: two 0.2 um x 0.2 um boxes
+#: under the resistor heads, outside the marker's own x-range). The issue
+#: #2226 reproduction shape: one correct declaration, one wrong-`on` one.
+_RESISTOR_DEVICES_WITH_WRONG_ROLE = [
+    {"name": "poly_resistor", "body_layer": "62/0", "on": "poly"},
+    {"name": "wrong_role_resistor", "body_layer": "62/0", "on": "contact"},
+]
 
 
 def _resistor_divider_spec(devices=None):
@@ -2795,9 +3289,66 @@ def test_device_body_subtraction_is_reported_in_provenance(tmp_path):
             "name": "poly_resistor",
             "body_layer": "62/0",
             "on": "poly",
-            "body_area_um2": 4.8,
+            "body_area_um2": _RESISTOR_SUBTRACTED_UM2,
         }
     ]
+
+
+def test_device_body_area_is_the_intersection_with_its_role(tmp_path):
+    """Issue #2226: `body_area_um2` is the area this declaration *actually*
+    subtracted -- `marker ∩ on`'s own conductor region -- not the marker
+    layer's own area.
+
+    The fixture's RES marker is 6 um x 0.8 um (4.8 um^2) drawn over a 0.6
+    um-tall poly bar, i.e. with the 0.1 um top/bottom overhang a PDK device
+    marker conventionally carries. Only the 6 um x 0.6 um overlap is
+    subtracted, so 3.6 is the honest number and 4.8 over-states it."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+    entry = report["provenance"]["devices"][0]
+
+    assert entry["body_area_um2"] == 3.6
+    # The marker's own area, which the pre-#2226 implementation reported.
+    assert entry["body_area_um2"] != 4.8
+    # And the carve-out still bites: the false rail-to-rail short is gone.
+    assert report["erc_findings"] == []
+
+
+def test_device_body_declared_on_a_role_it_does_not_touch_reports_zero(tmp_path):
+    """The issue #2226 reproduction: the *same* marker layer declared twice,
+    once `on` the role it is drawn over and once `on` a role it never
+    touches. Only the first subtracts anything, and the report now says so
+    -- pre-fix both echoed the marker's identical non-zero area, which made
+    the field useless as the wrong-`on` cross-check the docs promise."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES_WITH_WRONG_ROLE)
+    devices_by_name = {d["name"]: d for d in report["provenance"]["devices"]}
+
+    assert devices_by_name["poly_resistor"]["body_area_um2"] == 3.6
+    assert devices_by_name["wrong_role_resistor"]["body_area_um2"] == 0.0
+    # The wrong-`on` entry is reported, not dropped, and still names the
+    # role it was declared on.
+    assert devices_by_name["wrong_role_resistor"]["on"] == "contact"
+    # It also changed nothing: the `contact` via role is untouched, so the
+    # resistor heads still reach their rails.
+    assert not any(
+        f["rule"] in ("erc.unconnected_net", "erc.floating_gate")
+        for f in report["erc_findings"]
+    )
+
+
+def test_device_body_that_misses_its_declared_role_warns_on_stderr(tmp_path, capsys):
+    """A marker that *is* drawn on this layout but subtracts nothing from
+    the role it was declared `on` is a spec bug, not an unused layer -- so
+    it gets a one-line stderr warning as well as a `0.0` in the report
+    (issue #2226). JSON goes to stdout only, so the warning cannot corrupt
+    a piped report."""
+    _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES_WITH_WRONG_ROLE)
+    err = capsys.readouterr().err
+
+    assert "wrong_role_resistor" in err
+    assert "subtracted nothing" in err
+    assert "62/0" in err
+    # The correct declaration on `poly` is not warned about.
+    assert "'poly_resistor'" not in err
 
 
 def test_devices_omitted_reports_an_empty_provenance_list(tmp_path):
@@ -2806,7 +3357,7 @@ def test_devices_omitted_reports_an_empty_provenance_list(tmp_path):
     assert report["provenance"]["devices"] == []
 
 
-def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path):
+def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path, capsys):
     """A `body_layer` this stream never carries is not an error (matching
     `stackup`/`vias`' own convention) -- but the measured `body_area_um2`
     says so, instead of leaving a caller to infer that the carve-out bit."""
@@ -2818,6 +3369,10 @@ def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path):
     assert report["provenance"]["devices"][0]["body_area_um2"] == 0.0
     # Nothing was subtracted, so the false short is still reported.
     assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+    # No stderr warning here (issue #2226): a layer absent from the stream
+    # is the documented "this fixture doesn't draw it" case, unlike a marker
+    # that is drawn but misses the role it was declared `on`.
+    assert "subtracted nothing" not in capsys.readouterr().err
 
 
 def test_devices_declaration_does_not_change_schema_version(tmp_path):
@@ -3025,3 +3580,783 @@ def test_two_devices_on_the_same_role_are_unioned(tmp_path):
         "poly_resistor",
         "poly_fuse",
     ]
+
+
+# --- --deck: auto-apply a curated deck's own device-marker layers (issue #2204) ----
+#
+# Fixtures below are redrawn on gf180mcu's *real* curated-deck device layers
+# (`src/klayout_tools/decks/gf180mcu.py`'s `EXTRACTION_DECK`), not the
+# `62/0`/`63/0` stand-in markers the #2183 fixtures above use -- the whole
+# point of this feature is that `--deck` reads the *actual* deck
+# declarations, so a test against invented layer numbers would not exercise
+# the real matching rule at all.
+
+# `ppolyf_u`: body=Poly2 (30/0, also this deck's gate role), marker=RES_MK
+# (110/5), requires=(Pplus 31/0, SAB 49/0).
+_GF180MCU_POLY = "30/0"
+_GF180MCU_CONTACT = "33/0"
+_GF180MCU_MET1 = "34/0"
+_GF180MCU_MET1_LABEL = "34/10"
+
+# `cap_mim_2f0_m4m5_noshield`: top_plate=FuseTop (75/0, requires CAP_MK
+# 117/5 + MIM_L_MK 117/10), bottom_plate=Metal4 (46/0), top_plate_via=Via4
+# (41/0, gf180mcu's *own* ordinary Metal4<->Metal5 routing via layer too),
+# top_plate_via_metal=Metal5 (81/0).
+_GF180MCU_MET4 = "46/0"
+_GF180MCU_MET4_LABEL = "46/10"
+_GF180MCU_MET5 = "81/0"
+_GF180MCU_MET5_LABEL = "81/10"
+_GF180MCU_VIA4 = "41/0"
+
+
+def _gf180mcu_resistor_divider_fixture(path, *, narrow_requires=True) -> None:
+    """The #2183 rail-to-rail poly-resistor fixture (`_resistor_divider_
+    fixture`), redrawn on gf180mcu's *real* `ppolyf_u` resistor layers so
+    `--deck gf180mcu` auto-detects it with no `devices[]` declaration at
+    all: body=Poly2 (30/0, doubling as this deck's own gate layer, exactly
+    as real silicon draws it), marker=RES_MK (110/5), narrowed by Pplus
+    (31/0) + SAB (49/0).
+
+    `narrow_requires=False` (issue #2204's own edge-case test) omits the
+    Pplus/SAB narrowing entirely, so `ppolyf_u`'s own `requires` never see
+    a marker to narrow: the auto-detected candidate region comes out empty
+    (`body & marker & Pplus & SAB == body & marker & {} & {}`), and nothing
+    is subtracted -- exactly the same "no PDK device recognised here"
+    outcome as a layout that draws no resistor marker at all.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(30, 0)
+    contact = layout.layer(33, 0)
+    met1 = layout.layer(34, 0)
+    label = layout.layer(34, 5)
+    res_mk = layout.layer(110, 5)
+    pplus = layout.layer(31, 0)
+    sab = layout.layer(49, 0)
+
+    # Two labelled supply rails, 6 um apart -- no metal runs between them.
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(2), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5))))
+    top.shapes(met1).insert(kdb.Box.new(_um(8), _um(0), _um(10), _um(1)))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(9), _um(0.5))))
+
+    # The resistor: one Poly2 bar from rail to rail, contacted at each head.
+    top.shapes(poly).insert(kdb.Box.new(_um(1), _um(0.2), _um(9), _um(0.8)))
+    top.shapes(contact).insert(kdb.Box.new(_um(1.2), _um(0.3), _um(1.4), _um(0.5)))
+    top.shapes(contact).insert(kdb.Box.new(_um(8.6), _um(0.3), _um(8.8), _um(0.5)))
+
+    # The PDK's own RES_MK marker over the resistor body (not the heads):
+    # 6 um x 0.8 um = 4.8 um^2.
+    top.shapes(res_mk).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+    if narrow_requires:
+        top.shapes(pplus).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+        top.shapes(sab).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+
+    layout.write(str(path))
+
+
+def _gf180mcu_resistor_divider_spec(devices=None):
+    spec = {
+        "stackup": [
+            {"name": "poly", "layer": _GF180MCU_POLY, "role": "gate"},
+            {
+                "name": "met1",
+                "layer": _GF180MCU_MET1,
+                "label_layer": "34/5",
+            },
+        ],
+        "vias": [
+            {"name": "contact", "layer": _GF180MCU_CONTACT, "between": ["poly", "met1"]}
+        ],
+        "nets": [
+            {"name": "VDD", "kind": "supply"},
+            {"name": "VSS", "kind": "supply"},
+        ],
+    }
+    if devices is not None:
+        spec["devices"] = devices
+    return spec
+
+
+def _run_gf180mcu_resistor_divider(
+    tmp_path, *, deck=None, devices=None, narrow_requires=True, name="gf_divider"
+):
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds, narrow_requires=narrow_requires)
+    _write_spec(spec, _gf180mcu_resistor_divider_spec(devices))
+    return run_erc(str(gds), str(spec), deck=deck)
+
+
+def test_no_deck_still_reports_the_false_supply_short_on_a_real_deck_layout(tmp_path):
+    """Without `--deck`, this module's own auto-detection never runs -- the
+    #2183 baseline behaviour (a false `erc.supply_short`) is unchanged, even
+    though the drawn resistor happens to use a real curated deck's own
+    layers."""
+    report = _run_gf180mcu_resistor_divider(tmp_path)
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+    assert report["provenance"]["devices"] == []
+    assert report["provenance"]["deck"] is None
+
+
+def test_deck_auto_detects_resistor_body_and_breaks_the_rail_to_rail_string(tmp_path):
+    """`--deck gf180mcu` with no `devices[]` at all auto-carves the
+    recognised `ppolyf_u` body out of `poly`, clearing the false short."""
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    assert report["erc_findings"] == []
+    assert report["erc_finding_count"] == 0
+    assert report["erc_status"] == "clean"
+
+
+def test_deck_auto_detected_resistor_reported_in_provenance(tmp_path):
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    assert report["provenance"]["devices"] == [
+        {
+            "name": "ppolyf_u",
+            "body_layer": _GF180MCU_POLY,
+            "on": "poly",
+            # `poly & RES_MK & Pplus & SAB`, not the marker's own raw area
+            # (unlike a hand-declared `devices[]` entry, which subtracts
+            # its `body_layer` region directly -- see `_device_body_cuts`):
+            # poly spans x=[1,9]/y=[0.2,0.8] (8 x 0.6 um), the requires-
+            # narrowed marker spans x=[2,8]/y=[0.1,0.9] (6 x 0.8 um), so
+            # the overlap is 6 x 0.6 = 3.6 um^2.
+            "body_area_um2": 3.6,
+            "source": "deck",
+            "superseded_by": None,
+        }
+    ]
+
+
+def test_deck_selected_populates_provenance_deck(tmp_path):
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    deck_provenance = report["provenance"]["deck"]
+    assert deck_provenance["name"] == "gf180mcu"
+    assert deck_provenance["content_hash"].startswith("sha256:")
+
+
+def test_deck_selected_does_not_change_schema_version(tmp_path):
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    assert report["schema_version"] == 1
+
+
+def test_explicit_devices_entry_wins_over_deck_auto_detection(tmp_path):
+    """An explicit `devices[]` entry for `poly` wins: it is the one that
+    actually cuts, and the deck's own `ppolyf_u` match for the same role is
+    listed but not applied (`body_area_um2: 0.0`, `superseded_by` naming
+    the declared entry that won)."""
+    report = _run_gf180mcu_resistor_divider(
+        tmp_path,
+        deck="gf180mcu",
+        devices=[{"name": "my_resistor", "body_layer": "110/5", "on": "poly"}],
+    )
+
+    assert report["erc_findings"] == []
+    devices_by_name = {d["name"]: d for d in report["provenance"]["devices"]}
+    assert devices_by_name["my_resistor"]["source"] == "declared"
+    # 3.6, not the RES_MK marker's own 4.8: the declared entry's reported
+    # area is the marker intersected with `poly`'s own drawn region, and
+    # this fixture's marker overhangs the poly bar by 0.1 um top and bottom
+    # (issue #2226).
+    assert devices_by_name["my_resistor"]["body_area_um2"] == 3.6
+    assert devices_by_name["my_resistor"]["superseded_by"] is None
+    assert devices_by_name["ppolyf_u"]["source"] == "deck"
+    assert devices_by_name["ppolyf_u"]["body_area_um2"] == 0.0
+    assert devices_by_name["ppolyf_u"]["superseded_by"] == "my_resistor"
+
+
+def test_requires_narrowed_resistor_removes_only_the_narrowed_region(tmp_path):
+    """gf180mcu's `ppolyf_u` requires *both* Pplus and SAB. With neither
+    drawn, the candidate body (`body & marker & Pplus & SAB`) is empty, so
+    nothing is subtracted and the false short survives -- the deck's own
+    `requires` narrowing is honoured, not just its `body`/`marker` pair."""
+    report = _run_gf180mcu_resistor_divider(
+        tmp_path, deck="gf180mcu", narrow_requires=False
+    )
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+    # Nothing was recognised at all -- no entry to list (this deck ships
+    # over a dozen resistor/capacitor flavours; listing every one that
+    # matches no geometry on every `--deck`-selected run would bury the
+    # signal AC4 exists to surface -- see `_deck_device_cuts`'s docstring).
+    assert report["provenance"]["devices"] == []
+
+
+def _gf180mcu_mim_cap_fixture(path) -> None:
+    """A MiM cap drawn on gf180mcu's *real* layers: bottom plate on Metal4
+    (VDD), top plate (FuseTop, CAP_MK/MIM_L_MK-narrowed) bridged to Metal5
+    (VSS) through Via4 -- the *same* physical layer gf180mcu also uses for
+    ordinary Metal4<->Metal5 routing vias (`ExtractionDeck.vias[3]`), so a
+    spec that declares a `via4` role bridging `met4`/`met5` reads the cap's
+    own via as an ordinary short between the two plates without
+    auto-detection -- issue #2204's own worked "MiM cap on a via role"
+    example, now against the real deck rather than the #2183 fixture's
+    invented `4/0`/`63/0` stand-ins.
+
+    Also draws an unrelated, properly strapped gate (so `run_erc` has a
+    gate net) and a *second*, unrelated Metal4<->Metal5 Via4 stack far from
+    the cap, labelled `ROUTE` -- the regression guard for issue #364/#1388's
+    "not the whole via layer" guarantee, reused here by issue #2204's own
+    auto-detection (see `test_deck_auto_detection_does_not_disconnect_
+    ordinary_vias_on_the_same_layer`).
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(30, 0)
+    contact = layout.layer(33, 0)
+    met4 = layout.layer(46, 0)
+    met4_label = layout.layer(46, 5)
+    met5 = layout.layer(81, 0)
+    met5_label = layout.layer(81, 5)
+    via4 = layout.layer(41, 0)
+    fusetop = layout.layer(75, 0)
+    cap_mk = layout.layer(117, 5)
+    mim_l_mk = layout.layer(117, 10)
+
+    # Bottom plate on met4 (VDD), top-plate stack (FuseTop+Via4+Met5, VSS).
+    top.shapes(met4).insert(kdb.Box.new(_um(0), _um(0), _um(3), _um(2)))
+    top.shapes(met4_label).insert(kdb.Text("VDD", kdb.Trans(_um(0.5), _um(1))))
+
+    top.shapes(fusetop).insert(kdb.Box.new(_um(1), _um(0.5), _um(2), _um(1.5)))
+    top.shapes(cap_mk).insert(kdb.Box.new(_um(0.8), _um(0.3), _um(2.2), _um(1.7)))
+    top.shapes(mim_l_mk).insert(kdb.Box.new(_um(0.8), _um(0.3), _um(2.2), _um(1.7)))
+    top.shapes(via4).insert(kdb.Box.new(_um(1.2), _um(0.7), _um(1.8), _um(1.3)))
+    top.shapes(met5).insert(kdb.Box.new(_um(1), _um(0.5), _um(2), _um(1.5)))
+    top.shapes(met5_label).insert(kdb.Text("VSS", kdb.Trans(_um(1.5), _um(1))))
+
+    # An unrelated, properly strapped gate.
+    top.shapes(poly).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(contact).insert(kdb.Box.new(_um(20.2), _um(0.2), _um(20.4), _um(0.4)))
+    top.shapes(met4).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+
+    # An unrelated, ordinary Via4 stack -- no cap marker anywhere near it.
+    top.shapes(met4).insert(kdb.Box.new(_um(30), _um(0), _um(32), _um(1)))
+    top.shapes(via4).insert(kdb.Box.new(_um(30.4), _um(0.2), _um(30.6), _um(0.4)))
+    top.shapes(met5).insert(kdb.Box.new(_um(30), _um(0), _um(32), _um(1)))
+    top.shapes(met5_label).insert(kdb.Text("ROUTE", kdb.Trans(_um(31), _um(0.5))))
+
+    layout.write(str(path))
+
+
+def _gf180mcu_mim_cap_spec(devices=None, extra_nets=None):
+    spec = {
+        "stackup": [
+            {"name": "poly", "layer": _GF180MCU_POLY, "role": "gate"},
+            {"name": "met4", "layer": _GF180MCU_MET4, "label_layer": "46/5"},
+            {"name": "met5", "layer": _GF180MCU_MET5, "label_layer": "81/5"},
+        ],
+        "vias": [
+            {
+                "name": "contact",
+                "layer": _GF180MCU_CONTACT,
+                "between": ["poly", "met4"],
+            },
+            {"name": "via4", "layer": _GF180MCU_VIA4, "between": ["met4", "met5"]},
+        ],
+        "nets": [
+            {"name": "VDD", "kind": "supply"},
+            {"name": "VSS", "kind": "supply"},
+            *(extra_nets or []),
+        ],
+    }
+    if devices is not None:
+        spec["devices"] = devices
+    return spec
+
+
+def _run_gf180mcu_mim_cap(
+    tmp_path, *, deck=None, devices=None, extra_nets=None, name="gf_mimcap"
+):
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.erc.json"
+    _gf180mcu_mim_cap_fixture(gds)
+    _write_spec(spec, _gf180mcu_mim_cap_spec(devices, extra_nets))
+    return run_erc(str(gds), str(spec), deck=deck)
+
+
+def test_no_deck_reports_a_false_supply_short_through_the_ordinary_via_role(tmp_path):
+    report = _run_gf180mcu_mim_cap(tmp_path)
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+
+
+def test_deck_auto_detects_cap_via_overlap_and_breaks_the_plate_to_plate_bridge(
+    tmp_path,
+):
+    report = _run_gf180mcu_mim_cap(tmp_path, deck="gf180mcu")
+
+    assert report["erc_findings"] == []
+
+
+def test_deck_auto_detected_cap_reported_in_provenance(tmp_path):
+    report = _run_gf180mcu_mim_cap(tmp_path, deck="gf180mcu")
+
+    devices_by_layer = {d["body_layer"]: d for d in report["provenance"]["devices"]}
+    # FuseTop (the cap's own `top_plate`) matches no declared role in this
+    # spec -- listed, not silently dropped (issue #2204's own AC4).
+    fusetop_entry = devices_by_layer["75/0"]
+    assert fusetop_entry["name"] == "cap_mim_2f0_m4m5_noshield"
+    assert fusetop_entry["on"] is None
+    assert fusetop_entry["body_area_um2"] == 0.0
+    assert fusetop_entry["source"] == "deck"
+    # Via4 matches the declared `via4` role -- only the cap's own
+    # via-to-bottom-plate overlap is cut, not the whole via layer.
+    via4_entry = devices_by_layer[_GF180MCU_VIA4]
+    assert via4_entry["name"] == "cap_mim_2f0_m4m5_noshield"
+    assert via4_entry["on"] == "via4"
+    assert via4_entry["body_area_um2"] > 0.0
+    assert via4_entry["superseded_by"] is None
+
+
+def test_deck_auto_detection_does_not_disconnect_ordinary_vias_on_the_same_layer(
+    tmp_path,
+):
+    """The cut is the cap's own via-to-bottom-plate *overlap* only (issue
+    #364/#1388's own derivation, reused here) -- an ordinary Metal4<->
+    Metal5 via elsewhere on the same physical Via4 layer, unrelated to any
+    capacitor, must still connect normally."""
+    report = _run_gf180mcu_mim_cap(
+        tmp_path, deck="gf180mcu", extra_nets=[{"name": "ROUTE", "kind": "signal"}]
+    )
+
+    assert not any(f["net"] == "ROUTE" for f in report["erc_findings"])
+
+
+def _gf180mcu_real_short_fixture(path) -> None:
+    """Two supply rails joined by a plain metal wire -- a genuine short,
+    with no device-marker geometry anywhere. `--deck`'s auto-detection
+    (issue #2204) must not touch this: it only ever cuts where a curated
+    device's own conducting-body layer matches a declared role *and* that
+    device's own region is actually drawn, neither of which applies here."""
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    poly = layout.layer(30, 0)
+    contact = layout.layer(33, 0)
+    met1 = layout.layer(34, 0)
+    label = layout.layer(34, 5)
+
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(10), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(9), _um(0.5))))
+
+    top.shapes(poly).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(contact).insert(kdb.Box.new(_um(20.2), _um(0.2), _um(20.4), _um(0.4)))
+    top.shapes(met1).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+
+    layout.write(str(path))
+
+
+def test_deck_selected_still_reports_a_genuine_short(tmp_path):
+    """A real rail-to-rail metal short -- no device body involved at all --
+    must still be reported with `--deck` selected: the auto carve-out only
+    ever removes a curated device's own recognised body/via-overlap region,
+    never ordinary routing (issue #2204's own regression guard against an
+    over-broad carve-out silently hiding a real short)."""
+    gds = tmp_path / "gf_real_short.gds"
+    spec = tmp_path / "gf_real_short.erc.json"
+    _gf180mcu_real_short_fixture(gds)
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": _GF180MCU_POLY, "role": "gate"},
+                {"name": "met1", "layer": _GF180MCU_MET1, "label_layer": "34/5"},
+            ],
+            "vias": [
+                {
+                    "name": "contact",
+                    "layer": _GF180MCU_CONTACT,
+                    "between": ["poly", "met1"],
+                }
+            ],
+            "nets": [
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VSS", "kind": "supply"},
+            ],
+        },
+    )
+
+    report = run_erc(str(gds), str(spec), deck="gf180mcu")
+
+    assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+
+
+def test_unknown_deck_name_is_a_clean_error(tmp_path):
+    gds = tmp_path / "divider.gds"
+    spec = tmp_path / "divider.erc.json"
+    _resistor_divider_fixture(gds)
+    _write_spec(spec, _resistor_divider_spec())
+
+    with pytest.raises(ErcError, match="unknown deck 'not_a_real_deck'"):
+        run_erc(str(gds), str(spec), deck="not_a_real_deck")
+
+
+def test_cli_unknown_deck_exits_one_with_clean_message(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    assert main(["erc", str(gds), str(spec), "--deck", "not_a_real_deck"]) == 1
+    err = capsys.readouterr().err
+    assert "unknown deck" in err
+    assert "Traceback" not in err
+
+
+def test_deck_omitted_is_byte_identical_to_pre_2204_output(tmp_path):
+    """AC5: with no `--deck`, output is byte-identical to before this
+    feature existed -- `provenance.devices` entries keep their pre-#2204
+    4-key shape (no `source`/`superseded_by`), and `provenance.deck` stays
+    `None`, exactly as `test_device_body_subtraction_is_reported_in_
+    provenance` above (the #2183 baseline) already asserts."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+
+    assert report["provenance"]["deck"] is None
+    assert report["provenance"]["devices"] == [
+        {
+            "name": "poly_resistor",
+            "body_layer": "62/0",
+            "on": "poly",
+            "body_area_um2": _RESISTOR_SUBTRACTED_UM2,
+        }
+    ]
+
+
+def test_cli_deck_selected_via_flag_reports_no_findings(tmp_path, capsys):
+    """The `--deck` CLI flag itself plumbs through to `run_erc` (not just
+    the library function) -- no findings on the same gf180mcu resistor
+    fixture the library-level tests above exercise. No `--pdk` is given, so
+    the exit code (which follows the *antenna* question, per
+    `erc_cmd.py`'s own docstring) is `4` (`not_checked`), not `0` -- read
+    `erc_status`, the connectivity-only roll-up, for this check instead."""
+    gds = tmp_path / "gf_divider_cli.gds"
+    spec = tmp_path / "gf_divider_cli.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds)
+    _write_spec(spec, _gf180mcu_resistor_divider_spec())
+
+    assert (
+        main(["erc", str(gds), str(spec), "--deck", "gf180mcu", "--format", "json"])
+        == 4
+    )
+    out = json.loads(capsys.readouterr().out)
+    assert out["erc_findings"] == []
+    assert out["erc_status"] == "clean"
+    assert out["provenance"]["deck"]["name"] == "gf180mcu"
+
+
+# --- --findings-only: skip the antenna accumulation (issue #2219) ------------
+
+
+class _CountingL2N:
+    """A thin recording proxy around ``klayout.db.LayoutToNetlist``.
+
+    ``polygons_of_net`` is *the* expensive call in `klt erc` -- one merged
+    region per gate net per stackup role -- so the issue-#2219 skip is only
+    real if it makes fewer of them. Counting is done here, on the object
+    `run_erc` actually calls, rather than by timing: a wall-clock assertion
+    on a tiny fixture would be noise, while a call count is exact.
+    """
+
+    def __init__(self, inner, layer_index):
+        self._inner = inner
+        self.layer_index = layer_index
+        self.layer_calls: list[int] = []
+
+    def calls_for(self, role: str) -> int:
+        """How many times this graph was asked for a net's geometry on the
+        `stackup` role named `role`."""
+        return self.layer_calls.count(self.layer_index[role])
+
+    def polygons_of_net(self, net, layer, *rest):
+        self.layer_calls.append(layer)
+        return self._inner.polygons_of_net(net, layer, *rest)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _record_polygons_of_net(monkeypatch):
+    """Wrap `_extract_connectivity` so every `LayoutToNetlist` `run_erc`
+    builds is a counting proxy. Returns the list the proxies land in, in
+    creation order (the primary graph first, the tie graph -- when the spec
+    declares `ties[]` -- second)."""
+    from klayout_tools import erc as erc_module
+
+    proxies: list[_CountingL2N] = []
+    real = erc_module._extract_connectivity
+
+    def counting(*args, **kwargs):
+        l2n, circuit, layer_index, tie_layers = real(*args, **kwargs)
+        proxy = _CountingL2N(l2n, layer_index)
+        proxies.append(proxy)
+        return proxy, circuit, layer_index, tie_layers
+
+    monkeypatch.setattr(erc_module, "_extract_connectivity", counting)
+    return proxies
+
+
+def _assert_findings_identical(gds, spec):
+    """The contract the whole flag rests on: a findings-only run's
+    `erc_findings` (and the connectivity roll-up over them) are identical,
+    field for field, to the full run's."""
+    full = run_erc(str(gds), str(spec))
+    lean = run_erc(str(gds), str(spec), findings_only=True)
+
+    assert json.dumps(lean["erc_findings"], sort_keys=True) == json.dumps(
+        full["erc_findings"], sort_keys=True
+    )
+    assert lean["erc_finding_count"] == full["erc_finding_count"]
+    assert lean["erc_status"] == full["erc_status"]
+    assert lean["erc_coverage"] == full["erc_coverage"]
+    assert lean["gate_count"] == full["gate_count"]
+    assert [g["gate_id"] for g in lean["gates"]] == [
+        g["gate_id"] for g in full["gates"]
+    ]
+    assert [g["gate_area_um2"] for g in lean["gates"]] == [
+        g["gate_area_um2"] for g in full["gates"]
+    ]
+    return full, lean
+
+
+def test_findings_only_keeps_floating_gate_findings_identical(tmp_path):
+    """`erc.floating_gate` is the one rule that reads the per-level model,
+    so it is the one the skip could plausibly break."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    full, lean = _assert_findings_identical(gds, spec)
+
+    floating = [f for f in lean["erc_findings"] if f["rule"] == "erc.floating_gate"]
+    assert len(floating) == 1
+    assert floating[0]["gate_id"] == "gate1"
+    assert floating[0]["bbox"] is not None
+
+
+def test_findings_only_keeps_supply_read_findings_identical(tmp_path):
+    """The T1 item-11 supply read: `erc.unconnected_net` (a declared supply
+    that matches nothing) plus `erc.missing_tie` (wells whose declared tap
+    layer draws nothing), on the same routed two-gate layout issue #2169's
+    tie tests use."""
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / "supply_read.gds"
+    layout.write(str(gds))
+    spec_doc = _routed_tie_spec(ties=_routed_tie_entries(tap_layer="99/0"))
+    spec_doc["nets"].append({"name": "VDDA", "kind": "supply"})
+    spec = tmp_path / "supply_read.erc.json"
+    _write_spec(spec, spec_doc)
+
+    _full, lean = _assert_findings_identical(gds, spec)
+
+    rules = {f["rule"] for f in lean["erc_findings"]}
+    assert "erc.missing_tie" in rules
+    assert "erc.unconnected_net" in rules
+    assert {
+        f["net"] for f in lean["erc_findings"] if f["rule"] == "erc.missing_tie"
+    } == {"VDD", "VSS"}
+
+
+def test_findings_only_keeps_supply_short_findings_identical(tmp_path):
+    layout, top, _poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(10), _um(0), _um(12), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(10.5), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(11.5), _um(0.5))))
+
+    gds = tmp_path / "shorted_supplies.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "shorted_supplies.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "VSS", "kind": "supply"},
+            ]
+        ),
+    )
+
+    _full, lean = _assert_findings_identical(gds, spec)
+
+    shorts = [f for f in lean["erc_findings"] if f["rule"] == "erc.supply_short"]
+    assert len(shorts) == 1
+    assert {shorts[0]["net"], shorts[0]["other_net"]} == {"VDD", "VSS"}
+
+
+def test_findings_only_skips_the_per_level_accumulation(tmp_path, monkeypatch):
+    """The point of the flag: materially fewer `polygons_of_net` calls, and
+    *none at all* for the roles a strapped gate's accumulation would have
+    walked past its first connected level."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    proxies = _record_polygons_of_net(monkeypatch)
+    full = run_erc(str(gds), str(spec))
+    full_graph = proxies[0]
+
+    proxies.clear()
+    lean = run_erc(str(gds), str(spec), findings_only=True)
+    lean_graph = proxies[0]
+
+    assert len(lean_graph.layer_calls) < len(full_graph.layer_calls)
+
+    # Both gate nets are walked up the whole four-role stackup by the full
+    # run. The findings-only run stops at each gate's first connected role
+    # instead: gate A straps up through li1, so the roles above it are
+    # probed only for the floating gate B.
+    for role in ("li1", "met1", "met2"):
+        assert full_graph.calls_for(role) == 2, role
+    assert lean_graph.calls_for("li1") == 2
+    assert lean_graph.calls_for("met1") == 1
+    assert lean_graph.calls_for("met2") == 1
+
+    # And the skip is not achieved by dropping a gate on the floor.
+    assert lean["gate_count"] == full["gate_count"] == 2
+
+
+def test_findings_only_nulls_the_accumulation_and_says_so(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec), findings_only=True)
+
+    assert report["findings_only"] is True
+    assert report["pdk"] is None
+    for gate in report["gates"]:
+        assert gate["antenna_verdict"] == "unchecked"
+        assert [level["layer"] for level in gate["levels"]] == [
+            "poly",
+            "li1",
+            "met1",
+            "met2",
+        ]
+        for level in gate["levels"]:
+            assert level["step_area_um2"] is None
+            assert level["cumulative_area_um2"] is None
+            assert level["antenna_ratio"] is None
+            assert level["antenna_ratio_max"] is None
+            assert level["antenna_ratio_source"] is None
+            assert level["verdict"] == "unchecked"
+            assert level["remedy"] is None
+
+    # Nothing antenna-side was graded, and the envelope names why.
+    assert report["coverage"]["checked"] == []
+    assert {entry["reason"] for entry in report["coverage"]["skipped"]} == {
+        "findings_only"
+    }
+    # The connectivity half is untouched -- fully graded, with its own
+    # roll-up still reporting the floating gate this fixture carries.
+    assert report["erc_status"] == "violations"
+    assert report["status"] == "violations"
+
+
+def test_findings_only_clean_run_reports_not_checked(tmp_path):
+    """With no finding to report, a findings-only run's antenna answer is
+    `not_checked` -- the same answer a `--pdk`-less run already gives, not
+    a new status token."""
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / "clean.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "clean.erc.json"
+    ties = [{**entry, "tap_is_dedicated": True} for entry in _routed_tie_entries()]
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+
+    report = run_erc(str(gds), str(spec), findings_only=True)
+
+    assert report["erc_findings"] == []
+    assert report["erc_status"] == "clean"
+    assert report["status"] == "not_checked"
+
+
+def test_findings_only_with_pdk_raises(tmp_path):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    with pytest.raises(ErcError, match="--findings-only"):
+        run_erc(str(gds), str(spec), pdk="sky130", findings_only=True)
+
+
+def test_default_run_is_unchanged_by_the_flag(tmp_path):
+    """The flag is opt-in: an invocation that does not pass it accumulates
+    exactly as before, nulls nowhere."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert report["findings_only"] is False
+    gate_a = next(g for g in report["gates"] if g["net"] == "GATE_A")
+    assert all(level["step_area_um2"] is not None for level in gate_a["levels"])
+    # `levels[0]` is the gate role's own merged region, reused rather than
+    # re-extracted (issue #2219) -- still exactly the gate area.
+    assert gate_a["levels"][0]["step_area_um2"] == pytest.approx(
+        gate_a["gate_area_um2"]
+    )
+    assert gate_a["levels"][0]["cumulative_area_um2"] == pytest.approx(
+        gate_a["gate_area_um2"]
+    )
+
+
+def test_cli_findings_only_json(tmp_path, capsys):
+    layout, _top = _routed_tie_layout()
+    gds = tmp_path / "clean.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "clean.erc.json"
+    ties = [{**entry, "tap_is_dedicated": True} for entry in _routed_tie_entries()]
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+
+    exit_code = main(
+        ["erc", str(gds), str(spec), "--findings-only", "--format", "json"]
+    )
+    data = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 4
+    assert data["findings_only"] is True
+    assert data["erc_status"] == "clean"
+    assert data["status"] == "not_checked"
+
+
+def test_cli_findings_only_text_says_accumulation_skipped(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    assert main(["erc", str(gds), str(spec), "--findings-only"]) == 3
+    out = capsys.readouterr().out
+
+    assert "findings_only: True" in out
+    assert "met2: accumulation skipped (--findings-only)" in out
+    assert "step=" not in out
+    assert "[erc.floating_gate]" in out
+
+
+def test_cli_findings_only_with_pdk_exits_1(tmp_path, capsys):
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.erc.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    exit_code = main(["erc", str(gds), str(spec), "--findings-only", "--pdk", "sky130"])
+
+    assert exit_code == 1
+    assert "--findings-only" in capsys.readouterr().err

@@ -411,8 +411,9 @@ that. So this phase adds three things:
 - **A dedicated grading path**, :func:`_grade_power_delivery`: the cited set
   must contain a `klt erc` supply-spec run and the LVS report item 4 grades,
   plus -- for an RTL-flow digital block -- the `klt place-and-route` response
-  that says a PDN was built at all. Its four item-specific reasons
+  that says a PDN was built at all. Its five item-specific reasons
   (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
+  :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`,
   :data:`_REASON_SUPPLY_NOT_CONTINUOUS`, :data:`_REASON_LVS_SUPPLY_UNPROVEN`)
   keep "no grid was ever built" distinguishable from "the grid is built but
   a rail is split in two", per issue #826's invariant.
@@ -710,6 +711,46 @@ parser kept a leading backslash another stripped: both strings are valid
 pattern to other verbs' boundaries is deliberately deferred until this
 pilot's diagnostics have been seen in practice (#2011).
 
+## Input-artifact verification (issue #2196)
+
+``--manifest``'s freshness gate compares the manifest's pinned
+``content_hash`` against the *cited envelope's own self-reported*
+``provenance.input.content_hash``. Both sides of that comparison are
+statements **about** a revision; neither is the revision. A manifest and an
+envelope can go on agreeing with each other indefinitely while the GDS,
+netlist or record they describe is rewritten underneath them::
+
+    manifest.content_hash == envelope.provenance.input.content_hash   <- gated
+    envelope.provenance.input.content_hash == sha256(<the artifact>)  <- #2196
+
+:func:`_verify_input_artifact` closes the second line: it re-hashes the
+input artifact the envelope itself names
+(:data:`_INPUT_ARTIFACT_FIELDS` -- ``klt drc``'s ``file``, ``klt lvs``'s
+``layout``, ``klt pex``'s ``layout``, ...) with the same
+:func:`~klayout_tools._provenance.sha256_file` the producing run used, and
+every ``"met"`` citation carries the answer as ``input_verified``:
+
+- ``True`` -- the artifact was found and re-hashed, and it matches the hash
+  the envelope recorded. The freshness claim is anchored to a file.
+- ``False`` -- the artifact was found and re-hashed, and it **disagrees**:
+  the envelope's self-report no longer describes what is on disk.
+- ``None`` -- nothing was re-hashed, so the pinned hash was only ever
+  compared to another claim. Either the envelope records no input hash, its
+  kind names no input path this module can resolve, or the path it names
+  does not resolve to a readable file from the grading context (an absolute
+  scratch path, a request-file-relative path graded from elsewhere).
+
+**Disclosure, not grading** -- deliberately, and matching the precedent set
+by ``coverage`` (#2002) and ``body_bias`` (#1983): ``input_verified`` is
+never consulted by any grading rule, so no item's ``met``/``unmet`` verdict
+moves because of it. What changes is that the unverified case is now
+*visible*: a reviewer can tell a freshness claim checked against a file
+from one checked only against another claim, which was previously
+indistinguishable. The field is always present on a citation (``null``
+included) for exactly that reason -- an omitted key would leave the silent
+case silent. A verdict-changing remedy (a distinct ``input_changed``
+reason) is a deliberate follow-up, not smuggled in here.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -749,6 +790,7 @@ from typing import (
 )
 
 from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
+from ._report_verify import build_rerun_result, load_committed_report
 from .build_identity import version_report
 from .coverage import (
     coverage_nothing_checked,
@@ -759,11 +801,13 @@ from .coverage import (
     coverage_validation_error,
 )
 from .design_evidence_tiers import (
+    CANONICAL_DOC_LABEL,
     DEFAULT_DOC_PATH,
     DesignEvidenceTiersError,
     doc_source_label,
     parse_tier_doc,
 )
+from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
 
 __all__ = [
@@ -772,6 +816,9 @@ __all__ = [
     "build_signoff",
     "build_tier_report",
     "build_fleet_report",
+    "check_tier_report",
+    "check_fleet_report",
+    "describe_grader",
 ]
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -786,18 +833,23 @@ SCHEMA_VERSION = 1
 #: never imply the other changed.
 #:
 #: Still ``1`` after issue #2176 (``build``, ``items[].graded_by_build``, the
-#: ``ungradeable_by_build`` reason), deliberately: both fields are *new*
-#: keys, and a new ``reason`` value is a value set growing within an
-#: unchanged shape -- both explicitly additive under
-#: ``docs/json-contract.md`` ("adding new fields does not" bump; "an
-#: additive change can introduce a new enum-like value"). The grading change
-#: that rides with them refuses a citation this build has no rules for,
-#: which is a *correction* of a verdict that was wrong, not a redefinition
-#: of what ``status``/``reason`` mean -- the same shape as issue #1987's
-#: (item 3 stopped accepting `klt extract` citations) and issue #2044's
-#: (items 5/6/8 gained kind restrictions) grading corrections, neither of
-#: which bumped this constant. Contrast
-#: :data:`FLEET_REPORT_SCHEMA_VERSION` below, which bumped for issue #2178
+#: ``ungradeable_by_build`` reason), issue #2202
+#: (``build_t1_item_count``), and issue #2216 (``build.grading_ruleset_id``),
+#: deliberately: every one of those fields is a *new* key, and a new
+#: ``reason`` value is a value set growing within an unchanged shape -- both
+#: explicitly additive under ``docs/json-contract.md`` ("adding new fields
+#: does not" bump; "an additive change can introduce a new enum-like
+#: value"). Issue #2202's field has no behaviour change behind it at all: it
+#: reports *beside* ``t1_item_count``, and never reinterprets it. Issue
+#: #2216's field is the same shape: a new key inside the already-additive
+#: ``build`` block, reporting *beside* its existing fields rather than
+#: redefining any of them. The grading change that rode with #2176 refuses a
+#: citation this build has no rules for, which is a *correction* of a
+#: verdict that was wrong, not a redefinition of what ``status``/``reason``
+#: mean -- the same shape as issue #1987's (item 3 stopped accepting `klt
+#: extract` citations) and issue #2044's (items 5/6/8 gained kind
+#: restrictions) grading corrections, neither of which bumped this constant.
+#: Contrast :data:`FLEET_REPORT_SCHEMA_VERSION` below, which bumped for issue #2178
 #: because an already-shipped field's *meaning* changed there.
 TIER_REPORT_SCHEMA_VERSION = 1
 
@@ -817,7 +869,29 @@ TIER_REPORT_SCHEMA_VERSION = 1
 #: ``docs/json-contract.md``'s "value sets within an unchanged shape" rule
 #: (the `klt precheck` ``layer_whitelist[].shapes`` precedent, issue #452),
 #: so this bumps rather than landing silently.
-FLEET_REPORT_SCHEMA_VERSION = 2
+#:
+#: ``3`` (issue #2203): ``blocks[].blocking_item`` moves again, for exactly
+#: the same reason and so under exactly the same rule. An unmet item this
+#: build has no grading rules for (``graded_by_build: False``, issue #2176)
+#: is now *preferred* as the blocker over every other unmet item, where
+#: version ``2`` demoted it below any gradeable one -- it satisfied
+#: :func:`_is_structurally_ungradeable_item` incidentally, so #2178's skip
+#: swept it up. A fleet manifest graded against a ``--tiers-doc`` newer than
+#: the running build therefore reports a different ``blocking_item.id``
+#: under ``3`` than under ``2`` (see :func:`_blocking_t1_item` for the rule
+#: and the rationale). That case is reachable in practice -- it is the case
+#: issue #2176 exists for -- so this is a real observable move, not a
+#: speculative bump. Nothing else changes shape: ``ungraded_items`` lists
+#: exactly the same rows it did under ``2``, and no field is added, removed
+#: or retyped.
+FLEET_REPORT_SCHEMA_VERSION = 3
+
+#: Schema version for :func:`describe_grader`'s own JSON shape (issue
+#: #2216) -- distinct from the other three for the same reason they are
+#: distinct from each other: this mode's top-level fields are unrelated to
+#: envelope-aggregation, tier-report, and fleet-roll-up mode, so bumping one
+#: must never imply another changed.
+DESCRIBE_GRADER_SCHEMA_VERSION = 1
 
 #: Block kinds recognised by ``docs/design-evidence-tiers.md``'s "Block
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
@@ -1100,6 +1174,86 @@ def _is_graded_by_build(item_id: int, build_item_ids: frozenset[int] | None) -> 
     return item_id in build_item_ids
 
 
+def _build_t1_row_count(
+    build_item_ids: frozenset[int] | None, partition_count: int
+) -> int | None:
+    """How many T1 rows **this build's own shipped doc** would have rendered
+    for a block graded across ``partition_count`` partitions (issue #2202),
+    or ``None`` when that doc cannot be read at all.
+
+    The counterpart of ``t1_item_count``, and the answer to the direction
+    :func:`_is_graded_by_build` does *not* cover. That one reports items the
+    **parsed doc** lists which this build has no rules for -- rows that are
+    rendered, and must not look graded. The reverse -- a doc *older* than the
+    build, listing fewer items than this build knows how to check -- produces
+    no wrong verdict at all: every rendered row is correctly graded. It is a
+    pure **scope** gap, and an invisible one, because the missing items are
+    simply not rows. A report claiming ``tier: "T1"`` on 9/9 items is a
+    strictly weaker claim than one claiming it on 11/11, and without this
+    field the two are distinguishable only by a reader who already knows
+    which build produced which (issue #2176's ``build`` block narrows that to
+    a *reconstruction* -- which is exactly what a committed artifact must not
+    require).
+
+    Multiplied by ``partition_count`` for the same reason ``t1_item_count``
+    is: a ``mixed-signal`` block renders each T1 item once per partition, so
+    an unmultiplied count would read as a shortfall (11 vs. 22) on every
+    mixed-signal report that has none. The two counts are therefore directly
+    comparable, and equal whenever the parsed doc's item list matches the
+    build's.
+
+    ``None`` when :func:`_build_t1_item_ids` is ``None`` (an install with
+    neither the packaged doc nor a source checkout): the same "never invent a
+    claim you cannot substantiate" rule :func:`_is_graded_by_build` applies
+    to the other direction -- a fabricated count here would be read as a
+    shortfall, or as its absence, and neither would be true.
+
+    Note that neither count bounds the other: a doc can both omit items this
+    build grades *and* add items it does not, in which case
+    ``t1_item_count`` exceeds this value while some rows also carry
+    ``graded_by_build: false``. The two fields answer different questions and
+    are deliberately not derived from each other.
+    """
+    if build_item_ids is None:
+        return None
+    return len(build_item_ids) * partition_count
+
+
+def _is_ungradeable_by_build(item: dict[str, Any]) -> bool:
+    """Is this **rendered** T1 item one this build has no grading rules for
+    at all -- an id only a ``--tiers-doc``/``$KLT_TIERS_DOC`` copy of the doc
+    lists (issue #2203)?
+
+    Reads the ``graded_by_build`` field :func:`_is_graded_by_build` already
+    put on every rendered T1 item, rather than re-deriving the answer: the
+    roll-up must never be able to disagree with the per-block report about
+    which items were gradeable. A T2-T4 ladder row carries no such key (its
+    ``reason: "tier_not_supported"`` already says the repository cannot check
+    it), so an absent field reads as "graded" -- the same direction
+    :func:`_is_graded_by_build` defaults in when it cannot *prove* divergence.
+
+    **Deliberately distinct from :func:`_is_structurally_ungradeable_item`**,
+    which answers a different question: "does any `klt` verb exist for this
+    id, repo-wide". Today's ``graded_by_build: False`` population happens to
+    be a strict *subset* of that one -- an id no grading table names is
+    structurally ungradeable by that function's own derivation -- which is
+    exactly why the fleet reduction cannot key on the structural predicate
+    alone and expect to tell the two apart (issue #2203). They mean opposite
+    things to a reader:
+
+    ===========================  ==========================  ======================
+    ..                           structurally ungradeable    ungradeable by build
+    ===========================  ==========================  ======================
+    What is missing              a `klt` verb, repo-wide     *this build's* rules
+    Fix                          commit/cite the artifact    a newer `klt`
+    Expected?                    yes, for every manifest     no, never
+    ===========================  ==========================  ======================
+
+    See :func:`_blocking_t1_item` for what the roll-up does with each.
+    """
+    return item.get("graded_by_build", True) is False
+
+
 #: The :func:`~.build_identity.version_report` fields echoed into a tier /
 #: fleet report's ``build`` block (issue #2176), in order. ``klt version``'s
 #: own ``schema_version`` is dropped (the report carries its own, and a
@@ -1108,6 +1262,15 @@ def _is_graded_by_build(item_id: int, build_item_ids: frozenset[int] | None) -> 
 #: process happens to resolve says nothing about what its grading rules can
 #: check, and every cited envelope already carries the engine *its own* run
 #: used in its ``provenance`` block.
+#:
+#: ``grading_ruleset_id`` (issue #2216) is the opposite case from the
+#: KLayout fields -- it is included, not dropped: unlike the resolved engine
+#: version, it *is* a statement about what this build's grading rules can
+#: check, which is exactly what a report's ``build`` block exists to name.
+#: `git_commit`/`git_tag` alone cannot answer "did the grading rules that
+#: produced this report change" without a reader cross-referencing commit
+#: history that may not even be checked out (a wheel install has no `.git`
+#: directory); the content hash answers it directly.
 _BUILD_IDENTITY_FIELDS = (
     "version",
     "package_version",
@@ -1115,6 +1278,7 @@ _BUILD_IDENTITY_FIELDS = (
     "git_tag",
     "dirty",
     "is_release",
+    "grading_ruleset_id",
 )
 
 
@@ -1148,6 +1312,75 @@ def _build_identity() -> dict[str, Any]:
     the fields it drops and why.
     """
     return dict(_build_identity_fields())
+
+
+def _graded_t1_item_ids() -> frozenset[int] | None:
+    """Every T1 item id this build has grading rules for (issue #2216) --
+    the full set :func:`_is_graded_by_build` tests membership against, one
+    call instead of probing per id.
+
+    The union of both halves that function's own docstring names as
+    "graded": the ids named by a grading table (:data:`_ITEM_ALLOWED_KINDS`,
+    :data:`_ITEMS_GRADED_AS_POWER_DELIVERY`) and this build's own shipped
+    doc's item list (:func:`_build_t1_item_ids` -- covers the four items
+    with no `klt` verb behind them at all, items 1, 2, 9 and 10, which carry
+    no table entry by design). In practice the first set is always a subset
+    of the second for a self-consistent build (every table id is also one
+    the shipped doc lists), so this is normally just
+    :func:`_build_t1_item_ids`'s own answer -- the union guards the
+    hypothetical case of the two drifting apart without silently
+    under-reporting either.
+
+    ``None`` when :func:`_build_t1_item_ids` is, for the same "never invent
+    a claim you cannot substantiate" reason: an install that cannot read its
+    own shipped doc cannot *prove* which ids it grades, so it must not
+    enumerate a set it cannot back up.
+    """
+    build_item_ids = _build_t1_item_ids()
+    if build_item_ids is None:
+        return None
+    graded_table_ids = frozenset(_ITEM_ALLOWED_KINDS) | _ITEMS_GRADED_AS_POWER_DELIVERY
+    return graded_table_ids | build_item_ids
+
+
+def describe_grader() -> dict[str, Any]:
+    """The ``klt signoff --describe-grader`` JSON payload (issue #2216).
+
+    Answers, at runtime and without reading source, the two questions a
+    consumer who commits a tier-verdict report as evidence cannot otherwise
+    answer from a `klt` version string alone:
+
+    - **Which grading code is this** -- ``grading_ruleset_id``, the same
+      content hash :func:`~.build_identity.version_report` and every tier /
+      fleet report's own ``build`` block carry (see that function's
+      docstring for why a content hash rather than a derivation of
+      ``git_commit``).
+    - **Which T1 checklist items can it grade at all** --
+      ``graded_t1_item_ids``, built on :func:`_build_t1_item_ids` and the
+      same "is this item graded" test :func:`_is_graded_by_build` already
+      applies per item while rendering a tier report's ``items[]`` --
+      surfaced here directly rather than requiring a caller to run a whole
+      tier report against a throwaway manifest just to read which ids came
+      back ``graded_by_build: true``.
+
+    Always reports **this build's own shipped** grading rules --
+    deliberately not affected by ``--tiers-doc``/``$KLT_TIERS_DOC``, which
+    overrides the item *list* a tier report parses, not the grading logic
+    compiled into the running build (:func:`_build_t1_item_ids` reads
+    :data:`~.design_evidence_tiers.DEFAULT_DOC_PATH` for exactly this
+    reason). ``klt signoff --describe-grader --tiers-doc <path>`` is
+    therefore refused by the CLI layer rather than silently ignoring the
+    flag -- see ``docs/cli/signoff.md``.
+    """
+    report = version_report()
+    graded_ids = _graded_t1_item_ids()
+    return {
+        "schema_version": DESCRIBE_GRADER_SCHEMA_VERSION,
+        "version": report["version"],
+        "grading_ruleset_id": report["grading_ruleset_id"],
+        "source_doc": CANONICAL_DOC_LABEL,
+        "graded_t1_item_ids": (sorted(graded_ids) if graded_ids is not None else None),
+    }
 
 
 #: Provenance sub-fields compared for consistency across every input
@@ -1368,7 +1601,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
     "power": "pass_partial",
 }
 
-#: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Four
+#: Issue #2025, T1 item 11 ("Power delivery (structural)") only. Five
 #: reasons, not one, for the same reason :data:`_REASON_NOT_POST_LAYOUT` is
 #: distinct from :data:`_REASON_WRONG_KIND`: item 11 is a *compound* claim,
 #: and a report that collapsed "no grid was ever built" into the same
@@ -1384,13 +1617,26 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #: - :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- the cited `klt erc` run's own
 #:   spec document does not ask the question item 11 grades: it could not be
 #:   read, declares no ``"kind": "supply"`` net, declares no ``ties[]``
-#:   (so ``erc.missing_tie`` was never computed -- an uncomputed check is
-#:   not a clean one), declares a ``ties[]`` entry the ERC run itself
+#:   with no disclosure of why (see :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`
+#:   below for the disclosed case, issue #2234) -- an uncomputed check is
+#:   not a clean one -- declares a ``ties[]`` entry the ERC run itself
 #:   reported as *degenerate* (issue #2199, see
 #:   :func:`_erc_missing_tie_skipped` -- a check that could not tell a tap
 #:   from a source/drain contact is likewise not a clean one), or its
 #:   stackup does not cover every strap layer the P&R response reports.
 #:   Fix: widen the spec and re-run `klt erc`.
+#: - :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` -- the cited `klt
+#:   erc` run declares zero ``ties[]``, exactly as
+#:   :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`'s "no ``ties[]``" case -- but its
+#:   spec explicitly disclosed why no tap can be expressed
+#:   (``ties_disclosure``, issue #2234, see :func:`_erc_missing_tie_disclosed`).
+#:   Still ``"unmet"`` -- a disclosure proves nothing about the tap's actual
+#:   connectivity, so it can never substitute for a computed
+#:   ``erc.missing_tie`` result -- but distinguishable from "nobody declared
+#:   ties at all", which :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` still covers.
+#:   Fix: express the tap (``tap_boxes``, ``tap_requires``, or
+#:   ``tap_is_dedicated``) and re-run `klt erc`, or accept this item stays
+#:   unmet for this stream.
 #: - :data:`_REASON_SUPPLY_NOT_CONTINUOUS` -- the ERC run *did* ask, and the
 #:   answer is no: a declared supply resolved to zero or several islands
 #:   (``erc.unconnected_net``), two declared supplies resolved to the same
@@ -1404,6 +1650,7 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   reference-side net, so the supplies were not part of the compare.
 _REASON_NO_PDN = "no_pdn"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
+_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
 
@@ -1778,6 +2025,10 @@ class _PexRequired(_EnvelopeCommon):
 
 
 class _PexEnvelope(_PexRequired, total=False):
+    # The layout stream this run extracted from, in the `{path, scope}`
+    # shape `klt pex` echoes every input path under (issue #1261) -- read
+    # since issue #2196 to re-hash the artifact `provenance.input` pins.
+    layout: Any
     netlist: Any
     corner_count: Any
     passed: Any
@@ -1854,6 +2105,9 @@ class _ErcRequired(_EnvelopeCommon):
 
 
 class _ErcEnvelope(_ErcRequired, total=False):
+    # The layout stream this run checked -- read since issue #2196 to
+    # re-hash the artifact `provenance.input` pins.
+    file: Any
     spec: Any
     stackup: Any
     erc_findings: list[Any]
@@ -3587,6 +3841,11 @@ def build_tier_report(
             "kind": "analog",
             "tier": "T1" | None,
             "t1_item_count": 11,
+            # How many T1 rows this build's *own* shipped doc would have
+            # rendered (issue #2202) -- equal to `t1_item_count` unless
+            # `--tiers-doc`/`$KLT_TIERS_DOC` points at a doc with a
+            # different item list. `None` if the shipped doc is unreadable.
+            "build_t1_item_count": 11,
             "t1_met_count": 3,
             "source_doc": "docs/design-evidence-tiers.md",
             "source_doc_content_hash": "sha256:...",
@@ -3600,6 +3859,11 @@ def build_tier_report(
                 "git_tag": None,
                 "dirty": False,
                 "is_release": False,
+                # A content hash of the grading code itself (issue #2216) --
+                # distinct from git_commit/git_tag, which identify the
+                # checkout, not the grading rules. See
+                # `~.build_identity.grading_ruleset_id`.
+                "grading_ruleset_id": "sha256:...",
             },
             "items": [
                 {
@@ -3620,6 +3884,12 @@ def build_tier_report(
                         "kind": "drc",
                         "check_status": "clean",
                         "content_hash": "sha256:...",
+                        # Was that hash checked against the artifact the
+                        # envelope names, or only against the envelope's
+                        # own claim about it (issue #2196)? Always present:
+                        # True (re-hashed, matched) / False (re-hashed,
+                        # disagreed) / None (nothing was re-hashed).
+                        "input_verified": True,
                         "exit_status": 0,
                         # `drc` citations only, and only when the cited
                         # envelope reports coverage (issue #2002)
@@ -3763,6 +4033,23 @@ def build_tier_report(
     committed report still says what it could and could not check long after
     the terminal that produced it is gone.
 
+    **And how much of the checklist it did not look at** (issue #2202): the
+    other direction of the same divergence -- a doc *older* than the build,
+    listing fewer items than this build grades -- produces no wrong verdict,
+    because the report is the parsed doc's skeleton and the missing items are
+    simply not rows. That makes it invisible: ``tier: "T1"`` awarded on 9/9
+    items reads exactly like ``tier: "T1"`` awarded on 11/11, though it is a
+    strictly weaker claim. ``build_t1_item_count``
+    (:func:`_build_t1_row_count`) is what this build's own doc would have
+    rendered, beside ``t1_item_count``'s what the parsed doc did, so the
+    shortfall is a subtraction rather than a reconstruction from the
+    ``build`` block by a reader who has the matching checkout. Equal for the
+    shipped doc (and for any override with the same item list), and ``None``
+    -- never a fabricated count -- when this build cannot read its own doc.
+    Missing items are deliberately *not* rendered as rows: the report is the
+    parsed doc's skeleton by design, and inventing rows it does not contain
+    would destroy the property that makes the override meaningful at all.
+
     An ``"unmet"`` item's ``reason`` (issue #826, Phase 1b of epic #706)
     names *why*, machine-readably, so a reader never has to guess whether an
     item was skipped or actually failed:
@@ -3849,8 +4136,17 @@ def build_tier_report(
     - ``"supply_spec_incomplete"`` (issue #2025, item 11 only) -- the cited
       `klt erc` run's own spec document does not ask the question item 11
       grades: unreadable, no ``"kind": "supply"`` net declared, no ``ties[]``
-      declared (so ``erc.missing_tie`` was never computed), or a stackup that
+      declared with no disclosure of why (see
+      ``"supply_spec_disclosed_unexpressible"`` below for the disclosed
+      case) so ``erc.missing_tie`` was never computed, or a stackup that
       does not cover every strap layer the P&R response reports.
+    - ``"supply_spec_disclosed_unexpressible"`` (issue #2234, item 11 only)
+      -- the cited `klt erc` run declares zero ``ties[]``, exactly as
+      ``"supply_spec_incomplete"``'s "no ``ties[]``" case, but its spec
+      explicitly disclosed why no tap can be expressed on this stream
+      (``ties_disclosure``). Still unmet -- a disclosure proves nothing
+      about the tap's actual connectivity -- but distinguishable from
+      "nobody declared ties at all".
     - ``"supply_not_continuous"`` (issue #2025, item 11 only) -- the ERC run
       did ask, and the answer is no: a declared supply resolved to zero or
       several islands, two declared supplies resolved to one island, or a
@@ -3884,7 +4180,12 @@ def build_tier_report(
     ``docs/json-contract.md``; for a ``klt yield`` envelope, which carries no
     ``provenance`` block of its own at all as of issue #816's current shape,
     this is instead the hash of the samples document it names -- see
-    :func:`_yield_samples_content_hash`), and ``exit_status``: for a file-backed entry
+    :func:`_yield_samples_content_hash`), ``input_verified`` (issue #2196:
+    whether that input hash was itself checked against the artifact the
+    envelope names -- ``True`` re-hashed and matched, ``False`` re-hashed
+    and disagreed, ``None`` nothing was re-hashed, so the pinned hash was
+    only ever compared to another claim; disclosure only, never graded on
+    -- see :func:`_verify_input_artifact`), and ``exit_status``: for a file-backed entry
     this is *inferred* as ``0`` (a readable, classifiable, non-error
     envelope implies the producing command exited zero -- every ``klt``
     verb emits an ``error``-kind envelope, not a success envelope, on any
@@ -4005,6 +4306,11 @@ def build_tier_report(
         "kind": kind,
         "tier": tier,
         "t1_item_count": total,
+        # Issue #2202: what this build's *own* doc would have rendered, so a
+        # doc with fewer items than the build grades discloses the shortfall
+        # instead of hiding it behind a full-looking `t1_met_count/
+        # t1_item_count`. `None` when the shipped doc is unreadable.
+        "build_t1_item_count": _build_t1_row_count(build_item_ids, len(partitions)),
         "t1_met_count": met_count,
         "source_doc": doc_source_label(tiers_doc),
         "source_doc_content_hash": doc["content_hash"],
@@ -4239,6 +4545,158 @@ def _yield_samples_content_hash(
     return None, {"samples": samples, "searched": candidates}
 
 
+#: Per kind, the top-level envelope field(s) naming the **input artifact**
+#: whose bytes ``provenance.input.content_hash`` covers -- the file
+#: :func:`_verify_input_artifact` re-hashes to check that self-reported hash
+#: against the artifact itself (issue #2196).
+#:
+#: Each entry is the producing verb's own ``input_path=`` argument to
+#: :func:`klayout_tools._provenance.build_provenance`, named by the field
+#: that run echoes it back under -- so this table cannot claim to verify a
+#: hash of something the envelope does not actually point at:
+#:
+#: - ``drc``/``extract``/``erc`` -- ``file``, the layout stream each ran on.
+#: - ``lvs`` -- ``layout``: the *layout side* is what `klt lvs` hashes into
+#:   ``provenance.input`` (issue #1969), either the GDS/OASIS stream of the
+#:   ``layout.file`` request shape or the SPICE file of the pre-extracted
+#:   ``layout.netlist`` one. ``reference`` is deliberately **absent**: the
+#:   reference netlist is pinned under ``environment.reference_sha256``, a
+#:   different digest, so re-hashing it here would compare two unrelated
+#:   values and report a mismatch that is not one.
+#: - ``sim`` -- ``netlist``, the SPICE deck it simulated.
+#: - ``pex`` -- ``layout``: `klt pex` republishes its own `klt extract`
+#:   run's ``provenance`` block verbatim (``pex.py``), and that run's input
+#:   is this layout stream.
+#: - ``sta`` -- ``def_path`` when the run was given a DEF, else
+#:   ``verilog_path``, mirroring `klt sta`'s own
+#:   ``input_path = def_path if has_def else verilog_path`` branch. Ordered,
+#:   and only the first *present* field is consulted, so the two can never
+#:   be crossed.
+#:
+#: A kind absent here is never re-hashed and reports ``input_verified:
+#: null``: ``yield`` re-hashes its samples document already
+#: (:func:`_yield_samples_content_hash` -- that path reports ``True`` on its
+#: own); ``functional-verification``/``power``/``place-and-route``
+#: populate no ``provenance.input`` at all today, or echo no path for
+#: the artifact they hashed (`klt place-and-route` pins the gate-level
+#: netlist it placed but echoes only its *outputs*); ``generic`` envelopes
+#: choose their own field names by definition; ``error`` envelopes carry no
+#: verdict to anchor.
+_INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
+    "drc": ("file",),
+    "extract": ("file",),
+    "erc": ("file",),
+    "lvs": ("layout",),
+    "sim": ("netlist",),
+    "pex": ("layout",),
+    "sta": ("def_path", "verilog_path"),
+}
+
+
+def _input_artifact_candidates(
+    kind: str,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    evidence_file: str | None,
+) -> list[str]:
+    """Every filesystem path the cited envelope's own input-artifact field
+    (:data:`_INPUT_ARTIFACT_FIELDS`) could mean **from this grading
+    context** -- ``[]`` when the kind names no such field, the field is
+    absent, or its value is a shape that cannot be resolved here.
+
+    A path an envelope names is not portable: it was written relative to
+    whatever directory the producing run used, which is not necessarily the
+    one grading happens in. Rather than guess a single interpretation, this
+    returns each plausible one and lets :func:`_verify_input_artifact`
+    prefer a *match* over a mismatch, so a coincidentally same-named file
+    beside the envelope can never turn a genuinely fresh citation into a
+    reported mismatch:
+
+    - as the producing run itself named it -- :func:`_resolve_relative_to_spec`
+      (``spec["cwd"]`` for a command-backed entry, this process's cwd
+      otherwise), the same convention `klt drc --check`/`klt lvs --check`
+      re-hash a committed report under;
+    - relative to the **evidence file's own directory**, for a file-backed
+      entry. This is the case the two ``--check`` modes document as a known
+      limitation (``lvs.py``): ``klt lvs`` echoes ``layout``/``reference``
+      exactly as the *request document* gave them, so evidence committed
+      beside its inputs (``examples/signoff/`` -- ``lvs.json`` naming
+      ``layout.spice``) is only resolvable this way.
+
+    The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
+    `klt pex`'s ``layout``) is resolved against the repo root discovered
+    from the evidence file's own location, which is what ``scope: "repo"``
+    means by construction. ``scope: "external"`` carries no path at all (it
+    is ``null`` on purpose, so a host-specific absolute path never lands in
+    committed evidence) and is therefore unresolvable here -- correctly
+    reported as "not verified" rather than guessed at.
+    """
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    for field in _INPUT_ARTIFACT_FIELDS.get(kind, ()):
+        value = envelope.get(field)
+        if value is None:
+            # Not "unresolvable" -- this field simply was not the one the run
+            # hashed (`klt sta`'s DEF/Verilog branch); try the next.
+            continue
+        candidates: list[str] = []
+        if isinstance(value, str) and value:
+            candidates.append(_resolve_relative_to_spec(value, spec))
+            if evidence_dir is not None and not os.path.isabs(value):
+                candidates.append(os.path.join(evidence_dir, value))
+        elif isinstance(value, Mapping) and value.get("scope") == "repo":
+            repo_relative = value.get("path")
+            if isinstance(repo_relative, str) and repo_relative:
+                root = find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+                if root is not None:
+                    candidates.append(os.path.join(root, repo_relative))
+        # The first *present* field decides: it is the one the producing run
+        # hashed, so falling through to another on a failed resolution would
+        # verify the wrong artifact.
+        return list(dict.fromkeys(candidates))
+    return []
+
+
+def _verify_input_artifact(
+    kind: str,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    recorded_hash: Any,
+    evidence_file: str | None,
+) -> bool | None:
+    """Whether the envelope's self-reported ``recorded_hash`` still matches
+    the **input artifact it names** -- ``True``/``False``/``None``, the
+    ``input_verified`` disclosure issue #2196 adds to every ``"met"``
+    citation. See this module's "Input-artifact verification" docstring
+    section for what each value means.
+
+    ``None`` (never raising, never fabricating) whenever no comparison was
+    actually made: no recorded hash to check, no resolvable path for this
+    kind, or no candidate path that resolves to a readable file here.
+    ``False`` requires having genuinely read a named artifact and found it
+    different -- which is why a *match* on any candidate wins over a
+    mismatch on another (see :func:`_input_artifact_candidates`).
+
+    Reuses :func:`~klayout_tools._provenance.sha256_file` and its
+    ``sha256:``-prefixing convention rather than hashing a second way: a
+    digest computed differently from the one the producing run recorded
+    would report drift that is an artifact of this module, not of the
+    evidence.
+    """
+    if not isinstance(recorded_hash, str) or not recorded_hash:
+        return None
+    read_any = False
+    for candidate in _input_artifact_candidates(kind, envelope, spec, evidence_file):
+        digest = sha256_file(candidate)
+        if digest is None:
+            continue
+        read_any = True
+        if f"sha256:{digest}" == recorded_hash:
+            return True
+    return False if read_any else None
+
+
 def _grade_evidence(
     spec: dict[str, Any],
     *,
@@ -4459,6 +4917,7 @@ def _resolve_evidence(
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
     content_hash_unresolved: dict[str, Any] | None = None
+    input_verified: bool | None
     if actual_hash is None and check_kind == "yield":
         # klt yield's current JSON shape (issue #816) carries no
         # `provenance` block of its own -- see this module's "Statistical-
@@ -4466,6 +4925,21 @@ def _resolve_evidence(
         # :func:`_yield_samples_content_hash`.
         actual_hash, content_hash_unresolved = _yield_samples_content_hash(
             envelope, spec
+        )
+        # That hash *is* a live re-hash of the samples document itself, not
+        # a self-report about it, so this kind arrives at issue #2196's
+        # guarantee by construction -- `None` only when nothing could be
+        # hashed, which is the same "no comparison was made" case
+        # :func:`_verify_input_artifact` reports `None` for, and exactly the
+        # case issue #2197's `content_hash_unresolved` then names.
+        input_verified = True if actual_hash is not None else None
+    else:
+        # Issue #2196: the manifest's pinned hash is checked against
+        # `actual_hash` by the caller; this checks `actual_hash` itself
+        # against the artifact the envelope names. Disclosure only -- see
+        # this module's "Input-artifact verification" docstring section.
+        input_verified = _verify_input_artifact(
+            check_kind, envelope, spec, actual_hash, file_label
         )
 
     return (
@@ -4478,6 +4952,7 @@ def _resolve_evidence(
             "exit_status": exit_status,
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
+            "input_verified": input_verified,
         },
         None,
     )
@@ -4493,6 +4968,13 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "kind": resolution["kind"],
         "check_status": resolution["envelope"].get("status"),
         "content_hash": resolution["content_hash"],
+        # Issue #2196: was that `content_hash` checked against the input
+        # artifact itself, or only against the envelope's own claim about
+        # it? Always present -- including the `None` ("nothing was
+        # re-hashed") case, which is the one this field exists to stop
+        # being silent. See this module's "Input-artifact verification"
+        # docstring section; never consulted by any grading rule.
+        "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
     # Issue #2002: a `drc` citation also carries the three `coverage` fields
@@ -4563,11 +5045,11 @@ def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
 
 def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
     """Read the **spec document** a resolved `klt erc` citation names
-    (``envelope["spec"]``), and reduce it to the three facts T1 item 11
-    grades against -- or ``None`` when it cannot be read or parsed.
+    (``envelope["spec"]``), and reduce it to the facts T1 item 11 grades
+    against -- or ``None`` when it cannot be read or parsed.
 
     Returns ``{"supply_nets": [<name>, ...], "stackup": {<name/layer>, ...},
-    "tie_count": <int>}``:
+    "tie_count": <int>, "ties_disclosure_reason": <str> | None}``:
 
     - ``supply_nets`` -- every ``nets[]`` entry declared ``"kind":
       "supply"``, by name. Item 11 requires at least one: `klt erc` computes
@@ -4582,6 +5064,12 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
     - ``tie_count`` -- ``len(ties)``. Item 11 requires at least one for the
       same "an uncomputed check is not a clean one" reason: ``ties`` omitted
       means ``erc.missing_tie`` was never computed at all.
+    - ``ties_disclosure_reason`` -- the spec's top-level
+      ``ties_disclosure.reason`` (issue #2234), if it declared one, else
+      ``None``. Purely a human-readable detail: the actual
+      disclosed-vs-omitted *gate* reads the envelope's own
+      ``erc_coverage``, not this field -- see
+      :func:`_erc_missing_tie_disclosed`.
 
     **Why this reads a second document at all.** `klt erc`'s envelope
     (``docs/cli/erc.md``'s JSON schema) echoes the spec's *path* but not its
@@ -4614,6 +5102,12 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     ties = document.get("ties")
+    disclosure = document.get("ties_disclosure")
+    disclosure_reason = (
+        disclosure.get("reason")
+        if isinstance(disclosure, dict) and isinstance(disclosure.get("reason"), str)
+        else None
+    )
     return {
         "supply_nets": [
             entry["name"]
@@ -4631,6 +5125,14 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
             if isinstance(entry.get(field), str) and entry[field]
         },
         "tie_count": len(ties) if isinstance(ties, list) else 0,
+        # Issue #2234: the spec's own `ties_disclosure.reason`, read purely
+        # for a human-readable `detail` when item 11 renders
+        # `supply_spec_disclosed_unexpressible` -- see
+        # :func:`_resolve_erc_supply_spec`. The disclosure gate itself reads
+        # the *envelope*'s own `erc_coverage` (:func:`_erc_missing_tie_disclosed`),
+        # not this field, so a deleted/edited spec document never flips a
+        # rendered reason -- only degrades the detail text.
+        "ties_disclosure_reason": disclosure_reason,
     }
 
 
@@ -4848,6 +5350,74 @@ def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
     )
 
 
+def _erc_missing_tie_disclosed(envelope: dict[str, Any]) -> bool:
+    """Whether the cited `klt erc` run declares zero ``ties[]`` *and*
+    explicitly disclosed why no tap can be expressed (issue #2234).
+
+    `klt erc` records the undeclared ``erc.missing_tie`` work in
+    ``erc_coverage.inapplicable`` with a reason of either
+    ``"no_ties_declared"`` (``ties`` simply omitted/empty, no explanation)
+    or ``"ties_disclosed_unexpressible"`` (the spec's top-level
+    ``ties_disclosure`` was given) -- see ``docs/cli/erc.md``. Both describe
+    the identical "zero ties" fact reported by :func:`_erc_supply_spec`'s
+    ``tie_count == 0``; this function is what lets
+    :func:`_resolve_erc_supply_spec` tell them apart and render
+    :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` instead of the plain
+    :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` for the disclosed case --
+    :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` is still returned either way (a
+    disclosure proves nothing about the tap's actual connectivity, so item
+    11 stays ``"unmet"`` regardless); only the *reason* differs.
+
+    Matched on ``erc_coverage.inapplicable`` (not ``skipped`` --
+    :func:`_erc_missing_tie_skipped` covers a *declared but degenerate* tie,
+    a different case) and on the reason string itself, since presence alone
+    does not distinguish disclosed from undisclosed here -- both render an
+    ``erc.missing_tie:`` entry in ``inapplicable`` regardless. An envelope
+    with no ``erc_coverage`` block (every report before #2179) discloses
+    nothing and is graded exactly as it was.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return False
+    return any(
+        isinstance(record, dict)
+        and isinstance(record.get("id"), str)
+        and record["id"].startswith("erc.missing_tie:")
+        and record.get("reason") == "ties_disclosed_unexpressible"
+        for record in block.get("inapplicable") or []
+    )
+
+
+def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
+    """The cited `klt erc` run's ``erc_coverage.checked_by_assertion``
+    (issue #2234): the ``erc.missing_tie`` work identities whose tap region
+    came from a caller **assertion** (``ties[].tap_boxes``) rather than
+    PDK-marker narrowing -- ``[]`` for every run that used none, and for
+    every report produced before the field existed.
+
+    Carried into a ``"met"`` item 11 citation's ``power_delivery`` block
+    (:func:`_grade_power_delivery`) for the same reason `klt erc` grades it
+    as its own classification rather than folding it into ``checked``: an
+    asserted tie is real, evaluated work -- the geometry was intersected and
+    the connectivity walked, and a degenerate or unmatched assertion is
+    rejected exactly as any other narrowing form is (``docs/cli/erc.md`` →
+    "A tie with no distinguishing marker layer at all") -- but *which
+    geometry counts as the tap* rested on the caller's word rather than on a
+    drawn marker. That is a provenance difference a reader of the verdict of
+    record should not have to re-open the cited ERC envelope to discover.
+    It does not change the verdict: item 11 is ``"met"`` on an asserted tie
+    exactly as on a marker-derived one.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return []
+    return [
+        identity
+        for identity in block.get("checked_by_assertion") or []
+        if isinstance(identity, str)
+    ]
+
+
 def _resolve_erc_supply_spec(
     erc: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
@@ -4870,6 +5440,14 @@ def _resolve_erc_supply_spec(
     if supply_spec is None or not supply_spec["supply_nets"]:
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if supply_spec["tie_count"] == 0:
+        # Issue #2234: same "zero ties" fact either way, but a disclosed
+        # stream gets its own reason -- see `_erc_missing_tie_disclosed`.
+        if _erc_missing_tie_disclosed(erc["envelope"]):
+            return (
+                None,
+                _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE,
+                {"ties_disclosure_reason": supply_spec["ties_disclosure_reason"]},
+            )
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if _erc_missing_tie_skipped(erc["envelope"]):
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
@@ -4931,6 +5509,7 @@ def _grade_power_delivery(
     ``stale_evidence``/``unverifiable_provenance``), never a
     power-delivery-specific one. Item-specific
     reasons (:data:`_REASON_NO_PDN`, :data:`_REASON_SUPPLY_SPEC_INCOMPLETE`,
+    :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
@@ -5005,6 +5584,11 @@ def _grade_power_delivery(
         "power_connectivity_status": (
             lvs["envelope"].get("power_connectivity") or {}
         ).get("status"),
+        # Issue #2234: which of the cited run's `erc.missing_tie` checks
+        # rested on a caller assertion (`ties[].tap_boxes`) rather than on
+        # PDK-marker narrowing -- `[]` for a purely marker-derived (or
+        # pre-#2234) run. See `_erc_ties_checked_by_assertion`.
+        "ties_checked_by_assertion": _erc_ties_checked_by_assertion(erc["envelope"]),
     }
     return "met", None, citation, {}
 
@@ -5240,6 +5824,8 @@ def build_fleet_report(
                 "git_tag": None,
                 "dirty": False,
                 "is_release": False,
+                # A content hash of the grading code itself (issue #2216).
+                "grading_ruleset_id": "sha256:...",
             },
             "blocks": [
                 {
@@ -5248,6 +5834,10 @@ def build_fleet_report(
                     "kind": "analog",
                     "tier": "T1",
                     "t1_item_count": 11,
+                    # What this build's own doc would have rendered
+                    # (issue #2202) -- equal unless the parsed doc's item
+                    # list differs; None if that doc is unreadable.
+                    "build_t1_item_count": 11,
                     "t1_met_count": 11,
                     "source_doc_content_hash": "sha256:...",
                     "blocking_item": None,
@@ -5268,6 +5858,7 @@ def build_fleet_report(
                     "kind": "analog",
                     "tier": None,
                     "t1_item_count": 11,
+                    "build_t1_item_count": 11,
                     "t1_met_count": 3,
                     "source_doc_content_hash": "sha256:...",
                     "blocking_item": {
@@ -5292,23 +5883,29 @@ def build_fleet_report(
         }
 
     ``blocking_item`` is the one T1 item this roll-up names as the block's
-    blocker, or ``None`` when ``tier == "T1"``. It is the first rendered
-    unmet T1 item (in the same order :func:`build_tier_report` renders items
-    -- item id, then partition for a mixed-signal block) that has a check
-    behind it; only when *no* such item is unmet does it fall back to the
-    first unmet **structurally ungradeable** item (items 1, 2, 9 and 10 --
-    see :func:`_is_structurally_ungradeable_item` and
-    :func:`_blocking_t1_item` for the full rule and why, issue #2178). It is
-    deliberately a single item, not the full unmet list: the roll-up's job is
-    "what is the next thing to fix", not a re-rendering of the per-block
-    report (open that block's own ``--manifest`` report for the full
-    item-by-item detail).
+    blocker, or ``None`` when ``tier == "T1"``. Candidates are taken in the
+    order :func:`build_tier_report` renders items (item id, then partition
+    for a mixed-signal block), ranked in three classes
+    (:func:`_blocking_t1_item`, issues #2178 and #2203):
 
-    ``ungraded_items`` is every unmet structurally-ungradeable T1 item, in
-    render order and in ``blocking_item``'s own shape
-    (:func:`_ungraded_t1_items`) -- the rows ``blocking_item`` steps over, so
-    that demoting them never silently hides them. ``[]`` for a block that
-    cites all four, and for a block at ``tier: "T1"``.
+    1. an unmet item **this build has no grading rules for**
+       (``graded_by_build: False``) wins outright -- the roll-up could not
+       evaluate it at all, which no other explanation outranks and which no
+       manifest edit can clear;
+    2. otherwise the first unmet item that has a check behind it;
+    3. otherwise the first unmet **structurally ungradeable** item (items 1,
+       2, 9 and 10, which have no `klt` verb at all).
+
+    It is deliberately a single item, not the full unmet list: the roll-up's
+    job is "what is the next thing to fix", not a re-rendering of the
+    per-block report (open that block's own ``--manifest`` report for the
+    full item-by-item detail).
+
+    ``ungraded_items`` is every unmet T1 item with no runnable check behind
+    it -- both ungradeable classes above -- in render order and in
+    ``blocking_item``'s own shape (:func:`_ungraded_t1_items`), so that
+    ranking them never silently hides them. ``[]`` for a block that cites all
+    four, and for a block at ``tier: "T1"``.
 
     No evidence is read or graded here beyond what :func:`build_tier_report`
     already did -- this function only reduces its output, so a block's
@@ -5344,12 +5941,21 @@ def build_fleet_report(
     see which `klt` produced it. It is reported once for the whole roll-up
     rather than per block -- one process grades every block. Per-item
     ``graded_by_build`` lives in each block's own tier report; here an item
-    this build cannot grade surfaces as an ``ungraded_items`` row (and, when
-    it is the only gap left, as the ``blocking_item`` fallback), because an
-    item no grading table names is by construction structurally ungradeable
-    too (:func:`_is_structurally_ungradeable_item`) -- with
-    ``reason: "ungradeable_by_build"`` naming the *build*, not the manifest,
-    as what is missing.
+    this build cannot grade surfaces as an ``ungraded_items`` row **and** as
+    the ``blocking_item`` (class 1 above, issue #2203), with
+    ``reason: "ungradeable_by_build"`` -- or ``"no_evidence"`` if it was
+    never cited -- naming the *build*, not the manifest, as what is missing.
+
+    ``blocks[].build_t1_item_count`` (issue #2202) is the *reverse*
+    divergence, and unlike per-item ``graded_by_build`` it is carried here
+    as well as in each block's own ``--manifest`` report -- because
+    ``blocks[].t1_item_count``, the count whose shortfall it discloses, is
+    carried here too. A row reading ``T1: 9/9 items met`` against a doc older
+    than this build is a weaker claim than ``11/11`` and must not be
+    indistinguishable from it in the roll-up either. Its value is identical
+    across rows within one roll-up for blocks of the same ``kind``
+    (``tiers_doc`` and the build are both shared), and doubles for a
+    ``mixed-signal`` row exactly as ``t1_item_count`` does.
 
     Raises :class:`SignoffError` if ``fleet`` is not a JSON object, its
     ``blocks`` field is missing, not a JSON array, or empty; if any
@@ -5407,6 +6013,11 @@ def build_fleet_report(
                 "kind": tier_report["kind"],
                 "tier": tier_report["tier"],
                 "t1_item_count": tier_report["t1_item_count"],
+                # Issue #2202: carried here too, unlike per-item
+                # `graded_by_build`, because `t1_item_count` itself is
+                # carried here -- the shortfall this discloses is a property
+                # of that count, so the two must never be rendered apart.
+                "build_t1_item_count": tier_report["build_t1_item_count"],
                 "t1_met_count": tier_report["t1_met_count"],
                 "source_doc_content_hash": tier_report["source_doc_content_hash"],
                 "blocking_item": blocking_item,
@@ -5430,6 +6041,136 @@ def build_fleet_report(
         "build": _build_identity(),
         "blocks": blocks,
     }
+
+
+#: The tier/fleet-report paths ``--check`` excludes from its drift diff
+#: (issue #2249): the ``build`` block, and only it.
+#:
+#: This is the same exclusion
+#: :data:`~._report_verify.VOLATILE_PROVENANCE_PATHS` makes for the five
+#: verbs that already have ``--check`` ("tool identity is excluded from the
+#: diff, and only tool identity" -- ``docs/json-contract.md``), applied to
+#: the field *this* verb's reports carry it in.
+#:
+#: **Why it has to be excluded at all.** A ``build`` block states how the
+#: *install* was provisioned, not only which commit it came from, so two
+#: byte-legitimate installs of the **same pinned commit** can report
+#: different ones -- and therefore different report bytes -- while grading
+#: every item identically:
+#:
+#: - ``uv tool install "klayout-tools @ git+URL@<sha>"`` builds in a
+#:   package-manager-owned scratch checkout, so ``hatch_build.py`` records
+#:   real git facts: ``git_commit: "<sha>"``, ``version: "X.Y.Z+g<sha>"``
+#:   (and, before issue #2248, ``dirty: true`` from that checkout's own
+#:   build-tool residue).
+#: - ``pip install`` of a source *tarball* of the same ``<sha>`` (a GitHub
+#:   ``/archive/<sha>.tar.gz``, a vendored copy) builds in a tree with no
+#:   ``.git`` at all, so the hook records nothing and the same commit
+#:   reports ``git_commit: null``, ``version: "X.Y.Z+unknown"``,
+#:   ``is_release: null``.
+#:
+#: Neither is wrong -- each honestly describes the build it identifies, which
+#: is exactly why issue #2176 put it in the report -- and no fix to ``dirty``
+#: can collapse the second case, because the facts were never present to
+#: record. So "did this committed report drift" cannot be answered by
+#: comparing report *bytes*; it is answered by comparing everything the
+#: grading actually depends on, which is every other field. Every one of
+#: those is a function of the manifest, the cited evidence and the tiers doc
+#: -- including ``source_doc`` (normalised to
+#: :data:`~.design_evidence_tiers.CANONICAL_DOC_LABEL` regardless of whether
+#: this install reads its bundled copy or a checkout's ``docs/``) and
+#: ``build_t1_item_count``/``items[].graded_by_build`` (properties of the
+#: grading code, identical for a given commit however it was installed).
+#:
+#: A committed report that carries **no** ``build`` block at all (rendered
+#: before issue #2176) is unaffected: an excluded path is skipped whether or
+#: not either side has it, so such a report still verifies on its graded
+#: content rather than reporting one spurious whole-block drift entry.
+VOLATILE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset({("build",)})
+
+
+def check_tier_report(
+    report_path: str, manifest: dict[str, Any], *, tiers_doc: str | None = None
+) -> dict[str, Any]:
+    """``klt signoff --manifest M --check REPORT`` (issue #2249): verify that
+    a previously committed tier report at ``report_path`` still reproduces
+    from manifest ``M``, ignoring build identity.
+
+    Re-grades ``manifest`` (:func:`build_tier_report` -- the same work
+    rendering the report does, including actually running any command-backed
+    evidence it cites) and diffs the result against the committed report,
+    excluding :data:`VOLATILE_REPORT_PATHS`. ``status: "match"`` when nothing
+    else moved; ``"drifted"``, naming every field that did, otherwise --
+    a changed item ``status``/``reason``, a moved citation ``content_hash``,
+    a different ``source_doc_content_hash`` (the checklist itself changed), a
+    different ``t1_met_count``.
+
+    This is the mode a consumer gating on "does the committed evidence still
+    hold" should use **instead of byte-comparing the report file against a
+    fresh render**: that comparison fails between two correct installs of the
+    same pinned commit, on nothing but how each was provisioned (see
+    :data:`VOLATILE_REPORT_PATHS`).
+
+    Raises :class:`SignoffError` for a missing/unparseable committed report,
+    or one that is not a tier report at all -- never a traceback.
+    """
+    committed = _load_committed_signoff_report(report_path, "items", "--manifest")
+    fresh = build_tier_report(manifest, tiers_doc=tiers_doc)
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_REPORT_PATHS,
+        mode="check",
+    )
+
+
+def check_fleet_report(
+    report_path: str, fleet: dict[str, Any], *, tiers_doc: str | None = None
+) -> dict[str, Any]:
+    """``klt signoff --fleet F --check REPORT`` (issue #2249): the
+    :func:`check_tier_report` contract, one level up -- verify a committed
+    *fleet* roll-up still reproduces from fleet manifest ``F``.
+
+    Inherits everything, including the exclusion, by re-rendering through
+    :func:`build_fleet_report` (which itself calls :func:`build_tier_report`
+    once per block): a roll-up carries exactly one ``build`` block, at the
+    top level, so the same one-path exclusion covers it.
+    """
+    committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
+    fresh = build_fleet_report(fleet, tiers_doc=tiers_doc)
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_REPORT_PATHS,
+        mode="check",
+    )
+
+
+def _load_committed_signoff_report(
+    report_path: str, required_key: str, flag: str
+) -> dict[str, Any]:
+    """Load the committed report ``--check`` will diff against, refusing one
+    the requested mode could not have produced (issue #2249).
+
+    :func:`~._report_verify.load_committed_report` already rejects a missing,
+    unparseable, or non-object file. This adds the one shape question that
+    matters here: a tier report always carries ``items``, a fleet roll-up
+    always carries ``blocks``, so pointing ``--manifest --check`` at a fleet
+    roll-up (or at an unrelated JSON object) is refused as a *failure to
+    verify* -- exit ``1`` -- rather than diffed into a "drifted" verdict
+    listing every field of both shapes, which would read as evidence drift
+    when the real fault is the wrong file path.
+    """
+    committed = load_committed_report(report_path, SignoffError)
+    if required_key not in committed:
+        raise SignoffError(
+            f"committed report '{report_path}' carries no '{required_key}' key "
+            f"-- {flag} --check expects a report this mode produced (a "
+            f"'{required_key}' array is what identifies one); check the path"
+        )
+    return committed
 
 
 def _read_fleet_block_manifest(raw_entry: Any, index: int) -> tuple[str | None, Any]:
@@ -5491,30 +6232,63 @@ def _blocking_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     as the block's blocker, or ``None`` if every T1 item is met.
 
     The candidate order is :func:`build_tier_report`'s own item order (item
-    id, then partition), with one rule layered on top (issue #2178): a
-    **structurally ungradeable** item (:func:`_is_structurally_ungradeable_item`
-    -- items 1, 2, 9 and 10 today) is only reported as *the* blocker when no
-    gradeable T1 item is unmet. Concretely:
+    id, then partition), with a **three-class priority** layered on top
+    (issues #2178, #2203). Concretely:
 
-    1. the first unmet T1 item that has a check behind it, if any;
-    2. otherwise the first unmet structurally-ungradeable T1 item;
-    3. otherwise ``None`` (every T1 item is met).
+    1. the first unmet T1 item this build has no grading rules for at all
+       (:func:`_is_ungradeable_by_build`), if any;
+    2. otherwise the first unmet T1 item that has a check behind it;
+    3. otherwise the first unmet **structurally ungradeable** T1 item
+       (:func:`_is_structurally_ungradeable_item` -- items 1, 2, 9 and 10
+       today);
+    4. otherwise ``None`` (every T1 item is met).
 
-    Rule 1 is the whole point. ``docs/cli/signoff.md``'s "Items 1, 2, 9, and
-    10" section tells a manifest author that the honest default for those
-    four is to leave them **uncited**, since no `klt` verb can check their
-    topical relevance -- which means every honestly-authored manifest renders
-    item 1 ``unmet``/``no_evidence`` *by construction*. Reducing on "first
-    unmet in render order" therefore answered "blocked on item 1" for every
-    such block, hiding whatever its real gaps were. Skipping those four keeps
-    the answer to "what is the next thing to fix" a thing that can actually
-    be fixed by running something.
+    **Rule 2 over rule 3 is issue #2178's rule.** ``docs/cli/signoff.md``'s
+    "Items 1, 2, 9, and 10" section tells a manifest author that the honest
+    default for those four is to leave them **uncited**, since no `klt` verb
+    can check their topical relevance -- which means every honestly-authored
+    manifest renders item 1 ``unmet``/``no_evidence`` *by construction*.
+    Reducing on "first unmet in render order" therefore answered "blocked on
+    item 1" for every such block, hiding whatever its real gaps were.
+    Demoting those four keeps the answer to "what is the next thing to fix" a
+    thing that can actually be fixed by running something. Rule 3 then keeps
+    the degenerate case honest rather than silently clean: a block whose
+    *only* unmet items are those four is still not T1, so it must still name
+    a blocker -- one of those four -- never ``None``.
 
-    Rule 2 keeps the degenerate case honest rather than silently clean: a
-    block whose *only* unmet items are the ungradeable four is still not T1,
-    so it must still name a blocker -- one of those four -- never ``None``.
-    The full set skipped by rule 1 is reported alongside as the roll-up row's
-    ``ungraded_items`` (:func:`_ungraded_t1_items`), so nothing is dropped.
+    **Rule 1 is issue #2203's rule, and it is the deliberate opposite.**
+    Before it, an ``ungradeable_by_build`` row (an item id only a
+    ``--tiers-doc``/``$KLT_TIERS_DOC`` copy of the doc lists) was swept into
+    rule 3 *incidentally*, because it satisfies
+    :func:`_is_structurally_ungradeable_item` too -- an id no grading table
+    names is structurally ungradeable by that function's own derivation. But
+    #2178's argument for demoting an item does not transfer to it, and in
+    fact inverts:
+
+    - **Items 1/2/9/10 are demoted because they are expected.** Every honest
+      manifest has them unmet; they are the roll-up's background noise, and
+      a weak answer to "why isn't this block T1 yet".
+    - **An ``ungradeable_by_build`` row is never expected**, and it is the
+      *sharpest* available answer to that question: it says this roll-up
+      could not evaluate that item at all. Every other explanation it could
+      print is conditional on it being able to grade the checklist it was
+      handed; when it cannot, naming some other item implies a completeness
+      the verdict does not have. It is also the only class of blocker a
+      manifest edit cannot clear -- a ``graded_by_build: False`` item can
+      never render ``"met"`` on this build, so "blocked on item 4, run `klt
+      lvs`" would point the reader at work that cannot get this block to T1.
+      The fix is a newer `klt` (or grading against the doc this one ships).
+
+    So it outranks *both* other classes, cited (``ungradeable_by_build``) or
+    uncited (``no_evidence``) -- the class is read from ``graded_by_build``,
+    not from ``reason``, because the build is the gap either way.
+
+    The full set demoted by rules 1 and 2 -- both ungradeable classes -- is
+    reported alongside as the roll-up row's ``ungraded_items``
+    (:func:`_ungraded_t1_items`), so nothing is dropped. When rule 1 fires,
+    the named blocker is itself one of those rows; that was already true of
+    rule 3's fallback before #2203, so the two fields' relationship is
+    unchanged.
 
     T2-T4 ladder rows are never candidates -- they are always ``"unmet"`` by
     design (this toolkit's closed loop targets T1) and are not what gates the
@@ -5525,31 +6299,65 @@ def _blocking_t1_item(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     tier report can never disagree about *why* an item is unmet -- only about
     which unmet item is worth naming first.
     """
-    ungradeable_fallback: dict[str, Any] | None = None
+    # One pass, three "first match" slots rather than an early return: rule 1
+    # dominates rules 2 and 3, and an ungradeable-by-build item can sit
+    # anywhere in render order, so no candidate is final until every T1 row
+    # has been seen.
+    by_build: dict[str, Any] | None = None
+    gradeable: dict[str, Any] | None = None
+    structural: dict[str, Any] | None = None
+
     for item in items:
         if item["tier"] != "T1" or item["status"] == "met":
             continue
-        if _is_structurally_ungradeable_item(item["id"]):
-            if ungradeable_fallback is None:
-                ungradeable_fallback = _blocking_item_view(item)
-            continue
-        return _blocking_item_view(item)
-    return ungradeable_fallback
+        # Order matters: today every ungradeable-by-build id is *also*
+        # structurally ungradeable, so this branch has to be asked first for
+        # the two classes to stay distinguishable at all.
+        if _is_ungradeable_by_build(item):
+            if by_build is None:
+                by_build = _blocking_item_view(item)
+        elif _is_structurally_ungradeable_item(item["id"]):
+            if structural is None:
+                structural = _blocking_item_view(item)
+        elif gradeable is None:
+            gradeable = _blocking_item_view(item)
+
+    for candidate in (by_build, gradeable, structural):
+        if candidate is not None:
+            return candidate
+    return None
 
 
 def _ungraded_t1_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every unmet, **structurally ungradeable** T1 item in ``items``
-    (:func:`_is_structurally_ungradeable_item`), in render order -- exactly
-    the rows :func:`_blocking_t1_item`'s rule 1 steps over, trimmed to the
-    same ``{"id", "title", "partition", "reason"}`` shape ``blocking_item``
-    uses (issue #2178).
+    """Every unmet T1 item in ``items`` with **no runnable check behind it in
+    this roll-up**, in render order, trimmed to the same ``{"id", "title",
+    "partition", "reason"}`` shape ``blocking_item`` uses (issues #2178,
+    #2203).
 
-    Reported so that skipping those items in the blocker reduction *demotes*
-    them rather than hides them: a reader still sees that this block claims
-    items 1/2/9/10 with nothing cited behind them, but is no longer told that
-    is the one thing standing between it and T1 when a real, runnable gap
-    exists elsewhere. Empty for a block that cites all four (met items are
-    never listed) and for a block at ``tier: "T1"``.
+    That is the union of the two ungradeable classes
+    :func:`_blocking_t1_item` ranks separately:
+
+    - **structurally ungradeable** (:func:`_is_structurally_ungradeable_item`
+      -- items 1, 2, 9 and 10 today): no `klt` verb exists for the id at all;
+    - **ungradeable by this build** (:func:`_is_ungradeable_by_build`): an id
+      only a ``--tiers-doc``/``$KLT_TIERS_DOC`` copy of the doc lists, which
+      this build has no rules for.
+
+    The union is written out explicitly even though the first predicate
+    happens to cover both populations today (issue #2203): this function's
+    contract is the union, not whatever one derived predicate incidentally
+    spans, and relying on that coincidence is exactly what made the two
+    indistinguishable in the blocker reduction.
+
+    Reported so that ranking those items below a runnable gap *demotes* them
+    rather than hides them: a reader still sees that this block claims items
+    1/2/9/10 with nothing cited behind them, but is no longer told that is
+    the one thing standing between it and T1 when a real, runnable gap exists
+    elsewhere. Empty for a block that cites all four (met items are never
+    listed) and for a block at ``tier: "T1"``.
+
+    Unchanged by #2203's re-ranking: which rows are listed here is the same
+    set as before -- only which of them ``blocking_item`` names can move.
 
     Like :func:`_drc_coverage_rows`, this reduces the per-block tier report
     this roll-up already computed and reads no evidence of its own.
@@ -5559,7 +6367,10 @@ def _ungraded_t1_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         for item in items
         if item["tier"] == "T1"
         and item["status"] != "met"
-        and _is_structurally_ungradeable_item(item["id"])
+        and (
+            _is_structurally_ungradeable_item(item["id"])
+            or _is_ungradeable_by_build(item)
+        )
     ]
 
 

@@ -131,6 +131,41 @@ def test_resolve_reports_unknown_not_false_without_any_git_facts():
     assert build_identity._resolve(None, None, None, "1.2.3")["is_release"] is None
 
 
+def test_identity_of_one_commit_is_provisioning_route_dependent_by_design():
+    """Issue #2249: two byte-legitimate installs of the **same commit** can
+    report different identities, and that is correct -- which is why a
+    consumer verifying a committed `klt signoff` report must exclude the
+    report's `build` block rather than byte-compare it (see
+    `signoff.VOLATILE_REPORT_PATHS`, and `klt signoff --check`).
+
+    The divergence survives *any* fix to `dirty` (issue #2248 restricted the
+    build hook's probe to tracked files, which collapses the
+    `uv`-git-cache-residue case): a build made from a source **tarball** of
+    the same commit -- a GitHub `/archive/<sha>.tar.gz`, a vendored copy --
+    has no `.git` at all, so `hatch_build.git_identity()` returns `None`, no
+    `_build_info.py` is recorded, and the same commit honestly reports
+    `+unknown` with `git_commit: None`. The facts were never present to
+    record; no policy change here can invent them.
+    """
+    commit = "a" * 40
+    from_git_checkout = build_identity._resolve(commit, None, False, "1.2.3")
+    from_source_tarball = build_identity._resolve(None, None, None, "1.2.3")
+
+    assert from_git_checkout != from_source_tarball
+    assert build_identity.format_build_version("1.2.3", from_git_checkout) == (
+        f"1.2.3+g{commit[:12]}"
+    )
+    assert (
+        build_identity.format_build_version("1.2.3", from_source_tarball)
+        == "1.2.3+unknown"
+    )
+    # Neither is a release claim, and neither is wrong about the build it
+    # describes -- the report-side exclusion is what makes the two
+    # *comparable*, not a change to either of these.
+    assert from_git_checkout["is_release"] is False
+    assert from_source_tarball["is_release"] is None
+
+
 # --------------------------------------------------------------------------- #
 # live checkout probing
 # --------------------------------------------------------------------------- #
@@ -354,6 +389,7 @@ def test_version_report_shape():
         "git_tag",
         "dirty",
         "is_release",
+        "grading_ruleset_id",
         "klayout_version",
         "klayout_version_expected",
     }
@@ -361,6 +397,7 @@ def test_version_report_shape():
     assert report["package_version"] == __version__
     assert report["version"].startswith(__version__)
     assert report["is_release"] in (True, False, None)
+    assert report["grading_ruleset_id"].startswith("sha256:")
     assert report["klayout_version"] is None or isinstance(
         report["klayout_version"], str
     )
@@ -523,6 +560,88 @@ def test_version_report_includes_klayout_fields(monkeypatch):
     report = build_identity.version_report()
     assert report["klayout_version"] == "0.30.12"
     assert report["klayout_version_expected"] == "0.30.10"
+
+
+# --------------------------------------------------------------------------- #
+# grading_ruleset_id (issue #2216) -- distinguishing installs that claim the
+# same `klt` version but ship different `signoff.py` grading rules.
+# --------------------------------------------------------------------------- #
+
+
+def test_grading_ruleset_id_is_a_sha256_prefixed_hash():
+    ruleset_id = build_identity.grading_ruleset_id()
+    assert ruleset_id is not None
+    assert ruleset_id.startswith("sha256:")
+    assert len(ruleset_id) == len("sha256:") + 64
+
+
+def test_grading_ruleset_id_is_stable_across_calls():
+    """Same running build, called twice -- must not fabricate churn."""
+    assert build_identity.grading_ruleset_id() == build_identity.grading_ruleset_id()
+
+
+def test_grading_ruleset_id_identical_for_byte_identical_content_at_a_different_path(
+    tmp_path,
+):
+    """AC: a registry wheel and a `git+...` snapshot of the same tag ship
+    byte-identical `signoff.py` source at different install paths (neither
+    has the other's `.git` history to compare against) -- the id must match
+    regardless of where the file physically lives."""
+    real_path = build_identity._grading_module_path()
+    content = Path(real_path).read_bytes()
+
+    copy_a = tmp_path / "install_a" / "signoff.py"
+    copy_b = tmp_path / "install_b" / "signoff.py"
+    copy_a.parent.mkdir()
+    copy_b.parent.mkdir()
+    copy_a.write_bytes(content)
+    copy_b.write_bytes(content)
+
+    def _hash_at(path: Path) -> str | None:
+        monkeypatch_target = str(path)
+        original = build_identity._grading_module_path
+        build_identity._grading_module_path = lambda: monkeypatch_target
+        try:
+            return build_identity.grading_ruleset_id()
+        finally:
+            build_identity._grading_module_path = original
+
+    id_a = _hash_at(copy_a)
+    id_b = _hash_at(copy_b)
+    assert id_a == id_b == build_identity.grading_ruleset_id()
+
+
+def test_grading_ruleset_id_changes_when_the_grading_module_content_changes(
+    tmp_path, monkeypatch
+):
+    """AC: the identifier changes when `signoff.py`'s grading logic changes."""
+    module_copy = tmp_path / "signoff.py"
+    module_copy.write_text("# grading logic, version A\n")
+    monkeypatch.setattr(
+        build_identity, "_grading_module_path", lambda: str(module_copy)
+    )
+    before = build_identity.grading_ruleset_id()
+
+    module_copy.write_text("# grading logic, version B -- a rule changed\n")
+    after = build_identity.grading_ruleset_id()
+
+    assert before != after
+    assert before is not None and before.startswith("sha256:")
+    assert after is not None and after.startswith("sha256:")
+
+
+def test_grading_ruleset_id_none_when_the_module_is_missing(tmp_path, monkeypatch):
+    missing = tmp_path / "does-not-exist" / "signoff.py"
+    monkeypatch.setattr(build_identity, "_grading_module_path", lambda: str(missing))
+    assert build_identity.grading_ruleset_id() is None
+
+
+def test_version_report_includes_grading_ruleset_id(monkeypatch):
+    monkeypatch.setattr(
+        build_identity, "grading_ruleset_id", lambda: "sha256:" + "a" * 64
+    )
+    report = build_identity.version_report()
+    assert report["grading_ruleset_id"] == "sha256:" + "a" * 64
 
 
 def test_version_flag_does_not_probe_git_for_unrelated_commands(monkeypatch):

@@ -209,9 +209,19 @@ from ._paths import _load_request_json, validate_request_shape
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
+    _content_hash,
     _yosys_version,
     build_provenance,
     wasi_sandbox_hint_if_applicable,
+)
+from ._report_verify import (
+    VOLATILE_FLOW_PATHS,
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    load_committed_report,
+    strip_keys,
 )
 from .arith_gen import (
     ARCHITECTURES as ADDER_ARCHITECTURES,
@@ -3616,3 +3626,202 @@ def _compute_baseline(
         )
     result["delta_pct"] = delta_pct
     return result
+
+
+# --------------------------------------------------------------------------- #
+# --check / --rerun: verify a previously committed report (issue #2224)
+# --------------------------------------------------------------------------- #
+
+#: Run-scoped bookkeeping keys dropped from *both* sides of a ``--rerun``
+#: diff (issue #2224), via :func:`klayout_tools._report_verify.strip_keys`.
+#:
+#: Every one of these is a name (or a path derived from a name) this module
+#: mints fresh per invocation -- ``run_id`` defaults to a ``uuid4`` and every
+#: artifact path below is written *inside* ``.klt/synthesize/<run_id>/`` -- so
+#: two runs of the identical request against identical sources always
+#: disagree on them. None of them is verdict-bearing: what the run *found*
+#: lives in ``instance_count``/``area_um2``/``timing``/``sta``/``structural``/
+#: ``warnings``/``equivalence.status``/``arithmetic.selected_architecture``,
+#: all of which stay in the diff. A consumer that wants the fresh artifact
+#: paths reads them off the embedded ``fresh`` report, which is never
+#: canonicalized.
+RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset(
+    {
+        "run_id",
+        "netlist_path",
+        "script_path",
+        "run_script_path",
+        "restructured_netlist_path",
+        "log_path",
+        "stage2_script_path",
+        "stage2_log_path",
+    }
+)
+
+
+def _canonicalize_synthesize_report_for_rerun_diff(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """``report`` with :data:`RERUN_BOOKKEEPING_KEYS` removed at every depth
+    -- the comparison view :func:`rerun_synthesize_report` diffs, never what
+    it embeds as ``fresh``. See :func:`klayout_tools._report_verify.strip_keys`
+    for why the exclusion is keyed by name rather than by path."""
+    return strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+
+
+def _synthesize_provenance_hashes(
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Re-derive ``(input_content_hash, deck_content_hash)`` for the request
+    at ``request_path`` **without invoking Yosys** -- the cheap half of
+    :func:`check_synthesize_report`.
+
+    Deliberately mirrors :func:`run_synthesize`'s own hashing, step for step:
+    the sources are resolved through the same :func:`_resolve_sources`, a
+    single source hashes through :func:`klayout_tools._provenance._content_hash`
+    (what :func:`build_provenance`'s ``input_path`` does) and multiple sources
+    through :func:`klayout_tools._provenance._combined_content_hash` (what
+    :func:`run_synthesize` substitutes for the multi-source case), and the
+    liberty resolves through the same :func:`_resolve_liberty`. Any divergence
+    here would show up as permanent, unexplained drift on a report that never
+    moved, so there is exactly one rule and both call sites follow it.
+
+    Raises :class:`SynthesizeError` for a request that cannot be read,
+    validated, or resolved -- never a traceback.
+    """
+    request = load_request(request_path)
+    request_dir = os.path.dirname(os.path.abspath(request_path))
+    resolved_sources = _resolve_sources(request["sources"], request_dir)
+
+    pdk_spec = request["pdk"]
+    if not isinstance(pdk_spec, dict):
+        raise SynthesizeError("request.pdk must be a JSON object")
+    cell_library = pdk_spec.get("cell_library")
+    if not isinstance(cell_library, str) or not cell_library:
+        raise SynthesizeError("request.pdk.cell_library is required")
+    liberty_path, _corner, _pdk_info = _resolve_liberty(
+        cell_library,
+        pdk_spec.get("corner"),
+        variant=pdk_variant,
+        root=pdk_root,
+    )
+
+    if len(resolved_sources) == 1:
+        input_hash = _content_hash(resolved_sources[0])
+    else:
+        input_hash = _combined_content_hash(resolved_sources)
+    return input_hash, _content_hash(liberty_path)
+
+
+def check_synthesize_report(
+    report_path: str,
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+) -> dict[str, Any]:
+    """``klt synthesize <request> --check <report>`` (cheap mode, issue
+    #2224): verify a previously committed ``klt synthesize --format json``
+    report at ``report_path`` still reproduces from the request at
+    ``request_path``, without invoking Yosys at all.
+
+    Re-resolves the request's RTL sources and standard-cell liberty and
+    re-hashes both (:func:`_synthesize_provenance_hashes`), comparing each
+    against the ``sha256:``-prefixed digest the committed report already
+    recorded in ``provenance.input.content_hash``/``provenance.deck
+    .content_hash``. Returns the shared ``--check`` payload built by
+    :func:`klayout_tools._report_verify.build_check_result` -- ``status:
+    "match"`` when both agree, ``"drifted"`` (naming which one moved)
+    otherwise -- exactly the contract ``klt drc --check`` established
+    (issue #1106).
+
+    A recorded hash that is itself ``None`` never counts as a match; see
+    :func:`klayout_tools._report_verify.hash_check`. Tool identity
+    (``engine_version``, ``provenance.klt_version``) is deliberately **not**
+    among the checks, for the same reason ``--rerun`` excludes
+    :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS`: a Yosys upgrade
+    that leaves the synthesis result untouched is not evidence drift, and
+    reporting it as drift would train a consumer to ignore the verdict.
+
+    Raises :class:`SynthesizeError` for a missing/unparseable committed
+    report or an unresolvable request -- never a traceback.
+    """
+    committed = load_committed_report(report_path, SynthesizeError)
+    input_hash, deck_hash = _synthesize_provenance_hashes(
+        request_path, pdk_variant=pdk_variant, pdk_root=pdk_root
+    )
+    checks = [
+        hash_check(
+            "provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            input_hash,
+        ),
+        hash_check(
+            "provenance.deck.content_hash",
+            get_path(committed, ("provenance", "deck", "content_hash")),
+            deck_hash,
+        ),
+    ]
+    return build_check_result(report_path=report_path, checks=checks)
+
+
+def rerun_synthesize_report(
+    report_path: str,
+    request_path: str,
+    *,
+    pdk_variant: str | None = None,
+    pdk_root: str | None = None,
+    verify_equivalence: bool = False,
+    equiv_timeout_s: float | None = None,
+    restructure_timing: bool = False,
+    restructure_max_iterations: int | None = None,
+) -> dict[str, Any]:
+    """``klt synthesize <request> --check <report> --rerun`` (full mode,
+    issue #2224): verify a committed report by actually re-running the
+    synthesis the request declares and diffing the fresh report against the
+    committed one.
+
+    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
+    excluding :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS`
+    (``provenance.klt_version``/``klayout_version``/``pdk.version`` plus
+    ``engine_version``) and canonicalizing
+    :data:`RERUN_BOOKKEEPING_KEYS` out of both sides first. ``status:
+    "drifted"`` names every other field that changed -- a moved
+    ``instance_count``/``area_um2``/``timing``, a newly-inferred latch under
+    ``structural``, a changed ``provenance.input.content_hash``.
+
+    **Known limitations**, mirroring ``klt lvs``/``klt extract``'s own
+    ``--rerun``: the optional flags (``--verify-equivalence``,
+    ``--restructure-timing``, their tuning knobs) are not echoed anywhere in
+    the response, so they cannot be recovered from ``report_path`` -- pass
+    the same ones again here (the CLI does) or the corresponding blocks
+    legitimately drift. A request pinning an explicit ``run_id`` cannot be
+    re-run at all: :func:`_create_run_directory` refuses to reuse a retained
+    run directory, and that refusal (a :class:`SynthesizeError` naming the
+    directory) is surfaced unchanged rather than swallowed -- "could not
+    verify" is the honest answer there, never a false ``"match"``.
+
+    Raises :class:`SynthesizeError` for a missing/unparseable committed
+    report or any error the re-run itself raises -- never a traceback.
+    """
+    committed = load_committed_report(report_path, SynthesizeError)
+    fresh = run_synthesize(
+        request_path,
+        pdk_variant=pdk_variant,
+        pdk_root=pdk_root,
+        verify_equivalence=verify_equivalence,
+        equiv_timeout_s=equiv_timeout_s,
+        restructure_timing=restructure_timing,
+        restructure_max_iterations=restructure_max_iterations,
+    )
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_FLOW_PATHS,
+        committed_for_diff=_canonicalize_synthesize_report_for_rerun_diff(committed),
+        fresh_for_diff=_canonicalize_synthesize_report_for_rerun_diff(fresh),
+    )

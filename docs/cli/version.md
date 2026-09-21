@@ -46,6 +46,7 @@ a release.
   "git_tag": null,
   "dirty": false,
   "is_release": false,
+  "grading_ruleset_id": "sha256:1a2b3c4d5e6f...",
   "klayout_version": "0.30.12",
   "klayout_version_expected": "0.30.10"
 }
@@ -59,13 +60,31 @@ a release.
   unrecoverable.
 - `git_tag` — the tag the build sits exactly on, or `null`. A tag belonging to
   a *different* version is reported here but does not make `is_release` true.
-- `dirty` — whether the tree had uncommitted changes at build time (`null`
-  when unknown).
+- `dirty` — whether *tracked* files in the tree had uncommitted changes at
+  build time (`null` when unknown). Untracked files are deliberately not
+  considered (issue #2248): a `git+<sha>` install clones into a scratch
+  checkout a package manager can itself litter with bookkeeping files (e.g.
+  `uv` writes its own checkout-completion sentinel into the tree before the
+  build runs), which previously made a clean, immutable, sha-pinned revision
+  misreport as dirty.
 - `is_release` — **tri-state**, mirroring `provenance.deck.released`
   (see [`../json-contract.md`](../json-contract.md)): `true` for a confirmed
   release build, `false` for a confirmed non-release build, `null` when the
   question is unanswerable. A consumer gating on "this is a release" must
   require `is_release === true`; `null` is not a weaker `true`.
+- `grading_ruleset_id` (issue #2216) — **a `klt` version string alone does
+  not identify the grading build.** Three installs can report the exact same
+  `version`/`git_commit` yet grade a `klt signoff --manifest`/`--fleet`
+  tier-verdict report by different rules — a registry wheel built from a
+  release tag, a `pip install git+...@<tag>` snapshot of that same tag, and a
+  full-repo checkout that has moved past the tag on `main`. This field is a
+  `sha256:`-prefixed content hash of the shipped `signoff.py` grading module:
+  identical between two installs of byte-identical grading code regardless
+  of how each was installed, and different whenever the grading logic
+  changes — see [`signoff.md`'s "Identifying the grading
+  build"](signoff.md#identifying-the-grading-build) for the full mechanism,
+  including `klt signoff --describe-grader`. `null` only if this install's
+  `signoff.py` cannot be read at all (never fabricated).
 - `klayout_version` (issue #1490) — the KLayout engine actually resolved
   into this process (`klayout.__version__`, same value as
   `provenance.klayout_version`), or `null` if unresolvable.
@@ -73,6 +92,13 @@ a release.
   build/commit was tested against, or `null` when unresolvable (a build made
   before this field existed, or a checkout with no reachable `uv.lock`). See
   "Pinning the KLayout engine version" below.
+
+**`version`/`git_commit`/`git_tag`/`dirty`/`is_release` identify the
+*install*, not only the commit it came from** — two byte-legitimate installs
+of the same pinned `<sha>` can report different values for all five (issue
+#2249). That is why a committed report must never be byte-compared against a
+fresh re-render; see "These fields describe the install, not only the commit"
+under "Gating a build before doing work" below.
 
 Always exits `0`. Identifying the running build cannot fail — an
 unrecoverable identity is reported as `+unknown` with `is_release: null`,
@@ -148,3 +174,38 @@ klt deck hash --deck sky130 --format json \
 `provenance.klt_version` in a report carries the same build identity as
 `version` above (issue #2090) — see
 [`../json-contract.md`](../json-contract.md).
+
+### These fields describe the install, not only the commit (issue #2249)
+
+**`version`, `git_commit`, `git_tag`, `dirty` and `is_release` all report the
+state of the tree this install was *built from*, at the time it was built.**
+Pinning a commit does not pin them: two byte-legitimate installs of the same
+`<sha>` can report different values, because the routes differ in what git
+facts existed at build time.
+
+| Provisioning route for the same `<sha>` | `version` | `git_commit` | `dirty` |
+| --- | --- | --- | --- |
+| `uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>"` | `X.Y.Z+g<sha>` | `<sha>` | `false` — but `true` before issue #2248, from the package manager's own untracked residue in its scratch checkout |
+| Clean `git clone`/`git worktree add <sha>` + local `uv build` | `X.Y.Z+g<sha>` | `<sha>` | `false` |
+| `pip install` of a source **tarball** of `<sha>` (GitHub `/archive/<sha>.tar.gz`, a vendored copy) | `X.Y.Z+unknown` | `null` | `null` |
+
+The last row is not a defect and cannot be repaired: the build ran in a tree
+with no `.git`, so there were no facts to record (`hatch_build.py` writes
+nothing rather than guessing — see "How the identity is determined" above).
+
+Two consequences for a gate script:
+
+- **The byte-canonical route is a `git+…@<sha>` install** (or a clean local
+  build of `<sha>`) — the only route that records the commit at all. A gate
+  that wants reproducible identity bytes must provision *that* route on every
+  machine; a tarball/vendored install of the same commit will report
+  `+unknown` forever.
+- **Never byte-compare a committed `klt` report against a fresh re-render to
+  detect evidence drift.** The identity fields above are embedded in reports
+  (`provenance.klt_version`, and `klt signoff`'s whole `build` block), so that
+  comparison fails between two correct installs of the same pinned commit.
+  Use the verbs' own `--check` modes instead — they exclude tool identity and
+  only tool identity: `klt drc/lvs/extract --check`, `klt
+  synthesize/place-and-route REQUEST --check`, and `klt signoff
+  --manifest|--fleet M --check REPORT` (see
+  [`signoff.md`](signoff.md#verifying-a-committed-report---check-issue-2249)).

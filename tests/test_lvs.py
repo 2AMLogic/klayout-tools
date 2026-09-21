@@ -13829,6 +13829,153 @@ def test_run_lvs_gate_level_verilog_disjoint_pin_stray_cell_still_reported(tmp_p
     assert "MYLIB__DFXTP_1" not in pruned["description"]
 
 
+#: `_GATE_LEVEL_REFERENCE_VERILOG` extended with a filler/tap-cell instance
+#: whose connection list is completely empty (issue #2244) -- the shape a
+#: DEF-derived `write_verilog` reference (as opposed to `klt
+#: place-and-route`'s own `verilog_path` writer, which never emits one at
+#: all) produces for a placed physical-only component: `library__fill_4
+#: FILLER_0_10 ();` in the issue's own reproduction. `convert_gate_level_verilog`
+#: reads this back as a reference-side `.SUBCKT mylib__tapvpwrvgnd_1` stub
+#: declaring **zero** pins (nothing was ever connected to it), unlike the
+#: layout-side abstraction's stub, which always carries the cell's real,
+#: non-empty PDK pin list.
+_GATE_LEVEL_REFERENCE_VERILOG_WITH_FILLER = _GATE_LEVEL_REFERENCE_VERILOG.replace(
+    "endmodule", "  mylib__tapvpwrvgnd_1 TAP0 ();\nendmodule"
+)
+
+
+def test_run_lvs_gate_level_verilog_reference_side_filler_pruned_symmetrically(
+    tmp_path,
+):
+    """Issue #2244's own reproduction: a DEF-derived reference Verilog
+    instantiates the same filler/tap master (`mylib__tapvpwrvgnd_1`) the
+    layout-side abstraction also carries. Before this fix, the layout-side
+    prune (issue #1622) removed only its own copy, leaving the
+    freshly-unpruned reference-side stub and its instance with no
+    counterpart at all -- a `topology` "circuit could not be matched"
+    cascade around an otherwise-clean `power_connectivity: "match"`
+    verdict. The fix prunes the master from both sides, disclosed once."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    layout_path = _write(
+        tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_FILLER
+    )
+    reference_path = _write(
+        tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG_WITH_FILLER
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert "topology" not in report.get("category_counts", {})
+    assert report.get("category_counts", {}).get("topology.power_only_pruned") == 1
+    assert report["power_connectivity"]["status"] == "match"
+
+    (entry,) = [
+        m for m in report["mismatches"] if m["category"] == "topology.power_only_pruned"
+    ]
+    assert entry["severity"] == "warning"
+    # Both sides instantiated the same master name -- the disclosure names
+    # it under both.
+    assert entry["side"] == "both"
+    assert "MYLIB__TAPVPWRVGND_1" in entry["description"]
+    assert "layout" in entry["description"]
+    assert "reference" in entry["description"]
+
+
+def test_run_lvs_gate_level_verilog_reference_only_filler_pruned(tmp_path):
+    """Negative-shape variant of the reproduction above: the layout-side
+    abstraction never carried the filler/tap master at all (a plain
+    `_GATE_LEVEL_LAYOUT_SPICE_WITH_POWER`, no `XTAP0` instance), but the
+    DEF-derived reference still instantiates one with an empty connection
+    list. Only the reference side has anything to prune -- `side:
+    "reference"` -- and the compare still lands clean."""
+    root = _make_fake_pdk_library(
+        tmp_path, "myvariant", "mylib", _GATE_LEVEL_LIBRARY_SPICE_WITH_POWER
+    )
+    layout_path = _write(tmp_path / "layout.spice", _GATE_LEVEL_LAYOUT_SPICE_WITH_POWER)
+    reference_path = _write(
+        tmp_path / "ref.v", _GATE_LEVEL_REFERENCE_VERILOG_WITH_FILLER
+    )
+    request = {
+        "layout": {"netlist": layout_path, "top": "top"},
+        "reference": {
+            "netlist": reference_path,
+            "top": "top",
+            "form": "gate-level-verilog",
+            "library": "mylib",
+            "pdk": "myvariant",
+            "pdk_root": root,
+        },
+    }
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+    assert "topology" not in report.get("category_counts", {})
+    assert report.get("category_counts", {}).get("topology.power_only_pruned") == 1
+
+    (entry,) = [
+        m for m in report["mismatches"] if m["category"] == "topology.power_only_pruned"
+    ]
+    assert entry["side"] == "reference"
+    assert "MYLIB__TAPVPWRVGND_1" in entry["description"]
+
+
+def test_reference_power_only_masters_ignores_empty_declared_pins(tmp_path):
+    """Unit-level regression guard for the bug this issue fixes (issue
+    #2244): `_is_power_only_circuit` alone is the wrong tool for the
+    reference side, because a DEF-derived filler/tap instance's own
+    declared-pin list is empty (nothing was ever connected), and
+    `_is_power_only_circuit` treats zero declared pins as "no evidence,
+    don't prune" -- silently leaving the master unpruned.
+    `_reference_power_only_masters` must classify by the *library's* full
+    pin order instead, and still prune it. Builds the reference SPICE via
+    the real `convert_gate_level_verilog` conversion (not hand-written
+    SPICE), so the zero-pin stub shape under test is exactly what
+    production code emits."""
+    import klayout.db as kdb
+
+    library_pin_orders = parse_subckt_pin_orders(_GATE_LEVEL_LIBRARY_SPICE_WITH_POWER)
+    spice = convert_gate_level_verilog(
+        _GATE_LEVEL_REFERENCE_VERILOG_WITH_FILLER,
+        pin_order_lookup=library_pin_orders.get,
+    )
+    reference_path = _write(tmp_path / "ref.spice", spice)
+    reference_netlist = kdb.Netlist()
+    reference_netlist.read(reference_path, kdb.NetlistSpiceReader())
+    power_pin_names = lvs._gate_level_power_pin_names(
+        reference_netlist, library_pin_orders
+    )
+    assert power_pin_names == frozenset({"VGND", "VNB", "VPB", "VPWR"})
+
+    # The naive layout-side check finds no evidence at all -- the reference
+    # circuit's own declared pin list is empty.
+    tap_circuit = reference_netlist.circuit_by_name("MYLIB__TAPVPWRVGND_1")
+    assert list(tap_circuit.each_pin()) == []
+    assert lvs._is_power_only_circuit(tap_circuit, power_pin_names) is False
+
+    # The reference-side check, using the library's full pin order instead,
+    # correctly classifies it as power-only.
+    removed = lvs._reference_power_only_masters(
+        reference_netlist, library_pin_orders, power_pin_names
+    )
+    assert removed == ["MYLIB__TAPVPWRVGND_1"]
+    # The genuinely signal-bearing masters are untouched.
+    assert "MYLIB__INV_1" not in removed
+    assert "MYLIB__BUF_1" not in removed
+
+
 #: `_GATE_LEVEL_REFERENCE_VERILOG` extended with a port-to-port `assign`
 #: alias (issue #2021): `mid_alias` is a second declared top-level port for
 #: the same node as `mid` -- the headline scenario the issue describes
@@ -13953,9 +14100,9 @@ def test_run_lvs_gate_level_verilog_no_port_alias_leaves_disclosure_empty(tmp_pa
     assert "topology.reference_port_alias_joined" not in report["category_counts"]
 
 
-def test_prune_power_only_layout_circuits_never_prunes_keep_name(tmp_path):
-    """`keep_name` (the caller's own `layout.top`) is never pruned, even
-    when it does classify as power-only -- pruning it would turn a
+def test_prune_power_only_circuits_never_prunes_layout_keep_name(tmp_path):
+    """`layout_keep_name` (the caller's own `layout.top`) is never pruned,
+    even when it does classify as power-only -- pruning it would turn a
     classification edge case into a confusing "circuit not found" error
     instead of a clean no-op (issue #1622). Exercises the guard directly:
     a real design's top circuit always has genuine signal I/O, so no
@@ -13976,15 +14123,16 @@ XTAP0 VPWR VGND VPWR VGND mylib__tapvpwrvgnd_1
     layout_netlist.read(layout_path, kdb.NetlistSpiceReader())
     reference_netlist = _fake_gate_level_reference()
 
-    warning = lvs._prune_power_only_layout_circuits(
+    warning = lvs._prune_power_only_circuits(
         layout_netlist,
         reference_netlist,
         _FAKE_LIBRARY_PIN_ORDERS,
-        keep_name="top",
+        layout_keep_name="top",
     )
     # The tap cell is pruned; `TOP` -- power-only by the same test, and
     # resolved through `circuit_by_name`'s own case folding -- is not.
     assert warning is not None
+    assert warning["side"] == "layout"
     assert "MYLIB__TAPVPWRVGND_1" in warning["description"]
     remaining = {circuit.name for circuit in layout_netlist.each_circuit()}
     assert remaining == {"TOP"}

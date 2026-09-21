@@ -11,20 +11,51 @@ Exit codes (see ``docs/cli/place-and-route.md`` for the full table):
         error that stops the run before reaching the requested
         target_stage) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
+    3 - ``--check`` only: the committed report no longer reproduces
+        (``status: "drifted"``)
 (2 is reserved for argparse usage errors, as with every other ``klt``
-subcommand. There is no exit code 3 -- place-and-route has no pass/fail
+subcommand. A *fresh* run never exits 3 -- place-and-route has no pass/fail
 concept of its own; timing slack/violation counts are data, not a built-in
 gate. See ``docs/design/digital-flow-contracts-spike.md`` section 5.)
+
+``--check <report>`` (issue #2224) switches this verb from running a fresh
+flow to *verifying a previously committed one* still reproduces from the
+request given positionally -- see ``docs/cli/place-and-route.md``,
+"--check". Cheap mode (default): re-resolve and re-hash the request's
+gate-level netlist and liberty and compare against the recorded
+``provenance`` digests, no OpenROAD run. Full mode (``--check <report>
+--rerun``): actually re-run the flow and diff verdict-bearing fields.
 """
 
 import argparse
 import sys
 
-from ..place_and_route import PlaceAndRouteError, run_place_and_route
-from .output import emit_error, emit_success
+from ..place_and_route import (
+    PlaceAndRouteError,
+    check_place_and_route_report,
+    rerun_place_and_route_report,
+    run_place_and_route,
+)
+from .output import emit_error, emit_success, render_rerun_drift
+
+#: Aliases for the --check/--rerun outcome (issue #2224) -- the same 0/3
+#: split `klt drc --check` uses. This verb has no exit 3 of its own (see this
+#: module's docstring: place-and-route has no built-in pass/fail gate), so 3
+#: is unambiguous here: it means, and only means, "the committed report no
+#: longer reproduces".
+EXIT_MATCH = 0
+EXIT_DRIFTED = 3
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.check is not None:
+        return _run_check(args)
+
+    if args.rerun:
+        return emit_error(
+            "place-and-route", "--rerun requires --check <report>", args.format
+        )
+
     try:
         report = run_place_and_route(
             args.request, pdk_variant=args.pdk, pdk_root=args.pdk_root
@@ -44,6 +75,51 @@ def run(args: argparse.Namespace) -> int:
         print(f"klt place-and-route: warning: {warning}", file=sys.stderr)
 
     return 0
+
+
+def _run_check(args: argparse.Namespace) -> int:
+    """`--check <report>` (and `--rerun`): verify committed flow evidence
+    against the request still on disk (issue #2224).
+
+    The positional `request` stays *required*: a `klt place-and-route` report
+    echoes its output artifacts and provenance hashes but never the request
+    that produced it. See `_report_verify.py`'s module docstring.
+    """
+    try:
+        if args.rerun:
+            result = rerun_place_and_route_report(
+                args.check,
+                args.request,
+                pdk_variant=args.pdk,
+                pdk_root=args.pdk_root,
+            )
+        else:
+            result = check_place_and_route_report(
+                args.check,
+                args.request,
+                pdk_variant=args.pdk,
+                pdk_root=args.pdk_root,
+            )
+    except PlaceAndRouteError as exc:
+        return emit_error("place-and-route", str(exc), args.format)
+
+    text_renderer = render_rerun_drift if args.rerun else _print_check_text
+    emit_success(result, args.format, text_renderer)
+
+    return EXIT_MATCH if result["status"] == "match" else EXIT_DRIFTED
+
+
+def _print_check_text(result: dict) -> None:
+    """`--format text` rendering of a cheap-mode `--check` result -- the same
+    shape `klt drc`/`klt lvs`/`klt extract` already print (issue #1106)."""
+    print(f"report: {result['report']}")
+    print(f"status: {result['status']}")
+    for check in result["checks"]:
+        mark = "OK" if check["match"] else "DRIFTED"
+        print(f"  [{mark}] {check['field']}")
+        if not check["match"]:
+            print(f"      expected: {check['expected']}")
+            print(f"      actual:   {check['actual']}")
 
 
 def _print_text(report: dict) -> None:
