@@ -45,7 +45,7 @@ concurrency:
 jobs:
   deploy:
     name: Build and deploy to Cloudflare Pages
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
 

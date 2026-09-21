@@ -25,7 +25,7 @@ jobs:
     # step: it makes this job always green regardless of ruff's exit code,
     # which is exactly how a repo accumulates hundreds of unformatted files
     # behind a false-green check.
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -624,7 +624,7 @@ jobs:
     # pool the genuinely heavy jobs below (the pyo3-extension `native`/
     # `native-statime` legs and the full `test` matrix, which builds
     # Yosys/Verilator/Icarus from source) still need.
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     defaults:
       run:
@@ -696,7 +696,7 @@ jobs:
     # tool/PDK dependency, so unlike `native-techmap` there is no companion
     # Python-side job here (neither issue wires `klt-wave` into the Python
     # `klt` CLI; that is #1601's job).
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     defaults:
       run:
@@ -750,7 +750,7 @@ jobs:
     # documented path for a job with no measured baseline yet
     # (docs/guides/ci-wall-clock-budget.md, "Budget derivation"). Give it a
     # real budget at the next re-measure rather than guessing one now.
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -781,7 +781,7 @@ jobs:
     # job in this file, not just this one) so a PR that never touches the
     # frontend skips the Node setup / npm ci cost -- mirrors how
     # deploy-site.yml path-filters its own trigger.
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1344,7 +1344,7 @@ jobs:
     # Dogfoods action.yml (issue #268) against this repo's own fixtures on
     # every push/PR, so a broken action fails this repo's CI before it
     # breaks a downstream block repo's workflow -- see docs/guides/github-action.md.
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1562,7 +1562,7 @@ jobs:
     if: always()
     # Deliberately ubuntu-latest, never the heavy pool: a ~20s check that
     # measures queue contention must not queue behind it.
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: read

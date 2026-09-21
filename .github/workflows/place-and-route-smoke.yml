@@ -45,7 +45,7 @@ concurrency:
 jobs:
   place-and-route-smoke:
     name: synth -> place-and-route -> LVS -> DRC (gcd, mult8)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
