@@ -37,6 +37,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/erc.md`](docs/cli/erc.md)'s "A degenerate tie is reported as
   skipped, not as a pass".
 
+- **Added** (#2198): `klt signoff --manifest` reports a **version-skewed**
+  envelope distinguishably, with a new `reason` value
+  `"envelope_version_skew"` on the citing item. `_classify` recognises some
+  kinds by a *pair* of markers — `sta` needs a top-level `geometry_source`
+  string **plus** `timing_status` or a `corners` list — so a response
+  carrying the primary marker alone is refused rather than graded as timing
+  evidence. That is deliberate, but `timing_status` is additive (#1865/#1915),
+  so the refused shape is exactly what every `klt sta` response written
+  before it has; because committed evidence is append-only, that stock only
+  grows. Such a citation previously rendered `"unrecognized_envelope"` —
+  indistinguishable from "this file is not a `klt` artifact at all". It is
+  still never graded as `sta` evidence; what changes is that a block repo can
+  now tell *"re-run this check under a newer `klt`"* from *"this citation is
+  wrong"*. Envelope-aggregation mode still exits `1`, now with a message
+  naming the kind the envelope nearly matched and the fields it lacks.
+  Purely additive: a genuinely foreign document still renders
+  `"unrecognized_envelope"`, a malformed-for-its-kind envelope still renders
+  `"unrecognized_envelope"`, and a kind whose markers are both original
+  (`place-and-route`'s `stage_reached`+`power`) is unaffected. No
+  `schema_version` bump — the `reason` enum gains a value, none changed
+  meaning. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s `reason` values table.
+
 - **Documented** (#2180): `klt erc`'s "Connectivity model" section in
   [`docs/cli/erc.md`](docs/cli/erc.md) now states a false-positive risk that
   was previously undocumented: `erc.unconnected_net` can fire on a declared

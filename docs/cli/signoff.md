@@ -1004,6 +1004,20 @@ every `klt` envelope shape) paired with either the flat single-corner
 shape's `timing_status` or the multi-corner (`pdk.corners`) shape's
 `corners` list.
 
+**A response carrying `geometry_source` alone is version skew, not a foreign
+document** (issue #2198). The pairing is deliberate — a response carrying the
+primary marker without a shape discriminator is refused rather than graded as
+timing evidence — but `timing_status` is *additive* (issues #1865/#1915), so
+that shape is exactly what a `klt sta` response written before those fields
+existed has. Because committed evidence is append-only, the stock of such
+envelopes only grows. `--manifest` grading therefore renders it
+`"unmet"`/[`reason: "envelope_version_skew"`](#reason-values) rather than
+`"unrecognized_envelope"`, and envelope-aggregation mode exits `1` with a
+message naming the kind it nearly matched and the fields it lacks. It is
+still never graded as `sta` evidence; what the distinct reason buys is the
+decision a block repo actually has to make — *"re-run this check under a
+newer `klt`"* versus *"this citation points at the wrong artifact"*.
+
 Unlike every other kind, a `klt sta` envelope has **no pass/fail `status` of
 its own** — `status` is always `"ok"` (the verb reports timing, it does not
 judge it). So `klt signoff` derives a verdict from the reported timing
@@ -1529,6 +1543,7 @@ actually ran and failed):
 | `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
+| `"envelope_version_skew"` | yes | **(issue #2198)** The resolved evidence *is* a `klt` envelope, carrying a kind's **primary** marker but none of the shape discriminators that marker is paired with — the shape a response written before those (additive) fields existed has. Today this applies to one kind: **`sta`**, whose `geometry_source` marker shipped with the verb but whose `timing_status`/`corners` discriminators are additive (issues #1865/#1915), so any `klt sta` response committed before them lands here. Refused exactly like `"unrecognized_envelope"` — it is never graded as that kind's evidence — but reported distinguishably, because the remedy differs: re-run the check under the current `klt`, rather than fix a citation pointing at the wrong artifact. A kind whose markers are *both* original (`place-and-route`'s `stage_reached`+`power`) has no version-skew shape and is unaffected. See "Digital-flow evidence" above. |
 | `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
 | `"ungradeable_by_build"`  | yes | **(issue #2176)** The manifest cited evidence for an item this build has no grading rules for at all (`graded_by_build: false` — an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc lists). Not a statement about the cited artifact, which is never even resolved: the *build* is the gap, so the fix is a newer `klt` (or grading against the doc this one ships), not a different citation. Without it, such a citation fell through to the unrestricted grading path and could render `met` from rules that do not exist in the running build. See "An overridden doc can outrun the build" above. |
 | `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
