@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2202, additive — **no** `schema_version` bump on either mode):
+  `klt signoff --manifest`/`--fleet` now report `build_t1_item_count` beside
+  the existing `t1_item_count` — how many T1 rows **this build's own shipped
+  doc** would have rendered, against how many the parsed doc did. This is the
+  reverse of #2176's `graded_by_build`: a `--tiers-doc`/`$KLT_TIERS_DOC` copy
+  *older* than the running build produces no wrong verdict (every rendered
+  row is correctly graded), but the report says nothing about the items it
+  never listed, so a build that grades 11 T1 items pointed at a 9-item doc
+  awards `tier: "T1"` on 9/9 and reads exactly like a full-checklist claim —
+  a strictly weaker claim, previously distinguishable only by a reader who
+  already knew which build produced which report. The field is a **row**
+  count like `t1_item_count` (so a `mixed-signal` block's pair doubles
+  together), is carried on each `--fleet` `blocks[]` row as well as on the
+  tier report — unlike per-item `graded_by_build`, because those rows carry
+  `t1_item_count` too — and is surfaced in the text rendering as a `scope:`
+  line whenever the two differ. It is `null`, never a fabricated number, when
+  this build cannot read its own shipped doc, the same rule `graded_by_build`
+  follows when it cannot prove divergence. The missing items are deliberately
+  *not* rendered as rows: the report is the parsed doc's skeleton by design.
+  No `schema_version` bump — a new key on an unchanged shape, with no grading
+  change behind it, per
+  [`docs/json-contract.md`](docs/json-contract.md).
+
 - **Changed** (#2199): `klt erc` no longer reports a **degenerate** `ties[]`
   declaration as a passing `erc.missing_tie` check. A tie whose declared tap
   region is indistinguishable from an ordinary source/drain contact — no

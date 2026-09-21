@@ -945,10 +945,63 @@ content-drift question, not an item-list one, and it has its own answer:
 `build` (below) names the build that read it. The three are complementary —
 which doc, what it said, and which of its rules this build could apply.
 
-The reverse direction — a doc with *fewer* items than this build grades — is
-unchanged: the report renders the parsed doc's skeleton, so an item the doc
-does not list is simply not a row. `build` is what lets a later reader spot
-it, by naming the build whose extra rules went unused.
+### A doc the build has outrun: `build_t1_item_count`
+
+The reverse direction — a doc with *fewer* items than this build grades —
+produces no wrong verdict at all. The report renders the parsed doc's
+skeleton, so an item the doc does not list is simply not a row, and every
+row that *is* rendered is correctly graded. The defect is one of **scope
+disclosure**: the report does not say what it did not look at.
+
+Concretely, a build whose own doc lists 11 T1 items, pointed at a vendored
+copy that lists 9, renders a 9-row report. `t1_item_count` is `9`,
+`tier: "T1"` is awarded on 9/9, and nothing says this build knew how to
+check two items the reader never saw a row for — though "T1 against a 9-item
+checklist" is a strictly weaker claim than "T1 against 11".
+
+`build_t1_item_count` (issue #2202) is the counterpart to `t1_item_count`:
+how many T1 rows **this build's own shipped doc** would have rendered for
+this block. A reader comparing `9` against `11` sees the shortfall as a
+subtraction, with no second artifact involved:
+
+```
+$ klt signoff --manifest manifest.json --tiers-doc vendored/design-evidence-tiers.md
+block: my-bandgap  kind: analog
+tier: T1
+T1: 9/9 items met
+        scope: 2 more T1 item(s) this build grades are not in vendored/design-evidence-tiers.md (this build's own doc lists 11)
+...
+```
+
+Three things it deliberately is not:
+
+- **Not a rendered row.** The missing items do not appear in `items[]`. The
+  report is the parsed doc's skeleton by design; inventing rows the doc does
+  not contain would destroy the property that makes `--tiers-doc` meaningful
+  at all.
+- **Not derived from `graded_by_build`, and not bounded by
+  `t1_item_count`.** A doc can both omit items this build grades *and* add
+  items it does not, in which case `t1_item_count` exceeds
+  `build_t1_item_count` while some rows also carry `graded_by_build: false`.
+  The two fields answer different questions.
+- **Not fabricated.** A build that cannot read its own shipped doc reports
+  `null`, the same "never invent a claim you cannot substantiate" rule
+  `graded_by_build` follows when it reports every item as graded.
+
+Both counts are **row** counts, so a `mixed-signal` block's pair doubles
+together (`6` against `22` for the example above) — an unmultiplied
+build-side count would read as a shortfall on every mixed-signal report that
+has none.
+
+Unlike per-item `graded_by_build`, this field is also carried into `--fleet`
+per-block rows, for one reason: those rows carry `t1_item_count` too, and
+the shortfall is a property of that count, so the two must never be rendered
+apart.
+
+`build` (below) is what a reader used to have to fall back on here — with
+the right `klt` checkout in hand, the missing rows can be *reconstructed*.
+Reconstruction by a reader who was not at the terminal is exactly what a
+committed artifact must not require, which is why this is a field.
 
 ### Which build graded this: `build`
 
@@ -1540,6 +1593,7 @@ distinguishable from "no samples document was ever named" (see
   "kind": "analog",
   "tier": null,
   "t1_item_count": 11,
+  "build_t1_item_count": 11,
   "t1_met_count": 1,
   "source_doc": "docs/design-evidence-tiers.md",
   "source_doc_content_hash": "sha256:...",
@@ -1611,6 +1665,7 @@ distinguishable from "no samples document was ever named" (see
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the manifest.                  |
 | `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"`; otherwise `null` — no partial credit.  |
 | `t1_item_count` | integer              | Number of rendered T1 items (11 for `analog`/`digital`, 22 for `mixed-signal`). Eleven since issue #2025 added item 11 ("Power delivery (structural)"); the value is the parsed checklist's own length, never a literal in code. |
+| `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
 | `t1_met_count`  | integer              | Number of those items with `status: "met"`.                                              |
 | `source_doc`    | string               | Which doc the item list was parsed from: `"docs/design-evidence-tiers.md"` for the shipped doc (the same string whether this install reads its bundled copy or a source checkout), or the override path when `--tiers-doc`/`$KLT_TIERS_DOC` names a different doc. |
 | `source_doc_content_hash` | string \| null | `sha256:`-prefixed SHA-256 of `source_doc`'s resolved bytes on disk (issue #2175) — pins *what the checklist said*, not just which file it was, so two reports naming the same `source_doc` can be diffed to tell whether a changed verdict came from changed evidence or a changed checklist. `null` only if the doc became unreadable as bytes between the parse and the hash (e.g. deleted mid-run) — never fabricated. |
@@ -1790,6 +1845,7 @@ already-shipped field means).
       "kind": "analog",
       "tier": "T1",
       "t1_item_count": 11,
+      "build_t1_item_count": 11,
       "t1_met_count": 11,
       "source_doc_content_hash": "sha256:...",
       "blocking_item": null,
@@ -1810,6 +1866,7 @@ already-shipped field means).
       "kind": "analog",
       "tier": null,
       "t1_item_count": 11,
+      "build_t1_item_count": 11,
       "t1_met_count": 3,
       "source_doc_content_hash": "sha256:...",
       "blocking_item": {
@@ -1858,6 +1915,7 @@ already-shipped field means).
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the block's manifest.           |
 | `tier`          | string \| null       | `"T1"` only if every one of this block's rendered T1 items is `"met"`; otherwise `null`. |
 | `t1_item_count` | integer              | This block's rendered T1 item count (11, or 22 for `mixed-signal`).                      |
+| `build_t1_item_count` | integer \| null | As in tier-report mode (issue #2202): how many T1 rows **this build's own shipped doc** would have rendered for this block, so a row reading `T1: 9/9 items met` against a doc older than this build is distinguishable from one reading `11/11`. Carried here — unlike per-item `graded_by_build`, which is `--manifest`-only — because `t1_item_count` is carried here, and the shortfall is a property of that count. Identical across rows of the same `kind` within one roll-up (`tiers_doc` and the build are both shared), and doubled for a `mixed-signal` row exactly as `t1_item_count` is. |
 | `t1_met_count`  | integer              | This block's `"met"` T1 item count.                                                       |
 | `source_doc_content_hash` | string \| null | This block's tier report's own `source_doc_content_hash` (issue #2175), echoed verbatim — useful when this row is later extracted from a committed roll-up captured at a different time than another row's. |
 | `blocking_item` | object \| null       | `null` when `tier: "T1"`; otherwise the unmet T1 item this roll-up names as the blocker — the first unmet *gradeable* one, falling back to an ungradeable one only when nothing gradeable is unmet (issue #2178). See below. |
@@ -2416,6 +2474,7 @@ special-casing; its row in `--format json` is:
   "kind": "analog",
   "tier": null,
   "t1_item_count": 11,
+  "build_t1_item_count": 11,
   "t1_met_count": 9,
   "blocking_item": {
     "id": 6,

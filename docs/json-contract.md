@@ -299,6 +299,19 @@ and earned no `schema_version` bump on either mode. See
 [`docs/cli/signoff.md`](cli/signoff.md)'s "An overridden doc can outrun the
 build" and "Which build graded this".
 
+Issue #2202 closes the reverse direction of the same skew with one more
+additive key, `build_t1_item_count` (top-level in `--manifest`, per
+`blocks[]` row in `--fleet`): how many T1 rows this build's *own* shipped
+doc would have rendered, beside `t1_item_count`'s how many the parsed doc
+did. A doc *older* than the build produces no wrong verdict — every
+rendered row is correctly graded — but the report is silent about the items
+it never listed, so `tier: "T1"` on a 9-item checklist reads exactly like
+`tier: "T1"` on an 11-item one. `null`, never a fabricated number, when this
+build cannot read its own doc, for the same reason `graded_by_build` claims
+no divergence it cannot prove. A new key on an unchanged shape: no
+`schema_version` bump on either mode. See
+[`docs/cli/signoff.md`](cli/signoff.md)'s "A doc the build has outrun".
+
 `klt erc` since issue #2183 also carries a second verb-local key,
 `provenance.devices`: one entry per `devices[]` spec declaration (`{name,
 body_layer, on, body_area_um2}`), `[]` when none were declared. A
