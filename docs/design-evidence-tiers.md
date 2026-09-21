@@ -650,7 +650,17 @@ than the disclosure. The rule binds the writer, from now on.
 
 - **Staleness is failure.** Every report is checked against current source
   revisions/hashes before it counts. Provenance blocks in klt JSON output
-  (#335) exist for this.
+  (#335) exist for this. `klt signoff --manifest` applies the rule in two
+  steps, and discloses how far it got: the manifest's pinned `content_hash`
+  is *gated* against the cited envelope's self-reported
+  `provenance.input.content_hash` (a mismatch renders the item `unmet`),
+  and that self-report is then checked against the **artifact itself** by
+  re-hashing the input the envelope names — reported per citation as
+  `input_verified: true | false | null` (issue #2196), never graded on. A
+  `null` there means the freshness claim was only ever compared to another
+  claim: two statements about a revision, neither of which is the revision.
+  Committing evidence beside the artifact it names (so the path resolves
+  from the repo) is what turns that `null` into a real check.
 - **Coverage honesty.** A verdict's blind spots (deck holes, warning-level
   mismatches, uncombined evidence legs) are part of the claim and travel
   with it.

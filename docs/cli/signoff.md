@@ -386,6 +386,96 @@ mismatches, `power_connectivity: "unchecked"`) get no equivalent treatment
 for item 4 — that, and whether a non-empty gap should ever change item 3's
 verdict, are open questions #2002 deliberately left unanswered.
 
+### A pinned hash is checked against the artifact, not only against the envelope
+
+The freshness gate above compares the manifest's pinned `content_hash`
+against the cited envelope's own **self-reported**
+`provenance.input.content_hash`. Both sides of that comparison are
+statements *about* a revision; neither is the revision:
+
+```
+manifest.content_hash == envelope.provenance.input.content_hash   <- gated
+envelope.provenance.input.content_hash == sha256(<the artifact>)  <- issue #2196
+```
+
+Nothing used to check the second line, so a manifest and an envelope could
+go on agreeing with each other indefinitely while the GDS, netlist or record
+they describe was rewritten underneath them — the item stayed `met`, with a
+pinned hash, and nothing anywhere had read the file. That is the failure
+[`design-evidence-tiers.md`](../design-evidence-tiers.md)'s "staleness is
+failure" rule exists to prevent, and it was left to each block repo to
+re-implement.
+
+Issue #2196 closes it: every `"met"` citation carries **`input_verified`**,
+the answer to "was that hash checked against the artifact itself?"
+
+| Value | Meaning |
+| ----- | ------- |
+| `true` | The input artifact the envelope names was found, re-hashed (`sha256`, the same digest the producing run recorded), and **matches**. The freshness claim is anchored to a file. |
+| `false` | The artifact was found and re-hashed, and it **disagrees** with the hash the envelope recorded — the report describes a revision that is no longer on disk. |
+| `null`  | Nothing was re-hashed, so the pinned hash was only ever compared to another claim. Either the envelope records no input hash, its kind names no input path this command can resolve, or the path it names does not resolve to a readable file from the grading context. |
+
+```
+$ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id == 3) | .citation | {content_hash, input_verified}'
+{
+  "content_hash": "sha256:b30592...",
+  "input_verified": true
+}
+$ klt signoff --manifest manifest.json --format text
+...
+[MET  ] T1 #4 LVS clean
+        cite: lvs.json (kind=lvs, status=match, content_hash=sha256:..., exit_status=0)
+        input: CHANGED -- the artifact this envelope names no longer matches the content_hash it recorded
+```
+
+**Which artifact is re-hashed** is the one the producing run pinned into
+`provenance.input`, named by the field that run echoes it back under — never
+a second input the envelope happens to mention:
+
+| Kind | Field | Note |
+| ---- | ----- | ---- |
+| `drc`, `extract`, `erc` | `file` | The layout stream each ran on. |
+| `lvs` | `layout` | The **layout side** of the compare, which is what `provenance.input` pins (issue #1969) — the GDS/OASIS stream of a `layout.file` request, or the SPICE file of a pre-extracted `layout.netlist` one. `reference` is deliberately not re-hashed: it is pinned separately under `environment.reference_sha256`, so comparing it here would report a mismatch that is not one. |
+| `sim` | `netlist` | The SPICE deck it simulated. |
+| `pex` | `layout` | `klt pex` republishes its own `klt extract` run's `provenance` block, whose input is that layout stream. |
+| `sta` | `def_path`, else `verilog_path` | Mirrors `klt sta`'s own "DEF when given one, the gate-level Verilog otherwise" branch. |
+| `yield` | `samples` | Already re-hashed since issue #870 — a `yield` citation's `content_hash` *is* a live hash of the samples document, so it reports `input_verified: true` by construction. |
+
+Every other kind reports `null`: `functional-verification`, `power` and
+`place-and-route` either populate no `provenance.input` at all or echo only
+their outputs, a `generic` envelope's author chooses their own field names,
+and an `error` envelope carries no verdict to anchor.
+
+**Path resolution is best-effort, and an unresolved path is reported, never
+guessed at.** A path an envelope names was written relative to whatever
+directory the producing run used. Each plausible reading is tried — as the
+producing run named it (the command entry's `cwd`, else this process's
+working directory, the same convention `klt drc --check`/`klt lvs --check`
+use), and relative to the evidence file's own directory, which is how
+evidence committed beside its inputs resolves (`examples/signoff/`'s
+`lvs.json` names `layout.spice`). A `{path, scope}` input echo (issue #1261,
+`klt sim`/`klt pex`) resolves against the repo root the evidence lives in
+when `scope` is `"repo"`; `scope: "external"` carries no path by design and
+is therefore unverifiable here. A *match* on any candidate always wins over
+a mismatch on another, so a coincidentally same-named file beside the
+envelope can never turn a genuinely fresh citation into a reported one.
+
+**Cost**: one streamed `sha256` of the named artifact per citation — the
+same read `klt drc --check`/`klt lvs --check` already do, and never an
+engine re-run. A path that does not resolve costs a `stat`.
+
+**No verdict changes** — this is disclosure, matching the precedent set by
+`coverage` (#2002) and `body_bias` (#1983). `input_verified` is consulted by
+no grading rule: an item that is `met` today under the self-reported-hash
+comparison stays `met` with `input_verified: false` beside it, and no item
+becomes `unmet` because of this field. What changes is that the unverified
+case is *visible*: a freshness claim checked against a file and one checked
+only against another claim were previously indistinguishable. The key is
+always present, `null` included, for exactly that reason — an omitted key
+would leave the silent case silent. A verdict-changing remedy (a distinct
+`input_changed` reason, failing the item when a re-hash disagrees) is a
+deliberate follow-up, not part of this change.
+
 ### A check that checked nothing is refused, not reported
 
 The two surfacing phases above (`coverage`, `body_bias`) deliberately report
@@ -661,7 +751,11 @@ samples document its report names — see "`klt yield` evidence and content
 hashing" below, since `klt yield`'s current JSON shape carries no
 `provenance` block of its own — a mismatch means the check ran against a
 *different* input revision than the one being claimed: stale, so it renders
-`"unmet"`, never a false pass). Every other case — no evidence entry, a
+`"unmet"`, never a false pass — and, since issue #2196, the citation also
+discloses via `input_verified` whether that envelope's own recorded hash was
+itself checked against the artifact it names, or only taken at its word; see
+"A pinned hash is checked against the artifact, not only against the
+envelope" below). Every other case — no evidence entry, a
 malformed entry, an unreadable/unparsable evidence file, a command-backed
 entry whose subprocess couldn't be launched/timed out/exited
 nonzero/produced stdout that isn't valid JSON, an unrecognised envelope
@@ -1474,6 +1568,7 @@ distinguishable from "no samples document was ever named" (see
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:...",
+        "input_verified": true,
         "exit_status": 0,
         "coverage": {
           "layers_in_stream_without_rules": ["70/20"],
@@ -1535,7 +1630,7 @@ distinguishable from "no samples document was ever named" (see
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
 | `reason`    | string \| null       | `null` when `status: "met"`; otherwise **why**, so a missing check never reads the same as a failed one (issue #826) — see "`reason` values" below. |
 | `graded_by_build` | boolean        | **T1 items only** (issue #2176; a T2-T4 ladder row carries no such key — its `reason: "tier_not_supported"` already says this repository cannot check it at all). `true` when this build has grading rules for the item's id — always so for the shipped doc; `false` for an item only a `--tiers-doc`/`$KLT_TIERS_DOC` copy knows about, whose accepted kinds, evidence shape and pass conditions are all absent here. A `false` item that is nonetheless cited renders `unmet`/`ungradeable_by_build`. See "An overridden doc can outrun the build" above. |
-| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
+| `citation`  | object \| null       | Present only when `status: "met"`: `{"file", "command", "kind", "check_status", "content_hash", "input_verified", "exit_status"}`, plus `coverage` for a `drc` citation whose envelope reports one, `body_bias` for a `pex` citation whose envelope reports one (issue #1983), `content_hash_unresolved` for a `yield` citation whose named samples document could not be found (issue #2197), plus `parts` and `power_delivery` for item 11's compound citation (issue #2025). |
 
 #### `citation` fields
 
@@ -1546,6 +1641,7 @@ distinguishable from "no samples document was ever named" (see
 | `kind`          | string          | `"drc"`, `"lvs"`, `"extract"`, `"sim"`, `"yield"`, `"pex"`, `"sta"`, `"functional-verification"`, `"erc"`, `"place-and-route"`, or `"generic"` — the resolved envelope's classified kind. For item 11's compound citation this is the **leading** part's kind (always `"erc"`); see `parts` below. |
 | `check_status`  | string \| null  | The resolved envelope's own `status` field.                                           |
 | `content_hash`  | string \| null  | The resolved envelope's `provenance.input.content_hash`, when populated; for a `yield` envelope (which populates no `provenance` block), the hash of the samples document it names instead — see "`klt yield` evidence and content hashing" above. |
+| `input_verified`| boolean \| null | Whether that `content_hash` was itself checked against the **input artifact the envelope names**, or only against the envelope's own claim about it (issue #2196): `true` — re-hashed and matched; `false` — re-hashed and disagreed; `null` — nothing was re-hashed (no recorded hash, no resolvable input path for this kind, or a path that does not resolve to a readable file from the grading context). **Always present**, `null` included: an omitted key would leave the unverified case exactly as silent as it was before this field existed. Never consulted by any grading rule — see "A pinned hash is checked against the artifact, not only against the envelope" above. |
 | `content_hash_unresolved` | object | **`yield` citations only**, and only when the report names a samples document (`report["samples"]`) that could not be found in either place `klt signoff` looked (report-relative, then cwd-relative — issue #2197): `{"samples", "searched"}`, the named path and the candidate paths tried, in order. **Absent** whenever `content_hash` was successfully computed, and whenever the report names no samples document at all — an absent key never means "the input was verified", only that this particular failure mode did not occur; it distinguishes "this input could not be located" from any other reason `content_hash` might be `null`. Quoted, never graded on — a manifest that pins `content_hash` for this item still renders `unmet`/`unverifiable_provenance` on its own, independent of this field. |
 | `exit_status`   | integer         | `0`, *inferred*, for a file-backed entry (a readable, passing envelope implies its producing command exited zero); the subprocess's *actually observed* return code, for a command-backed entry. |
 | `body_bias`     | object          | **`pex` citations only**, and only when the cited envelope carries a `body_bias` block (issue #1983): `{"status", "unbiased_device_count", "unbiased_nets"}`, reduced from it — whether the extracted netlist these post-layout numbers were measured on had a DC bias path for every device body. **Absent** for any other kind, and for `pex` evidence committed before `klt pex` reported it — an absent `body_bias` means "this artifact made no body-bias statement", never "every device body was biased". See "Device-body bias is reported, not graded" above. |
@@ -2041,6 +2137,7 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
     "kind": "drc",
     "check_status": "clean",
     "content_hash": "sha256:...",
+    "input_verified": true,
     "exit_status": 0
   }
 }
@@ -2080,6 +2177,7 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
     "kind": "yield",
     "check_status": "pass",
     "content_hash": "sha256:...",
+    "input_verified": true,
     "exit_status": 0
   }
 }
@@ -2122,6 +2220,7 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
     "kind": "pex",
     "check_status": "pass",
     "content_hash": "sha256:...",
+    "input_verified": true,
     "exit_status": 0
   }
 }
@@ -2175,6 +2274,7 @@ $ klt signoff --manifest manifest.json --format json | jq '.items[] | select(.id
     "kind": "generic",
     "check_status": "pass",
     "content_hash": null,
+    "input_verified": null,
     "exit_status": 0
   }
 }
