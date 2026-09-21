@@ -3657,6 +3657,7 @@ def test_compose_routes_bjt_emitter_bus_via_legs_clearing_pre_existing_base_pads
             "route_length_um",
             "reason",
             "channel_track",
+            "landed_on_block",
         }
 
     drc_report = run_drc(str(output), "sky130")
@@ -13040,6 +13041,171 @@ def test_route_two_pin_own_block_escape_check_needs_a_cell_sourced_block(
     # see test_compose_rejects_a_leg_whose_own_block_escape_crosses_its_own_net
     # above, whose fixture this mirrors exactly.
     assert result["routed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Post-route landing connectivity -- `nets[].landed_on_block` (issue #2210).
+#
+# #1527's own-block escape check (above) catches a leg whose approach stub
+# crosses *other* real drawn metal on its way out of a block; it says nothing
+# about a leg that reaches a caller-declared `ports[]` coordinate with
+# nothing there at all -- a "floating pad", e.g. a `blocks[].cell` port
+# expressed in a frame that does not exactly match the block's own placed
+# geometry (the caller's own bookkeeping, a placement offset applied twice, a
+# stale response file). Before this issue, every one of `route_two_pin()`'s
+# checks 1-6 (and #1527's own guard) look for a *problem* against
+# gen-compose's own already-drawn geometry, so a leg like that composed
+# `routed: true` unconditionally: nothing was there to conflict with.
+# --------------------------------------------------------------------------- #
+
+
+def _write_floating_pad_gds(path, cell_name, wire_y0):
+    """Fabricate a library stream holding one li1 (67/20) wire (``wire_a``,
+    a 1.5um-long horizontal leg at ``y=wire_y0`` to ``wire_y0 + 0.2``) --
+    ``u1``'s only real drawn geometry. The fixtures below declare a port
+    *away* from this wire (a different ``y_um``) to simulate a ``ports[]``
+    frame mismatch: the declared coordinate is a plausible point inside the
+    block's own ``bbox_um``, but the block never actually drew anything
+    there.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li1 = layout.layer(67, 20)
+    cell = layout.create_cell(cell_name)
+
+    def d(v):
+        return int(round(v / layout.dbu))
+
+    wire_a = kdb.Box(d(0.0), d(wire_y0), d(1.5), d(wire_y0 + 0.2))
+    cell.shapes(li1).insert(wire_a)
+    layout.write(str(path))
+    return str(path)
+
+
+def _floating_pad_request(tmp_path, pdk_root, port_a_y_um, cell_name, output):
+    """A two-pin net between a `blocks[].cell` block (``u1``, real geometry
+    drawn only at ``y=0.9-1.1``) and a plain library pad (``u2``, real
+    geometry spanning its whole declared extent). ``port_a_y_um`` is ``u1``'s
+    own declared port position -- ``1.0`` sits on the real wire (the control
+    case); any other value inside ``u1``'s own ``bbox_um`` (``y1=5.0``) is a
+    coordinate the block never drew anything at (the floating-pad case).
+    Both blocks' declared ports face each other along the same row, so
+    ``manhattan_backbone()`` draws a single straight leg with nothing in the
+    way -- every existing geometric check (channel width, #1527's own-block
+    escape, obstacle overlap) passes either way, which is exactly what makes
+    the floating-pad case invisible without this issue's own connectivity
+    check.
+    """
+    u1_gds = _write_floating_pad_gds(tmp_path / "u1.gds", cell_name, 0.9)
+    u2_gds = _write_library_gds(tmp_path / "u2.gds", {"pad": (0.4, 5.0)})
+    return {
+        "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+        "blocks": [
+            {
+                "id": "u1",
+                "cell": {
+                    "gds_path": u1_gds,
+                    "cell_name": cell_name,
+                    "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 3.0, "y1": 5.0},
+                    "ports": [
+                        {
+                            "name": "A",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 1.5,
+                            "y_um": port_a_y_um,
+                            "width_um": 0.17,
+                            "direction_deg": 0,
+                        }
+                    ],
+                },
+            },
+            {
+                "id": "u2",
+                "cell": {
+                    "gds_path": u2_gds,
+                    "cell_name": "pad",
+                    "ports": [
+                        {
+                            "name": "B",
+                            "layer": {"layer": 67, "datatype": 20},
+                            "x_um": 0.0,
+                            "y_um": port_a_y_um,
+                            "width_um": 0.17,
+                            "direction_deg": 180,
+                        }
+                    ],
+                },
+            },
+        ],
+        "placement": {
+            "strategy": "explicit",
+            "order": ["u1", "u2"],
+            "origins_um": {"u1": {"x": 0.0, "y": 0.0}, "u2": {"x": 5.0, "y": 0.0}},
+        },
+        "connectivity": [
+            {
+                "net": "N",
+                "pins": [{"block": "u1", "port": "A"}, {"block": "u2", "port": "B"}],
+            }
+        ],
+        "routing": {"layer_role": "metal", "width_um": 0.17},
+        "options": {"cell_name": cell_name + "_top", "output": str(output)},
+    }
+
+
+def test_compose_reports_landed_on_block_false_for_a_floating_pad(tmp_path, pdk_root):
+    # port_a_y_um=4.0 is nowhere near u1's real wire (y=0.9-1.1), but is a
+    # plausible point inside u1's own declared bbox_um -- exactly the "frame
+    # divergence" this issue describes, not a nonsensical value. Every
+    # geometric routability check passes (nothing to cross, nothing to
+    # overlap), so before this issue's fix this composed `routed: true`
+    # unconditionally, with no signal that "A" never actually touched u1.
+    output = tmp_path / "floating_pad.gds"
+    request = _floating_pad_request(tmp_path, pdk_root, 4.0, "floating_pad", output)
+    report = compose(request)
+
+    net = report["nets"][0]
+    # The leg still draws -- this is a connectivity finding, not a
+    # geometric rejection; `unrouted_nets`/`routed`/`status` are unaffected.
+    assert report["unrouted_nets"] == []
+    assert net["routed"] is True
+    assert net["status"] == "routed"
+    leg = net["legs"][0]
+    assert leg["routed"] is True
+
+    # The new signal: this leg's landing pin on "u1" never touches any real
+    # drawn geometry there, so both the leg-level and net-level verdicts are
+    # False -- distinguishable from an ordinary, fully-connected `routed:
+    # true` net.
+    assert leg["landed_on_block"] is False
+    assert net["landed_on_block"] is False
+
+    drc_report = run_drc(str(output), "sky130", top=request["options"]["cell_name"])
+    # DRC stays clean -- a floating pad in empty space is not a spacing/width
+    # violation, which is exactly why #1527's overlap-only guard (a purely
+    # geometric check, same family as `klt drc`) cannot see this either; only
+    # a connectivity check can.
+    assert drc_report["violation_count"] == 0
+
+
+def test_compose_reports_landed_on_block_true_when_the_leg_actually_lands(
+    tmp_path, pdk_root
+):
+    # Control case: identical fixture, except port A's declared position
+    # (y=1.0) sits squarely on u1's real wire -- the ordinary, correctly
+    # composed case must not regress to a new False verdict.
+    output = tmp_path / "landed_pad.gds"
+    request = _floating_pad_request(tmp_path, pdk_root, 1.0, "landed_pad", output)
+    report = compose(request)
+
+    net = report["nets"][0]
+    assert report["unrouted_nets"] == []
+    assert net["routed"] is True
+    leg = net["legs"][0]
+    assert leg["landed_on_block"] is True
+    assert net["landed_on_block"] is True
 
 
 # --------------------------------------------------------------------------- #

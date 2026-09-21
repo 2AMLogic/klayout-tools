@@ -319,8 +319,46 @@ cleanly.
   `unrouted_nets: []` plus a clean `klt drc` run is therefore still not
   proof of the intended connectivity; a net-by-net `klt extract` diff
   against the previous composition (device counts, merged label sets) is
-  the only proof, and is worth the extra step precisely because the two
-  signals a caller naturally trusts both say "fine" when they are not.
+  the most thorough proof, and is worth the extra step precisely because the
+  two signals a caller naturally trusts both say "fine" when they are not.
+- **`nets[].landed_on_block` / `nets[].legs[].landed_on_block` (issue
+  #2210) — what `routed: true` now additionally guarantees, and what it
+  still does not.** Every check described above (the route-vs-route
+  collision check, #1520's pad self-notch check, #1527's own-block escape
+  guard, #1904's own-block approach spacing) compares a leg's own drawn
+  metal against some *other* already-drawn geometry; none of them ever asks
+  whether the block a leg's endpoint names actually drew *any* real
+  conductor at the caller-declared `ports[]` coordinate in the first place.
+  A `blocks[].cell` port expressed in a frame that does not exactly match
+  the block's own placed geometry (the caller's own bookkeeping, a
+  placement offset applied twice, a stale response file) lands its leg's
+  via-drop/stub-widen landing pad on an empty patch of the composed layout —
+  nothing else is there to conflict with, so every check above passes and
+  the leg composed `routed: true` unconditionally, even though it never
+  actually touched the block whose net it claims to join (a "floating pad";
+  #1527's own-block escape guard is, by its own docstring, an *overlap*
+  detector and does not cover this — a pad floating in genuinely empty
+  space has nothing to overlap). `landed_on_block` closes this specific
+  gap: after a leg is drawn, each of its endpoint pins with a reported
+  position and physical `layer` is checked against that pin's own named
+  block's real drawn geometry on that layer (the same per-(block, layer)
+  read the pad self-notch/approach-spacing checks above already share, so
+  this reuses an already-cached read far more often than it pays for a new
+  one — no whole-layout re-extraction per leg or per net). `nets[].routed`/
+  `nets[].status` stay purely geometric (unaffected by this field) — a net
+  can be `routed: true` and still `landed_on_block: false`. Per-leg,
+  `landed_on_block` is present only on a drawn leg (`routed: true`, the
+  same convention `channel_track` already uses), `True` when every
+  checkable endpoint landed on real geometry; the net-level field is the
+  logical AND of every drawn leg's own verdict, or `null` when the net drew
+  nothing to check (declare-only, or every candidate leg was rejected). A
+  pin with no reported position/physical layer is skipped, not failed —
+  the same "nothing to check" case via-drop resolution already tolerates.
+  **This does not replace the net-by-net `klt extract` diff above as the
+  most thorough connectivity proof** — it catches a leg landing on
+  genuinely empty space, not a leg that lands on the *wrong* real geometry
+  (e.g. two blocks whose actual pads happen to sit at the same coordinate
+  by coincidence), which only a real netlist diff can distinguish.
 
 ## Known limitations (found during phase 3 bring-up, #196)
 
