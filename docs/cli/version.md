@@ -60,8 +60,13 @@ a release.
   unrecoverable.
 - `git_tag` — the tag the build sits exactly on, or `null`. A tag belonging to
   a *different* version is reported here but does not make `is_release` true.
-- `dirty` — whether the tree had uncommitted changes at build time (`null`
-  when unknown).
+- `dirty` — whether *tracked* files in the tree had uncommitted changes at
+  build time (`null` when unknown). Untracked files are deliberately not
+  considered (issue #2248): a `git+<sha>` install clones into a scratch
+  checkout a package manager can itself litter with bookkeeping files (e.g.
+  `uv` writes its own checkout-completion sentinel into the tree before the
+  build runs), which previously made a clean, immutable, sha-pinned revision
+  misreport as dirty.
 - `is_release` — **tri-state**, mirroring `provenance.deck.released`
   (see [`../json-contract.md`](../json-contract.md)): `true` for a confirmed
   release build, `false` for a confirmed non-release build, `null` when the
