@@ -3176,3 +3176,419 @@ def test_modexp_canary_klt_signoff_reports_pass(tmp_path):
     assert check["passed"] is True
     assert check["detail"]["em_verdict_status"] == "pass"
     assert check["detail"]["em_verdict_fail_count"] == 0
+
+
+# --- devices[]: drawn device bodies are not wires (issue #2260) --------------
+
+
+def _resistor_string_fixture(path) -> None:
+    """A rail-to-rail poly-resistor string: two labelled `met1` supply rails
+    joined *only* through a drawn poly resistor body, contacted at each end
+    -- the defining topology of a power-on-reset divider, a brown-out
+    detector, or a supply-referenced bias string.
+
+    The layout is DRC-plausible and electrically correct: VDD and VSS are
+    two distinct nodes with a resistor between them, not a short. But every
+    shape on the path is on a declared conductor role, so without a
+    `devices[]` declaration `klt power`'s connectivity model reads the
+    resistor body as a wire -- and then *solves* it, putting the worst-case
+    IR-drop node and the failing EM edge on the far rail. That is the
+    reproduction from issue #2260.
+
+    Layer numbers: met1=1/0, met1 label=1/5, poly=4/0, contact=5/0, and the
+    PDK device-body marker on 62/0 (gf180mcu's own `Resistor` layer number,
+    kept recognisable -- the same number `tests/test_erc.py`'s sibling
+    `devices[]` fixture uses).
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+
+    met1 = layout.layer(1, 0)
+    met1_label = layout.layer(1, 5)
+    poly = layout.layer(4, 0)
+    contact = layout.layer(5, 0)
+    res_marker = layout.layer(62, 0)
+
+    # The two supply rails, on met1, 6 um apart -- no metal runs between them.
+    top.shapes(met1).insert(kdb.Box.new(_um(0), _um(0), _um(2), _um(1)))
+    top.shapes(met1_label).insert(kdb.Text("VDD", kdb.Trans(_um(1), _um(0.5))))
+    top.shapes(met1).insert(kdb.Box.new(_um(8), _um(0), _um(10), _um(1)))
+    top.shapes(met1_label).insert(kdb.Text("VSS", kdb.Trans(_um(9), _um(0.5))))
+
+    # The resistor: one poly bar from rail to rail, contacted at each head.
+    top.shapes(poly).insert(kdb.Box.new(_um(1), _um(0.2), _um(9), _um(0.8)))
+    top.shapes(contact).insert(kdb.Box.new(_um(1.2), _um(0.3), _um(1.4), _um(0.5)))
+    top.shapes(contact).insert(kdb.Box.new(_um(8.6), _um(0.3), _um(8.8), _um(0.5)))
+
+    # The PDK's own device-body marker over the resistor body (not the
+    # heads): 6 um x 0.8 um = 4.8 um^2, drawn with the 0.1 um top/bottom
+    # enclosure past the 0.6 um-tall poly bar that a PDK device marker
+    # conventionally carries -- so only 6 um x 0.6 um = 3.6 um^2 of it is
+    # actually subtracted from `poly`.
+    top.shapes(res_marker).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
+
+    layout.write(str(path))
+
+
+#: The `devices[]` declaration matching `_resistor_string_fixture`.
+_RESISTOR_DEVICES = [{"name": "poly_resistor", "body_layer": "62/0", "on": "poly"}]
+
+#: What `_RESISTOR_DEVICES` actually subtracts from `poly`: the 6 um x 0.8 um
+#: marker (4.8 um^2 of its own) intersected with the 0.6 um-tall poly bar it
+#: is drawn over -> 6 um x 0.6 um. The gap between the two numbers is
+#: ordinary marker overhang, and reporting the *intersection* is the point --
+#: see `test_device_body_area_is_the_intersection_with_its_role`.
+_RESISTOR_SUBTRACTED_UM2 = 3.6
+
+#: `_RESISTOR_DEVICES` with the same marker layer additionally declared `on` a
+#: role it never touches (the `contact` via role: two 0.2 um x 0.2 um boxes
+#: under the resistor heads, outside the marker's own x-range). One correct
+#: declaration, one wrong-`on` one.
+_RESISTOR_DEVICES_WITH_WRONG_ROLE = [
+    {"name": "poly_resistor", "body_layer": "62/0", "on": "poly"},
+    {"name": "wrong_role_resistor", "body_layer": "62/0", "on": "contact"},
+]
+
+
+def _resistor_string_spec(devices=None, *, solve=True):
+    """The spec for `_resistor_string_fixture`. With `solve` (the default) it
+    also declares a VDD pad at the left rail and a 1 mA load at the *right*
+    rail -- which is on net VSS, and so must not be reachable from VDD at
+    all once the resistor body stops conducting."""
+    spec = {
+        "power_nets": ["VDD", "VSS"],
+        "stackup": [
+            {
+                "name": "met1",
+                "layer": "1/0",
+                "label_layer": "1/5",
+                "sheet_resistance_ohm_per_sq": 0.1,
+                "current_limit_a_per_um": 0.001,
+                "current_limit_source": "synthetic fixture",
+            },
+            {
+                "name": "poly",
+                "layer": "4/0",
+                "sheet_resistance_ohm_per_sq": 50.0,
+                "current_limit_a_per_um": 0.001,
+                "current_limit_source": "synthetic fixture",
+            },
+        ],
+        "vias": [
+            {
+                "name": "contact",
+                "layer": "5/0",
+                "between": ["met1", "poly"],
+                "resistance_ohm": 20.0,
+                "current_limit_a": 0.001,
+                "current_limit_source": "synthetic fixture",
+            }
+        ],
+    }
+    if solve:
+        spec["pads"] = [
+            {
+                "name": "vdd_pad",
+                "net": "VDD",
+                "x_um": 0.5,
+                "y_um": 0.5,
+                "voltage_v": 1.8,
+            }
+        ]
+        spec["current_model"] = {
+            "supply_net": "VDD",
+            "instances": [
+                {"name": "load", "x_um": 9.5, "y_um": 0.5, "current_a": 0.001}
+            ],
+        }
+    if devices is not None:
+        spec["devices"] = devices
+    return spec
+
+
+def _run_resistor_string(tmp_path, devices=None, *, solve=True, name="string"):
+    gds = tmp_path / f"{name}.gds"
+    spec = tmp_path / f"{name}.power.json"
+    _resistor_string_fixture(gds)
+    spec.write_text(json.dumps(_resistor_string_spec(devices, solve=solve)))
+    return run_power(str(gds), str(spec))
+
+
+def _island_x_range(network):
+    xs = [node["x_um"] for island in network["islands"] for node in island["nodes"]]
+    return min(xs), max(xs)
+
+
+def _network(report, net):
+    return next(entry for entry in report["networks"] if entry["net"] == net)
+
+
+def test_undeclared_device_body_fuses_the_two_supply_rails(tmp_path):
+    """The bug, reproduced (issue #2260): with no `devices[]` declaration
+    the drawn resistor body conducts, so VDD and VSS resolve to the *same*
+    electrical net -- each reported network spans both rails."""
+    report = _run_resistor_string(tmp_path, solve=False)
+
+    assert _island_x_range(_network(report, "VDD")) == (0.0, 10.0)
+    assert _island_x_range(_network(report, "VSS")) == (0.0, 10.0)
+    # Same physical net seen twice, once per requested name.
+    assert (
+        _network(report, "VDD")["node_count"] == _network(report, "VSS")["node_count"]
+    )
+
+
+def test_declared_device_body_breaks_the_rail_to_rail_string(tmp_path):
+    """The fix: declaring the device-body marker subtracts it from `poly`'s
+    conductor region before the R network is built, so each supply stays on
+    its own rail -- the resistor heads still reach their rail through the
+    contacts, but nothing crosses the body."""
+    report = _run_resistor_string(tmp_path, devices=_RESISTOR_DEVICES, solve=False)
+
+    assert _island_x_range(_network(report, "VDD")) == (0.0, 2.0)
+    assert _island_x_range(_network(report, "VSS")) == (8.0, 10.0)
+    # Both rails still extract as one island each -- the carve-out breaks
+    # the string, not the rails.
+    assert _network(report, "VDD")["island_count"] == 1
+    assert _network(report, "VSS")["island_count"] == 1
+
+
+def test_undeclared_device_body_puts_the_ir_drop_verdict_on_the_other_rail(tmp_path):
+    """`klt power` does not merely mislabel the fused net -- it solves it.
+    Without the carve-out the worst-case droop node for VDD sits at x=10 um,
+    which is the *VSS* rail: a 707 mV verdict computed on a rail that does
+    not exist."""
+    report = _run_resistor_string(tmp_path)
+
+    worst = report["ir_drop_map"]["worst_case"]
+    assert worst["net"] == "VDD"
+    assert worst["x_um"] == 10.0
+    assert report["worst_case_droop_mv"] > 100.0
+
+
+def test_declared_device_body_moves_the_ir_drop_verdict_back_to_the_rail(tmp_path):
+    """With the body declared, VDD's worst-case droop node is on VDD's own
+    rail (x <= 2 um) and the droop collapses to the real rail's own IR --
+    the 1 mA load at x=9.5 um is on VSS and no longer sinks through a
+    resistor body pretending to be wire."""
+    report = _run_resistor_string(tmp_path, devices=_RESISTOR_DEVICES)
+
+    worst = report["ir_drop_map"]["worst_case"]
+    assert worst["net"] == "VDD"
+    assert worst["x_um"] <= 2.0
+    assert report["worst_case_droop_mv"] < 1.0
+
+
+def test_declared_device_body_changes_the_em_verdict(tmp_path):
+    """The EM half of the same verdict: undeclared, the resistor body is an
+    EM-checked `poly` edge carrying the whole 1 mA load and failing its
+    limit; declared, there is no such edge and no failure."""
+    undeclared = _run_resistor_string(tmp_path, name="undeclared")
+    declared = _run_resistor_string(
+        tmp_path, devices=_RESISTOR_DEVICES, name="declared"
+    )
+
+    assert undeclared["em_verdict"]["status"] == "fail"
+    assert undeclared["em_verdict"]["fail_count"] == 1
+    assert undeclared["em_verdict"]["worst_case"]["layer"] == "poly"
+    assert undeclared["status"] == "fail"
+
+    assert declared["em_verdict"]["fail_count"] == 0
+    assert declared["em_verdict"]["status"] != "fail"
+    assert declared["status"] != "fail"
+
+
+def test_device_body_subtraction_is_reported(tmp_path):
+    """The carved area is echoed per declaration, so a declaration that
+    matched nothing is a visible zero rather than a silent no-op. Top-level
+    `devices` rather than `klt erc`'s `provenance.devices` only because
+    `klt power` has no `provenance` block -- the four fields are identical."""
+    report = _run_resistor_string(tmp_path, devices=_RESISTOR_DEVICES, solve=False)
+
+    assert report["devices"] == [
+        {
+            "name": "poly_resistor",
+            "body_layer": "62/0",
+            "on": "poly",
+            "body_area_um2": _RESISTOR_SUBTRACTED_UM2,
+        }
+    ]
+
+
+def test_device_body_area_is_the_intersection_with_its_role(tmp_path):
+    """`body_area_um2` is the area this declaration *actually* subtracted --
+    `marker & on`'s own conductor region -- not the marker layer's own area
+    (the same rule `klt erc` settled in issue #2226).
+
+    The fixture's RES marker is 6 um x 0.8 um (4.8 um^2) drawn over a 0.6
+    um-tall poly bar, i.e. with the 0.1 um top/bottom overhang a PDK device
+    marker conventionally carries. Only the 6 um x 0.6 um overlap is
+    subtracted, so 3.6 is the honest number and 4.8 over-states it."""
+    report = _run_resistor_string(tmp_path, devices=_RESISTOR_DEVICES, solve=False)
+    entry = report["devices"][0]
+
+    assert entry["body_area_um2"] == 3.6
+    assert entry["body_area_um2"] != 4.8
+
+
+def test_device_body_declared_on_a_role_it_does_not_touch_reports_zero(tmp_path):
+    """The same marker layer declared twice, once `on` the role it is drawn
+    over and once `on` a role it never touches. Only the first subtracts
+    anything, and the report says so -- that is what makes the field usable
+    as a wrong-`on` cross-check."""
+    report = _run_resistor_string(
+        tmp_path, devices=_RESISTOR_DEVICES_WITH_WRONG_ROLE, solve=False
+    )
+    devices_by_name = {d["name"]: d for d in report["devices"]}
+
+    assert devices_by_name["poly_resistor"]["body_area_um2"] == 3.6
+    assert devices_by_name["wrong_role_resistor"]["body_area_um2"] == 0.0
+    # The wrong-`on` entry is reported, not dropped, and still names the
+    # role it was declared on.
+    assert devices_by_name["wrong_role_resistor"]["on"] == "contact"
+    # It also changed nothing: the `contact` via role is untouched, so the
+    # resistor heads still reach their rails.
+    assert _island_x_range(_network(report, "VDD")) == (0.0, 2.0)
+    assert _island_x_range(_network(report, "VSS")) == (8.0, 10.0)
+
+
+def test_device_body_that_misses_its_declared_role_warns_on_stderr(tmp_path, capsys):
+    """A marker that *is* drawn on this layout but subtracts nothing from
+    the role it was declared `on` is a spec bug, not an unused layer -- so
+    it gets a one-line stderr warning as well as a `0.0` in the report. JSON
+    goes to stdout only, so the warning cannot corrupt a piped report."""
+    _run_resistor_string(
+        tmp_path, devices=_RESISTOR_DEVICES_WITH_WRONG_ROLE, solve=False
+    )
+    err = capsys.readouterr().err
+
+    assert "klt power: warning:" in err
+    assert "wrong_role_resistor" in err
+    assert "subtracted nothing" in err
+    assert "62/0" in err
+    # The correct declaration on `poly` is not warned about.
+    assert "'poly_resistor'" not in err
+
+
+def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path, capsys):
+    """A `body_layer` this stream never carries is not an error (matching
+    `stackup`/`vias`' own convention) -- but the measured `body_area_um2`
+    says so, instead of leaving a caller to infer that the carve-out bit."""
+    report = _run_resistor_string(
+        tmp_path,
+        devices=[{"name": "poly_resistor", "body_layer": "99/0", "on": "poly"}],
+        solve=False,
+    )
+
+    assert report["devices"][0]["body_area_um2"] == 0.0
+    # Nothing was subtracted, so the two rails are still fused.
+    assert _island_x_range(_network(report, "VDD")) == (0.0, 10.0)
+    # No stderr warning here: a layer absent from the stream is the
+    # documented "this fixture doesn't draw it" case, unlike a marker that
+    # is drawn but misses the role it was declared `on`.
+    assert "subtracted nothing" not in capsys.readouterr().err
+
+
+def test_devices_omitted_reports_an_empty_list(tmp_path):
+    report = _run_resistor_string(tmp_path, solve=False)
+
+    assert report["devices"] == []
+
+
+def test_devices_omitted_is_identical_to_an_empty_declaration(tmp_path):
+    """Additive-only: a spec with no `devices[]` behaves exactly as one that
+    declares an empty array, and neither bumps `schema_version`."""
+    omitted = _run_resistor_string(tmp_path, name="omitted")
+    empty = _run_resistor_string(tmp_path, devices=[], name="empty")
+
+    assert omitted["schema_version"] == 1
+    assert empty["devices"] == []
+    for key in ("networks", "ir_drop_map", "em_verdict", "status", "coverage"):
+        assert omitted[key] == empty[key]
+
+
+def test_devices_declaration_does_not_disturb_an_unrelated_layout(tmp_path):
+    """A `devices[]` declaration whose marker touches nothing on the
+    declared role leaves every other output exactly as it was."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+    baseline = run_power(str(gds), str(spec))
+
+    spec_dict = json.loads(spec.read_text())
+    spec_dict["devices"] = [
+        {"name": "poly_resistor", "body_layer": "62/0", "on": "met1"}
+    ]
+    with_devices = tmp_path / "basic_devices.power.json"
+    with_devices.write_text(json.dumps(spec_dict))
+    report = run_power(str(gds), str(with_devices))
+
+    assert report["networks"] == baseline["networks"]
+    assert report["island_count"] == baseline["island_count"]
+    assert report["devices"][0]["body_area_um2"] == 0.0
+
+
+def test_devices_on_a_via_role_breaks_the_bridge(tmp_path):
+    """A `devices[]` entry may name a `vias` role too -- a MiM capacitor
+    whose top-plate strap is the drawn via role itself. Declaring the cap
+    body stops the via from bridging the two metal roles."""
+    report = _run_resistor_string(
+        tmp_path,
+        devices=[{"name": "poly_resistor", "body_layer": "62/0", "on": "poly"}]
+        + [{"name": "contact_cut", "body_layer": "5/0", "on": "contact"}],
+        solve=False,
+    )
+
+    # Both contacts are gone, so neither resistor head reaches a rail; each
+    # supply is now just its own bare met1 rail.
+    assert report["devices"][1]["on"] == "contact"
+    assert report["devices"][1]["body_area_um2"] > 0.0
+    assert _island_x_range(_network(report, "VDD")) == (0.0, 2.0)
+
+
+# --- devices[] spec validation (issue #2260) ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "devices,message",
+    [
+        ("not-an-array", "'devices' must be an array"),
+        ([[]], "devices[0] must be a JSON object"),
+        ([{"on": "poly"}], "devices[0] missing 'body_layer'"),
+        ([{"body_layer": "62/0"}], "devices[0] missing 'on'"),
+        (
+            [{"body_layer": "62", "on": "poly"}],
+            "devices[0].body_layer must be '<layer>/<datatype>'",
+        ),
+        (
+            [{"body_layer": "62/0", "on": "nosuchrole"}],
+            "devices[0].on must name a 'stackup' or 'vias' entry",
+        ),
+        (
+            [
+                {"name": "r", "body_layer": "62/0", "on": "poly"},
+                {"name": "r", "body_layer": "62/0", "on": "met1"},
+            ],
+            "duplicate device name 'r'",
+        ),
+    ],
+)
+def test_malformed_devices_declaration_is_rejected(tmp_path, devices, message):
+    gds = tmp_path / "string.gds"
+    spec = tmp_path / "string.power.json"
+    _resistor_string_fixture(gds)
+    spec.write_text(json.dumps(_resistor_string_spec(devices, solve=False)))
+
+    with pytest.raises(PowerError) as excinfo:
+        run_power(str(gds), str(spec))
+
+    assert message in str(excinfo.value)
+
+
+def test_devices_entry_name_defaults_to_its_index(tmp_path):
+    report = _run_resistor_string(
+        tmp_path, devices=[{"body_layer": "62/0", "on": "poly"}], solve=False
+    )
+
+    assert report["devices"][0]["name"] == "device0"

@@ -200,6 +200,22 @@ The spec file is a JSON object:
     one resistor" model.
   - `current_limit_source` (string, optional) — same citation convention as
     a `stackup` entry's, above.
+- `devices` (optional array, default `[]`, issue #2260) — where a drawn
+  **device body** sits on an already-declared role, so it stops being read
+  as wire. Identical in shape and semantics to `klt erc`'s own `devices[]`
+  (issue #2183) — the same declaration can be handed to both verbs. See
+  "Device bodies are not wires" below for why this exists and what it does
+  *not* claim:
+  - `name` (string, optional, defaults to `"device<index>"`, must be
+    unique) — echoed back in the report's top-level `devices[]`.
+  - `body_layer` (string, `"<layer>/<datatype>"`, required) — the PDK's own
+    device-body marker layer (gf180mcu's `Resistor`/`RES_MK`/`SAB` for a
+    poly resistor, `CAP_MK`/`MIM_L_MK`/`FuseTop` for a MiM cap — the same
+    markers a curated deck already uses for device recognition).
+  - `on` (string, required) — the `stackup` or `vias` role that body's
+    geometry is drawn on. A `stackup` role for a poly/metal body; a `vias`
+    entry for a device whose bridge between two declared roles *is* the
+    via-role geometry (a MiM cap's top-plate strap).
 - `pads` (optional array, default `[]`) — where each power net's supply is
   actually delivered. Each pad is held at a fixed voltage (an ideal source)
   and is the boundary condition the solve is relative to:
@@ -304,9 +320,10 @@ so 'VDD_CORE' matches a net named 'DVDD,VDD_CORE'), and that at least one
 
 Connectivity is traced with `klayout.db.LayoutToNetlist`, used purely for
 wire/via connectivity — no device recognition is registered, unlike `klt
-extract`'s deck-based extraction. This is the same API `extract.py`'s own
-metal/via connectivity graph uses, scoped down to only the layers this
-spec declares.
+extract`'s deck-based extraction (but see "Device bodies are not wires"
+below, which lets a spec declare where a drawn device body sits so it stops
+reading as wire). This is the same API `extract.py`'s own metal/via
+connectivity graph uses, scoped down to only the layers this spec declares.
 
 - Each metal role's net geometry (`LayoutToNetlist.polygons_of_net`,
   merged into maximal polygons) becomes **one metal edge per *rectangular*
@@ -392,6 +409,76 @@ only its resistor model is missing), contributes no nodes for a pad or an
 instance to attach to, and contributes no edges for the EM verdict to check.
 Refusing is deliberate: an IR/EM verdict that is *absent* is recoverable,
 one that is quietly optimistic is not.
+
+### Device bodies are not wires (`devices[]`, issue #2260)
+
+A conductor role carries *geometry*, and the model above has no way to tell
+a wire from a **drawn device body** on the same layer: a poly resistor, a
+poly fuse, a MiM/MOM capacitor plate. Whatever the body is electrically, it
+conducts across its own extent in this graph — and `klt power` does not
+merely mislabel the resulting net, it **solves** it. The body becomes a
+low-resistance path in the R network, so the IR-drop map and the EM verdict
+are computed on a rail that does not exist.
+
+A supply-referenced analog block routinely draws a device body straight onto
+a role the spec *must* declare: a silicide-blocked poly load resistor
+running rail-to-node on the same `Poly2` a poly riser needs, a MiM
+capacitor whose top-plate strap is the drawn via role, a diffusion resistor
+on a declared active role. **Dropping the layer from `stackup[]` is not an
+answer** — it removes the rail wherever poly genuinely carries supply
+current (a Metal1-trunk/poly-riser channel route, a poly strap between
+abutted cells), fragmenting `Metal1` into disconnected islands that report
+`no_pad` everywhere not directly under a pad. Restricting `power_nets` or
+the label set does not help either: the false merge is geometric, not
+name-based.
+
+`devices[]` is how a spec declares those bodies (schema in "Spec file"
+above). Each entry names a device-body marker layer — the
+`RES_MK`/`SAB`/`Resistor`, `CAP_MK`/`MIM_L_MK`/`FuseTop`-style layer the
+curated PDK decks already use for device recognition — plus the `stackup`
+or `vias` role that body is drawn on. That region is **subtracted from the
+role's conductor region before connectivity is traced and before the
+resistor network is built**, so the body breaks the net instead of bridging
+it.
+
+**This is `klt erc`'s `devices[]` (issue #2183), verbatim.** Same keys, same
+semantics, same validation — the two verbs share one implementation
+(`src/klayout_tools/_devices.py`), so the identical `devices[]` block can be
+lifted straight from an `.erc.json` spec into a `.power.json` one. The only
+difference is where the echo lands: `klt erc` nests it under
+`provenance.devices`, and `klt power` — which has no `provenance` block at
+all — carries the same four fields in a **top-level `devices[]`**.
+Inventing a half-populated `provenance` (no `input`, no `tool`) would have
+been a worse divergence than a differently-placed key.
+
+Three properties, all deliberate:
+
+- **The carve-out is visible in the report.** `devices[]` echoes every
+  declaration with the area it actually removed (`body_area_um2` — the
+  marker **intersected with the `on` role's own drawn region**, not the
+  marker layer's own area), so a declaration that silently matched
+  nothing — wrong datatype, wrong `on` role, marker layer absent from this
+  stream — is a visible `0.0` rather than a silent no-op. A marker that is
+  drawn on the stream but misses its declared role also warns on stderr;
+  JSON goes to stdout only, so a piped report is unaffected.
+- **It cuts, so declare it where the device is.** Subtraction is purely
+  geometric — a marker layer that over-covers real routing will break that
+  routing's connectivity too, which typically shows up as a rail
+  fragmenting into extra islands or an island losing its path to a pad.
+  `body_area_um2` and the island counts are the cross-check; a marker that
+  covers only the device body (the usual PDK convention) leaves everything
+  else untouched.
+- **Omitting it changes nothing.** A spec with no `devices[]` produces the
+  same report it always did, plus an empty `devices: []`.
+
+**Still not modelled**: what the device *is*. `devices[]` says "this drawn
+body is not wire" — it does **not** say "this is a 3.4 kΩ resistor". The
+body is removed from the conductor and both terminals are left as two
+separate nets; nothing inserts the device's own impedance into the resistor
+network, so a rail whose real current path runs *through* a declared device
+is reported as two unconnected islands rather than as one net with a large
+series resistance. Modelling device impedance is a separate, larger
+question this declaration deliberately does not answer.
 
 ## Static IR-drop solve (how the numbers are produced)
 
@@ -720,6 +807,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
       {"net": "VGND", "status": "not_checked", "checked_edge_count": 0, "unchecked_edge_count": 0, "fail_count": 0, "worst_case": null, "failing_edges": []}
     ]
   },
+  "devices": [],
   "warnings": [
     "power net 'VGND' matches no labelled net in this layout -- nets actually present: 'VPWR'; check 'power_nets' against the layout's own pin/label text (a 'power_nets' entry matches a net that *carries* that label, so 'VDD_CORE' matches a net named 'DVDD,VDD_CORE'), and that at least one 'stackup' entry's 'label_layer' actually carries it"
   ]
@@ -746,6 +834,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
 | `em_verdict`         | object \| null     | The per-net EM current-density verdict, or `null` when the spec declared neither `pads` nor `current_model` (the same condition under which `ir_drop_map` is `null`) — see below. |
+| `devices`            | array\<object\>    | One entry per `devices[]` spec declaration, in declaration order: `{"name", "body_layer", "on", "body_area_um2"}`. `body_area_um2` is the area this declaration **actually** subtracted — the marker intersected with the `on` role's own drawn region, not the marker layer's own area — so `0.0` means the declaration changed nothing. `[]` when the spec declares no `devices`. See "Device bodies are not wires" below. |
 | `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via that lands on no modelled segment of one of the roles it declares, an island whose emitted network is more than one connected component (some real connection is not modelled), a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
 
 ### `ir_drop_map` (Phase 1b)
@@ -983,7 +1072,11 @@ criterion 4):**
   net's geometry is whatever the declared `stackup`/`vias` layers
   physically connect, nothing more. A net that also draws current through
   a transistor body tie or a well tap is not modelled differently; this
-  command only sees drawn metal/via shapes.
+  command only sees drawn metal/via shapes. `devices[]` (see "Device bodies
+  are not wires" above) is the one, deliberately narrow exception: it
+  *removes* a declared device body from the wire graph so it stops
+  conducting, but it still does not model the device — nothing inserts the
+  body's own impedance into the resistor network.
 - **A rectangle is one resistor; a non-rectangle is a mesh, never a
   bounding box.** A rectangular merged polygon becomes exactly one resistor
   edge from its longer-axis length/width. A non-rectangular one (an L/T/

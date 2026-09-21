@@ -88,6 +88,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   positional only — it cannot sever connectivity, because the node it picks
   is in the same island either way. That trade is now stated explicitly in
   the docs.
+- **Added** (#2260, `klt power`, additive — **no** `schema_version` bump: a
+  spec that declares no `devices[]` produces a byte-identical report apart
+  from the new empty list): `klt power` specs may declare the same
+  optional `devices[]` array `klt erc` grew in #2183 — `{"name",
+  "body_layer": "<layer>/<datatype>", "on": "<stackup or vias name>"}` —
+  naming where a drawn **device body** sits on an already-declared
+  conducting role. Each entry's region is subtracted from that role's
+  conductor region before connectivity is traced **and before the resistor
+  network is built**. Without it, a poly load resistor or MiM capacitor
+  drawn on a role the spec must declare (poly that also carries supply
+  current, the via role that straps a top plate) was read as wire — and
+  `klt power` does not merely mislabel the resulting net, it *solves* it:
+  the body became a low-resistance path in the R network, so the IR-drop
+  map and the EM verdict were computed on a rail that does not exist, with
+  the worst-case droop node and the failing EM edge landing on the *other*
+  supply. Dropping the layer from `stackup[]` was no answer either (it
+  fragments any rail that genuinely uses that layer into padless islands).
+  What each declaration actually removed is echoed in a new **top-level**
+  `devices[]` (`{"name", "body_layer", "on", "body_area_um2"}`, the marker
+  intersected with the role's own drawn region, `0.0` when the declaration
+  matched nothing) — top-level rather than `klt erc`'s
+  `provenance.devices` only because `klt power` has no `provenance` block
+  to nest under. The schema, its validation, the subtraction, and the area
+  accounting are now a single shared implementation
+  (`src/klayout_tools/_devices.py`) used by both verbs, so the identical
+  `devices[]` block can be handed to either; `klt erc`'s behaviour is
+  unchanged. Semantics stay deliberately narrow — "this drawn body is not
+  wire", not "this is a 3.4 kΩ resistor"; device impedance is still not
+  modelled. Written up in [`docs/cli/power.md`](docs/cli/power.md)'s new
+  "Device bodies are not wires" section.
 - **Added** (#2247, `klt erc` + `klt signoff`, additive — **no**
   `schema_version` bump on either verb: one new optional spec sub-key, one
   new coverage reason token it can record, and one new item-11 reason

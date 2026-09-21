@@ -41,10 +41,37 @@ landed:
   spec that only ever set ``current_a`` behaves exactly as before.
 
 Connectivity: geometry is traced with ``klayout.db.LayoutToNetlist`` used
-purely for wire/via connectivity (no device recognition registered) --
+purely for wire/via connectivity (no device recognition registered -- but
+see the optional ``devices`` spec section below, issue #2260, which lets a
+spec declare where a drawn device body sits so it stops reading as wire) --
 exactly the same API ``extract.py``'s ``_extract_netlist`` uses for its
 metal/via connectivity graph, scoped down to only the caller-declared power-
-grid layers. A net's *name* comes from text labels on a caller-declared
+grid layers.
+
+Device bodies (``devices``, issue #2260, mirroring ``klt erc``'s #2183): a
+declared ``stackup``/``vias`` role carries more than wire. A supply-
+referenced analog block routinely draws a device body straight onto a role
+the spec *must* declare -- a silicide-blocked poly load resistor running
+rail-to-node on the same ``Poly2`` a poly riser needs, a MiM capacitor
+whose top-plate strap is the drawn via role. Without a carve-out the
+connectivity model conducts across that body, and ``klt power`` does not
+merely mislabel the resulting net: it **solves** it. The body becomes a
+low-resistance path in the R network, and the IR-drop and EM verdicts are
+computed on a rail that does not exist. The optional ``devices`` array is
+how a spec says where those bodies are -- each entry names a device-body
+marker layer plus the role it sits on, and that region is subtracted from
+the role's conductor region before connectivity is traced and before the
+resistor network is built. The declaration is deliberately narrow: it says
+"this drawn body is not wire", not "this is a 3.4 kOhm resistor" --
+modelling the device's own impedance in the network is a separate, larger
+question. What was subtracted is echoed per declaration in the top-level
+``devices`` report block (see :func:`run_power`), so a declaration that
+matched nothing is a visible ``body_area_um2`` of ``0.0`` rather than a
+silent no-op. The whole fragment lives in
+:mod:`klayout_tools._devices`, shared verbatim with ``klt erc`` so a caller
+can hand the same declaration to either verb.
+
+A net's *name* comes from text labels on a caller-declared
 ``label_layer`` per metal role (the routed layout's own pin/net-name text,
 e.g. sky130's ``met1.pin``/``68/5`` datatype convention) -- there is no
 naming without at least one labelled layer in the spec's ``stackup``.
@@ -114,6 +141,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ._devices import (
+    _conductor_role_layers,
+    _cut_device_bodies,
+    _device_body_cuts,
+    _validate_devices,
+)
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -130,6 +163,11 @@ if TYPE_CHECKING:
 #: every field an earlier phase documented is unchanged -- so no bump was
 #: needed for any of them (see docs/cli/power.md and
 #: docs/json-contract.md's additive-envelope design).
+#:
+#: Issue #2260 adds the optional `devices[]` spec section and the top-level
+#: `devices` echo of what it subtracted -- additive on both sides: a spec
+#: that declares no `devices[]` produces a byte-identical report except for
+#: the new (empty) `devices` list, so no bump here either.
 SCHEMA_VERSION = 1
 
 #: The most mesh cells one non-rectangular merged polygon may be decomposed
@@ -2030,6 +2068,16 @@ def run_power(
       ``stackup`` names -- ``{"name" (optional, defaults to "via<index>"),
       "layer": "<layer>/<datatype>", "between": ["<metal>", "<metal>"],
       "resistance_ohm"}``.
+    - ``devices`` (optional array, default ``[]``, issue #2260): where a
+      drawn *device body* sits on an already-declared role, so it stops
+      being read as wire -- ``{"name" (optional, defaults to
+      "device<index>"), "body_layer": "<layer>/<datatype>", "on":
+      "<stackup or vias name>"}``. Identical in shape and semantics to
+      ``klt erc``'s own ``devices[]`` (issue #2183) -- the same declaration
+      can be handed to both verbs. Each body's geometry is subtracted from
+      its role before connectivity is traced and before the resistor
+      network is built; what was actually subtracted is echoed in the
+      report's top-level ``devices`` block.
     - ``pads`` (optional array, default ``[]``): where each net's supply is
       delivered -- ``{"name" (optional), "net", "x_um", "y_um",
       "voltage_v"}``.
@@ -2048,7 +2096,19 @@ def run_power(
     -- see ``docs/cli/layers.md``'s ``--top``).
 
     Returns a dict matching the documented ``klt power`` JSON schema (see
-    ``docs/cli/power.md``), including ``schema_version``. ``ir_drop_map`` and
+    ``docs/cli/power.md``), including ``schema_version``.
+
+    ``devices`` echoes what each ``devices[]`` declaration actually
+    subtracted -- ``{"name", "body_layer", "on", "body_area_um2"}`` per
+    declaration, in declaration order, ``[]`` when the spec declares none.
+    It is a **top-level** key rather than ``klt erc``'s
+    ``provenance.devices`` for the plain reason that ``klt power`` has no
+    ``provenance`` block to nest it under; inventing a half-populated one
+    (no ``input``, no ``tool``) would be a worse divergence than a
+    differently-placed key carrying the identical four fields. See
+    ``docs/cli/power.md``'s "Device bodies are not wires".
+
+    ``ir_drop_map`` and
     ``worst_case_droop_mv`` are ``None`` when the spec declares neither
     ``pads`` nor a ``current_model`` (extraction only -- there is nothing to
     solve). Raises :class:`PowerError` for a malformed spec, an unresolvable
@@ -2063,6 +2123,15 @@ def run_power(
     stackup = _validate_stackup(spec, spec_path)
     stackup_names = [entry["name"] for entry in stackup]
     vias = _validate_vias(spec, spec_path, stackup_names)
+    # The `devices[]` fragment is shared verbatim with `klt erc` (issue
+    # #2260), so it lives in `_devices.py` and takes the flat list of
+    # conductor role names -- `stackup` first, then `vias`.
+    devices = _validate_devices(
+        spec,
+        spec_path,
+        stackup_names + [via["name"] for via in vias],
+        PowerError,
+    )
     pads = _validate_pads(spec, spec_path, power_nets)
     instances = _validate_current_model(spec, spec_path, power_nets)
 
@@ -2081,10 +2150,27 @@ def run_power(
 
     l2n = kdb.LayoutToNetlist(top_cell.name, dbu)
 
+    # `devices[]` (issue #2260): the declared device bodies, resolved once
+    # and subtracted from their own role below -- so a drawn poly-resistor
+    # or MiM-capacitor body breaks the net instead of becoming a low-
+    # resistance path in the R network that the IR-drop and EM verdicts are
+    # then computed against. `role_layers` (role name -> its declared
+    # `(layer, datatype)`) is what lets `_device_body_cuts` report the area
+    # each declaration *actually* subtracted -- `marker ∩ that role's own
+    # drawn region` -- rather than the marker layer's own area. Both are
+    # empty (and so a no-op) whenever the spec declares no `devices`, which
+    # is what keeps this feature byte-identical when unused.
+    role_layers = _conductor_role_layers(stackup, vias)
+    device_cuts, devices_applied = _device_body_cuts(
+        layout, top_cell, devices, role_layers, verb="klt power"
+    )
+
     layer_index: dict[str, int] = {}
     metal_regions: dict[str, Any] = {}
     for entry in stackup:
-        metal_region = _region(layout, top_cell, entry["layer"])
+        metal_region = _cut_device_bodies(
+            _region(layout, top_cell, entry["layer"]), device_cuts.get(entry["name"])
+        )
         metal_regions[entry["name"]] = metal_region
         layer_index[entry["name"]] = l2n.register(metal_region, entry["name"])
         l2n.connect(metal_region)
@@ -2095,7 +2181,9 @@ def run_power(
 
     via_layer_index: dict[str, int] = {}
     for via in vias:
-        via_region = _region(layout, top_cell, via["layer"])
+        via_region = _cut_device_bodies(
+            _region(layout, top_cell, via["layer"]), device_cuts.get(via["name"])
+        )
         via_layer_index[via["name"]] = l2n.register(via_region, via["name"])
         l2n.connect(via_region)
         layer_a, layer_b = via["between"]
@@ -2217,5 +2305,6 @@ def run_power(
         "em_verdict": em_verdict,
         "status": status,
         "coverage": coverage,
+        "devices": devices_applied,
         "warnings": warnings,
     }
