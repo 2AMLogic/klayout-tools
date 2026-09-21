@@ -326,7 +326,12 @@ LVS run reported the identical net as **one**, zero-mismatch electrical
 node. **Do not treat a multi-island `erc.unconnected_net` finding as a
 confirmed design defect by itself** — cross-check against a real,
 device-aware LVS run before acting on it (see also `docs/design-evidence-
-tiers.md`'s item 11).
+tiers.md`'s item 11). The finding's `islands[]` array (issue #2194, see
+"Locating the islands of a multi-island `erc.unconnected_net`" below) is
+what makes that triage possible per island rather than per net: one
+finding can cover a genuine floating-supply defect *and* a well-continuity
+false positive on the same net, and only the per-island boxes let you tell
+which is which.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
@@ -538,6 +543,11 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   or more than one, disconnected electrical island. Zero matches means
   nothing in the layout carries that net's label at all; more than one
   means the intended net is split into pieces that never actually touch.
+  A multi-island finding says **where** each island is, not just how many
+  there are (issue #2194): `islands[]` carries one
+  `{"bbox", "layer", "shape_count"}` entry per island, and the finding's
+  own `bbox` spans all of them — see "Locating the islands of a
+  multi-island `erc.unconnected_net`" below.
 - **`erc.multiply_driven_net`** / **`erc.supply_short`** — two *different*
   declared `nets[]` names whose matched geometry resolves to the very same
   electrical island (a short), reported per unordered pair. When both
@@ -561,6 +571,56 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   net) are reported under this one rule id. A well holding several taps
   passes as soon as *one* of them reaches the net; see "Well/tap
   connectivity" above for what this check does and does not model.
+
+### Locating the islands of a multi-island `erc.unconnected_net` (issue #2194)
+
+"This net resolves to 3 islands" is the alarm, not the answer: the islands
+are not interchangeable, and one finding can cover both a genuine
+floating-supply defect and a false positive (see "Known false-positive:
+diffusion/well continuity is not modeled" above) on the same net. So a
+multi-island finding carries the islands themselves:
+
+```json
+{
+  "rule": "erc.unconnected_net",
+  "description": "declared net 'VDD' resolves to 3 disconnected electrical islands (expected exactly one)",
+  "net": "VDD",
+  "other_net": null,
+  "gate_id": null,
+  "layer": null,
+  "bbox": {"left": 5000, "bottom": 0, "right": 21000, "top": 1000},
+  "islands": [
+    {"bbox": {"left": 5000, "bottom": 0, "right": 6000, "top": 1000}, "layer": "li1", "shape_count": 1},
+    {"bbox": {"left": 8000, "bottom": 0, "right": 11000, "top": 1000}, "layer": "poly", "shape_count": 2},
+    {"bbox": {"left": 20000, "bottom": 0, "right": 21000, "top": 1000}, "layer": "li1", "shape_count": 1}
+  ]
+}
+```
+
+- `islands[]` has one entry per island, in the same order `klt erc` walks
+  them internally (ascending KLayout cluster id) — deterministic for a
+  given layout and spec, so two runs of the same input list them the same
+  way.
+- `islands[].bbox` is the island's whole extent, unioned across every
+  `stackup` role it has geometry on, in the same raw-database-unit
+  `{"left", "bottom", "right", "top"}` convention as `klt drc`'s
+  `violations[].bbox`. It is what you point a layout viewer at.
+- `islands[].layer` names the `stackup` role carrying the most of that
+  island's area (ties broken by stackup order) — the single most useful
+  layer to open first, not an exhaustive list of the roles it touches.
+- `islands[].shape_count` is the number of merged polygons across those
+  roles, which separates a one-shape orphan stub from a whole sub-block
+  that failed to strap up.
+- The finding's own top-level `bbox` is the box spanning every island, so a
+  caller that only reads `bbox` still lands in the right part of the block.
+
+`islands` is `null` for every other finding — including the *zero*-match
+`erc.unconnected_net` case, which has no geometry to point at at all.
+
+Because each island is located, two reports of the same net can be diffed:
+going from 3 islands to 2 now says *which* island was resolved, instead of
+leaving "the fix worked" and "the fix broke something else and merged a
+different pair" indistinguishable.
 
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 
@@ -929,7 +989,11 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].other_net` | string \| null | The second net name implicated, for `erc.multiply_driven_net`/`erc.supply_short` only; `null` otherwise. |
 | `erc_findings[].gate_id` | string \| null | The `gates[].gate_id` implicated, for `erc.floating_gate` only; `null` otherwise.           |
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
-| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
+| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. |
+| `erc_findings[].islands` | array\<object\> \| null | (issue #2194) One entry per disconnected electrical island, populated **only** for a multi-island `erc.unconnected_net`; `null` for every other finding (including the zero-match one). Entries are in ascending KLayout cluster-id order — deterministic for a given layout+spec. See "Locating the islands of a multi-island `erc.unconnected_net`" above. |
+| `erc_findings[].islands[].bbox` | object \| null | That island's whole extent, unioned across every `stackup` role it has geometry on, in the same raw-database-unit convention as `erc_findings[].bbox`. Populated for every island of a net that resolved to geometry (a labelled net always has `stackup` geometry by construction). |
+| `erc_findings[].islands[].layer` | string \| null | The `stackup` role carrying the most of this island's area (ties broken by stackup order) — the most useful layer to open a viewer on, not an exhaustive list of the roles it touches. |
+| `erc_findings[].islands[].shape_count` | integer | Number of merged polygons this island has across the `stackup` roles — separates a one-shape orphan stub from a whole sub-block that failed to strap up. |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration, issue #2199), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |

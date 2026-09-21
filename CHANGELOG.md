@@ -90,6 +90,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "A pinned hash is checked
   against the artifact, not only against the envelope".
 
+- **Added** (#2194): a multi-island `erc.unconnected_net` finding from `klt
+  erc` now says **where** the islands are, not only how many there are. Each
+  such finding carries a new `islands[]` array — one
+  `{"bbox", "layer", "shape_count"}` entry per disconnected electrical
+  island, in ascending cluster-id order — and its previously always-`null`
+  top-level `bbox` is now the box spanning every island. `bbox` values are
+  raw database units, the same `{"left", "bottom", "right", "top"}`
+  convention as `klt drc`'s `violations[].bbox`. Previously the only
+  actionable content ("which island is which, and where") required a caller
+  to rebuild `klt erc`'s own `LayoutToNetlist` connectivity model by hand.
+  The `islands` key is present on **every** finding for a uniform key set,
+  but is `null` for every rule other than multi-island
+  `erc.unconnected_net` — including the zero-match `erc.unconnected_net`
+  case, which has no geometry to point at. `klt erc --format text` prints
+  one `island N: (left,bottom)-(right,top) layer=… shapes=…` line per
+  island. Additive: no `schema_version` bump. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "Locating the islands of a
+  multi-island `erc.unconnected_net`".
+
 - **Documented** (#2180): `klt erc`'s "Connectivity model" section in
   [`docs/cli/erc.md`](docs/cli/erc.md) now states a false-positive risk that
   was previously undocumented: `erc.unconnected_net` can fire on a declared

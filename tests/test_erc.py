@@ -1336,6 +1336,148 @@ def test_unconnected_net_flags_split_island(tmp_path):
     assert findings[0]["net"] == "VDD"
     assert "2 disconnected electrical islands" in findings[0]["description"]
 
+    # Issue #2194: the finding says *where* each island is, not just how
+    # many there are. Both li1 bars, in ascending-x order (the islands are
+    # emitted in `cluster_id` order, which follows the insertion order of
+    # the geometry above).
+    islands = findings[0]["islands"]
+    assert [island["bbox"] for island in islands] == [
+        {"left": _um(5), "bottom": _um(0), "right": _um(6), "top": _um(1)},
+        {"left": _um(8), "bottom": _um(0), "right": _um(9), "top": _um(1)},
+    ]
+    assert [island["layer"] for island in islands] == ["li1", "li1"]
+    assert [island["shape_count"] for island in islands] == [1, 1]
+    # The per-net `bbox` spans every island, so a caller who only reads the
+    # top-level box still lands on the right part of the layout.
+    assert findings[0]["bbox"] == {
+        "left": _um(5),
+        "bottom": _um(0),
+        "right": _um(9),
+        "top": _um(1),
+    }
+
+
+def test_unconnected_net_islands_locate_each_of_three_islands(tmp_path):
+    """Issue #2194: one `islands[]` entry per island for N > 2 as well --
+    the motivating real case was a supply net resolving to three islands,
+    where "which island did my fix resolve?" is unanswerable from a count.
+    Each island here sits on a different role (li1-only, poly+li1, li1-only)
+    so `layer`/`shape_count` are exercised too, not just `bbox`."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    licon = layout.layer(2, 0)
+    # Island 1: a lone li1 bar.
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    # Island 2: an li1 bar strapped down to a poly bar through a licon
+    # via -- two roles on one island, and a bbox wider than either shape.
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(poly).insert(kdb.Box.new(_um(8.5), _um(0), _um(11), _um(1)))
+    top.shapes(licon).insert(kdb.Box.new(_um(8.6), _um(0.2), _um(8.8), _um(0.4)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.2), _um(0.5))))
+    # Island 3: another lone li1 bar, far away.
+    top.shapes(li1).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(20.5), _um(0.5))))
+
+    gds = tmp_path / "three_islands.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "three_islands.erc.json"
+    spec_dict = _nets_spec(nets=[{"name": "VDD", "kind": "supply"}])
+    spec_dict["vias"] = [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}]
+    _write_spec(spec, spec_dict)
+
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+
+    assert len(findings) == 1
+    assert "3 disconnected electrical islands" in findings[0]["description"]
+
+    islands = findings[0]["islands"]
+    assert len(islands) == 3
+    # Every island is locatable, and no two of them point at the same place
+    # (a count-shaped finding repeated N times would not be actionable).
+    assert all(island["bbox"] is not None for island in islands)
+    boxes = [tuple(sorted(island["bbox"].items())) for island in islands]
+    assert len(set(boxes)) == 3
+
+    by_left = sorted(islands, key=lambda island: island["bbox"]["left"])
+    assert by_left[0]["bbox"] == {
+        "left": _um(5),
+        "bottom": _um(0),
+        "right": _um(6),
+        "top": _um(1),
+    }
+    # The poly+li1 island's bbox covers both roles; `layer` names the role
+    # carrying the most of its area (poly: 2 um^2 vs. li1: 1 um^2).
+    assert by_left[1]["bbox"] == {
+        "left": _um(8),
+        "bottom": _um(0),
+        "right": _um(11),
+        "top": _um(1),
+    }
+    assert by_left[1]["layer"] == "poly"
+    assert by_left[1]["shape_count"] == 2
+    assert by_left[2]["bbox"] == {
+        "left": _um(20),
+        "bottom": _um(0),
+        "right": _um(21),
+        "top": _um(1),
+    }
+
+
+def test_unconnected_net_finding_keys_are_uniform_across_rules(tmp_path):
+    """Issue #2194 adds `islands` to the finding shape; it must be present
+    (as `null`) on every other rule too, so the `erc_findings[]` key set
+    stays identical for every rule id -- `islands` is populated only by the
+    multi-island `erc.unconnected_net` call site."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    # A split "VDD" (two islands -> populated `islands`) plus a shorted
+    # A/B pair and an unmatched name (both -> `islands is None`).
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(12), _um(0), _um(14), _um(1)))
+    top.shapes(label).insert(kdb.Text("A", kdb.Trans(_um(12.5), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("B", kdb.Trans(_um(13.5), _um(0.5))))
+
+    gds = tmp_path / "mixed.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "mixed.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply"},
+                {"name": "A"},
+                {"name": "B"},
+                {"name": "MISSING"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    findings = report["erc_findings"]
+    assert findings
+    for finding in findings:
+        assert set(finding) == {
+            "rule",
+            "description",
+            "net",
+            "other_net",
+            "gate_id",
+            "layer",
+            "bbox",
+            "islands",
+        }
+
+    populated = [f for f in findings if f["islands"] is not None]
+    assert [f["net"] for f in populated] == ["VDD"]
+    # The zero-match `erc.unconnected_net` case has no geometry to point at
+    # and is unchanged in shape.
+    unmatched = next(f for f in findings if f["net"] == "MISSING")
+    assert unmatched["islands"] is None
+    assert unmatched["bbox"] is None
+
 
 def test_unconnected_net_flags_unmatched_name(tmp_path):
     layout, top, poly, li1, label = _nets_fixture_layout()
@@ -2202,6 +2344,27 @@ def test_cli_text_output(tmp_path, capsys):
     assert "gates: 2" in out
     assert "GATE_A" in out
     assert "met2: step=" in out
+
+
+def test_cli_text_output_prints_island_locations(tmp_path, capsys):
+    """Issue #2194: the text courtesy view carries the per-island boxes
+    too, so a human reading the terminal output does not have to re-run
+    with `--format json` just to find out where to look."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.5), _um(0.5))))
+
+    gds = tmp_path / "split.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "split.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    assert main(["erc", str(gds), str(spec)]) == 3
+    out = capsys.readouterr().out
+    assert "island 1: (5000,0)-(6000,1000)  layer=li1  shapes=1" in out
+    assert "island 2: (8000,0)-(9000,1000)  layer=li1  shapes=1" in out
 
 
 def test_cli_pdk_json_contract(tmp_path, capsys):
