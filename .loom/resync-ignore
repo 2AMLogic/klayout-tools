@@ -202,3 +202,28 @@ scripts/tests/test-verify-proposal-refs.sh
 # Loom project ever adopts an equivalent post-worktree-hook call from
 # pr-worktree.sh, this pin can be dropped and the file resynced normally.
 scripts/pr-worktree.sh
+
+# #2193: check-promotion-landed.sh (and its test) carry a local-only "Step 1c"
+# guard that treats a current `loom:operator-only` label exactly like the
+# `loom:building`/`loom:blocked` labels its Step 1b later-lifecycle guard
+# already recognized -- DECISION=OK (or ALREADY_ESCALATED when this script's
+# own `<!-- champion:promotion-landed-mismatch -->` marker comment shows a
+# prior run raised the escalation), never a label write. Upstream's version
+# checks `loom:operator-only` ONLY inside the tier-UNRECOVERABLE escalation
+# branch, so an issue with a stale `Champion Review: APPROVED` comment, no
+# `loom:issue`, and a recoverable tier took the DECISION=COMPLETED branch and
+# re-applied `loom:issue` + tier on top of a live human escalation. Observed
+# live on issue #1779 (2026-09-20): approved 2026-09-14, weeks of legitimate
+# loom:blocked/loom:curated dependency cycling, correctly re-escalated to
+# loom:operator-only,loom:operator-decision, then overwritten ~15 hours later
+# by Pass 0c -- bypassing a pending human ruling, caught and reverted by hand
+# before a Builder claimed it. This contradicts champion-issue-promo.md /
+# champion-pr-merge.md's own "When NOT to Promote" rule (Champion must never
+# write loom:issue onto a loom:operator-only issue). The fix was not upstreamed
+# into rjwalters/loom's own check-promotion-landed.sh template, so an unpinned
+# resync would silently revert it -- the same reversion pattern as
+# #606/#662/#1292/#1316/#1356/#1546/#1674/#1898/#2020. If the upstream Loom
+# project ever adopts an equivalent guard, these pins can be dropped and the
+# files resynced normally.
+scripts/check-promotion-landed.sh
+scripts/tests/test-check-promotion-landed.sh

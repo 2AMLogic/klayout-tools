@@ -45,10 +45,14 @@
 #   3. If no tier could be recovered, or the completing edit's own read-back
 #      still fails: posts an explanatory comment and adds
 #      `loom:operator-only,loom:operator-mechanical` so a human finishes it —
-#      never guesses. DECISION=ESCALATED. If the issue ALREADY carries
-#      `loom:operator-only` (a prior run already escalated it and nothing
-#      changed since), this is skipped entirely — no duplicate comment, no
-#      redundant label edit. DECISION=ALREADY_ESCALATED instead (#6942).
+#      never guesses. DECISION=ESCALATED.
+#
+# An issue that ALREADY carries `loom:operator-only` never reaches any of
+# that — see Step 1c. A human owns it, and Champion must never write
+# `loom:issue` onto a `loom:operator-only` issue (champion-issue-promo.md /
+# champion-pr-merge.md, "When NOT to Promote"). DECISION is OK for a live
+# escalation another role raised, or ALREADY_ESCALATED when a prior run of
+# THIS script is the one that escalated it (#6942).
 #
 # Output (stdout — one KEY=VALUE per line, machine-parseable):
 #   DECISION=OK|NOT_OPEN|MISMATCH|COMPLETED|ESCALATED|ALREADY_ESCALATED
@@ -60,14 +64,17 @@
 #        loom:issue is currently absent but a later-lifecycle label
 #        (loom:building/loom:blocked) is currently present, proving the
 #        promotion landed and the issue has since progressed independent of
-#        the timeline read (#7299); or loom:issue is currently absent but the
-#        label timeline shows it WAS applied after the newest APPROVED
-#        comment and the issue has since legitimately progressed further,
-#        e.g. loom:issue -> loom:building or -> loom:blocked — nothing to
-#        reconcile in any of these cases, #6933).
-#        ALSO used for DECISION=ALREADY_ESCALATED (tier unrecoverable, but the
-#        issue already carries loom:operator-only from a prior run — a human
-#        already owns it, nothing further to do, #6942).
+#        the timeline read (#7299); loom:issue is currently absent but
+#        loom:operator-only is currently present — a live human escalation
+#        this script must never write over (#2193); or loom:issue is
+#        currently absent but the label timeline shows it WAS applied after
+#        the newest APPROVED comment and the issue has since legitimately
+#        progressed further, e.g. loom:issue -> loom:building or ->
+#        loom:blocked — nothing to reconcile in any of these cases, #6933).
+#        ALSO used for DECISION=ALREADY_ESCALATED (the issue already carries
+#        loom:operator-only AND this script's own escalation marker comment
+#        from a prior run — a human already owns it, nothing further to do,
+#        #6942).
 #   1  = usage or environment error (bad args, `gh`/`jq` missing, a required
 #        `gh` read failed)
 #   10 = NOT_OPEN (issue is closed — nothing left to reconcile)
@@ -196,6 +203,49 @@ if jq -e '.labels[] | select(.name=="loom:building" or .name=="loom:blocked")' <
   exit 0
 fi
 
+# --- Step 1c: loom:issue is currently absent and `loom:operator-only` IS
+# present — a LIVE operator escalation. This is exactly as strong evidence
+# that the issue has progressed past the stale APPROVED comment as Step 1b's
+# labels are, and it carries an additional hard constraint: Champion must
+# NEVER write `loom:issue` onto a `loom:operator-only` issue (the "When NOT to
+# Promote" rule in champion-issue-promo.md / champion-pr-merge.md). Checked
+# here — before the Step 2 timeline lookup and before ANY --apply write path —
+# so no branch below can override a pending human ruling (#2193).
+#
+# Incident that motivated this (klayout-tools #2193, 2026-09-20): issue #1779
+# was approved on 2026-09-14 (loom:issue really was applied at the time — not
+# a lost write), then cycled legitimately through loom:blocked/loom:curated
+# for weeks on a dependency. Once that dependency cleared it re-entered the
+# curated-proposal discovery query, was freshly re-evaluated, and was
+# correctly escalated to loom:operator-only,loom:operator-decision — a live,
+# substantive human decision point. ~15 hours later this reconciliation pass
+# found the OLD APPROVED comment, saw loom:issue absent, found neither
+# loom:building nor loom:blocked to explain the absence, concluded
+# DECISION=COMPLETED, and re-added loom:issue + tier:goal-supporting on top of
+# the live escalation — bypassing a real pending human ruling. Caught and
+# reverted by hand before a Builder claimed it.
+if jq -e '.labels[] | select(.name=="loom:operator-only")' <<<"$ISSUE_JSON" >/dev/null 2>&1; then
+  # Distinguish an escalation a PRIOR RUN OF THIS SCRIPT raised from one
+  # another role or a human raised. Both mean "do nothing" (exit 0), but they
+  # are not the same event, and #6942's ALREADY_ESCALATED is the accurate
+  # report for the former — saying "the issue has since progressed" about an
+  # issue this script itself parked would be wrong. The tell is this script's
+  # own escalation marker comment, which the ESCALATED branch below posts
+  # BEFORE it adds the label (so the label can never be ours without it).
+  #
+  # This subsumes the idempotency guard that used to live inside the
+  # tier-unrecoverable branch (#6942): hoisting it here makes it independent
+  # of --apply and of whether a tier happens to be recoverable this time,
+  # which is what keeps the completing `--add-label loom:issue` edit further
+  # down structurally unreachable while loom:operator-only is present.
+  if jq -e '.comments[]? | select(.body != null and (.body | contains("<!-- champion:promotion-landed-mismatch -->")))' <<<"$ISSUE_JSON" >/dev/null 2>&1; then
+    emit "ALREADY_ESCALATED" "APPROVED verdict comment present and loom:issue is missing, but a prior run of this script already routed the issue to loom:operator-only — a human already owns it, nothing further to do"
+    exit 0
+  fi
+  emit "OK" "loom:issue is currently absent but loom:operator-only is present — a live operator escalation this script did not raise; Champion must never write loom:issue over a pending human ruling (#2193)"
+  exit 0
+fi
+
 # --- Step 2: loom:issue is currently absent — but it may have landed and the
 # issue has SINCE legitimately progressed further (loom:issue -> loom:building,
 # or -> loom:blocked), which looks identical to a lost write from labels alone
@@ -250,19 +300,13 @@ elif printf '%s' "$TIER_LINE" | grep -qi 'Tier 3'; then
 fi
 
 if [[ -z "$TIER" ]]; then
-  # Idempotency guard (#6942): if a PRIOR run of this exact branch already
-  # routed the issue to loom:operator-only, nothing about the issue's state
-  # has changed since (the label edit is the only durable side effect this
-  # branch has, and it's already present) — re-posting the escalation
-  # comment on every subsequent --apply invocation just spams the issue
-  # (#6076 accumulated 18 near-identical comments this way). Mirrors the
-  # ALREADY_ROUTED short-circuit in champion-issue-promo.md's Idempotency
-  # check and classify-dependency-block.sh's own-marker check.
-  if jq -e '.labels[] | select(.name=="loom:operator-only")' <<<"$ISSUE_JSON" >/dev/null 2>&1; then
-    emit "ALREADY_ESCALATED" "$REASON; already routed to loom:operator-only by a prior run — nothing further to do"
-    exit 0
-  fi
-
+  # Idempotency (#6942) is handled in Step 1c, not here: an issue that
+  # already carries loom:operator-only (whether from a prior run of this
+  # branch or from a live escalation another role raised) short-circuits long
+  # before reaching this point, so re-posting the escalation comment on every
+  # subsequent --apply invocation — the #6076 failure, 18 near-identical
+  # comments on one issue — cannot happen. Reaching here means the issue does
+  # NOT currently carry loom:operator-only.
   gh issue comment "$ISSUE" --body "<!-- champion:promotion-landed-mismatch -->
 **Champion: Promotion write did not land — escalating**
 
@@ -282,6 +326,11 @@ This issue carries a \`Champion Review: APPROVED\` verdict comment, but \`loom:i
 fi
 
 # Complete the promotion: add loom:issue + the recovered tier.
+#
+# INVARIANT: this line is unreachable while the issue carries
+# `loom:operator-only` — Step 1c exits before here in that case. That is the
+# whole point of Step 1c: a recoverable tier must never be enough to write
+# `loom:issue` over a live human escalation (#2193).
 if ! gh issue edit "$ISSUE" --add-label "loom:issue" --add-label "$TIER" >/dev/null 2>"$GH_STDERR"; then
   echo "ERROR: failed to add loom:issue/$TIER to #$ISSUE: $(cat "$GH_STDERR" 2>/dev/null)" >&2
   emit "ESCALATED" "$REASON; the completing label edit FAILED" "$TIER"
