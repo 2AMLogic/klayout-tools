@@ -36,6 +36,22 @@ not `klt --version`, if you need to detect this kind of drift. See
   side did, `"both"` when each side did). See
   [`docs/cli/lvs.md`](docs/cli/lvs.md)'s `topology.power_only_pruned`
   section for the corrected contract.
+- **Documented** (#2246): `docs/cli/gen.md`'s "Semantics and guarantees"
+  section now states plainly that generator *geometry* output is not
+  guaranteed stable across `klt` releases before `1.0` — only the JSON
+  envelope shape carries the existing additive-fields guarantee — citing the
+  `0.5.0` gf180mcu implant-ring coverage fixes (#1577, #1580) and the
+  per-PDK output-dbu-grid change (#1496) as concrete precedents. A
+  byte-reproduction-based consumer is told to key drift detection off
+  `provenance.klt_version`/`provenance.klayout_version` (already shipped,
+  unreleased, via #2035/PR #2066) rather than a bare `klt --version`, and to
+  consult this file to see whether a version difference is
+  geometry-affecting before assuming a byte diff means an operator edit.
+  `docs/json-contract.md`'s shared `provenance` block section cross-links
+  the new caveat. No functional change: the existing
+  `provenance.klt_version`/`klayout_version` fields are judged sufficient
+  granularity for this use case, so no dedicated per-generator
+  geometry-revision field was added.
 
 - **Added** (#2234, additive — **no** `schema_version` bump on `klt erc` or
   `klt signoff`; every field below is new, and a spec that uses neither new

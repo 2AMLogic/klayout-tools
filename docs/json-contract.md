@@ -372,8 +372,11 @@ and mirrors the identity the report's own top-level `pdk` field carries.
 `klt_version` and `klayout_version` are what these two verbs gained the
 block for: a consumer that commits generated geometry plus its report as
 evidence and re-runs the generator later can otherwise not tell a real
-geometry change from a klt/KLayout upgrade. See
-[`docs/cli/gen.md`](cli/gen.md) and
+geometry change from a klt/KLayout upgrade. **Generator geometry itself is
+not guaranteed stable across releases before `1.0`** — only this block's
+shape is covered by the additive-envelope guarantee above; see
+[`docs/cli/gen.md`](cli/gen.md)'s "Semantics and guarantees" section for the
+stability statement, concrete precedents, and drift-detection guidance, and
 [`docs/cli/gen-compose.md`](cli/gen-compose.md).
 
 ```json
