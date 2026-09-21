@@ -43,7 +43,11 @@ _EXIT_BY_STATUS = {
 
 def run(args: argparse.Namespace) -> int:
     try:
-        report = run_equiv(args.request, timeout_s=args.timeout_s)
+        report = run_equiv(
+            args.request,
+            timeout_s=args.timeout_s,
+            sim_backend=args.sim_backend,
+        )
     except EquivError as exc:
         return emit_error("equiv", str(exc), args.format)
 
@@ -54,6 +58,7 @@ def run(args: argparse.Namespace) -> int:
 
 def _print_text(report: dict) -> None:
     print(f"engine: {report['engine']} {report['engine_version'] or '-'}")
+    print(f"sim_backend: {report['sim_backend']}")
     print(f"gold: top={report['gold']['top']}  sources={report['gold']['sources']}")
     print(f"gate: top={report['gate']['top']}  sources={report['gate']['sources']}")
     if report.get("port_map"):
@@ -87,6 +92,7 @@ def _print_text(report: dict) -> None:
                 )
         confirmed = counterexample["confirmed_by_simulation"]
         print(f"  confirmed_by_simulation: {confirmed}")
+        _print_cross_check(counterexample)
     elif counterexample is not None:
         print()
         print("counterexample:")
@@ -102,6 +108,7 @@ def _print_text(report: dict) -> None:
             )
         confirmed = counterexample["confirmed_by_simulation"]
         print(f"  confirmed_by_simulation: {confirmed}")
+        _print_cross_check(counterexample)
 
     artifacts = report["artifacts"]
     print()
@@ -114,3 +121,26 @@ def _print_text(report: dict) -> None:
         print(f"stage2 script: {artifacts['stage2_script_path']}")
     if artifacts.get("stage2_log_path"):
         print(f"stage2 log: {artifacts['stage2_log_path']}")
+
+
+def _print_cross_check(counterexample: dict) -> None:
+    """Report the second replay backend's own outcome under
+    `--sim-backend both` (issue #2223) -- silent when no cross-check ran,
+    so the default single-backend output is unchanged."""
+    cross_check = counterexample.get("simulation_cross_check")
+    if not cross_check:
+        return
+    print(
+        f"  cross_check ({cross_check['engine']} "
+        f"{cross_check['engine_version'] or '-'}): "
+        f"agreement={cross_check['agreement']} "
+        f"confirmed_by_simulation={cross_check['confirmed_by_simulation']}"
+    )
+    for entry in cross_check["output_mismatches"]:
+        cycle = f"t={entry['cycle']} " if "cycle" in entry else ""
+        print(
+            f"    mismatch: {cycle}{entry['side']}.{entry['name']} "
+            f"canonical={entry['canonical']} "
+            f"cross_check={entry['cross_check']} "
+            f"explained_by={entry['explained_by']}"
+        )

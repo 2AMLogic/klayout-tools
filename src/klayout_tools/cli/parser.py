@@ -9,6 +9,7 @@ import argparse
 import sys
 
 from .. import arith_gen, pdk_stackup
+from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
     arith_gen_cmd,
@@ -2128,6 +2129,24 @@ def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
             "overrides the request field when given. A run that does not "
             "finish within this budget is reported `inconclusive`, never "
             "`equivalent` -- see docs/cli/equiv.md."
+        ),
+    )
+    equiv_parser.add_argument(
+        "--sim-backend",
+        dest="sim_backend",
+        choices=SUPPORTED_SIM_BACKENDS,
+        default=None,
+        help=(
+            "simulator used to replay a counterexample vector/trace "
+            "(default: iverilog, or the request's own `sim_backend` field); "
+            "overrides the request field when given. `verilator` compiles "
+            "the replay via `verilator --binary` instead of interpreting it "
+            "-- much faster on long vectors, but `iverilog` stays the "
+            "canonical backend for evidence. `both` runs both and requires "
+            "them to agree: a disagreement is reported as an error-severity "
+            "`sim_backend_disagreement` diagnostic and `inconclusive`, never "
+            "silently resolved in favour of one backend. See "
+            "docs/cli/equiv.md."
         ),
     )
     _add_format_arg(equiv_parser)
