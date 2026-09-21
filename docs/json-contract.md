@@ -328,8 +328,11 @@ body_layer, on, body_area_um2}`), `[]` when none were declared. A
 `devices[]` entry subtracts a drawn device body's region from a declared
 conductor role before connectivity is registered — it changes which nets
 exist, and so which findings are reachable — and `body_area_um2` reports
-the area each declaration *actually* removed, so a declaration that
-matched no geometry is distinguishable from one that bit. Same rationale
+the area each declaration *actually* removed — the marker intersected
+with the declared role's own conductor region, not the marker layer's own
+area (issue #2226) — so a declaration that subtracted nothing is
+distinguishable from one that bit, whether it named the wrong role or
+matched no geometry at all. Same rationale
 as `provenance.spec` above: a report whose verdict depends on a
 transformation of its input has to say what the transformation did. See
 [`docs/cli/erc.md`](cli/erc.md)'s "Device bodies are not wires".

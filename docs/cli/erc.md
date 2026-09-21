@@ -287,7 +287,12 @@ use) — matching `klt power`'s own convention.
     same markers the curated decks already use for device recognition and
     `klt extract` already consults. A `body_layer` absent from the given
     layout is not an error (matching `stackup`/`vias`' own convention); it
-    subtracts nothing and reports `body_area_um2: 0.0`.
+    subtracts nothing and reports `body_area_um2: 0.0`. A `body_layer`
+    that *is* drawn here but does not overlap its declared `on` role
+    reports the same `0.0` — that field is the intersection with the role,
+    not the marker's own area (issue #2226) — plus a one-line warning on
+    stderr, since that combination is a spec bug rather than an unused
+    layer.
   - `on` (string, required) — which declared role that body's geometry is
     drawn on: either a `stackup` `name` (a poly resistor body, a fuse, a
     capacitor plate) **or** a `vias` `name` (a MiM/MOM cap whose whole
@@ -497,11 +502,16 @@ committed layout, defeating the point of a content-hash-pinned artifact.
 Three properties, all deliberate:
 
 - **The carve-out is visible in the report.** `provenance.devices` echoes
-  every declaration with the area it actually removed (`body_area_um2`),
-  so a declaration that silently matched nothing — wrong datatype, marker
-  layer absent from this stream — is distinguishable from one that bit,
-  and two runs of the same layout that disagree about `erc.supply_short`
-  carry the reason in the payload.
+  every declaration with the area it actually removed (`body_area_um2` —
+  the marker **intersected with the `on` role's own conductor region**,
+  issue #2226, not the marker layer's own area), so a declaration that
+  silently matched nothing — wrong datatype, wrong `on` role, marker layer
+  absent from this stream — is distinguishable from one that bit, and two
+  runs of the same layout that disagree about `erc.supply_short` carry the
+  reason in the payload. A marker that is drawn on the stream but misses
+  its declared role (`body_area_um2: 0.0` with geometry elsewhere) also
+  warns on stderr; JSON goes to stdout only, so a piped report is
+  unaffected.
 - **It applies to both graphs.** The `ties[]` extraction (above) sees the
   same carve-out: a drawn resistor body is not a wire there either.
 - **It cuts, so declare it where the device is.** Subtraction is purely
@@ -1064,7 +1074,7 @@ removed from the connectivity graph:
     "name": "poly_resistor",
     "body_layer": "62/0",
     "on": "poly",
-    "body_area_um2": 4.8
+    "body_area_um2": 3.6
   }
 ]
 ```
@@ -1087,7 +1097,7 @@ auto-detected `ppolyf_u` match for the same role:
       "name": "my_resistor",
       "body_layer": "110/5",
       "on": "poly",
-      "body_area_um2": 4.8,
+      "body_area_um2": 3.6,
       "source": "declared",
       "superseded_by": null
     },
@@ -1194,7 +1204,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
-| `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region (`0.0` when its marker layer carries no geometry in this layout). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
+| `provenance.devices` | array\<object\> | (issue #2183) One entry per `devices[]` declaration, in spec order — `{"name", "body_layer", "on", "body_area_um2"}`, where `body_area_um2` is the area this declaration **actually** subtracted from `on`'s conductor region — `area(marker ∩ on's own drawn region)`, **not** the marker layer's own area (issue #2226), since a device-body marker is conventionally drawn with enclosure past the conductor it marks. `0.0` therefore means this declaration changed nothing at all: its marker layer carries no geometry in this layout, is drawn on a different datatype, or does not touch the role it was declared `on` (that last case also warns on stderr). `[]` when the spec declares no `devices` and no `--deck` was selected. A carve-out changes which nets exist, and therefore which `erc.supply_short`/`erc.unconnected_net` findings are possible, so it has to be readable from the report rather than only from the spec. When `--deck` selects a curated deck (issue #2204), every entry — hand-declared and deck-detected alike — additionally carries `source` (`"declared"` \| `"deck"`) and `superseded_by` (`string` \| `null`, the hand-declared device name that pre-empted a deck-detected match for the same role); the deck's own matches are appended after the spec's declared entries, and a deck match whose conducting-body layer names no declared role appears with `"on": null`. Both keys are omitted entirely when `--deck` was not given — see "Deck-driven device-marker auto-detection" above. |
 
 ## Checked-work coverage
 

@@ -2878,7 +2878,10 @@ def _resistor_divider_fixture(path) -> None:
     top.shapes(contact).insert(kdb.Box.new(_um(8.6), _um(0.3), _um(8.8), _um(0.5)))
 
     # The PDK's own device-body marker over the resistor body (not the
-    # heads): 6 um x 0.8 um = 4.8 um^2.
+    # heads): 6 um x 0.8 um = 4.8 um^2, drawn with the 0.1 um top/bottom
+    # enclosure past the 0.6 um-tall poly bar that a PDK device marker
+    # conventionally carries -- so only 6 um x 0.6 um = 3.6 um^2 of it is
+    # actually subtracted from `poly` (issue #2226).
     top.shapes(res_marker).insert(kdb.Box.new(_um(2), _um(0.1), _um(8), _um(0.9)))
 
     layout.write(str(path))
@@ -2886,6 +2889,22 @@ def _resistor_divider_fixture(path) -> None:
 
 #: The `devices[]` declaration matching `_resistor_divider_fixture`.
 _RESISTOR_DEVICES = [{"name": "poly_resistor", "body_layer": "62/0", "on": "poly"}]
+
+#: What `_RESISTOR_DEVICES` actually subtracts from `poly`: the 6 um x 0.8 um
+#: marker (4.8 um^2 of its own) intersected with the 0.6 um-tall poly bar it
+#: is drawn over -> 6 um x 0.6 um. The gap between the two numbers is
+#: ordinary marker overhang, and reporting the *intersection* is the point of
+#: issue #2226 -- see `test_device_body_area_is_the_intersection_with_its_role`.
+_RESISTOR_SUBTRACTED_UM2 = 3.6
+
+#: `_RESISTOR_DEVICES` with the same marker layer additionally declared `on` a
+#: role it never touches (the `contact` via role: two 0.2 um x 0.2 um boxes
+#: under the resistor heads, outside the marker's own x-range). The issue
+#: #2226 reproduction shape: one correct declaration, one wrong-`on` one.
+_RESISTOR_DEVICES_WITH_WRONG_ROLE = [
+    {"name": "poly_resistor", "body_layer": "62/0", "on": "poly"},
+    {"name": "wrong_role_resistor", "body_layer": "62/0", "on": "contact"},
+]
 
 
 def _resistor_divider_spec(devices=None):
@@ -2959,9 +2978,66 @@ def test_device_body_subtraction_is_reported_in_provenance(tmp_path):
             "name": "poly_resistor",
             "body_layer": "62/0",
             "on": "poly",
-            "body_area_um2": 4.8,
+            "body_area_um2": _RESISTOR_SUBTRACTED_UM2,
         }
     ]
+
+
+def test_device_body_area_is_the_intersection_with_its_role(tmp_path):
+    """Issue #2226: `body_area_um2` is the area this declaration *actually*
+    subtracted -- `marker ∩ on`'s own conductor region -- not the marker
+    layer's own area.
+
+    The fixture's RES marker is 6 um x 0.8 um (4.8 um^2) drawn over a 0.6
+    um-tall poly bar, i.e. with the 0.1 um top/bottom overhang a PDK device
+    marker conventionally carries. Only the 6 um x 0.6 um overlap is
+    subtracted, so 3.6 is the honest number and 4.8 over-states it."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES)
+    entry = report["provenance"]["devices"][0]
+
+    assert entry["body_area_um2"] == 3.6
+    # The marker's own area, which the pre-#2226 implementation reported.
+    assert entry["body_area_um2"] != 4.8
+    # And the carve-out still bites: the false rail-to-rail short is gone.
+    assert report["erc_findings"] == []
+
+
+def test_device_body_declared_on_a_role_it_does_not_touch_reports_zero(tmp_path):
+    """The issue #2226 reproduction: the *same* marker layer declared twice,
+    once `on` the role it is drawn over and once `on` a role it never
+    touches. Only the first subtracts anything, and the report now says so
+    -- pre-fix both echoed the marker's identical non-zero area, which made
+    the field useless as the wrong-`on` cross-check the docs promise."""
+    report = _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES_WITH_WRONG_ROLE)
+    devices_by_name = {d["name"]: d for d in report["provenance"]["devices"]}
+
+    assert devices_by_name["poly_resistor"]["body_area_um2"] == 3.6
+    assert devices_by_name["wrong_role_resistor"]["body_area_um2"] == 0.0
+    # The wrong-`on` entry is reported, not dropped, and still names the
+    # role it was declared on.
+    assert devices_by_name["wrong_role_resistor"]["on"] == "contact"
+    # It also changed nothing: the `contact` via role is untouched, so the
+    # resistor heads still reach their rails.
+    assert not any(
+        f["rule"] in ("erc.unconnected_net", "erc.floating_gate")
+        for f in report["erc_findings"]
+    )
+
+
+def test_device_body_that_misses_its_declared_role_warns_on_stderr(tmp_path, capsys):
+    """A marker that *is* drawn on this layout but subtracts nothing from
+    the role it was declared `on` is a spec bug, not an unused layer -- so
+    it gets a one-line stderr warning as well as a `0.0` in the report
+    (issue #2226). JSON goes to stdout only, so the warning cannot corrupt
+    a piped report."""
+    _run_resistor_divider(tmp_path, devices=_RESISTOR_DEVICES_WITH_WRONG_ROLE)
+    err = capsys.readouterr().err
+
+    assert "wrong_role_resistor" in err
+    assert "subtracted nothing" in err
+    assert "62/0" in err
+    # The correct declaration on `poly` is not warned about.
+    assert "'poly_resistor'" not in err
 
 
 def test_devices_omitted_reports_an_empty_provenance_list(tmp_path):
@@ -2970,7 +3046,7 @@ def test_devices_omitted_reports_an_empty_provenance_list(tmp_path):
     assert report["provenance"]["devices"] == []
 
 
-def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path):
+def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path, capsys):
     """A `body_layer` this stream never carries is not an error (matching
     `stackup`/`vias`' own convention) -- but the measured `body_area_um2`
     says so, instead of leaving a caller to infer that the carve-out bit."""
@@ -2982,6 +3058,10 @@ def test_device_body_layer_absent_from_layout_subtracts_nothing(tmp_path):
     assert report["provenance"]["devices"][0]["body_area_um2"] == 0.0
     # Nothing was subtracted, so the false short is still reported.
     assert [f["rule"] for f in report["erc_findings"]] == ["erc.supply_short"]
+    # No stderr warning here (issue #2226): a layer absent from the stream
+    # is the documented "this fixture doesn't draw it" case, unlike a marker
+    # that is drawn but misses the role it was declared `on`.
+    assert "subtracted nothing" not in capsys.readouterr().err
 
 
 def test_devices_declaration_does_not_change_schema_version(tmp_path):
@@ -3370,7 +3450,11 @@ def test_explicit_devices_entry_wins_over_deck_auto_detection(tmp_path):
     assert report["erc_findings"] == []
     devices_by_name = {d["name"]: d for d in report["provenance"]["devices"]}
     assert devices_by_name["my_resistor"]["source"] == "declared"
-    assert devices_by_name["my_resistor"]["body_area_um2"] == 4.8
+    # 3.6, not the RES_MK marker's own 4.8: the declared entry's reported
+    # area is the marker intersected with `poly`'s own drawn region, and
+    # this fixture's marker overhangs the poly bar by 0.1 um top and bottom
+    # (issue #2226).
+    assert devices_by_name["my_resistor"]["body_area_um2"] == 3.6
     assert devices_by_name["my_resistor"]["superseded_by"] is None
     assert devices_by_name["ppolyf_u"]["source"] == "deck"
     assert devices_by_name["ppolyf_u"]["body_area_um2"] == 0.0
@@ -3633,7 +3717,7 @@ def test_deck_omitted_is_byte_identical_to_pre_2204_output(tmp_path):
             "name": "poly_resistor",
             "body_layer": "62/0",
             "on": "poly",
-            "body_area_um2": 4.8,
+            "body_area_um2": _RESISTOR_SUBTRACTED_UM2,
         }
     ]
 
