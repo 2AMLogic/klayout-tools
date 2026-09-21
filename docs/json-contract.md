@@ -817,7 +817,7 @@ klt env-provenance lint-envelope`, with an **empty** allow-list, in
 
 ## Verifying committed evidence: `--check` / `--rerun`
 
-Five verbs let a consumer verify that a previously committed `--format json`
+Six verbs let a consumer verify that a previously committed `--format json`
 report still reproduces, built on one shared implementation
 (`src/klayout_tools/_report_verify.py`):
 
@@ -828,13 +828,19 @@ report still reproduces, built on one shared implementation
 | `extract` | `klt extract --check REPORT [--rerun]` | #1149 |
 | `synthesize` | `klt synthesize REQUEST --check REPORT [--rerun]` | #2224 |
 | `place-and-route` | `klt place-and-route REQUEST --check REPORT [--rerun]` | #2224 |
+| `signoff` | `klt signoff --manifest\|--fleet M --check REPORT` | #2249 |
 
-All five share one contract:
+All six share one contract:
 
 - **Cheap mode (`--check`)** re-derives the recorded input/deck content hashes
   and compares them. No engine runs.
 - **Full mode (`--check … --rerun`)** re-runs the analysis and diffs
   verdict-bearing fields against the committed report.
+- **`klt signoff` has one mode, not two** (issue #2249): re-grading the
+  manifest *is* the whole verification — there is no engine run to hold back
+  — so `--check` alone produces the full-mode `{status, drift, fresh}` shape
+  under `mode: "check"`, and it takes its manifest the way the flow verbs
+  take their request (a tier report echoes verdicts, not the manifest).
 - **`status` is two-valued**: `"match"` (exit `0`) or `"drifted"` (exit `3`,
   naming which hash moved or which fields changed). A report that cannot be
   verified at all — missing, unparseable, missing the field needed to re-run —
@@ -847,7 +853,25 @@ All five share one contract:
   `provenance.pdk.version`, plus (flow verbs only) `engine_version` — the
   Yosys/OpenROAD build string, which stands in the same relation to a flow
   verb that the KLayout engine build does to `klt drc`. The engine *identity*
-  (`engine`) is not excluded: swapping engines is a different run.
+  (`engine`) is not excluded: swapping engines is a different run. For
+  `signoff` the same rule lands on the field *its* reports carry tool
+  identity in — the whole `build` block (issue #2249), and nothing else.
+
+**Build identity is route-dependent, so committed reports must not be
+byte-compared (issue #2249).** A `klt signoff` tier/fleet report's `build`
+block (and `provenance.klt_version` elsewhere) records the state of the tree
+the running install was *built from*, at build time — not a property of the
+commit. Two byte-legitimate installs of the **same pinned commit** can
+therefore emit different bytes for identical evidence: a
+`git+https://…@<sha>` install records real git facts (`+g<sha>`), while a
+`pip install` of a source tarball of that same `<sha>` has no `.git` at build
+time and honestly records none (`+unknown`, `git_commit: null`, `is_release:
+null`). The second case cannot be fixed by tightening `dirty` (issue #2248) —
+the facts were never present to record. So "does this committed evidence
+still hold" is answered by `--check`, which excludes exactly the identity
+surface, **not** by `diff`-ing a committed report against a fresh render. See
+[`cli/signoff.md`](cli/signoff.md)'s "`build` describes the *install*, not
+only the commit".
 
 **The flow verbs take the request back.** `drc`/`lvs`/`extract` echo their own
 inputs into the report, so `--check REPORT` is self-sufficient. A
@@ -859,10 +883,14 @@ the question answered becomes "does this committed record still reproduce
 `--rerun` diff on both sides (`synthesize`'s per-run `run_id` and the artifact
 paths under it; `place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4`
 per OpenROAD invocation) — without that, `--rerun` would report `"drifted"`
-unconditionally. Per-verb detail: [`cli/drc.md`](cli/drc.md),
-[`cli/lvs.md`](cli/lvs.md), [`cli/extract.md`](cli/extract.md),
+unconditionally. `klt signoff` is the same shape one level up: a tier/fleet
+report echoes graded verdicts, never the manifest, so `--check` sits beside
+the `--manifest`/`--fleet` argument it re-grades. Per-verb detail:
+[`cli/drc.md`](cli/drc.md), [`cli/lvs.md`](cli/lvs.md),
+[`cli/extract.md`](cli/extract.md),
 [`cli/synthesize.md`](cli/synthesize.md),
-[`cli/place-and-route.md`](cli/place-and-route.md).
+[`cli/place-and-route.md`](cli/place-and-route.md),
+[`cli/signoff.md`](cli/signoff.md).
 
 ## Checked-work coverage (`coverage.schema_version: 1`)
 

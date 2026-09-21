@@ -14,6 +14,26 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2249, `klt signoff`, no `schema_version` bump — a new flag and
+  a new response shape for it, no change to the tier/fleet report's own
+  fields): `klt signoff --manifest|--fleet M --check REPORT` verifies that a
+  previously committed tier/fleet report still reproduces, re-grading `M` and
+  diffing the result against `REPORT` **excluding the `build` block** —
+  `status: "match"` (exit `0`) / `"drifted"` (exit `3`, naming every field
+  that moved), the same `{schema_version, mode, report, status, drift,
+  fresh}` shape and exit codes the five existing `--check` verbs use
+  (`docs/json-contract.md` → "Verifying committed evidence"). This replaces
+  byte-comparing a committed report against a fresh re-render: a report's
+  `build` block states the checkout state of the tree the running install was
+  *built* from, so two byte-legitimate installs of the **same pinned commit**
+  can emit different bytes for identical evidence (a `git+…@<sha>` install
+  records `+g<sha>`; a `pip install` of a source tarball of that same `<sha>`
+  has no `.git` at build time and honestly records `+unknown`, which no fix
+  to `dirty` can collapse). Documented in `docs/cli/signoff.md`
+  ("`build` describes the *install*, not only the commit", "Verifying a
+  committed report: `--check`") and `docs/cli/version.md` ("These fields
+  describe the install, not only the commit"), which also now names the
+  byte-canonical provisioning route for a gate script.
 - **Fixed** (#2244, `klt lvs`, no `schema_version` bump — the `side` field
   already documented `"layout"`/`"reference"`/`"both"` as valid values;
   this changes when each is emitted, not the shape): a

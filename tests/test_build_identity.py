@@ -131,6 +131,41 @@ def test_resolve_reports_unknown_not_false_without_any_git_facts():
     assert build_identity._resolve(None, None, None, "1.2.3")["is_release"] is None
 
 
+def test_identity_of_one_commit_is_provisioning_route_dependent_by_design():
+    """Issue #2249: two byte-legitimate installs of the **same commit** can
+    report different identities, and that is correct -- which is why a
+    consumer verifying a committed `klt signoff` report must exclude the
+    report's `build` block rather than byte-compare it (see
+    `signoff.VOLATILE_REPORT_PATHS`, and `klt signoff --check`).
+
+    The divergence survives *any* fix to `dirty` (issue #2248 restricted the
+    build hook's probe to tracked files, which collapses the
+    `uv`-git-cache-residue case): a build made from a source **tarball** of
+    the same commit -- a GitHub `/archive/<sha>.tar.gz`, a vendored copy --
+    has no `.git` at all, so `hatch_build.git_identity()` returns `None`, no
+    `_build_info.py` is recorded, and the same commit honestly reports
+    `+unknown` with `git_commit: None`. The facts were never present to
+    record; no policy change here can invent them.
+    """
+    commit = "a" * 40
+    from_git_checkout = build_identity._resolve(commit, None, False, "1.2.3")
+    from_source_tarball = build_identity._resolve(None, None, None, "1.2.3")
+
+    assert from_git_checkout != from_source_tarball
+    assert build_identity.format_build_version("1.2.3", from_git_checkout) == (
+        f"1.2.3+g{commit[:12]}"
+    )
+    assert (
+        build_identity.format_build_version("1.2.3", from_source_tarball)
+        == "1.2.3+unknown"
+    )
+    # Neither is a release claim, and neither is wrong about the build it
+    # describes -- the report-side exclusion is what makes the two
+    # *comparable*, not a change to either of these.
+    assert from_git_checkout["is_release"] is False
+    assert from_source_tarball["is_release"] is None
+
+
 # --------------------------------------------------------------------------- #
 # live checkout probing
 # --------------------------------------------------------------------------- #

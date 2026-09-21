@@ -790,6 +790,7 @@ from typing import (
 )
 
 from ._provenance import INPUT_ROLE_LAYOUT, sha256_file
+from ._report_verify import build_rerun_result, load_committed_report
 from .build_identity import version_report
 from .coverage import (
     coverage_nothing_checked,
@@ -815,6 +816,8 @@ __all__ = [
     "build_signoff",
     "build_tier_report",
     "build_fleet_report",
+    "check_tier_report",
+    "check_fleet_report",
     "describe_grader",
 ]
 
@@ -6038,6 +6041,136 @@ def build_fleet_report(
         "build": _build_identity(),
         "blocks": blocks,
     }
+
+
+#: The tier/fleet-report paths ``--check`` excludes from its drift diff
+#: (issue #2249): the ``build`` block, and only it.
+#:
+#: This is the same exclusion
+#: :data:`~._report_verify.VOLATILE_PROVENANCE_PATHS` makes for the five
+#: verbs that already have ``--check`` ("tool identity is excluded from the
+#: diff, and only tool identity" -- ``docs/json-contract.md``), applied to
+#: the field *this* verb's reports carry it in.
+#:
+#: **Why it has to be excluded at all.** A ``build`` block states how the
+#: *install* was provisioned, not only which commit it came from, so two
+#: byte-legitimate installs of the **same pinned commit** can report
+#: different ones -- and therefore different report bytes -- while grading
+#: every item identically:
+#:
+#: - ``uv tool install "klayout-tools @ git+URL@<sha>"`` builds in a
+#:   package-manager-owned scratch checkout, so ``hatch_build.py`` records
+#:   real git facts: ``git_commit: "<sha>"``, ``version: "X.Y.Z+g<sha>"``
+#:   (and, before issue #2248, ``dirty: true`` from that checkout's own
+#:   build-tool residue).
+#: - ``pip install`` of a source *tarball* of the same ``<sha>`` (a GitHub
+#:   ``/archive/<sha>.tar.gz``, a vendored copy) builds in a tree with no
+#:   ``.git`` at all, so the hook records nothing and the same commit
+#:   reports ``git_commit: null``, ``version: "X.Y.Z+unknown"``,
+#:   ``is_release: null``.
+#:
+#: Neither is wrong -- each honestly describes the build it identifies, which
+#: is exactly why issue #2176 put it in the report -- and no fix to ``dirty``
+#: can collapse the second case, because the facts were never present to
+#: record. So "did this committed report drift" cannot be answered by
+#: comparing report *bytes*; it is answered by comparing everything the
+#: grading actually depends on, which is every other field. Every one of
+#: those is a function of the manifest, the cited evidence and the tiers doc
+#: -- including ``source_doc`` (normalised to
+#: :data:`~.design_evidence_tiers.CANONICAL_DOC_LABEL` regardless of whether
+#: this install reads its bundled copy or a checkout's ``docs/``) and
+#: ``build_t1_item_count``/``items[].graded_by_build`` (properties of the
+#: grading code, identical for a given commit however it was installed).
+#:
+#: A committed report that carries **no** ``build`` block at all (rendered
+#: before issue #2176) is unaffected: an excluded path is skipped whether or
+#: not either side has it, so such a report still verifies on its graded
+#: content rather than reporting one spurious whole-block drift entry.
+VOLATILE_REPORT_PATHS: frozenset[tuple[str, ...]] = frozenset({("build",)})
+
+
+def check_tier_report(
+    report_path: str, manifest: dict[str, Any], *, tiers_doc: str | None = None
+) -> dict[str, Any]:
+    """``klt signoff --manifest M --check REPORT`` (issue #2249): verify that
+    a previously committed tier report at ``report_path`` still reproduces
+    from manifest ``M``, ignoring build identity.
+
+    Re-grades ``manifest`` (:func:`build_tier_report` -- the same work
+    rendering the report does, including actually running any command-backed
+    evidence it cites) and diffs the result against the committed report,
+    excluding :data:`VOLATILE_REPORT_PATHS`. ``status: "match"`` when nothing
+    else moved; ``"drifted"``, naming every field that did, otherwise --
+    a changed item ``status``/``reason``, a moved citation ``content_hash``,
+    a different ``source_doc_content_hash`` (the checklist itself changed), a
+    different ``t1_met_count``.
+
+    This is the mode a consumer gating on "does the committed evidence still
+    hold" should use **instead of byte-comparing the report file against a
+    fresh render**: that comparison fails between two correct installs of the
+    same pinned commit, on nothing but how each was provisioned (see
+    :data:`VOLATILE_REPORT_PATHS`).
+
+    Raises :class:`SignoffError` for a missing/unparseable committed report,
+    or one that is not a tier report at all -- never a traceback.
+    """
+    committed = _load_committed_signoff_report(report_path, "items", "--manifest")
+    fresh = build_tier_report(manifest, tiers_doc=tiers_doc)
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_REPORT_PATHS,
+        mode="check",
+    )
+
+
+def check_fleet_report(
+    report_path: str, fleet: dict[str, Any], *, tiers_doc: str | None = None
+) -> dict[str, Any]:
+    """``klt signoff --fleet F --check REPORT`` (issue #2249): the
+    :func:`check_tier_report` contract, one level up -- verify a committed
+    *fleet* roll-up still reproduces from fleet manifest ``F``.
+
+    Inherits everything, including the exclusion, by re-rendering through
+    :func:`build_fleet_report` (which itself calls :func:`build_tier_report`
+    once per block): a roll-up carries exactly one ``build`` block, at the
+    top level, so the same one-path exclusion covers it.
+    """
+    committed = _load_committed_signoff_report(report_path, "blocks", "--fleet")
+    fresh = build_fleet_report(fleet, tiers_doc=tiers_doc)
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_REPORT_PATHS,
+        mode="check",
+    )
+
+
+def _load_committed_signoff_report(
+    report_path: str, required_key: str, flag: str
+) -> dict[str, Any]:
+    """Load the committed report ``--check`` will diff against, refusing one
+    the requested mode could not have produced (issue #2249).
+
+    :func:`~._report_verify.load_committed_report` already rejects a missing,
+    unparseable, or non-object file. This adds the one shape question that
+    matters here: a tier report always carries ``items``, a fleet roll-up
+    always carries ``blocks``, so pointing ``--manifest --check`` at a fleet
+    roll-up (or at an unrelated JSON object) is refused as a *failure to
+    verify* -- exit ``1`` -- rather than diffed into a "drifted" verdict
+    listing every field of both shapes, which would read as evidence drift
+    when the real fault is the wrong file path.
+    """
+    committed = load_committed_report(report_path, SignoffError)
+    if required_key not in committed:
+        raise SignoffError(
+            f"committed report '{report_path}' carries no '{required_key}' key "
+            f"-- {flag} --check expects a report this mode produced (a "
+            f"'{required_key}' array is what identifies one); check the path"
+        )
+    return committed
 
 
 def _read_fleet_block_manifest(raw_entry: Any, index: int) -> tuple[str | None, Any]:

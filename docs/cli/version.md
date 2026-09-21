@@ -93,6 +93,13 @@ a release.
   before this field existed, or a checkout with no reachable `uv.lock`). See
   "Pinning the KLayout engine version" below.
 
+**`version`/`git_commit`/`git_tag`/`dirty`/`is_release` identify the
+*install*, not only the commit it came from** — two byte-legitimate installs
+of the same pinned `<sha>` can report different values for all five (issue
+#2249). That is why a committed report must never be byte-compared against a
+fresh re-render; see "These fields describe the install, not only the commit"
+under "Gating a build before doing work" below.
+
 Always exits `0`. Identifying the running build cannot fail — an
 unrecoverable identity is reported as `+unknown` with `is_release: null`,
 never as an error.
@@ -167,3 +174,38 @@ klt deck hash --deck sky130 --format json \
 `provenance.klt_version` in a report carries the same build identity as
 `version` above (issue #2090) — see
 [`../json-contract.md`](../json-contract.md).
+
+### These fields describe the install, not only the commit (issue #2249)
+
+**`version`, `git_commit`, `git_tag`, `dirty` and `is_release` all report the
+state of the tree this install was *built from*, at the time it was built.**
+Pinning a commit does not pin them: two byte-legitimate installs of the same
+`<sha>` can report different values, because the routes differ in what git
+facts existed at build time.
+
+| Provisioning route for the same `<sha>` | `version` | `git_commit` | `dirty` |
+| --- | --- | --- | --- |
+| `uv tool install "klayout-tools @ git+https://github.com/2AMLogic/klayout-tools@<sha>"` | `X.Y.Z+g<sha>` | `<sha>` | `false` — but `true` before issue #2248, from the package manager's own untracked residue in its scratch checkout |
+| Clean `git clone`/`git worktree add <sha>` + local `uv build` | `X.Y.Z+g<sha>` | `<sha>` | `false` |
+| `pip install` of a source **tarball** of `<sha>` (GitHub `/archive/<sha>.tar.gz`, a vendored copy) | `X.Y.Z+unknown` | `null` | `null` |
+
+The last row is not a defect and cannot be repaired: the build ran in a tree
+with no `.git`, so there were no facts to record (`hatch_build.py` writes
+nothing rather than guessing — see "How the identity is determined" above).
+
+Two consequences for a gate script:
+
+- **The byte-canonical route is a `git+…@<sha>` install** (or a clean local
+  build of `<sha>`) — the only route that records the commit at all. A gate
+  that wants reproducible identity bytes must provision *that* route on every
+  machine; a tarball/vendored install of the same commit will report
+  `+unknown` forever.
+- **Never byte-compare a committed `klt` report against a fresh re-render to
+  detect evidence drift.** The identity fields above are embedded in reports
+  (`provenance.klt_version`, and `klt signoff`'s whole `build` block), so that
+  comparison fails between two correct installs of the same pinned commit.
+  Use the verbs' own `--check` modes instead — they exclude tool identity and
+  only tool identity: `klt drc/lvs/extract --check`, `klt
+  synthesize/place-and-route REQUEST --check`, and `klt signoff
+  --manifest|--fleet M --check REPORT` (see
+  [`signoff.md`](signoff.md#verifying-a-committed-report---check-issue-2249)).
