@@ -14,6 +14,29 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#2199): `klt erc` no longer reports a **degenerate** `ties[]`
+  declaration as a passing `erc.missing_tie` check. A tie whose declared tap
+  region is indistinguishable from an ordinary source/drain contact — no
+  `tap_requires` narrowing that actually removes geometry inside the well,
+  and no new `tap_is_dedicated` affirmation — reports every well as "tied" as
+  soon as any contact in it reaches the declared net, which on a PMOS row
+  whose sources sit on VDD is every well, every time. That work is now
+  recorded in `erc_coverage.skipped[]` with reason
+  `degenerate_tap_declaration` (the record's work identity names the tie)
+  instead of in `checked`, so `erc_status` reads `"clean_partial"` rather
+  than `"clean"`. `erc_findings` is unchanged for every input, degenerate or
+  well-formed: this changes which coverage list an existing identity lands
+  in, not what the rule detects, so no `schema_version` bump. New optional
+  spec key `ties[].tap_is_dedicated` (boolean, default `false`) asserts that
+  `tap_layer` already names a tap-only layer (sky130's `tap`), which keeps
+  such a tie graded as checked work. `klt signoff`'s T1 item 11 renders a
+  cited ERC run with a skipped `erc.missing_tie` as `supply_spec_incomplete`
+  — the same "an uncomputed check is not a clean one" rule that already
+  rejects a spec declaring no `ties[]` at all. Envelopes produced before this
+  change carry no skip records and grade exactly as they did. See
+  [`docs/cli/erc.md`](docs/cli/erc.md)'s "A degenerate tie is reported as
+  skipped, not as a pass".
+
 - **Documented** (#2180): `klt erc`'s "Connectivity model" section in
   [`docs/cli/erc.md`](docs/cli/erc.md) now states a false-positive risk that
   was previously undocumented: `erc.unconnected_net` can fire on a declared

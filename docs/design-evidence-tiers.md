@@ -360,7 +360,13 @@ written to every block.
       well/substrate taps. Every declared supply must resolve to exactly
       **one** electrical island — no `erc.unconnected_net` and no
       `erc.supply_short` naming it — and the run must report zero
-      `erc.missing_tie`. Those are the rules this item grades, not the
+      `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
+      entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
+      reason `degenerate_tap_declaration`, issue #2199) returns zero for a
+      reason that has nothing to do with taps, and renders
+      `supply_spec_incomplete` rather than a met item — the same rule that
+      already rejects a spec declaring no `ties[]` at all. Those are the
+      rules this item grades, not the
       report's overall `status`: an antenna verdict or a floating-gate
       finding is a real defect, but it is not this item's subject and does
       not block it (#1994). IR-drop and EM (`klt power`) stay deliberately
