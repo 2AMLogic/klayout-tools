@@ -60,6 +60,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   meaning. See
   [`docs/cli/signoff.md`](docs/cli/signoff.md)'s `reason` values table.
 
+- **Added** (#2196, additive — **no** `schema_version` bump, per
+  [`docs/json-contract.md`](docs/json-contract.md)): every `"met"` citation
+  in `klt signoff --manifest`'s tier report now carries `input_verified`
+  — whether the cited envelope's own recorded
+  `provenance.input.content_hash` was checked against the **input artifact
+  the envelope names**, or only against the envelope's claim about it.
+  `--manifest`'s freshness gate compares a manifest's pinned `content_hash`
+  against that self-report; both sides are statements *about* a revision,
+  and neither is the revision, so a manifest and an envelope could go on
+  agreeing with each other indefinitely while the GDS/netlist/record they
+  describe was rewritten underneath them — the item stayed `met`, with a
+  pinned hash, and nothing anywhere had read the file. `klt signoff` now
+  re-hashes the artifact the envelope names (`drc`/`extract`/`erc`'s `file`,
+  `lvs`'s `layout` — the layout side `provenance.input` actually pins —
+  `sim`'s `netlist`, `pex`'s `layout`, `sta`'s `def_path`/`verilog_path`;
+  `yield` already re-hashed its samples document since #870) and reports
+  `true` (re-hashed, matches), `false` (re-hashed, disagrees) or `null`
+  (nothing was re-hashed — no recorded hash, no resolvable input path for
+  that kind, or a path that does not resolve to a readable file from the
+  grading context). The key is always present, `null` included: an omitted
+  key would leave the unverified case exactly as silent as it was before.
+  `--format text` prints the same statement under the `cite:` line it
+  qualifies. **Disclosure only**, matching #2002 (`coverage`) and #1983
+  (`body_bias`): no grading rule consults it, so no item's `met`/`unmet`
+  verdict moves — a citation that is `met` today stays `met` with
+  `input_verified: false` beside it. A verdict-changing remedy (a distinct
+  `input_changed` reason) is a deliberate follow-up. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "A pinned hash is checked
+  against the artifact, not only against the envelope".
+
 - **Documented** (#2180): `klt erc`'s "Connectivity model" section in
   [`docs/cli/erc.md`](docs/cli/erc.md) now states a false-positive risk that
   was previously undocumented: `erc.unconnected_net` can fire on a declared

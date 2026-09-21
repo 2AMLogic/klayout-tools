@@ -450,6 +450,22 @@ geometry change from a klt/KLayout upgrade. See
   otherwise-consistent `drc` + `sim` bundle); #2039 closes that gap now that
   roles scope the comparison. `input` is still `null` for a verb with no
   single input artifact to pin this way.
+
+  **A consumer may verify this hash against the artifact, not only against
+  another claim** (issue #2196). `content_hash` is a *self-report*: it says
+  what the producing run hashed, and comparing it against a manifest's
+  pinned copy compares two statements about a revision, neither of which is
+  the revision. Every verb that populates `input` also echoes the artifact
+  it hashed under a top-level field of its own — `drc`/`extract`/`erc`'s
+  `file`, `lvs`'s `layout` (the layout side; the reference netlist is pinned
+  separately under `environment.reference_sha256`), `sim`'s `netlist`,
+  `pex`'s `layout`, `sta`'s `def_path`/`verilog_path` — so the loop is
+  closeable with no schema change: re-hash that file and compare. `klt
+  signoff --manifest` does exactly this and reports the answer per citation
+  as `input_verified: true | false | null` (see
+  [`cli/signoff.md`](cli/signoff.md)); a verb that pins an `input` hash
+  without echoing the path it covers leaves its consumers with `null` there,
+  so **new verbs should echo the artifact path they hashed**.
   - `role` (issue #2027) — **which kind of artifact `content_hash` covers**.
     One of:
 

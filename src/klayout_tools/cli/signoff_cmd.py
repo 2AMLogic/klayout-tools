@@ -233,6 +233,41 @@ def _print_text(result: dict) -> None:
 _COVERAGE_PREVIEW = 4
 
 
+def _print_input_verified(citation: dict) -> None:
+    """Print one line stating whether a citation's ``content_hash`` was
+    verified against the **input artifact** the cited envelope names, or
+    only against the envelope's own claim about it (issue #2196) -- or
+    nothing at all, when there is nothing to say.
+
+    Its own function (rather than an ``if`` in the already-dense caller)
+    so the "nothing to say" branch does not land in
+    :func:`_print_tier_report_text`'s complexity budget.
+
+    Nothing to say means the envelope recorded no input hash at all *and*
+    none could be re-derived: the citation already renders ``content_hash:
+    None``, and a second line repeating that adds no information. Every
+    other case prints, including the unverified one -- a freshness claim
+    checked against a file and one checked only against another claim being
+    indistinguishable in the output is the exact gap this discloses.
+    """
+    verified = citation.get("input_verified")
+    if verified is None and citation.get("content_hash") is None:
+        return
+    if verified is True:
+        statement = "re-hashed the artifact this envelope names -- matches"
+    elif verified is False:
+        statement = (
+            "CHANGED -- the artifact this envelope names no longer matches "
+            "the content_hash it recorded"
+        )
+    else:
+        statement = (
+            "not re-hashed (content_hash compared against this envelope's own "
+            "claim only -- the artifact itself was not read)"
+        )
+    print(f"        input: {statement}")
+
+
 def _format_coverage(coverage: dict) -> str:
     """One line summarising a `drc` citation's three disclosed `coverage`
     fields (issue #2002): each field's entry count, plus the first few
@@ -333,6 +368,13 @@ def _print_tier_report_text(result: dict) -> None:
                 f"content_hash={citation['content_hash']}, "
                 f"exit_status={citation['exit_status']})"
             )
+            # Issue #2196: whether that `content_hash` was checked against
+            # the input artifact itself or only against the envelope's own
+            # claim about it. Shown beside the hash it qualifies, because a
+            # freshness claim verified against a file and one verified
+            # against another claim are otherwise indistinguishable to a
+            # reader. Disclosure only -- the verdict above is unaffected.
+            _print_input_verified(citation)
             # Issue #2002: a `drc` citation's own coverage statement, shown
             # beside the "clean" it qualifies -- item 3's doc text requires
             # the claim to disclose these, and `klt signoff` does not grade

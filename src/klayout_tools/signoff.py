@@ -710,6 +710,46 @@ parser kept a leading backslash another stripped: both strings are valid
 pattern to other verbs' boundaries is deliberately deferred until this
 pilot's diagnostics have been seen in practice (#2011).
 
+## Input-artifact verification (issue #2196)
+
+``--manifest``'s freshness gate compares the manifest's pinned
+``content_hash`` against the *cited envelope's own self-reported*
+``provenance.input.content_hash``. Both sides of that comparison are
+statements **about** a revision; neither is the revision. A manifest and an
+envelope can go on agreeing with each other indefinitely while the GDS,
+netlist or record they describe is rewritten underneath them::
+
+    manifest.content_hash == envelope.provenance.input.content_hash   <- gated
+    envelope.provenance.input.content_hash == sha256(<the artifact>)  <- #2196
+
+:func:`_verify_input_artifact` closes the second line: it re-hashes the
+input artifact the envelope itself names
+(:data:`_INPUT_ARTIFACT_FIELDS` -- ``klt drc``'s ``file``, ``klt lvs``'s
+``layout``, ``klt pex``'s ``layout``, ...) with the same
+:func:`~klayout_tools._provenance.sha256_file` the producing run used, and
+every ``"met"`` citation carries the answer as ``input_verified``:
+
+- ``True`` -- the artifact was found and re-hashed, and it matches the hash
+  the envelope recorded. The freshness claim is anchored to a file.
+- ``False`` -- the artifact was found and re-hashed, and it **disagrees**:
+  the envelope's self-report no longer describes what is on disk.
+- ``None`` -- nothing was re-hashed, so the pinned hash was only ever
+  compared to another claim. Either the envelope records no input hash, its
+  kind names no input path this module can resolve, or the path it names
+  does not resolve to a readable file from the grading context (an absolute
+  scratch path, a request-file-relative path graded from elsewhere).
+
+**Disclosure, not grading** -- deliberately, and matching the precedent set
+by ``coverage`` (#2002) and ``body_bias`` (#1983): ``input_verified`` is
+never consulted by any grading rule, so no item's ``met``/``unmet`` verdict
+moves because of it. What changes is that the unverified case is now
+*visible*: a reviewer can tell a freshness claim checked against a file
+from one checked only against another claim, which was previously
+indistinguishable. The field is always present on a citation (``null``
+included) for exactly that reason -- an omitted key would leave the silent
+case silent. A verdict-changing remedy (a distinct ``input_changed``
+reason) is a deliberate follow-up, not smuggled in here.
+
 Pure library: :func:`build_signoff`, :func:`build_tier_report`, and
 :func:`build_fleet_report` all return plain Python data (a ``dict`` of
 JSON-serialisable primitives) and never print, mirroring ``report.py``.
@@ -764,6 +804,7 @@ from .design_evidence_tiers import (
     doc_source_label,
     parse_tier_doc,
 )
+from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
 
 __all__ = [
@@ -1778,6 +1819,10 @@ class _PexRequired(_EnvelopeCommon):
 
 
 class _PexEnvelope(_PexRequired, total=False):
+    # The layout stream this run extracted from, in the `{path, scope}`
+    # shape `klt pex` echoes every input path under (issue #1261) -- read
+    # since issue #2196 to re-hash the artifact `provenance.input` pins.
+    layout: Any
     netlist: Any
     corner_count: Any
     passed: Any
@@ -1854,6 +1899,9 @@ class _ErcRequired(_EnvelopeCommon):
 
 
 class _ErcEnvelope(_ErcRequired, total=False):
+    # The layout stream this run checked -- read since issue #2196 to
+    # re-hash the artifact `provenance.input` pins.
+    file: Any
     spec: Any
     stackup: Any
     erc_findings: list[Any]
@@ -3620,6 +3668,12 @@ def build_tier_report(
                         "kind": "drc",
                         "check_status": "clean",
                         "content_hash": "sha256:...",
+                        # Was that hash checked against the artifact the
+                        # envelope names, or only against the envelope's
+                        # own claim about it (issue #2196)? Always present:
+                        # True (re-hashed, matched) / False (re-hashed,
+                        # disagreed) / None (nothing was re-hashed).
+                        "input_verified": True,
                         "exit_status": 0,
                         # `drc` citations only, and only when the cited
                         # envelope reports coverage (issue #2002)
@@ -3884,7 +3938,12 @@ def build_tier_report(
     ``docs/json-contract.md``; for a ``klt yield`` envelope, which carries no
     ``provenance`` block of its own at all as of issue #816's current shape,
     this is instead the hash of the samples document it names -- see
-    :func:`_yield_samples_content_hash`), and ``exit_status``: for a file-backed entry
+    :func:`_yield_samples_content_hash`), ``input_verified`` (issue #2196:
+    whether that input hash was itself checked against the artifact the
+    envelope names -- ``True`` re-hashed and matched, ``False`` re-hashed
+    and disagreed, ``None`` nothing was re-hashed, so the pinned hash was
+    only ever compared to another claim; disclosure only, never graded on
+    -- see :func:`_verify_input_artifact`), and ``exit_status``: for a file-backed entry
     this is *inferred* as ``0`` (a readable, classifiable, non-error
     envelope implies the producing command exited zero -- every ``klt``
     verb emits an ``error``-kind envelope, not a success envelope, on any
@@ -4239,6 +4298,158 @@ def _yield_samples_content_hash(
     return None, {"samples": samples, "searched": candidates}
 
 
+#: Per kind, the top-level envelope field(s) naming the **input artifact**
+#: whose bytes ``provenance.input.content_hash`` covers -- the file
+#: :func:`_verify_input_artifact` re-hashes to check that self-reported hash
+#: against the artifact itself (issue #2196).
+#:
+#: Each entry is the producing verb's own ``input_path=`` argument to
+#: :func:`klayout_tools._provenance.build_provenance`, named by the field
+#: that run echoes it back under -- so this table cannot claim to verify a
+#: hash of something the envelope does not actually point at:
+#:
+#: - ``drc``/``extract``/``erc`` -- ``file``, the layout stream each ran on.
+#: - ``lvs`` -- ``layout``: the *layout side* is what `klt lvs` hashes into
+#:   ``provenance.input`` (issue #1969), either the GDS/OASIS stream of the
+#:   ``layout.file`` request shape or the SPICE file of the pre-extracted
+#:   ``layout.netlist`` one. ``reference`` is deliberately **absent**: the
+#:   reference netlist is pinned under ``environment.reference_sha256``, a
+#:   different digest, so re-hashing it here would compare two unrelated
+#:   values and report a mismatch that is not one.
+#: - ``sim`` -- ``netlist``, the SPICE deck it simulated.
+#: - ``pex`` -- ``layout``: `klt pex` republishes its own `klt extract`
+#:   run's ``provenance`` block verbatim (``pex.py``), and that run's input
+#:   is this layout stream.
+#: - ``sta`` -- ``def_path`` when the run was given a DEF, else
+#:   ``verilog_path``, mirroring `klt sta`'s own
+#:   ``input_path = def_path if has_def else verilog_path`` branch. Ordered,
+#:   and only the first *present* field is consulted, so the two can never
+#:   be crossed.
+#:
+#: A kind absent here is never re-hashed and reports ``input_verified:
+#: null``: ``yield`` re-hashes its samples document already
+#: (:func:`_yield_samples_content_hash` -- that path reports ``True`` on its
+#: own); ``functional-verification``/``power``/``place-and-route``
+#: populate no ``provenance.input`` at all today, or echo no path for
+#: the artifact they hashed (`klt place-and-route` pins the gate-level
+#: netlist it placed but echoes only its *outputs*); ``generic`` envelopes
+#: choose their own field names by definition; ``error`` envelopes carry no
+#: verdict to anchor.
+_INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
+    "drc": ("file",),
+    "extract": ("file",),
+    "erc": ("file",),
+    "lvs": ("layout",),
+    "sim": ("netlist",),
+    "pex": ("layout",),
+    "sta": ("def_path", "verilog_path"),
+}
+
+
+def _input_artifact_candidates(
+    kind: str,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    evidence_file: str | None,
+) -> list[str]:
+    """Every filesystem path the cited envelope's own input-artifact field
+    (:data:`_INPUT_ARTIFACT_FIELDS`) could mean **from this grading
+    context** -- ``[]`` when the kind names no such field, the field is
+    absent, or its value is a shape that cannot be resolved here.
+
+    A path an envelope names is not portable: it was written relative to
+    whatever directory the producing run used, which is not necessarily the
+    one grading happens in. Rather than guess a single interpretation, this
+    returns each plausible one and lets :func:`_verify_input_artifact`
+    prefer a *match* over a mismatch, so a coincidentally same-named file
+    beside the envelope can never turn a genuinely fresh citation into a
+    reported mismatch:
+
+    - as the producing run itself named it -- :func:`_resolve_relative_to_spec`
+      (``spec["cwd"]`` for a command-backed entry, this process's cwd
+      otherwise), the same convention `klt drc --check`/`klt lvs --check`
+      re-hash a committed report under;
+    - relative to the **evidence file's own directory**, for a file-backed
+      entry. This is the case the two ``--check`` modes document as a known
+      limitation (``lvs.py``): ``klt lvs`` echoes ``layout``/``reference``
+      exactly as the *request document* gave them, so evidence committed
+      beside its inputs (``examples/signoff/`` -- ``lvs.json`` naming
+      ``layout.spice``) is only resolvable this way.
+
+    The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
+    `klt pex`'s ``layout``) is resolved against the repo root discovered
+    from the evidence file's own location, which is what ``scope: "repo"``
+    means by construction. ``scope: "external"`` carries no path at all (it
+    is ``null`` on purpose, so a host-specific absolute path never lands in
+    committed evidence) and is therefore unresolvable here -- correctly
+    reported as "not verified" rather than guessed at.
+    """
+    evidence_dir = (
+        os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
+    )
+    for field in _INPUT_ARTIFACT_FIELDS.get(kind, ()):
+        value = envelope.get(field)
+        if value is None:
+            # Not "unresolvable" -- this field simply was not the one the run
+            # hashed (`klt sta`'s DEF/Verilog branch); try the next.
+            continue
+        candidates: list[str] = []
+        if isinstance(value, str) and value:
+            candidates.append(_resolve_relative_to_spec(value, spec))
+            if evidence_dir is not None and not os.path.isabs(value):
+                candidates.append(os.path.join(evidence_dir, value))
+        elif isinstance(value, Mapping) and value.get("scope") == "repo":
+            repo_relative = value.get("path")
+            if isinstance(repo_relative, str) and repo_relative:
+                root = find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+                if root is not None:
+                    candidates.append(os.path.join(root, repo_relative))
+        # The first *present* field decides: it is the one the producing run
+        # hashed, so falling through to another on a failed resolution would
+        # verify the wrong artifact.
+        return list(dict.fromkeys(candidates))
+    return []
+
+
+def _verify_input_artifact(
+    kind: str,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    recorded_hash: Any,
+    evidence_file: str | None,
+) -> bool | None:
+    """Whether the envelope's self-reported ``recorded_hash`` still matches
+    the **input artifact it names** -- ``True``/``False``/``None``, the
+    ``input_verified`` disclosure issue #2196 adds to every ``"met"``
+    citation. See this module's "Input-artifact verification" docstring
+    section for what each value means.
+
+    ``None`` (never raising, never fabricating) whenever no comparison was
+    actually made: no recorded hash to check, no resolvable path for this
+    kind, or no candidate path that resolves to a readable file here.
+    ``False`` requires having genuinely read a named artifact and found it
+    different -- which is why a *match* on any candidate wins over a
+    mismatch on another (see :func:`_input_artifact_candidates`).
+
+    Reuses :func:`~klayout_tools._provenance.sha256_file` and its
+    ``sha256:``-prefixing convention rather than hashing a second way: a
+    digest computed differently from the one the producing run recorded
+    would report drift that is an artifact of this module, not of the
+    evidence.
+    """
+    if not isinstance(recorded_hash, str) or not recorded_hash:
+        return None
+    read_any = False
+    for candidate in _input_artifact_candidates(kind, envelope, spec, evidence_file):
+        digest = sha256_file(candidate)
+        if digest is None:
+            continue
+        read_any = True
+        if f"sha256:{digest}" == recorded_hash:
+            return True
+    return False if read_any else None
+
+
 def _grade_evidence(
     spec: dict[str, Any],
     *,
@@ -4459,6 +4670,7 @@ def _resolve_evidence(
     input_block = provenance.get("input") or {}
     actual_hash = input_block.get("content_hash")
     content_hash_unresolved: dict[str, Any] | None = None
+    input_verified: bool | None
     if actual_hash is None and check_kind == "yield":
         # klt yield's current JSON shape (issue #816) carries no
         # `provenance` block of its own -- see this module's "Statistical-
@@ -4466,6 +4678,21 @@ def _resolve_evidence(
         # :func:`_yield_samples_content_hash`.
         actual_hash, content_hash_unresolved = _yield_samples_content_hash(
             envelope, spec
+        )
+        # That hash *is* a live re-hash of the samples document itself, not
+        # a self-report about it, so this kind arrives at issue #2196's
+        # guarantee by construction -- `None` only when nothing could be
+        # hashed, which is the same "no comparison was made" case
+        # :func:`_verify_input_artifact` reports `None` for, and exactly the
+        # case issue #2197's `content_hash_unresolved` then names.
+        input_verified = True if actual_hash is not None else None
+    else:
+        # Issue #2196: the manifest's pinned hash is checked against
+        # `actual_hash` by the caller; this checks `actual_hash` itself
+        # against the artifact the envelope names. Disclosure only -- see
+        # this module's "Input-artifact verification" docstring section.
+        input_verified = _verify_input_artifact(
+            check_kind, envelope, spec, actual_hash, file_label
         )
 
     return (
@@ -4478,6 +4705,7 @@ def _resolve_evidence(
             "exit_status": exit_status,
             "content_hash": actual_hash,
             "content_hash_unresolved": content_hash_unresolved,
+            "input_verified": input_verified,
         },
         None,
     )
@@ -4493,6 +4721,13 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
         "kind": resolution["kind"],
         "check_status": resolution["envelope"].get("status"),
         "content_hash": resolution["content_hash"],
+        # Issue #2196: was that `content_hash` checked against the input
+        # artifact itself, or only against the envelope's own claim about
+        # it? Always present -- including the `None` ("nothing was
+        # re-hashed") case, which is the one this field exists to stop
+        # being silent. See this module's "Input-artifact verification"
+        # docstring section; never consulted by any grading rule.
+        "input_verified": resolution.get("input_verified"),
         "exit_status": resolution["exit_status"],
     }
     # Issue #2002: a `drc` citation also carries the three `coverage` fields

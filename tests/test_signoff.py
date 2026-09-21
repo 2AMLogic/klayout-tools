@@ -1753,6 +1753,10 @@ def test_tier_report_item_3_citation_omits_coverage_for_legacy_evidence(tmp_path
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
+        # Issue #2196: this fixture's envelope names a `file` that does not
+        # exist beside the evidence, so nothing was re-hashed -- the pinned
+        # hash was compared only against the envelope's own claim.
+        "input_verified": None,
         "exit_status": 0,
     }
 
@@ -4063,6 +4067,9 @@ def test_met_item_carries_a_citation_with_file_hash_and_exit_status(tmp_path):
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
+        # Issue #2196: nothing was re-hashed (this fixture's `file` names no
+        # artifact reachable from the grading context).
+        "input_verified": None,
         "exit_status": 0,
         # Issue #2002: item 3's citation also quotes the three `coverage`
         # fields docs/design-evidence-tiers.md requires the claim to
@@ -4592,6 +4599,8 @@ def test_pex_evidence_satisfies_item_7(tmp_path):
         "kind": "pex",
         "check_status": "pass",
         "content_hash": "sha256:extractedpex",
+        # Issue #2196: nothing was re-hashed.
+        "input_verified": None,
         "exit_status": 0,
     }
 
@@ -4923,6 +4932,9 @@ def test_generic_evidence_satisfies_item_8(tmp_path):
         "kind": "generic",
         "check_status": "pass",
         "content_hash": None,
+        # Issue #2196: a `generic` envelope with no recorded input hash has
+        # nothing to verify against an artifact either.
+        "input_verified": None,
         "exit_status": 0,
     }
 
@@ -5272,6 +5284,8 @@ def test_command_evidence_runs_and_grades_met(monkeypatch):
         "kind": "drc",
         "check_status": "clean",
         "content_hash": "sha256:layoutA",
+        # Issue #2196: nothing was re-hashed.
+        "input_verified": None,
         "exit_status": 0,
         # Issue #2002: a command-backed `drc` citation quotes the coverage
         # block off the envelope the command actually printed, exactly like
@@ -8424,3 +8438,322 @@ def test_cli_item_11_text_output_names_every_cited_part(tmp_path, capsys):
     assert "kind=place-and-route" in out
     assert "power delivery: supplies=VPWR, VGND" in out
     assert "power_connectivity=match" in out
+
+
+# --------------------------------------------------------------------------- #
+# Input-artifact verification (issue #2196): `--manifest`'s freshness gate
+# compares the manifest's pinned `content_hash` against the cited envelope's
+# own *self-reported* `provenance.input.content_hash` -- two statements about
+# a revision, neither of which is the revision. Every `"met"` citation now
+# also carries `input_verified`: whether that self-reported hash was itself
+# checked against the artifact the envelope names (`True`), found to disagree
+# with it (`False`), or never re-hashed at all (`None`). Disclosure only --
+# no verdict anywhere moves because of it.
+# --------------------------------------------------------------------------- #
+
+
+def _hash_of(path) -> str:
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _drc_evidence_beside_its_layout(
+    tmp_path, *, layout_bytes: bytes = b"GDS-A", recorded_hash: str | None = None
+) -> tuple[str, Path]:
+    """A `klt drc` envelope written beside the layout stream it names --
+    the shape committed evidence actually takes in a block repo (see
+    `examples/signoff/`). Returns `(envelope path, layout path)`.
+
+    `recorded_hash` defaults to the layout's real digest (an honest,
+    unmodified report); pass a different value to simulate the artifact
+    having been rewritten under a report that still claims the old one.
+    """
+    layout_path = tmp_path / "block.gds"
+    layout_path.write_bytes(layout_bytes)
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "block.gds",
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {
+                "content_hash": recorded_hash or _hash_of(layout_path),
+                "role": "layout",
+            },
+        },
+    }
+    return _write(tmp_path, "drc.json", envelope), layout_path
+
+
+def test_citation_input_verified_true_when_the_named_artifact_matches(tmp_path):
+    """The gap this closes: the pinned hash is now checked against the
+    layout stream itself, not only against the envelope's claim about it."""
+    drc_path, _ = _drc_evidence_beside_its_layout(tmp_path)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is True
+
+
+def test_citation_input_verified_false_when_the_named_artifact_changed(tmp_path):
+    """A manifest and an envelope agreeing with each other while the layout
+    was rewritten underneath them -- the exact silent case #2196 reports.
+    The verdict is deliberately unchanged: the item is still `met` (both
+    hashes still agree), and only `input_verified` says otherwise."""
+    drc_path, layout_path = _drc_evidence_beside_its_layout(tmp_path)
+    recorded = _hash_of(layout_path)
+    layout_path.write_bytes(b"GDS-B -- rewritten after the report was made")
+
+    result = build_tier_report(
+        # The manifest pins exactly what the envelope self-reports, so the
+        # existing staleness gate is satisfied -- as it is today.
+        _manifest(evidence={"3": {"file": drc_path, "content_hash": recorded}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    assert item_3["citation"]["content_hash"] == recorded
+    assert item_3["citation"]["input_verified"] is False
+
+
+def test_citation_input_verified_null_for_an_unresolvable_path(tmp_path):
+    """An absolute, scratch-local path that does not exist here: nothing is
+    re-hashed, nothing raises, and the citation says so rather than passing
+    an unverified claim off as a verified one."""
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "/nonexistent/scratch/run-1234/block.gds",
+    }
+    drc_path = _write(tmp_path, "drc.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"3": drc_path}))
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["content_hash"] == "sha256:layoutA"
+    assert item_3["citation"]["input_verified"] is None
+
+
+def test_citation_input_verified_null_when_the_envelope_records_no_hash(tmp_path):
+    """Nothing to verify: a `generic` envelope whose author pinned no
+    `provenance.input.content_hash` reports `None`, never `False`."""
+    generic_path = _write(tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"8": generic_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["content_hash"] is None
+    assert item_8["citation"]["input_verified"] is None
+
+
+def test_citation_input_verified_never_moves_a_verdict(tmp_path):
+    """The disclosure-only guarantee, stated as a test: an item graded with
+    a changed artifact renders byte-identically to one graded with an
+    unchanged artifact, apart from `input_verified` itself."""
+    unchanged_dir = tmp_path / "unchanged"
+    unchanged_dir.mkdir()
+    changed_dir = tmp_path / "changed"
+    changed_dir.mkdir()
+    unchanged_path, _ = _drc_evidence_beside_its_layout(unchanged_dir)
+    changed_path, layout_path = _drc_evidence_beside_its_layout(changed_dir)
+    layout_path.write_bytes(b"rewritten")
+
+    unchanged = build_tier_report(_manifest(evidence={"3": unchanged_path}))
+    changed = build_tier_report(_manifest(evidence={"3": changed_path}))
+
+    def item_3(result):
+        return next(item for item in result["items"] if item["id"] == 3)
+
+    assert unchanged["t1_met_count"] == changed["t1_met_count"]
+    assert item_3(unchanged)["status"] == item_3(changed)["status"] == "met"
+    assert item_3(unchanged)["reason"] == item_3(changed)["reason"] is None
+    unchanged_citation = dict(item_3(unchanged)["citation"], file=None)
+    changed_citation = dict(item_3(changed)["citation"], file=None)
+    assert unchanged_citation.pop("input_verified") is True
+    assert changed_citation.pop("input_verified") is False
+    assert unchanged_citation == changed_citation
+
+
+def test_lvs_citation_verifies_the_layout_side_only(tmp_path):
+    """`provenance.input` pins the *layout* side of an LVS compare (issue
+    #1969); the reference netlist is pinned separately under
+    `environment.reference_sha256`. Re-hashing the reference against the
+    input hash would report a mismatch that is not one, so the reference is
+    deliberately never consulted here."""
+    layout_path = tmp_path / "design.spice"
+    layout_path.write_bytes(b"* extracted layout netlist\n")
+    reference_path = tmp_path / "golden.spice"
+    reference_path.write_bytes(b"* an entirely different schematic netlist\n")
+    envelope = {
+        **LVS_MATCH_ENVELOPE,
+        "provenance": {
+            **LVS_MATCH_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(layout_path), "role": "netlist"},
+        },
+    }
+    lvs_path = _write(tmp_path, "lvs.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"4": lvs_path}))
+
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    assert item_4["status"] == "met"
+    assert item_4["citation"]["input_verified"] is True
+
+
+def test_sim_citation_resolves_the_repo_relative_path_shape(tmp_path):
+    """`klt sim`/`klt pex` echo their input path as `{path, scope}` (issue
+    #1261), not as a bare string -- a `"repo"`-scoped entry is resolved
+    against the repo root the evidence itself lives in."""
+    (tmp_path / ".git").mkdir()
+    netlist_path = tmp_path / "netlists" / "design.spice"
+    netlist_path.parent.mkdir()
+    netlist_path.write_bytes(b"* schematic netlist\n")
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": "netlists/design.spice", "scope": "repo"},
+        "provenance": {
+            **SIM_PASS_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(netlist_path), "role": "netlist"},
+        },
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"5": sim_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is True
+
+
+def test_sim_citation_external_scope_is_not_verifiable(tmp_path):
+    """`scope: "external"` carries `path: null` on purpose (the absolute
+    path is never committed), so there is nothing to re-hash -- `None`,
+    not a guessed answer."""
+    envelope = {
+        **SIM_PASS_ENVELOPE,
+        "netlist": {"path": None, "scope": "external"},
+    }
+    sim_path = _write(tmp_path, "sim.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"5": sim_path}))
+
+    item_5 = next(item for item in result["items"] if item["id"] == 5)
+    assert item_5["status"] == "met"
+    assert item_5["citation"]["input_verified"] is None
+
+
+def test_command_backed_entry_verifies_against_the_command_cwd(tmp_path, monkeypatch):
+    """A command-backed entry has no evidence file to resolve beside, so the
+    envelope's relative path resolves against the `cwd` the command ran in
+    -- the same convention `klt yield`'s samples document already uses."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    layout_path = run_dir / "block.gds"
+    layout_path.write_bytes(b"GDS-A")
+    envelope = {
+        **DRC_CLEAN_ENVELOPE,
+        "file": "block.gds",
+        "provenance": {
+            **DRC_CLEAN_ENVELOPE["provenance"],
+            "input": {"content_hash": _hash_of(layout_path), "role": "layout"},
+        },
+    }
+
+    def fake_run(command, **kwargs):
+        return fake_completed(stdout=json.dumps(envelope))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {
+                    "command": ["klt", "drc", "block.gds", "--deck", "sky130"],
+                    "cwd": str(run_dir),
+                }
+            }
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["input_verified"] is True
+
+
+def test_yield_citation_is_verified_by_construction(tmp_path):
+    """`klt yield` carries no `provenance` block, so its citation's
+    `content_hash` *is* a live re-hash of the samples document (issue
+    #870) -- the guarantee #2196 adds for every other kind."""
+    samples_path = tmp_path / "mc-samples.json"
+    samples_path.write_text(json.dumps({"measurements": []}))
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": str(samples_path)}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["content_hash"] == _hash_of(samples_path)
+    assert item_6["citation"]["input_verified"] is True
+
+
+def test_yield_citation_unhashable_samples_reports_null_not_false(tmp_path):
+    envelope = {**YIELD_PASS_ENVELOPE, "samples": "/nonexistent/mc-samples.json"}
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["content_hash"] is None
+    assert item_6["citation"]["input_verified"] is None
+
+
+def test_input_artifact_fields_name_only_recognised_kinds_and_fields():
+    """Drift guard: every kind in the table is one `_classify` can return,
+    and every field it names is one that kind's declared envelope shape
+    actually carries -- a typo here would silently disable verification for
+    that kind rather than fail."""
+    for kind, fields in signoff_module._INPUT_ARTIFACT_FIELDS.items():
+        shape = signoff_module._ENVELOPE_SHAPES[kind]
+        declared = set(shape.__required_keys__) | set(shape.__optional_keys__)
+        assert fields, kind
+        assert set(fields) <= declared, kind
+
+
+def test_cli_manifest_text_names_a_changed_input_artifact(tmp_path, capsys):
+    """The text rendering discloses it too -- a reviewer reading the
+    terminal output sees the same thing the JSON says."""
+    drc_path, layout_path = _drc_evidence_beside_its_layout(tmp_path)
+    layout_path.write_bytes(b"rewritten after the report was made")
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    input_line = next(
+        line for line in out.splitlines() if line.strip().startswith("input:")
+    )
+    assert "CHANGED" in input_line
+
+
+def test_cli_manifest_text_names_an_unverified_input_artifact(tmp_path, capsys):
+    """The silent case is the one this exists for: an envelope whose named
+    path does not resolve here still prints a line saying the hash was
+    compared against a claim only."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    manifest_path = _write(
+        tmp_path, "manifest.json", _manifest(evidence={"3": drc_path})
+    )
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    input_line = next(
+        line for line in out.splitlines() if line.strip().startswith("input:")
+    )
+    assert "not re-hashed" in input_line
