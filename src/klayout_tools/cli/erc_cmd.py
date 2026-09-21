@@ -92,3 +92,18 @@ def _print_text(report: dict) -> None:
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"
         print(f"  [{finding['rule']}] {subject}: {finding['description']}")
+        # Per-island locations for a multi-island `erc.unconnected_net`
+        # (issue #2194) -- the count alone says nothing about where to
+        # look. Raw-database-unit boxes, same `(left,bottom)-(right,top)`
+        # rendering `klt drc`'s own text violations use.
+        for i, island in enumerate(finding["islands"] or []):
+            bbox = island["bbox"]
+            where = (
+                f"({bbox['left']},{bbox['bottom']})-({bbox['right']},{bbox['top']})"
+                if bbox is not None
+                else "?"
+            )
+            print(
+                f"    island {i + 1}: {where}  layer={island['layer']}  "
+                f"shapes={island['shape_count']}"
+            )

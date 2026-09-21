@@ -72,7 +72,9 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   ``erc.multiply_driven_net``): driven by the new optional ``nets`` spec
   section (named nets to check, mirroring ``klt power``'s ``power_nets``
   but with an added ``kind``). A declared net matching zero or more than
-  one disconnected electrical island is "unconnected"; two *different*
+  one disconnected electrical island is "unconnected" -- and when it is
+  more than one, the finding carries an ``islands[]`` entry locating each
+  island (issue #2194, see :func:`_island_entry`); two *different*
   declared net names that resolve to the same electrical island are
   "multiply-driven" (shorted together) -- or, when both are declared
   ``"kind": "supply"``, a **supply short** (``erc.supply_short``) instead.
@@ -790,16 +792,22 @@ def _finding(
     gate_id: str | None = None,
     layer: str | None = None,
     bbox: dict[str, int] | None = None,
+    islands: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """One ``erc_findings[]`` entry (issue #861's finding shape, see this
-    module's docstring "ERC finding checks"): the 7-key dict shared
+    module's docstring "ERC finding checks"): the 8-key dict shared
     verbatim by every rule id (``erc.floating_gate``,
     ``erc.unconnected_net``, ``erc.multiply_driven_net``,
     ``erc.supply_short``, ``erc.missing_tie``) -- only which of
-    ``net``/``other_net``/``gate_id``/``layer``/``bbox`` are populated vs.
-    left ``None`` varies per call site. Mirrors ``ring_check.py``'s own
-    keyword-only ``_violation()`` helper for the equivalent ``klt drc``-
-    shaped violation dict."""
+    ``net``/``other_net``/``gate_id``/``layer``/``bbox``/``islands`` are
+    populated vs. left ``None`` varies per call site. Mirrors
+    ``ring_check.py``'s own keyword-only ``_violation()`` helper for the
+    equivalent ``klt drc``-shaped violation dict.
+
+    ``islands`` (issue #2194) is populated only by the multi-island
+    ``erc.unconnected_net`` call site -- the one rule whose subject is
+    several distinct places in the layout rather than one -- and is
+    ``None`` everywhere else, so the key set stays uniform across rules."""
     return {
         "rule": rule,
         "description": description,
@@ -808,6 +816,7 @@ def _finding(
         "gate_id": gate_id,
         "layer": layer,
         "bbox": bbox,
+        "islands": islands,
     }
 
 
@@ -955,8 +964,71 @@ def _match_net_clusters(circuit: Any, name: str) -> list[Any]:
     )
 
 
+def _island_entry(l2n: Any, layer_index: dict[str, int], net: Any) -> dict[str, Any]:
+    """One ``erc.unconnected_net`` ``islands[]`` entry (issue #2194): where
+    a single disconnected electrical island of a declared net actually is.
+
+    ``bbox`` is the island's whole extent (raw database units, the
+    ``_bbox_dict`` convention) unioned across every ``stackup`` role it has
+    geometry on; ``layer`` names the role carrying the most of that island's
+    area (ties broken by stackup order, so the answer is deterministic), as
+    the single most useful layer to open a viewer on; ``shape_count`` is the
+    number of merged polygons across those roles -- enough to tell a
+    one-shape orphan stub apart from a whole sub-block that failed to
+    strap up.
+
+    Only ``stackup`` roles are measured: ``vias`` conductors are registered
+    without their index being kept (see :func:`_extract_connectivity`), and
+    a via sits inside the two stackup shapes it joins anyway, so it can
+    neither extend the bbox nor be an island's only geometry in practice.
+    A labelled net always has stackup geometry by construction -- labels are
+    connected to a ``stackup`` conductor region, never to anything else --
+    so ``bbox``/``layer`` are never ``None`` for a net this function is
+    reached for; the guard exists so a degenerate graph degrades rather
+    than raising."""
+    bbox: Any = None
+    layer: str | None = None
+    best_area = 0
+    shape_count = 0
+    for role, index in layer_index.items():
+        region = l2n.polygons_of_net(net, index).merged()
+        if region.is_empty():
+            continue
+        shape_count += region.count()
+        role_bbox = region.bbox()
+        bbox = role_bbox if bbox is None else bbox + role_bbox
+        area = region.area()
+        if area > best_area:
+            best_area = area
+            layer = role
+    return {
+        "bbox": _bbox_dict(bbox) if bbox is not None else None,
+        "layer": layer,
+        "shape_count": shape_count,
+    }
+
+
+def _union_bbox(boxes: list[dict[str, int] | None]) -> dict[str, int] | None:
+    """The single bbox spanning every non-``None`` entry of ``boxes``, or
+    ``None`` when there is none -- used for the multi-island
+    ``erc.unconnected_net`` finding's own top-level ``bbox`` (issue #2194),
+    which is the extent the split net covers as a whole."""
+    present = [box for box in boxes if box is not None]
+    if not present:
+        return None
+    return {
+        "left": min(box["left"] for box in present),
+        "bottom": min(box["bottom"] for box in present),
+        "right": max(box["right"] for box in present),
+        "top": max(box["top"] for box in present),
+    }
+
+
 def _net_connectivity_findings(
-    circuit: Any, nets_decl: list[dict[str, Any]]
+    l2n: Any,
+    circuit: Any,
+    layer_index: dict[str, int],
+    nets_decl: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """``erc.unconnected_net`` / ``erc.multiply_driven_net`` /
     ``erc.supply_short`` findings (issue #861), driven by the optional
@@ -965,6 +1037,17 @@ def _net_connectivity_findings(
     A declared net matching zero, or more than one, disconnected electrical
     island is ``erc.unconnected_net`` (nothing carries that name at all, or
     the intended net is split into pieces that never actually touch).
+
+    A multi-island finding carries **where** each island is (issue #2194):
+    an ``islands[]`` entry per island in the same ``cluster_id`` order
+    :func:`_match_net_clusters` returns (see :func:`_island_entry` for the
+    per-island shape), plus a top-level ``bbox`` spanning all of them. The
+    count alone is only the alarm -- without per-island locations a caller
+    has to rebuild this module's own connectivity graph by hand just to find
+    out which piece of a multi-hundred-micron block to look at, and two
+    reports of the same net cannot be diffed to see *which* island a fix
+    resolved. The zero-match case has no geometry to point at and is
+    unchanged (``islands`` stays ``None``).
 
     Two *different* declared net names whose matched nets share a
     ``cluster_id`` are electrically the very same net regardless of their
@@ -992,6 +1075,7 @@ def _net_connectivity_findings(
                 )
             )
         elif len(matched) > 1:
+            islands = [_island_entry(l2n, layer_index, net) for net in matched]
             findings.append(
                 _finding(
                     "erc.unconnected_net",
@@ -1001,6 +1085,8 @@ def _net_connectivity_findings(
                         "(expected exactly one)"
                     ),
                     net=decl["name"],
+                    bbox=_union_bbox([island["bbox"] for island in islands]),
+                    islands=islands,
                 )
             )
 
@@ -1570,7 +1656,9 @@ def run_erc(
     erc_findings.extend(
         _floating_gate_findings(list(zip(gates, gate_regions, strict=True)), gate_role)
     )
-    erc_findings.extend(_net_connectivity_findings(circuit, nets_decl))
+    erc_findings.extend(
+        _net_connectivity_findings(l2n, circuit, layer_index, nets_decl)
+    )
 
     # The tie graph (issue #2169): a second extraction, built only when the
     # spec actually declares `ties[]`, that adds each tie's derived tap
