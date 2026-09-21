@@ -4,6 +4,7 @@
 * - coupling: vertical overlap (crossover) unconditionally -- where one net's conductor on an adjacent metal level sits directly over another *distinct* net's conductor, that overlap area is charged between the two nets instead of to ground (issue #760) -- plus lateral (same-layer, sidewall) coupling, but only for a net pair naming one of the caller's declared `--critical-net` nets (issue #976): facing-edge length within that layer's own minimum-spacing lookback is charged between the two nets, *additively* (not deducted from either net's substrate fringe term, unlike the vertical case -- a known simplification). Any same-layer pair with neither side named `--critical-net`, and fringe shielding in general, are still not modelled
 * - resistance: single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star
 * - frequency: quasi-static -- one frequency-independent R and C per net; no skin effect, no distributed transmission-line behavior
+.GLOBAL vsubs
 
 * cell sky130_fd_sc_hd__dfxtp_2
 * pin CLK
@@ -257,55 +258,27 @@ RVPWR_t8 VPWR__t8 VPWR 131.78545533
 * device instance VPWR r0 *1 0,0 
 CVPWR VPWR vsubs 1.843385e-15
 * device instance cc__2__4 r0 *1 0,0 
-Ccc__2__4 \$2 \$4 3.8979e-17
+Ccc__2__4 \$2 \$4 2.718e-18
 * device instance cc__2__5 r0 *1 0,0 
-Ccc__2__5 \$2 \$5 9.832e-18
-* device instance cc__2__8 r0 *1 0,0 
-Ccc__2__8 \$2 \$8 4.9419e-17
-* device instance cc__2__9 r0 *1 0,0 
-Ccc__2__9 \$2 \$9 1.581e-17
-* device instance cc__2_VGND r0 *1 0,0 
-Ccc__2_VGND \$2 VGND 4.2228e-17
-* device instance cc__2_VPWR r0 *1 0,0 
-Ccc__2_VPWR \$2 VPWR 2.9937e-17
+Ccc__2__5 \$2 \$5 2.718e-18
 * device instance cc__4__5 r0 *1 0,0 
-Ccc__4__5 \$4 \$5 2.80266e-16
+Ccc__4__5 \$4 \$5 8.713e-18
 * device instance cc__4__7 r0 *1 0,0 
-Ccc__4__7 \$4 \$7 1.5675e-17
+Ccc__4__7 \$4 \$7 3.18e-18
 * device instance cc__4__8 r0 *1 0,0 
-Ccc__4__8 \$4 \$8 7.1568e-17
-* device instance cc__4__9 r0 *1 0,0 
-Ccc__4__9 \$4 \$9 4.845e-18
-* device instance cc__4_CLK r0 *1 0,0 
-Ccc__4_CLK \$4 CLK 3.4425e-17
-* device instance cc__4_VGND r0 *1 0,0 
-Ccc__4_VGND \$4 VGND 3.1238e-17
+Ccc__4__8 \$4 \$8 2.718e-18
 * device instance cc__4_VPWR r0 *1 0,0 
-Ccc__4_VPWR \$4 VPWR 3.1746e-17
+Ccc__4_VPWR \$4 VPWR 2.038e-18
 * device instance cc__5__7 r0 *1 0,0 
-Ccc__5__7 \$5 \$7 2.401e-17
+Ccc__5__7 \$5 \$7 2.718e-18
 * device instance cc__5__8 r0 *1 0,0 
 Ccc__5__8 \$5 \$8 8.211e-18
-* device instance cc__5__9 r0 *1 0,0 
-Ccc__5__9 \$5 \$9 5.2913e-17
 * device instance cc__5_D r0 *1 0,0 
 Ccc__5_D \$5 D 4.3696e-17
-* device instance cc__5_VGND r0 *1 0,0 
-Ccc__5_VGND \$5 VGND 3.5164e-17
-* device instance cc__5_VPWR r0 *1 0,0 
-Ccc__5_VPWR \$5 VPWR 3.417e-17
-* device instance cc__7__8 r0 *1 0,0 
-Ccc__7__8 \$7 \$8 1.8156e-17
 * device instance cc__7_D r0 *1 0,0 
 Ccc__7_D \$7 D 2.4225e-17
-* device instance cc__7_VGND r0 *1 0,0 
-Ccc__7_VGND \$7 VGND 3.4603e-17
-* device instance cc__7_VPWR r0 *1 0,0 
-Ccc__7_VPWR \$7 VPWR 2.3332e-17
-* device instance cc__8_VGND r0 *1 0,0 
-Ccc__8_VGND \$8 VGND 3.5598e-17
-* device instance cc__8_VPWR r0 *1 0,0 
-Ccc__8_VPWR \$8 VPWR 5.8114e-17
 * device instance cc_D_VGND r0 *1 0,0 
 Ccc_D_VGND D VGND 6.375e-18
+* device instance vsubs_dctie r0 *1 0,0 
+Rvsubs_dctie vsubs 0 1e+12
 .ENDS sky130_fd_sc_hd__dfxtp_2

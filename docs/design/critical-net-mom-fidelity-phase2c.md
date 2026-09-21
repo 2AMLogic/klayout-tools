@@ -194,8 +194,8 @@ $ uv run python examples/critical-net-mom-fidelity/generate_and_measure.py
 
 | | `total_capacitance_ff` | `total_coupling_capacitance_ff` |
 | --- | --- | --- |
-| Lumped (Phase 2a) | 10.860575 | 1.054535 |
-| Distributed (Phase 2b) | 10.860575 | 1.054535 |
+| Lumped (Phase 2a) | 10.860575 | 0.10731 |
+| Distributed (Phase 2b) | 10.860575 | 0.10731 |
 
 Byte-identical. `--distributed-rc` changes **where** a net's capacitance
 sits (which internal node it's attached to) and **how many** resistors

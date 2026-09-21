@@ -19,25 +19,66 @@
   "dummy_devices_dropped": 0,
   "file": "examples/critical-net-mom-fidelity/lateral-coupling.gds",
   "ignored_layers": [],
+  "matched_device_groups": [],
   "merged_net_labels": [],
+  "metrics": {
+    "extract__capacitance__ff": 0.88494,
+    "extract__capacitor__count": 3,
+    "extract__coupling__capacitance__ff": 0.0,
+    "extract__coupling__capacitor__count": 0,
+    "extract__device__count": 0,
+    "extract__inductance__nh": 0.0,
+    "extract__inductor__count": 0,
+    "extract__net__count": 3,
+    "extract__pin__count": 3,
+    "extract__resistance__ohm": 0.75,
+    "extract__resistor__count": 3
+  },
   "net_count": 3,
   "netlist_path": "examples/critical-net-mom-fidelity/phase1-baseline.spice",
-  "netlist_sha256": "0eac629d8061bb660a788da4dc5b33dc0f192c655ba70ba1da4033944a553fdf",
+  "netlist_sha256": "a40d891d969b59a96ff32a6d4f6c5b20e4f5b563148476f0ec809e31a2371884",
   "nets": [
     {
       "device_count": 0,
+      "label_positions_um": [
+        {
+          "text": "AGR",
+          "x_um": 1.0,
+          "y_um": 0.5
+        }
+      ],
       "name": "AGR",
-      "pin": true
+      "net_id": 1,
+      "pin": true,
+      "pin_index": 0
     },
     {
       "device_count": 0,
+      "label_positions_um": [
+        {
+          "text": "FAR",
+          "x_um": 5.45,
+          "y_um": 0.5
+        }
+      ],
       "name": "FAR",
-      "pin": true
+      "net_id": 3,
+      "pin": true,
+      "pin_index": 2
     },
     {
       "device_count": 0,
+      "label_positions_um": [
+        {
+          "text": "VIC",
+          "x_um": 3.1,
+          "y_um": 0.5
+        }
+      ],
       "name": "VIC",
-      "pin": true
+      "net_id": 2,
+      "pin": true,
+      "pin_index": 1
     }
   ],
   "parasitics": {
@@ -45,6 +86,7 @@
     "cc_count": 0,
     "critical_nets": [],
     "distributed_rc": false,
+    "l_count": 0,
     "metals_without_coefficient": [],
     "model": {
       "capacitance": "net-to-ground for every net's own (non-coupled) area/perimeter, plus net-to-net for the vertical-overlap coupling `coupling` describes below -- a coupled net pair gets a direct capacitor between their two hub nodes, not just capacitors to the deck's ground/substrate net",
@@ -53,62 +95,108 @@
       "resistance": "single lumped series resistance per net, distributed as a star across that net's device terminals (issue #592) -- not a per-segment, distributed RC ladder, *unless* `--distributed-rc` names this net via `--critical-net` (issue #977, Epic #709 Phase 2b): then the net's terminals are ordered along their approximate physical spread and its total R/C is broken into a chain of per-segment resistors (segment length proportional to inter-terminal distance) with a ground capacitor at each terminal node (proportional to its adjacent segment length/2), instead of one star hub -- still an approximation (terminal position is a device-placement proxy, not true per-segment routing geometry), but a strictly finer-grained one than the single-hub star"
     },
     "mom_crosscheck": null,
+    "mom_rlc_override": null,
     "nets": [
       {
+        "by_layer": [
+          {
+            "capacitance_ff": 0.29498,
+            "layer": "metal1",
+            "resistance_ohm": 0.25
+          }
+        ],
         "capacitance_ff": 0.29498,
+        "capacitance_ff_top_cell": null,
         "coupled": [],
         "hub_net": "AGR__par",
+        "inductance_nh": 0.0,
         "net": "AGR",
         "net_id": 1,
         "rc_model": "lumped",
         "resistance_ohm": 0.25,
+        "resistance_ohm_top_cell": null,
         "segments": [],
         "terminals": []
       },
       {
+        "by_layer": [
+          {
+            "capacitance_ff": 0.29498,
+            "layer": "metal1",
+            "resistance_ohm": 0.25
+          }
+        ],
         "capacitance_ff": 0.29498,
+        "capacitance_ff_top_cell": null,
         "coupled": [],
         "hub_net": "FAR__par",
+        "inductance_nh": 0.0,
         "net": "FAR",
         "net_id": 3,
         "rc_model": "lumped",
         "resistance_ohm": 0.25,
+        "resistance_ohm_top_cell": null,
         "segments": [],
         "terminals": []
       },
       {
+        "by_layer": [
+          {
+            "capacitance_ff": 0.29498,
+            "layer": "metal1",
+            "resistance_ohm": 0.25
+          }
+        ],
         "capacitance_ff": 0.29498,
+        "capacitance_ff_top_cell": null,
         "coupled": [],
         "hub_net": "VIC__par",
+        "inductance_nh": 0.0,
         "net": "VIC",
         "net_id": 2,
         "rc_model": "lumped",
         "resistance_ohm": 0.25,
+        "resistance_ohm_top_cell": null,
         "segments": [],
         "terminals": []
       }
     ],
     "overlap_pairs_without_coefficient": [],
+    "parasitics_nets": [],
     "r_count": 3,
+    "substrate_dc_tie": {
+      "nets": [
+        {
+          "device": "Rvsubs_dctie",
+          "net": "vsubs"
+        }
+      ],
+      "node_scope": "global",
+      "resistance_ohm": 1000000000000.0
+    },
+    "top_cell_only": false,
     "total_capacitance_ff": 0.88494,
     "total_coupling_capacitance_ff": 0.0,
+    "total_inductance_nh": 0.0,
     "total_resistance_ohm": 0.75
   },
   "pdk": null,
   "pin_count": 3,
   "provenance": {
     "deck": {
-      "content_hash": "sha256:2e78949d63f03012c505528158948a250e18c2c21c8710c85a23a8243649f4d0",
-      "name": "sky130"
+      "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+      "name": "sky130",
+      "released": false
     },
     "input": {
-      "content_hash": "sha256:cf0c6e72c5861f48a9bcd3f06367f90a861c15e232f5c03778b4d8be751d3dbe"
+      "content_hash": "sha256:245643d86efe2e0bde07753f19817a9aab43834502d192a41994e4b7fab9cac8",
+      "role": "layout"
     },
     "klayout_version": "0.30.10",
-    "klt_version": "0.2.0",
+    "klt_version": "0.5.0+g24594473db10.dirty",
     "pdk": null
   },
-  "schema_version": 2,
+  "schema_version": 3,
   "single_terminal_nets": [],
   "spef_path": null,
   "status": "extracted",
