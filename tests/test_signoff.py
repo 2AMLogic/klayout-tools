@@ -7612,6 +7612,85 @@ def test_item_11_unmet_when_the_erc_spec_declared_no_ties(tmp_path):
     assert _item_11(result)["reason"] == "supply_spec_incomplete"
 
 
+def test_item_11_unmet_when_the_erc_run_skipped_the_tie_as_degenerate(tmp_path):
+    """Issue #2199: the same "an uncomputed check is not a clean one" rule,
+    applied to a `ties[]` entry that *was* declared but could not be
+    answered. `klt erc` reports such a tie in `erc_coverage.skipped`
+    because its declared tap region is indistinguishable from an ordinary
+    source/drain contact -- so its zero `erc.missing_tie` findings say
+    nothing about taps, and item 11 must not read them as a clean tie."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_status": "clean_partial",
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": ['erc.net_connectivity:["VPWR"]'],
+            "skipped": [
+                {
+                    "id": 'erc.missing_tie:["nwell_tie"]',
+                    "reason": "degenerate_tap_declaration",
+                }
+            ],
+            "inapplicable": [],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+
+
+def test_item_11_met_when_the_erc_run_checked_the_tie_it_declared(tmp_path):
+    """The control for the test above: the identical envelope with the tie
+    in `checked` rather than `skipped` still reaches `met`, so the new gate
+    fires on the degenerate classification and nothing else."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_status": "clean",
+        "erc_coverage": {
+            "schema_version": 1,
+            "scope": "connectivity",
+            "known": True,
+            "checked": [
+                'erc.missing_tie:["nwell_tie"]',
+                'erc.net_connectivity:["VPWR"]',
+            ],
+            "skipped": [],
+            "inapplicable": [],
+            "unknown": [],
+            "nothing_checked": False,
+            "nothing_checked_reasons": [],
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["status"] == "met"
+
+
 def test_item_11_unmet_when_a_strap_layer_is_outside_the_erc_spec_stackup(tmp_path):
     """The ERC run must actually look at the layers the supply is routed on
     -- a "one island" verdict computed over met1 alone says nothing about a

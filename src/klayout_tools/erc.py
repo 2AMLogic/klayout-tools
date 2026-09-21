@@ -87,7 +87,11 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   declared well is *not* a conductor in that graph -- it contributes only
   where its taps sit -- and the graph is extracted separately from the one
   ``gates[]`` is built on, so no ``ties`` declaration can reach the antenna
-  half of the same report (issue #2169).
+  half of the same report (issue #2169). A tie whose declared tap region is
+  **indistinguishable from an ordinary source/drain contact** -- no
+  ``tap_requires`` narrowing, no ``tap_is_dedicated`` affirmation -- is
+  reported as *skipped* work rather than as a passing check (issue #2199,
+  see :func:`_degenerate_tie_names`).
 
 Device bodies (``devices``, issue #2183): a conductor role carries
 *geometry*, and nothing in the model above distinguishes a wire from a
@@ -145,6 +149,11 @@ from .coverage import build_check_coverage, coverage_rollup, rollup_status, work
 #: `provenance.devices` echo of what it subtracted -- additive on both
 #: sides: a spec that declares no `devices[]` produces a byte-identical
 #: report except for the new (empty) `provenance.devices` list.
+#: Issue #2199 adds the optional `ties[].tap_is_dedicated` spec key and
+#: classifies a *degenerate* tie declaration as skipped rather than checked
+#: work in `erc_coverage` (see `_degenerate_tie_names`). No field is added,
+#: removed, or retyped: the change is which coverage list an existing
+#: identity lands in, and the `erc_status` token that follows from it.
 SCHEMA_VERSION = 1
 
 
@@ -177,10 +186,18 @@ def _antenna_coverage(gates: list[dict[str, Any]], pdk: str | None) -> dict[str,
     }
 
 
+#: The stable ``erc_coverage`` skip reason for a ``ties[]`` entry whose
+#: declared tap region is indistinguishable from ordinary source/drain
+#: contacts (issue #2199). See :func:`_degenerate_tie_names` for exactly
+#: when it applies and `docs/cli/erc.md` for how a spec clears it.
+REASON_DEGENERATE_TAP_DECLARATION = "degenerate_tap_declaration"
+
+
 def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
     ties: list[dict[str, Any]],
+    degenerate_ties: set[str] | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -209,7 +226,17 @@ def _connectivity_coverage(
     - ``erc.net_connectivity`` -- one per declared ``nets[]`` entry (the
       ``erc.unconnected_net``/``erc.multiply_driven_net``/
       ``erc.supply_short`` rules all key off the same declaration).
-    - ``erc.missing_tie`` -- one per declared ``ties[]`` entry.
+    - ``erc.missing_tie`` -- one per declared ``ties[]`` entry, *except*
+      the degenerate ones (``degenerate_ties``, issue #2199): a tie whose
+      declared tap region cannot be told apart from an ordinary
+      source/drain contact is requested work that could not actually be
+      performed, so it is recorded as **skipped**
+      (:data:`REASON_DEGENERATE_TAP_DECLARATION`) and the whole
+      connectivity scope reads ``clean_partial`` rather than ``clean``.
+      Without that, the one rule ``docs/design-evidence-tiers.md`` item 11
+      requires to be zero can be satisfied by a declaration that never
+      looked at a tap at all -- an unfalsifiable pass, indistinguishable in
+      the envelope from a real one.
 
     A spec that declares no ``nets``/``ties`` asked for none of that work,
     so those rules are recorded as **inapplicable**, never skipped: a skip
@@ -220,8 +247,10 @@ def _connectivity_coverage(
     declared and came back clean" -- reading the envelope alone, without
     re-opening the spec document.
     """
+    degenerate = degenerate_ties or set()
     checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
     inapplicable: list[dict[str, str]] = []
+    skipped: list[dict[str, str]] = []
 
     checked.extend(work_id("erc.net_connectivity", decl["name"]) for decl in nets_decl)
     if not nets_decl:
@@ -229,7 +258,14 @@ def _connectivity_coverage(
             {"id": work_id("erc.net_connectivity"), "reason": "no_nets_declared"}
         )
 
-    checked.extend(work_id("erc.missing_tie", tie["name"]) for tie in ties)
+    for tie in ties:
+        identity = work_id("erc.missing_tie", tie["name"])
+        if tie["name"] in degenerate:
+            skipped.append(
+                {"id": identity, "reason": REASON_DEGENERATE_TAP_DECLARATION}
+            )
+        else:
+            checked.append(identity)
     if not ties:
         inapplicable.append(
             {"id": work_id("erc.missing_tie"), "reason": "no_ties_declared"}
@@ -237,7 +273,9 @@ def _connectivity_coverage(
 
     return {
         "scope": "connectivity",
-        **build_check_coverage(checked=checked, inapplicable=inapplicable),
+        **build_check_coverage(
+            checked=checked, skipped=skipped, inapplicable=inapplicable
+        ),
     }
 
 
@@ -505,6 +543,34 @@ def _parse_tap_requires(
     ]
 
 
+def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -> bool:
+    """``ties[].tap_is_dedicated`` (optional, issue #2199): the spec's
+    affirmation that ``tap_layer`` names a layer drawn **only** for taps --
+    sky130's own ``tap`` (65/44), a PDK tub-contact marker -- so no
+    ``tap_requires`` narrowing is needed for the derived tap to be a real
+    tap.
+
+    It is not a hint and it changes no geometry: it is the one declarative
+    way to say "there is nothing to narrow here", which is what keeps such
+    a tie *checked* work instead of the skipped-degenerate classification
+    :func:`_degenerate_tie_names` otherwise assigns. Omitted/``null`` ->
+    ``False``. Anything but a JSON boolean is rejected rather than coerced:
+    a truthy ``"false"`` string quietly asserting the opposite of what it
+    reads is exactly the silent-pass shape issue #2199 is about.
+
+    Split out of :func:`_validate_ties` to keep that function under the
+    repo's C901 complexity ratchet, as :func:`_parse_tap_requires` is.
+    """
+    raw = entry.get("tap_is_dedicated", False)
+    if raw is None:
+        return False
+    if not isinstance(raw, bool):
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].tap_is_dedicated must be true or false"
+        )
+    return raw
+
+
 def _validate_ties(
     spec: dict[str, Any], spec_path: str, stackup_names: list[str]
 ) -> list[dict[str, Any]]:
@@ -523,7 +589,14 @@ def _validate_ties(
     with every source/drain in the same well. Same "second plain layer
     field, intersected at use time" shape as ``stackup[0].active_layer``
     (issue #1979), generalised to a list; omitted -> ``tap_layer`` alone,
-    unchanged."""
+    unchanged.
+
+    ``tap_is_dedicated`` (optional boolean, issue #2199) is the other way
+    to say the same thing for a PDK that draws taps on their own layer:
+    nothing needs narrowing because the layer is already tap-only. A tie
+    that declares neither is *degenerate* -- see
+    :func:`_degenerate_tie_names` -- and is graded as skipped rather than
+    checked work."""
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -552,6 +625,7 @@ def _validate_ties(
         )
 
         tap_requires = _parse_tap_requires(entry, spec_path, i)
+        tap_is_dedicated = _parse_tap_is_dedicated(entry, spec_path, i)
 
         connect_to = str(entry["connect_to"])
         if connect_to not in stackup_names:
@@ -570,6 +644,7 @@ def _validate_ties(
                 "well_layer": well_layer,
                 "tap_layer": tap_layer,
                 "tap_requires": tap_requires,
+                "tap_is_dedicated": tap_is_dedicated,
                 "connect_to": connect_to,
                 "net": net,
             }
@@ -1035,6 +1110,53 @@ def _tie_findings(
     return findings
 
 
+def _degenerate_tie_names(tie_layers: list[dict[str, Any]]) -> set[str]:
+    """The declared ties whose ``erc.missing_tie`` verdict is unfalsifiable
+    (issue #2199) -- reported as skipped work by
+    :func:`_connectivity_coverage` rather than as a check that passed.
+
+    There is no device recognition here: a tap and an ordinary source/drain
+    contact drawn on the same diffusion/contact layer are the *same
+    geometry* to this module. So a tie whose derived tap region is just
+    "whatever that layer happens to draw inside the well" reports the well
+    as tied as soon as **any** contact in it reaches the declared net --
+    which, for a PMOS row whose sources sit on VDD, is every well, every
+    time, regardless of whether a tap was ever drawn. The verdict is not
+    wrong so much as it is not about taps; the reproduction in issue #2199
+    is the same spec and the same GDS answering "tied" for ``vdd`` and
+    "untied" for ``vss``.
+
+    A tie is degenerate when all three hold:
+
+    - the spec did not affirm ``tap_is_dedicated`` -- a tap-only layer
+      (sky130's ``tap``) needs no narrowing and is a real tap by
+      construction;
+    - the declared narrowing removed **nothing** from the drawn
+      ``tap_layer`` inside the well (``tap_narrowed``, measured in
+      :func:`_extract_connectivity`). Omitting ``tap_requires`` is the
+      usual way to land here, but a ``tap_requires`` that happens to
+      intersect the whole drawn layer in *this* stream (an implant drawn
+      over every contact, not only the taps) is exactly as unfalsifiable,
+      so the test is geometric rather than a check for the key's presence;
+    - the resulting tap region is non-empty. An empty one asserts nothing
+      about taps either -- but it cannot pass: every well in it is reported
+      as having no tap drawn, which is an honest finding, not a silent
+      clean.
+
+    Deliberately *not* a change to ``erc_findings``: the same findings are
+    emitted for the same geometry as before. What changes is that the
+    envelope now says the check could not be performed, instead of letting
+    ``erc_status: "clean"`` stand for it.
+    """
+    return {
+        tie["name"]
+        for tie in tie_layers
+        if not tie["tap_is_dedicated"]
+        and not tie["tap_narrowed"]
+        and not tie["tap_region"].is_empty()
+    }
+
+
 def _extract_connectivity(
     layout: Any,
     top_cell: Any,
@@ -1113,7 +1235,8 @@ def _extract_connectivity(
     tie_layers: list[dict[str, Any]] = []
     for tie in ties:
         well_region = _region(layout, top_cell, tie["well_layer"]).merged()
-        tap_region = _region(layout, top_cell, tie["tap_layer"])
+        drawn_tap = _region(layout, top_cell, tie["tap_layer"])
+        tap_region = drawn_tap
         for required in tie["tap_requires"]:
             tap_region = tap_region & _region(layout, top_cell, required)
         tap_sites = (tap_region & well_region).merged()
@@ -1126,6 +1249,12 @@ def _extract_connectivity(
                 "well_region": well_region,
                 "tap_region": tap_sites,
                 "tap_index": tap_index,
+                # Issue #2199: measured here, where both regions exist,
+                # rather than re-derived later from the spec alone -- see
+                # `_degenerate_tie_names`.
+                "tap_narrowed": not (
+                    (drawn_tap & well_region).merged() - tap_sites
+                ).is_empty(),
             }
         )
 
@@ -1178,13 +1307,18 @@ def run_erc(
       tie declarations -- ``{"name" (optional, defaults to "tie<index>"),
       "well_layer": "<layer>/<datatype>", "tap_layer": "<layer>/<datatype>",
       "tap_requires": ["<layer>/<datatype>", ...] (optional, issue #2169),
+      "tap_is_dedicated": <bool> (optional, issue #2199),
       "connect_to": "<stackup role>", "net"}``. Drives the
       ``erc.missing_tie`` finding; omitted entirely -> none are computed.
       ``tap_requires`` intersects further layers into the tap so the spec
-      can name the boolean a real PDK tap is drawn as (``Comp ∩ Nplus``).
-      Ties are extracted in their own connectivity graph
-      (:func:`_extract_connectivity`), so they affect ``erc.missing_tie``
-      and nothing else.
+      can name the boolean a real PDK tap is drawn as (``Comp ∩ Nplus``);
+      ``tap_is_dedicated`` says the ``tap_layer`` is already tap-only and
+      needs no narrowing. A tie that says neither, and whose tap region is
+      therefore whatever that layer draws inside the well, is graded as
+      *skipped* work in ``erc_coverage`` (see
+      :func:`_degenerate_tie_names`). Ties are extracted in their own
+      connectivity graph (:func:`_extract_connectivity`), so they affect
+      ``erc.missing_tie`` and nothing else.
     - ``devices`` (optional array, default ``[]``, issue #2183): where a
       drawn *device body* sits on an already-declared conductor role --
       ``{"name" (optional, defaults to "device<index>"), "body_layer":
@@ -1226,7 +1360,10 @@ def run_erc(
     ``nets[]``/``ties[]`` work actually declared, so "the connectivity rules
     ran and passed" stays readable on a PDK with no antenna-ratio table at
     all, where ``status`` is necessarily ``"not_checked"``. See
-    :func:`_connectivity_coverage`.
+    :func:`_connectivity_coverage`. A ``ties[]`` entry whose tap region is
+    indistinguishable from an ordinary source/drain contact makes that
+    roll-up ``"clean_partial"`` rather than ``"clean"`` (issue #2199, see
+    :func:`_degenerate_tie_names`).
 
     Raises :class:`ErcError` for a malformed spec, an unknown ``pdk``, an
     unresolvable layout/top cell, or a layout in which no net carries any
@@ -1442,11 +1579,13 @@ def run_erc(
     # geometry without any `ties[]` declaration -- correct, over-broad, or
     # outright wrong -- being able to reach `gates[]`, the antenna ratios,
     # or the `nets[]` findings already computed.
+    degenerate_ties: set[str] = set()
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
+        degenerate_ties = _degenerate_tie_names(tie_layers)
     erc_findings.sort(
         key=lambda f: (
             f["rule"],
@@ -1514,7 +1653,13 @@ def run_erc(
     # the rules this item grades, not the report's overall `status`"). The
     # converse holds too: `status` still goes `"violations"` for a
     # connectivity finding, so nothing here weakens the combined verdict.
-    erc_coverage = _connectivity_coverage(gates, nets_decl, ties)
+    #
+    # A degenerate `ties[]` declaration (issue #2199) lands in that scope's
+    # `skipped` list rather than `checked`, so this roll-up reports
+    # `"clean_partial"` for it: an `erc.missing_tie` check that cannot tell
+    # a tap from a source/drain contact must not be readable as the clean
+    # missing-tie verdict `docs/design-evidence-tiers.md` item 11 asks for.
+    erc_coverage = _connectivity_coverage(gates, nets_decl, ties, degenerate_ties)
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)
     )

@@ -1352,8 +1352,12 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   spec document does not ask the question item 11 grades: it could not be
 #:   read, declares no ``"kind": "supply"`` net, declares no ``ties[]``
 #:   (so ``erc.missing_tie`` was never computed -- an uncomputed check is
-#:   not a clean one), or its stackup does not cover every strap layer the
-#:   P&R response reports. Fix: widen the spec and re-run `klt erc`.
+#:   not a clean one), declares a ``ties[]`` entry the ERC run itself
+#:   reported as *degenerate* (issue #2199, see
+#:   :func:`_erc_missing_tie_skipped` -- a check that could not tell a tap
+#:   from a source/drain contact is likewise not a clean one), or its
+#:   stackup does not cover every strap layer the P&R response reports.
+#:   Fix: widen the spec and re-run `klt erc`.
 #: - :data:`_REASON_SUPPLY_NOT_CONTINUOUS` -- the ERC run *did* ask, and the
 #:   answer is no: a declared supply resolved to zero or several islands
 #:   (``erc.unconnected_net``), two declared supplies resolved to the same
@@ -4569,6 +4573,38 @@ def _pdn_branch_reason(
     return None
 
 
+def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
+    """Whether the cited `klt erc` run reports any ``erc.missing_tie`` work
+    it **declined to perform** (issue #2199).
+
+    `klt erc` records a ``ties[]`` entry whose declared tap region cannot
+    be told apart from an ordinary source/drain contact in
+    ``erc_coverage.skipped`` rather than ``checked``
+    (``docs/cli/erc.md`` → "Well/tap connectivity"). Item 11 requires zero
+    ``erc.missing_tie`` findings, and such a tie reports zero for a reason
+    that has nothing to do with taps -- the same "an uncomputed check is
+    not a clean one" rule that already rejects a spec declaring no
+    ``ties[]`` at all, applied to a declaration that was made but could not
+    be answered.
+
+    Matched on the work identity's ``erc.missing_tie:`` domain prefix
+    (:func:`~klayout_tools.coverage.work_id`) rather than on the skip
+    reason, so a future `klt erc` that declines this rule for some *other*
+    stated reason is caught by the same gate. An envelope with no
+    ``erc_coverage`` block (every report before #2179) skips nothing and is
+    graded exactly as it was.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return False
+    return any(
+        isinstance(record, dict)
+        and isinstance(record.get("id"), str)
+        and record["id"].startswith("erc.missing_tie:")
+        for record in block.get("skipped") or []
+    )
+
+
 def _resolve_erc_supply_spec(
     erc: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
@@ -4592,6 +4628,8 @@ def _resolve_erc_supply_spec(
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if supply_spec["tie_count"] == 0:
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
+    if _erc_missing_tie_skipped(erc["envelope"]):
+        return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
 
     if _erc_supply_findings(erc["envelope"], supply_spec["supply_nets"]):
         return None, _REASON_SUPPLY_NOT_CONTINUOUS, {}
@@ -4612,8 +4650,10 @@ def _grade_power_delivery(
 
     - an ``"erc"`` citation -- a `klt erc` run against a **supply spec**
       (:func:`_erc_supply_spec`): at least one ``"kind": "supply"`` net
-      declared, at least one ``ties[]`` entry declared, and no supply-side
-      finding (:func:`_erc_supply_findings`);
+      declared, at least one ``ties[]`` entry declared, none of them
+      reported as degenerate by the run itself
+      (:func:`_erc_missing_tie_skipped`), and no supply-side finding
+      (:func:`_erc_supply_findings`);
     - an ``"lvs"`` citation -- the same report item 4 grades, which must
       itself pass (:func:`_check_passed`);
     - and, for an RTL-flow digital block, a ``"place-and-route"`` citation

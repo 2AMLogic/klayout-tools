@@ -855,7 +855,12 @@ def test_erc_status_reports_a_connectivity_finding_on_a_graded_pdk(tmp_path):
 
 def test_erc_coverage_names_the_gates_nets_and_ties_actually_checked(tmp_path):
     """The connectivity scope grades real work: one checked identity per
-    discovered gate, per declared net, and per declared tie."""
+    discovered gate, per declared net, and per declared tie.
+
+    The tie declares `tap_is_dedicated` (issue #2199) because this
+    fixture's `11/0` really is a tap-only layer -- without that affirmation
+    (or a `tap_requires` narrowing) the tie would be graded as skipped
+    degenerate work, which the two tests below cover."""
     layout, top, li1, label, nwell, tap = _strapped_supply_layout()
     # A well with a tap inside it, sitting under the labelled li1 rail, so
     # the tap really does reach the declared "VDD" net.
@@ -874,6 +879,7 @@ def test_erc_coverage_names_the_gates_nets_and_ties_actually_checked(tmp_path):
                     "name": "nwell_tie",
                     "well_layer": "10/0",
                     "tap_layer": "11/0",
+                    "tap_is_dedicated": True,
                     "connect_to": "li1",
                     "net": "VDD",
                 }
@@ -1808,6 +1814,159 @@ def test_missing_tie_reported_when_only_untied_contacts_sit_in_the_well(tmp_path
     assert len(missing) == 1
     assert missing[0]["net"] == "VDD"
     assert "not connected to declared net 'VDD'" in missing[0]["description"]
+
+
+# --- ties: the degenerate declaration (issue #2199) ---------------------------
+#
+# The false pass this guards: with no `tap_requires` narrowing, an ordinary
+# PMOS *source* contact sitting on the VDD rail inside the n-well is
+# indistinguishable from a tap, so `erc.missing_tie` reports the well as
+# tied on the strength of geometry that is not a tap at all. The
+# reproduction in issue #2199 is the same spec and the same GDS answering
+# "tied" for `vdd` and "untied" for `vss`; the layout below is that shape,
+# reduced.
+
+
+def _degenerate_tie_layout(tmp_path, stem, ties):
+    """An n-well whose only contact is a PMOS source contact on the VDD
+    rail -- no tap implant drawn anywhere in it. The p-well keeps its
+    genuine (implant-marked) tap, so any difference between the two ties is
+    the declaration's, not the layout's."""
+    layout, top = _routed_tie_layout(vdd_tap=False)
+    top.shapes(layout.layer(11, 0)).insert(
+        kdb.Box.new(_um(4), _um(10.2), _um(4.6), _um(10.8))
+    )
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def _tie_skips(report):
+    return {
+        record["id"]: record["reason"] for record in report["erc_coverage"]["skipped"]
+    }
+
+
+# Case (e) of the `ties[]` table: a well plus a bare `tap_layer` that
+# happens to match a source/drain contact already on the declared net. The
+# findings are unchanged -- zero, as before -- but the envelope no longer
+# reads as a clean missing-tie verdict.
+def test_degenerate_tie_is_skipped_work_not_a_clean_missing_tie(tmp_path):
+    report = _degenerate_tie_layout(tmp_path, "degenerate", _routed_tie_entries())
+
+    # The mechanism itself is unchanged: the source contact reaches VDD, so
+    # no finding is emitted. That is exactly why the coverage signal has to
+    # carry the caveat.
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["nwell_tie"]': "degenerate_tap_declaration",
+        'erc.missing_tie:["pwell_tie"]': "degenerate_tap_declaration",
+    }
+    assert not any(
+        identity.startswith("erc.missing_tie:")
+        for identity in report["erc_coverage"]["checked"]
+    )
+    assert report["erc_status"] == "clean_partial"
+
+
+# The control that localises it: the same GDS, the same ties, with the
+# narrowing the degenerate form lacks. The n-well has no tap implant in it,
+# so the honest answer is a finding -- and that tie is graded as checked
+# work, not skipped.
+def test_tap_requires_makes_the_same_layout_report_an_honest_missing_tie(tmp_path):
+    report = _degenerate_tie_layout(
+        tmp_path, "narrowed", _routed_tie_entries(tap_requires=["12/0"])
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert [f["net"] for f in missing] == ["VDD"]
+    assert report["erc_coverage"]["skipped"] == []
+    assert 'erc.missing_tie:["nwell_tie"]' in report["erc_coverage"]["checked"]
+    assert report["erc_status"] == "violations"
+
+
+def test_tap_is_dedicated_keeps_a_bare_tap_layer_checked(tmp_path):
+    """A PDK that draws taps on their own layer has nothing to narrow, so
+    the spec affirms that instead -- and the tie is graded as the real
+    check it is. The affirmation changes no geometry: the findings are
+    identical to the degenerate run's."""
+    ties = [{**entry, "tap_is_dedicated": True} for entry in _routed_tie_entries()]
+    report = _degenerate_tie_layout(tmp_path, "dedicated", ties)
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert report["erc_coverage"]["skipped"] == []
+    assert {
+        'erc.missing_tie:["nwell_tie"]',
+        'erc.missing_tie:["pwell_tie"]',
+    } <= set(report["erc_coverage"]["checked"])
+    assert report["erc_status"] == "clean"
+
+
+def test_tap_requires_that_narrows_nothing_is_still_degenerate(tmp_path):
+    """The test is geometric, not "is the key present": a `tap_requires`
+    that covers every contact in the well (an implant drawn over the whole
+    well, not only over the taps) narrows nothing and is exactly as
+    unfalsifiable as omitting it."""
+    ties = [
+        {
+            "name": "nwell_tie",
+            "well_layer": "10/0",
+            "tap_layer": "11/0",
+            # The n-well layer itself -- inside the well, this intersection
+            # removes nothing at all.
+            "tap_requires": ["10/0"],
+            "connect_to": "li1",
+            "net": "VDD",
+        }
+    ]
+    report = _degenerate_tie_layout(tmp_path, "no_narrowing", ties)
+
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["nwell_tie"]': "degenerate_tap_declaration"
+    }
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_a_tie_whose_tap_matches_no_geometry_is_not_called_degenerate(tmp_path):
+    """An empty tap region asserts nothing about taps either -- but it
+    cannot produce a false pass: every well in it is reported as having no
+    tap drawn. That is an honest finding, so the tie stays checked work and
+    the skip list stays empty."""
+    report = _run_routed_tie(
+        tmp_path, "empty_tap", _routed_tie_entries(tap_layer="99/0")
+    )
+
+    assert report["erc_coverage"]["skipped"] == []
+    assert 'erc.missing_tie:["nwell_tie"]' in report["erc_coverage"]["checked"]
+    assert report["erc_status"] == "violations"
+
+
+def test_ties_rejects_a_non_boolean_tap_is_dedicated(tmp_path):
+    gds = tmp_path / "basic.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_is_dedicated": "yes",
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        },
+    )
+    with pytest.raises(ErcError, match="tap_is_dedicated must be true or false"):
+        run_erc(str(gds), str(spec))
 
 
 def test_multiple_taps_in_one_well_pass_when_any_reaches_the_declared_net(tmp_path):

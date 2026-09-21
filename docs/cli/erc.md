@@ -244,6 +244,16 @@ use) — matching `klt power`'s own convention.
     matters). Same "second plain layer field, intersected at use time"
     shape as `stackup[0].active_layer`, generalised to a list; omitted ->
     `tap_layer` alone, unchanged.
+  - `tap_is_dedicated` (optional boolean, default `false`, issue #2199) —
+    assert that `tap_layer` already names a **tap-only** layer (sky130's
+    own `tap`, a PDK tub-contact marker), so there is nothing for
+    `tap_requires` to narrow. This changes no geometry; it is the
+    declaration that keeps such a tie graded as *checked* work instead of
+    the skipped-degenerate classification a bare `tap_layer` otherwise
+    gets (see "Well/tap connectivity" below). Anything but a JSON boolean
+    is an error rather than a coercion — a truthy `"false"` string quietly
+    asserting the opposite of what it reads is the exact silent-pass shape
+    this key exists to close.
   - `connect_to` (string, required) — the `stackup` role name the tap is
     wired up to (e.g. `"li1"`) — must name an entry in `stackup`.
   - `net` (string, required) — the net name (matched the same way as
@@ -376,15 +386,57 @@ The cost of the isolation is one extra connectivity extraction, incurred
 extraction, as before.
 
 **Still not modelled**: there is no device recognition and no layer
-adjacency (z) rule here, so `tap_requires` is the only way to say "this
-tap is a real tap". Express it — a single-layer `tap_layer` naming a
-diffusion or contact layer will match every source/drain contact inside
-the well, and those contacts are real conductors, so `erc.missing_tie`
-will report the well as tied whenever any of them happens to reach the
-declared supply. And a block sitting in a native substrate with no *drawn*
-well/tub layer cannot declare a substrate tie at all: `well_layer`
-requires drawn geometry, so only the drawn-well half of such a design is
-graded.
+adjacency (z) rule here, so `tap_requires` (or `tap_is_dedicated`) is the
+only way to say "this tap is a real tap". Express it — a single-layer
+`tap_layer` naming a diffusion or contact layer will match every
+source/drain contact inside the well, and those contacts are real
+conductors, so `erc.missing_tie` will report the well as tied whenever any
+of them happens to reach the declared supply. And a block sitting in a
+native substrate with no *drawn* well/tub layer cannot declare a substrate
+tie at all: `well_layer` requires drawn geometry, so only the drawn-well
+half of such a design is graded.
+
+#### A degenerate tie is reported as skipped, not as a pass (issue #2199)
+
+A caller cannot always express the narrowing. `tap_requires` needs the
+PDK's real tap boolean to be *drawn in the layout* — on gf180mcu that is
+`Comp ∩ Nplus` / `Comp ∩ Pplus`, and a stream that draws no implant layers
+at all (common for generated/full-custom analog whose implants are derived
+downstream) has no geometry for it to intersect. The only declarable form
+is then the bare `tap_layer`, which is exactly the form the paragraph above
+says not to write.
+
+So `klt erc` says so in the report instead of quietly passing. A tie is
+**degenerate** when all three hold:
+
+- the spec did not affirm `tap_is_dedicated`;
+- the declared narrowing removed *nothing* from the drawn `tap_layer`
+  inside the well. Omitting `tap_requires` is the usual way to land here,
+  but a `tap_requires` that happens to intersect the whole drawn layer in
+  *this* stream (an implant drawn over every contact, not only the taps) is
+  exactly as unfalsifiable, so the test is geometric rather than a check
+  for the key's presence;
+- the resulting tap region is non-empty. An empty one cannot produce a
+  false pass — every well in it is reported as having no tap drawn, which
+  is an honest finding.
+
+Such a tie's `erc.missing_tie` work is recorded in `erc_coverage.skipped`
+with reason `degenerate_tap_declaration` (the skip record's work identity
+names the tie), instead of in `checked`. The connectivity roll-up then
+reports `erc_status: "clean_partial"` rather than `"clean"`, so committed
+evidence carries the caveat and
+[`docs/design-evidence-tiers.md`](../design-evidence-tiers.md)'s item 11
+— "zero `erc.missing_tie`" — can no longer be satisfied by a declaration
+that never looked at a tap (`klt signoff` renders that as
+`supply_spec_incomplete`, the same reason it gives a spec that declared no
+`ties[]` at all).
+
+**`erc_findings` is unchanged by this.** The same findings are emitted for
+the same geometry as before, for degenerate and well-formed declarations
+alike; what changed is that the envelope now states that the check could
+not be performed instead of letting a clean verdict stand for it. To clear
+the skip, narrow the tap with `tap_requires`, or affirm `tap_is_dedicated`
+when the layer really is tap-only.
 
 ### Device bodies are not wires (`devices[]`, issue #2183)
 
@@ -668,10 +720,16 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   (`erc_finding_count == 0`).
 - **`erc_status: "violations"`** — at least one `erc_findings` entry.
   Antenna violations never appear here; they are `status`'s business.
-- `"not_checked"`/`"clean_partial"` are reachable tokens of the shared
-  rollup vocabulary, listed for completeness: today `erc_coverage` always
-  grades at least one gate (a run with no gate net at all is exit 1), so a
-  successful run reports one of the two above.
+- **`erc_status: "clean_partial"`** — no finding, but some requested
+  connectivity work was skipped: today that means a **degenerate `ties[]`
+  declaration** (issue #2199, see "Well/tap connectivity" above), whose
+  `erc.missing_tie` verdict could not be told apart from an ordinary
+  source/drain contact reaching the declared net. A successful, but not
+  unconditional, result: read `erc_coverage.skipped` for which tie.
+- `"not_checked"` is a reachable token of the shared rollup vocabulary,
+  listed for completeness: `erc_coverage` always grades at least one gate
+  (a run with no gate net at all is exit 1), so a successful run reports
+  one of the three above.
 
 **Which one to gate on.** Gate a connectivity/structural-supply CI check on
 `erc_status`; gate an antenna check on `status`. Do not derive either from
@@ -873,7 +931,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
 | `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.unconnected_net`/`erc.multiply_driven_net`/`erc.supply_short`, which can span disconnected geometry). |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
-| `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"`/`"clean_partial"` are reachable tokens a reader must accept, but a successful run reports one of the two above today. |
+| `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration, issue #2199), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` is always `null` (`klt erc` applies no rule/model deck). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
@@ -902,6 +960,13 @@ distinction is what lets a consumer tell "no supply was declared, so
 `erc.supply_short` was never computed" from "the declared supplies came back
 clean" off the envelope alone. The gate scope is never empty: a run in which
 no net carries gate-role geometry is exit 1, not a zero-coverage report.
+
+A declared `ties[]` entry is the one case this scope records as **skipped**
+(`degenerate_tap_declaration`, issue #2199): work that was requested and
+could not be performed, because the declared tap region is
+indistinguishable from an ordinary source/drain contact. That is a
+requested skip, so it does make the scope partial — see "A degenerate tie
+is reported as skipped, not as a pass" above.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as
