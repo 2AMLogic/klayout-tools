@@ -1,0 +1,13 @@
+{
+  "task": "five-transistor-ota",
+  "targeted": [
+    {
+      "name": "tail-current-undersized",
+      "netlist": "ota_5t.spice",
+      "find": ".param ibias=20u",
+      "replace": ".param ibias=2u",
+      "why": "bias reference current shrunk 10x -> the diode-connected mirror pulls the tail current down proportionally, gm falls with the square root of that current, and gain-bandwidth product (~gm/(2*pi*CL)) drops well below the 5 MHz minimum"
+    }
+  ],
+  "equivalent": []
+}

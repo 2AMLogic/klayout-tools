@@ -111,11 +111,13 @@ makes exactly this "every non-equivalent mutant of the reference must be
 killed" check a per-task build gate for RTL. Nothing is reproduced from it;
 only the idea of gating on discrimination is reused.
 
-**Coverage today** (issue #2262 shipped the mechanism and migrated the
-existing hand-written coverage): `telescopic-cascode-amp`,
-`miller-integrator`, and `schmitt-trigger`. Extending it to the remaining
-tasks is tracked in issue #2263 — a task with no mutations file is neither
-passed nor failed by this check, it is simply not covered yet.
+**Coverage today**: all 12 tasks (issue #2262 shipped the mechanism and
+migrated the existing hand-written coverage for `telescopic-cascode-amp`,
+`miller-integrator`, and `schmitt-trigger`; issue #2263 added the remaining
+9 — the 4 easy-tier tasks, `five-transistor-ota`/`two-stage-miller-ota`, and
+the 3 hard-tier tasks). A task with no mutations file is still neither
+passed nor failed by this check, only uncovered — there is simply no task
+left in that state today.
 
 Run the harness (default: 5 attempts/task, pass@1 and pass@5, the
 deterministic `reference` candidate provider):

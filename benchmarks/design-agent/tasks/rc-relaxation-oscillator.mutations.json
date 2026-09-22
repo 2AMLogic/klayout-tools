@@ -1,0 +1,13 @@
+{
+  "task": "rc-relaxation-oscillator",
+  "targeted": [
+    {
+      "name": "timing-cap-oversized",
+      "netlist": "oscillator.spice",
+      "find": ".param cosc=10p",
+      "replace": ".param cosc=15p",
+      "why": "timing capacitor widened 50% -> period (C*dV/I) grows proportionally from its ~1.8-2.1 us nominal-to-worst-case range to well past the 2.2 us ceiling across the corner matrix"
+    }
+  ],
+  "equivalent": []
+}

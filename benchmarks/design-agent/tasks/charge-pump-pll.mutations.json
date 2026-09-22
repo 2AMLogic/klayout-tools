@@ -1,0 +1,13 @@
+{
+  "task": "charge-pump-pll",
+  "targeted": [
+    {
+      "name": "loop-filter-zero-resistor-undersized",
+      "netlist": "pll.spice",
+      "find": ".param r1=20k",
+      "replace": ".param r1=200",
+      "why": "loop-filter zero-forming resistor collapsed from 20 kOhm to near-zero -> the stabilizing zero the loop filter was hand-tuned around is gone, so the closed loop no longer settles cleanly within the transient window and steady-state phase error exceeds the +/-500 ns tolerance at one or both checkpoints"
+    }
+  ],
+  "equivalent": []
+}
