@@ -132,6 +132,18 @@ def _print_check_text(result: dict) -> None:
             print(f"      actual:   {check['actual']}")
 
 
+def _print_resume_line(resume: dict | None) -> None:
+    """Issue #2280: present only when --resume was requested. Text is a
+    courtesy rendering (docs/json-contract.md), so this line mirrors
+    sim_cmd's resume line rather than inventing a second vocabulary."""
+    if resume is None:
+        return
+    print(
+        f"resume: reused stage {resume['resumed_stage']} commit record  "
+        f"record_path={resume['record_path']}"
+    )
+
+
 def _print_text(report: dict) -> None:
     print(f"engine: {report['engine']} {report['engine_version'] or '-'}")
     print(f"sim_backend: {report['sim_backend']}")
@@ -141,16 +153,7 @@ def _print_text(report: dict) -> None:
         print(f"port_map: {report['port_map']}")
     print(f"status: {report['status']}")
     print(f"timeout_s: {report['timeout_s']}  elapsed_s: {report['elapsed_s']}")
-
-    resume = report.get("resume")
-    if resume is not None:
-        # Issue #2280: present only when --resume was requested. Text is a
-        # courtesy rendering (docs/json-contract.md), so this line mirrors
-        # sim_cmd's resume line rather than inventing a second vocabulary.
-        print(
-            f"resume: reused stage {resume['resumed_stage']} commit record  "
-            f"record_path={resume['record_path']}"
-        )
+    _print_resume_line(report.get("resume"))
 
     for diag in report["diagnostics"]:
         print(f"  diagnostic: {diag['code']} - {diag['message']}")

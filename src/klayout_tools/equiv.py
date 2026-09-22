@@ -663,6 +663,58 @@ def _write_partial_stage_record(path: str, fingerprint: str, *, reason: str) -> 
     )
 
 
+def _stage_record_shape_error(data: Any, fingerprint: str) -> str | None:
+    """The structural-validation half of :func:`_load_committed_stage1`:
+    the reason a parsed record must be discarded, or ``None`` when every
+    structural check passes. Factored out so the loader itself stays under
+    the repo's complexity ratchet (`scripts/check_complexity_baseline.py`,
+    issue #2034) -- each check here is one of the ways a partial or
+    fabricated artifact is prevented from satisfying the resume's verdict
+    check (issue #2280).
+    """
+    if not isinstance(data, dict):
+        return "record is not a JSON object"
+    if data.get("partial") is not False:
+        return "record is marked partial (or carries no partial marker)"
+    if data.get("stage") != 1:
+        return "record is not for stage 1"
+    if data.get("fingerprint") != fingerprint:
+        return (
+            "fingerprint mismatch -- the request changed since this stage "
+            "record was committed"
+        )
+    if data.get("classification") not in _STAGE1_CLASSIFICATIONS:
+        return "record carries no valid stage-1 classification"
+    blacklist = data.get("blacklist")
+    if not isinstance(blacklist, list) or not all(
+        isinstance(name, str) and name for name in blacklist
+    ):
+        return "record's blacklist is not a list of wire names"
+    refinements = data.get("refinements")
+    if (
+        not isinstance(refinements, int)
+        or isinstance(refinements, bool)
+        or (refinements < 0)
+    ):
+        return "record's refinement count is not a non-negative integer"
+    return None
+
+
+def _stage_log_corroborates(log_text: str, classification: str) -> bool:
+    """Whether the committed stage log's own bytes corroborate the recorded
+    classification: an ``all_proven`` record requires Yosys's own
+    ``Equivalence successfully proven!`` line; an ``unproven_cells`` record
+    requires unproven-``$equiv`` report lines and the success line's
+    absence. The log, not the record, is the primary artifact -- a
+    fabricated or truncated record whose log disagrees is discarded (issue
+    #2280's negative-control property)."""
+    if classification == _STAGE1_ALL_PROVEN:
+        return bool(_EQUIV_ALL_PROVEN_RE.search(log_text))
+    return not _EQUIV_ALL_PROVEN_RE.search(log_text) and bool(
+        _UNPROVEN_EQUIV_RE.search(log_text)
+    )
+
+
 def _load_committed_stage1(
     record_path: str,
     fingerprint: str,
@@ -683,27 +735,11 @@ def _load_committed_stage1(
     structural: the only verdict-bearing field a record carries is its
     ``classification`` (an ``all_proven`` classification *is* the final
     ``"equivalent"`` verdict for the resumed run), so each check exists to
-    make sure nothing but a fully-corroborated commit can reach it:
-
-    - ``partial`` must be exactly JSON ``false`` -- a ``partial: true``
-      record (or one with the key missing entirely, e.g. hand-written or
-      written by a future writer that never heard of the marker) is never
-      a commit.
-    - the fingerprint must match this request -- a record committed by a
-      different request (different sources, engine, timeout, ...) says
-      nothing about this one's stage 1.
-    - every field must be present with the right type -- a future or
-      foreign writer's shape is treated as absent, never best-effort
-      interpreted.
-    - the committed log must exist and its own bytes must corroborate the
-      recorded classification (``all_proven`` requires Yosys's own
-      ``Equivalence successfully proven!`` line; ``unproven_cells``
-      requires unproven-``$equiv`` report lines and the success line's
-      *absence*) -- a fabricated or truncated record whose log disagrees
-      is discarded, because the log, not the record, is the primary
-      artifact.
-    - an ``unproven_cells`` record additionally requires the committed
-      stage-1 netlist (stage 2's own input) to still be on disk.
+    make sure nothing but a fully-corroborated commit can reach it -- see
+    :func:`_stage_record_shape_error` (the structural checks) and
+    :func:`_stage_log_corroborates` (the log-bytes check). An
+    ``unproven_cells`` record additionally requires the committed stage-1
+    netlist (stage 2's own input) to still be on disk.
     """
     if not os.path.isfile(record_path):
         return None, None
@@ -712,32 +748,9 @@ def _load_committed_stage1(
             data = json.load(handle)
     except (OSError, json.JSONDecodeError, ValueError):
         return None, "record is unreadable or not valid JSON"
-    if not isinstance(data, dict):
-        return None, "record is not a JSON object"
-    if data.get("partial") is not False:
-        return None, "record is marked partial (or carries no partial marker)"
-    if data.get("stage") != 1:
-        return None, "record is not for stage 1"
-    if data.get("fingerprint") != fingerprint:
-        return None, (
-            "fingerprint mismatch -- the request changed since this stage "
-            "record was committed"
-        )
-    classification = data.get("classification")
-    if classification not in _STAGE1_CLASSIFICATIONS:
-        return None, "record carries no valid stage-1 classification"
-    blacklist = data.get("blacklist")
-    refinements = data.get("refinements")
-    if not isinstance(blacklist, list) or not all(
-        isinstance(name, str) and name for name in blacklist
-    ):
-        return None, "record's blacklist is not a list of wire names"
-    if (
-        not isinstance(refinements, int)
-        or isinstance(refinements, bool)
-        or (refinements < 0)
-    ):
-        return None, "record's refinement count is not a non-negative integer"
+    shape_error = _stage_record_shape_error(data, fingerprint)
+    if shape_error is not None:
+        return None, shape_error
     if not os.path.isfile(log_path):
         return None, "the committed stage log artifact is missing"
     try:
@@ -745,18 +758,14 @@ def _load_committed_stage1(
             log_text = handle.read()
     except OSError:
         return None, "the committed stage log artifact is unreadable"
-    if classification == _STAGE1_ALL_PROVEN:
-        corroborated = bool(_EQUIV_ALL_PROVEN_RE.search(log_text))
-    else:
-        corroborated = not _EQUIV_ALL_PROVEN_RE.search(log_text) and bool(
-            _UNPROVEN_EQUIV_RE.search(log_text)
-        )
-    if not corroborated:
+    if not _stage_log_corroborates(log_text, data["classification"]):
         return None, (
             "the committed stage log does not corroborate the recorded "
-            f"classification {classification!r}"
+            f"classification {data['classification']!r}"
         )
-    if classification == _STAGE1_UNPROVEN_CELLS and not os.path.isfile(netlist_path):
+    if data["classification"] == _STAGE1_UNPROVEN_CELLS and not os.path.isfile(
+        netlist_path
+    ):
         return None, "the committed stage netlist artifact (stage 2's input) is missing"
     return data, None
 
@@ -810,6 +819,29 @@ def load_request_arg(value: str) -> tuple[dict[str, Any], str]:
         required_fields=_REQUIRED_REQUEST_FIELDS,
         load_request_fn=load_request,
     )
+
+
+def _build_resume_block(
+    engine: str, output_dir: str, resume: bool
+) -> dict[str, Any] | None:
+    """The additive `resume` envelope block (issue #2280), built once in
+    :func:`run_equiv` and attached to whichever report the run produces:
+    present only when ``resume`` was requested (the same
+    present-only-when-requested convention ``klt sim``'s
+    ``environment.resume`` block uses), so a run without ``--resume`` is
+    byte-identical to pre-#2280 output. ``resumed_stage`` starts at 0 and
+    is upgraded to 1 by :func:`_resume_report_from_committed_stage1` iff a
+    committed stage record is actually adopted; the combinational engine
+    has no stage records, so its ``record_path`` is null (the
+    resolved-fields-are-null convention)."""
+    if not resume:
+        return None
+    return {
+        "resumed_stage": 0,
+        "record_path": (
+            _stage_record_path(output_dir, 1) if engine == "yosys-sequential" else None
+        ),
+    }
 
 
 def run_equiv(
@@ -911,24 +943,9 @@ def run_equiv(
             f"could not create output directory '{output_dir}': {exc}"
         ) from exc
 
-    # The additive `resume` envelope block (issue #2280): built once here,
-    # engine-independently, and attached to whichever report the run
-    # produces -- present only when `resume` was requested (the same
-    # present-only-when-requested convention `klt sim`'s
-    # `environment.resume` block uses). `resumed_stage` is upgraded to 1 by
-    # `_run_sequential` iff a committed stage record is actually adopted;
-    # the combinational engine has no stage records, so its `record_path`
-    # is null (resolved-fields-are-null convention).
-    resume_block: dict[str, Any] | None = None
-    if resume:
-        resume_block = {
-            "resumed_stage": 0,
-            "record_path": (
-                _stage_record_path(output_dir, 1)
-                if engine == "yosys-sequential"
-                else None
-            ),
-        }
+    # The additive `resume` envelope block (issue #2280) -- see
+    # `_build_resume_block`.
+    resume_block = _build_resume_block(engine, output_dir, resume)
 
     if engine == "yosys-sequential":
         induction_depth = request_doc.get("induction_depth", DEFAULT_INDUCTION_DEPTH)
@@ -2813,6 +2830,28 @@ def _build_sequential_report(
     return report
 
 
+def _new_blacklist_candidates(
+    stdout: str, netlist_path: str, blacklisted: set[str]
+) -> set[str] | None:
+    """The next ``equiv_make -blacklist`` widening for stage 1's cut-point
+    refinement loop (issue #1353): the names ``equiv_status`` reported
+    unproven that are *not* top-level ports and not already blacklisted --
+    or ``None`` when the loop must stop: an unparsable netlist (no new
+    candidates can be derived) or nothing new to drop (either every
+    unproven obligation is a top-level port -- a real output difference,
+    stage 2's job -- or refinement has reached its fixpoint)."""
+    try:
+        ports = _parse_module_ports(netlist_path, "gold")
+    except EquivError:
+        return None
+    candidates = {
+        name for name in _parse_unproven_equiv_signals(stdout) if name not in ports
+    }
+    if candidates <= blacklisted:
+        return None
+    return candidates - blacklisted
+
+
 def _stage1_refinement_diagnostics(
     refinements: int, blacklisted: set[str]
 ) -> list[dict[str, str]]:
@@ -2837,6 +2876,124 @@ def _stage1_refinement_diagnostics(
             ),
         }
     ]
+
+
+def _load_stage1_record_for_resume(
+    resume_block: dict[str, Any] | None,
+    record_path: str,
+    fingerprint: str,
+    *,
+    log_path: str,
+    netlist_path: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, str]]]:
+    """The resume-only record load for :func:`_run_sequential`:
+    ``(record, resume_diagnostics)`` -- ``record`` is what
+    :func:`_load_committed_stage1` adopted (``None`` unless ``--resume``
+    was requested), and ``resume_diagnostics`` carries the
+    ``resume_stage_record_discarded`` warning when a record existed but
+    was rejected. A rejected record is never silently ignored: the
+    envelope must describe truthfully that stage 1 re-ran because the
+    commit on disk did not satisfy the resume contract (issue #2280)."""
+    if resume_block is None:
+        return None, []
+    record, discard_reason = _load_committed_stage1(
+        record_path, fingerprint, log_path=log_path, netlist_path=netlist_path
+    )
+    if record is None and discard_reason is not None:
+        return None, [
+            {
+                "severity": "warning",
+                "code": "resume_stage_record_discarded",
+                "message": (
+                    f"committed stage record '{record_path}' was "
+                    f"discarded ({discard_reason}) -- stage 1 re-runs "
+                    "from scratch"
+                ),
+            }
+        ]
+    return record, []
+
+
+def _resume_report_from_committed_stage1(
+    stage1_record: dict[str, Any],
+    *,
+    engine: str,
+    engine_version: str | None,
+    sim_backend: str,
+    gold: dict[str, Any],
+    gate: dict[str, Any],
+    port_map: dict[str, str] | None,
+    effective_timeout_s: float,
+    induction_depth: int,
+    script1_path: str,
+    log1_path: str,
+    netlist_path: str,
+    blacklist_path: str,
+    resume_block: dict[str, Any],
+    resume_diagnostics: list[dict[str, str]],
+) -> tuple[dict[str, Any] | None, set[str], int, str | None]:
+    """Adopt a loader-validated stage-1 commit record (issue #2280): the
+    committed record IS stage 1's outcome, so reconstruct the exact
+    post-stage-1 state the interrupted run left -- blacklisted set,
+    refinement count, refinement diagnostic, blacklist artifact -- without
+    re-running Yosys. The loader has already corroborated the recorded
+    classification against the committed log's own bytes, which is what
+    makes this reconstruction safe to trust (see
+    :func:`_load_committed_stage1`).
+
+    Returns ``(report, blacklisted, refinements, active_blacklist_path)``
+    where ``report`` is the final ``"equivalent"`` envelope when the
+    record's classification is ``all_proven`` (the run is done -- stage 2
+    must not run), or ``None`` when it is ``unproven_cells`` and the
+    caller falls through to stage 2 with the reconstructed state.
+    """
+    blacklisted = set(stage1_record["blacklist"])
+    refinements = stage1_record["refinements"]
+    if blacklisted and not os.path.isfile(blacklist_path):
+        # Regenerate the blacklist artifact deterministically (the same
+        # sorted names `_write_equiv_blacklist` always writes), so the
+        # resumed envelope's `artifacts.stage1_blacklist_path` matches the
+        # uninterrupted run's even when the resume happens on a host that
+        # received the record but not that one artifact file.
+        _write_equiv_blacklist(blacklist_path, blacklisted)
+    active_blacklist_path = blacklist_path if blacklisted else None
+
+    resume_block["resumed_stage"] = 1  # a record is only loaded under resume
+    refinement_diagnostics = resume_diagnostics + _stage1_refinement_diagnostics(
+        refinements, blacklisted
+    )
+
+    if stage1_record["classification"] != _STAGE1_ALL_PROVEN:
+        # classification == unproven_cells: fall through to stage 2,
+        # exactly as a live stage-1 run that left cells unproven would.
+        return None, blacklisted, refinements, active_blacklist_path
+
+    return (
+        _build_sequential_report(
+            engine=engine,
+            engine_version=engine_version,
+            sim_backend=sim_backend,
+            status="equivalent",
+            gold=gold,
+            gate=gate,
+            port_map=port_map or None,
+            timeout_s=effective_timeout_s,
+            elapsed_s=0.0,
+            induction_depth=induction_depth,
+            counterexample=None,
+            diagnostics=refinement_diagnostics,
+            stage1_script_path=script1_path,
+            stage1_log_path=log1_path,
+            stage2_script_path=None,
+            stage2_log_path=None,
+            netlist_path=netlist_path,
+            stage1_blacklist_path=active_blacklist_path,
+            resume=resume_block,
+        ),
+        blacklisted,
+        refinements,
+        active_blacklist_path,
+    )
 
 
 def _run_sequential(
@@ -2879,34 +3036,19 @@ def _run_sequential(
         sim_backend=sim_backend,
     )
 
-    # `resumed_stage` is upgraded to 1 below iff a committed record was
+    # `resumed_stage` is upgraded to 1 inside
+    # `_resume_report_from_committed_stage1` iff a committed record was
     # actually adopted; a discarded record keeps it at 0, with the
     # `resume_stage_record_discarded` warning explaining why. The loader
     # only runs when `resume_block` is not None, so a default run neither
     # reads nor writes stage records.
-    resume_diagnostics: list[dict[str, str]] = []
-
-    stage1_record: dict[str, Any] | None = None
-    if resume_block is not None:
-        stage1_record, discard_reason = _load_committed_stage1(
-            record_path, fingerprint, log_path=log1_path, netlist_path=netlist_path
-        )
-        if stage1_record is None and discard_reason is not None:
-            # A rejected record is never silently ignored: the envelope must
-            # describe truthfully that stage 1 re-ran because the commit on
-            # disk did not satisfy the resume contract (issue #2280's
-            # "envelope describes the run truthfully" requirement).
-            resume_diagnostics.append(
-                {
-                    "severity": "warning",
-                    "code": "resume_stage_record_discarded",
-                    "message": (
-                        f"committed stage record '{record_path}' was "
-                        f"discarded ({discard_reason}) -- stage 1 re-runs "
-                        "from scratch"
-                    ),
-                }
-            )
+    stage1_record, resume_diagnostics = _load_stage1_record_for_resume(
+        resume_block,
+        record_path,
+        fingerprint,
+        log_path=log1_path,
+        netlist_path=netlist_path,
+    )
 
     # Stage 1, run as a bounded cut-point refinement loop: each pass drops
     # the wrongly-paired *internal* wires the previous pass could not prove
@@ -2919,55 +3061,34 @@ def _run_sequential(
     active_blacklist_path: str | None = None
 
     if stage1_record is not None:
-        # Resume reuse path (issue #2280): the committed record IS stage 1's
-        # outcome. Reconstruct the exact post-stage-1 state the interrupted
-        # run left -- blacklisted set, refinement count, refinement
-        # diagnostic, blacklist artifact -- without re-running Yosys. The
-        # loader has already corroborated the recorded classification
-        # against the committed log's own bytes, which is what makes this
-        # reconstruction safe to trust (see `_load_committed_stage1`).
-        blacklisted = set(stage1_record["blacklist"])
-        refinements = stage1_record["refinements"]
-        if blacklisted and not os.path.isfile(blacklist_path):
-            # Regenerate the blacklist artifact deterministically (the same
-            # sorted names `_write_equiv_blacklist` always writes), so the
-            # resumed envelope's `artifacts.stage1_blacklist_path` matches
-            # the uninterrupted run's even when the resume happens on a
-            # host that received the record but not that one artifact file.
-            _write_equiv_blacklist(blacklist_path, blacklisted)
-        active_blacklist_path = blacklist_path if blacklisted else None
-
-        assert resume_block is not None  # a record is only loaded under resume
-        resume_block["resumed_stage"] = 1
-
-        refinement_diagnostics = resume_diagnostics + _stage1_refinement_diagnostics(
-            refinements, blacklisted
+        # Resume reuse path (issue #2280): reconstruct stage 1's outcome
+        # from the committed record. An `all_proven` record yields the
+        # final envelope directly; an `unproven_cells` record falls
+        # through to stage 2 with the reconstructed state.
+        (
+            resumed_report,
+            blacklisted,
+            refinements,
+            active_blacklist_path,
+        ) = _resume_report_from_committed_stage1(
+            stage1_record,
+            engine=engine,
+            engine_version=engine_version,
+            sim_backend=sim_backend,
+            gold=gold,
+            gate=gate,
+            port_map=port_map or None,
+            effective_timeout_s=effective_timeout_s,
+            induction_depth=induction_depth,
+            script1_path=script1_path,
+            log1_path=log1_path,
+            netlist_path=netlist_path,
+            blacklist_path=blacklist_path,
+            resume_block=resume_block,
+            resume_diagnostics=resume_diagnostics,
         )
-
-        if stage1_record["classification"] == _STAGE1_ALL_PROVEN:
-            return _build_sequential_report(
-                engine=engine,
-                engine_version=engine_version,
-                sim_backend=sim_backend,
-                status="equivalent",
-                gold=gold,
-                gate=gate,
-                port_map=port_map or None,
-                timeout_s=effective_timeout_s,
-                elapsed_s=total_elapsed_s,
-                induction_depth=induction_depth,
-                counterexample=None,
-                diagnostics=refinement_diagnostics,
-                stage1_script_path=script1_path,
-                stage1_log_path=log1_path,
-                stage2_script_path=None,
-                stage2_log_path=None,
-                netlist_path=netlist_path,
-                stage1_blacklist_path=active_blacklist_path,
-                resume=resume_block,
-            )
-        # classification == unproven_cells: fall through to stage 2 below,
-        # exactly as a live stage-1 run that left cells unproven would.
+        if resumed_report is not None:
+            return resumed_report
     else:
         while True:
             _write_sequential_stage1_script(
@@ -3007,19 +3128,10 @@ def _run_sequential(
             ):
                 break
 
-            try:
-                ports = _parse_module_ports(netlist_path, "gold")
-            except EquivError:
-                break
-            candidates = {
-                name
-                for name in _parse_unproven_equiv_signals(stage1.stdout)
-                if name not in ports
-            }
-            if candidates <= blacklisted:
-                # Nothing new to drop -- either every unproven obligation is a
-                # top-level port (a real output difference, stage 2's job) or
-                # refinement has reached its fixpoint.
+            candidates = _new_blacklist_candidates(
+                stage1.stdout, netlist_path, blacklisted
+            )
+            if candidates is None:
                 break
             blacklisted |= candidates
             _write_equiv_blacklist(blacklist_path, blacklisted)
@@ -3140,6 +3252,15 @@ def _run_sequential(
     # correspondence induction alone could not decide. Stage 2 attempts a
     # genuinely bounded (complete-within-its-own-depth) SAT search for an
     # actual demonstrated counterexample; see module docstring.
+    #
+    # `refinement_diagnostics` is (re)built here for whichever fall-through
+    # path reached this point: a live stage-1 run that left cells unproven,
+    # or a resumed run whose committed record said `unproven_cells` (in
+    # which case the reconstruction comes from the record's committed
+    # blacklist/refinement count, not a Yosys run).
+    refinement_diagnostics = resume_diagnostics + _stage1_refinement_diagnostics(
+        refinements, blacklisted
+    )
     ports = _parse_module_ports(netlist_path, "gold")
 
     script2_path = os.path.join(output_dir, "equiv_seq_stage2.ys")
