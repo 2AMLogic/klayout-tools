@@ -574,6 +574,55 @@ delay:
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
 
+## Run identity — **proposed v1 pilot, NOT yet emitted** (issue #2097)
+
+> **This feature does not exist in the production verb yet.** The ratified
+> v1 pilot ([issue #2097](https://github.com/2AMLogic/klayout-tools/issues/2097),
+> Candidate A, operator-ratified 2026-09-22) delivers the *contract,
+> reference fixtures and tests only*. The runner does not accept
+> `options.evidence` and never emits `run_identity` today; documenting
+> otherwise would misstate this tool. The full contract, hash recipe,
+> closure rules and follow-up scoping live in
+> [`docs/design/functional-verification-run-identity-v1.md`](../design/functional-verification-run-identity-v1.md);
+> this section records the compatibility boundary.
+
+The ratified design: a future **opt-in** `options.evidence` request object
+(named `roots`; an explicit `files` inventory with roles such as
+`rtl_include`, `testbench_helper`, `fixture`, `configuration`; and an
+explicit `environment` name list) causes the runner to inventory the
+ordered RTL sources, the resolved entry testbench, supplied SDF and
+generated build inputs, hash a **versioned resolved manifest**
+(`schema_version: 1`, domain-separated
+`klt-functional-verification-input-v1` digest, canonical UTF-8 JSON
+profile), and attach an additive `run_identity` block to the report.
+Callers explicitly declare additional helper/header/fixture files; Python
+imports are never guessed and include directories are never recursively
+hashed (include *order* is recorded; include bytes come from the explicit
+inventory).
+
+Hard boundaries, ratified and permanent for v1:
+
+- **Closure is always `partial`.** The manifest names what is *not*
+  covered (uncollected Python/native imports, ambient environment/external
+  reads, unbound tool-binary bytes, unobserved seed, unknown/dirty KLT
+  build identity) instead of pretending coverage. A declared-mode
+  `complete` claim is a contract violation, not an achievement.
+- **No production dependency collector** — no import closure, no
+  filesystem tracing.
+- **No signoff-qualification change** — `klt signoff` behavior is
+  untouched; consumer verification (caller-owned expected manifest, current
+  input-root re-hash, output-integrity pins, explicit
+  `allow_partial_inputs` acceptance, default *false*) is a separately
+  scoped follow-up.
+- A declared-only fixture passing is evidence about **that fixture**, not
+  about arbitrary testbenches or complete closure.
+
+Compatibility: requests without `options.evidence` keep today's exact
+envelope — no new fields, no `schema_version` movement on this verb. See
+[`docs/json-contract.md`](../json-contract.md)'s
+"Functional-verification run identity" section for the additive-field
+analysis.
+
 ## Mutation testing: `--mutations`
 
 ```

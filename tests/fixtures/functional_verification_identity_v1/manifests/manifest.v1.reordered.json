@@ -1,0 +1,137 @@
+{
+  "toolchain": {
+    "python_version": "3.12.3",
+    "python_implementation": "CPython",
+    "klt_build_version": "0.2.0+gabc1234def0",
+    "klt_build_identity": {
+      "is_release": false,
+      "git_tag": null,
+      "git_commit": "abc1234def0abc1234def0abc1234def0abc1234",
+      "dirty": false
+    },
+    "engine_version": "13.0 (stable)",
+    "engine_name": "icarus",
+    "cocotb_version": "2.0.0"
+  },
+  "recipe": {
+    "user_source_ids": [
+      "design:rtl/counter.sv"
+    ],
+    "trace_enabled": false,
+    "timescale": "1ns/1ps",
+    "testbench_module": "tb_counter",
+    "selected_testcases": [
+      "test_counter_counts"
+    ],
+    "sdf_corner": "typ",
+    "sdf_annotation_config": {
+      "scale": "1.0:1.0:1.0",
+      "annotated": true
+    },
+    "requested_top": "counter",
+    "requested_seed": 1234,
+    "requested_build_args": [
+      "-g2005-sv"
+    ],
+    "parameters": {
+      "WIDTH": 8
+    },
+    "original_sdf_logical_id": "design:sdf/tb_counter_typ.sdf",
+    "include_search_roots": [
+      "design:rtl/include"
+    ],
+    "generated_source_ids": [
+      "generated:sdf_wrapper.sv"
+    ],
+    "environment": [
+      {
+        "value_sha256": "03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4",
+        "state": "set",
+        "name": "KLT_FIXTURE_SEED"
+      },
+      {
+        "value_sha256": null,
+        "state": "unset",
+        "name": "KLT_FIXTURE_UNSET"
+      }
+    ],
+    "entry_testbench_logical_id": "design:tb/tb_counter.py",
+    "effective_top": "counter",
+    "effective_seed": 1234,
+    "effective_sdf_logical_id": "generated:sdf_wrapper.sv",
+    "effective_build_args": [
+      "-g2005-sv"
+    ],
+    "defines": {
+      "SIM_MODE": "caf\u00e9"
+    },
+    "coverage_enabled": false
+  },
+  "files": [
+    {
+      "sha256": "ecd0849153d2a45a4cfe39e6c93e368adfc2f9b0625a2873609689b44b6dfcc9",
+      "roles": [
+        "rtl_source"
+      ],
+      "logical_id": "design:rtl/counter.sv",
+      "byte_length": 655
+    },
+    {
+      "sha256": "b34eff2112ac310801d441cd3a82aaf81ef2e18bd7c19f1d8d677dd8e4a1dd1e",
+      "roles": [
+        "rtl_include"
+      ],
+      "logical_id": "design:rtl/include/counter_defs.svh",
+      "byte_length": 332
+    },
+    {
+      "sha256": "0ff68e1182689a264d227440902754ad06cb7712623c989cbee2dbeeb7783c0b",
+      "roles": [
+        "sdf_original"
+      ],
+      "logical_id": "design:sdf/tb_counter_typ.sdf",
+      "byte_length": 206
+    },
+    {
+      "sha256": "92901ac0d6ae1fdc62ade9e3dea4bc297f9ca37e599deaf71ca4053d99286fc2",
+      "roles": [
+        "testbench_helper"
+      ],
+      "logical_id": "design:tb/expected_counts.py",
+      "byte_length": 359
+    },
+    {
+      "sha256": "d4323f90c469d4f187ff9e5300ae7b5d69be0b8683e6d34acda1753c1371f41f",
+      "roles": [
+        "fixture"
+      ],
+      "logical_id": "design:tb/fixtures/vectors.json",
+      "byte_length": 36
+    },
+    {
+      "sha256": "7101406fb68d83978d03ecf488b7035a689e077fa256f1d5075b7e2e22ef763c",
+      "roles": [
+        "testbench_entry"
+      ],
+      "logical_id": "design:tb/tb_counter.py",
+      "byte_length": 2055
+    },
+    {
+      "sha256": "6d4028fee07b038e4858af6ac073df8c7bcd6d9cf6393d0518f0740f30df8d16",
+      "roles": [
+        "generated_source"
+      ],
+      "logical_id": "generated:sdf_wrapper.sv",
+      "byte_length": 561
+    }
+  ],
+  "closure": {
+    "status": "partial",
+    "reasons": [
+      "ambient_environment_not_isolated",
+      "python_native_imports_uncollected",
+      "tool_binary_bytes_not_bound"
+    ],
+    "mode": "declared"
+  }
+}

@@ -936,6 +936,53 @@ Per-verb detail:
 [`cli/equiv.md`](cli/equiv.md),
 [`cli/signoff.md`](cli/signoff.md).
 
+## Functional-verification run identity (**proposed** — not yet emitted, issue #2097)
+
+> **Status: contract ratified, producer not implemented.** The v1 pilot
+> ([#2097](https://github.com/2AMLogic/klayout-tools/issues/2097),
+> Candidate A, operator-ratified 2026-09-22) ships the contract, reference
+> fixtures and contract tests — *not* a producer. `klt
+> functional-verification` emits no `run_identity` field today, and this
+> document must not pretend otherwise. The authoritative contract record
+> is
+> [`docs/design/functional-verification-run-identity-v1.md`](design/functional-verification-run-identity-v1.md).
+
+When the producer follow-up lands, `run_identity` will be an **additive,
+opt-in** sibling block on the functional-verification envelope
+(`schema_version: 1`, `input_manifest`, `input_sha256`, plus a
+non-identity `input_locators` block): by the envelope rules above it earns
+no `schema_version` bump on the verb, because every request/response valid
+before is still valid and means what it meant — the block appears only
+when a request explicitly asks for identity collection via the proposed
+`options.evidence` object, exactly like the pre-existing additive
+`options.trace`/`environment.sdf` fields (issue #1002's precedent).
+
+Compatibility boundaries fixed by the ratified contract:
+
+- **Request side**: no `options.evidence` → byte-identical behavior today;
+  a request using the new value set is rejected (exit 1, error envelope)
+  by an older `klt` rather than silently mis-executed.
+- **Hash roles stay disjoint**: `input_sha256` is domain-separated by the
+  `klt-functional-verification-input-v1` prefix and must never be
+  compared with a `provenance.input` layout/netlist/DEF content hash
+  (#2027/#2058's roles), a deck hash, or another run's digest; it is not
+  added to `provenance.input` in v1.
+- **Closure is structurally `partial` in v1** and the manifest's
+  `closure.reasons` name the uncovered classes (Python/native imports,
+  ambient environment/external reads, unbound tool binaries, plus
+  missing-seed/tool-identity/dirty-build disclosures as applicable). A
+  declared-mode `complete` claim is rejected by the contract checker, not
+  scored.
+- **Consumer verification is separately scoped**: a caller-owned expected
+  manifest, current input-root re-hash, externally held report/artifact
+  byte pins, and explicit `allow_partial_inputs` acceptance (default
+  false). Missing legacy identity cannot satisfy the opt-in policy;
+  #2094/#2096's independent checks are not replaced by it.
+
+The reference checker (`tests/helpers/identity_contract_v1.py`) and the
+golden vectors it validates are the executable form of this section until
+the producer follow-up moves that core into `src/` with tests.
+
 ## Checked-work coverage (`coverage.schema_version: 1`)
 
 The [checked-work coverage contract](coverage-contract.md) defines required

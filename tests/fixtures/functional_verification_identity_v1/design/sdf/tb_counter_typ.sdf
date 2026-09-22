@@ -1,0 +1,13 @@
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (TIMESCALE 1ns/1ps)
+  (CELL
+    (CELLTYPE "counter")
+    (INSTANCE dut)
+    (DELAY
+      (ABSOLUTE
+        (IOPATH (posedge clk) count (1:2:3) (2:3:4))
+      )
+    )
+  )
+)
