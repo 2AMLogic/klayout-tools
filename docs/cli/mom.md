@@ -382,14 +382,17 @@ the knob to change. Exit code stays `0` — a warning is a diagnostic, not a
 failure.
 
 In practice a warning always means the same thing: **`panel_size_um` is too
-coarse relative to the smallest conductor-to-conductor separation.** Two
-panels on facing conductors are then much closer to each other than the
-panels are wide, and the centroid-to-centroid `1/r` kernel (see "Scope and
-limitations") wildly overestimates their coupling — badly enough to flip the
-mutual term's sign. As a rule of thumb, keep `panel_size_um` at or below the
-smallest gap you care about resolving, and re-run with a smaller value to
-confirm the answer has stopped moving. Convergence-under-refinement is
-validated systematically in
+coarse relative to the smallest conductor-to-conductor separation.** A
+constant-density panel cannot represent the charge that piles up on a surface
+facing a gap narrower than the panel itself, so the coupling between such a
+pair is structurally unreliable. The near-field quadrature kernel (#2061)
+keeps the matrix's *sign structure* physical even in that regime — the old
+failure mode, a sign-flipped mutual term, is gone — but no kernel can invent
+resolution the mesh does not have, so the coarseness diagnostic names the
+pair and the knob instead of staying silent. As a rule of thumb, keep
+`panel_size_um` at or below the smallest gap you care about resolving, and
+re-run with a smaller value to confirm the answer has stopped moving.
+Convergence-under-refinement is validated systematically in
 [`docs/design/mom-validation.md`](../design/mom-validation.md) (#719), which
 also measures what a given `panel_size_um`/gap ratio costs you in accuracy:
 `panel_size_um = gap` lands within ~1% of the converged answer on a
@@ -401,11 +404,11 @@ $ klt mom plates.gds coarse.mom.json
 (femtofarads)
 
 warnings:
-  mutual capacitance between conductors "top" and "bottom" is 0.118396 fF, but a
-  physical Maxwell capacitance matrix has non-positive off-diagonal entries -- the
-  point-collocation fill has broken down, most likely because panel_size_um is
-  coarse relative to the spacing between these conductors; reduce panel_size_um
-  and re-run
+  conductors "top" and "bottom" are separated by as little as 0.0100 um
+  (panel-centroid scale) while discretised with panels up to 2.0000 um wide --
+  a constant-density panel cannot resolve the charge facing a gap narrower
+  than the panel, so their coupling should not be trusted; reduce
+  panel_size_um and re-run
 ```
 
 ## PEEC inductance/resistance
@@ -1027,15 +1030,20 @@ oracles), for the exact geometry and measured accuracy.
   for the whole solve; there is no per-layer dielectric stack (e.g. a real
   oxide/nitride stack with different permittivities per layer). Multi-layer
   dielectric support is a follow-up.
-- **Simplified point-collocation BEM fill.** Off-diagonal
-  potential-coefficient entries use the bare point-charge kernel between
-  panel centroids rather than a true panel-to-panel double integral; the
-  diagonal (self) term uses the standard closed-form equivalent-square-panel
-  approximation. This is adequate for "produces a numeric result" (this
-  command's bar); accuracy-vs-refinement is measured in
-  [`docs/design/mom-validation.md`](../design/mom-validation.md). The kernel's
-  known failure mode — panels wider than the gap they face — is detected and
-  surfaced in `warnings` rather than returned silently (see "Warnings").
+- **Constant-panel collocation BEM fill with a near-field/far-field split.**
+  Off-diagonal potential-coefficient entries integrate the source panel
+  properly (4-point-per-axis Gauss–Legendre quadrature of the potential at
+  the target centroid, symmetrised across the pair) when the two panels'
+  centroids are closer than a few panel widths; well-separated pairs keep
+  the cheap point-charge kernel between centroids; the diagonal (self) term
+  uses the standard closed-form equivalent-square-panel approximation.
+  Measured against FastCap on a common mesh (#2015), the capacitance matrix
+  agrees to ≤0.5% on every fixture including closely spaced parallel plates
+  — see [`docs/design/fastcap-oracle.md`](../design/fastcap-oracle.md) and
+  [`docs/design/mom-validation.md`](../design/mom-validation.md). One thing
+  no kernel fixes: panels wider than the gap they face cannot resolve the
+  gap-facing charge distribution, so such pairs are flagged by a coarseness
+  diagnostic in `warnings` (see "Warnings") rather than trusted silently.
 - **The capacitance and PEEC inductance/resistance solves are quasi-static**
   (DC/low-frequency) — no frequency dependence, no skin effect. The
   full-wave solve above adds a genuine frequency sweep for the *series*
@@ -1165,7 +1173,8 @@ are exhaustive forever.
   independently implemented MoM capacitance solver — the very program
   `native/mom/src/solver.rs` cites as the method it implements — run over the
   same geometry and the same panel set. Why FastCap rather than Palace, the
-  measured agreement (0.17% on a coupled-line pair), where the two solvers
+  measured agreement (0.03% on a coupled-line pair, 0.32% on closely spaced
+  parallel plates, after #2061's near-field kernel), where the two solvers
   disagree most and why, and the declared shared surface. The executable form
   is `tests/test_mom_capacitance_oracle.py`, provisioned by
   `scripts/install-fastcap.sh`.

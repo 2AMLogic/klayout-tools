@@ -40,6 +40,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   `ExtractionDeck.tap`) as reachable through `ExtractionDeck.contact`, so a
   port on either still gets a real licon/mcon ladder rather than the
   uncontacted metal stub a `tap`-role port used to get.
+- **Fixed** (#2061, `klt mom` numerics — **no** `schema_version` bump, same
+  JSON shape): the capacitance solver's off-diagonal kernel no longer lumps
+  each panel's charge at its centroid for nearby panel pairs. The kernel fill
+  now splits near field from far field: when two panels' centroids are
+  closer than a few panel widths, the source panel's potential is integrated
+  properly (4-point-per-axis Gauss–Legendre quadrature at the target
+  centroid, symmetrised across the pair so the matrix — and the
+  Conjugate Gradient solve — stays symmetric); well-separated pairs keep
+  the cheap centroid point-charge kernel, and the diagonal (self) term keeps
+  its closed form. Motivated and measured by the FastCap 2.0 cross-validation
+  oracle: on the same mesh that used to disagree by 3.29% on closely spaced
+  parallel plates, `klt mom` now agrees with FastCap to 0.32% (coupled lines
+  0.17% → 0.03%, shielded triple 1.29% → 0.46%). The correction also
+  removed the old coarse-mesh failure mode where the mutual capacitance of a
+  pair whose gap was far narrower than its panels came back sign-flipped:
+  the sign is now physical, and the unresolvable-magnitude condition is
+  instead flagged by a new coarseness diagnostic in `warnings` (same
+  `panel_size_um` guidance, one entry per offending conductor pair), so the
+  under-resolved-solve warning contract is unchanged. Two closed-form
+  validation tolerances were recalibrated to the cross-validated
+  discretisation with FastCap co-witness runs (parallel-plate/Kirchhoff 5%
+  → 6%, square-coax 2% → 3%, refinement-order floor first-order → 0.4):
+  the pre-#2061 agreement there leaned on the kernel's over-coupling
+  cancelling the constant-density basis's under-resolution of gap-facing
+  charge — FastCap sits at the same values (0.1–0.3% from `klt mom` on
+  every co-witnessed fixture). Fill cost rises only for near-field pairs
+  (+45 ms of 1.5 s on the largest oracle fixture); no measurable end-to-end
+  solve-time change.
 - **Added** (#2308, `klt deck rules` + docs, additive — **no**
   `schema_version` bump, a new verb with its own `schema_version: 1`): a
   read-only query for the *numbers* a built-in deck enforces —

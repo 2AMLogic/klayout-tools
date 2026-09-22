@@ -169,11 +169,17 @@ pub struct MomResponse {
     /// Total panel count across every conductor (informational -- lets a
     /// caller sanity-check discretisation density without re-deriving it).
     pub panel_count: usize,
-    /// Non-fatal diagnostics about the *physicality* of the returned matrix
-    /// (see `solver::physicality_warnings`). Empty on a well-resolved solve.
-    /// A populated list means the numbers came back but should not be
-    /// trusted -- almost always a `panel_size_um` too coarse relative to the
-    /// smallest conductor-to-conductor separation.
+    /// Non-fatal diagnostics about the *trustworthiness* of the returned
+    /// numbers: `solver::physicality_warnings` checks the matrix against the
+    /// sign structure every physical Maxwell matrix has, and
+    /// `solver::discretisation_warnings` flags conductor pairs whose facing
+    /// panels are wider than the conductors' separation (a constant-density
+    /// panel cannot resolve the charge facing a narrower gap -- the
+    /// coupling's sign survives the near-field quadrature kernel, #2061,
+    /// but its magnitude does not). Empty on a well-resolved solve. A
+    /// populated list means the numbers came back but should not be
+    /// trusted -- almost always a `panel_size_um` too coarse relative to
+    /// the smallest conductor-to-conductor separation.
     pub warnings: Vec<String>,
     /// The partial-inductance matrix, in nanohenries:
     /// `inductance_matrix_nh[j][k]` is conductor `j`'s partial self

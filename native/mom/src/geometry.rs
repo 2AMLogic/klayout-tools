@@ -7,11 +7,20 @@ use crate::contract::{BoxRequest, ConductorRequest};
 /// One flat rectangular panel: a constant-charge-density collocation point
 /// (`center`) with an `area` (um^2), tagged with the index of the conductor
 /// it belongs to (an index into the caller's conductor-name list).
+///
+/// `side_vectors` carries the panel's two in-plane edge vectors (um): the
+/// point `center + (xi/2) * side_vectors[0] + (eta/2) * side_vectors[1]`
+/// sweeps the panel for `xi, eta` in `[-1, 1]`. The near-field kernel fill
+/// in `solver.rs` integrates over the panel through exactly that map
+/// (`panel_pair_potential_average`); the far-field centroid kernel ignores
+/// it, which is why it lives next to the geometry rather than inside the
+/// kernel's own data.
 #[derive(Debug, Clone, Copy)]
 pub struct Panel {
     pub center: [f64; 3],
     pub area_um2: f64,
     pub conductor_index: usize,
+    pub side_vectors: [[f64; 3]; 2],
 }
 
 /// Minimum extent (um) below which a box dimension is treated as exactly
@@ -675,13 +684,26 @@ fn emit_face(
     }
     for (uc, ulen) in subdivide_1d(u0, u1, panel_size_um) {
         for (vc, vlen) in subdivide_1d(v0, v1, panel_size_um) {
+            // `to_xyz` is affine in (u, v), so the side vectors are exact
+            // chord differences between opposite edge midpoints -- evaluated
+            // here rather than assumed axis-aligned so the panel's own
+            // parameterisation stays the single source of truth.
+            let u_lo = to_xyz(uc - ulen / 2.0, vc);
+            let u_hi = to_xyz(uc + ulen / 2.0, vc);
+            let v_lo = to_xyz(uc, vc - vlen / 2.0);
+            let v_hi = to_xyz(uc, vc + vlen / 2.0);
             out.push(Panel {
                 center: to_xyz(uc, vc),
                 area_um2: ulen * vlen,
                 conductor_index,
+                side_vectors: [sub3(u_hi, u_lo), sub3(v_hi, v_lo)],
             });
         }
     }
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
 /// Split `[lo, hi]` into `n = max(1, round((hi-lo)/panel_size)))` equal

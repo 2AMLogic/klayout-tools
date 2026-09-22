@@ -10,11 +10,13 @@ closed forms -- but a closed form only exists for a handful of idealised
 shapes, so for anything else there has been nothing to ask. FastCap
 (Nabors & White, IEEE TCAD 1991) is a second, independent implementation
 of exactly this job, and is the very paper `solver.rs` cites as the method
-it implements -- with a materially better discretisation (analytic
-panel-to-panel integrals plus a multipole-accelerated solve, where
-`solver.rs` deliberately uses the bare point-charge kernel between panel
-centroids). Agreement between them is therefore evidence about `klt mom`'s
-numerics that no amount of self-consistency testing can produce.
+it implements. Both use the same constant-panel collocation scheme; the
+kernels differ in degree (`solver.rs` quadratures the source-panel integral
+only for near-field pairs -- #2061 -- and keeps the cheap centroid
+point-charge kernel for well-separated ones, where FastCap integrates
+analytically everywhere and accelerates the far field with multipoles).
+Agreement between them is therefore evidence about `klt mom`'s numerics
+that no amount of self-consistency testing can produce.
 
 `tests/helpers/fastcap_oracle.py` drives FastCap (shell-only, no
 PostScript dumps, per this repo's headless-always rule);
@@ -76,27 +78,28 @@ if _ORACLE_SKIP_REASON:
 #: disagree with `klt mom` over a constant.
 EPS0_F_PER_M = 8.854_187_812_8e-12
 
-#: Agreement band for a **three-dimensional** fixture whose conductors are
-#: separated by at least two panel widths (the coupled-line and shielded
-#: fixtures below). Measured on this repo's own geometry at `klt` 0.5.0 /
-#: FastCap 2.0: 0.09%-0.17% for the coupled lines, <=1.3% for the shielded
-#: triple. 3% leaves room for a different host's arithmetic and for the
-#: shielded fixture's flat-ish near field without being loose enough to
+#: Agreement band for **every** fixture below: each one is now expected to
+#: sit inside the same 3% envelope, including the flat-plate pair (see
+#: :data:`FLAT_PLATE_AGREEMENT_TOL`). Measured on this repo's geometry at
+#: `klt` 0.5.0 / FastCap 2.0 after #2061's near-field kernel: 0.01%-0.03%
+#: for the coupled lines, <=0.46% for the shielded triple, 0.32% for the
+#: parallel plates. 3% leaves room for a different host's arithmetic and
+#: for coarser meshes than the fixtures use, without being loose enough to
 #: hide a real kernel regression (the seeded defects below move entries by
-#: 19%-39%, an order of magnitude above this band).
+#: 19%-39%, two orders of magnitude above this band).
 AGREEMENT_TOL = 0.03
 
-#: Agreement band for the **flat-lamina** parallel-plate fixture. Two
-#: zero-thickness plates one panel-width-and-a-bit apart is the worst case
-#: for `solver.rs`'s centroid point-charge off-diagonal kernel -- the panel
-#: separation is comparable to the panel size, which is exactly where a
-#: point-charge approximation to a panel-to-panel integral is least
-#: accurate, and where FastCap's analytic integral is not. Measured 2.8%
-#: (self) / 3.3% (coupling); the band is set at 6% rather than at
-#: :data:`AGREEMENT_TOL` because this is a *declared* accuracy difference
-#: between the two kernels, not a defect -- see
-#: docs/design/fastcap-oracle.md's "Where the two solvers disagree most".
-FLAT_PLATE_AGREEMENT_TOL = 0.06
+#: Agreement band for the **flat-lamina** parallel-plate fixture. Pre-#2061
+#: this fixture needed a band of its own (6%): two zero-thickness plates one
+#: panel-width-and-a-bit apart was the worst case for the bare centroid
+#: point-charge kernel -- panel separation comparable to panel size is
+#: exactly where a point charge is a poor stand-in for the source-panel
+#: integral, and where FastCap's analytic integral is not. The near-field
+#: quadrature kernel (#2061) closed the gap: measured 0.25%-0.32%, so the
+#: band tightens to the common :data:`AGREEMENT_TOL` envelope. Kept as a
+#: named constant so the fixture's history and its band stay visible here;
+#: see docs/design/fastcap-oracle.md's "Where the two solvers disagree most".
+FLAT_PLATE_AGREEMENT_TOL = 0.03
 
 #: The panel size every fixture is solved at unless it is refining on
 #: purpose. `klt mom`'s own default is 0.5 um (`mom.DEFAULT_PANEL_SIZE_UM`).

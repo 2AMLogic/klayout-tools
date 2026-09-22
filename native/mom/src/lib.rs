@@ -97,7 +97,8 @@ fn solve_mom_json(request_json: &str) -> PyResult<String> {
     };
 
     let conductors: Vec<String> = request.conductors.into_iter().map(|c| c.name).collect();
-    let warnings = solver::physicality_warnings(&capacitance_matrix_ff, &conductors);
+    let mut warnings = solver::physicality_warnings(&capacitance_matrix_ff, &conductors);
+    warnings.extend(solver::discretisation_warnings(&panels, &conductors));
 
     let response = MomResponse {
         schema_version: RESPONSE_SCHEMA_VERSION,
