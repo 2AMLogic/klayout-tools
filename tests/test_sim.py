@@ -135,12 +135,260 @@ def test_run_sim_unsupported_engine_raises(tmp_path):
         tmp_path,
         {
             "netlist": "body.spice",
-            "engine": "xyce",
+            # Issue #2016 landed an `xyce` execution path; this gate is for
+            # engine names no path recognises at all.
+            "engine": "spectre",
             "analysis": {"kind": "tran", "args": "1n 1u"},
         },
     )
     with pytest.raises(sim.SimError, match="unsupported engine"):
         sim.run_sim(str(request))
+
+
+# --------------------------------------------------------------------------- #
+# run_sim: engine "xyce" request-level gates (issue #2016)
+#
+# Each unimplemented combination is refused up front with a SimError naming
+# what IS supported, before any corner runs.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_sim_xyce_refuses_remote_backend(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "backend": "remote",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="xyce.*local backends"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_refuses_supply_corners(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "dc", "args": "Vdd 0 2 0.5"},
+            "corners": {"supply_v": {"vdd": [1.0, 1.8]}},
+        },
+    )
+    with pytest.raises(sim.SimError, match="xyce.*supply_v"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_refuses_monte_carlo(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "process"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="xyce.*monte_carlo"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_refuses_fail_fast_probe(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"fail_fast_probe": True},
+        },
+    )
+    with pytest.raises(sim.SimError, match="fail_fast_probe.*xyce"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_missing_binary_reports_per_corner_error(tmp_path, monkeypatch):
+    # A missing Xyce binary is not an exception: like a missing ngspice, it
+    # folds into per-corner `status: "error"` diagnostics ("every corner is
+    # reported"), so the caller sees which engine failed to launch. The
+    # binary name is monkeypatched rather than PATH-manipulated so the test
+    # is deterministic whether or not Xyce is installed.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "op", "args": ""},
+        },
+    )
+    monkeypatch.setattr(sim, "XYCE_BINARY", "xyce-not-on-path-xyz")
+    report = sim.run_sim(str(request))
+    assert report["corner_count"] == 1
+    corner = report["corners"][0]
+    assert corner["status"] == "error"
+    assert any(
+        "could not launch" in d["message"] and "xyce-not-on-path-xyz" in d["message"]
+        for d in corner["diagnostics"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Xyce deck generation and log parsing (issue #2016)
+#
+# Pure-function tests, no binary required: the deck Xyce receives must not
+# carry the ngspice-only cards Xyce ignores or rejects (.control/alter,
+# .temp), and the parser must read what Xyce actually writes.
+# --------------------------------------------------------------------------- #
+
+
+def _xyce_point() -> sim.CornerPoint:
+    return sim.CornerPoint(
+        process=None,
+        supply_v={},
+        temperature_c=85,
+    )
+
+
+def _xyce_bundle_point() -> sim.CornerPoint:
+    return sim.CornerPoint(
+        process="tt",
+        supply_v={},
+        temperature_c=85,
+        process_sections=["tt", "bjt_tt"],
+    )
+
+
+def test_write_xyce_deck_shape(tmp_path):
+    deck = tmp_path / "corner.cir"
+    sim._write_xyce_deck(
+        deck_path=str(deck),
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        point=_xyce_point(),
+        analysis={"kind": "tran", "args": "1n 10u"},
+        measurements_spec=[{"name": "vout", "spice": ".meas tran vmax MAX v(out)"}],
+    )
+    text = deck.read_text()
+    # The analysis is a top-level dot card (no .control block to live in).
+    assert ".tran 1n 10u" in text
+    # Temperature rides `.options device temp=` -- a `.temp` card is a
+    # silent no-op in Xyce (verified against 7.10.0).
+    assert ".options device temp=85" in text
+    assert ".temp " not in text
+    # No ngspice-only machinery ever reaches a Xyce deck.
+    assert ".control" not in text
+    assert "alter " not in text
+    # The request's .meas cards pass through verbatim, and the deck ends.
+    assert ".meas tran vmax MAX v(out)" in text
+    assert text.rstrip().endswith(".end")
+
+
+def test_write_xyce_deck_process_corner_lib_cards(tmp_path):
+    deck = tmp_path / "corner.cir"
+    sim._write_xyce_deck(
+        deck_path=str(deck),
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib="/pdk/corner.lib",
+        point=_xyce_bundle_point(),
+        analysis={"kind": "op", "args": ""},
+        measurements_spec=[],
+    )
+    text = deck.read_text()
+    assert ".lib /pdk/corner.lib tt" in text
+    assert ".lib /pdk/corner.lib bjt_tt" in text
+
+
+def test_extract_xyce_version_from_log():
+    log = (
+        "*****\n***** Welcome to the Xyce(TM) Parallel Electronic Simulator\n"
+        "*****\n***** This is version XyceNF Release 7.10.0\n"
+        "***** Date: Tue Sep 22 12:10:20 PDT 2026\n"
+    )
+    assert sim._extract_xyce_version(log) == "7.10.0"
+    # The open-source (non-NORAD) build labels itself without the NF.
+    opensource_banner = "***** This is version Xyce Release 7.9\n"
+    assert sim._extract_xyce_version(opensource_banner) == "7.9"
+    assert sim._extract_xyce_version("no banner here") is None
+
+
+def test_parse_xyce_measurements():
+    # The exact shapes XyceNF 7.10.0 prints in its "Measure Functions"
+    # section: value lines with analysis-specific trailers, FAILED lines,
+    # and the summary lines around the section (which must not parse).
+    log = (
+        "***** Netlist sensitive analysis...\n"
+        "\n ***** Measure Functions ***** \n"
+        "\n"
+        "VMAX = 9.691320e-01 at time = 6.544640e-09\n"
+        "\n"
+        "VOUT_MID = 5.000000e-01 for AT = 2.500000e+00\n"
+        "\n"
+        "TPHL = 1.391548e-09 with targ = 3.641548e-09 and trig = 2.250000e-09\n"
+        "\n"
+        "TDEAD = FAILED with targ = not found and trig = not found\n"
+        "\n"
+        "Measure Start Time= 0.000000e+00\tMeasure End Time= 8.000000e-09\n"
+        "***** Total Simulation Solvers Run Time: 0.01 seconds\n"
+    )
+    values = sim._parse_xyce_measurements(log)
+    # Xyce upper-cases names; the parser lower-cases them for the
+    # case-insensitive lookup `_run_corner` performs.
+    assert values == {
+        "vmax": pytest.approx(9.691320e-01),
+        "vout_mid": pytest.approx(5.000000e-01),
+        "tphl": pytest.approx(1.391548e-09),
+    }
+    # A failed measurement is absent, never zero-parsed into a value.
+    assert "tdead" not in values
+    # Section-scoped: nothing outside "Measure Functions" parses.
+    assert sim._parse_xyce_measurements("Time= 1.0 V(a)=2.0") == {}
+
+
+def test_classify_xyce_diagnostics():
+    log = (
+        "Netlist error in file lib at or near line 3\n"
+        " Simulation aborted due to error.\n"
+    )
+    diagnostics = sim._classify_xyce_diagnostics(log)
+    codes = [d["code"] for d in diagnostics]
+    assert "netlist" in codes
+    assert "unknown" in codes
+    # All Xyce classifications start fatal; `_recovered_from_stepping` owns
+    # any downgrade (same rule as the ngspice path).
+    assert all(d["severity"] == "error" for d in diagnostics)
+    assert sim._classify_xyce_diagnostics("***** End of Xyce(TM) Simulation") == []
+
+
+def test_xyce_downgraded_singular_matrix_when_measurements_returned():
+    # Xyce's Amesos "numerically singular matrix, returning zero" narration
+    # can accompany a run that ultimately produced every measurement; the
+    # same recovery rule as ngspice's stepping narration applies.
+    assert sim._recovered_from_stepping(
+        [{"name": "v"}],
+        [{"name": "v", "value": 1.0, "status": "pass", "unit": None, "margin": None}],
+        "Netlist warning: Numerically singular matrix found by Amesos",
+        aborted_re=sim._XYCE_SIMULATION_ABORTED_RE,
+    )
+    # But never when a measurement is missing or the abort trailer fired.
+    assert not sim._recovered_from_stepping(
+        [{"name": "v"}],
+        [{"name": "v", "value": None, "status": "error", "unit": None, "margin": None}],
+        "Netlist warning: Numerically singular matrix found by Amesos",
+        aborted_re=sim._XYCE_SIMULATION_ABORTED_RE,
+    )
+    assert not sim._recovered_from_stepping(
+        [{"name": "v"}],
+        [{"name": "v", "value": 1.0, "status": "pass", "unit": None, "margin": None}],
+        "Simulation aborted due to error",
+        aborted_re=sim._XYCE_SIMULATION_ABORTED_RE,
+    )
 
 
 def test_run_sim_unsupported_backend_raises(tmp_path):
