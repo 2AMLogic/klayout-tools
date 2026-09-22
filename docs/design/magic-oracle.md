@@ -189,17 +189,22 @@ compared: `device.body_unverified` and the empty-device-class `topology`
 note describe `klt`'s own inline extraction, which the magic-fed side never
 runs, so they are asymmetric by construction.
 
-**One asymmetry is real and is documented rather than asserted away.**
-`klt lvs` reports the *same* widened-NMOS defect at different granularity
-depending on the request shape: the pre-extracted shape recognises the
-device pair and emits `device.property` (`w_um` 0.755 vs 0.65), downgrading
-the unmatched device/net entries behind it to warnings; the inline-extraction
-shape does not pair the device at all and emits `device.unmatched` +
-`net.unmatched` as errors. Both name the same NFET and the same two nets, so
-the pairing's claim holds — but the two shapes are not interchangeable in
-reporting granularity, and the tests compare the *identity* of the
-implicated objects across all entries rather than the severity bucket they
-landed in. Tracked separately in #2317.
+**The granularity asymmetry is resolved.** `klt lvs` used to report the same
+widened-NMOS defect at different granularity depending on the request shape:
+the pre-extracted shape recognised the device pair and emitted
+`device.property` (`w_um` 0.755 vs 0.65), downgrading the unmatched
+device/net entries behind it to warnings, while the inline-extraction shape
+did not pair the device at all and emitted `device.unmatched` +
+`net.unmatched` as errors. The root cause was `_degraded_param_pair`'s
+name comparisons being case-sensitive: the inline path's device class keeps
+the deck's verbatim spelling (`nfet`), while the SPICE-read reference side is
+upper-cased (`NFET`) by `NetlistSpiceReader`, so the pairing's
+`class_a.name != class_b.name` check silently declined every inline-shape
+pair before reaching any structural guard. Case-folding those comparisons
+(#2317) makes both request shapes report the identical `device.property`
+finding, naming the same NFET and the same two nets at the same granularity —
+the tests compare the *identity* of the implicated objects across all
+entries, and now the severity bucket they land in as well.
 
 **The adapter.** `magic_oracle.write_magic_lvs_netlist` renders a
 `MagicExtractResult` as SPICE `klt lvs` can read. It is a *format*

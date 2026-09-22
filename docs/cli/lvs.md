@@ -1000,6 +1000,25 @@ reported as-is, all at `severity: "error"`. Two corrupted devices in the same
 minimal cell also decline — nothing in the event stream says which layout
 device belongs to which reference device.
 
+The recovery applies identically to both `request.layout` shapes (issue
+#2317): the inline-extraction shape (`layout.file` + `layout.deck`) and the
+pre-extracted shape (`layout.netlist`) reach the comparer through different
+code paths but produce the same recovery. Every *name* the recovery compares
+— device class, terminal, parameter, net — is matched case-insensitively:
+SPICE names are case-insensitive and `NetlistSpiceReader` normalises them to
+upper case, so the pre-extracted shape's SPICE round-trip has always compared
+upper-cased names on both sides, while the inline shape has no round-trip and
+keeps the deck's registered spelling verbatim (`nfet`, `vsubs`) against an
+upper-cased reference side (`NFET`, `VSUBS`). An exact-name comparison
+therefore silently declined every inline-shape recovery (#2317), degrading
+the very same parameter defect to a plain `device.unmatched` +
+`net.unmatched` error cascade — losing the actionable `w_um`-style finding
+exactly on the shape a caller runs against a GDS. Case-folding is the
+SPICE-honest reading of "same name" (the same case-insensitive convention
+request-side device-class resolution already applies) and loosens nothing
+structural: the pairing is still proven by the terminal-by-terminal net
+correspondence, never by a name.
+
 The verdict itself is unaffected either way: `status` and the exit code come
 from `compare()`, which reports the mismatch in every one of these cases.
 
