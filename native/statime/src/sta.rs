@@ -578,7 +578,8 @@ mod tests {
     use crate::netlist::{CellInstance, Port, PortDirection};
 
     /// A 1x1 NLDM table that always interpolates to `delay_ns` regardless of
-    /// input slew / output load -- see `nldm::tests::single_row_or_column_table`
+    /// input slew / output load -- see
+    /// `native/nldm-interp/src/lib.rs`'s `tests::single_row_or_column_table`
     /// for why a single-point axis pins the result to the sole table entry.
     fn flat_table(delay_ns: f64) -> Table2D {
         Table2D {
