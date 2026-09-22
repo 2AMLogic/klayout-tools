@@ -22,7 +22,14 @@
     "the baseline was measured. 300s is a deliberately conservative first",
     "estimate for two checkouts + one uv sync + ~1.5s of generators (still",
     "half the 600s an unbudgeted job would inherit); re-derive it from real",
-    "timings at the next re-measure."
+    "timings at the next re-measure.",
+    "",
+    "'Tests (numpy cross-check)' (issue #2276) gets the same treatment as",
+    "the row above, for the same reasons: it did not exist at measure time,",
+    "it is the same two-checkouts + one uv sync shape plus a ~2s pytest",
+    "suite, and 300s is a deliberately conservative first estimate --",
+    "re-derive it from real timings at the next re-measure rather than",
+    "trusting this guess."
   ],
   "exclude_jobs": [
     "CI wall-clock budget"
@@ -44,7 +51,8 @@
     "Tests (Python 3.12)": 360,
     "Tests (Python 3.13)": 360,
     "klt verify Action smoke test": 120,
-    "Golden artifacts (hash seed + path varied)": 300
+    "Golden artifacts (hash seed + path varied)": 300,
+    "Tests (numpy cross-check)": 300
   },
   "baseline": {
     "measured_on": "2026-09-17",

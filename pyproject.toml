@@ -142,6 +142,44 @@ yield = [
 statime = [
     "klt-statime-native",
 ]
+# `numerical` (issue #2276): the full-strength numerical-oracle surface --
+# numpy as a *test-only* cross-check oracle for this repo's pure-Python
+# numerical code (the conjugate-gradient IR solver behind `klt power`,
+# `src/klayout_tools/ir_solver.py`, and `sim.py`'s Monte Carlo statistics).
+# It is NOT a runtime dependency and does not move the contract that
+# docstring itself states ("No numpy/scipy: klayout-tools's runtime
+# dependency set is deliberately just klayout/jsonschema"): nothing under
+# `src/klayout_tools/` imports numpy, and a PEP 735 dependency group is
+# never installed by a plain `pip install klayout-tools` -- it exists only
+# for checkouts that ask for it (`uv sync --group numerical`), same
+# checkout-local reasoning as the four Rust groups above.
+#
+# A dependency *group*, not a `[project.optional-dependencies]` extra,
+# on purpose: an extra advertises itself to end users installing the
+# package (`pip install klayout-tools[numerical]` would land in the wheel's
+# published metadata), while this oracle exists solely for this repo's own
+# cross-check suite (`tests/test_ir_solver_numpy_crosscheck.py`) and its
+# dedicated CI job (`test-numerical` in .github/workflows/ci.yml).
+# Everywhere numpy's absence is the *declared* state -- the test module
+# skips itself wholesale via `pytest.importorskip("numpy")`, and a
+# stdlib-only host is expected to see exactly that skip, never a failure
+# and never a silent false-pass. See
+# docs/guides/dependency-gated-ci.md for the full skip/refuse/fail
+# convention this group exists to serve.
+#
+# `>=2.2` with deliberately no upper cap. numpy 2.3 dropped Python 3.10
+# (this repo's `requires-python` floor), so 2.2.x is the newest line that
+# still resolves across the whole supported range 3.10-3.13 -- but capping
+# at `<2.3` would reach into the one place numpy already resolves in
+# `uv.lock` today (PyNEC's transitive dependency for the `mom-cross-
+# validation` extra: 2.4.6 on 3.11, 2.5.2 on >=3.12) and silently force a
+# downgrade there. The uncapped floor instead lets the universal lock keep
+# its per-interpreter markers exactly as they are: 2.2.x on 3.10 (where
+# this group is the only requester) and the existing 2.4.6/2.5.2 on 3.11+,
+# unchanged for every surface that already synced numpy.
+numerical = [
+    "numpy>=2.2",
+]
 
 [tool.uv.sources]
 klt-mom-native = { path = "native/mom" }
