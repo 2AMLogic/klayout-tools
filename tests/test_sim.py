@@ -3475,6 +3475,11 @@ def test_run_sim_invalid_max_workers_raises(tmp_path, bad_value):
 
 
 def test_default_max_workers_derives_from_cpu_count(monkeypatch):
+    # Pinned to "no host cap" (issue #2286) so the derived-default contract is
+    # asserted on its own terms even when the box running pytest exports
+    # `KLT_SIM_MAX_WORKERS` -- which is exactly what that feature asks a
+    # shared box to do.
+    monkeypatch.delenv(sim.MAX_WORKERS_ENV, raising=False)
     monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
     assert sim._default_max_workers() == 4
 
@@ -3483,6 +3488,317 @@ def test_default_max_workers_derives_from_cpu_count(monkeypatch):
 
     monkeypatch.setattr(sim.os, "cpu_count", lambda: None)
     assert sim._default_max_workers() == 1
+
+
+# --------------------------------------------------------------------------- #
+# Host-level worker cap: $KLT_SIM_MAX_WORKERS (issue #2286)
+# --------------------------------------------------------------------------- #
+
+
+def _recording_pool(monkeypatch):
+    """Record the `max_workers` the `local-parallel` backend actually hands
+    to its `ThreadPoolExecutor`, and return the dict it is recorded into."""
+    seen_workers = {}
+    real_pool = sim.ThreadPoolExecutor
+
+    class _RecordingPool(real_pool):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            seen_workers["max_workers"] = max_workers
+            super().__init__(*args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", _RecordingPool)
+    return seen_workers
+
+
+#: A stubbed `ngspice` log that satisfies `_PASSING_MEASUREMENT` below.
+_PASSING_LOG = (
+    "  Measurements for Transient Analysis\n\nvout                =  1.00000e+00\n"
+)
+_PASSING_MEASUREMENT = {
+    "name": "vout",
+    "spice": ".meas tran vout FIND v(out) AT=1u",
+    "limits": {"min": 0.5},
+}
+
+
+def _parallel_request(tmp_path, *, options=None, name="request.json", **extra):
+    _write_body(tmp_path)
+    body = {
+        "netlist": "body.spice",
+        "backend": "local-parallel",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        **extra,
+    }
+    if options is not None:
+        body["options"] = options
+    return _write_request(tmp_path, body, name=name)
+
+
+def test_host_max_workers_cap_unset_is_unchanged(tmp_path, monkeypatch, capsys):
+    # Acceptance criterion: unset -> behaviour identical to before #2286.
+    monkeypatch.delenv(sim.MAX_WORKERS_ENV, raising=False)
+    assert sim._host_max_workers_cap() is None
+
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
+    assert sim._default_max_workers() == 4
+    assert sim._resolve_max_workers(None) == 4
+    assert sim._resolve_max_workers(64) == 64
+
+    request = _parallel_request(tmp_path, options={"max_workers": 6})
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 6
+    assert sim.MAX_WORKERS_ENV not in capsys.readouterr().err
+
+
+def test_host_max_workers_cap_empty_string_means_unset(monkeypatch):
+    # `KLT_SIM_MAX_WORKERS=` (an empty entry in a shell env file) is "no cap",
+    # not a malformed cap -- see `_host_max_workers_cap`.
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
+    for blank in ("", "   "):
+        monkeypatch.setenv(sim.MAX_WORKERS_ENV, blank)
+        assert sim._host_max_workers_cap() is None
+        assert sim._default_max_workers() == 4
+        assert sim._resolve_max_workers(64) == 64
+
+
+def test_host_max_workers_cap_bounds_the_derived_default(monkeypatch):
+    # Set, with no explicit max_workers anywhere: the CPU-derived default is
+    # bounded by the cap.
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
+
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "2")
+    assert sim._host_max_workers_cap() == 2
+    assert sim._default_max_workers() == 2
+    assert sim._resolve_max_workers(None) == 2
+
+    # A cap *above* the derived default leaves it alone -- the cap is an upper
+    # bound, never a floor that widens the pool.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "16")
+    assert sim._default_max_workers() == 4
+    assert sim._resolve_max_workers(None) == 4
+
+
+def test_host_max_workers_cap_bounds_default_pool_end_to_end(
+    tmp_path, monkeypatch, capsys
+):
+    # The same thing through `run_sim`, which is the path the CLI, a library
+    # caller, and this test suite's own simulation fixtures all share.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 64)
+    request = _parallel_request(tmp_path)
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 1
+    # Nobody asked for a specific number here, so nothing is "clamped" and no
+    # notice is owed -- see `_default_max_workers`.
+    assert sim.MAX_WORKERS_ENV not in capsys.readouterr().err
+
+
+def test_host_max_workers_cap_leaves_request_below_cap_alone(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "4")
+    request = _parallel_request(tmp_path, options={"max_workers": 2})
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 2
+    assert sim.MAX_WORKERS_ENV not in capsys.readouterr().err
+
+    # An exactly-at-the-cap request is likewise untouched.
+    assert sim._resolve_max_workers(4) == 4
+
+
+def test_host_max_workers_cap_clamps_request_above_cap(tmp_path, monkeypatch, capsys):
+    # Acceptance criterion: clamped, not errored, and says so once.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "2")
+    request = _parallel_request(tmp_path, options={"max_workers": 16})
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 2
+    assert report["status"] != "error"
+
+    captured = capsys.readouterr()
+    notices = [
+        line for line in captured.err.splitlines() if sim.MAX_WORKERS_ENV in line
+    ]
+    assert len(notices) == 1
+    assert "max_workers=16" in notices[0]
+    assert f"{sim.MAX_WORKERS_ENV}=2" in notices[0]
+    assert "clamping" in notices[0]
+    # stderr only -- the report JSON on stdout is unaffected.
+    assert sim.MAX_WORKERS_ENV not in captured.out
+
+
+def test_host_max_workers_cap_clamps_cli_flag_above_cap(tmp_path, monkeypatch, capsys):
+    # The `--max-workers` flag path (`klt sim ... --max-workers N`) is clamped
+    # the same way, and the run still succeeds (exit 0, not an error exit).
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
+    request = _parallel_request(
+        tmp_path,
+        options={"max_workers": 2},
+        measurements=[_PASSING_MEASUREMENT],
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_PASSING_LOG)
+    seen_workers = _recording_pool(monkeypatch)
+
+    exit_code = main(["sim", str(request), "--max-workers", "8", "--format", "json"])
+
+    assert exit_code == 0
+    assert seen_workers["max_workers"] == 1
+    captured = capsys.readouterr()
+    assert (
+        len([line for line in captured.err.splitlines() if sim.MAX_WORKERS_ENV in line])
+        == 1
+    )
+    # The JSON envelope on stdout still parses -- the notice never leaks into it.
+    json.loads(captured.out)
+
+
+def test_host_max_workers_cap_notice_is_once_per_sweep(tmp_path, monkeypatch, capsys):
+    # Deduped within a sweep (`hosts > 1` re-enters `_run_local_parallel` once
+    # per shard), but a *second* sweep in the same process is told again.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "2")
+    request = _parallel_request(tmp_path, options={"max_workers": 16})
+    _stub_subprocess_run(monkeypatch)
+
+    sim._reset_worker_cap_notices()
+    assert sim._resolve_max_workers(16) == 2
+    assert sim._resolve_max_workers(16) == 2
+    assert (
+        len(
+            [
+                line
+                for line in capsys.readouterr().err.splitlines()
+                if sim.MAX_WORKERS_ENV in line
+            ]
+        )
+        == 1
+    )
+
+    sim.run_sim(str(request))
+    first = capsys.readouterr().err
+    sim.run_sim(str(request))
+    second = capsys.readouterr().err
+
+    assert sim.MAX_WORKERS_ENV in first
+    assert sim.MAX_WORKERS_ENV in second
+
+
+def test_host_max_workers_cap_applies_to_sharded_local_parallel(
+    tmp_path, monkeypatch, capsys
+):
+    # `--hosts N` fans the unit list across N in-process shards, each of which
+    # builds its own `local-parallel` pool: every shard is capped, and the
+    # caller is still told exactly once.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "corners": {"temperature_c": [10, 20, 30, 40]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"max_workers": 8},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    seen_workers = []
+    real_pool = sim.ThreadPoolExecutor
+
+    class _RecordingPool(real_pool):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            seen_workers.append(max_workers)
+            super().__init__(*args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", _RecordingPool)
+
+    report = sim.run_sim(str(request), hosts=2)
+
+    assert report["corner_count"] == 4
+    # Every `local-parallel` pool built during the sweep is capped. (The shard
+    # fan-out itself uses a pool too; it is sized by `hosts`, not by the
+    # worker cap, so only assert that no pool exceeded the cap for workers.)
+    assert seen_workers.count(1) >= 2
+    assert 8 not in seen_workers
+    assert (
+        len(
+            [
+                line
+                for line in capsys.readouterr().err.splitlines()
+                if sim.MAX_WORKERS_ENV in line
+            ]
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "1.5", "many", "0x4", "2 workers"])
+def test_invalid_host_max_workers_cap_is_an_application_error(
+    tmp_path, monkeypatch, bad_value
+):
+    # Acceptance criterion: a `KLT_SIM_MAX_WORKERS=0`/non-integer value is a
+    # hard error, deliberately consistent with `options.max_workers < 1` --
+    # silently degrading to "uncapped" would defeat the point of the cap.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, bad_value)
+    with pytest.raises(sim.SimError, match=sim.MAX_WORKERS_ENV):
+        sim._host_max_workers_cap()
+
+    request = _parallel_request(tmp_path)
+    _stub_subprocess_run(monkeypatch)
+    with pytest.raises(sim.SimError, match=sim.MAX_WORKERS_ENV):
+        sim.run_sim(str(request))
+
+
+def test_invalid_host_max_workers_cap_fails_before_dispatch(tmp_path, monkeypatch):
+    # The cap is validated up front, so a malformed value never lets a single
+    # corner start (and never surfaces from inside a shard thread).
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "0")
+    request = _parallel_request(tmp_path)
+
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):  # pragma: no cover - guard
+        calls.append(cmd)
+        raise AssertionError("no corner should be dispatched with a malformed cap")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    with pytest.raises(sim.SimError, match="must be a positive integer"):
+        sim.run_sim(str(request))
+    assert calls == []
+
+
+def test_invalid_host_max_workers_cap_is_a_clean_cli_error(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "nope")
+    request = _parallel_request(tmp_path)
+    _stub_subprocess_run(monkeypatch)
+
+    exit_code = main(["sim", str(request)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert (
+        f"klt sim: {sim.MAX_WORKERS_ENV} must be a positive integer (got 'nope')"
+        in captured.err
+    )
+    assert captured.out == ""
 
 
 # --------------------------------------------------------------------------- #

@@ -57,6 +57,7 @@ import os
 import re
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -428,6 +429,22 @@ DEFAULT_MC_QUANTILES = (5.0, 50.0, 95.0)
 #: conservative estimate, not a measured value.
 _ASSUMED_THREADS_PER_NGSPICE = 8
 
+#: Host-level upper bound on the ``local-parallel`` worker pool (issue #2286),
+#: read from the environment rather than from any request document: the box a
+#: sweep happens to land on is a property of the *host*, not of the design
+#: being simulated, and the callers that oversubscribe a shared box (this
+#: package's own test suite, agent-driven runs) are exactly the ones that never
+#: pass ``--max-workers``. Set it once in the shared box's environment and
+#: every entry point -- CLI, library call, ``pytest`` -- is bounded by it. See
+#: :func:`_host_max_workers_cap` and docs/cli/sim.md's "Useful on a
+#: workstation, harmful on a shared worker" section.
+MAX_WORKERS_ENV = "KLT_SIM_MAX_WORKERS"
+
+#: Clamp notices already printed for the sweep in progress, plus its guard --
+#: see :func:`_worker_cap_notice`/:func:`_reset_worker_cap_notices`.
+_WORKER_CAP_NOTICES_EMITTED: set[str] = set()
+_WORKER_CAP_NOTICE_LOCK = threading.Lock()
+
 #: Recognised ``.meas`` failure line, e.g.
 #: `` .meas tran vout_high find v(out) when v(out)=5 failed!``
 _MEAS_FAILED_RE = re.compile(
@@ -623,6 +640,19 @@ def run_sim(
     process is itself internally multi-threaded, so one worker per CPU
     oversubscribes a small box immediately. Must be a positive integer when
     given explicitly; a non-positive value raises :class:`SimError`.
+
+    A host-level ``$KLT_SIM_MAX_WORKERS`` cap (:data:`MAX_WORKERS_ENV`, issue
+    #2286), when set in the environment, is an upper bound on the pool
+    regardless of how it was sized: the effective worker count is
+    ``min(requested_or_default, cap)``. A request/flag above the cap is
+    clamped, not refused, with a one-line stderr notice per sweep; unset means
+    exactly the pre-#2286 behaviour. The cap itself must be a positive integer
+    -- a malformed value raises :class:`SimError` here, up front, matching how
+    an explicit ``options.max_workers`` is validated. Because it is read from
+    the environment rather than from the request, it bounds library callers
+    and this package's own test suite the same way it bounds the CLI. See
+    docs/cli/sim.md's "Useful on a workstation, harmful on a shared worker"
+    section.
 
     ``hosts`` shards the expanded unit list (corners x Monte Carlo samples)
     into that many contiguous slices and merges the per-shard reports back
@@ -845,6 +875,15 @@ def run_sim(
             or max_workers < 1
         ):
             raise SimError("options.max_workers must be a positive integer")
+    # Host worker cap (issue #2286): validated here, up front, so a malformed
+    # `$KLT_SIM_MAX_WORKERS` fails the sweep with a clean application error
+    # before any corner is dispatched -- rather than surfacing from inside a
+    # `hosts > 1` shard thread once work is already in flight. The value
+    # itself is re-read (never cached) where the pool is actually sized, in
+    # `_resolve_max_workers`. Resetting the notice dedupe here scopes "say so
+    # once" to this sweep rather than to the process.
+    _host_max_workers_cap()
+    _reset_worker_cap_notices()
 
     budget_s = budget_s if budget_s is not None else options.get("wall_clock_budget_s")
     if budget_s is not None:
@@ -2159,6 +2198,69 @@ def _run_local(
     return corners, engine_version, None
 
 
+def _host_max_workers_cap() -> int | None:
+    """The host-level ``local-parallel`` worker cap, or ``None`` when unset.
+
+    Read from ``$KLT_SIM_MAX_WORKERS`` (:data:`MAX_WORKERS_ENV`) on every
+    call -- never cached at import time -- so a library caller that sets the
+    variable between two :func:`run_sim` invocations gets what it asked for,
+    and so a test can set/clear it (``monkeypatch.setenv``/``delenv``)
+    without any reset hook. Unset (or set to the empty/whitespace-only
+    string, which is what ``KLT_SIM_MAX_WORKERS=`` in a shell env file
+    produces) means "no cap": behaviour is then byte-identical to before
+    issue #2286.
+
+    Applies to whichever box is actually running the worker pool: the
+    ``remote``/``batch`` backends re-invoke ``klt sim --backend
+    local-parallel`` on the provisioned instance, where *that* host's own
+    environment decides the cap -- the caller's cap describes the caller's
+    box and deliberately does not travel with the job.
+
+    A value that is not a positive integer is an **application error**
+    (:class:`SimError`, exit 1), deliberately matching how ``run_sim``
+    validates an explicit ``options.max_workers``/``--max-workers`` -- a
+    typo'd cap that silently degraded to "uncapped" would defeat the entire
+    point of setting it on a shared box.
+    """
+    raw = os.environ.get(MAX_WORKERS_ENV)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        cap = int(raw.strip(), 10)
+    except ValueError:
+        cap = 0
+    if cap < 1:
+        raise SimError(f"{MAX_WORKERS_ENV} must be a positive integer (got {raw!r})")
+    return cap
+
+
+def _worker_cap_notice(message: str) -> None:
+    """Print a clamp notice to stderr at most once per sweep.
+
+    Deduplicated on the message itself (reset per :func:`run_sim` call by
+    :func:`_reset_worker_cap_notices`) because ``hosts > 1`` re-enters
+    :func:`_run_local_parallel` once per shard, from several threads at
+    once -- the caller asked for one oversized pool, so they get one notice,
+    not one per shard. stderr rather than the report body so a caller piping
+    ``--format json`` to a file still sees it on the terminal, the same
+    convention ``_provenance._warn_klayout_version_mismatch`` follows.
+    """
+    with _WORKER_CAP_NOTICE_LOCK:
+        if message in _WORKER_CAP_NOTICES_EMITTED:
+            return
+        _WORKER_CAP_NOTICES_EMITTED.add(message)
+    print(message, file=sys.stderr)
+
+
+def _reset_worker_cap_notices() -> None:
+    """Clear the per-sweep clamp-notice dedupe set (see
+    :func:`_worker_cap_notice`). Called once at the top of :func:`run_sim`, so
+    a long-lived process running several sweeps is told about the clamp once
+    per sweep rather than once per process."""
+    with _WORKER_CAP_NOTICE_LOCK:
+        _WORKER_CAP_NOTICES_EMITTED.clear()
+
+
 def _default_max_workers() -> int:
     """Conservative default worker count for the ``local-parallel`` backend.
 
@@ -2170,9 +2272,41 @@ def _default_max_workers() -> int:
     shared/CI box should still set ``options.max_workers``/``--max-workers``
     explicitly (see docs/cli/sim.md's shared-worker warning); ``local``
     remains the default backend everywhere for exactly that reason.
+
+    A host-level ``$KLT_SIM_MAX_WORKERS`` cap (issue #2286), when set, bounds
+    this derived default too -- silently, since nobody asked for a specific
+    number here. The clamp notice is reserved for the case where a caller
+    *did* ask (:func:`_resolve_max_workers`).
     """
     cpu_count = os.cpu_count() or 1
-    return max(1, cpu_count // _ASSUMED_THREADS_PER_NGSPICE)
+    default = max(1, cpu_count // _ASSUMED_THREADS_PER_NGSPICE)
+    cap = _host_max_workers_cap()
+    return default if cap is None else min(default, cap)
+
+
+def _resolve_max_workers(max_workers: int | None) -> int:
+    """Final ``local-parallel`` pool size: ``min(requested_or_default, cap)``.
+
+    The single place both worker-count paths converge (issue #2286): the
+    "nothing given" default from :func:`_default_max_workers` (already capped
+    there) and an explicit ``options.max_workers``/``--max-workers``, which
+    is clamped **here**. An over-cap request is clamped rather than refused --
+    the caller's number is a preference about this sweep, the cap is a fact
+    about the box, and failing a sweep outright over a preference would be a
+    worse outcome than running it slightly slower -- but the clamp is never
+    silent: see :func:`_worker_cap_notice`.
+    """
+    if max_workers is None:
+        return _default_max_workers()
+    cap = _host_max_workers_cap()
+    if cap is not None and max_workers > cap:
+        _worker_cap_notice(
+            f"klt: notice: max_workers={max_workers} exceeds this host's "
+            f"{MAX_WORKERS_ENV}={cap} cap; clamping the local-parallel worker "
+            f"pool to {cap}."
+        )
+        return cap
+    return max_workers
 
 
 def _run_local_parallel(
@@ -2219,6 +2353,16 @@ def _run_local_parallel(
     (only ``remote`` reads it) and ignored; the third return value is always
     ``None`` here.
 
+    **Pool size and the host cap.** ``max_workers`` (the request's
+    ``options.max_workers``, or ``--max-workers``) sizes the pool; when it is
+    ``None`` the conservative CPU-derived default from
+    :func:`_default_max_workers` is used instead. Either way the host-level
+    ``$KLT_SIM_MAX_WORKERS`` cap, when set, is an upper bound on the result
+    (issue #2286) -- a request for more workers than the cap is **clamped,
+    not refused**, with a one-line stderr notice per sweep. See
+    :func:`_resolve_max_workers` and docs/cli/sim.md's "Useful on a
+    workstation, harmful on a shared worker" section.
+
     ``deadline``/``initial_ppid`` (issue #473): unlike the naive "submit
     everything up front" the pre-#473 implementation used (which lets the
     pool's own internal queue keep draining corners regardless of how long
@@ -2240,9 +2384,7 @@ def _run_local_parallel(
     :func:`_unrun_corner_report` with that code/message/estimate.
     """
     del request  # unused: local-parallel needs no request-level context
-    resolved_workers = (
-        max_workers if max_workers is not None else _default_max_workers()
-    )
+    resolved_workers = _resolve_max_workers(max_workers)
 
     total = len(corner_points)
     results: list[tuple[dict[str, Any], str | None] | None] = [None] * total

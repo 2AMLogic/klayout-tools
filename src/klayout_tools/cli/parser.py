@@ -465,7 +465,10 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
             "the request's `options.max_workers`, or a conservative estimate "
             "derived from the local CPU count); overrides the request field "
             "when given. Ignored by `local`. Useful on a workstation, "
-            "harmful on a shared/CI box -- see docs/cli/sim.md."
+            "harmful on a shared/CI box -- on a shared box set "
+            "$KLT_SIM_MAX_WORKERS once in the environment, which caps this "
+            "flag (a larger value is clamped to the cap, with a notice, not "
+            "refused) and the derived default alike. See docs/cli/sim.md."
         ),
     )
     sim_parser.add_argument(
