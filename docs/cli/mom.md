@@ -1090,6 +1090,18 @@ are exhaustive forever.
   Phase 2c): why NEC2++, the license-handling (subprocess-only, never
   embedded — GPL-3.0), the benchmark, the tolerance/metric definitions, and
   the measured agreement.
+- [`docs/design/fastcap-oracle.md`](../design/fastcap-oracle.md) —
+  cross-validation of the **capacitance matrix** above against FastCap 2.0
+  ([#2015](https://github.com/2AMLogic/klayout-tools/issues/2015), pairing #4
+  of oracle tracking issue
+  [#2007](https://github.com/2AMLogic/klayout-tools/issues/2007)): an
+  independently implemented MoM capacitance solver — the very program
+  `native/mom/src/solver.rs` cites as the method it implements — run over the
+  same geometry and the same panel set. Why FastCap rather than Palace, the
+  measured agreement (0.17% on a coupled-line pair), where the two solvers
+  disagree most and why, and the declared shared surface. The executable form
+  is `tests/test_mom_capacitance_oracle.py`, provisioned by
+  `scripts/install-fastcap.sh`.
 - [`docs/design/mom-iterative-solver.md`](../design/mom-iterative-solver.md) —
   the iterative (preconditioned Conjugate Gradient) solve step
   ([#799](https://github.com/2AMLogic/klayout-tools/issues/799)): why CG over
