@@ -119,6 +119,15 @@ fn self_term_ln1p_sqrt2() -> f64 {
 /// -- sits far below the threshold. Raising it would only spend fill time
 /// on accuracy the solve does not need; the sensitivity is pinned by
 /// `far_field_pairs_agree_with_the_centroid_kernel` below.
+///
+/// The hard cutoff's own artifact -- the two kernels disagreeing by
+/// ~0.1-0.5% for a pair sitting exactly at the boundary -- is measured,
+/// bounded, and accepted rather than blended away:
+/// `kernel_disagreement_at_the_threshold_stays_under_the_documented_
+/// artifact_band` pins the entry-level mismatch, and
+/// `threshold_perturbation_moves_the_solution_far_less_than_the_agreement_
+/// band` pins the solved matrix's insensitivity to walking pairs across the
+/// boundary (#2323, with the numbers in `docs/design/mom-validation.md`).
 const NEAR_FIELD_CIRCUMRADII_MULTIPLE: f64 = 3.0;
 
 /// Gauss-Legendre 4-point rule on `[-1, 1]` (nodes ascending; exact for
@@ -160,8 +169,17 @@ fn norm3(v: &[f64; 3]) -> f64 {
 /// within `NEAR_FIELD_CIRCUMRADII_MULTIPLE` of each other, i.e. when the
 /// centroid separation is no longer large compared to the panel sizes.
 fn panels_are_near_field(a: &Panel, b: &Panel) -> bool {
+    panels_are_near_field_within(a, b, NEAR_FIELD_CIRCUMRADII_MULTIPLE)
+}
+
+/// [`panels_are_near_field`] at an arbitrary threshold multiple. The
+/// production predicate is this function at the constant; keeping the
+/// parameterised form here (not behind `#[cfg(test)]`) is what guarantees
+/// the boundary/sensitivity tests below exercise the *same* comparison the
+/// production fill makes, not a test-side copy of it (#2323).
+fn panels_are_near_field_within(a: &Panel, b: &Panel, multiple: f64) -> bool {
     distance(&a.center, &b.center)
-        < NEAR_FIELD_CIRCUMRADII_MULTIPLE * (panel_circumradius_um(a) + panel_circumradius_um(b))
+        < multiple * (panel_circumradius_um(a) + panel_circumradius_um(b))
 }
 
 /// Map `(xi, eta)` in `[-1, 1]^2` onto the panel through its side vectors:
@@ -1138,6 +1156,387 @@ mod tests {
             * (panel_source_potential_average(&a.center, &far, &GL4_NODES, &GL4_WEIGHTS)
                 + panel_source_potential_average(&far.center, &a, &GL4_NODES, &GL4_WEIGHTS));
         assert_relative_eq!(centroid, quadrature, max_relative = 1e-3);
+    }
+
+    // --- the near/far boundary itself (#2323) ---
+
+    #[test]
+    fn near_field_predicate_is_strictly_less_at_the_threshold() {
+        // The boundary the split switches kernels on: a pair whose centroid
+        // separation sits exactly at `3 * (r_i + r_j)` is *far* field (the
+        // comparison is strict `<`), a hair inside is near, a hair outside
+        // is far. Pinning the three sides keeps the cutoff's semantics (and
+        // its strictness) deliberate rather than accidental -- and keeps a
+        // future `<=`/`>` flip or threshold change from landing silently.
+        let a = square_panel([0.0, 0.0, 0.0], 1.0, 0);
+        let radius_sum = panel_circumradius_um(&a) * 2.0;
+        let threshold = NEAR_FIELD_CIRCUMRADII_MULTIPLE * radius_sum;
+
+        // On-axis placement makes the centroid distance `sqrt(t^2)`, which
+        // lands on `t` to well under a relative ulp-scale nudge of t used
+        // below; assert the placement really is at the boundary before
+        // asserting what side of it the pair lands on.
+        let at = square_panel([0.0, 0.0, threshold], 1.0, 1);
+        assert_relative_eq!(
+            distance(&a.center, &at.center),
+            threshold,
+            max_relative = 1e-12
+        );
+
+        // Relative 1e-9 nudges: far tighter than anything a mesh refinement
+        // could land a pair on, far looser than float noise in `distance`.
+        let nudge = 1.0 - 1e-9;
+        let inside = square_panel([0.0, 0.0, threshold * nudge], 1.0, 1);
+        assert!(
+            panels_are_near_field(&a, &inside),
+            "a pair a relative 1e-9 inside the threshold must be near field"
+        );
+        assert!(
+            !panels_are_near_field(&a, &at),
+            "a pair exactly at the threshold is far field: the comparison is \
+             strict `<`"
+        );
+        let outside = square_panel([0.0, 0.0, threshold / nudge], 1.0, 1);
+        assert!(
+            !panels_are_near_field(&a, &outside),
+            "a pair a relative 1e-9 outside the threshold must be far field"
+        );
+    }
+
+    /// Pair shapes representative of what the discretiser actually emits
+    /// (see `panel_pair_quadrature_matches_high_order_reference` for the
+    /// two canonical ones), each placed with its centroid separation at
+    /// exactly `d = 3 * (r_i + r_j)` -- the boundary where the fill
+    /// switches kernels. Returns `(label, a, b)`.
+    fn boundary_pair_fixtures() -> Vec<(&'static str, Panel, Panel)> {
+        let s = 1.0_f64;
+        let r_sq = 0.5 * (s * s + s * s).sqrt(); // circumradius of a unit square
+
+        // Facing coaxial squares (the parallel-plate pair), gap = threshold.
+        let facing_gap = NEAR_FIELD_CIRCUMRADII_MULTIPLE * 2.0 * r_sq;
+        // Coplanar squares with an edge gap putting the centroids on the
+        // threshold (the coupled-line/in-plate neighbour pair).
+        let coplanar_gap = NEAR_FIELD_CIRCUMRADII_MULTIPLE * 2.0 * r_sq - s;
+
+        vec![
+            (
+                "facing coaxial squares",
+                square_panel([0.0, 0.0, 0.0], s, 0),
+                square_panel([0.0, 0.0, facing_gap], s, 1),
+            ),
+            (
+                "coplanar edge gap",
+                square_panel([0.0, 0.0, 0.0], s, 0),
+                square_panel([s + coplanar_gap, 0.0, 0.0], s, 1),
+            ),
+            (
+                "coplanar diagonal",
+                square_panel([0.0, 0.0, 0.0], s, 0),
+                square_panel(
+                    [
+                        NEAR_FIELD_CIRCUMRADII_MULTIPLE * 2.0 * r_sq / std::f64::consts::SQRT_2,
+                        NEAR_FIELD_CIRCUMRADII_MULTIPLE * 2.0 * r_sq / std::f64::consts::SQRT_2,
+                        0.0,
+                    ],
+                    s,
+                    1,
+                ),
+            ),
+            (
+                "perpendicular (wall/floor)",
+                Panel {
+                    center: [0.0, 0.0, 0.0],
+                    area_um2: s * s,
+                    conductor_index: 0,
+                    side_vectors: [[s, 0.0, 0.0], [0.0, 0.0, s]],
+                },
+                square_panel(
+                    [0.0, NEAR_FIELD_CIRCUMRADII_MULTIPLE * 2.0 * r_sq, 0.0],
+                    s,
+                    1,
+                ),
+            ),
+            (
+                "unequal sizes 2:1 facing",
+                square_panel([0.0, 0.0, 0.0], s, 0),
+                square_panel(
+                    [
+                        0.0,
+                        0.0,
+                        NEAR_FIELD_CIRCUMRADII_MULTIPLE * (r_sq + r_sq * 2.0),
+                    ],
+                    2.0 * s,
+                    1,
+                ),
+            ),
+        ]
+    }
+
+    #[test]
+    fn kernel_disagreement_at_the_threshold_stays_under_the_documented_artifact_band() {
+        // #2323's measurement, kept as a gate: the hard kernel switch leaves
+        // an entry-level discontinuity at the boundary -- the quadrature
+        // kernel and the centroid kernel are different approximations of the
+        // same potential coefficient, and they do not agree exactly at any
+        // finite mesh resolution. Measured over these boundary pair shapes
+        // (equal and 2:1 sizes, facing / coplanar / diagonal / perpendicular
+        // orientations): 0.11%-0.51%, worst for the unequal facing pair,
+        // ~0.23% for the equal-size edge-gap pair the issue probed. The
+        // worst sits ~6x inside the FastCap oracle's 3% agreement band (see
+        // docs/design/mom-validation.md's #2323 section). This pins it so
+        // it cannot grow silently: a future kernel or threshold change that
+        // worsens the boundary mismatch fails here.
+        let mut worst = 0.0_f64;
+        let mut worst_label = "";
+        for (label, a, b) in boundary_pair_fixtures() {
+            // The fixture must sit *at* the boundary. Not asserted as
+            // literally outside: for the diagonal placement the centroid
+            // distance is `sqrt((t/sqrt(2))^2 * 2)`, which can round one
+            // ulp below `t` -- a hair inside. A relative 1e-9 window is
+            // ~4 ulps wide here and is what "at the boundary" means for a
+            // discontinuity measurement. (The exact strict-`<` semantics
+            // are pinned by
+            // `near_field_predicate_is_strictly_less_at_the_threshold`.)
+            let separation = distance(&a.center, &b.center);
+            let boundary = NEAR_FIELD_CIRCUMRADII_MULTIPLE
+                * (panel_circumradius_um(&a) + panel_circumradius_um(&b));
+            assert!(
+                (separation - boundary).abs() < 1e-9 * boundary,
+                "{label}: fixture is not at the threshold ({separation} vs \
+                 {boundary})"
+            );
+            let centroid = 1.0 / distance(&a.center, &b.center);
+            let quadrature = panel_pair_near_field_kernel(&a, &b);
+            let relative_gap = ((quadrature - centroid) / centroid).abs();
+            println!(
+                "{label}: centroid {centroid:.9} vs quadrature {quadrature:.9} \
+                 (rel gap {:.4}%)",
+                relative_gap * 100.0
+            );
+            if relative_gap > worst {
+                worst = relative_gap;
+                worst_label = label;
+            }
+        }
+        println!(
+            "worst boundary kernel disagreement: {:.4}% ({worst_label})",
+            worst * 100.0
+        );
+        assert!(
+            worst < 6e-3,
+            "boundary kernel disagreement grew to {:.4}% (worst shape: \
+             {worst_label}); the documented artifact band is 0.6% -- see \
+             docs/design/mom-validation.md (#2323)",
+            worst * 100.0
+        );
+    }
+
+    /// Builds the potential matrix exactly like
+    /// [`build_potential_matrix_with_kernel`] but with the near-field
+    /// threshold moved to `multiple` -- the ±20%-threshold knob the
+    /// sensitivity test below measures with.
+    fn build_potential_matrix_with_near_multiple(
+        panels: &[Panel],
+        eps: f64,
+        multiple: f64,
+    ) -> DMatrix<f64> {
+        let n = panels.len();
+        let ln1p_sqrt2 = self_term_ln1p_sqrt2();
+        let greens = 1.0 / (4.0 * std::f64::consts::PI * eps);
+        let mut p = DMatrix::<f64>::zeros(n, n);
+        for i in 0..n {
+            p[(i, i)] = ln1p_sqrt2 / (std::f64::consts::PI * eps * panels[i].area_um2.sqrt());
+            for j in (i + 1)..n {
+                let r = if panels_are_near_field_within(&panels[i], &panels[j], multiple) {
+                    panel_pair_near_field_kernel(&panels[i], &panels[j])
+                } else {
+                    1.0 / distance(&panels[i].center, &panels[j].center)
+                };
+                let entry = greens * r;
+                p[(i, j)] = entry;
+                p[(j, i)] = entry;
+            }
+        }
+        p
+    }
+
+    /// Solves the capacitance matrix from a pre-built potential matrix --
+    /// the same pipeline [`solve_capacitance_matrix_ff_with_stats`] runs,
+    /// test-visible so the threshold-sensitivity test can swap the fill.
+    fn solve_from_matrix(
+        panels: &[Panel],
+        conductor_count: usize,
+        p: &DMatrix<f64>,
+    ) -> Vec<Vec<f64>> {
+        let rhs = build_rhs(panels, conductor_count);
+        let (charge, _stats) = pcg_solve(p, &rhs, ITERATIVE_REL_TOL, ITERATIVE_MAX_ITER)
+            .expect("threshold-sensitivity solve");
+        assemble_capacitance_matrix_ff(panels, conductor_count, &charge).unwrap()
+    }
+
+    #[test]
+    fn threshold_perturbation_moves_the_solution_far_less_than_the_agreement_band() {
+        // #2323's materiality measurement, kept as a gate: move the
+        // near-field threshold ±20% (3.0 -> 2.4 / 3.6), forcing every panel
+        // pair within that band of the boundary to switch kernels, and
+        // compare the *solved* capacitance matrices. If walking pairs across
+        // the boundary moved any aggregate value materially, the
+        // discontinuity would need smoothing rather than documenting. It
+        // does not: measured on the flat-plate and coupled-line fixtures,
+        // every entry moves orders of magnitude less than the FastCap
+        // oracle's 3% band (docs/design/mom-validation.md's "#2323"
+        // section). 0.3% asserted = 10% of the oracle band. This default
+        // gate runs at 1.0 um panels (inside the oracle's refinement band);
+        // `threshold_perturbation_report` is the 0.5 um release-mode
+        // companion measurement at the oracle's own operating point.
+        let eps_r = 3.9;
+        let eps = EPS0_SI * eps_r;
+        let fixtures: Vec<(&str, Vec<ConductorRequest>)> = vec![
+            (
+                "parallel plates 10x10 um, 1 um gap, 1.0 um panels",
+                vec![plate("top", 1.0), plate("bottom", 0.0)],
+            ),
+            (
+                "coupled lines 20x2x0.6 um, 1 um gap, 1.0 um panels",
+                vec![
+                    box_conductor("a", 0.0, 0.0, 20.0, 2.0, 0.0, 0.6),
+                    box_conductor("b", 0.0, 3.0, 20.0, 5.0, 0.0, 0.6),
+                ],
+            ),
+        ];
+        for (label, conductors) in &fixtures {
+            let worst =
+                threshold_perturbation_worst_entry_movement(conductors, 1.0, eps, &mut (0, 0));
+            println!("{label}: worst solved-entry movement {:.4}%", worst * 100.0);
+            assert!(
+                worst < 3e-3,
+                "{label}: moving the near-field threshold ±20% moved a solved \
+                 capacitance entry by {:.4}% -- the boundary \
+                 discontinuity is material after all; it needs smoothing, \
+                 not documenting (docs/design/mom-validation.md #2323)",
+                worst * 100.0
+            );
+        }
+    }
+
+    /// The ±20%-threshold measurement core shared by the default gate above
+    /// and the release-mode report below: solve one fixture at threshold
+    /// multiples 2.4 / 3.0 / 3.6 and return the worst solved-entry movement
+    /// the ±20% perturbation causes, filling `switches` with how many panel
+    /// pairs each direction of the perturbation walks across the boundary.
+    fn threshold_perturbation_worst_entry_movement(
+        conductors: &[ConductorRequest],
+        panel_size_um: f64,
+        eps: f64,
+        switches: &mut (usize, usize),
+    ) -> f64 {
+        let panels = discretize(conductors, panel_size_um).unwrap();
+        let k = conductors.len();
+        let nominal = solve_from_matrix(
+            &panels,
+            k,
+            &build_potential_matrix_with_near_multiple(&panels, eps, 3.0),
+        );
+        *switches = (0, 0);
+        for i in 0..panels.len() {
+            for j in (i + 1)..panels.len() {
+                let (a, b) = (&panels[i], &panels[j]);
+                // Near at the nominal 3.0 but far once the threshold drops
+                // to 2.4 (ratio in [2.4, 3.0)) ...
+                if panels_are_near_field(a, b) && !panels_are_near_field_within(a, b, 2.4) {
+                    switches.0 += 1;
+                }
+                // ... and far at the nominal but near once it rises to 3.6
+                // (ratio in [3.0, 3.6)).
+                if !panels_are_near_field_within(a, b, 3.0)
+                    && panels_are_near_field_within(a, b, 3.6)
+                {
+                    switches.1 += 1;
+                }
+            }
+        }
+        let mut worst = 0.0_f64;
+        for threshold in [2.4, 3.6] {
+            let shifted = solve_from_matrix(
+                &panels,
+                k,
+                &build_potential_matrix_with_near_multiple(&panels, eps, threshold),
+            );
+            for (row_nom, row_shift) in nominal.iter().zip(&shifted) {
+                for (v_nom, v_shift) in row_nom.iter().zip(row_shift) {
+                    worst = worst.max((v_shift - v_nom).abs() / v_nom.abs());
+                }
+            }
+        }
+        worst
+    }
+
+    /// The 0.5 um-panel (FastCap-oracle operating point) companion to
+    /// `threshold_perturbation_moves_the_solution_far_less_than_the_
+    /// agreement_band`, on the oracle's full shielded fixture too --
+    /// the numbers `docs/design/mom-validation.md`'s #2323 section
+    /// transcribes. Multi-second debug-build solves at this panel count,
+    /// hence `#[ignore]` + release mode, the same convention as
+    /// `near_field_runtime_report`:
+    ///
+    /// ```text
+    /// cargo test --release threshold_perturbation_report -- --ignored --nocapture
+    /// ```
+    ///
+    /// The movement bound is still asserted -- the report cannot silently
+    /// rot into "whatever the numbers happen to be".
+    #[test]
+    #[ignore = "multi-second 0.5 um-panel solves are slow in debug builds -- \
+                run with --release"]
+    fn threshold_perturbation_report() {
+        let eps_r = 3.9;
+        let eps = EPS0_SI * eps_r;
+        let fixtures: Vec<(&str, Vec<ConductorRequest>)> = vec![
+            (
+                "parallel plates 10x10 um, 1 um gap, 0.5 um panels",
+                vec![plate("top", 1.0), plate("bottom", 0.0)],
+            ),
+            (
+                "coupled lines 20x2x0.6 um, 1 um gap, 0.5 um panels",
+                vec![
+                    box_conductor("a", 0.0, 0.0, 20.0, 2.0, 0.0, 0.6),
+                    box_conductor("b", 0.0, 3.0, 20.0, 5.0, 0.0, 0.6),
+                ],
+            ),
+            (
+                "shielded pair (oracle fixture), 0.5 um panels",
+                vec![
+                    box_conductor("a", 0.0, 0.0, 20.0, 2.0, 0.0, 0.6),
+                    box_conductor("b", 0.0, 3.0, 20.0, 5.0, 0.0, 0.6),
+                    box_conductor("shield", -2.0, -3.0, 22.0, 8.0, -1.6, -1.0),
+                ],
+            ),
+        ];
+        for (label, conductors) in &fixtures {
+            let mut switches = (0, 0);
+            let worst =
+                threshold_perturbation_worst_entry_movement(conductors, 0.5, eps, &mut switches);
+            println!(
+                "{label}: {n} panels, {lo}+{hi} pairs switch at -/+20% \
+                 threshold -- worst solved-entry movement {:.4}%",
+                worst * 100.0,
+                n = panels_of(conductors, 0.5),
+                lo = switches.0,
+                hi = switches.1,
+            );
+            assert!(
+                worst < 3e-3,
+                "{label}: ±20% threshold perturbation moved a solved entry \
+                 by {:.4}% (see docs/design/mom-validation.md #2323)",
+                worst * 100.0
+            );
+        }
+    }
+
+    /// Panel count for the report's prints (the measurement itself
+    /// re-discretises internally).
+    fn panels_of(conductors: &[ConductorRequest], panel_size_um: f64) -> usize {
+        discretize(conductors, panel_size_um).unwrap().len()
     }
 
     #[test]
