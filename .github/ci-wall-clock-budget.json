@@ -38,13 +38,27 @@
     "issue's point is that a drift detector must EXECUTE in the dep-full",
     "environment, so that cost is load-bearing, not incidental. 60s of",
     "headroom absorbs the new row with margin for runner noise; the next",
-    "baseline re-measure folds it into the derived numbers properly."
+    "baseline re-measure folds it into the derived numbers properly.",
+    "",
+    "total_job_budget_seconds is 1800 as of PR #1869 (issue #1841's",
+    "multi-box conductor increment): the 2026-09-17 baseline's 1560 no",
+    "longer fits MAIN itself -- main's own run of 2026-09-22 measured 1589s",
+    "total compute (+29 over budget) without any PR change, mostly growth",
+    "in the four Tests matrix legs since the baseline was taken (194s p90",
+    "per leg then, ~310s now, per-job budgets still holding). This PR adds",
+    "~54s of justified new compute on top (multi-box PEEC and full-wave",
+    "tests in each of the four matrix legs plus the mom cargo leg; PR run",
+    "measured 1643s total), which the check's own BREACH message directs",
+    "to be budgeted in the same PR. 1800 is +9.6% over the measured 1643s",
+    "-- headroom for runner noise only, not a licence to grow. A full",
+    "baseline re-measure (per docs/guides/ci-wall-clock-budget.md) remains",
+    "owed and should re-derive both the total and the Tests per-leg rows."
   ],
   "exclude_jobs": [
     "CI wall-clock budget"
   ],
   "default_job_budget_seconds": 600,
-  "total_job_budget_seconds": 1560,
+  "total_job_budget_seconds": 1800,
   "run_wall_clock_budget_seconds": 1800,
   "jobs": {
     "Lint (ruff)": 120,
