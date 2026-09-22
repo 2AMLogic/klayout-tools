@@ -173,6 +173,65 @@ as the line lengthens:
 The Laplace problem is linear in `ε`, so this is exact, and it is asserted at
 `rel=1e-12` (round-off, not tolerance).
 
+### 6. The near/far kernel-split boundary — an accepted discretisation artifact (#2323)
+
+The near-field/far-field split (#2061) switches kernels at a hard distance
+cutoff: pairs with centroid separation `d < 3·(r_i + r_j)` (panel
+circumradii) get the Gauss-quadrature panel integral, everything farther out
+gets the centroid point-charge kernel. The two kernels are different
+approximations of the same potential coefficient, so a pair sitting exactly
+at the cutoff gets a matrix entry that depends on which side of it the pair
+lands: an **entry-level discontinuity** at the boundary, first probed during
+PR #2322's review (issue #2323, reported as ~0.23%).
+
+Measured (order-4 symmetrised collocation quadrature vs the centroid kernel,
+for equal 1 µm square panels placed with centroid separation exactly at
+`d = 3·(r_i + r_j)`; executable form:
+`solver::tests::kernel_disagreement_at_the_threshold_stays_under_the_
+documented_artifact_band`, re-run with
+`cargo test -p klt-mom-native kernel_disagreement -- --nocapture`):
+
+| pair shape at the boundary | kernel disagreement |
+| -------------------------- | ------------------- |
+| facing coaxial squares | 0.4585% |
+| coplanar edge gap (the #2323 probe's pair) | 0.2303% |
+| coplanar diagonal | 0.2360% |
+| perpendicular (wall/floor) | 0.1141% |
+| unequal sizes 2:1, facing | 0.5070% (worst) |
+
+**Decision: document, don't blend.** The entry-level artifact is bounded by
+**0.6%** (asserted band: measured worst 0.51%), but the entry level is not
+what the oracles in this document gate — the solved capacitance matrix is.
+Moving the threshold **±20%** (3.0 → 2.4 / 3.6) walks every panel pair
+within that band of the boundary across it and re-solves, which is the
+worst-case version of "a refinement sweep or geometry change moves entries
+across the threshold" (executable form:
+`threshold_perturbation_moves_the_solution_far_less_than_the_agreement_band`
+in the default suite at 1.0 µm panels;
+`threshold_perturbation_report -- --ignored --nocapture` in release mode at
+the oracle's 0.5 µm operating point; measured with the #2061 kernel):
+
+| fixture (0.5 µm panels) | panels | pairs switching (−20% / +20%) | worst solved-entry movement |
+| ----------------------- | ------ | ----------------------------- | --------------------------- |
+| parallel plates 10 × 10 µm, 1 µm gap | 800 | 15004 / 12852 | 0.1110% |
+| coupled lines 20 × 2 × 0.6 µm, 1 µm gap | 816 | 9876 / 10052 | 0.0063% |
+| shielded pair (the FastCap-oracle fixture) | 3068 | 69580 / 88352 | 0.0781% |
+
+Even with up to ~88 000 pairs (≈1.9% of all pairs) forced across the
+boundary at once, the solved matrix moves at most **0.111%** — a ~27×
+margin under the 3% FastCap-oracle agreement band, and the flat-plate
+band is the same 3%. The CG solve's charge redistribution damps the
+entry-level kernel mismatch by another factor of several. A blended/ramped
+transition band would add a third kernel regime (its own tuning knob, its
+own boundary artifacts) to remove a mismatch that never reaches the
+documented accuracy budget, so the hard cutoff stays and this section is
+the record of why.
+
+Two tests pin the artifact so it cannot grow silently: the boundary
+predicate's strict-`<` semantics at exactly `d = 3·(r_i + r_j)`
+(`near_field_predicate_is_strictly_less_at_the_threshold`), and the
+kernel-disagreement and threshold-sensitivity bands above.
+
 ## Convergence under refinement
 
 Two independent demonstrations, because they answer different questions.
