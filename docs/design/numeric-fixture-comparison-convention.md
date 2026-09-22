@@ -105,7 +105,11 @@ variance is expected and bounded, not when it's an undeclared bug.
 ## Related
 
 - [`../guides/golden-artifact-determinism.md`](../guides/golden-artifact-determinism.md)
-  — generator-determinism checking (a different, related concern; see above).
+  — generator-determinism checking (a different, related concern; see above),
+  including the manifest-level `platform-variable` declaration (#2275) that
+  implements this convention's "declare which regions are tolerance-compared"
+  half for checked golden-artifact generators, plus the forensics + rerun
+  triage pack its CI jobs attach to failures.
 - [`../cli/sim.md`](../cli/sim.md) — "Worked example" section, the `klt sim`
   no-byte-exact-fixture example cited above.
 - `native/mom/src/solver.rs` — the `ITERATIVE_REL_TOL` tolerance-comparison

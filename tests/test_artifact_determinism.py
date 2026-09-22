@@ -795,8 +795,563 @@ def test_random_seeds_are_drawn_distinct_when_none_are_given(tmp_path: Path) -> 
 
 
 # --------------------------------------------------------------------------
-# Wiring against this repo's own files
+# Declared platform-variable regions + failure forensics (issue #2275)
 # --------------------------------------------------------------------------
+
+# The synthetic checkouts are at path lengths 7 ("primary") and 37
+# ("alt/a-second-checkout-at-another-path") -- a difference of 30, so a
+# `len % 7` digest selector differs between the two runs by 2 modulo 7 (2
+# or 5 units depending on where the runner's tmp path length lands the
+# first run in the cycle): the drift is deterministic -- never zero, never
+# huge -- on every host, interpreter, and CI runner, and exactly measurable
+# in ULPs.
+#
+# `ulp = 2^-52`; `1.0 + k * 4 * ulp` is exact for k <= 6 (both operands
+# representable, sum representable in [1, 2)), so two runs' digests differ
+# by exactly `4 * |k1 - k2|` ULPs -- 8 or 20 here -- and a declared
+# threshold of 32 admits either while still refusing the 400-ulp-step
+# fixture below.
+PLATFORM_DRIFT = """
+import json, pathlib
+root = pathlib.Path(__file__).resolve().parent.parent
+out = root / "artifacts"
+out.mkdir(parents=True, exist_ok=True)
+ulp = 2.220446049250313e-16
+k = len(str(root)) % 7
+digest = 1.0 + k * 4 * ulp
+(out / "digests.json").write_text(
+    json.dumps({"digests": {"gain": digest}}, indent=2)
+)
+"""
+
+# The same path-derived drift, but 400 ulp per step: 800 ulp apart, far
+# outside any honest threshold.
+PLATFORM_DRIFT_HUGE = """
+import json, pathlib
+root = pathlib.Path(__file__).resolve().parent.parent
+out = root / "artifacts"
+out.mkdir(parents=True, exist_ok=True)
+ulp = 2.220446049250313e-16
+k = len(str(root)) % 7
+digest = 1.0 + k * 400 * ulp
+(out / "digests.json").write_text(
+    json.dumps({"digests": {"gain": digest}}, indent=2)
+)
+"""
+
+# Declared field drifts *and* an undeclared field drifts: the guarantee
+# bounds the declared region only -- the undeclared one must still fail.
+PLATFORM_DRIFT_WITH_LEAK = """
+import json, pathlib
+root = pathlib.Path(__file__).resolve().parent.parent
+out = root / "artifacts"
+out.mkdir(parents=True, exist_ok=True)
+ulp = 2.220446049250313e-16
+digest = 1.0 + (len(str(root)) % 7) * 4 * ulp
+(out / "digests.json").write_text(
+    json.dumps(
+        {"digests": {"gain": digest}, "meta": {"count": len(str(root))}},
+        indent=2,
+    )
+)
+"""
+
+# Structural drift (list length derived from the checkout path): 0 elements
+# in one run, 2 in the other -- no field threshold can paper over a shape
+# change, declared or not.
+PLATFORM_STRUCTURAL = """
+import json, pathlib
+root = pathlib.Path(__file__).resolve().parent.parent
+out = root / "artifacts"
+out.mkdir(parents=True, exist_ok=True)
+n = len(str(root)) % 7
+(out / "digests.json").write_text(
+    json.dumps({"digests": [0.5] * n}, indent=2)
+)
+"""
+
+# Declared format json, payload not json: the declaration must refuse to
+# check nothing and stay green.
+PLATFORM_UNPARSEABLE = """
+import pathlib
+out = pathlib.Path(__file__).resolve().parent.parent / "artifacts"
+out.mkdir(parents=True, exist_ok=True)
+(out / "digests.json").write_text("not json at all")
+"""
+
+# A deterministic numeric artifact, for the declared-but-no-drift case.
+DETERMINISTIC_NUMERIC = """
+import json, pathlib
+out = pathlib.Path(__file__).resolve().parent.parent / "artifacts"
+out.mkdir(parents=True, exist_ok=True)
+(out / "digests.json").write_text(json.dumps({"counts": {"a": 3}}, indent=2))
+"""
+
+
+def _pv_manifest_entry(
+    block: dict[str, object] | None = None, **overrides: object
+) -> dict[str, object]:
+    """A valid `platform-variable` manifest entry over gen/generate.py --
+    the declared-guarantee shape a real manifest would carry (issue
+    #2275). `overrides` replace keys *inside* the platform_variable block;
+    `block` replaces the whole block (for delete-a-key validation tests)."""
+    merged: dict[str, object] = {
+        "artifacts": ["artifacts/digests.json"],
+        "format": "json",
+        "guarantee": "libm-transcendental-digest",
+        "max_abs_ulps": 32,
+        "fields": ["digests.gain"],
+    }
+    merged.update(overrides)
+    if block is not None:
+        merged = block
+    return {
+        "script": "gen/generate.py",
+        "artifacts": ["artifacts/*.json"],
+        "float_discipline": "platform-variable",
+        "platform_variable": merged,
+    }
+
+
+def _run_with_pv_entry(
+    tmp_path: Path,
+    entry: dict[str, object],
+    *,
+    body: str = PLATFORM_DRIFT,
+    extra_args: tuple[str, ...] = (),
+    tag: str = "",
+) -> subprocess.CompletedProcess:
+    """Two synthetic checkouts + a caller-written manifest entry (the
+    platform-variable analogue of `_run_with_manifest_entry`, which cannot
+    express the block). `tag` distinguishes repeated calls in one
+    `tmp_path`."""
+    a = _checkout(tmp_path, f"primary{tag}", body)
+    b = _checkout(tmp_path, f"alt/a-second-checkout-at-another-path{tag}", body)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"schema_version": 1, "generators": [entry]}))
+    return _run(
+        "--checkout",
+        str(a),
+        "--checkout",
+        str(b),
+        "--seed",
+        "1",
+        "--seed",
+        "2",
+        "--manifest",
+        str(manifest),
+        "--format",
+        "json",
+        *extra_args,
+    )
+
+
+def test_platform_variable_drift_within_guarantee_passes_and_is_named(
+    tmp_path: Path,
+) -> None:
+    """Acceptance (a) of issue #2275: a declared platform-variable artifact
+    whose bytes differ -- within its declared threshold -- passes, and the
+    accepted drift is named in the machine-readable output, not swallowed."""
+    result = _run_with_pv_entry(tmp_path, _pv_manifest_entry())
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["findings"] == []
+    (comparison,) = payload["platform_variable"]
+    assert comparison["artifact"] == "artifacts/digests.json"
+    assert comparison["guarantee"] == "libm-transcendental-digest"
+    assert comparison["max_abs_ulps"] == 32
+    # Exactly 8 or 20 ulp, by construction (path lengths differing by 30,
+    # selector % 7, 4 ulp per unit) -- a threshold is only honest if the
+    # report measures.
+    assert comparison["max_observed_ulps"] in (8, 20)
+    (moved,) = comparison["moved"]
+    assert moved["field"] == "digests.gain"
+    assert moved["ulp"] == comparison["max_observed_ulps"]
+
+
+def test_platform_variable_declaration_and_drift_are_named_in_text(
+    tmp_path: Path,
+) -> None:
+    """The declaration is loud (issue #2275): even on a green run the report
+    names every threshold-compared artifact and its guarantee, and the
+    accepted drift gets its own OK line -- a green must never masquerade as
+    byte-identical everywhere."""
+    a = _checkout(tmp_path, "primary", PLATFORM_DRIFT)
+    b = _checkout(tmp_path, "alt/a-second-checkout-at-another-path", PLATFORM_DRIFT)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"schema_version": 1, "generators": [_pv_manifest_entry()]})
+    )
+    result = _run(
+        "--checkout",
+        str(a),
+        "--checkout",
+        str(b),
+        "--seed",
+        "1",
+        "--seed",
+        "2",
+        "--manifest",
+        str(manifest),
+        "--format",
+        "text",
+    )
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    assert "platform-variable artifacts" in result.stdout
+    assert "artifacts/digests.json" in result.stdout
+    assert "libm-transcendental-digest" in result.stdout
+    assert "OK (declared platform-variable drift)" in result.stdout
+    assert "ulp (declared max 32)" in result.stdout
+    assert "digests.gain=" in result.stdout
+
+
+def test_platform_variable_artifact_is_named_even_without_drift(
+    tmp_path: Path,
+) -> None:
+    """A declared artifact that happened to come out byte-identical is still
+    listed as threshold-compared: the header documents the comparison style
+    actually in force, not just the exceptions."""
+    result = _run_with_pv_entry(
+        tmp_path,
+        _pv_manifest_entry(),
+        body=DETERMINISTIC_NUMERIC,
+    )
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    (comparison,) = payload["platform_variable"]
+    assert comparison["artifact"] == "artifacts/digests.json"
+    assert comparison["moved"] == []
+    assert comparison["max_observed_ulps"] == 0
+
+
+def test_undeclared_drift_still_fails(tmp_path: Path) -> None:
+    """Acceptance (b) of issue #2275: the identical drifting generator
+    without a declaration still fails -- the mechanism is per-artifact
+    opt-in, never a blanket tolerance."""
+    result = _run_with_pv_entry(
+        tmp_path,
+        {
+            "script": "gen/generate.py",
+            "artifacts": ["artifacts/*.json"],
+        },
+    )
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "differ"
+    assert payload["differing_artifacts"] == ["artifacts/digests.json"]
+    assert payload["platform_variable"] == []
+
+
+def test_platform_variable_drift_beyond_threshold_fails(tmp_path: Path) -> None:
+    """A declared field that moves further than its declared threshold is a
+    finding, not an accepted drift: the guarantee bounds, it does not excuse."""
+    result = _run_with_pv_entry(
+        tmp_path, _pv_manifest_entry(), body=PLATFORM_DRIFT_HUGE
+    )
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    (finding,) = payload["findings"]
+    assert finding["kind"] == "platform_variable_exceeded"
+    assert finding["artifact"] == "artifacts/digests.json"
+    assert "ulp (declared max 32)" in finding["detail"]
+
+
+def test_exceeded_declaration_is_annotated_as_a_file(tmp_path: Path) -> None:
+    result = _run_with_pv_entry(
+        tmp_path,
+        _pv_manifest_entry(),
+        body=PLATFORM_DRIFT_HUGE,
+        extra_args=("--annotate",),
+    )
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    annotations = [ln for ln in result.stdout.splitlines() if ln.startswith("::error")]
+    assert annotations
+    assert all("file=artifacts/digests.json" in ln for ln in annotations)
+    assert all("platform_variable_exceeded" in ln for ln in annotations)
+
+
+def test_undeclared_region_inside_a_declared_artifact_fails(
+    tmp_path: Path,
+) -> None:
+    """Byte-drift inside a non-declared region of a *declared* artifact
+    still fails, and names the leaking field: declaring one region never
+    loosens its neighbours (issue #2275's no-blanket-tolerance rule)."""
+    result = _run_with_pv_entry(
+        tmp_path, _pv_manifest_entry(), body=PLATFORM_DRIFT_WITH_LEAK
+    )
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    (finding,) = payload["findings"]
+    assert finding["kind"] == "platform_variable_region_leak"
+    assert finding["artifact"] == "artifacts/digests.json"
+    assert "meta.count" in finding["detail"]
+
+
+def test_structural_drift_inside_a_declared_artifact_fails(
+    tmp_path: Path,
+) -> None:
+    """A shape change (list length) is a finding even under a declaration:
+    a ULP guarantee over fields that no longer line up says nothing."""
+    result = _run_with_pv_entry(
+        tmp_path,
+        _pv_manifest_entry(fields=["digests.*"]),
+        body=PLATFORM_STRUCTURAL,
+    )
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    (finding,) = payload["findings"]
+    assert finding["kind"] == "platform_variable_structure"
+    assert "list length changed" in finding["detail"]
+
+
+def test_unparseable_declared_artifact_fails(tmp_path: Path) -> None:
+    """Declaring format json while emitting non-JSON must fail loudly: a
+    guarantee that checks nothing is worse than none."""
+    result = _run_with_pv_entry(
+        tmp_path, _pv_manifest_entry(), body=PLATFORM_UNPARSEABLE
+    )
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    kinds = {finding["kind"] for finding in payload["findings"]}
+    assert kinds == {"platform_variable_unparseable"}
+    assert "does not parse as JSON" in payload["findings"][0]["detail"]
+
+
+# --------------------------------------------------------------------------
+# Forensics on failure (issue #2275)
+# --------------------------------------------------------------------------
+
+
+def test_forensics_writes_both_variants_reports_and_recipe(tmp_path: Path) -> None:
+    """Acceptance (c) of issue #2275: on failure the check writes the
+    evidence pack -- both variants of the differing artifact (so the
+    bit-identical-inputs question can be answered from CI artifacts alone),
+    both reports, and a rerun script carrying the exact seeds and
+    checkouts."""
+    a = _checkout(tmp_path, "primary", SET_ORDERING)
+    b = _checkout(tmp_path, "alt/second", SET_ORDERING)
+    forensics = tmp_path / "forensics"
+    result = _run(
+        "--checkout",
+        str(a),
+        "--checkout",
+        str(b),
+        "--seed",
+        "1",
+        "--seed",
+        "2",
+        "--manifest",
+        str(_manifest(tmp_path)),
+        "--forensics-dir",
+        str(forensics),
+    )
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+
+    first = forensics / "artifacts" / "run-1" / "artifacts" / "report.json"
+    second = forensics / "artifacts" / "run-2" / "artifacts" / "report.json"
+    assert first.is_file() and second.is_file()
+    assert first.read_bytes() != second.read_bytes()
+    # The variants are the actual run outputs, not re-generations.
+    assert first.read_bytes() == (a / "artifacts" / "report.json").read_bytes()
+    assert second.read_bytes() == (b / "artifacts" / "report.json").read_bytes()
+
+    report = json.loads((forensics / "report.json").read_text())
+    assert report["status"] == "differ"
+    assert report["differing_artifacts"] == ["artifacts/report.json"]
+    text = (forensics / "report.txt").read_text()
+    assert "Differing artifact paths:" in text
+    assert "Reproduce this failure" in text
+
+    recipe = (forensics / "rerun.sh").read_text()
+    assert "--seed 1" in recipe and "--seed 2" in recipe
+    assert str(a) in recipe and str(b) in recipe
+    assert "check_artifact_determinism.py" in recipe
+
+
+def test_failing_text_report_echoes_the_rerun_recipe(tmp_path: Path) -> None:
+    """The recipe is echoed in the report itself, not only written to the
+    forensics directory -- the log alone must be enough to re-run exactly."""
+    result = _check(tmp_path, SET_ORDERING, fmt="text")
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    assert "Reproduce this failure (rerun recipe" in result.stdout
+    assert "--seed 1" in result.stdout and "--seed 2" in result.stdout
+    assert "Triage before blaming code" in result.stdout
+
+
+def test_forensics_directory_not_created_on_a_green_run(tmp_path: Path) -> None:
+    a = _checkout(tmp_path, "primary", DETERMINISTIC)
+    b = _checkout(tmp_path, "alt/second", DETERMINISTIC)
+    forensics = tmp_path / "forensics"
+    result = _run(
+        "--checkout",
+        str(a),
+        "--checkout",
+        str(b),
+        "--seed",
+        "1",
+        "--seed",
+        "2",
+        "--manifest",
+        str(_manifest(tmp_path)),
+        "--forensics-dir",
+        str(forensics),
+    )
+    assert result.returncode == EXIT_OK, result.stdout + result.stderr
+    assert not forensics.exists()
+
+
+def test_forensics_written_even_when_the_check_cannot_run(tmp_path: Path) -> None:
+    """Exit 2 writes why, so the uploaded evidence explains its own
+    absence -- a forensics upload that finds nothing must mean a green, not
+    a crash."""
+    forensics = tmp_path / "forensics"
+    a = _checkout(tmp_path, "primary2", FAILING)
+    b = _checkout(tmp_path, "alt2/second", FAILING)
+    result = _run(
+        "--checkout",
+        str(a),
+        "--checkout",
+        str(b),
+        "--seed",
+        "1",
+        "--seed",
+        "2",
+        "--manifest",
+        str(_manifest(tmp_path)),
+        "--forensics-dir",
+        str(forensics),
+    )
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    report = json.loads((forensics / "report.json").read_text())
+    assert report["status"] == "cannot_run"
+    assert "gen/generate.py" in report["error"]
+    assert not (forensics / "artifacts").exists()
+
+
+# --------------------------------------------------------------------------
+# platform_variable manifest validation (issue #2275: loudness rules)
+# --------------------------------------------------------------------------
+
+
+def test_platform_variable_block_on_integer_exact_cannot_run(tmp_path: Path) -> None:
+    """A declaration on an entry the check byte-compares anyway could never
+    bind -- refused at parse time, like pin fields on a non-pinned entry."""
+    result = _run_with_manifest_entry(
+        tmp_path,
+        {
+            "script": "gen/generate.py",
+            "artifacts": ["artifacts/*.json"],
+            "float_discipline": "integer-exact",
+            "platform_variable": _pv_manifest_entry()["platform_variable"],
+        },
+    )
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    assert "only mean something" in result.stderr
+
+
+def test_platform_variable_discipline_without_block_cannot_run(
+    tmp_path: Path,
+) -> None:
+    """A declared discipline with no guarantee format + threshold is a
+    blanket tolerance in disguise -- the exact thing issue #2275 rules out."""
+    result = _run_with_pv_entry(
+        tmp_path,
+        {
+            "script": "gen/generate.py",
+            "artifacts": ["artifacts/*.json"],
+            "float_discipline": "platform-variable",
+        },
+    )
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    assert "platform_variable" in result.stderr
+
+
+def test_platform_variable_missing_required_keys_cannot_run(tmp_path: Path) -> None:
+    block = dict(_pv_manifest_entry()["platform_variable"])
+    del block["max_abs_ulps"]
+    result = _run_with_pv_entry(tmp_path, _pv_manifest_entry(block=block))
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    assert "max_abs_ulps" in result.stderr
+
+
+def test_platform_variable_unknown_key_cannot_run(tmp_path: Path) -> None:
+    """A typo'd extra key (`max_abs_ulp` alongside a valid `max_abs_ulps`)
+    must fail loudly, not be quietly ignored."""
+    block = dict(_pv_manifest_entry()["platform_variable"])
+    block["max_abs_ulp"] = block["max_abs_ulps"]
+    result = _run_with_pv_entry(tmp_path, _pv_manifest_entry(block=block))
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    assert "unknown platform_variable key" in result.stderr
+
+
+def test_platform_variable_zero_threshold_cannot_run(tmp_path: Path) -> None:
+    """0 ulp is byte-exact, which is what not declaring the region means."""
+    result = _run_with_pv_entry(tmp_path, _pv_manifest_entry(max_abs_ulps=0))
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    assert "integer >= 1" in result.stderr
+
+
+def test_platform_variable_unsupported_format_cannot_run(tmp_path: Path) -> None:
+    result = _run_with_pv_entry(tmp_path, _pv_manifest_entry(format="csv"))
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    assert "not supported" in result.stderr
+
+
+def test_platform_variable_empty_or_malformed_fields_cannot_run(
+    tmp_path: Path,
+) -> None:
+    """Empty, empty-segment, and space-bearing patterns are refused at load:
+    a malformed field path would declare a region that matches nothing."""
+    for index, fields in enumerate(([], [""], ["digests..gain"], ["digests gain"])):
+        result = _run_with_pv_entry(
+            tmp_path, _pv_manifest_entry(fields=fields), tag=f"-{index}"
+        )
+        assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+        assert "dotted leaf paths" in result.stderr
+
+
+def test_platform_variable_block_on_pinned_entry_cannot_run(tmp_path: Path) -> None:
+    """A pinned artifact's guarantee is the pin -- it is never regenerated,
+    so a threshold declaration could never bind."""
+    result = _run_with_manifest_entry(
+        tmp_path,
+        {
+            "script": "gen/generate.py",
+            "artifacts": ["artifacts/*.json"],
+            "float_discipline": "pinned-artifact",
+            "generator_sha256": _sha256_hex(b"x"),
+            "regenerate": "python3 gen/generate.py",
+            "artifact_sha256": {"artifacts/report.json": _sha256_hex(b"y")},
+            "platform_variable": _pv_manifest_entry()["platform_variable"],
+        },
+    )
+    assert result.returncode == EXIT_CANNOT_RUN, result.stdout + result.stderr
+    assert "only mean something" in result.stderr
+
+
+def test_platform_variable_generator_is_not_float_scanned(tmp_path: Path) -> None:
+    """The scan skip is the point of the discipline: the *same* generator
+    -- a host-libm `**` riding along with the committed digest -- is a
+    `host_float_op` finding under `integer-exact`, but under its
+    declaration the check is dynamic instead: no static finding, only the
+    threshold."""
+    entry = _pv_manifest_entry()
+    integer_exact = {
+        "script": entry["script"],
+        "artifacts": entry["artifacts"],
+        "float_discipline": "integer-exact",
+    }
+    body = PLATFORM_DRIFT + "\ncoefficient = 2.0 ** 3\n"
+    result = _run_with_pv_entry(tmp_path, integer_exact, body=body)
+    assert result.returncode == EXIT_DIFFER, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    kinds = {finding["kind"] for finding in payload["findings"]}
+    assert "host_float_op" in kinds
+
+    declared = _run_with_pv_entry(tmp_path, entry, body=body, tag="-declared")
+    assert declared.returncode == EXIT_OK, declared.stdout + declared.stderr
+    assert "host_float_op" not in declared.stdout
 
 
 def test_default_manifest_names_real_generators() -> None:
@@ -847,6 +1402,21 @@ def test_default_manifest_generators_declare_integer_exact_and_scan_clean() -> N
         assert not ops, f"host-libm float op in committed-artifact generator: {ops}"
 
 
+def _checkout_step_paths(job: str) -> list[str]:
+    """The `path:` values of the job's `actions/checkout` steps only --
+    scoped per step, so another step's `path:` (an artifact upload's, say)
+    cannot be mistaken for a checkout location."""
+    import re
+
+    steps = re.split(r"\n(?=      - )", job)
+    paths = []
+    for step in steps:
+        if "actions/checkout" not in step:
+            continue
+        paths.extend(re.findall(r"^\s+path:\s+(\S+)\s*$", step, re.MULTILINE))
+    return paths
+
+
 def test_ci_workflow_runs_the_determinism_check_from_two_checkouts() -> None:
     """The job is only a path-variation check if the two paths actually
     differ -- a copy-paste that pointed both `--checkout` flags at the same
@@ -864,10 +1434,53 @@ def test_ci_workflow_runs_the_determinism_check_from_two_checkouts() -> None:
     assert passed[0] != passed[1]
 
     # ...and the two `actions/checkout` steps must land at those two paths.
-    checkout_paths = re.findall(r"^\s+path:\s+(\S+)\s*$", job, re.MULTILINE)
+    checkout_paths = _checkout_step_paths(job)
     assert len(set(checkout_paths)) == 2, checkout_paths
     for path in checkout_paths:
         assert any(passed_path.endswith(path) for passed_path in passed), path
+
+
+def test_determinism_job_uploads_failure_forensics() -> None:
+    """Issue #2275 deliverable: a failing byte-compare must arrive with its
+    evidence -- the job passes --forensics-dir and uploads the pack (both
+    artifact variants + reports + rerun script) on failure, retained like
+    the repo's other evidence artifacts."""
+    import re
+
+    job = _job_block(WORKFLOW.read_text(), "artifact-determinism")
+    assert "--forensics-dir" in job
+    upload = [s for s in re.split(r"\n(?=      - )", job) if "upload-artifact" in s]
+    assert len(upload) == 1, upload
+    step = upload[0]
+    assert "if: failure()" in step
+    assert "retention-days: 90" in step
+    assert "if-no-files-found: ignore" in step
+    # The `with:` block's name, not the step's display name (both are
+    # spelled `name:`) -- anchored to its own line for exactly that reason.
+    name = re.search(r"^\s+name:\s+(\S+)\s*$", step, re.MULTILINE)
+    assert name is not None and name.group(1) == "determinism-forensics"
+
+
+def test_numerical_job_uploads_failure_forensics_under_a_distinct_name() -> None:
+    """The dep-full drift-detector leg (issue #2276) gets the same forensics
+    upload (issue #2275) -- under a DIFFERENT artifact name, since both jobs
+    can fail in one workflow run and a shared name would 409 the upload."""
+    import re
+
+    job = _job_block(WORKFLOW.read_text(), "test-numerical")
+    assert "--forensics-dir" in job
+    upload = [s for s in re.split(r"\n(?=      - )", job) if "upload-artifact" in s]
+    assert len(upload) == 1, upload
+    step = upload[0]
+    assert "if: failure()" in step
+    assert "retention-days: 90" in step
+    name = re.search(r"^\s+name:\s+(\S+)\s*$", step, re.MULTILINE)
+    assert name is not None and name.group(1) == "determinism-forensics-numerical"
+    # The forensics directory must live OUTSIDE both checkouts: it is
+    # written after the runs complete, and writing inside a checkout would
+    # leave the tree dirty for any subsequent inspection.
+    assert "determinism-forensics" in job
+    assert "$GITHUB_WORKSPACE/determinism-forensics" in job
 
 
 def test_wall_clock_budget_job_waits_for_the_determinism_job() -> None:
