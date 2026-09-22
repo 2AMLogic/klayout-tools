@@ -1722,7 +1722,9 @@ def test_missing_tie_does_not_flag_properly_connected_tap(tmp_path):
 # --- ties[]: well/tap connectivity scoping (issue #2169) --------------------
 
 
-def _routed_tie_layout(*, vdd_tap: bool = True, vss_tap: bool = True):
+def _routed_tie_layout(
+    *, vdd_tap: bool = True, vss_tap: bool = True, draw_pwell: bool = True
+):
     """A miniature *routed* two-gate layout -- the shape issue #2169's
     reproduction collapses on, reduced to the smallest geometry that still
     reproduces it.
@@ -1741,6 +1743,14 @@ def _routed_tie_layout(*, vdd_tap: bool = True, vss_tap: bool = True):
     licon=2/0, li1=3/0, li1 label=3/5, nwell=10/0, contact=11/0,
     tap_implant=12/0, pwell=13/0. 98/0 and 99/0 are deliberately left empty
     for the "no well geometry" / "no tap geometry" cases.
+
+    ``draw_pwell=False`` (issue #2255) omits the pwell band entirely: the
+    **native-substrate** shape, where the NMOS half sits in bulk and no
+    drawn well/tub layer exists for a `ties[]` entry to name. Everything
+    else -- the VSS rail, its real (implant-marked) tap, and the
+    source/drain contacts that make a bare `tap_layer` over-broad -- is
+    unchanged, so any difference between a `draw_pwell=True` run and a
+    `draw_pwell=False` one is the missing well layer alone.
     """
     layout = kdb.Layout()
     layout.dbu = DBU
@@ -1758,7 +1768,8 @@ def _routed_tie_layout(*, vdd_tap: bool = True, vss_tap: bool = True):
     # between -- the "blanket well region spanning whole standard-cell
     # rows" the issue names.
     top.shapes(nwell).insert(kdb.Box.new(_um(0), _um(8), _um(20), _um(12)))
-    top.shapes(pwell).insert(kdb.Box.new(_um(0), _um(0), _um(20), _um(4)))
+    if draw_pwell:
+        top.shapes(pwell).insert(kdb.Box.new(_um(0), _um(0), _um(20), _um(4)))
 
     # Supply rails, each inside its own well band.
     top.shapes(li1).insert(kdb.Box.new(_um(0), _um(10), _um(20), _um(11)))
@@ -2272,6 +2283,330 @@ def test_tap_boxes_rejects_an_inverted_box(tmp_path):
                     "net": "VDD",
                 }
             ],
+        },
+    )
+    with pytest.raises(ErcError, match="left < right and bottom < top"):
+        run_erc(str(gds), str(spec))
+
+
+# --- ties: caller-asserted substrate regions (issue #2255) ---------------
+#
+# The gap every test above leaves open: `tap_boxes` relaxes how the *tap*
+# side is expressed, but `well_layer` still required drawn geometry, so a
+# block sitting in a native substrate -- NMOS-in-bulk, no drawn pwell/tub
+# anywhere in the stream -- could not declare its substrate tie at all, and
+# only the drawn-well (nwell) half of such a design was ever graded.
+# `well_layer: null` + `well_boxes` is the substitute, and unlike
+# `tap_boxes` it replaces a required field rather than narrowing one -- so
+# it carries its own falsifiability test and its own coverage bucket.
+
+
+def _run_native_substrate(tmp_path, stem, ties, *, vdd_tap=True):
+    """`_routed_tie_layout` with no pwell drawn -- the native-substrate
+    stream this issue is about."""
+    layout, _top = _routed_tie_layout(vdd_tap=vdd_tap, draw_pwell=False)
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def _substrate_tie(well_boxes, **overrides):
+    """A substrate tie against the native-substrate fixture: no drawn well
+    to name, the real (implant-marked) VSS tap narrowed by `tap_requires`
+    so the tap side is not itself degenerate."""
+    return {
+        "name": "substrate_tie",
+        "well_layer": None,
+        "well_boxes": [list(box) for box in well_boxes],
+        "tap_layer": "11/0",
+        "tap_requires": ["12/0"],
+        "connect_to": "li1",
+        "net": "VSS",
+        **overrides,
+    }
+
+
+# The fixture's own extent: the drawn geometry spans x in [0, 20] and y in
+# [0, 12], so the substrate band below the routing gap is a third of it --
+# a real claim about where the substrate tie applies, not "the whole die".
+_SUBSTRATE_BAND = (0.0, 0.0, 20.0, 4.0)
+_WHOLE_EXTENT = (-5.0, -5.0, 25.0, 25.0)
+
+
+def test_native_substrate_tie_is_declarable_without_a_drawn_well(tmp_path):
+    """Issue #2255's own reproduction: a block with no drawn pwell can now
+    declare its substrate tie, and the declaration is graded as real,
+    checked work -- distinguishable in `erc_coverage` from a tie derived
+    from drawn well geometry."""
+    report = _run_native_substrate(
+        tmp_path, "native_clean", [_substrate_tie([_SUBSTRATE_BAND])]
+    )
+
+    identity = 'erc.missing_tie:["substrate_tie"]'
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert identity in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_coverage"]["checked_by_well_assertion"] == [identity]
+    # The well was asserted; the *tap* was still derived from drawn markers,
+    # so the tap-side assertion list stays empty. The two are separate
+    # claims and must not be conflated.
+    assert report["erc_coverage"]["checked_by_assertion"] == []
+    # `checked_by_well_assertion` names a subset of `checked`, never a
+    # parallel, differently-populated list.
+    assert set(report["erc_coverage"]["checked_by_well_assertion"]) <= set(
+        report["erc_coverage"]["checked"]
+    )
+    assert report["erc_status"] == "clean"
+
+
+def test_native_substrate_well_assertion_can_fail(tmp_path):
+    """The falsifiability that earns the assertion its `checked` grade: an
+    asserted region the layout does not actually tie is reported, per
+    asserted polygon, exactly as an untied drawn well would be. The left
+    box holds the real implant-marked tap; the right box (disjoint from it,
+    so the two stay separate polygons after merging) holds only source/drain
+    contacts, which the `tap_requires` narrowing removes."""
+    report = _run_native_substrate(
+        tmp_path,
+        "native_untied",
+        [_substrate_tie([(0.0, 0.0, 9.0, 4.0), (11.0, 0.0, 20.0, 4.0)])],
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["net"] == "VSS"
+    assert missing[0]["layer"] == "substrate_tie"
+    assert "no 'substrate_tie' tap contact drawn" in missing[0]["description"]
+    # The right-hand asserted polygon is the one reported, not the whole
+    # asserted region: the finer the partition, the sharper the evidence.
+    assert missing[0]["bbox"]["left"] == _um(11.0)
+    assert report["erc_status"] == "violations"
+
+
+def test_a_whole_extent_well_assertion_is_degenerate_not_evidence(tmp_path):
+    """The #2199 bar, adapted to the well side: an assertion that covers the
+    entire top-cell extent makes `erc.missing_tie` trivially satisfiable by
+    any contact anywhere that reaches the declared net -- one die-sized
+    "well" polygon, so the per-well loop asks nothing about taps. It is
+    recorded as skipped work under its own reason, never as a pass."""
+    report = _run_native_substrate(
+        tmp_path, "native_degenerate", [_substrate_tie([_WHOLE_EXTENT])]
+    )
+
+    identity = 'erc.missing_tie:["substrate_tie"]'
+    assert _tie_skips(report) == {identity: "degenerate_well_assertion"}
+    assert identity not in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+    # Findings are unchanged by the classification, exactly as for a
+    # degenerate tap declaration -- what changes is that the envelope no
+    # longer reads as a clean missing-tie verdict.
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_the_well_degeneracy_reason_is_distinct_from_the_tap_one(tmp_path):
+    """Two different defects, two different remedies: "you claimed the whole
+    die" must not render as "narrow your tap". The well test is applied
+    first because the tap narrowing is measured *inside* the well region, so
+    on a die-sized well the tap answer is about the die, not about a tap."""
+    both_degenerate = _substrate_tie([_WHOLE_EXTENT])
+    del both_degenerate["tap_requires"]  # tap-degenerate as well
+    report = _run_native_substrate(tmp_path, "native_both", [both_degenerate])
+
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["substrate_tie"]': "degenerate_well_assertion"
+    }
+
+
+def test_a_drawn_blanket_well_is_not_treated_as_a_degenerate_assertion(tmp_path):
+    """The degeneracy test applies to *assertions* only. A drawn well layer
+    that happens to cover most of the block is a fact about the stream, not
+    an unverifiable claim, and grades exactly as it did before this issue --
+    the whole existing `ties[]` corpus depends on that."""
+    report = _run_routed_tie(
+        tmp_path, "drawn_blanket", _routed_tie_entries(tap_requires=["12/0"])
+    )
+
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+    assert report["erc_status"] == "clean"
+
+
+def test_an_asserted_substrate_tie_coexists_with_a_drawn_well_tie(tmp_path):
+    """The mixed-substrate design the issue names: an n-well tie graded off
+    drawn geometry beside a substrate tie graded off an assertion, in the
+    same run. The two must stay independent -- including when the asserted
+    region overlaps the drawn well in plan view, which it does here (the
+    assertion reaches up to y=9, the n-well band starts at y=8)."""
+    ties = [
+        {
+            "name": "nwell_tie",
+            "well_layer": "10/0",
+            "tap_layer": "11/0",
+            "tap_requires": ["12/0"],
+            "connect_to": "li1",
+            "net": "VDD",
+        },
+        _substrate_tie([(0.0, 0.0, 20.0, 9.0)]),
+    ]
+    report = _run_native_substrate(tmp_path, "native_mixed", ties)
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert {
+        'erc.missing_tie:["nwell_tie"]',
+        'erc.missing_tie:["substrate_tie"]',
+    } <= set(report["erc_coverage"]["checked"])
+    # Only the asserted half is graded as asserted: the drawn n-well tie is
+    # an ordinary geometrically-derived pass, and the overlap does not
+    # promote it (or demote it) into the assertion bucket.
+    assert report["erc_coverage"]["checked_by_well_assertion"] == [
+        'erc.missing_tie:["substrate_tie"]'
+    ]
+    assert report["erc_status"] == "clean"
+
+
+def test_well_and_tap_assertions_are_reported_in_separate_buckets(tmp_path):
+    """A stream with neither a drawn well nor a distinguishing tap marker
+    asserts both -- and each claim is reported under its own classification,
+    so a reader can see exactly how much of the verdict rested on the
+    caller's word."""
+    tie = _substrate_tie([_SUBSTRATE_BAND], tap_boxes=[list(_VSS_TAP_BOX)])
+    del tie["tap_requires"]
+    report = _run_native_substrate(tmp_path, "native_both_asserted", [tie])
+
+    identity = 'erc.missing_tie:["substrate_tie"]'
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert report["erc_coverage"]["checked_by_assertion"] == [identity]
+    assert report["erc_coverage"]["checked_by_well_assertion"] == [identity]
+    assert report["erc_status"] == "clean"
+
+
+def test_a_spec_that_declares_no_ties_reports_no_well_assertions(tmp_path):
+    """The additive-when-unused guarantee: the new list is present and empty
+    for every spec that does not use it."""
+    report = _run_routed_tie(tmp_path, "no_well_assertion")
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+
+
+def _native_substrate_spec_error(tmp_path, stem, tie):
+    gds = tmp_path / f"{stem}.gds"
+    _basic_fixture(gds)
+    spec = tmp_path / f"{stem}.json"
+    _write_spec(
+        spec,
+        {
+            "stackup": [
+                {"name": "poly", "layer": "1/0", "role": "gate"},
+                {"name": "li1", "layer": "3/0"},
+            ],
+            "ties": [tie],
+        },
+    )
+    return gds, spec
+
+
+def test_a_null_well_layer_without_well_boxes_is_rejected(tmp_path):
+    """A "there is no well and I am not asserting one" entry is not a tie that
+    quietly checks nothing -- that state is already expressible (omit the
+    entry, disclose why), and unlike this one it cannot be mistaken for a
+    graded check."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "null_no_boxes",
+        {
+            "well_layer": None,
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="well_boxes must assert the substrate region"):
+        run_erc(str(gds), str(spec))
+
+
+def test_an_empty_well_boxes_list_on_a_null_well_layer_is_rejected(tmp_path):
+    """Same rule for an explicitly empty list: an assertion that names no
+    region asserts nothing."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "null_empty_boxes",
+        {
+            "well_layer": None,
+            "well_boxes": [],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="well_boxes must assert the substrate region"):
+        run_erc(str(gds), str(spec))
+
+
+def test_well_boxes_alongside_a_drawn_well_layer_is_rejected(tmp_path):
+    """The two well forms are mutually exclusive: a box list applied to a
+    drawn well is either a tap narrowing (`tap_boxes` already expresses
+    that, better) or a second, unstated claim."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "boxes_and_layer",
+        {
+            "well_layer": "10/0",
+            "well_boxes": [[0.0, 0.0, 4.0, 4.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="well_layer.*must be null"):
+        run_erc(str(gds), str(spec))
+
+
+def test_an_omitted_well_layer_key_is_still_missing_not_asserted(tmp_path):
+    """The absence of a drawn well must be *declared* (`well_layer: null`),
+    never inferred from a key that was simply left out -- a typo must not
+    silently become an assertion."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "no_well_key",
+        {
+            "well_boxes": [[0.0, 0.0, 4.0, 4.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="missing 'well_layer'"):
+        run_erc(str(gds), str(spec))
+
+
+def test_well_boxes_rejects_a_malformed_entry(tmp_path):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "bad_well_box",
+        {
+            "well_layer": None,
+            "well_boxes": [[1.0, 2.0, 3.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=r"well_boxes\[0\]"):
+        run_erc(str(gds), str(spec))
+
+
+def test_well_boxes_rejects_an_inverted_box(tmp_path):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "inverted_well_box",
+        {
+            "well_layer": None,
+            "well_boxes": [[3.0, 2.0, 1.0, 4.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
         },
     )
     with pytest.raises(ErcError, match="left < right and bottom < top"):

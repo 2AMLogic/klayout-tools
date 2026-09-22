@@ -362,7 +362,8 @@ written to every block.
       `erc.supply_short` naming it — and the run must report zero
       `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
-      reason `degenerate_tap_declaration`, issue #2199) returns zero for a
+      reason `degenerate_tap_declaration`, issue #2199, or
+      `degenerate_well_assertion`, issue #2255) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
       already rejects a spec declaring no `ties[]` at all. **A stream with
@@ -373,6 +374,28 @@ written to every block.
       tap-geometry boxes, graded under its own
       `erc_coverage.checked_by_assertion` classification and held to the
       same degenerate/falsifiability test as every other narrowing form.
+      **A block sitting in a native substrate** — NMOS-in-bulk, with no
+      *drawn* well/tub layer anywhere in the stream — can likewise declare
+      its substrate tie with `ties[].well_layer: null` +
+      `ties[].well_boxes` (issue #2255), asserting the substrate region
+      rather than naming one. Before that, one half of this item was
+      unreachable by construction for such a block: `well_layer` required
+      drawn geometry, and a `ties_disclosure` describes only *undeclared*
+      work, so a design that declared its n-well tie could not even
+      disclose the missing substrate half. It reaches **met** on the same
+      terms as a drawn-well tie, because the assertion is falsifiable and
+      `klt erc` falsifies it where it can: each asserted polygon must
+      independently hold a tap that reaches the declared net, and an
+      asserted region indistinguishable from the whole top-cell extent is
+      skipped as `degenerate_well_assertion` (which this item already
+      refuses to read as a clean missing-tie verdict, via the same gate
+      that catches a degenerate tap). What a grader gains is the
+      provenance, not a weaker bar: a met citation's
+      `power_delivery.ties_checked_by_well_assertion` names which ties
+      rested on an asserted well, beside
+      `ties_checked_by_assertion` for the tap side — two distinct claims,
+      reported distinctly, so "the well itself was the caller's word" never
+      hides inside "a tap box was asserted".
       When a stream genuinely cannot express a tap at all, a top-level
       `ties_disclosure` declares that explicitly; the item still renders
       `supply_spec_disclosed_unexpressible` rather than a met item — a

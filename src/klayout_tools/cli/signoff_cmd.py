@@ -407,6 +407,14 @@ def _print_power_delivery(citation: dict) -> None:
     reads. Printed only when non-empty, so a purely marker-derived report
     (and every report produced before the field existed) renders exactly as
     it did before.
+
+    The third line (issue #2255) does the same for the *well* side: the ties
+    whose substrate region was itself asserted (``ties[].well_layer: null``
+    + ``ties[].well_boxes``), for a block that draws no well/tub layer at
+    all. Same disclosure-only status, same print-when-non-empty rule, and
+    deliberately its own line rather than being folded into the tap one --
+    "which drawn geometry is the tap" and "where the substrate is" are
+    different claims, and the second is the weaker of the two.
     """
     power_delivery = citation.get("power_delivery")
     if not power_delivery:
@@ -422,6 +430,12 @@ def _print_power_delivery(citation: dict) -> None:
         print(
             f"        taps asserted by the caller: {len(asserted)} "
             f"({', '.join(asserted)})"
+        )
+    well_asserted = power_delivery.get("ties_checked_by_well_assertion") or []
+    if well_asserted:
+        print(
+            "        substrate regions asserted by the caller (no drawn "
+            f"well): {len(well_asserted)} ({', '.join(well_asserted)})"
         )
 
 

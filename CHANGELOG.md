@@ -14,6 +14,47 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2255, `klt erc` + `klt signoff`, additive — **no**
+  `schema_version` bump on either verb: one new optional spec key, one
+  *widened* existing one, one new coverage skip reason, one new
+  `erc_coverage` list, and one new item-11 citation field; a spec that does
+  not use the new key produces a byte-identical report apart from the new
+  empty list): a block sitting in a **native substrate** — NMOS-in-bulk,
+  with no *drawn* well/tub layer anywhere in the stream because the
+  substrate is diffusion-derived rather than layer-marked — can now declare
+  its substrate tie. `ties[].well_layer` accepts `null`, and the new
+  `ties[].well_boxes` asserts the substrate region in its place as the same
+  `[left, bottom, right, top]` micrometre box list `tap_boxes` takes.
+  Previously `well_layer` required drawn geometry, so only the drawn-well
+  (n-well) half of such a design was ever graded, and #2234's `tap_boxes`
+  did not close it (that narrows an already-drawn tap layer; this
+  *substitutes* for a required well layer). The two well forms are mutually
+  exclusive and both are validated: `well_boxes` requires `well_layer:
+  null`, and `well_layer: null` requires a non-empty `well_boxes` — "no
+  well and no assertion" stays expressible only as an omitted entry plus a
+  `ties_disclosure`, which cannot be mistaken for a graded check.
+  Falsifiability is enforced on the same principle as #2199's degenerate
+  tap, adapted to a claim with no drawn baseline to narrow: an asserted
+  region covering the top cell's own bounding box to within 1% of its area
+  is indistinguishable from "the whole die is the substrate", which would
+  make `erc.missing_tie` satisfiable by any contact anywhere that reaches
+  the declared net, so it is recorded in `erc_coverage.skipped` with the new
+  reason `degenerate_well_assertion` (`erc_status: "clean_partial"`) instead
+  of being accepted as evidence — and for the same reason no implicit
+  whole-top-cell substrate region and no derived `substrate = extent −
+  nwell` boolean is offered. A non-degenerate asserted tie is real, checked
+  work (each asserted polygon must independently hold a tap that reaches the
+  declared net, and one that does not produces an ordinary
+  `erc.missing_tie` finding), named additionally in the new
+  `erc_coverage.checked_by_well_assertion` list — kept separate from
+  #2234's `checked_by_assertion` because asserting *which drawn geometry is
+  the tap* and asserting *where the substrate is* are different claims.
+  `klt signoff`'s T1 item 11 reaches `met` on such a tie on the same terms
+  as a drawn-well one, with the weaker provenance stated in the citation's
+  new `power_delivery.ties_checked_by_well_assertion`; a degenerate one is
+  caught by the existing skipped-work gate and renders
+  `supply_spec_incomplete`. See `docs/cli/erc.md`'s "A block with no drawn
+  well at all" and `docs/design-evidence-tiers.md` item 11.
 - **Added** (#2247, `klt erc` + `klt signoff`, additive — **no**
   `schema_version` bump on either verb: one new optional spec sub-key, one
   new coverage reason token it can record, and one new item-11 reason

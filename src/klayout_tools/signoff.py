@@ -5361,9 +5361,13 @@ def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
     Matched on the work identity's ``erc.missing_tie:`` domain prefix
     (:func:`~klayout_tools.coverage.work_id`) rather than on the skip
     reason, so a future `klt erc` that declines this rule for some *other*
-    stated reason is caught by the same gate. An envelope with no
-    ``erc_coverage`` block (every report before #2179) skips nothing and is
-    graded exactly as it was.
+    stated reason is caught by the same gate. Issue #2255 is the first such
+    reason to actually arrive -- ``degenerate_well_assertion``, a
+    caller-asserted substrate region indistinguishable from the whole
+    top-cell extent -- and needed no change here, which is the property this
+    prefix match was chosen for. An envelope with no ``erc_coverage`` block
+    (every report before #2179) skips nothing and is graded exactly as it
+    was.
     """
     block = envelope.get("erc_coverage")
     if not isinstance(block, dict):
@@ -5465,6 +5469,42 @@ def _erc_ties_checked_by_assertion(envelope: dict[str, Any]) -> list[str]:
     ]
 
 
+def _erc_ties_checked_by_well_assertion(envelope: dict[str, Any]) -> list[str]:
+    """The cited `klt erc` run's ``erc_coverage.checked_by_well_assertion``
+    (issue #2255): the ``erc.missing_tie`` work identities whose **well
+    region itself** came from a caller assertion (``ties[].well_layer:
+    null`` + ``ties[].well_boxes``) because the block sits in a native
+    substrate that draws no well/tub layer at all -- ``[]`` for every run
+    that used none, and for every report produced before the field existed.
+
+    Carried into a ``"met"`` item 11 citation beside
+    :func:`_erc_ties_checked_by_assertion`'s tap-side list, and deliberately
+    **not** merged into it, because the two state different things about the
+    same verdict. A ``tap_boxes`` assertion says which of the drawn tap
+    geometry counts as the tap; the well is still drawn, and still measured.
+    A ``well_boxes`` assertion says where the substrate *is*, for a stream
+    that draws nothing to corroborate it -- the weaker of the two claims,
+    and the one a grader is most likely to want to see stated explicitly.
+
+    It does not change the verdict: item 11 is ``"met"`` on an asserted
+    substrate tie exactly as on a drawn-well one. It can be, because the
+    assertion is falsifiable and `klt erc` falsifies it where it can -- each
+    asserted polygon must independently contain a tap that reaches the
+    declared net, and an assertion indistinguishable from the whole top-cell
+    extent is rejected as degenerate (``docs/cli/erc.md`` → "A block with no
+    drawn well at all"), landing in ``erc_coverage.skipped`` where
+    :func:`_erc_missing_tie_skipped` already renders it ``unmet``.
+    """
+    block = envelope.get("erc_coverage")
+    if not isinstance(block, dict):
+        return []
+    return [
+        identity
+        for identity in block.get("checked_by_well_assertion") or []
+        if isinstance(identity, str)
+    ]
+
+
 def _resolve_erc_supply_spec(
     erc: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
@@ -5524,8 +5564,14 @@ def _grade_power_delivery(
       (:func:`_erc_supply_spec`): at least one ``"kind": "supply"`` net
       declared, at least one ``ties[]`` entry declared, none of them
       reported as degenerate by the run itself
-      (:func:`_erc_missing_tie_skipped`), and no supply-side finding
-      (:func:`_erc_supply_findings`);
+      (:func:`_erc_missing_tie_skipped` -- on the tap side, issue #2199, or
+      the well side, issue #2255), and no supply-side finding
+      (:func:`_erc_supply_findings`). A **native-substrate** block, whose
+      ties assert their substrate region because no well/tub layer is drawn
+      (``ties[].well_boxes``), reaches ``"met"`` on the same terms as a
+      drawn-well one; which of its ties rested on that assertion is stated
+      in the citation's ``power_delivery.ties_checked_by_well_assertion``
+      (:func:`_erc_ties_checked_by_well_assertion`);
     - an ``"lvs"`` citation -- the same report item 4 grades, which must
       itself pass (:func:`_check_passed`);
     - and, for an RTL-flow digital block, a ``"place-and-route"`` citation
@@ -5641,6 +5687,15 @@ def _grade_power_delivery(
         # PDK-marker narrowing -- `[]` for a purely marker-derived (or
         # pre-#2234) run. See `_erc_ties_checked_by_assertion`.
         "ties_checked_by_assertion": _erc_ties_checked_by_assertion(erc["envelope"]),
+        # Issue #2255: which of them rested on a caller-asserted *well*
+        # region (`ties[].well_layer: null` + `ties[].well_boxes`) rather
+        # than on a drawn well/tub layer -- the native-substrate case, `[]`
+        # for every drawn-well (or pre-#2255) run. A separate list from the
+        # tap-side one above because it is a separate, weaker claim; see
+        # `_erc_ties_checked_by_well_assertion`.
+        "ties_checked_by_well_assertion": _erc_ties_checked_by_well_assertion(
+            erc["envelope"]
+        ),
     }
     return "met", None, citation, {}
 

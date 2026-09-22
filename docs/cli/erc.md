@@ -244,9 +244,29 @@ use) — matching `klt power`'s own convention.
   declarations for the `erc.missing_tie` check:
   - `name` (string, optional, defaults to `"tie<index>"`) — echoed in each
     finding's `layer` field.
-  - `well_layer` (string, `"<layer>/<datatype>"`, required) — the
-    well/tub diffusion layer; each of its physically distinct (merged)
-    shapes is checked independently.
+  - `well_layer` (string `"<layer>/<datatype>"` **or `null`**, required) —
+    the well/tub diffusion layer; each of its physically distinct (merged)
+    shapes is checked independently. `null` (issue #2255) declares that
+    this block draws **no** well/tub layer for this tie at all — the
+    native-substrate case — and requires `well_boxes` below to assert the
+    region instead. The key itself is always required: the absence of a
+    drawn well must be declared, never inferred from an omitted key.
+  - `well_boxes` (optional array of `[left, bottom, right, top]` micrometre
+    boxes, default `[]`, issue #2255) — a caller **assertion** of the
+    substrate region this tie covers, for a block that draws no well/tub
+    layer to name. Valid **only** with `well_layer: null`, and required
+    with it (an empty/omitted list there is a spec error, not a tie that
+    quietly checks nothing); declaring it alongside a drawn `well_layer` is
+    an error too — to narrow a drawn well's taps, use `tap_boxes`. Unlike
+    every other optional key on this entry, this one *substitutes* for a
+    required field rather than narrowing one, so it is graded under its own
+    coverage classification (`erc_coverage.checked_by_well_assertion`,
+    separate from `tap_boxes`' `checked_by_assertion`) and carries its own
+    falsifiability test: an asserted region indistinguishable from the whole
+    top-cell extent is recorded as skipped work, never accepted as evidence
+    (see "A block with no drawn well at all" below). Each box's
+    `left`/`bottom`/`right`/`top` must satisfy `left < right` and
+    `bottom < top`.
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
   - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
@@ -475,15 +495,19 @@ only way to say "this tap is a real tap". Express it — a single-layer
 `tap_layer` naming a diffusion or contact layer will match every
 source/drain contact inside the well, and those contacts are real
 conductors, so `erc.missing_tie` will report the well as tied whenever any
-of them happens to reach the declared supply. And a block sitting in a
-native substrate with no *drawn* well/tub layer cannot declare a substrate
-tie at all: `well_layer` requires drawn geometry, so only the drawn-well
-half of such a design is graded. Neither #2234's `tap_boxes`/
-`ties_disclosure` nor #2247's `ties_disclosure.kind` closes that one — both
-relax how the *tap* side is expressed or disclosed, and a `ties_disclosure`
-only ever describes *undeclared* work, so a design that declares its n-well
-tie and can express nothing for its substrate has no way to disclose the
-missing half either. Tracked as its own open issue (#2255).
+of them happens to reach the declared supply.
+
+A block sitting in a native substrate with no *drawn* well/tub layer is
+**no longer unmodellable** (issue #2255): `well_layer` accepts `null`, with
+`well_boxes` asserting the substrate region in its place — see "A block
+with no drawn well at all" below for the form, its falsifiability test, and
+what that costs the resulting evidence. What stays unmodelled is anything
+that would *derive* such a region on the caller's behalf: there is no
+implicit "the whole top cell is the substrate" region and no derived
+`substrate = extent − nwell` boolean, both of which were considered and
+rejected as unfalsifiable — they make `erc.missing_tie` satisfiable by any
+contact anywhere that reaches the declared net, which is exactly the silent
+pass the sections above exist to close.
 
 #### A degenerate tie is reported as skipped, not as a pass (issue #2199)
 
@@ -657,6 +681,109 @@ applies to the run in front of them. The distinction earns its keep by
 naming the right remedy: re-run against a build whose tie extraction is
 isolated and declare the tie, rather than go looking for a tap that is
 already there.
+
+#### A block with no drawn well at all (`well_boxes`, issue #2255)
+
+Everything above relaxes how the **tap** side is expressed. The well side
+stayed mandatory and drawn: `well_layer` parsed a `"<layer>/<datatype>"`,
+so a block sitting in a **native substrate** — NMOS-in-bulk, the substrate
+diffusion-derived rather than layer-marked, nothing drawn anywhere in the
+stream to point at — could not declare its substrate tie in any form. Only
+the drawn-well (n-well) half of such a design was ever graded, and
+`ties_disclosure` could not cover the gap either: a disclosure describes
+*undeclared* work, so a spec that declares its n-well tie and can express
+nothing for its substrate had nothing to disclose.
+
+The declarable form is `well_layer: null` plus a `well_boxes` list naming
+the substrate region the tie covers, in the same `[left, bottom, right,
+top]` micrometre boxes `tap_boxes` uses:
+
+```json
+{
+  "ties": [
+    {
+      "name": "substrate_tie",
+      "well_layer": null,
+      "well_boxes": [
+        [-10.7, -74.5, 191.3, -60.0],
+        [-10.7, -45.0, 191.3, -31.7]
+      ],
+      "tap_layer": "22/0",
+      "tap_boxes": [
+        [-10.7, -74.5, 191.3, -73.1],
+        [-10.7, -33.1, 191.3, -31.7]
+      ],
+      "connect_to": "metal1",
+      "net": "vss"
+    }
+  ]
+}
+```
+
+**This is not the `tap_boxes` mechanism applied one layer up, and the
+difference matters.** `tap_boxes` *narrows* a required, drawn `tap_layer`:
+it composes with geometry, and geometry is still what gets measured. This
+*substitutes* for a required drawn layer, so nothing in the stream
+corroborates the region at all. Three consequences follow, all deliberate:
+
+- **The two forms are mutually exclusive.** `well_boxes` is valid only with
+  `well_layer: null`, and required with it — an empty or omitted list there
+  is a spec error. "There is no well and I am not asserting one" is already
+  expressible (omit the entry, say why in `ties_disclosure`), and unlike
+  this form that route cannot be mistaken for a graded check.
+- **It has its own coverage bucket**, `erc_coverage.checked_by_well_assertion`
+  — a list of the same `erc.missing_tie` work identities that also appear in
+  `checked`, parallel to but separate from `tap_boxes`' own
+  `checked_by_assertion`. A tie can appear in both (an asserted substrate
+  region whose tap is also caller-named), in either, or in neither. They are
+  not merged because they are different claims: one says *which drawn
+  geometry is the tap*, the other says *where the substrate is*.
+- **It has its own falsifiability test**, and it is not `tap_narrowed`.
+  That test measures what an assertion removes from a drawn baseline; here
+  there is no baseline to remove from. The equivalent bar is
+  indistinguishability from "everything": **an asserted region that covers
+  the top cell's own bounding box, to within 1% of its area, is recorded as
+  skipped work** (`erc_coverage.skipped`, reason
+  `degenerate_well_assertion`) rather than accepted as evidence — and the
+  connectivity roll-up reports `erc_status: "clean_partial"`, exactly as it
+  does for a degenerate tap declaration.
+
+**Why the whole-extent form has to be rejected.** `erc.missing_tie` loops
+over each merged polygon of the well region and asks "does this one contain
+a tap that reaches the declared net?". One die-sized polygon reduces that to
+"does *any* contact anywhere reach the declared net?" — satisfied by every
+PMOS source sitting on the rail, tap or not. That is the same unfalsifiable
+pass issue #2199 rejected on the tap side, one level up, and it is the
+reason the two obvious alternatives (an implicit "the whole top cell is the
+substrate" region, or a derived `substrate = extent − nwell` boolean) are
+not implemented: both land in that shape by construction, the latter
+whenever the n-wells are small relative to the block.
+
+The corollary is that **evidence value grows with how finely the assertion
+partitions the block**: each merged asserted polygon must independently hold
+a tap that reaches the net, so two disjoint boxes are a strictly stronger
+claim than one box spanning both, and adjacent boxes merge into one polygon
+(assert the ring edges, not the ring's enclosing rectangle — the same
+guidance the `tap_boxes` example above gives). The reverse also holds: an
+asserted region the layout does not actually tie produces the ordinary "no
+tap contact drawn inside it" `erc.missing_tie` finding, per asserted
+polygon, exactly as an untied drawn well would. The assertion can be wrong,
+and the run says so.
+
+**A drawn `well_layer` is never subject to this test**, however much of the
+block it covers. A blanket drawn well is a fact about the stream — checkable
+by opening the GDS — not an unverifiable claim, so every spec written before
+this feature grades exactly as it did.
+
+`klt signoff`'s T1 item 11 reaches **met** on a substrate tie declared this
+way, on the same terms as a drawn-well one: the assertion is falsifiable and
+this command falsifies it where it can, and a degenerate one lands in
+`erc_coverage.skipped`, which item 11 already refuses to read as a clean
+missing-tie verdict. The citation's
+`power_delivery.ties_checked_by_well_assertion` names which ties rested on an
+asserted well, so the weaker provenance is stated in the verdict of record
+rather than reachable only by re-opening the ERC envelope — see
+[`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11.
 
 ### Device bodies are not wires (`devices[]`, issue #2183)
 
@@ -854,7 +981,8 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   — declare it in `devices[]` (see "Device bodies are not wires" above), or
   read the finding as unreliable for that block.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
-  (one per merged polygon of a `ties[]` entry's `well_layer`), a tap must
+  (one per merged polygon of a `ties[]` entry's `well_layer` — or of its
+  asserted `well_boxes`, issue #2255, for a block that draws none), a tap must
   be drawn inside it (`tap_layer`, narrowed by `tap_requires`) *and* at
   least one such tap must be electrically connected — via the tie
   connectivity graph, where the tap is wired to `connect_to`'s `stackup`
@@ -1078,10 +1206,16 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   Antenna violations never appear here; they are `status`'s business.
 - **`erc_status: "clean_partial"`** — no finding, but some requested
   connectivity work was skipped: today that means a **degenerate `ties[]`
-  declaration** (issue #2199, see "Well/tap connectivity" above), whose
-  `erc.missing_tie` verdict could not be told apart from an ordinary
-  source/drain contact reaching the declared net. A successful, but not
-  unconditional, result: read `erc_coverage.skipped` for which tie.
+  declaration**, whose `erc.missing_tie` verdict could not be told apart
+  from one that never looked at a tap. Two forms, both under "Well/tap
+  connectivity" above: a degenerate *tap* (issue #2199,
+  `degenerate_tap_declaration` — the declared tap region is
+  indistinguishable from an ordinary source/drain contact reaching the
+  declared net) and a degenerate *well assertion* (issue #2255,
+  `degenerate_well_assertion` — a caller-asserted substrate region
+  indistinguishable from the whole top-cell extent). A successful, but not
+  unconditional, result: read `erc_coverage.skipped` for which tie, and
+  which of the two.
 - `"not_checked"` is a reachable token of the shared rollup vocabulary,
   listed for completeness: `erc_coverage` always grades at least one gate
   (a run with no gate net at all is exit 1), so a successful run reports
@@ -1391,7 +1525,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].islands[].layer` | string \| null | The `stackup` role carrying the most of this island's area (ties broken by stackup order) — the most useful layer to open a viewer on, not an exhaustive list of the roles it touches. |
 | `erc_findings[].islands[].shape_count` | integer | Number of merged polygons this island has across the `stackup` roles — separates a one-shape orphan stub from a whole sub-block that failed to strap up. |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
-| `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration, issue #2199), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
+| `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration — a degenerate tap, issue #2199, or a degenerate well assertion, issue #2255), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
 | `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
 | `ties_disclosure` | object \| null | (issues #2234, #2247) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`, plus `"kind": "unexpressible"\|"tool_limitation"` when the spec declared one); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" and "When the obstacle is the build, not the stream" above. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
@@ -1429,20 +1563,34 @@ was never computed" from "the declared supplies came back clean" off the
 envelope alone. The gate scope is never empty: a run in which no net
 carries gate-role geometry is exit 1, not a zero-coverage report.
 
-A declared `ties[]` entry is the one case this scope records as **skipped**
-(`degenerate_tap_declaration`, issue #2199): work that was requested and
-could not be performed, because the declared tap region is
-indistinguishable from an ordinary source/drain contact. That is a
-requested skip, so it does make the scope partial — see "A degenerate tie
-is reported as skipped, not as a pass" above.
+A declared `ties[]` entry is the one case this scope records as **skipped**:
+work that was requested and could not be performed. Two reasons today —
+`degenerate_tap_declaration` (issue #2199: the declared tap region is
+indistinguishable from an ordinary source/drain contact) and
+`degenerate_well_assertion` (issue #2255: a caller-asserted substrate region
+is indistinguishable from the whole top-cell extent). The well test is
+applied first when both would hold, since the tap narrowing is measured
+inside the well region. Either is a requested skip, so it does make the
+scope partial — see "A degenerate tie is reported as skipped, not as a
+pass" and "A block with no drawn well at all" above.
 
-`erc_coverage` additionally carries `checked_by_assertion` (array\<string\>,
-issue #2234): the subset of `checked` work identities whose tap region was
-derived (at least in part) from a caller assertion (`ties[].tap_boxes`)
-rather than pure PDK-marker narrowing — `[]` when no tie used it. This is
-purely informational, additive to the four common-contract lists: a
-consumer that only reads `checked`/`skipped`/`inapplicable` sees an
-asserted tie exactly as it sees any other checked, non-degenerate tie.
+`erc_coverage` additionally carries two assertion lists, both subsets of
+`checked`, both `[]` when unused, and both purely informational — additive
+to the four common-contract lists, so a consumer that only reads
+`checked`/`skipped`/`inapplicable` sees an asserted tie exactly as it sees
+any other checked, non-degenerate tie:
+
+- `checked_by_assertion` (array\<string\>, issue #2234) — the work
+  identities whose **tap** region was derived (at least in part) from a
+  caller assertion (`ties[].tap_boxes`) rather than pure PDK-marker
+  narrowing.
+- `checked_by_well_assertion` (array\<string\>, issue #2255) — the work
+  identities whose **well** region was itself asserted
+  (`ties[].well_layer: null` + `ties[].well_boxes`), because the block
+  draws no well/tub layer at all. Deliberately a separate list rather than
+  more entries in the first: asserting which drawn geometry counts as the
+  tap and asserting where the substrate is are different claims, and the
+  second is the weaker one. A tie may appear in both.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as
