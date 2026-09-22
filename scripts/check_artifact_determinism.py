@@ -395,66 +395,74 @@ def load_generators(manifest_path: Path | None) -> list[Generator]:
     if not isinstance(entries, (list, tuple)) or not entries:
         raise CannotRun("manifest declares no generators")
 
-    generators: list[Generator] = []
-    for entry in entries:
-        if not isinstance(entry, dict) or "script" not in entry:
-            raise CannotRun(f"malformed generator entry: {entry!r}")
-        globs = entry.get("artifacts") or []
-        if not isinstance(globs, list):
-            raise CannotRun(f"generator {entry['script']!r}: artifacts must be a list")
+    return [_generator_from_entry(entry) for entry in entries]
 
-        # Float discipline (issue #2279). A typo'd discipline must be loud
-        # (exit 2), never a silent fall-through to the default scan -- the
-        # same rule `schema_version` above is held to.
-        script_name = str(entry["script"])
-        discipline = entry.get("float_discipline", DEFAULT_FLOAT_DISCIPLINE)
-        if discipline not in FLOAT_DISCIPLINES:
-            raise CannotRun(
-                f"generator {script_name!r}: unknown float_discipline "
-                f"{discipline!r} (expected one of {', '.join(FLOAT_DISCIPLINES)})"
-            )
 
-        # Pin fields: required on a pinned-artifact entry, a likely mistake
-        # anywhere else -- a `generator_sha256` recorded against
-        # `integer-exact` would look like a pin while nothing verified it.
-        present = [name for name in _PIN_FIELDS if name in entry]
-        if discipline == PINNED_ARTIFACT:
-            missing = [name for name in _PIN_FIELDS if name not in entry]
-            if missing:
-                raise CannotRun(
-                    f"generator {script_name!r}: float_discipline "
-                    f"{PINNED_ARTIFACT!r} requires {', '.join(_PIN_FIELDS)} "
-                    f"(missing: {', '.join(missing)})"
-                )
-            generator_sha256 = _validated_hash(entry, "generator_sha256", script_name)
-            regenerate = entry["regenerate"]
-            if not isinstance(regenerate, str) or not regenerate.strip():
-                raise CannotRun(
-                    f"generator {script_name!r}: regenerate must be a non-empty "
-                    "command string -- it is the recorded human path to "
-                    "regenerate (and re-pin) the artifact"
-                )
-            artifact_sha256 = _validated_artifact_hashes(entry, script_name)
-        else:
-            if present:
-                raise CannotRun(
-                    f"generator {script_name!r}: {', '.join(present)} only mean "
-                    f"something with float_discipline {PINNED_ARTIFACT!r}; a pin "
-                    "recorded against another discipline would never be verified"
-                )
-            generator_sha256, regenerate, artifact_sha256 = None, None, ()
+def _generator_from_entry(entry: object) -> Generator:
+    """Validate and normalise one manifest entry -- the float-discipline and
+    pin-field halves of the schema (issue #2279) included. Every malformed
+    shape is `CannotRun` (exit 2): a typo'd discipline or a pin nothing
+    verifies must be loud, never a silent fall-through."""
+    if not isinstance(entry, dict) or "script" not in entry:
+        raise CannotRun(f"malformed generator entry: {entry!r}")
+    globs = entry.get("artifacts") or []
+    if not isinstance(globs, list):
+        raise CannotRun(f"generator {entry['script']!r}: artifacts must be a list")
 
-        generators.append(
-            Generator(
-                script=script_name,
-                artifacts=tuple(str(g) for g in globs),
-                float_discipline=discipline,
-                generator_sha256=generator_sha256,
-                regenerate=regenerate,
-                artifact_sha256=artifact_sha256,
-            )
+    script_name = str(entry["script"])
+    discipline = entry.get("float_discipline", DEFAULT_FLOAT_DISCIPLINE)
+    if discipline not in FLOAT_DISCIPLINES:
+        raise CannotRun(
+            f"generator {script_name!r}: unknown float_discipline "
+            f"{discipline!r} (expected one of {', '.join(FLOAT_DISCIPLINES)})"
         )
-    return generators
+
+    generator_sha256, regenerate, artifact_sha256 = _validated_pin(
+        entry, script_name, discipline
+    )
+    return Generator(
+        script=script_name,
+        artifacts=tuple(str(g) for g in globs),
+        float_discipline=discipline,
+        generator_sha256=generator_sha256,
+        regenerate=regenerate,
+        artifact_sha256=artifact_sha256,
+    )
+
+
+def _validated_pin(
+    entry: dict[str, object], script_name: str, discipline: str
+) -> tuple[str | None, str | None, tuple[tuple[str, str], ...]]:
+    """The pin triple for one entry: required (and validated) on a
+    `pinned-artifact` entry, a likely mistake anywhere else -- a
+    `generator_sha256` recorded against `integer-exact` would look like a pin
+    while nothing verified it."""
+    present = [name for name in _PIN_FIELDS if name in entry]
+    if discipline != PINNED_ARTIFACT:
+        if present:
+            raise CannotRun(
+                f"generator {script_name!r}: {', '.join(present)} only mean "
+                f"something with float_discipline {PINNED_ARTIFACT!r}; a pin "
+                "recorded against another discipline would never be verified"
+            )
+        return None, None, ()
+
+    missing = [name for name in _PIN_FIELDS if name not in entry]
+    if missing:
+        raise CannotRun(
+            f"generator {script_name!r}: float_discipline "
+            f"{PINNED_ARTIFACT!r} requires {', '.join(_PIN_FIELDS)} "
+            f"(missing: {', '.join(missing)})"
+        )
+    generator_sha256 = _validated_hash(entry, "generator_sha256", script_name)
+    regenerate = entry["regenerate"]
+    if not isinstance(regenerate, str) or not regenerate.strip():
+        raise CannotRun(
+            f"generator {script_name!r}: regenerate must be a non-empty "
+            "command string -- it is the recorded human path to regenerate "
+            "(and re-pin) the artifact"
+        )
+    return generator_sha256, regenerate, _validated_artifact_hashes(entry, script_name)
 
 
 def _validated_hash(entry: dict[str, object], name: str, script_name: str) -> str:
@@ -526,6 +534,72 @@ def _has_float_literal(node: ast.expr) -> bool:
     return False
 
 
+def _float_import_resolutions(
+    tree: ast.AST,
+) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Pass 1 of :func:`scan_float_ops`: resolve, across the whole module,
+    (a) the local aliases that refer to a flagged module
+    (``import numpy as np`` -> ``"np"``), (b) the bare names bound to one of
+    those modules' flagged callables (``from math import pow as p`` ->
+    ``"p"``), and (c) the flagged modules star-imported (whose bindings are
+    unknowable statically). Imports can sit anywhere in the file, so this is
+    one full walk before the construct walk."""
+    module_aliases: dict[str, str] = {}
+    bare_flagged: dict[str, str] = {}
+    star_imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in _HOST_FLOAT_CALLS:
+                    module_aliases[alias.asname or root] = root
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root not in _HOST_FLOAT_CALLS:
+                continue
+            if any(alias.name == "*" for alias in node.names):
+                star_imports.add(root)
+                continue
+            for alias in node.names:
+                if alias.name in _flagged_calls(root):
+                    bare_flagged[alias.asname or alias.name] = root
+    return module_aliases, bare_flagged, star_imports
+
+
+def _flagged_call_construct(
+    node: ast.Call,
+    module_aliases: dict[str, str],
+    bare_flagged: dict[str, str],
+    star_imports: set[str],
+) -> str | None:
+    """A human-readable construct name when `node` is a host-libm call, else
+    `None` -- the per-call half of :func:`scan_float_ops`."""
+    func = node.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        module = module_aliases.get(func.value.id)
+        if module and func.attr in _flagged_calls(module):
+            return f"{func.value.id}.{func.attr}(...)"
+        return None
+    if isinstance(func, ast.Name):
+        name = func.id
+        if name in bare_flagged:
+            return f"{name}(...) (imported from {bare_flagged[name]})"
+        if any(name in _flagged_calls(module) for module in star_imports):
+            # `from math import *`: the name's provenance is unknowable
+            # statically, so a bare call to a flagged name is attributed to
+            # the star import rather than missed.
+            return f"{name}(...) (star-imported float module)"
+        if (
+            name == "pow"
+            and len(node.args) == 2
+            and not node.keywords
+            and (_has_float_literal(node.args[0]) or _has_float_literal(node.args[1]))
+        ):
+            # Three-argument pow(a, b, m) is modular *integer* arithmetic.
+            return "pow(a, b) with a float-literal argument"
+    return None
+
+
 def scan_float_ops(source: str, filename: str = "<generator>") -> list[FloatOp]:
     """Every host-libm float computation in `source`, in first-appearance
     order (empty list when clean).
@@ -563,31 +637,8 @@ def scan_float_ops(source: str, filename: str = "<generator>") -> list[FloatOp]:
     except SyntaxError as exc:
         raise CannotRun(f"cannot parse {filename}: {exc}") from exc
 
-    # Pass 1: resolve the local aliases that refer to a flagged module
-    # (`import numpy as np` -> "np"), the bare names bound to one of its
-    # flagged callables (`from math import pow as p` -> "p"), and any
-    # star-import (whose bindings are unknowable statically).
-    module_aliases: dict[str, str] = {}
-    bare_flagged: dict[str, str] = {}
-    star_imports: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                root = alias.name.split(".")[0]
-                if root in _HOST_FLOAT_CALLS:
-                    module_aliases[alias.asname or root] = root
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            root = node.module.split(".")[0]
-            if root not in _HOST_FLOAT_CALLS:
-                continue
-            if any(alias.name == "*" for alias in node.names):
-                star_imports.add(root)
-                continue
-            for alias in node.names:
-                if alias.name in _flagged_calls(root):
-                    bare_flagged[alias.asname or alias.name] = root
+    module_aliases, bare_flagged, star_imports = _float_import_resolutions(tree)
 
-    # Pass 2: find the constructs.
     lines = source.splitlines()
     ops: list[FloatOp] = []
 
@@ -598,32 +649,11 @@ def scan_float_ops(source: str, filename: str = "<generator>") -> list[FloatOp]:
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
-                module = module_aliases.get(func.value.id)
-                if module and func.attr in _flagged_calls(module):
-                    record(node, f"{func.value.id}.{func.attr}(...)")
-            elif isinstance(func, ast.Name):
-                name = func.id
-                if name in bare_flagged:
-                    origin = bare_flagged[name]
-                    record(node, f"{name}(...) (imported from {origin})")
-                elif any(name in _flagged_calls(module) for module in star_imports):
-                    # `from math import *`: the name's provenance is
-                    # unknowable statically, so a bare call to a flagged name
-                    # is attributed to the star import rather than missed.
-                    record(node, f"{name}(...) (star-imported float module)")
-                elif (
-                    name == "pow"
-                    and name not in bare_flagged
-                    and len(node.args) == 2
-                    and not node.keywords
-                    and (
-                        _has_float_literal(node.args[0])
-                        or _has_float_literal(node.args[1])
-                    )
-                ):
-                    record(node, "pow(a, b) with a float-literal argument")
+            construct = _flagged_call_construct(
+                node, module_aliases, bare_flagged, star_imports
+            )
+            if construct is not None:
+                record(node, construct)
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
             if _has_float_literal(node.left) or _has_float_literal(node.right):
                 record(node, "`**` with a float-literal operand")
@@ -815,6 +845,41 @@ def _declared(checkout: Path, generators: list[Generator]) -> set[str]:
     return found
 
 
+def _run_generator_script(
+    generator: Generator,
+    checkout: Path,
+    *,
+    env: dict[str, str],
+    python: str,
+    timeout: int,
+) -> None:
+    """Execute one (non-pinned) generator in `checkout`; `CannotRun` on a
+    timeout, a spawn failure, or a non-zero exit -- a generator that fails is
+    a check that cannot run, never a green."""
+    script = checkout / generator.script
+    try:
+        proc = subprocess.run(
+            [python, str(script)],
+            cwd=str(checkout),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CannotRun(
+            f"generator {generator.script} timed out after {timeout}s in {checkout}"
+        ) from exc
+    except OSError as exc:
+        raise CannotRun(f"cannot run {generator.script}: {exc}") from exc
+    if proc.returncode != 0:
+        raise CannotRun(
+            f"generator {generator.script} failed in {checkout} "
+            f"(exit {proc.returncode}):\n{proc.stdout}{proc.stderr}"
+        )
+
+
 def execute_run(
     checkout: Path,
     seed: str,
@@ -862,27 +927,9 @@ def execute_run(
             continue
         if verbose:
             print(f"  -> {generator.script} (PYTHONHASHSEED={seed})", flush=True)
-        try:
-            proc = subprocess.run(
-                [python, str(script)],
-                cwd=str(checkout),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise CannotRun(
-                f"generator {generator.script} timed out after {timeout}s in {checkout}"
-            ) from exc
-        except OSError as exc:
-            raise CannotRun(f"cannot run {generator.script}: {exc}") from exc
-        if proc.returncode != 0:
-            raise CannotRun(
-                f"generator {generator.script} failed in {checkout} "
-                f"(exit {proc.returncode}):\n{proc.stdout}{proc.stderr}"
-            )
+        _run_generator_script(
+            generator, checkout, env=env, python=python, timeout=timeout
+        )
 
     # Declared globs, widened by anything the run newly dirtied: a generator
     # that starts writing an artifact nobody declared is still compared,
