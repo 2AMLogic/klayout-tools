@@ -440,25 +440,43 @@ jobs:
         if: matrix.crate == 'mom'
         timeout-minutes: 20
         working-directory: .
+        # `shell: bash` is load-bearing for the same reason it is on the
+        # FastCap step above: it selects `bash --noprofile --norc -eo
+        # pipefail`, and without `pipefail` a `run:` step that pipes pytest
+        # into `tee` reports *tee's* exit status (always 0), so a real
+        # inductance disagreement would go green. The skip gate in the next
+        # step only catches skips, never failures.
+        shell: bash
         run: |
           uv sync --locked --extra dev --group mom --extra mom-pypeec-cross-validation
           uv run --frozen --extra dev --group mom --extra mom-pypeec-cross-validation \
-            pytest tests/test_mom_pypeec_cross_validation.py -v --capture=tee-sys
+            pytest tests/test_mom_pypeec_cross_validation.py -v --capture=tee-sys \
+            | tee pytest-pypeec-oracle.log
 
       - name: Assert the PyPEEC cross-validation test actually ran (no silent skip)
         # The test module skips itself (with an explicit reason) when pypeec
         # is not importable -- by design, so a network-less sandbox degrades
         # gracefully. This step is what makes sure a silent skip is never the
-        # only thing CI ever sees, exactly like the PyNEC assert above.
+        # only thing CI ever sees, exactly like the PyNEC and FastCap asserts
+        # above.
+        #
+        # Greps the tee'd pytest log rather than re-asserting `import pypeec`
+        # (issue #2307): the import probe only proved pypeec was importable,
+        # which is just *one* of the module's two skip gates -- a skip raised
+        # for any other reason (a missing klt_mom_native, a
+        # `pytest.skip` inside a test) still left this leg green having run
+        # nothing. Grepping the log is strictly stronger: it observes what
+        # pytest actually did. Same pattern, same expression as the FastCap
+        # gate above.
         if: matrix.crate == 'mom'
         timeout-minutes: 5
         working-directory: .
         run: |
-          uv run --frozen --extra dev --group mom --extra mom-pypeec-cross-validation \
-            python -c "import pypeec" || {
-            echo "::error::pypeec did not install -- tests/test_mom_pypeec_cross_validation.py would have skipped"
+          if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-pypeec-oracle.log; then
+            echo "::error::tests/test_mom_pypeec_cross_validation.py was SKIPPED, not run -- provisioning did not satisfy its gate (klt_mom_native built, pypeec installed)." >&2
             exit 1
-          }
+          fi
+          echo "PyPEEC spiral cross-validation ran to completion (not skipped)."
 
   native-statime:
     name: Native engines (Rust) — static timing
