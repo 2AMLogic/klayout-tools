@@ -182,6 +182,41 @@ uv run pytest tests/test_drc_magic_oracle.py tests/test_extract_magic_oracle.py
 See [`docs/design/magic-oracle.md`](../docs/design/magic-oracle.md) for the
 methodology, the measured results, and the declared shared surface.
 
+## `install-fastcap.sh`
+
+Provisioning for the FastCap-backed capacitance cross-validation oracle
+(issue #2015, pairing #4 of tracking issue #2007):
+[`tests/test_mom_capacitance_oracle.py`](../tests/test_mom_capacitance_oracle.py)
+checks `klt mom`'s Maxwell capacitance matrix against FastCap 2.0, an
+independently implemented Method-of-Moments capacitance solver — and the very
+program `native/mom/src/solver.rs` names as the method it implements. The test
+module skips cleanly without it; `ci.yml`'s `Native engines (Rust)` (`mom`)
+leg runs it for real on every PR.
+
+There is no distro package (FastCap's last upstream release was 1992), so
+this builds a pinned, checksum-verified source archive from
+`ediloren/FastCap2`'s `master` branch — the M.I.T. distribution under its
+permissive 2003 relicensing, *not* the `WRCad` branch, whose sources are
+still under the original "internal, noncommercial purposes" license — and
+applies
+[`patches/fastcap-2.0-modern-toolchain.patch`](patches/fastcap-2.0-modern-toolchain.patch),
+two build-only hunks without which 1992 K&R C does not build (or, worse,
+builds and segfaults on its first allocation). Nothing is vendored. Same
+`--force`/idempotent/`$FASTCAP_INSTALL_PREFIX` conventions; the whole build
+takes about 7 seconds, and ends in a smoke test that requires a real
+capacitance matrix rather than a zero exit status.
+
+```
+scripts/install-fastcap.sh
+export PATH="$HOME/.cache/fastcap-2.0-ec3479e/bin:$PATH"
+uv sync --extra dev --group mom
+uv run pytest tests/test_mom_capacitance_oracle.py
+```
+
+See [`docs/design/fastcap-oracle.md`](../docs/design/fastcap-oracle.md) for
+the methodology, why FastCap rather than Palace, the measured agreement, and
+the declared shared surface.
+
 ## `ci-apt-install.sh`
 
 The `apt-get` front end for all three package-install steps in
