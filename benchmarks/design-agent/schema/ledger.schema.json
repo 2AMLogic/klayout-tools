@@ -37,13 +37,18 @@
       "minimum": 1,
       "description": "1-based round number within this task's ledger; rounds are numbered and appended in run order."
     },
+    "cached": {
+      "type": "boolean",
+      "description": "Whether this line was *replicated* from an earlier round rather than really run (issue #2295). `true` only for rounds 2..R of a provider marked `is_deterministic = True` (today: `reference`), which by construction resubmits byte-identical bytes every round and ignores the round-history context entirely -- so the harness runs round 1 for real and copies its outcome across the remaining rounds instead of paying for R identical corner sweeps, mirroring `run_task_attempts`'s existing `--attempts`-mode shortcut (issue #1781). A `true` line carries the real round's `submission_sha256`/`functional`/`ppa`/`valid`/`score`/`notes`/`usage` verbatim, its own renumbered `round` and recomputed `seed_sha256`, and `agent_wall_s`/`round_wall_s` of `0` (so a ledger's wall-clock total is the one real round's actual cost, not an R-times multiple of it). Optional for backwards compatibility with ledgers written before this field existed; absent is equivalent to `false`.",
+      "default": false
+    },
     "submission_sha256": {
       "type": ["string", "null"],
       "description": "Content hash of this round's submission: for an agent-backed provider, the bytes of the netlist(s)/request(s) its `klt eval` descriptor references by absolute path -- the same files the harness copies into its own `submissions/round-<N>/` directory and scores from there, so this hash identifies what was actually graded, not a path that could later be swapped. Falls back to hashing the descriptor/candidate argument strings when the descriptor names no absolute path (the repository-committed `reference` descriptor's case). `null` only when the provider itself produced no submission at all (see `notes`). Stable across rounds for the deterministic `reference` provider, which resubmits the identical fixed reference every round -- the basis of the plumbing test in issue #2253's acceptance criteria."
     },
     "seed_sha256": {
       "type": "string",
-      "description": "Hash of this round's input context: the task id plus the up-to-3 trailing ledger entries fed into this round's prompt. Identical for every round-1 invocation of the same task (no prior history); differs once history accumulates. A provider that ignores context entirely (e.g. `reference`) can still produce an identical `submission_sha256` across rounds despite a differing `seed_sha256` -- the two fields are independent."
+      "description": "Hash of this round's input context: the task id plus the up-to-3 trailing ledger entries fed into this round's prompt. Identical for every round-1 invocation of the same task (no prior history); differs once history accumulates. A provider that ignores context entirely (e.g. `reference`) can still produce an identical `submission_sha256` across rounds despite a differing `seed_sha256` -- the two fields are independent. On a `cached: true` line this is recomputed from the preceding ledger lines rather than copied from the real round, so every line's `seed_sha256` stays re-derivable from the lines above it."
     },
     "agent_wall_s": {
       "type": "number",

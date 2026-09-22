@@ -1157,6 +1157,214 @@ def test_reference_provider_round_mode_resubmits_identical_reference(monkeypatch
     assert all(e["valid"] for e in entries)
 
 
+def test_reference_provider_round_mode_ledger_hashes_stable_through_public_runner(
+    monkeypatch, tmp_path
+):
+    """The same plumbing claim as the test above, asserted against the
+    *public* entry point (`run_task_rounds`) rather than a per-round loop --
+    so it holds whether or not the deterministic-provider caching shortcut
+    (issue #2295) is engaged, rather than accidentally testing "the provider
+    was called every round"."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    _stub_run_eval(monkeypatch, valid=True)
+
+    entries = dab.run_task_rounds(
+        task,
+        3,
+        dab.reference_candidate_provider,
+        REPO_ROOT,
+        rounds_root=tmp_path,
+    )
+
+    assert [e["round"] for e in entries] == [1, 2, 3]
+    hashes = {e["submission_sha256"] for e in entries}
+    assert len(hashes) == 1, "reference provider must resubmit byte-identical rounds"
+    assert all(e["valid"] for e in entries)
+    _restore_writable(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# Unit tests: deterministic-provider round caching (issue #2295)
+# --------------------------------------------------------------------------
+#
+# The round-mode counterpart of the `--attempts`-mode caching tests above
+# (issue #1781): a provider marked `is_deterministic = True` resubmits
+# byte-identical output every round *and* ignores the round-history context
+# entirely, so rounds 2..R re-simulate the exact same submission for zero
+# refinement signal. `run_task_rounds` runs round 1 for real and replicates
+# its ledger entry across the rest.
+
+
+def _deterministic_round_provider(call_log: list[int]):
+    """A stand-in for `reference_candidate_provider`: byte-identical output
+    every round (it ignores both `round_index` and the round-history context
+    the harness attaches), opted into the caching shortcut."""
+
+    def provider(_task: dict, round_index: int, _repo_root: Path):
+        call_log.append(round_index)
+        return "fixed-descriptor", None
+
+    provider.is_deterministic = True
+    return provider
+
+
+def test_run_task_rounds_runs_a_deterministic_provider_exactly_once(
+    monkeypatch, tmp_path
+):
+    """Issue #2295's core claim, mirroring
+    `test_run_task_attempts_runs_a_deterministic_provider_exactly_once`: the
+    provider *and* `klt eval` each run for real exactly once, no matter how
+    many rounds were asked for."""
+    eval_calls = _stub_run_eval(monkeypatch, valid=True)
+    call_log: list[int] = []
+
+    entries = dab.run_task_rounds(
+        {"id": "fake-task"},
+        4,
+        _deterministic_round_provider(call_log),
+        Path("/repo"),
+        rounds_root=tmp_path,
+    )
+
+    assert call_log == [1]  # the provider itself only ran for round 1
+    assert len(eval_calls) == 1  # ... and so did `klt eval`
+    assert [e["round"] for e in entries] == [1, 2, 3, 4]
+    assert entries[0]["cached"] is False
+    assert all(e["cached"] is True for e in entries[1:])
+    assert all(e["agent_wall_s"] == 0.0 for e in entries[1:])
+    assert all(e["round_wall_s"] == 0.0 for e in entries[1:])
+    # Everything describing the submission and its score is replicated.
+    assert len({e["submission_sha256"] for e in entries}) == 1
+    assert all(e["valid"] for e in entries)
+    assert len({e["score"] for e in entries}) == 1
+    _restore_writable(tmp_path)
+
+
+def test_run_task_rounds_runs_every_round_for_a_non_deterministic_provider(
+    monkeypatch, tmp_path
+):
+    """A provider that does not opt in -- every agent-backed provider, whose
+    whole point in round mode is that later rounds differ -- must still run
+    every round for real."""
+    eval_calls = _stub_run_eval(monkeypatch, valid=True)
+    call_log: list[dict] = []
+
+    entries = dab.run_task_rounds(
+        {"id": "fake-task"},
+        3,
+        _counting_round_provider(call_log),
+        Path("/repo"),
+        rounds_root=tmp_path,
+    )
+
+    assert [c["round"] for c in call_log] == [1, 2, 3]
+    assert len(eval_calls) == 3
+    assert all(e["cached"] is False for e in entries)
+    _restore_writable(tmp_path)
+
+
+def test_run_task_rounds_cached_entries_match_the_ledger_schema(monkeypatch, tmp_path):
+    """Replicated lines are ordinary `klt.design_agent_benchmark.ledger/1`
+    entries -- the `cached` field is additive, and the schema still rejects
+    anything else."""
+    _stub_run_eval(monkeypatch, valid=True)
+    validator = _ledger_validator()
+
+    entries = dab.run_task_rounds(
+        {"id": "fake-task"},
+        3,
+        _deterministic_round_provider([]),
+        Path("/repo"),
+        rounds_root=tmp_path,
+    )
+
+    for entry in entries:
+        validator.validate(entry)
+    # ... and the on-disk ledger really does carry every round, cached or not.
+    ledger_path = tmp_path / "fake-task" / dab.LEDGER_FILENAME
+    lines = [json.loads(ln) for ln in ledger_path.read_text().splitlines()]
+    assert lines == entries
+    assert [ln["cached"] for ln in lines] == [False, True, True]
+    _restore_writable(tmp_path)
+
+
+def test_run_task_rounds_cached_seed_sha256_is_rederivable_from_the_ledger(
+    monkeypatch, tmp_path
+):
+    """A replicated round's `seed_sha256` is recomputed from the lines above
+    it rather than copied from round 1, so the ledger stays self-describing:
+    any line's seed re-derives from its predecessors."""
+    _stub_run_eval(monkeypatch, valid=True)
+
+    entries = dab.run_task_rounds(
+        {"id": "fake-task"},
+        3,
+        _deterministic_round_provider([]),
+        Path("/repo"),
+        rounds_root=tmp_path,
+    )
+
+    for i, entry in enumerate(entries):
+        expected = dab._round_seed_sha256(
+            "fake-task", entries[:i][-dab.ROUND_HISTORY_WINDOW :]
+        )
+        assert entry["seed_sha256"] == expected
+    assert len({e["seed_sha256"] for e in entries}) == 3  # still differs per round
+    _restore_writable(tmp_path)
+
+
+def test_run_task_rounds_summaries_identical_whether_or_not_caching_engages(
+    monkeypatch, tmp_path
+):
+    """`best_round`/`summarize_rounds` must not be able to tell the
+    difference: the caching shortcut is a cost optimization, never a
+    reporting change."""
+    _stub_run_eval(monkeypatch, valid=True)
+
+    cached_entries = dab.run_task_rounds(
+        {"id": "fake-task"},
+        3,
+        _deterministic_round_provider([]),
+        Path("/repo"),
+        rounds_root=tmp_path / "cached",
+    )
+    # The same provider with the opt-in flag removed runs every round for
+    # real -- byte-identical output each time, by construction.
+    uncached_provider = _deterministic_round_provider([])
+    uncached_provider.is_deterministic = False
+    uncached_entries = dab.run_task_rounds(
+        {"id": "fake-task"},
+        3,
+        uncached_provider,
+        Path("/repo"),
+        rounds_root=tmp_path / "uncached",
+    )
+
+    # The progress series (round/valid/score) is what a reader ranks and
+    # plots -- it must be byte-for-byte identical.
+    assert (
+        dab.summarize_rounds(cached_entries)["series"]
+        == dab.summarize_rounds(uncached_entries)["series"]
+    )
+    assert dab.summarize_rounds(cached_entries)["count"] == 3
+    # `best` is a whole ledger entry, so it legitimately carries this run's
+    # own wall-clock timings; everything else about it must match.
+    assert _best_modulo_wall_time(cached_entries) == _best_modulo_wall_time(
+        uncached_entries
+    )
+    _restore_writable(tmp_path)
+
+
+def _best_modulo_wall_time(entries: list[dict]) -> dict:
+    """`summarize_rounds`'s `best` entry with the only fields a real rerun
+    could not reproduce exactly (its own measured wall-clock timings)
+    dropped."""
+    best = dict(dab.best_round(entries) or {})
+    for key in ("agent_wall_s", "round_wall_s"):
+        best.pop(key, None)
+    return best
+
+
 def test_run_benchmark_rounds_are_additive_when_requested(monkeypatch, tmp_path):
     task = _write_reference_cache_fixture(tmp_path)
     _stub_run_eval(monkeypatch, valid=True)

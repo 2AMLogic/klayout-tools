@@ -226,8 +226,8 @@ methodology reference only, no code reuse), not reused code:
   `<rounds-root>/<task-id>/ledger.jsonl`: `round`, `submission_sha256`,
   `seed_sha256`, `agent_wall_s`/`round_wall_s`, `timed_out`, `usage`,
   `functional` (the gate/pass-fail leg), `ppa` (the objective/metrics leg),
-  `valid`, `score`, `notes`. Full field-by-field contract in the schema
-  file's own `description`s.
+  `valid`, `score`, `notes`, `cached`. Full field-by-field contract in the
+  schema file's own `description`s.
 - **`score` is a spec margin, not a raw objective value.** When a task's
   `objective` reads a `sim` measurement's worst-case *value* (the
   `measurements.<i>.worst_case.value` convention every shipped task uses),
@@ -264,6 +264,17 @@ methodology reference only, no code reuse), not reused code:
   (`submission_sha256` unchanged across rounds). This is the harness's own
   plumbing proof, not a real optimization-quality signal — see "Known
   limitations" above for what `reference` does and does not establish.
+  Because that resubmission is byte-identical *and* the provider ignores
+  the round-history context, `--provider reference --rounds R` runs the
+  provider and `klt eval` for real exactly **once** and replicates round 1's
+  ledger entry across rounds 2..R (issue #2295, the round-mode counterpart
+  of `--attempts` mode's own shortcut, issue #1781). Replicated lines are
+  marked `cached: true` with zeroed `agent_wall_s`/`round_wall_s` and a
+  `seed_sha256` recomputed from the lines above them; everything describing
+  the submission and its score is copied verbatim, so the ledger still has
+  `R` lines and `best()`/the progress series are identical to an uncached
+  run. Every agent-backed provider (whose later rounds are supposed to
+  differ) runs every round for real, unchanged.
 - **Report fields are additive only.** `run`'s JSON report gains a top-level
   `n_rounds` and, per task, a `"rounds"` key (`{"count", "best",
   "series", "ledger_path"}`) when `--rounds > 0`; `--attempts`'s own pass@k

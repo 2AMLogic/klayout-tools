@@ -2623,11 +2623,17 @@ def _round_ledger_entry(
     """Assemble one ``klt.design_agent_benchmark.ledger/1`` line -- the single
     place this module's ledger shape is written, so
     `benchmarks/design-agent/schema/ledger.schema.json` has exactly one
-    implementation to stay in step with."""
+    implementation to stay in step with.
+
+    ``cached`` is always ``False`` here: this function is only ever called
+    for a round that really ran the provider and `klt eval`. The replicated
+    entries :func:`_replicated_round_entry` derives from a real round are
+    the only ones that carry ``cached: true`` (issue #2295)."""
     return {
         "schema": LEDGER_SCHEMA,
         "task_id": task_id,
         "round": round_index,
+        "cached": False,
         "submission_sha256": submission_sha256,
         "seed_sha256": seed_sha256,
         "agent_wall_s": agent_wall_s,
@@ -2693,6 +2699,58 @@ def summarize_rounds(entries: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _replicated_round_entry(
+    first: dict[str, Any],
+    round_index: int,
+    task_id: str,
+    history: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Round ``round_index``'s ledger entry, replicated from the one real
+    round ``first`` a deterministic provider already produced (issue #2295 --
+    the round-mode counterpart of :func:`run_task_attempts`'s own
+    deterministic-provider shortcut).
+
+    Everything that describes *what was submitted and how it scored*
+    (``submission_sha256``, ``functional``, ``ppa``, ``valid``, ``score``,
+    ``notes``, ``usage``, ``timed_out``) is copied verbatim -- that is the
+    whole premise of the shortcut: a provider marked ``is_deterministic =
+    True`` would have resubmitted byte-identical bytes, which `klt eval`
+    would have scored identically. Everything that describes *this round's
+    own execution* is corrected rather than copied:
+
+    - ``round`` is renumbered, so :func:`summarize_rounds`'s series and
+      :func:`best_round`'s tie-breaking see the same round numbering a real
+      rerun would have produced.
+    - ``agent_wall_s``/``round_wall_s`` are zeroed, so a ledger's wall-clock
+      total reflects the one real round's actual cost rather than a
+      tautological ``R``-times multiple of it (exactly what
+      :func:`run_task_attempts` does to ``wall_clock_s``).
+    - ``cached`` is ``True``, so a replicated round is never mistaken for a
+      real one by any consumer of the ledger.
+    - ``seed_sha256`` is **recomputed** from the history this round would
+      have been handed (``history``, trimmed to
+      :data:`ROUND_HISTORY_WINDOW`), rather than reusing round 1's. The
+      field's documented meaning is "hash of this round's input context",
+      and the ledger is self-describing: a reader can re-derive any line's
+      ``seed_sha256`` from the lines above it. Reusing round 1's value would
+      break that check for every replicated line; recomputing keeps it,
+      costs one sha256 over at most three already-in-memory entries, and is
+      exactly the value a real rerun would have recorded for round 2. (From
+      round 3 on it necessarily differs from a real rerun, because the
+      history being hashed now contains replicated entries -- zeroed wall
+      times, ``cached: true``. That divergence is inherent to the shortcut
+      and is why ``cached`` is on the line at all. It is harmless here
+      because a deterministic provider ignores the history entirely.)
+    """
+    entry = copy.deepcopy(first)
+    entry["round"] = round_index
+    entry["agent_wall_s"] = 0.0
+    entry["round_wall_s"] = 0.0
+    entry["cached"] = True
+    entry["seed_sha256"] = _round_seed_sha256(task_id, history[-ROUND_HISTORY_WINDOW:])
+    return entry
+
+
 def run_task_rounds(
     task: dict[str, Any],
     n_rounds: int,
@@ -2725,6 +2783,27 @@ def run_task_rounds(
     Once every round has run, the ledger file itself is chmod'd read-only
     (best-effort) -- "the ledger is published read-only ... next to the
     results" (issue #2253's Reference shape).
+
+    **Deterministic-provider caching (issue #2295)**: when ``provider`` is
+    marked ``is_deterministic = True`` (only
+    :func:`reference_candidate_provider` today), it is documented to return
+    byte-identical output for every round *and* to ignore the round-history
+    context entirely -- so rounds 2..R would re-simulate the exact same
+    submission for zero additional refinement signal, only cost. Round 1 is
+    therefore run for real and its ledger entry replicated across the
+    remaining rounds (:func:`_replicated_round_entry`), mirroring the
+    identical shortcut :func:`run_task_attempts` already applies in
+    ``--attempts`` mode. Every replicated round is still appended to the
+    ledger as its own line, so the ledger still has exactly ``n_rounds``
+    lines and :func:`summarize_rounds`/:func:`best_round` behave identically
+    to an uncached run; only ``submissions/round-1/`` exists on disk, since
+    rounds 2..R submitted nothing new to snapshot (their
+    ``submission_sha256`` names round 1's bytes, by definition of
+    determinism).
+
+    A provider that does not opt in (the default -- every agent-backed
+    provider, issues #1732/#1739, whose whole point in round mode is that
+    later rounds differ) runs every round for real, unchanged.
     """
     if n_rounds <= 0:
         return []
@@ -2739,17 +2818,23 @@ def run_task_rounds(
     submissions_root = task_root / SUBMISSIONS_DIRNAME
     submissions_root.mkdir(parents=True, exist_ok=True)
 
+    deterministic = bool(getattr(provider, "is_deterministic", False))
     entries: list[dict[str, Any]] = []
     for round_index in range(1, n_rounds + 1):
-        entry = run_task_round(
-            task,
-            round_index,
-            provider,
-            repo_root,
-            entries,
-            scratch_root=scratch_root,
-            submission_dir=submissions_root / f"round-{round_index}",
-        )
+        if deterministic and entries:
+            entry = _replicated_round_entry(
+                entries[0], round_index, task["id"], entries
+            )
+        else:
+            entry = run_task_round(
+                task,
+                round_index,
+                provider,
+                repo_root,
+                entries,
+                scratch_root=scratch_root,
+                submission_dir=submissions_root / f"round-{round_index}",
+            )
         append_ledger_entry(ledger_path, entry)
         entries.append(entry)
 
