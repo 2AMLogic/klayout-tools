@@ -14,6 +14,7 @@
     "deck_layers": [
       "64/20",
       "65/20",
+      "65/44",
       "66/20",
       "66/44",
       "67/20",
@@ -89,6 +90,8 @@
       "nwell.space.1",
       "nwell.width.1",
       "poly.enclosing.licon.1",
+      "tap.enclosing.licon.1",
+      "tap.width.1",
       "via.space.1",
       "via.width.1",
       "via2.space.1",
@@ -297,6 +300,14 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "tap.enclosing.licon.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "tap.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "via.space.1",
         "reason": "no_applicable_geometry"
       },
@@ -339,7 +350,7 @@
     "pdk": null,
     "deck": {
       "name": "sky130",
-      "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+      "content_hash": "sha256:d7a9ddfa4785e2427553cc8701f9ed547d1b68abb21aef2c8c9fb6c8d8ca3791",
       "released": null
     },
     "input": {
