@@ -20,9 +20,13 @@ each task's pass criterion is exactly the ``klt eval`` descriptor its own
 Two subcommands:
 
 ``validate``
-    Schema-validate every task under a tasks directory, and confirm each
-    task's own reference solution passes its own ``eval_descriptor`` (the
-    "task cannot be unsatisfiable" acceptance check from issue #1719).
+    Schema-validate every task under a tasks directory, confirm each task's
+    own reference solution passes its own ``eval_descriptor`` (the "task
+    cannot be unsatisfiable" acceptance check from issue #1719), and -- for
+    every task shipping a ``<id>.mutations.json`` beside it -- confirm that
+    each declared mutant of its reference netlist is *rejected* by that same
+    gate (the "task cannot be vacuously satisfiable" discrimination check,
+    issue #2262; see :func:`check_mutation_gates`).
 
 ``run``
     Run ``--attempts`` independent attempts per task through a *candidate
@@ -71,11 +75,13 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -88,12 +94,25 @@ if str(SRC_DIR) not in sys.path:
 
 from klayout_tools._paths import _resolve_relative  # noqa: E402
 from klayout_tools._provenance import sha256_file  # noqa: E402
+from klayout_tools._vendor import mutation_variants as _mutation_variants  # noqa: E402
 from klayout_tools.eval import EvalError, run_eval  # noqa: E402
 from klayout_tools.sim import SimError, _resolve_models_lib  # noqa: E402
 
 DEFAULT_TASKS_DIR = REPO_ROOT / "benchmarks" / "design-agent" / "tasks"
 DEFAULT_SCHEMA_PATH = (
     REPO_ROOT / "benchmarks" / "design-agent" / "schema" / "task.schema.json"
+)
+
+#: Filename suffix of a task's optional mutation-gate document (issue #2262):
+#: ``<tasks_dir>/<task-id>.mutations.json``, validated against
+#: :data:`DEFAULT_MUTATIONS_SCHEMA_PATH`. Deliberately lives *beside* the task
+#: rather than under a separate directory, so a task and its own
+#: discrimination gate move together -- and is excluded from
+#: :func:`_task_paths` so it is never mistaken for a task descriptor.
+MUTATIONS_SUFFIX = ".mutations.json"
+
+DEFAULT_MUTATIONS_SCHEMA_PATH = (
+    REPO_ROOT / "benchmarks" / "design-agent" / "schema" / "mutations.schema.json"
 )
 
 TIERS = ("easy", "medium", "hard")
@@ -111,9 +130,19 @@ class BenchmarkError(Exception):
 
 
 def _task_paths(tasks_dir: Path) -> list[Path]:
+    """Every task descriptor under ``tasks_dir``, in filename order.
+
+    Skips ``*.mutations.json`` (issue #2262): a task's mutation-gate
+    document lives beside the task it belongs to, so a plain ``*.json`` glob
+    would otherwise hand one to :func:`load_task` and schema-fail it as a
+    malformed task."""
     if not tasks_dir.is_dir():
         raise BenchmarkError(f"tasks directory not found: {tasks_dir}")
-    return sorted(tasks_dir.glob("*.json"))
+    return sorted(
+        path
+        for path in tasks_dir.glob("*.json")
+        if not path.name.endswith(MUTATIONS_SUFFIX)
+    )
 
 
 def load_task(path: Path) -> dict[str, Any]:
@@ -250,6 +279,525 @@ def check_reference_solutions(
         "schema_version": 1,
         "valid": all(result["valid"] for result in results),
         "task_count": len(results),
+        "tasks": results,
+    }
+
+
+# --------------------------------------------------------------------------
+# Per-task mutation gates (issue #2262)
+#
+# `check_reference_solutions` above proves a task is *satisfiable* (its own
+# reference solution passes its own gate). It says nothing about whether the
+# gate is *discriminating*: a threshold that accepts everything passes that
+# check just as happily. This section closes that gap the way AHRR
+# (https://github.com/ZijD/AHRR, ICCAD'26, MIT -- methodology reference
+# only, nothing reproduced from it) does for RTL: every task may ship a
+# `<id>.mutations.json` declaring deliberately-wrong variants of its own
+# reference netlist, and `validate` requires the task's own
+# `reference.eval_descriptor` gate to REJECT every one of them.
+#
+# Three details carried over deliberately (issue #2254):
+#   1. A mutant's `find` anchor must match exactly one site in the netlist it
+#      targets, or validation errors out -- never a silently-unapplied
+#      mutant.
+#   2. A mutant that survives must be declared equivalent, with a written
+#      reason AND a code anchor; a declaration whose anchor no longer occurs
+#      reverts to SURVIVED, and one with an explicitly null anchor is
+#      reported UNVERIFIED. Neither silences a survivor.
+#   3. A task shipping a mutations file must declare at least one mutant --
+#      `targeted[]` is `minItems: 1` in the schema, so no task passes this
+#      gate vacuously.
+#
+# The find/replace-and-apply step itself reuses the byte-exact mutation seam
+# already vendored for `klt functional-verification --mutations` (issue
+# #1592, `klayout_tools._vendor.mutation_variants`) rather than growing a
+# second applier -- see `_apply_mutant_edits`.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _NetlistEdit:
+    """One byte-exact netlist edit, shaped to satisfy the vendored
+    ``mutation_variants.MutationProposal`` protocol
+    (``index``/``file``/``line``/``original_code``/``mutated_code``) so the
+    already-tested anchoring machinery can resolve it -- the benchmark-side
+    analogue of ``functional_verification._ProposalRecord``.
+
+    ``line`` is *derived* (see :func:`_apply_mutant_edits`) rather than
+    declared in the mutations document: a mutations file anchors on text that
+    must be unique in the whole netlist, which is a stronger condition than
+    the vendored protocol's "unique on the declared line", and asking a
+    mutant author to keep a line number in sync with an edited netlist would
+    only add a way for the file to go stale.
+    """
+
+    index: int
+    file: str
+    line: int
+    original_code: str
+    mutated_code: str
+
+
+def _exact_text_list(value: Any, field: str, label: str) -> list[str]:
+    """Normalize a schema ``exactText`` value (a string, or a list of them)
+    into a list. Raises :class:`BenchmarkError` for anything else -- the
+    schema already rejects those shapes, so this is the belt-and-braces path
+    for a caller that skipped validation."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return list(value)
+    raise BenchmarkError(f"{label}: {field} must be a string or a list of strings")
+
+
+def _mutant_edits(mutant: dict[str, Any], label: str) -> list[tuple[str, str]]:
+    """Pair up a targeted mutant's ``find``/``replace`` spans. Both may be a
+    bare string (one edit) or equal-length lists (one conceptual mutant that
+    takes several coordinated edits, e.g. "remove both cascode devices")."""
+    finds = _exact_text_list(mutant.get("find"), "find", label)
+    replaces = _exact_text_list(mutant.get("replace"), "replace", label)
+    if len(finds) != len(replaces):
+        raise BenchmarkError(
+            f"{label}: find/replace must have the same number of entries "
+            f"(got {len(finds)} find, {len(replaces)} replace)"
+        )
+    return list(zip(finds, replaces, strict=True))
+
+
+def _apply_mutant_edits(
+    netlist_path: Path, edits: list[tuple[str, str]], label: str
+) -> None:
+    """Apply one mutant's every ``find``/``replace`` span to ``netlist_path``
+    in place, byte-exactly, raising :class:`BenchmarkError` if any anchor is
+    not unique.
+
+    Drives the vendored mutation seam's own building blocks
+    (``_all_offsets``/``_line_at`` to locate and uniqueness-check the anchor,
+    ``MutationVariantPlan._resolve_one`` to resolve it to an exact byte span,
+    ``_replace_exact`` to splice it) exactly as
+    ``functional_verification._resolve_mutation_proposals`` does, rather than
+    re-deriving byte-exact replacement here. Two deliberate differences from
+    that caller, both because a *netlist* mutant is a different unit than an
+    RTL proposal:
+
+    * **Whole-file anchor uniqueness.** ``_resolve_one`` requires the anchor
+      to be unique on a declared line; issue #2254's requirement 1 is
+      stronger -- unique in the whole netlist -- so that is checked first and
+      the line is then derived from the single match.
+    * **All of one mutant's spans are applied together.** ``_resolve_one``
+      resolves against pristine bytes, so the resolved spans are spliced in
+      descending offset order (later spans first), leaving every
+      not-yet-applied span's offsets still valid. Overlapping spans are
+      rejected rather than silently applied in some order.
+
+    A deleted device is expressed by commenting its card out, never by an
+    empty ``replace``: the vendored ``_resolve_one`` requires a non-empty,
+    different replacement (and the schema mirrors that), and a commented-out
+    card is both netlist-equivalent to deletion for ngspice and visible
+    evidence in the mutated file of what the mutant removed.
+    """
+    source = netlist_path.read_bytes()
+    resolved: list[_mutation_variants.ResolvedMutation] = []
+    for position, (find, replace) in enumerate(edits, start=1):
+        needle = find.encode("utf-8")
+        offsets = _mutation_variants._all_offsets(source, needle)
+        if len(offsets) != 1:
+            raise BenchmarkError(
+                f"{label}: find[{position}] matches {len(offsets)} sites in "
+                f"{netlist_path.name} (must match exactly one): {find!r}"
+            )
+        edit = _NetlistEdit(
+            index=position,
+            file=netlist_path.name,
+            line=_mutation_variants._line_at(source, offsets[0]),
+            original_code=find,
+            mutated_code=replace,
+        )
+        try:
+            resolved.append(
+                _mutation_variants.MutationVariantPlan._resolve_one(edit, source)
+            )
+        except _mutation_variants.MutationVariantError as exc:
+            raise BenchmarkError(f"{label}: find[{position}]: {exc}") from exc
+
+    ordered = sorted(resolved, key=lambda mutation: mutation.start)
+    for previous, following in zip(ordered, ordered[1:], strict=False):
+        if following.start < previous.end:
+            raise BenchmarkError(
+                f"{label}: two of this mutant's find spans overlap in "
+                f"{netlist_path.name}; they must edit disjoint text"
+            )
+
+    mutated = source
+    for mutation in reversed(ordered):
+        mutated = _mutation_variants._replace_exact(mutated, mutation)
+    netlist_path.write_bytes(mutated)
+
+
+def mutations_path_for(task_path: Path) -> Path:
+    """Where ``task_path``'s mutation-gate document lives (whether or not it
+    exists): ``<task-id>.mutations.json`` beside the task."""
+    return task_path.with_name(task_path.stem + MUTATIONS_SUFFIX)
+
+
+def load_mutations(path: Path) -> dict[str, Any]:
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BenchmarkError(f"{path}: failed to load mutations: {exc}") from exc
+    if not isinstance(document, dict):
+        raise BenchmarkError(f"{path}: mutations document must be a JSON object")
+    return document
+
+
+def _mutations_validator(
+    schema_path: Path = DEFAULT_MUTATIONS_SCHEMA_PATH,
+) -> jsonschema.protocols.Validator:
+    """Build the mutations-document validator, using the same
+    ``validator_for``/``check_schema`` convention :func:`validate_tasks` uses
+    for ``task.schema.json``."""
+    if not schema_path.is_file():
+        raise BenchmarkError(f"mutations schema file not found: {schema_path}")
+    schema = json.loads(schema_path.read_text())
+    validator_cls = jsonschema.validators.validator_for(schema)
+    validator_cls.check_schema(schema)
+    return validator_cls(schema)
+
+
+def _resolve_mutant_netlist(
+    mutant_netlist: str, task: dict[str, Any], label: str
+) -> str:
+    """Which of ``task``'s own ``reference.netlists`` entries a mutant's
+    ``netlist`` field names -- accepting either the full repository-relative
+    path as written there or just its filename. Raises
+    :class:`BenchmarkError` when it names none of them, or when a bare
+    filename is ambiguous across two entries: a mutant that cannot be tied to
+    exactly one declared reference netlist is a broken declaration, never
+    something to guess at."""
+    declared = [
+        entry
+        for entry in (task.get("reference") or {}).get("netlists") or []
+        if isinstance(entry, str)
+    ]
+    matches = [entry for entry in declared if entry == mutant_netlist]
+    if not matches:
+        matches = [entry for entry in declared if Path(entry).name == mutant_netlist]
+    if len(matches) != 1:
+        raise BenchmarkError(
+            f"{label}: netlist {mutant_netlist!r} matches {len(matches)} of the "
+            f"task's reference.netlists entries (must match exactly one): "
+            f"{declared}"
+        )
+    return matches[0]
+
+
+def _mutations_task_field_errors(document: dict[str, Any], path: Path) -> list[str]:
+    """Cross-check a mutations document's own ``task`` field against both its
+    filename stem and the task it was loaded beside -- split out of
+    :func:`_mutations_errors` to keep that function's branching within the
+    repo's complexity baseline."""
+    errors: list[str] = []
+    expected_task = path.name[: -len(MUTATIONS_SUFFIX)]
+    if document["task"] != expected_task:
+        errors.append(
+            f"task {document['task']!r} does not match filename stem {expected_task!r}"
+        )
+    return errors
+
+
+def _targeted_mutant_errors(
+    document: dict[str, Any], task: dict[str, Any]
+) -> tuple[list[str], set[str]]:
+    """Validate every ``targeted[]`` mutant's name uniqueness, find/replace
+    shape, and netlist reference, returning ``(errors, declared_names)``.
+    Split out of :func:`_mutations_errors` to keep that function's branching
+    within the repo's complexity baseline."""
+    errors: list[str] = []
+    names: set[str] = set()
+    for mutant in document["targeted"]:
+        label = f"targeted[{mutant['name']}]"
+        if mutant["name"] in names:
+            errors.append(f"{label}: duplicate mutant name")
+        names.add(mutant["name"])
+        try:
+            _mutant_edits(mutant, label)
+        except BenchmarkError as exc:
+            errors.append(str(exc))
+        try:
+            _resolve_mutant_netlist(mutant["netlist"], task, label)
+        except BenchmarkError as exc:
+            errors.append(str(exc))
+    return errors, names
+
+
+def _equivalent_declaration_errors(
+    document: dict[str, Any], names: set[str]
+) -> list[str]:
+    """Validate every ``equivalent[]`` declaration's name uniqueness and that
+    it names a real ``targeted[]`` mutant. Split out of
+    :func:`_mutations_errors` to keep that function's branching within the
+    repo's complexity baseline."""
+    errors: list[str] = []
+    declared: set[str] = set()
+    for declaration in document.get("equivalent") or []:
+        name = declaration["name"]
+        if name in declared:
+            errors.append(f"equivalent[{name}]: duplicate equivalence declaration")
+        declared.add(name)
+        if name not in names:
+            errors.append(
+                f"equivalent[{name}]: names no targeted mutant "
+                f"(declared: {sorted(names)})"
+            )
+    return errors
+
+
+def _mutations_errors(
+    path: Path,
+    task: dict[str, Any],
+    validator: jsonschema.protocols.Validator,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Schema- and cross-reference-validate one mutations document against
+    the task it belongs to, returning ``(document, errors)``. Never raises
+    for a document-level problem -- mirrors :func:`_task_errors`'s posture so
+    one malformed mutations file reports as that task's own errors rather
+    than aborting the whole check."""
+    try:
+        document = load_mutations(path)
+    except BenchmarkError as exc:
+        return None, [str(exc)]
+
+    errors: list[str] = []
+    for error in sorted(validator.iter_errors(document), key=str):
+        location = "/".join(str(part) for part in error.path)
+        errors.append(f"{location}: {error.message}" if location else error.message)
+    if errors:
+        # Cross-reference checks below assume the schema-declared shape.
+        return document, errors
+
+    errors.extend(_mutations_task_field_errors(document, path))
+    if document["task"] != task.get("id"):
+        errors.append(
+            f"task {document['task']!r} does not match the task's own id "
+            f"{task.get('id')!r}"
+        )
+
+    targeted_errors, names = _targeted_mutant_errors(document, task)
+    errors.extend(targeted_errors)
+    errors.extend(_equivalent_declaration_errors(document, names))
+
+    return document, errors
+
+
+def _mutant_scratch_repo(
+    task: dict[str, Any], repo_root: Path, scratch_root: Path
+) -> Path:
+    """Copy ``task``'s whole reference directory into a scratch repository
+    root at the same repository-relative location, so a mutated netlist can
+    be scored through the task's own (unmodified) ``eval_descriptor``/`klt
+    sim` request files without touching the checkout. The same scratch shape
+    ``tests/test_design_agent_benchmark.py`` already used for its
+    hand-written mutation parametrize list before this check existed."""
+    reference_rel = Path(task["reference"]["eval_descriptor"]).parent
+    scratch_repo = scratch_root / "repo"
+    destination = scratch_repo / reference_rel
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(repo_root / reference_rel, destination)
+    return scratch_repo
+
+
+def _equivalence_status(
+    declaration: dict[str, Any], mutated_netlist_text: str
+) -> tuple[str, str]:
+    """Classify a surviving mutant that carries an ``equivalent[]``
+    declaration, returning ``(status, note)``:
+
+    * ``"unverified"`` -- the declaration has an explicitly null ``code``
+      anchor, so there is nothing to re-verify it against.
+    * ``"survived"`` -- the anchor no longer occurs in the mutated netlist,
+      so the reference was edited out from under the declaration and the
+      equivalence argument no longer demonstrably applies.
+    * ``"declared-equivalent"`` -- anchor still present; the survival is
+      accounted for.
+    """
+    code = declaration.get("code")
+    if not isinstance(code, str) or not code:
+        return "unverified", "equivalence declared without a code anchor"
+    if code not in mutated_netlist_text:
+        return "survived", (
+            "equivalence declaration is stale: its code anchor no longer "
+            "occurs in the mutated netlist"
+        )
+    return "declared-equivalent", declaration.get("reason", "")
+
+
+def _run_targeted_mutant(
+    mutant: dict[str, Any],
+    task: dict[str, Any],
+    repo_root: Path,
+    declarations: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply one targeted mutant to a scratch copy of its task's reference
+    solution, score it through the task's own ``reference.eval_descriptor``
+    (:func:`klayout_tools.eval.run_eval` -- the same library entry point
+    :func:`check_reference_solutions` calls), and classify the outcome.
+
+    Deliberately calls ``run_eval`` directly rather than
+    :func:`check_reference_solutions`: that function also writes the
+    cross-step reference-solution cache (issue #1783), and a mutant's result
+    must never land there -- a later `run` step would then score the *mutant*
+    as if it were the reference.
+    """
+    label = f"{task['id']} targeted[{mutant['name']}]"
+    record: dict[str, Any] = {
+        "name": mutant["name"],
+        "netlist": mutant["netlist"],
+        "why": mutant["why"],
+        "status": "unapplied",
+        "eval_valid": None,
+        "error": None,
+        "note": None,
+        "equivalence_declared": mutant["name"] in declarations,
+    }
+    with tempfile.TemporaryDirectory(
+        prefix=f"design-agent-mutant-{task['id']}-{mutant['name']}-"
+    ) as scratch:
+        try:
+            scratch_repo = _mutant_scratch_repo(task, repo_root, Path(scratch))
+            netlist_rel = _resolve_mutant_netlist(mutant["netlist"], task, label)
+            netlist_path = scratch_repo / netlist_rel
+            if not netlist_path.is_file():
+                raise BenchmarkError(
+                    f"{label}: netlist {netlist_rel} is not inside the task's "
+                    "reference directory, so it cannot be mutated in isolation"
+                )
+            _apply_mutant_edits(netlist_path, _mutant_edits(mutant, label), label)
+        except BenchmarkError as exc:
+            record["error"] = str(exc)
+            return record
+
+        descriptor_path = scratch_repo / task["reference"]["eval_descriptor"]
+        try:
+            report = run_eval(str(descriptor_path))
+        except EvalError as exc:
+            # The mutant could not be scored at all (ngspice refused the
+            # deck, a measurement had nothing to read). Reported in its own
+            # bucket rather than as a kill: it is certainly not a survivor,
+            # but it also did not demonstrate the gate discriminating.
+            record["status"] = "unbuildable"
+            record["error"] = str(exc)
+            return record
+
+        record["eval_valid"] = bool(report.get("valid"))
+        if not record["eval_valid"]:
+            record["status"] = "killed"
+            return record
+
+        declaration = declarations.get(mutant["name"])
+        if declaration is None:
+            record["status"] = "survived"
+            record["note"] = (
+                "the task's own reference gate accepted this mutant -- either "
+                "the gate does not discriminate what this mutant changes, or "
+                "the mutant is equivalent and must say so in equivalent[]"
+            )
+            return record
+        status, note = _equivalence_status(declaration, netlist_path.read_text())
+        record["status"] = status
+        record["note"] = note
+        return record
+
+
+def check_mutation_gates(
+    tasks_dir: Path = DEFAULT_TASKS_DIR,
+    repo_root: Path = REPO_ROOT,
+    schema_path: Path = DEFAULT_MUTATIONS_SCHEMA_PATH,
+) -> dict[str, Any]:
+    """For every task under ``tasks_dir`` that ships a ``<id>.mutations.json``
+    beside it, apply each declared ``targeted[]`` mutant to a scratch copy of
+    the reference netlist it names and require the task's own
+    ``reference.eval_descriptor`` gate to **reject** it (issue #2262).
+
+    Reports killed / survived / unbuildable / declared-equivalent per task,
+    and is ``valid: false`` when any task has
+
+    * a malformed or internally-inconsistent mutations document (including a
+      ``find`` anchor that does not match exactly one site, and -- via the
+      schema's own ``minItems: 1`` -- an empty ``targeted[]``),
+    * a **survivor**: a mutant its own task's gate accepted, with no
+      equivalence declaration, or with one whose code anchor has gone stale,
+    * an **unverified** equivalence declaration (no code anchor).
+
+    A task with no mutations file contributes nothing -- neither a pass nor a
+    failure. Growing coverage to the tasks that have none today is issue
+    #2263; this function is the mechanism that makes such coverage
+    enforceable.
+
+    Never raises :class:`BenchmarkError` for a per-task problem (mirrors
+    :func:`validate_tasks`), only for an environment one: a missing tasks
+    directory or mutations schema file.
+    """
+    validator = _mutations_validator(schema_path)
+
+    results = []
+    for task_path in _task_paths(tasks_dir):
+        mutations_path = mutations_path_for(task_path)
+        if not mutations_path.is_file():
+            continue
+        task = load_task(task_path)
+        document, errors = _mutations_errors(mutations_path, task, validator)
+
+        mutants: list[dict[str, Any]] = []
+        if document is not None and not errors:
+            declarations = {
+                declaration["name"]: declaration
+                for declaration in document.get("equivalent") or []
+            }
+            for mutant in document["targeted"]:
+                record = _run_targeted_mutant(mutant, task, repo_root, declarations)
+                mutants.append(record)
+                if record["status"] == "unapplied":
+                    errors.append(record["error"])
+
+        counts = {
+            status: sum(1 for record in mutants if record["status"] == status)
+            for status in (
+                "killed",
+                "survived",
+                "unbuildable",
+                "declared-equivalent",
+                "unverified",
+                "unapplied",
+            )
+        }
+        valid = (
+            not errors
+            and bool(mutants)
+            and counts["survived"] == 0
+            and counts["unverified"] == 0
+        )
+        results.append(
+            {
+                "id": task["id"],
+                "tier": task.get("tier"),
+                "valid": valid,
+                "errors": errors,
+                "total": len(mutants),
+                "killed": counts["killed"],
+                "survived": counts["survived"],
+                "unbuildable": counts["unbuildable"],
+                "declared_equivalent": counts["declared-equivalent"],
+                "unverified": counts["unverified"],
+                "mutants": mutants,
+            }
+        )
+
+    return {
+        "schema_version": 1,
+        "valid": all(result["valid"] for result in results),
+        "task_count": len(results),
+        "mutant_count": sum(result["total"] for result in results),
+        "survived_count": sum(result["survived"] for result in results),
         "tasks": results,
     }
 
@@ -1324,14 +1872,32 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     schema_result = validate_tasks(
         Path(args.tasks_dir), Path(args.schema), Path(args.repo_root)
     )
+    run_slow_checks = schema_result["valid"] and not args.schema_only
     ref_result = (
         check_reference_solutions(Path(args.tasks_dir), Path(args.repo_root))
-        if schema_result["valid"] and not args.schema_only
+        if run_slow_checks
         else None
     )
-    payload = {"schema": schema_result, "reference_solutions": ref_result}
+    mutation_result = (
+        check_mutation_gates(
+            Path(args.tasks_dir),
+            Path(args.repo_root),
+            Path(args.mutations_schema),
+        )
+        if run_slow_checks and not args.skip_mutation_gates
+        else None
+    )
+    payload = {
+        "schema": schema_result,
+        "reference_solutions": ref_result,
+        "mutation_gates": mutation_result,
+    }
     print(json.dumps(payload, indent=2))
-    ok = schema_result["valid"] and (ref_result is None or ref_result["valid"])
+    ok = (
+        schema_result["valid"]
+        and (ref_result is None or ref_result["valid"])
+        and (mutation_result is None or mutation_result["valid"])
+    )
     return 0 if ok else 1
 
 
@@ -1400,15 +1966,34 @@ def main(argv: list[str] | None = None) -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     validate_parser = subparsers.add_parser(
-        "validate", help="schema-validate the task set and check reference solutions"
+        "validate",
+        help=(
+            "schema-validate the task set, check reference solutions, and "
+            "enforce every task's declared mutation gate"
+        ),
     )
     validate_parser.add_argument("--tasks-dir", default=str(DEFAULT_TASKS_DIR))
     validate_parser.add_argument("--schema", default=str(DEFAULT_SCHEMA_PATH))
+    validate_parser.add_argument(
+        "--mutations-schema", default=str(DEFAULT_MUTATIONS_SCHEMA_PATH)
+    )
     validate_parser.add_argument("--repo-root", default=str(REPO_ROOT))
     validate_parser.add_argument(
         "--schema-only",
         action="store_true",
-        help="skip the (slower) reference-solution eval run",
+        help=(
+            "skip the (slower) reference-solution eval run, and with it the "
+            "mutation gates"
+        ),
+    )
+    validate_parser.add_argument(
+        "--skip-mutation-gates",
+        action="store_true",
+        help=(
+            "skip the per-task mutation gates (issue #2262) while still "
+            "running the reference-solution check -- for a local run that "
+            "only cares whether the reference solutions still pass"
+        ),
     )
     validate_parser.set_defaults(func=_cmd_validate)
 

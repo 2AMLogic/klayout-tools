@@ -14,9 +14,11 @@ nothing is reproduced from it.
 
 ```
 benchmarks/design-agent/
-  schema/task.schema.json   # JSON Schema every tasks/*.json must satisfy
-  tasks/*.json               # task descriptors (see "Task shape" below)
-  reference/<task-id>/       # each task's known-good reference solution
+  schema/task.schema.json       # JSON Schema every tasks/*.json must satisfy
+  schema/mutations.schema.json  # JSON Schema every tasks/*.mutations.json must satisfy
+  tasks/*.json                  # task descriptors (see "Task shape" below)
+  tasks/*.mutations.json        # per-task mutation gates (see "Mutation gates" below)
+  reference/<task-id>/          # each task's known-good reference solution
 ```
 
 ## Task shape
@@ -42,11 +44,77 @@ reimplemented here:
 ```
 
 Validate the task set (schema + "every reference solution passes its own
-gate" check):
+gate" check + every declared mutation gate, below):
 
 ```
 uv run python scripts/design_agent_benchmark.py validate
 ```
+
+## Mutation gates
+
+A task's reference solution passing its own `eval_descriptor` proves the
+task is *satisfiable*. It says nothing about whether the gate
+**discriminates**: a threshold that accepts everything passes that check
+just as happily. So a task may ship a mutation gate beside it, at
+`tasks/<task-id>.mutations.json` (schema:
+`schema/mutations.schema.json`) — deliberately-wrong variants of its own
+reference netlist that the task's gate **must reject**:
+
+```json
+{
+  "task": "schmitt-trigger",
+  "targeted": [
+    {
+      "name": "schmitt-feedback-undersized",
+      "netlist": "schmitt.spice",
+      "find": ["XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1"],
+      "replace": ["XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=1 nf=1 mult=1"],
+      "why": "feedback devices under-sized -> ~0.1 V of hysteresis, not 0.3 V"
+    }
+  ],
+  "equivalent": []
+}
+```
+
+`validate` applies every `targeted[]` mutant to a scratch copy of the named
+netlist, scores it through the task's own `reference.eval_descriptor`, and
+reports killed / survived / unbuildable / declared-equivalent per task. It
+**fails** on:
+
+- a **survivor** — a mutant the task's own gate accepted;
+- a `find` anchor that does not match **exactly one** site in the netlist it
+  targets (never a silently-unapplied, or over-applied, mutant);
+- an **empty `targeted[]`** — a task shipping a mutations file cannot pass
+  its own discrimination gate vacuously.
+
+`find`/`replace` are byte-exact literal spans (no regex, no whitespace
+normalization) and may each be a list, which is how one *conceptual* mutant
+expresses the several coordinated edits it takes (e.g. "remove both cascode
+devices"). A `replace` is never empty: express a deleted device by
+commenting its card out (`* ` prefix, which ngspice ignores), so the mutated
+netlist still shows what the mutant removed. The apply step reuses the same
+byte-exact mutation seam `klt functional-verification --mutations` uses
+(`src/klayout_tools/_vendor/mutation_variants.py`), not a second applier.
+
+A mutant that *should* survive because it is genuinely equivalent to the
+reference must say so in `equivalent[]`, with a written `reason` **and** a
+`code` anchor in the mutated netlist. If the netlist is later edited so that
+anchor no longer occurs, the declaration is stale and the mutant reverts to
+`SURVIVED` until re-verified; a declaration with an explicitly `null` anchor
+is reported `UNVERIFIED` and still fails. Only targeted mutants exist here —
+analog SPICE has no meaningful generic operator mutation (an `<`→`<=` regex
+pass has no analogue).
+
+Methodology reference: [AHRR](https://github.com/ZijD/AHRR) (ICCAD'26, MIT)
+makes exactly this "every non-equivalent mutant of the reference must be
+killed" check a per-task build gate for RTL. Nothing is reproduced from it;
+only the idea of gating on discrimination is reused.
+
+**Coverage today** (issue #2262 shipped the mechanism and migrated the
+existing hand-written coverage): `telescopic-cascode-amp`,
+`miller-integrator`, and `schmitt-trigger`. Extending it to the remaining
+tasks is tracked in issue #2263 — a task with no mutations file is neither
+passed nor failed by this check, it is simply not covered yet.
 
 Run the harness (default: 5 attempts/task, pass@1 and pass@5, the
 deterministic `reference` candidate provider):

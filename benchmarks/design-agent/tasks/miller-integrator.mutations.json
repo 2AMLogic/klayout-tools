@@ -1,0 +1,13 @@
+{
+  "task": "miller-integrator",
+  "targeted": [
+    {
+      "name": "integrating-cap-removed",
+      "netlist": "integrator.spice",
+      "find": "Cf gate out {cf}",
+      "replace": "Cf gate out 1f",
+      "why": "integrating capacitor shrunk to 1 fF -> flat gain stage"
+    }
+  ],
+  "equivalent": []
+}
