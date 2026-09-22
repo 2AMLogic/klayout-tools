@@ -440,8 +440,9 @@ ESD_MAX_FINGERS_PER_RING = 32
 _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "active": (65, 20),  # diff.drawing
-        "tap": (65, 44),  # tap.drawing -- present in sky130.py's LAYER_NAMES
-        # but no curated rule checks it, so a tap ring is DRC-free there.
+        "tap": (65, 44),  # tap.drawing -- width- and licon-enclosure-checked
+        # by sky130.py's `tap.width.1`/`tap.enclosing.licon.1` since issue
+        # #2321; before that rule pair, a tap ring was DRC-free there.
         "poly": (66, 20),  # poly.drawing
         "contact": (66, 44),  # licon1.drawing
         "metal": (67, 20),  # li1.drawing

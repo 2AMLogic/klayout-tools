@@ -14,6 +14,7 @@
     "deck_layers": [
       "64/20",
       "65/20",
+      "65/44",
       "66/20",
       "66/44",
       "67/20",
@@ -89,6 +90,8 @@
       "met5.width.1",
       "nwell.space.1",
       "nwell.width.1",
+      "tap.enclosing.licon.1",
+      "tap.width.1",
       "via.space.1",
       "via.width.1",
       "via2.space.1",
@@ -297,6 +300,14 @@
       },
       {
         "id": "nwell.width.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "tap.enclosing.licon.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "tap.width.1",
         "reason": "no_applicable_geometry"
       },
       {

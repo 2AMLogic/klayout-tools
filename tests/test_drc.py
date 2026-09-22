@@ -3110,6 +3110,111 @@ def test_run_drc_sky130_diff_enclosing_licon_touching_shapes_real_shortfall(tmp_
     assert violation["layer"] == "diff.drawing"
 
 
+# --- #2321: tap.drawing (65/44) tie rings get width + licon coverage -------
+
+
+def _sky130_tap_layout(tmp_path, name, tap_boxes, licon_boxes):
+    """Write a tap.drawing (+ optional licon1) layout and return its path."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    tap = layout.layer(65, 44)
+    layout.set_info(tap, kdb.LayerInfo(65, 44, "tap.drawing"))
+    licon1 = layout.layer(66, 44)
+    layout.set_info(licon1, kdb.LayerInfo(66, 44, "licon1.drawing"))
+    for box in tap_boxes:
+        top.shapes(tap).insert(box)
+    for box in licon_boxes:
+        top.shapes(licon1).insert(box)
+    path = tmp_path / f"{name}.gds"
+    layout.write(str(path))
+    return path
+
+
+def test_run_drc_sky130_tap_width_violation(tmp_path):
+    """The #2321 negative control, width half: a tap.drawing bar narrower
+    than the 150 dbu (0.15 um) `tap.width.1` threshold trips exactly one
+    violation. The deck's only other `difftap`-family rule (`diff.width.1`)
+    reads diff.drawing (65/20) shapes only, so before this rule existed the
+    identical layout passed `klt drc --deck sky130` clean -- nothing ever
+    looked at tap.drawing geometry, which is exactly the gap #2321 closes."""
+    path = _sky130_tap_layout(
+        tmp_path, "tap_width_violation", [kdb.Box(0, 0, 100, 2000)], []
+    )  # 100 dbu < 150
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"tap.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "tap.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == "tap.drawing"
+
+
+def test_run_drc_sky130_tap_width_clean(tmp_path):
+    """A well-formed tap ring segment at least 150 dbu wide passes
+    `tap.width.1` -- the #2321 positive control: correctly-drawn tie-ring
+    geometry stays clean under the new rule."""
+    path = _sky130_tap_layout(
+        tmp_path, "tap_width_clean", [kdb.Box(0, 0, 200, 2000)], []
+    )  # 200 >= 150
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
+def test_run_drc_sky130_tap_enclosing_licon_escaped_cut_violation(tmp_path):
+    """The #2321 negative control, enclosure half: a licon1 cut straddling
+    its tap.drawing tie region -- part inside, part sticking out of the
+    ring's right edge -- trips `tap.enclosing.licon.1`.
+
+    `tap.enclosing.licon.1` transcribes licon.7 at the zero-margin floor
+    (the same unconditional treatment `li1.enclosing.licon1.1` gives the
+    identically-derived li.5), so the violation surfaces through
+    `_run_check`'s `outside_region` escape term rather than a
+    marginal-distance edge pair -- the one mechanism that fires at a 0.0
+    threshold. The `diff.*` rules must stay silent throughout: this layout
+    draws no diff.drawing (65/20) shape at all, which is precisely why it
+    was invisible to the deck before #2321."""
+    path = _sky130_tap_layout(
+        tmp_path,
+        "tap_enclosing_licon_violation",
+        [kdb.Box(0, 0, 2000, 1000)],  # tap ring segment
+        [kdb.Box(1900, 400, 2100, 600)],  # cut hangs 100 dbu out the right edge
+    )
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {"tap.enclosing.licon.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == "tap.enclosing.licon.1"
+    assert violation["check"] == "enclosing"
+    assert violation["layer"] == "tap.drawing"
+    # The reported polygon is the escaped part of the cut, not the whole cut.
+    assert violation["bbox"]["left"] == 2000
+    assert violation["bbox"]["right"] == 2100
+
+
+def test_run_drc_sky130_tap_enclosing_licon_clean(tmp_path):
+    """A licon1 cut comfortably inside its tap.drawing tie region passes
+    `tap.enclosing.licon.1` -- the #2321 positive control for the floor."""
+    path = _sky130_tap_layout(
+        tmp_path,
+        "tap_enclosing_licon_clean",
+        [kdb.Box(0, 0, 2000, 1000)],  # tap ring segment
+        [kdb.Box(400, 400, 600, 600)],  # 400 dbu clear of every tap edge
+    )
+
+    report = run_drc(str(path), "sky130")
+
+    assert report["status"] == "clean"
+    assert report["violation_count"] == 0
+
+
 def test_run_drc_synthetic_enclosed_check_touching_shapes_clean(tmp_path, monkeypatch):
     """Symmetric coverage for `check="enclosed"` (#995): neither shipped deck
     has an `"enclosed"` rule, so this exercises the dispatch against the same
@@ -5130,20 +5235,20 @@ def test_sky130_holes_area_rules_cite_pinned_sky130a_mr_drc():
 
 def test_sky130_deck_check_kind_breakdown():
     """Structural regression for the deck's own `docs/cli/drc.md` "Coverage"
-    kind-breakdown table (#1976, extending #1955's 52-rule baseline): 57
-    rules total -- 15 `width`, 13 `space`, 1 `isolated`, 16 `enclosing`,
-    2 `separation`, 10 `area`. Fails loudly (at the exact number that
-    changed) if a future rule addition/removal drifts from that table
-    without updating it."""
+    kind-breakdown table (#1976, extending #1955's 52-rule baseline; #2321
+    adds `tap.width.1`/`tap.enclosing.licon.1`): 59 rules total -- 16
+    `width`, 13 `space`, 1 `isolated`, 17 `enclosing`, 2 `separation`,
+    10 `area`. Fails loudly (at the exact number that changed) if a future
+    rule addition/removal drifts from that table without updating it."""
     deck = get_deck("sky130")
 
-    assert len(deck) == 57
+    assert len(deck) == 59
     counts = Counter(rule.check for rule in deck)
     assert counts == {
-        "width": 15,
+        "width": 16,
         "space": 13,
         "isolated": 1,
-        "enclosing": 16,
+        "enclosing": 17,
         "separation": 2,
         "area": 10,
     }
