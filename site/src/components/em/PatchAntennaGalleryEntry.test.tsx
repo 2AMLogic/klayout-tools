@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { PatchAntennaGalleryEntry } from "./PatchAntennaGalleryEntry";
 import type { EmSiteExport } from "./types";
+import { makeFakeGL, mockFetchOk } from "@/test-utils/mocks";
 
 const fixture: EmSiteExport = {
   schema_version: 1,
@@ -38,36 +39,6 @@ const fixture: EmSiteExport = {
     generated_at: "2026-08-12T04:15:40Z",
   },
 };
-
-function mockFetchOk(payload: EmSiteExport) {
-  return vi.fn(() =>
-    Promise.resolve({
-      ok: true,
-      json: () => Promise.resolve(payload),
-    } as Response),
-  );
-}
-
-function makeFakeGL(): WebGL2RenderingContext {
-  const overrides: Record<string, (...args: unknown[]) => unknown> = {
-    createShader: () => ({}),
-    createProgram: () => ({}),
-    createBuffer: () => ({}),
-    getShaderParameter: () => true,
-    getProgramParameter: () => true,
-    getAttribLocation: () => 0,
-    getUniformLocation: () => ({}),
-    getExtension: () => ({}),
-  };
-  const handler: ProxyHandler<Record<string, unknown>> = {
-    get(target, prop) {
-      if (typeof prop === "string" && prop in overrides) return overrides[prop];
-      if (typeof prop === "string" && /^[A-Z][A-Z0-9_]*$/.test(prop)) return 1;
-      return target[prop as string] ?? (() => undefined);
-    },
-  };
-  return new Proxy({}, handler) as unknown as WebGL2RenderingContext;
-}
 
 beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
