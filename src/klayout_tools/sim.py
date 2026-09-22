@@ -12,12 +12,24 @@ module implements it, with one deliberate deviation documented below.
 
 Engine-neutral contract, ngspice v1 (per the spike): the JSON contract does
 not name the engine in its shape -- ``request["engine"]`` is a data field,
-not a code path -- but only ``"ngspice"`` is implemented in this version.
-``ngspice -b`` is invoked as a subprocess per corner (never ``libngspice``):
-process-corner selection needs a fresh ``.lib`` parse anyway, a hung engine
-must be killable without taking down our own process, and process fan-out is
-the whole parallelism story for a future ``max_parallel`` (see the spike's
-"Invocation strategy").
+not a code path. ``ngspice -b`` is invoked as a subprocess per corner (never
+``libngspice``): process-corner selection needs a fresh ``.lib`` parse anyway, a
+hung engine must be killable without taking down our own process, and process
+fan-out is the whole parallelism story for a future ``max_parallel`` (see the
+spike's "Invocation strategy").
+
+Issue #2016 (pairing #5 of oracle-tracking #2007) adds a second, deliberately
+independent engine: Sandia's Xyce, a from-scratch SPICE implementation rather
+than a SPICE 3f5 derivative, used as a cross-validation oracle for the
+``ngspice`` results. ``Xyce -b`` runs the same subprocess-per-corner way, on
+its own deck shape (``_write_xyce_deck`` -- no ``.control`` block, no
+``alter``; see that function for the syntax divergences that motivated it).
+The ``xyce`` path is intentionally narrower than ``ngspice``'s: DC/OP/TRAN
+analyses, process/temperature corners, ``local``/``local-parallel`` backends
+only, no Monte Carlo, no supply-axis corners, no fail-fast probe -- every
+unimplemented combination raises :class:`SimError` naming what *is*
+supported. See docs/design/xyce-oracle.md for the methodology and measured
+agreement, and tests/test_sim_xyce_oracle.py for the real-binary oracle.
 
 Deviation from the spike: the spike's proposed response shape carries a
 ``"schema": "klt.sim.corners/1"`` top-level field. This module instead uses
@@ -166,9 +178,17 @@ assert is_registered(_CORNER_PASSED_COUNT_METRIC_NAME)
 assert is_registered(_CORNER_FAILED_COUNT_METRIC_NAME)
 assert is_registered(_CORNER_ERRORED_COUNT_METRIC_NAME)
 
-#: ``ngspice`` is the only implemented engine in v1; see this module's
-#: docstring and the spike's engine survey for why.
-SUPPORTED_ENGINES = ("ngspice",)
+#: Implemented engines. ``ngspice`` is the reference path (see the spike's
+#: engine survey). ``xyce`` (issue #2016, pairing #5 of oracle-tracking
+#: #2007) is the cross-validation oracle: Sandia's from-scratch SPICE
+#: implementation, never a ngspice derivative, so agreement between the two
+#: is real evidence rather than a shared-bug blind spot. The ``xyce`` path
+#: is deliberately narrower than ``ngspice``'s -- DC/OP/TRAN analyses,
+#: process/temperature corners, ``local``/``local-parallel`` backends only;
+#: everything it does not yet implement raises a :class:`SimError` naming
+#: what *is* supported rather than silently degrading. See
+#: ``_run_corner``'s ``engine`` branch and docs/design/xyce-oracle.md.
+SUPPORTED_ENGINES = ("ngspice", "xyce")
 
 #: Recognised values for the optional ``request.netlist_source`` field --
 #: caller-declared provenance of ``request.netlist``, distinguishing a
@@ -934,6 +954,13 @@ def run_sim(
     corner_points = _expand_corners(corners_spec, request.get("exclude") or [])
 
     monte_carlo_spec = request.get("monte_carlo")
+    _enforce_xyce_support_boundary(
+        engine=engine,
+        backend=backend,
+        corners_spec=corners_spec,
+        monte_carlo_declared=monte_carlo_spec is not None,
+        fail_fast_probe=fail_fast_probe,
+    )
     monte_carlo_info: dict[str, Any] | None = None
     monte_carlo_stats: dict[str, Any] | None = None
     explicit_points_wire = request.get("_explicit_points")
@@ -1086,6 +1113,12 @@ def run_sim(
             "fraction": probe_result["estimated_fraction"],
         }
 
+    # The engine seam (issue #2016) rides along to the local backends only:
+    # `remote`/`batch` run whatever their provisioned box/job ships (the
+    # ngspice toolchain -- and `run_sim` refuses `engine: "xyce"` for them
+    # above anyway), so the kwarg would be dead weight there.
+    local_engine_kwargs = {"engine": engine} if backend not in _OFFHOST_BACKENDS else {}
+
     if hosts == 1:
         # The exact pre-#376 call for the default case (no budget, no
         # resume, hosts=1, no fail-fast probe) -- `dispatch_points`/the four
@@ -1109,6 +1142,7 @@ def run_sim(
             initial_ppid=initial_ppid,
             checkpoint=checkpoint,
             probe_abort=probe_abort,
+            **local_engine_kwargs,
         )
     elif backend in _OFFHOST_BACKENDS:
         # Real fleet dispatch (Epic #375 Phase 1B, #377, wired in here by
@@ -1153,6 +1187,7 @@ def run_sim(
                 initial_ppid=initial_ppid,
                 checkpoint=checkpoint,
                 probe_abort=probe_abort,
+                **local_engine_kwargs,
             )
 
         corners_new, backend_engine_version, remote_environment = _run_sharded(
@@ -2097,6 +2132,53 @@ class _Checkpoint:
 # --------------------------------------------------------------------------- #
 
 
+def _enforce_xyce_support_boundary(
+    *,
+    engine: str,
+    backend: str,
+    corners_spec: dict[str, Any],
+    monte_carlo_declared: bool,
+    fail_fast_probe: bool,
+) -> None:
+    """Refuse the ``engine: "xyce"`` combinations the v1 path does not
+    implement (issue #2016) -- up front, with the same clean
+    :class:`SimError` the engine/backend gates use, rather than as
+    per-corner errors after dispatch. Each refusal names what *is*
+    supported so a caller can re-shape the request instead of guessing;
+    the syntax divergences behind each refusal are recorded in
+    ``_write_xyce_deck``'s docstring and docs/design/xyce-oracle.md. A
+    no-op for every other engine.
+    """
+    if engine != "xyce":
+        return
+    if backend not in ("local", "local-parallel"):
+        raise SimError(
+            f"engine 'xyce' supports only the local backends (local, "
+            f"local-parallel), not '{backend}' -- the remote/batch "
+            "provisioning path pins the ngspice toolchain"
+        )
+    if corners_spec.get("supply_v"):
+        raise SimError(
+            "engine 'xyce' does not support corners.supply_v: Xyce has "
+            "no netlist equivalent of ngspice's `alter` control command, "
+            "so per-corner supply rails cannot be patched into the deck "
+            "-- leave corners.supply_v unset (fixed supply, hardcoded in "
+            "the netlist body) or use engine 'ngspice'"
+        )
+    if monte_carlo_declared:
+        raise SimError(
+            "engine 'xyce' does not implement monte_carlo sampling -- "
+            "ngspice's `.options seed=`/rndseed mechanism has no Xyce "
+            "equivalent wired up yet; use engine 'ngspice'"
+        )
+    if fail_fast_probe:
+        raise SimError(
+            "options.fail_fast_probe is not implemented for engine "
+            "'xyce': the calibration probe reads ngspice's own rawfile "
+            "stream; use engine 'ngspice' or drop the option"
+        )
+
+
 def _run_local(
     *,
     corner_points: list[CornerPoint],
@@ -2114,6 +2196,7 @@ def _run_local(
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
+    engine: str = "ngspice",
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -2189,6 +2272,7 @@ def _run_local(
             keep_artifacts=keep_artifacts,
             want_waveforms=want_waveforms,
             artifacts_dir=artifacts_dir,
+            engine=engine,
         )
         corners.append(result)
         if version is not None:
@@ -2326,6 +2410,7 @@ def _run_local_parallel(
     initial_ppid: int | None = None,
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
+    engine: str = "ngspice",
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -2430,6 +2515,7 @@ def _run_local_parallel(
                     keep_artifacts=keep_artifacts,
                     want_waveforms=want_waveforms,
                     artifacts_dir=artifacts_dir,
+                    engine=engine,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -2490,6 +2576,76 @@ _BACKENDS = {
 _ENGINE_VERSION_RE = re.compile(r"ngspice-([\w.]+)")
 
 
+def _prepare_corner_run(
+    *,
+    corner_dir: str,
+    netlist_path: str,
+    models_lib: str | None,
+    point: CornerPoint,
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+    want_waveforms: bool,
+    engine: str,
+) -> tuple[list[str], str, str | None, str]:
+    """Write the engine's per-corner deck and build its command line.
+
+    Returns ``(command, log_path, raw_path, deck_path)``. The engine's own
+    deck writer (``_write_corner_deck`` for ngspice, ``_write_xyce_deck``
+    for Xyce) owns every syntax divergence; this is only the dispatch seam.
+    """
+    is_xyce = engine == "xyce"
+    deck_path = os.path.join(corner_dir, "corner.cir")
+    log_path = os.path.join(corner_dir, "xyce.log" if is_xyce else "ngspice.log")
+    raw_path = os.path.join(corner_dir, "waveform.raw") if want_waveforms else None
+    if is_xyce:
+        _write_xyce_deck(
+            deck_path=deck_path,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            point=point,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+        )
+        command = [XYCE_BINARY, "-b", deck_path, "-l", log_path]
+        if raw_path is not None:
+            # `-a` flips the rawfile from Xyce's default binary format to
+            # the ASCII layout `parse_ascii_rawfile` reads (verified against
+            # XyceNF 7.10.0; the layout is ngspice-like but not identical).
+            command += ["-r", raw_path, "-a"]
+    else:
+        _write_corner_deck(
+            deck_path=deck_path,
+            netlist_path=netlist_path,
+            models_lib=models_lib,
+            point=point,
+            analysis=analysis,
+            measurements_spec=measurements_spec,
+            raw_path=raw_path,
+        )
+        command = ["ngspice", "-b", deck_path, "-o", log_path]
+    return command, log_path, raw_path, deck_path
+
+
+def _parse_engine_measurements(log_text: str, engine: str) -> dict[str, float]:
+    """Parse ``.measure``/``.meas`` scalar results from an engine log --
+    ``_parse_xyce_measurements`` for Xyce (section-scoped, names
+    lower-cased), ``_parse_measurements`` for ngspice."""
+    if engine == "xyce":
+        return _parse_xyce_measurements(log_text)
+    return _parse_measurements(log_text)
+
+
+def _classify_engine_diagnostics(
+    log_text: str, netlist_path: str, engine: str
+) -> list[dict[str, str]]:
+    """Engine-dispatched log diagnostics -- ``_XYCE_DIAGNOSTIC_PATTERNS``
+    for Xyce, ``_DIAGNOSTIC_PATTERNS`` (plus its netlist-aware refinement)
+    for ngspice."""
+    if engine == "xyce":
+        return _classify_xyce_diagnostics(log_text)
+    return _classify_diagnostics(log_text, netlist_path)
+
+
 def _run_corner(
     *,
     point: CornerPoint,
@@ -2501,46 +2657,59 @@ def _run_corner(
     keep_artifacts: bool,
     want_waveforms: bool,
     artifacts_dir: str,
+    engine: str = "ngspice",
 ) -> tuple[dict[str, Any], str | None]:
-    """Run one corner point through ``ngspice -b`` and classify the result.
+    """Run one corner point through the selected engine's batch binary and
+    classify the result.
 
     Returns ``(corner_report, engine_version_or_none)``. Never raises: any
     failure to run (bad spawn, timeout, nonzero-but-uninformative exit) is
     folded into the corner's own ``status: "error"`` + ``diagnostics``,
     per the contract's "every corner is reported" guarantee.
+
+    ``engine="ngspice"`` runs ``ngspice -b`` on a deck carrying a
+    ``.control`` block (see ``_write_corner_deck``). ``engine="xyce"``
+    (issue #2016) runs ``Xyce -b`` -- the ``-b`` is accepted-and-ignored
+    SPICE-compatibility -- on a control-block-free deck (see
+    ``_write_xyce_deck``), with ``-l`` for the log and ``-r ... -a`` for an
+    ASCII rawfile when waveforms were requested. Both branches share the
+    measurement/limits/status tail: the response contract is
+    engine-shaped, not engine-specific, and the two engines are kept
+    byte-comparable for the cross-validation oracle
+    (tests/test_sim_xyce_oracle.py).
     """
+    is_xyce = engine == "xyce"
+    engine_name = XYCE_BINARY if is_xyce else "ngspice"
     if keep_artifacts:
         corner_dir = os.path.join(artifacts_dir, point.slug)
         os.makedirs(corner_dir, exist_ok=True)
     else:
         corner_dir = _tmp_work_dir()
 
-    deck_path = os.path.join(corner_dir, "corner.cir")
-    log_path = os.path.join(corner_dir, "ngspice.log")
-    raw_path = os.path.join(corner_dir, "waveform.raw") if want_waveforms else None
-
-    _write_corner_deck(
-        deck_path=deck_path,
+    command, log_path, raw_path, deck_path = _prepare_corner_run(
+        corner_dir=corner_dir,
         netlist_path=netlist_path,
         models_lib=models_lib,
         point=point,
         analysis=analysis,
         measurements_spec=measurements_spec,
-        raw_path=raw_path,
+        want_waveforms=want_waveforms,
+        engine=engine,
     )
 
-    diagnostics: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, str]] = []
     started = time.monotonic()
     timed_out = False
     engine_version: str | None = None
+    stdout_text = ""
     try:
         completed = subprocess.run(
-            ["ngspice", "-b", deck_path, "-o", log_path],
+            command,
             capture_output=True,
             text=True,
             timeout=timeout_s,
         )
-        engine_version = _extract_engine_version(completed.stdout)
+        stdout_text = completed.stdout or ""
     except subprocess.TimeoutExpired:
         timed_out = True
     except FileNotFoundError as exc:
@@ -2548,35 +2717,42 @@ def _run_corner(
             {
                 "severity": "error",
                 "code": "unknown",
-                "message": f"could not launch ngspice: {exc}",
+                "message": f"could not launch {engine_name}: {exc}",
             }
         )
     runtime_s = round(time.monotonic() - started, 3)
 
-    log_text = ""
-    if os.path.isfile(log_path):
-        try:
-            with open(log_path, encoding="utf-8", errors="replace") as handle:
-                log_text = handle.read()
-        except OSError:
-            log_text = ""
+    log_text = _read_log_file(log_path)
+
+    if is_xyce:
+        # Xyce stamps its version banner into the `-l` log (ngspice's lands
+        # on stdout, read below); the log is read either way.
+        engine_version = _extract_xyce_version(log_text)
+    elif not timed_out:
+        engine_version = _extract_engine_version(stdout_text)
 
     if timed_out:
         diagnostics.append(
             {
                 "severity": "error",
                 "code": "timeout",
-                "message": f"ngspice did not complete within {timeout_s}s, killed",
+                "message": (
+                    f"{engine_name} did not complete within {timeout_s}s, killed"
+                ),
             }
         )
     else:
-        diagnostics.extend(_classify_diagnostics(log_text, netlist_path))
+        diagnostics.extend(_classify_engine_diagnostics(log_text, netlist_path, engine))
 
-    measurement_values = _parse_measurements(log_text)
+    # Xyce upper-cases measurement names in its own output (`Vout` ->
+    # `VOUT`), so the lookup below is case-insensitive for that engine
+    # (`_parse_engine_measurements` lower-cases its keys; ngspice preserves
+    # the request's case, so its keys are used verbatim).
+    measurement_values = _parse_engine_measurements(log_text, engine)
     measurement_results: list[dict[str, Any]] = []
     for spec in measurements_spec:
         name = spec["name"]
-        value = measurement_values.get(name)
+        value = measurement_values.get(name.lower() if is_xyce else name)
         unit = spec.get("unit")
         limits = spec.get("limits")
         if value is None:
@@ -2608,13 +2784,23 @@ def _run_corner(
                 }
             )
 
-    # A recovered `singular_matrix`/`nonconvergence` classification (ngspice's
-    # own gmin/source-stepping recovery narration -- routine noise on the way
-    # to a *successful* analysis, not evidence the run failed) does not count
-    # as fatal on its own: downgrade its severity in place before computing
-    # the corner's aggregate status. See `_recovered_from_stepping` and issue
-    # #205; `timeout`/`netlist`/`measurement`/`unknown` are never downgraded.
-    if _recovered_from_stepping(measurements_spec, measurement_results, log_text):
+    # A recovered `singular_matrix`/`nonconvergence` classification (the
+    # engine's own stepping-recovery narration -- routine noise on the way
+    # to a *successful* analysis, not evidence the run failed) does not
+    # count as fatal on its own: downgrade its severity in place before
+    # computing the corner's aggregate status. See
+    # `_recovered_from_stepping` and issue #205;
+    # `timeout`/`netlist`/`measurement`/`unknown` are never downgraded.
+    # Xyce (issue #2016) gets the same rule against its own abort trailer:
+    # its Amesos "numerically singular matrix, returning zero" warnings can
+    # narrate intermediate solver trouble on a run that ultimately produced
+    # every requested measurement.
+    if _recovered_from_stepping(
+        measurements_spec,
+        measurement_results,
+        log_text,
+        aborted_re=(_XYCE_SIMULATION_ABORTED_RE if is_xyce else _SIMULATION_ABORTED_RE),
+    ):
         for diagnostic in diagnostics:
             if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
                 diagnostic["severity"] = "warning"
@@ -2693,6 +2879,20 @@ def _run_corner(
     return corner, engine_version
 
 
+def _read_log_file(path: str) -> str:
+    """Best-effort whole-file read of an engine log: a missing or unreadable
+    file yields empty text, never an exception (``_run_corner``'s
+    "never raises" contract -- the corner-classified diagnostics carry the
+    failure instead)."""
+    if not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
 def _tmp_work_dir() -> str:
     import tempfile
 
@@ -2767,9 +2967,216 @@ def _write_corner_deck(
         handle.write("\n".join(lines) + "\n")
 
 
+def _write_xyce_deck(
+    *,
+    deck_path: str,
+    netlist_path: str,
+    models_lib: str | None,
+    point: CornerPoint,
+    analysis: dict[str, Any],
+    measurements_spec: list[dict[str, Any]],
+) -> None:
+    """Generate the corner-specific Xyce deck (issue #2016).
+
+    Deliberately *not* a transcription of ``_write_corner_deck``: Xyce is a
+    from-scratch SPICE implementation, and several cards the ngspice deck
+    relies on parse differently or not at all (all verified against
+    XyceNF 7.10.0 while building this):
+
+    - No ``.control`` block and no ``alter``: the analysis card is a plain
+      top-level dot card, and per-corner supply patching is impossible --
+      which is why ``run_sim`` refuses ``corners.supply_v`` for this engine.
+    - ``.temp`` is silently ignored (the device report still shows the
+      27 C default afterwards), so temperature rides
+      ``.options device temp=<T>`` -- verified to move device physics (a
+      diode's forward drop at fixed current dropped ~104 mV from 27 C to
+      85 C) where ``.temp`` provably did not.
+    - ``.lib <file> <section>`` is supported, but the library file's
+      sections must close with a *named* ``.endl <section>`` (a bare
+      ``.endl`` is a parse error inside an included library -- divergence
+      from ngspice, documented in docs/design/xyce-oracle.md).
+    - The request's ``.meas`` cards are inserted verbatim: Xyce accepts the
+      ``.meas`` abbreviation, and its ``.MEASURE`` implements the same
+      DC/AC/TRAN/NOISE set ngspice's does (no ``.measure op`` -- same
+      ``_validate_meas_card`` gate as ngspice).
+
+    Monte Carlo seed cards are never emitted: ``run_sim`` refuses
+    ``monte_carlo`` for this engine before any deck exists.
+    """
+    lines = ["* klt sim -- generated Xyce corner deck, do not edit"]
+    if point.process_sections is not None:
+        # Multi-section corner bundle -- one line per declared section, in
+        # order (see `_parse_process_entry`), same as the ngspice deck.
+        for section in point.process_sections:
+            lines.append(f".lib {models_lib} {section}")
+    elif point.process is not None:
+        lines.append(f".lib {models_lib} {point.process}")
+    lines.append(f".include {netlist_path}")
+    # Xyce's documented circuit-wide device-temperature control; `.temp`
+    # would be a silent no-op (see this docstring's list).
+    lines.append(f".options device temp={point.temperature_c}")
+    # The analysis card precedes the measurement cards (the order every
+    # probe against XyceNF 7.10.0 used while building this). Top-level dot
+    # card, with the dot -- there is no `.control` block for a bare
+    # `dc`/`tran`/`op` command to live in.
+    lines.append("." + f"{analysis['kind']} {analysis['args']}".strip())
+    for spec in measurements_spec:
+        lines.append(spec["spice"])
+    lines.append(".end")
+
+    with open(deck_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
 def _extract_engine_version(stdout: str) -> str | None:
     match = _ENGINE_VERSION_RE.search(stdout or "")
     return match.group(1) if match else None
+
+
+# --------------------------------------------------------------------------- #
+# Per-corner Xyce invocation (issue #2016)
+# --------------------------------------------------------------------------- #
+
+#: The Xyce batch binary. PATH-discovered like ``ngspice`` -- the binary is
+#: an external oracle dependency (see scripts/install-xyce.sh), never a
+#: runtime dependency of ``klt`` itself. Tests monkeypatch this name (the
+#: same seam the ngspice path's literal ``"ngspice"`` argv entry provides).
+XYCE_BINARY = "Xyce"
+
+#: Xyce stamps ``***** This is version XyceNF Release 7.10.0`` (the NF/NORAD
+#: distribution labels itself ``XyceNF``; the open-source build reads
+#: ``Xyce Release ...``) into the log file ``-l`` writes -- unlike ngspice,
+#: whose banner lands on stdout. Version is read from the log for exactly
+#: that reason; see ``_run_corner``.
+_XYCE_VERSION_RE = re.compile(
+    r"^\*+ This is version Xyce(?:NF)? Release ([\w.]+)", re.MULTILINE
+)
+
+#: Xyce's own "this run never completed" trailer (``Simulation aborted due
+#: to error. There are N MSG_FATAL ...``) -- the abort-marker
+#: `_recovered_from_stepping` checks for this engine.
+_XYCE_SIMULATION_ABORTED_RE = re.compile(
+    r"Simulation aborted due to error", re.IGNORECASE
+)
+
+#: A successful Xyce ``.measure`` scalar line, in the "Measure Functions"
+#: log section. Xyce upper-cases the measurement name and appends
+#: analysis-specific trailers after the value, all of which are ignored:
+#: ::
+#:
+#:     VMAX = 9.691320e-01 at time = 6.544640e-09
+#:     VOUT_MID = 5.000000e-01 for AT = 2.500000e+00
+#:     TPHL = 1.391548e-09 with targ = 3.641548e-09 and trig = 2.250000e-09
+#:     VOUT_FINAL = 9.000024e-03
+_XYCE_MEAS_VALUE_RE = re.compile(
+    r"^([A-Za-z_]\w*)\s*=\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    r"(?:\s|$)"
+)
+
+#: A failed Xyce ``.measure`` line: ``TPHL = FAILED with targ = not found
+#: and trig = not found``. Like ngspice's ``... failed!``, the failed name
+#: is excluded from the parsed values (the caller treats an absent name as
+#: "no value" -> ``status: "error"``).
+_XYCE_MEAS_FAILED_RE = re.compile(r"^([A-Za-z_]\w*)\s*=\s*FAILED\b", re.IGNORECASE)
+
+
+def _extract_xyce_version(log_text: str) -> str | None:
+    match = _XYCE_VERSION_RE.search(log_text or "")
+    return match.group(1) if match else None
+
+
+def _xyce_measure_section(log_text: str) -> str:
+    """The text of Xyce's ``***** Measure Functions *****`` log section, or
+    ``""`` when the run produced none (a section-scoped parse, rather than
+    scanning the whole log, so unrelated ``name = value``-shaped lines
+    elsewhere in Xyce's verbose output can never masquerade as a
+    measurement). The section ends at the next ``*****`` banner.
+    """
+    marker = log_text.find("Measure Functions")
+    if marker < 0:
+        return ""
+    rest = log_text[marker:]
+    banner = rest.find("\n*****")
+    return rest[:banner] if banner >= 0 else rest
+
+
+def _parse_xyce_measurements(log_text: str) -> dict[str, float]:
+    """Parse ``.measure`` scalar results from the Xyce log's "Measure
+    Functions" section.
+
+    Xyce upper-cases measurement names in its own output; the returned
+    dict's keys are lower-cased so the caller's case-insensitive lookup
+    (see ``_run_corner``) can match the request's ``measurements[].name``
+    verbatim. A failed measurement (``NAME = FAILED ...``) is excluded, the
+    same "absent means error" convention `_parse_measurements` follows for
+    ngspice's ``... failed!`` lines.
+    """
+    values: dict[str, float] = {}
+    failed: set[str] = set()
+    for raw_line in _xyce_measure_section(log_text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        failed_match = _XYCE_MEAS_FAILED_RE.match(line)
+        if failed_match:
+            failed.add(failed_match.group(1).lower())
+            continue
+        value_match = _XYCE_MEAS_VALUE_RE.match(line)
+        if value_match:
+            name, value = value_match.groups()
+            values[name.lower()] = float(value)
+    for name in failed:
+        values.pop(name, None)
+    return values
+
+
+#: Ordered diagnostic classifiers for the Xyce log -- the Xyce-native
+#: counterpart of ``_DIAGNOSTIC_PATTERNS``, matched against what XyceNF
+#: 7.10.0 actually emits (not transcriptions of ngspice's text). Order
+#: matters, most specific first: a fatal netlist parse error usually also
+#: produces a trailing abort banner, and the more specific code should win.
+#:
+#: - ``Netlist error``: Xyce's fatal parse/topology failures (e.g. the
+#:   bare-``.endl`` library syntax divergence this engine's docs record).
+#: - ``Numerically singular matrix found by Amesos``: Xyce's singular-matrix
+#:   narration (it "returns zero solution to nonlinear solver!" and
+#:   continues) -- downgradeable per ``_recovered_from_stepping`` when every
+#:   requested measurement still came back.
+#: - ``Time step too small``: the classic transient nonconvergence death.
+#: - ``Simulation aborted due to error``: the generic fatal trailer, for
+#:   solver/method failures none of the more specific patterns caught.
+_XYCE_DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("netlist", re.compile(r"^\s*Netlist error", re.IGNORECASE | re.MULTILINE)),
+    (
+        "singular_matrix",
+        re.compile(r"Numerically singular matrix", re.IGNORECASE),
+    ),
+    (
+        "nonconvergence",
+        re.compile(r"Time step too small|failed to converge", re.IGNORECASE),
+    ),
+    ("unknown", re.compile(r"Simulation aborted due to error", re.IGNORECASE)),
+)
+
+
+def _classify_xyce_diagnostics(log_text: str) -> list[dict[str, str]]:
+    """Classify structured diagnostics from a Xyce log, per
+    ``_XYCE_DIAGNOSTIC_PATTERNS`` (one match per code, same shape and
+    severity conventions as :func:`_classify_diagnostics`).
+    """
+    diagnostics: list[dict[str, str]] = []
+    for code, pattern in _XYCE_DIAGNOSTIC_PATTERNS:
+        match = pattern.search(log_text)
+        if match is None:
+            continue
+        diagnostics.append(
+            {
+                "severity": "error",
+                "code": code,
+                "message": _line_containing(log_text, match.start()),
+            }
+        )
+    return diagnostics
 
 
 # --------------------------------------------------------------------------- #
@@ -3070,13 +3477,7 @@ def _run_calibration_probe(
     wall_s = round(time.monotonic() - started, 3)
 
     if not timed_out and error is None:
-        log_text = ""
-        if os.path.isfile(log_path):
-            try:
-                with open(log_path, encoding="utf-8", errors="replace") as handle:
-                    log_text = handle.read()
-            except OSError:
-                log_text = ""
+        log_text = _read_log_file(log_path)
         if _SIMULATION_ABORTED_RE.search(log_text):
             # The probe's own (shortened) analysis never completed cleanly
             # -- e.g. a genuine convergence failure at this corner, not the
@@ -3384,6 +3785,7 @@ def _recovered_from_stepping(
     measurements_spec: list[dict[str, Any]],
     measurement_results: list[dict[str, Any]],
     log_text: str,
+    aborted_re: re.Pattern[str] = _SIMULATION_ABORTED_RE,
 ) -> bool:
     """True when a ``singular_matrix``/``nonconvergence`` classification for
     this corner should be treated as recovered (non-fatal) rather than fatal.
@@ -3399,11 +3801,17 @@ def _recovered_from_stepping(
     the analysis failed -- so it is only treated as fatal when there is no
     other way to tell the run actually succeeded.
 
+    Xyce (issue #2016) gets the same rule against its own narration: its
+    "Numerically singular matrix found by Amesos, returning zero solution to
+    nonlinear solver!" warnings likewise narrate intermediate solver trouble
+    rather than a final verdict. ``aborted_re`` carries the engine's own
+    "this run never completed" trailer text.
+
     Conservative by construction: recovery requires *every* requested
     measurement to have actually come back with a value (a corner with no
     ``measurements[]`` at all has no independent signal to check against, so
-    it is never considered recovered), and ngspice's own
-    ``simulation(s) aborted`` trailer must be absent -- either one failing
+    it is never considered recovered), and the engine's own
+    simulation-aborted trailer must be absent -- either one failing
     means the analysis never produced a trustworthy result and the
     classification stays fatal.
     """
@@ -3411,7 +3819,7 @@ def _recovered_from_stepping(
         return False
     if any(m["status"] == "error" for m in measurement_results):
         return False
-    if _SIMULATION_ABORTED_RE.search(log_text):
+    if aborted_re.search(log_text):
         return False
     return True
 
