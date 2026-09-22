@@ -747,6 +747,92 @@ def test_cli_text_output_renders_peec_fields(tmp_path, capsys):
     assert "resistance (ohms):" in out
 
 
+def test_run_mom_peec_accepts_multi_box_conductor(tmp_path):
+    """A conductor built from more than one box -- e.g. a dual-strip "go"
+    rail spread across two GDS layers, both sharing the current-flow axis
+    and axial span with "return" -- is accepted end to end (#1841's PEEC
+    increment (i): multi-box conductors sharing one axis)."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    # "go" is two parallel 2um-wide strips (layers 1 and 3), each 500um
+    # long along x.
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(500), _um(2)))
+    top.shapes(layout.layer(3, 0)).insert(
+        kdb.Box.new(_um(0), _um(10), _um(500), _um(12))
+    )
+    # "return" is an ordinary single-box conductor on the same axis/span.
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(0), _um(30), _um(500), _um(32))
+    )
+    gds = tmp_path / "multi_box.gds"
+    layout.write(str(gds))
+
+    spec = tmp_path / "multi_box.mom.json"
+    entry = {"z0_um": 0.0, "z1_um": 2.0, "conductivity_S_per_m": 5.96e7}
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "panel_size_um": 5.0,
+                "compute_inductance": True,
+                "filament_size_um": 0.5,
+                "stackup": [
+                    {"layer": "1/0", "conductor": "go", **entry},
+                    {"layer": "3/0", "conductor": "go", **entry},
+                    {"layer": "2/0", "conductor": "return", **entry},
+                ],
+            }
+        )
+    )
+
+    report = run_mom(str(gds), str(spec))
+    assert report["conductors"] == ["go", "return"]
+    # Every filament from "go"'s two boxes must be attributed to "go" (not
+    # split across a phantom third conductor), so the matrix stays 2x2.
+    inductance = report["inductance_matrix_nh"]
+    assert len(inductance) == 2 and len(inductance[0]) == 2
+    assert inductance[0][0] > 0  # "go" self inductance
+    assert inductance[1][1] > 0  # "return" self inductance
+    assert report["filament_count"] > 0
+    resistance = report["resistance_ohm"]
+    assert len(resistance) == 2
+    assert all(r > 0 for r in resistance)
+
+
+def test_run_mom_peec_rejects_mixed_axis_multi_box_conductor(tmp_path):
+    """A conductor's own boxes must also share one current-flow axis: the
+    coax shield's four wall segments (north/south run along x, east/west
+    along y -- see `_coax_fixture`) stay genuinely out of scope even after
+    #1841's "multi-box, single-axis" relaxation. That mixed-axis geometry is
+    increment (ii)'s territory, not this one's."""
+    gds = tmp_path / "coax.gds"
+    _coax_fixture(gds)
+
+    spec = tmp_path / "coax.mom.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "compute_inductance": True,
+                "stackup": [
+                    {
+                        "layer": f"{layer_num}/0",
+                        "conductor": "outer",
+                        "z0_um": 0.0,
+                        "z1_um": 0.5,
+                        "conductivity_S_per_m": 5.96e7,
+                    }
+                    for layer_num in (10, 11, 12, 13)
+                ],
+            }
+        )
+    )
+
+    with pytest.raises(MomError, match="current-flow axis"):
+        run_mom(str(gds), str(spec))
+
+
 # --- full-wave frequency sweep (issue #893) ---------------------------------
 
 
@@ -867,6 +953,53 @@ def test_run_mom_full_wave_accepts_cross_axis_conductors(tmp_path):
     # omitted entirely, not silently wrong.
     assert "characteristic_impedance_real_ohm" not in point
     assert "phase_rad_per_m" not in point
+
+
+def test_run_mom_full_wave_accepts_multi_box_conductor(tmp_path):
+    """Same multi-box relaxation exercised through the full-wave solve's
+    shared `classify_bars` path (#1841): "go" is two boxes on separate
+    layers, "return" a single box, all sharing the current-flow axis and
+    axial span."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    top.shapes(layout.layer(1, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(500), _um(2)))
+    top.shapes(layout.layer(3, 0)).insert(
+        kdb.Box.new(_um(0), _um(10), _um(500), _um(12))
+    )
+    top.shapes(layout.layer(2, 0)).insert(
+        kdb.Box.new(_um(0), _um(30), _um(500), _um(32))
+    )
+    gds = tmp_path / "multi_box_fw.gds"
+    layout.write(str(gds))
+
+    spec = tmp_path / "multi_box_fw.mom.json"
+    entry = {"z0_um": 0.0, "z1_um": 2.0}
+    spec.write_text(
+        json.dumps(
+            {
+                "background_permittivity": 1.0,
+                "panel_size_um": 2.0,
+                "frequencies_hz": [1.0e6],
+                "segment_size_um": 5.0,
+                "stackup": [
+                    {"layer": "1/0", "conductor": "go", **entry},
+                    {"layer": "3/0", "conductor": "go", **entry},
+                    {"layer": "2/0", "conductor": "return", **entry},
+                ],
+            }
+        )
+    )
+
+    report = run_mom(str(gds), str(spec))
+    assert report["conductors"] == ["go", "return"]
+    sweep = report["full_wave_sweep"]
+    assert len(sweep) == 1
+    # Two conductors (not per-box) -> a 2x2 impedance matrix.
+    point = sweep[0]
+    assert len(point["impedance_matrix_real_ohm"]) == 2
+    assert len(point["impedance_matrix_real_ohm"][0]) == 2
+    assert point["characteristic_impedance_real_ohm"] is not None
 
 
 def test_run_mom_without_frequencies_hz_omits_full_wave_fields(tmp_path):

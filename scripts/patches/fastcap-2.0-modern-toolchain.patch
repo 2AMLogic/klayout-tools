@@ -1,0 +1,67 @@
+Build FastCap 2.0 (MIT, 1992; ediloren/FastCap2 `master`) with a 2020s C
+compiler -- issue #2015, pairing #4 of cross-validation tracking issue #2007.
+
+Applied by scripts/install-fastcap.sh with `patch -p1` against the pinned
+source archive named in that script; `patch` fails closed if either hunk
+does not apply exactly, so a silently-drifted upstream can never be built
+and compared against. Both hunks are build fixes only -- nothing here
+touches the discretisation, the multipole expansion, the kernel, or the
+solve, so the numbers this build produces are FastCap's own.
+
+Deliberately NOT taken from ediloren/FastCap2's `WRCad` branch, which
+already carries equivalent fixes: that branch is distributed under MIT's
+original 1990 "internal, noncommercial purposes" license, while `master`
+carries the 2003 relicensing ("use, copy, modify, sell and/or distribute
+... for any purpose ... without royalty"). This repo is MIT and public, so
+the permissively-licensed branch plus this patch is the right pairing --
+see docs/design/fastcap-oracle.md's "Licensing" section.
+
+--- a/src/mulGlobal.h
++++ b/src/mulGlobal.h
+@@ -72,10 +72,18 @@
+   - MALLOC() used when memory can be anything
+     core should be malloc() or ualloc()
+ ***********************************************************************/
+-/* #define CALCORE(NUM, TYPE) calloc((unsigned)(NUM),sizeof(TYPE)) */
+-#define CALCORE(NUM, TYPE) ualloc((unsigned)(NUM)*sizeof(TYPE))
+-/* #define MALCORE malloc */
+-#define MALCORE ualloc
++/* klayout-tools (issue #2015): use the C library allocator, not FastCap's
++   own sbrk()-based `ualloc`.  `ualloc` returns a `char *` but is never
++   prototyped, so on LP64 every allocation is truncated to the implicitly
++   declared `int` return type and the first dereference segfaults; sbrk()
++   itself is also deprecated on modern systems.  This is the same switch
++   Whiteley Research made in their own FastCap branch ("Default now is to
++   use calloc/malloc rather than ualloc.  The sbrk function is deprecated
++   in many operating systems").  The sbrk() stub keeps DUMPRSS's memory
++   report compiling; it is diagnostic output only. */
++#define CALCORE(NUM, TYPE) calloc((unsigned)(NUM),sizeof(TYPE))
++#define MALCORE malloc
++#define sbrk(x) 0
+ 
+ /* counts of memory usage by multipole matrix type */
+ extern long memcount;
+--- a/src/mulSetup.c
++++ b/src/mulSetup.c
+@@ -35,6 +35,21 @@
+ 
+ #include "mulGlobal.h"
+ 
++/* klayout-tools (issue #2015): forward-declare this file's own static
++   helpers.  Each is called above its K&R definition, which creates an
++   implicit *extern* declaration; the later `static` definition is then a
++   hard error ("static declaration of 'X' follows non-static declaration")
++   on every C compiler since GCC 9.  Declaring them unprototyped keeps them
++   byte-compatible with the K&R definitions below. */
++static int placeq();
++static int indexkid();
++static int getnbrs();
++static int linkcubes();
++static int setMaxq();
++static int getAllInter();
++static int set_vector_masks();
++
++
+ cube *cstack[1024];		/* Stack used in several routines. */
+ 
+ /*

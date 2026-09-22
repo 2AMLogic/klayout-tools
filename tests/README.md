@@ -30,7 +30,14 @@ tests/
   `cocotb_fakes.FakeCocotbRunner`, `fake_aws._FakeAws`,
   `metrics_regression`'s tolerance-based scalar comparator), extracted from
   near-identical definitions that had drifted across multiple test files.
-  Nothing here is importable from the installed `klt` distribution.
+  Nothing here is importable from the installed `klt` distribution. It also
+  holds the **external-oracle drivers** — `magic_oracle` (`klt drc` /
+  `klt extract` vs. magic) and `fastcap_oracle` (`klt mom`'s capacitance
+  matrix vs. FastCap 2.0) — which drive a real, independently implemented
+  tool rather than a double. Their test modules are *real-binary-gated*: they
+  skip with a specific reason when the tool is not installed, so absence
+  never fails CI. See `docs/design/magic-oracle.md` and
+  `docs/design/fastcap-oracle.md` for each pairing's methodology.
 - **`corpus/`, `golden_deck/`, `golden_metrics/`** each hold checked-in
   fixture data plus a `generate_golden*.py` regeneration script; see each
   directory's own README for provenance, licensing, and how to regenerate
