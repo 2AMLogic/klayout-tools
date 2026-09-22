@@ -1,11 +1,12 @@
-# `klt drc` / `klt extract` cross-validation against magic
+# `klt drc` / `klt extract` / `klt lvs` cross-validation against magic
 
-Methodology for the magic-backed cross-validation oracle — issue #2014,
-pairing #1 of tracking issue #2007 ("independent cross-validation oracles
-for `klt` verdicts"). The implementation is
+Methodology for the magic-backed cross-validation oracle — issues #2014 and
+#2316, pairing #1 of tracking issue #2007 ("independent cross-validation
+oracles for `klt` verdicts"). The implementation is
 [`tests/helpers/magic_oracle.py`](../../tests/helpers/magic_oracle.py) plus
-[`tests/test_drc_magic_oracle.py`](../../tests/test_drc_magic_oracle.py) and
-[`tests/test_extract_magic_oracle.py`](../../tests/test_extract_magic_oracle.py).
+[`tests/test_drc_magic_oracle.py`](../../tests/test_drc_magic_oracle.py),
+[`tests/test_extract_magic_oracle.py`](../../tests/test_extract_magic_oracle.py)
+and [`tests/test_lvs_magic_oracle.py`](../../tests/test_lvs_magic_oracle.py).
 
 Run it with:
 
@@ -13,7 +14,8 @@ Run it with:
 scripts/install-magic.sh          # pinned magic 8.3.683 -> ~/.cache/magic-8.3.683
 export PATH="$HOME/.cache/magic-8.3.683/bin:$PATH"
 scripts/fetch-magic-tech.sh       # open_pdks decks -> pdks/magic-tech/*.tech
-uv run pytest tests/test_drc_magic_oracle.py tests/test_extract_magic_oracle.py -v
+uv run pytest tests/test_drc_magic_oracle.py \
+  tests/test_extract_magic_oracle.py tests/test_lvs_magic_oracle.py -v
 ```
 
 or, in CI, `gh workflow run magic-oracle.yml`
@@ -27,6 +29,18 @@ real cross-validation — but both of its comparators are fed by KLayout's own
 layout extraction, so it validates *comparison*, not extraction. Nothing in
 the suite could distinguish a correct netlist, or a correct "clean" DRC
 verdict, from a consistently wrong one.
+
+**`klt lvs`'s own verdict had the same shape of gap, one level up** (#2316).
+`tests/test_extract_magic_oracle.py` establishes that the two extractors'
+*netlists* agree device for device, but a netlist agreeing is not a verdict
+agreeing: the netlist still has to travel the whole comparer — device-class
+resolution, pin matching, net pairing, parameter comparison — and a matcher
+bug that is invisible on KLayout-shaped netlist text (naming conventions,
+port order, property formatting) would not show up in a per-device equality
+check even though it would produce a wrong `klt lvs` verdict.
+`tests/test_lvs_magic_oracle.py` closes that by running the **verdict**
+pipeline with magic's netlist as `request.layout.netlist`. See
+"[The LVS verdict pairing](#the-lvs-verdict-pairing-2316)" below.
 
 [magic](http://opencircuitdesign.com/magic/) is a different implementation of
 both jobs — a separate codebase in a different language with its own geometry
@@ -88,6 +102,10 @@ question.
   extracted parasitic R/C — which is the scope `klt extract` produces by
   default. (`klt extract --parasitics` is a different surface with its own
   oracle row in #2007: OpenRCX.)
+- **Reference netlist (LVS pairing).** Both verdict pipelines are compared
+  against the *same*, byte-identical, hand-written schematic reference —
+  never against either extractor's own output, which would make that
+  pipeline's verdict trivially `"match"` and the whole comparison circular.
 
 ## Evidence the work ran (#2007 criterion 2)
 
@@ -105,6 +123,17 @@ this oracle. The helper therefore fails closed on all of:
 - `ext2spice` writing no netlist, or one whose `.subckt` is not the cell asked
   for.
 
+The LVS adapter (`write_magic_lvs_netlist`, below) extends the same rule to
+the netlist it renders, because a *device-less* or *device-dropping* layout
+netlist compares clean against almost anything. It raises rather than
+writing one on: an empty device list, a device it cannot express as a SPICE
+MOSFET card (a resistor, an unrecognised model), a MOSFET whose terminal
+count is not `ext2spice`'s documented four, a missing device parameter, a
+bulk alias whose source net this cell does not actually have (a stale alias
+translates nothing, silently), a translation that would merge two distinct
+magic nets onto one name, and an `extra_ports` entry naming a net that does
+not exist.
+
 On top of that, every test asserts positive evidence rather than an absence:
 the technology magic loaded (`tech name` == `sky130A`/`gf180mcuC`), the
 bounding box match above, `klt`'s own `coverage.layers_checked` being
@@ -114,9 +143,11 @@ host, decks and fixtures.
 
 ## Fixtures (#2007 criterion 3)
 
-One known-good case per PDK, three seeded defects. Every defect is injected
+One known-good case per PDK, four seeded defects. Every defect is injected
 into the *same* corpus cell used as the clean case, so the injected geometry
-is the only difference between the two runs.
+is the only difference between the two runs. The input-to-output short is
+reused by both the extraction and the LVS pairing — one fixture, reacted to
+at two levels.
 
 | Fixture | What is seeded | Expected reaction |
 | --- | --- | --- |
@@ -125,16 +156,89 @@ is the only difference between the two runs.
 | met1 spacing | one 0.6 × 1.0 µm met1 rectangle 0.09 µm from the ground rail (`m1.2`/`met1.space.1` is 0.14 µm) | both flag a met1-spacing failure, in the same place |
 | input-to-output short | an li1 bridge merging the `A` island into the `Y` island | both lose exactly one net; both show gate == drain |
 | missing vias | all 11 `licon1` (66/44) cuts deleted | both report 11 nets instead of 6, still 2 devices, unchanged device parameters |
+| widened NMOS channel (LVS) | the NMOS `diff` island stretched from 0.885 µm to 0.99 µm, so `w` grows 0.65 → 0.755 µm | both verdict pipelines: `"mismatch"`, implicating the **NFET** and its `VGND`/`vsubs` nets |
 
-A fourth test is a negative control on the fixture *mechanism*: re-writing the
-clean corpus cell through the same KLayout write path, with nothing injected,
-must still read clean under magic — so the seeding, not the round-trip, is
-what both engines reacted to.
+A further DRC test is a negative control on the fixture *mechanism*:
+re-writing the clean corpus cell through the same KLayout write path, with
+nothing injected, must still read clean under magic — so the seeding, not
+the round-trip, is what both engines reacted to.
+
+## The LVS verdict pairing (#2316)
+
+`klt lvs`'s `request.layout` accepts a **pre-extracted** SPICE netlist
+(`{"netlist": …, "top": …}`) instead of a GDS to extract inline. That is the
+seam magic is plugged into: the verdict pipeline runs with a layout netlist
+no part of KLayout produced.
+
+```
+                    ┌─ klt extract (KLayout) ────┐   klt lvs ──► verdict A
+  same GDS bytes ───┤                            ├──►
+                    └─ magic extract + ext2spice ┘   klt lvs ──► verdict B
+                                                        ▲
+                             one hand-written schematic reference,
+                             byte-identical for both compares
+```
+
+Verdict A (`layout.file` + `deck`, which is what a caller actually runs) and
+verdict B (`layout.netlist`, magic's) must agree.
+
+**What is compared.** `status` itself, and — for a seeded defect — *which*
+device and *which* nets the report implicates, so a defect test cannot pass
+on "both said mismatch" alone. `severity: "warning"` disclosures are not
+compared: `device.body_unverified` and the empty-device-class `topology`
+note describe `klt`'s own inline extraction, which the magic-fed side never
+runs, so they are asymmetric by construction.
+
+**One asymmetry is real and is documented rather than asserted away.**
+`klt lvs` reports the *same* widened-NMOS defect at different granularity
+depending on the request shape: the pre-extracted shape recognises the
+device pair and emits `device.property` (`w_um` 0.755 vs 0.65), downgrading
+the unmatched device/net entries behind it to warnings; the inline-extraction
+shape does not pair the device at all and emits `device.unmatched` +
+`net.unmatched` as errors. Both name the same NFET and the same two nets, so
+the pairing's claim holds — but the two shapes are not interchangeable in
+reporting granularity, and the tests compare the *identity* of the
+implicated objects across all entries rather than the severity bucket they
+landed in. Tracked separately in #2317.
+
+**The adapter.** `magic_oracle.write_magic_lvs_netlist` renders a
+`MagicExtractResult` as SPICE `klt lvs` can read. It is a *format*
+translation, not a filter: magic writes subcircuit-instance cards naming the
+full PDK model (`X0 Y A VGND VNB sky130_fd_pr__nfet_01v8 w=0.65 l=0.15 …`),
+which KLayout's SPICE reader reads as a call into an abstract circuit rather
+than as a MOS device, so the adapter re-emits each device as an `M` card on
+the deck's own class name — carrying **every** parameter magic reported
+(`l`, `w`, `as`, `ad`, `ps`, `pd`), not a compare-friendly subset.
+
+**The declared naming differences are normalised on the way in**, which is
+the LVS-side answer to the same conventions the "Unsupported / deliberately
+unmatched" section already lists:
+
+| Difference | magic | `klt` | How the adapter handles it |
+| --- | --- | --- | --- |
+| MOSFET bulk | `VNB` (sky130A), `SUB` (gf180mcuC) | synthesized `vsubs` | `BULK_NET_ALIASES_BY_DECK`, asserted live against the cell's own nets |
+| Unlabelled internal net | `w_n86_453#`, `a_74_47#` | `$5` | renamed to `magic_unnamed_<n>`, in sorted order (stable, collision-checked) |
+| Substrate as a top-level pin | no port | promoted to a pin | `extra_ports=("vsubs",)`, which must name an existing net |
+| Device class | `sky130_fd_pr__nfet_01v8` | `nfet` | `device_kind()` — the same mapping #2014 already declared |
+
+`test_declared_bulk_naming_difference_cannot_decide_the_verdict` keeps that
+table honest in both directions: it asserts the difference is real (magic's
+netlist has `VNB`, `klt`'s has `vsubs`), that the adapter translates it, and
+that the `klayout` engine pairs the two nets **topologically anyway** — the
+deliberately untranslated netlist also reaches `"match"`. So the translation
+is a normalisation, not the only thing standing between this pairing and a
+false verdict; if that ever stops being true, the test fails rather than the
+claim quietly going stale. The `gf180mcu` clean case is the same point made
+from the other side: its nwell is unlabelled, so `klt` calls it `$5`, magic
+calls it `w_n86_453#` and the reference netlist calls it `NWELL` — three
+different names for one node, and the compare still matches.
 
 ## Measured results
 
-Recorded 2026-09-17 on `b314de8`, magic **8.3.683**, open_pdks **1.0.608**
-(`1689ac3f`), KLayout **0.30.10**, `klt` 0.5.0. All 13 tests pass.
+DRC and extraction rows recorded 2026-09-17 on `b314de8`; the LVS rows
+recorded 2026-09-22 on `53c1317` (#2316). magic **8.3.683**, open_pdks
+**1.0.608** (`1689ac3f`), KLayout **0.30.10**, `klt` 0.5.0. All 30 tests
+pass (13 DRC/extract + 17 LVS).
 
 | Check | `klt` | magic | Agreement |
 | --- | --- | --- | --- |
@@ -147,6 +251,10 @@ Recorded 2026-09-17 on `b314de8`, magic **8.3.683**, open_pdks **1.0.608**
 | gf180mcu clkinv, extract | 2 devices, 6 nets; nfet `l=0.6 w=0.73 as=ad=0.3212 ps=pd=2.34` | identical | exact |
 | seeded short | 5 nets (was 6), gate == drain | 5 nets (was 6), gate == drain | exact |
 | seeded missing vias | 11 nets (was 6), 2 devices | 11 nets, 2 devices | exact |
+| sky130 inverter, **LVS verdict** | `match`, no error entries | `match`, no error entries | exact |
+| gf180mcu clkinv, **LVS verdict** | `match`, no error entries | `match`, no error entries | exact |
+| seeded widened NMOS, LVS verdict | `mismatch`; NFET + `VGND`/`vsubs` | `mismatch`; NFET + `VGND`/`vsubs`, plus `w_um` 0.755 vs 0.65 | same verdict, same device, same nets (granularity differs — see #2317) |
+| seeded short, LVS verdict | `mismatch`; `device.unmatched` ×2, `net.unmatched` ×11 | identical error categories and counts | exact |
 
 ### Why DRC violations are compared as zero/non-zero plus location
 
@@ -205,8 +313,12 @@ declared instead of compared:
 - **Bulk and unnamed-net naming.** magic names a MOSFET's bulk from its own
   well/substrate node (`VNB`, `SUB`, `w_n86_453#`) where `klt` synthesises
   `vsubs` or numbers the well net (`\$5`); magic generates `a_<x>_<y>#` names
-  for unlabelled internal nets where `klt` uses `$<n>`. Bulk is excluded from
-  the terminal comparison; net *counts* and topology are compared instead.
+  for unlabelled internal nets where `klt` uses `$<n>`. In the extraction
+  pairing, bulk is excluded from the terminal comparison and net *counts* and
+  topology are compared instead; in the LVS pairing the same names are
+  *translated* on the way into the compare (see the table in "The LVS verdict
+  pairing" above), because a verdict pipeline has no equivalent of "compare
+  the count instead".
 - **Merged-label naming.** On the seeded short `klt` reports `A|Y` and magic
   reports `Y`; only the topology (gate == drain) is comparable, and that is
   what is asserted.
@@ -222,6 +334,13 @@ Out of scope for this pairing, and not covered by these tests:
   extraction (`extract` across placed subcells, `ext2spice` with subcircuits)
   is not compared; `klt extract`'s own hierarchy handling is covered by
   `tests/test_extract.py`, not here.
+- **`klt lvs`'s other engine and its compare-shaping options.** The LVS
+  pairing runs the default `"klayout"` engine with no
+  `combine_devices`/`flatten_*`/`parameter_tolerance`/`hints` set. The
+  `"netgen"` engine is separately cross-validated by `tests/test_lvs.py`'s
+  netgen tier (#343) — that tier is what makes the *comparison* independent,
+  this one is what makes the *extraction* feeding it independent, and neither
+  substitutes for the other.
 - **Device types beyond MOSFETs.** No resistors, MiM capacitors, diodes,
   bipolars, SONOS or ReRAM devices appear in these fixtures, so nothing is
   claimed about them.
@@ -238,4 +357,7 @@ Out of scope for this pairing, and not covered by these tests:
 - [`mom-cross-validation.md`](mom-cross-validation.md) — the same pattern for
   `klt mom` against NEC2++, and the precedent for an external-oracle test tier.
 - [`docs/cli/drc.md`](../cli/drc.md) / [`docs/cli/extract.md`](../cli/extract.md)
-  — the verbs under test, and `klt drc`'s `coverage` contract.
+  / [`docs/cli/lvs.md`](../cli/lvs.md) — the verbs under test, `klt drc`'s
+  `coverage` contract, and `klt lvs`'s request/report schema.
+- Issue #2317 — the inline-vs-pre-extracted reporting-granularity asymmetry
+  this pairing surfaced in `klt lvs` itself.
