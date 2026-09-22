@@ -195,6 +195,9 @@ full inputs/outputs reference and a complete worked example.
 - [The `klt verify` GitHub Action](docs/guides/github-action.md) — reusable
   composite Action wrapping `klt` for downstream block repo CI: inputs,
   outputs, and a worked example.
+- [Tagged remote compute](docs/guides/remote-compute.md) — provisioning and
+  operating a tagged EC2 box for heavy agent workloads (sim sweeps, renders,
+  evidence runs) while git/forge operations stay local (#2277).
 
 ## Agent skills
 
