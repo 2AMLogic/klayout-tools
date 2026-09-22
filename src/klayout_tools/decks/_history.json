@@ -126,6 +126,55 @@
       "git_tag": "v0.5.0",
       "git_commit": "6bf5610939a096b81605a381e70454bf1cb20316",
       "package_version": "0.5.0"
+    },
+    {
+      "deck": "extraction",
+      "content_hash": "sha256:acf2781e56dfd5efadb60e8fc8c32594bf8ac4430e87e6743b3a762e98623fab",
+      "git_tag": "v0.6.0",
+      "git_commit": "c622e8addb362491664d44ba4d717f354ca88bbd",
+      "package_version": "0.6.0"
+    },
+    {
+      "deck": "gf180mcu",
+      "content_hash": "sha256:95c2eb9148b29ded02182aeca4222287ff57f813691d5e2f9f8d7a675f6cb637",
+      "git_tag": "v0.6.0",
+      "git_commit": "c622e8addb362491664d44ba4d717f354ca88bbd",
+      "package_version": "0.6.0"
+    },
+    {
+      "deck": "parasitics",
+      "content_hash": "sha256:3dc0913ab5a3d7edecb8a74314e97b869019838c416d0ef59da14bc6239baf39",
+      "git_tag": "v0.6.0",
+      "git_commit": "c622e8addb362491664d44ba4d717f354ca88bbd",
+      "package_version": "0.6.0"
+    },
+    {
+      "deck": "rules",
+      "content_hash": "sha256:c45a03bc5a50d56fed32887eef5127fcc4e3a852c70e0ab4d49996589596eebd",
+      "git_tag": "v0.6.0",
+      "git_commit": "c622e8addb362491664d44ba4d717f354ca88bbd",
+      "package_version": "0.6.0"
+    },
+    {
+      "deck": "sg13cmos5l",
+      "content_hash": "sha256:1912f17486e78de5259aab5d68533488ebbd239a05018f096217aa62ddee2909",
+      "git_tag": "v0.6.0",
+      "git_commit": "c622e8addb362491664d44ba4d717f354ca88bbd",
+      "package_version": "0.6.0"
+    },
+    {
+      "deck": "sg13g2",
+      "content_hash": "sha256:894326a4e37fb24fef2f7ffc6ae1da55a0e262b0f0bc1c09adc4862909278fda",
+      "git_tag": "v0.6.0",
+      "git_commit": "c622e8addb362491664d44ba4d717f354ca88bbd",
+      "package_version": "0.6.0"
+    },
+    {
+      "deck": "sky130",
+      "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+      "git_tag": "v0.6.0",
+      "git_commit": "c622e8addb362491664d44ba4d717f354ca88bbd",
+      "package_version": "0.6.0"
     }
   ]
 }
