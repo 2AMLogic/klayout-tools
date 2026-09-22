@@ -258,10 +258,62 @@ as the combinational engine does, an unreproduced stage-2 counterexample
 this engine's own bounded search can otherwise trip on (a real post-route
 netlist's resizer/repair-buffer-renamed internal wires; see
 ``docs/cli/equiv.md``'s "Re-running the real pre/post-route canary").
+
+## Resumable runs: ``--resume`` (issue #2280)
+
+Long evidence runs die mid-way in autonomous-agent fleets (rate limits,
+session reaping) -- issue #2280's two gf180-surge incidents. ``--resume``
+gives ``klt equiv`` an idempotent re-entry contract modeled on ``klt sim``'s
+own ``--resume`` checkpoint machinery (issue #473), adapted to what a Yosys
+proof can actually checkpoint: **stages**, not corners.
+
+- The ``"yosys-sequential"`` engine's stage 1 (the
+  ``equiv_make``/``equiv_induct`` induction proof, including its bounded
+  cut-point refinement loop) commits a stage record --
+  ``.klt/equiv/stage1.commit.json`` -- atomically (temp file +
+  ``os.replace``, the same never-partially-written discipline
+  ``sim._Checkpoint`` uses) only after the stage reaches a classified
+  outcome. A later ``klt equiv --resume`` run whose request fingerprint
+  matches the record's skips stage 1 entirely: an ``all_proven`` record
+  produces the final ``"equivalent"`` envelope without re-running Yosys at
+  all; an ``unproven_cells`` record re-enters directly at stage 2.
+- The combinational engine is a single Yosys subprocess -- it has no
+  earlier stage artifact to re-enter from, so ``--resume`` is accepted and
+  re-runs its one stage (documented, so an agent fleet can issue one
+  uniform retry command regardless of engine).
+- **A stage record is never verdict-bearing unless it is fully
+  corroborated.** The loader (:func:`_load_committed_stage1`) rejects --
+  and the resume re-runs the stage -- for: a ``partial: true`` record (the
+  marker written when a stage attempt died or timed out before
+  classifying), a fingerprint mismatch (the request changed since the
+  commit), any missing/mistyped field, a missing committed log artifact,
+  or a log whose own bytes do not corroborate the recorded classification
+  (an ``all_proven`` record whose log lacks Yosys's success line can never
+  satisfy the resume). A discarded record is never silent: the resumed
+  envelope carries a ``resume_stage_record_discarded`` warning diagnostic
+  naming the reason.
+- **An envelope, by contrast, is never partial.** A run that dies mid-way
+  emits nothing; the stage artifacts it left behind carry the ``partial``
+  marking instead. A committed ``--format json`` envelope exists only for
+  a run that reached a verdict. This is the negative-control property
+  issue #2280's acceptance criteria require: partial artifacts can never
+  satisfy a verdict check, structurally, because the only code path from
+  a stage record to an envelope ``status`` runs the full loader
+  validation above.
+
+A resumed run's envelope is byte-identical to the uninterrupted run's
+except in the fields the guide declares as run-scoped: ``elapsed_s``, the
+additive ``resume`` block (present only when ``--resume`` was given,
+mirroring ``klt sim``'s ``environment.resume`` convention), and --
+when the resume happens on a different host -- the host-scoped
+``provenance.klt_version``/``engine_version`` identity fields
+(``docs/guides/remote-evidence-runs.md``).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -273,9 +325,19 @@ from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
     INPUT_ROLE_SOURCE,
     _combined_content_hash,
+    _content_hash,
     _yosys_version,
     build_provenance,
     wasi_sandbox_hint_if_applicable,
+)
+from ._report_verify import (
+    VOLATILE_FLOW_PATHS,
+    build_check_result,
+    build_rerun_result,
+    get_path,
+    hash_check,
+    load_committed_report,
+    strip_keys,
 )
 
 #: Bumped only on a non-additive (breaking) change to this command's own
@@ -447,6 +509,258 @@ _UNPROVEN_EQUIV_RE = re.compile(r"^\s*Unproven \$equiv \S+: (.+)$", re.MULTILINE
 _MAX_STAGE1_REFINEMENTS = 3
 
 
+# --------------------------------------------------------------------------- #
+# Resumable runs: stage commit records (issue #2280)
+#
+# Modeled on `sim.py`'s checkpoint/resume machinery (issue #473), adapted to
+# what a Yosys proof can checkpoint: whole *stages*, not per-unit results.
+# See this module's docstring, "Resumable runs", for the full contract --
+# in particular why a stage record is structurally incapable of carrying a
+# verdict unless every validation below passes.
+# --------------------------------------------------------------------------- #
+
+#: The two classified outcomes stage 1 can commit. Anything else (a process
+#: timeout, a Yosys error, zero `$equiv` cells) is either an error the run
+#: raises or a `partial: true` record -- never a resumable commit.
+_STAGE1_ALL_PROVEN = "all_proven"
+_STAGE1_UNPROVEN_CELLS = "unproven_cells"
+_STAGE1_CLASSIFICATIONS = (_STAGE1_ALL_PROVEN, _STAGE1_UNPROVEN_CELLS)
+
+
+def _stage_record_path(output_dir: str, stage: int) -> str:
+    """Where stage ``stage``'s commit record lives: ``stage<N>.commit.json``
+    directly under ``output_dir`` (the same ``.klt/equiv/`` directory the
+    stage's own script/log/netlist artifacts already go to), so a resumable
+    run's on-disk footprint stays in one place -- the same convention
+    ``sim._checkpoint_path`` follows for ``.klt/sim/checkpoint.json``.
+    """
+    return os.path.join(output_dir, f"stage{stage}.commit.json")
+
+
+def _stage_fingerprint(
+    *,
+    gold: dict[str, Any],
+    gate: dict[str, Any],
+    port_map: dict[str, str],
+    effective_timeout_s: float,
+    engine: str,
+    induction_depth: int,
+    sim_backend: str,
+) -> str:
+    """A SHA-256 fingerprint of everything that determines what a
+    sequential run's stages actually compute -- the basis for deciding
+    whether an on-disk stage record still applies to *this* request.
+
+    Mirrors ``sim._checkpoint_fingerprint``'s own rule: content-hashes the
+    inputs (not just their paths -- an edited-in-place file at the same
+    path must invalidate the record) alongside every run parameter that
+    reaches the proof. Deliberately *path-independent* (the same property
+    ``_combined_content_hash`` documents for itself): the same request
+    checked out at a different path -- or pulled back from a remote host
+    with the artifacts (``docs/guides/remote-evidence-runs.md``) -- is
+    resumable, which a path-keyed fingerprint would silently forbid.
+    ``timeout_s`` is normalized through ``float()`` so the JSON-encoded
+    ``60`` and ``60.0`` (a request integer vs. a ``--timeout-s`` float)
+    fingerprint identically -- they are the same budget, and a resume must
+    not discard a valid record over encoding.
+
+    A fingerprint mismatch means "the request changed since the stage
+    committed" -- the record is discarded (with a
+    ``resume_stage_record_discarded`` diagnostic, never silently), exactly
+    like ``sim._load_checkpoint``'s mismatched checkpoint.
+    """
+    payload = {
+        "engine": engine,
+        "gold": {
+            "top": gold["top"],
+            "sources_sha256": _combined_content_hash(gold["sources"]),
+            "liberty_sha256": (
+                _content_hash(gold["liberty"]) if gold.get("liberty") else None
+            ),
+        },
+        "gate": {
+            "top": gate["top"],
+            "sources_sha256": _combined_content_hash(gate["sources"]),
+            "liberty_sha256": (
+                _content_hash(gate["liberty"]) if gate.get("liberty") else None
+            ),
+        },
+        "port_map": port_map,
+        "timeout_s": float(effective_timeout_s),
+        "induction_depth": induction_depth,
+        "sim_backend": sim_backend,
+    }
+    blob = json.dumps(payload, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _write_stage_record(path: str, record: dict[str, Any]) -> None:
+    """Atomically write a stage record: temp file + ``os.replace`` -- the
+    same never-partially-written discipline ``sim._Checkpoint._flush_locked``
+    uses, so a reader (this one or a future one) can never observe a
+    half-written record. ``partial`` defaults to an explicit JSON ``false``
+    when the caller does not state it: the committing path in
+    :func:`_run_sequential` writes classified records (always committed),
+    while :func:`_write_partial_stage_record` is the only caller that
+    passes ``partial: True`` explicitly.
+    """
+    payload = dict(record)
+    payload.setdefault("partial", False)
+    tmp_path = f"{path}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+        os.replace(tmp_path, path)
+    except OSError:
+        # Best-effort, exactly like the stage log write above it: a record
+        # write failure must never fail an otherwise-successful proof. The
+        # cost of losing one is only that the next `--resume` re-runs the
+        # stage -- never a wrong verdict.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _write_partial_stage_record(path: str, fingerprint: str, *, reason: str) -> None:
+    """Best-effort write of a ``partial: true`` stage record documenting a
+    stage attempt that died or failed *before* reaching a classified
+    outcome (process timeout, Yosys error, zero `$equiv` cells).
+
+    This is the producer behind issue #2280's `partial: true` marking: an
+    interrupted run's on-disk trace of "stage 1 was attempted here and did
+    not complete" is explicitly partial, and the loader below refuses any
+    record whose ``partial`` is not exactly JSON ``false`` -- so a partial
+    record can never satisfy the resume, no matter what else it contains.
+    Never overwrites an already-committed (``partial: false``) record: a
+    later, killed re-run's partial marker must not destroy the one valid
+    commit an earlier run left. Never raises (see
+    :func:`_write_stage_record` for the failure posture).
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            existing = json.load(handle)
+        if isinstance(existing, dict) and existing.get("partial") is False:
+            return
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    _write_stage_record(
+        path,
+        {
+            "stage": 1,
+            "fingerprint": fingerprint,
+            # The marker this function exists for: an attempt that never
+            # reached a classified outcome is explicitly partial, and the
+            # loader refuses any record whose `partial` is not exactly
+            # JSON false -- so this artifact can never satisfy the resume,
+            # no matter what else it contains.
+            "partial": True,
+            "classification": None,
+            "blacklist": [],
+            "refinements": 0,
+            "reason": reason,
+        },
+    )
+
+
+def _load_committed_stage1(
+    record_path: str,
+    fingerprint: str,
+    *,
+    log_path: str,
+    netlist_path: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read and fully validate stage 1's commit record for a ``--resume``
+    run. Returns ``(record, None)`` when the record is committed, intact,
+    fingerprint-matched, and corroborated by its own committed log bytes;
+    ``(None, None)`` when no record exists at all (the ordinary first-run
+    shape -- nothing was discarded, so no diagnostic is owed); and
+    ``(None, reason)`` when a record exists but is rejected -- the caller
+    surfaces ``reason`` as a ``resume_stage_record_discarded`` warning and
+    re-runs the stage.
+
+    Every rejection below is issue #2280's negative-control property made
+    structural: the only verdict-bearing field a record carries is its
+    ``classification`` (an ``all_proven`` classification *is* the final
+    ``"equivalent"`` verdict for the resumed run), so each check exists to
+    make sure nothing but a fully-corroborated commit can reach it:
+
+    - ``partial`` must be exactly JSON ``false`` -- a ``partial: true``
+      record (or one with the key missing entirely, e.g. hand-written or
+      written by a future writer that never heard of the marker) is never
+      a commit.
+    - the fingerprint must match this request -- a record committed by a
+      different request (different sources, engine, timeout, ...) says
+      nothing about this one's stage 1.
+    - every field must be present with the right type -- a future or
+      foreign writer's shape is treated as absent, never best-effort
+      interpreted.
+    - the committed log must exist and its own bytes must corroborate the
+      recorded classification (``all_proven`` requires Yosys's own
+      ``Equivalence successfully proven!`` line; ``unproven_cells``
+      requires unproven-``$equiv`` report lines and the success line's
+      *absence*) -- a fabricated or truncated record whose log disagrees
+      is discarded, because the log, not the record, is the primary
+      artifact.
+    - an ``unproven_cells`` record additionally requires the committed
+      stage-1 netlist (stage 2's own input) to still be on disk.
+    """
+    if not os.path.isfile(record_path):
+        return None, None
+    try:
+        with open(record_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None, "record is unreadable or not valid JSON"
+    if not isinstance(data, dict):
+        return None, "record is not a JSON object"
+    if data.get("partial") is not False:
+        return None, "record is marked partial (or carries no partial marker)"
+    if data.get("stage") != 1:
+        return None, "record is not for stage 1"
+    if data.get("fingerprint") != fingerprint:
+        return None, (
+            "fingerprint mismatch -- the request changed since this stage "
+            "record was committed"
+        )
+    classification = data.get("classification")
+    if classification not in _STAGE1_CLASSIFICATIONS:
+        return None, "record carries no valid stage-1 classification"
+    blacklist = data.get("blacklist")
+    refinements = data.get("refinements")
+    if not isinstance(blacklist, list) or not all(
+        isinstance(name, str) and name for name in blacklist
+    ):
+        return None, "record's blacklist is not a list of wire names"
+    if (
+        not isinstance(refinements, int)
+        or isinstance(refinements, bool)
+        or (refinements < 0)
+    ):
+        return None, "record's refinement count is not a non-negative integer"
+    if not os.path.isfile(log_path):
+        return None, "the committed stage log artifact is missing"
+    try:
+        with open(log_path, encoding="utf-8") as handle:
+            log_text = handle.read()
+    except OSError:
+        return None, "the committed stage log artifact is unreadable"
+    if classification == _STAGE1_ALL_PROVEN:
+        corroborated = bool(_EQUIV_ALL_PROVEN_RE.search(log_text))
+    else:
+        corroborated = not _EQUIV_ALL_PROVEN_RE.search(log_text) and bool(
+            _UNPROVEN_EQUIV_RE.search(log_text)
+        )
+    if not corroborated:
+        return None, (
+            "the committed stage log does not corroborate the recorded "
+            f"classification {classification!r}"
+        )
+    if classification == _STAGE1_UNPROVEN_CELLS and not os.path.isfile(netlist_path):
+        return None, "the committed stage netlist artifact (stage 2's input) is missing"
+    return data, None
+
+
 class EquivError(Exception):
     """Raised when an equivalence check cannot even be attempted or
     completed to a verdict: a missing/malformed request, an unresolvable/
@@ -503,6 +817,7 @@ def run_equiv(
     *,
     timeout_s: float | None = None,
     sim_backend: str | None = None,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run the ``klt equiv`` equivalence check declared by ``request`` (a
     path, ``-`` for stdin, or an inline JSON object string -- see
@@ -520,6 +835,23 @@ def run_equiv(
     replays a counterexample: ``"iverilog"`` (default/canonical),
     ``"verilator"`` (compiled fast path), or ``"both"`` (run both and
     require agreement) -- see this module's docstring, "Replay backend".
+
+    ``resume`` (the CLI's ``--resume``, issue #2280) enables stage-scoped
+    idempotent re-entry from committed stage artifacts under
+    ``.klt/equiv/`` -- see this module's docstring, "Resumable runs". For
+    the ``"yosys-sequential"`` engine, a fingerprint-matched, fully
+    corroborated ``stage1.commit.json`` skips stage 1 entirely; every
+    other case re-runs from stage 1. For the combinational engine the
+    flag is accepted and without effect beyond the additive ``resume``
+    envelope block: that engine is a single Yosys subprocess with no
+    earlier stage artifact to re-enter from, so re-entry *is* the re-run
+    -- accepted so an agent fleet can issue one uniform retry command
+    regardless of engine. When given, the returned dict carries the
+    additive ``resume`` block (``{"resumed_stage": 0 | 1, "record_path":
+    ...}``); when ``False``, the returned dict is byte-identical to
+    pre-#2280 output (the key is omitted entirely, the same
+    present-only-when-requested convention ``klt sim``'s
+    ``environment.resume`` block uses).
 
     Returns a dict matching the documented JSON schema (see
     ``docs/cli/equiv.md``). Raises :class:`EquivError` for anything that
@@ -579,6 +911,25 @@ def run_equiv(
             f"could not create output directory '{output_dir}': {exc}"
         ) from exc
 
+    # The additive `resume` envelope block (issue #2280): built once here,
+    # engine-independently, and attached to whichever report the run
+    # produces -- present only when `resume` was requested (the same
+    # present-only-when-requested convention `klt sim`'s
+    # `environment.resume` block uses). `resumed_stage` is upgraded to 1 by
+    # `_run_sequential` iff a committed stage record is actually adopted;
+    # the combinational engine has no stage records, so its `record_path`
+    # is null (resolved-fields-are-null convention).
+    resume_block: dict[str, Any] | None = None
+    if resume:
+        resume_block = {
+            "resumed_stage": 0,
+            "record_path": (
+                _stage_record_path(output_dir, 1)
+                if engine == "yosys-sequential"
+                else None
+            ),
+        }
+
     if engine == "yosys-sequential":
         induction_depth = request_doc.get("induction_depth", DEFAULT_INDUCTION_DEPTH)
         if (
@@ -596,9 +947,13 @@ def run_equiv(
             induction_depth=induction_depth,
             engine=engine,
             sim_backend=effective_sim_backend,
+            resume_block=resume_block,
         )
 
     # engine == "yosys" (combinational, Phase 0/1) continues below, unchanged.
+    # `resume` is deliberately unused on this path beyond the envelope block:
+    # a single Yosys subprocess has no earlier stage artifact to re-enter
+    # from (see `run_equiv`'s docstring), so re-entry *is* the re-run.
     script_path = os.path.join(output_dir, "equiv.ys")
     netlist_path = os.path.join(output_dir, "equiv_netlist.v")
     log_path = os.path.join(output_dir, "equiv.log")
@@ -651,6 +1006,7 @@ def run_equiv(
 
     if timed_out:
         return _build_report(
+            resume=resume_block,
             engine=engine,
             engine_version=engine_version,
             sim_backend=effective_sim_backend,
@@ -713,6 +1069,7 @@ def run_equiv(
             status = "inconclusive"
 
     return _build_report(
+        resume=resume_block,
         engine=engine,
         engine_version=engine_version,
         sim_backend=effective_sim_backend,
@@ -1627,6 +1984,7 @@ def _build_report(
     script_path: str,
     netlist_path: str,
     log_path: str,
+    resume: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
@@ -1643,7 +2001,7 @@ def _build_report(
             "role": INPUT_ROLE_SOURCE,
         }
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
@@ -1663,6 +2021,9 @@ def _build_report(
         },
         "provenance": provenance,
     }
+    if resume is not None:
+        report["resume"] = resume
+    return report
 
 
 # --------------------------------------------------------------------------- #
@@ -2373,6 +2734,7 @@ def _build_sequential_report(
     stage2_log_path: str | None,
     netlist_path: str,
     stage1_blacklist_path: str | None = None,
+    resume: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``"yosys-sequential"`` engine's own report builder -- mirrors
     :func:`_build_report`'s shape (``schema_version``/``engine``/``status``/
@@ -2391,6 +2753,12 @@ def _build_sequential_report(
     ``equiv_make -blacklist`` file stage 1's cut-point refinement loop wrote,
     or ``None`` when no refinement was needed -- the auditable record of
     exactly which internal wire pairings the proof dropped.
+
+    ``resume`` (issue #2280) is the additive ``resume`` envelope block,
+    attached only when ``--resume`` was requested (``None`` otherwise, so a
+    run without the flag emits byte-identical output to pre-#2280 builds --
+    the same present-only-when-requested convention ``klt sim``'s
+    ``environment.resume`` block uses).
     """
     all_sources = gold["sources"] + gate["sources"]
     if len(all_sources) == 1:
@@ -2407,7 +2775,7 @@ def _build_sequential_report(
             "role": INPUT_ROLE_SOURCE,
         }
 
-    return {
+    report: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
@@ -2440,6 +2808,35 @@ def _build_sequential_report(
         },
         "provenance": provenance,
     }
+    if resume is not None:
+        report["resume"] = resume
+    return report
+
+
+def _stage1_refinement_diagnostics(
+    refinements: int, blacklisted: set[str]
+) -> list[dict[str, str]]:
+    """The ``equiv_cutpoint_refinement`` info diagnostic, factored out of
+    :func:`_run_sequential` so a resumed run can reconstruct it
+    byte-identically from the committed stage record's ``refinements``/
+    ``blacklist`` fields instead of re-deriving them from a Yosys run that
+    (by definition of the resume) did not happen again."""
+    if not blacklisted:
+        return []
+    return [
+        {
+            "severity": "info",
+            "code": "equiv_cutpoint_refinement",
+            "message": (
+                f"stage 1 re-ran equiv_make {refinements}x with "
+                f"{len(blacklisted)} internal wire(s) blacklisted -- "
+                "same-named gold/gate wires that could not be proven "
+                "equivalent and so were dropped as cut points (no "
+                "top-level port is ever dropped; see "
+                "artifacts.stage1_blacklist_path for the exact list)"
+            ),
+        }
+    ]
 
 
 def _run_sequential(
@@ -2452,18 +2849,64 @@ def _run_sequential(
     induction_depth: int,
     engine: str,
     sim_backend: str = DEFAULT_SIM_BACKEND,
+    resume_block: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ``"yosys-sequential"`` engine's own top-level driver, called from
     ``run_equiv`` once ``gold``/``gate``/``port_map``/``output_dir`` are
     already resolved -- see this module's docstring, "Engine:
-    yosys-sequential" section, for the two-stage rationale."""
+    yosys-sequential" section, for the two-stage rationale, and
+    "Resumable runs" (issue #2280) for the ``resume`` contract: a
+    fingerprint-matched, log-corroborated ``stage1.commit.json`` skips
+    stage 1 (an ``all_proven`` record yields the final ``"equivalent"``
+    envelope directly; an ``unproven_cells`` record re-enters at stage 2),
+    and every other case re-runs stage 1, committing its own record for
+    the next resume."""
     script1_path = os.path.join(output_dir, "equiv_seq_stage1.ys")
     netlist_path = os.path.join(output_dir, "equiv_seq_netlist.v")
     log1_path = os.path.join(output_dir, "equiv_seq_stage1.log")
     blacklist_path = os.path.join(output_dir, "equiv_seq_blacklist.txt")
+    record_path = _stage_record_path(output_dir, 1)
 
     int_timeout = max(1, round(effective_timeout_s))
     engine_version = _yosys_version()
+    fingerprint = _stage_fingerprint(
+        gold=gold,
+        gate=gate,
+        port_map=port_map,
+        effective_timeout_s=effective_timeout_s,
+        engine=engine,
+        induction_depth=induction_depth,
+        sim_backend=sim_backend,
+    )
+
+    # `resumed_stage` is upgraded to 1 below iff a committed record was
+    # actually adopted; a discarded record keeps it at 0, with the
+    # `resume_stage_record_discarded` warning explaining why. The loader
+    # only runs when `resume_block` is not None, so a default run neither
+    # reads nor writes stage records.
+    resume_diagnostics: list[dict[str, str]] = []
+
+    stage1_record: dict[str, Any] | None = None
+    if resume_block is not None:
+        stage1_record, discard_reason = _load_committed_stage1(
+            record_path, fingerprint, log_path=log1_path, netlist_path=netlist_path
+        )
+        if stage1_record is None and discard_reason is not None:
+            # A rejected record is never silently ignored: the envelope must
+            # describe truthfully that stage 1 re-ran because the commit on
+            # disk did not satisfy the resume contract (issue #2280's
+            # "envelope describes the run truthfully" requirement).
+            resume_diagnostics.append(
+                {
+                    "severity": "warning",
+                    "code": "resume_stage_record_discarded",
+                    "message": (
+                        f"committed stage record '{record_path}' was "
+                        f"discarded ({discard_reason}) -- stage 1 re-runs "
+                        "from scratch"
+                    ),
+                }
+            )
 
     # Stage 1, run as a bounded cut-point refinement loop: each pass drops
     # the wrongly-paired *internal* wires the previous pass could not prove
@@ -2475,151 +2918,223 @@ def _run_sequential(
     total_elapsed_s = 0.0
     active_blacklist_path: str | None = None
 
-    while True:
-        _write_sequential_stage1_script(
-            script_path=script1_path,
-            gold=gold,
-            gate=gate,
-            port_map=port_map,
-            netlist_path=netlist_path,
-            induction_depth=induction_depth,
-            blacklist_path=active_blacklist_path,
+    if stage1_record is not None:
+        # Resume reuse path (issue #2280): the committed record IS stage 1's
+        # outcome. Reconstruct the exact post-stage-1 state the interrupted
+        # run left -- blacklisted set, refinement count, refinement
+        # diagnostic, blacklist artifact -- without re-running Yosys. The
+        # loader has already corroborated the recorded classification
+        # against the committed log's own bytes, which is what makes this
+        # reconstruction safe to trust (see `_load_committed_stage1`).
+        blacklisted = set(stage1_record["blacklist"])
+        refinements = stage1_record["refinements"]
+        if blacklisted and not os.path.isfile(blacklist_path):
+            # Regenerate the blacklist artifact deterministically (the same
+            # sorted names `_write_equiv_blacklist` always writes), so the
+            # resumed envelope's `artifacts.stage1_blacklist_path` matches
+            # the uninterrupted run's even when the resume happens on a
+            # host that received the record but not that one artifact file.
+            _write_equiv_blacklist(blacklist_path, blacklisted)
+        active_blacklist_path = blacklist_path if blacklisted else None
+
+        assert resume_block is not None  # a record is only loaded under resume
+        resume_block["resumed_stage"] = 1
+
+        refinement_diagnostics = resume_diagnostics + _stage1_refinement_diagnostics(
+            refinements, blacklisted
         )
 
-        # Every refinement pass shares the single `timeout_s` budget (the
-        # first pass gets all of it, since `total_elapsed_s` is still 0), so
-        # the loop can never push stage 1 past the one-stage budget the JSON
-        # contract documents.
-        stage1 = _run_yosys_subprocess(
-            script1_path, effective_timeout_s - total_elapsed_s
-        )
-        total_elapsed_s = round(total_elapsed_s + stage1.elapsed_s, 3)
-        try:
-            with open(log1_path, "w", encoding="utf-8") as handle:
-                handle.write(stage1.stdout)
-                if stage1.stderr:
-                    handle.write("\n--- stderr ---\n")
-                    handle.write(stage1.stderr)
-        except OSError:
-            pass
+        if stage1_record["classification"] == _STAGE1_ALL_PROVEN:
+            return _build_sequential_report(
+                engine=engine,
+                engine_version=engine_version,
+                sim_backend=sim_backend,
+                status="equivalent",
+                gold=gold,
+                gate=gate,
+                port_map=port_map or None,
+                timeout_s=effective_timeout_s,
+                elapsed_s=total_elapsed_s,
+                induction_depth=induction_depth,
+                counterexample=None,
+                diagnostics=refinement_diagnostics,
+                stage1_script_path=script1_path,
+                stage1_log_path=log1_path,
+                stage2_script_path=None,
+                stage2_log_path=None,
+                netlist_path=netlist_path,
+                stage1_blacklist_path=active_blacklist_path,
+                resume=resume_block,
+            )
+        # classification == unproven_cells: fall through to stage 2 below,
+        # exactly as a live stage-1 run that left cells unproven would.
+    else:
+        while True:
+            _write_sequential_stage1_script(
+                script_path=script1_path,
+                gold=gold,
+                gate=gate,
+                port_map=port_map,
+                netlist_path=netlist_path,
+                induction_depth=induction_depth,
+                blacklist_path=active_blacklist_path,
+            )
 
-        if (
-            stage1.timed_out
-            or stage1.returncode != 0
-            or _EQUIV_NONE_FOUND_RE.search(stage1.stdout)
-            or _EQUIV_ALL_PROVEN_RE.search(stage1.stdout)
-            or refinements >= _MAX_STAGE1_REFINEMENTS
-            or effective_timeout_s - total_elapsed_s <= 0
-        ):
-            break
+            # Every refinement pass shares the single `timeout_s` budget (the
+            # first pass gets all of it, since `total_elapsed_s` is still 0), so
+            # the loop can never push stage 1 past the one-stage budget the JSON
+            # contract documents.
+            stage1 = _run_yosys_subprocess(
+                script1_path, effective_timeout_s - total_elapsed_s
+            )
+            total_elapsed_s = round(total_elapsed_s + stage1.elapsed_s, 3)
+            try:
+                with open(log1_path, "w", encoding="utf-8") as handle:
+                    handle.write(stage1.stdout)
+                    if stage1.stderr:
+                        handle.write("\n--- stderr ---\n")
+                        handle.write(stage1.stderr)
+            except OSError:
+                pass
 
-        try:
-            ports = _parse_module_ports(netlist_path, "gold")
-        except EquivError:
-            break
-        candidates = {
-            name
-            for name in _parse_unproven_equiv_signals(stage1.stdout)
-            if name not in ports
-        }
-        if candidates <= blacklisted:
-            # Nothing new to drop -- either every unproven obligation is a
-            # top-level port (a real output difference, stage 2's job) or
-            # refinement has reached its fixpoint.
-            break
-        blacklisted |= candidates
-        _write_equiv_blacklist(blacklist_path, blacklisted)
-        active_blacklist_path = blacklist_path
-        refinements += 1
+            if (
+                stage1.timed_out
+                or stage1.returncode != 0
+                or _EQUIV_NONE_FOUND_RE.search(stage1.stdout)
+                or _EQUIV_ALL_PROVEN_RE.search(stage1.stdout)
+                or refinements >= _MAX_STAGE1_REFINEMENTS
+                or effective_timeout_s - total_elapsed_s <= 0
+            ):
+                break
 
-    refinement_diagnostics: list[dict[str, str]] = []
-    if blacklisted:
-        refinement_diagnostics.append(
-            {
-                "severity": "info",
-                "code": "equiv_cutpoint_refinement",
-                "message": (
-                    f"stage 1 re-ran equiv_make {refinements}x with "
-                    f"{len(blacklisted)} internal wire(s) blacklisted -- "
-                    "same-named gold/gate wires that could not be proven "
-                    "equivalent and so were dropped as cut points (no "
-                    "top-level port is ever dropped; see "
-                    "artifacts.stage1_blacklist_path for the exact list)"
-                ),
+            try:
+                ports = _parse_module_ports(netlist_path, "gold")
+            except EquivError:
+                break
+            candidates = {
+                name
+                for name in _parse_unproven_equiv_signals(stage1.stdout)
+                if name not in ports
             }
+            if candidates <= blacklisted:
+                # Nothing new to drop -- either every unproven obligation is a
+                # top-level port (a real output difference, stage 2's job) or
+                # refinement has reached its fixpoint.
+                break
+            blacklisted |= candidates
+            _write_equiv_blacklist(blacklist_path, blacklisted)
+            active_blacklist_path = blacklist_path
+            refinements += 1
+
+        refinement_diagnostics = resume_diagnostics + _stage1_refinement_diagnostics(
+            refinements, blacklisted
         )
 
-    if stage1.timed_out:
-        return _build_sequential_report(
-            engine=engine,
-            engine_version=engine_version,
-            sim_backend=sim_backend,
-            status="inconclusive",
-            gold=gold,
-            gate=gate,
-            port_map=port_map or None,
-            timeout_s=effective_timeout_s,
-            elapsed_s=total_elapsed_s,
-            induction_depth=induction_depth,
-            counterexample=None,
-            diagnostics=refinement_diagnostics
-            + [
-                {
-                    "severity": "error",
-                    "code": "process_timeout",
-                    "message": (
-                        f"yosys (stage 1: equiv_make/equiv_induct) did not "
-                        f"complete within {effective_timeout_s}s (process "
-                        "killed) -- proof is inconclusive, not 'equivalent'"
-                    ),
-                }
-            ],
-            stage1_script_path=script1_path,
-            stage1_log_path=log1_path,
-            stage2_script_path=None,
-            stage2_log_path=None,
-            netlist_path=netlist_path,
-            stage1_blacklist_path=active_blacklist_path,
+        if stage1.timed_out:
+            # Stage 1 never reached a classified outcome, so nothing is
+            # committed for a later resume (issue #2280): the on-disk record is
+            # (re)written as a `partial: true` marker documenting the failed
+            # attempt -- which `_load_committed_stage1` can never adopt.
+            _write_partial_stage_record(
+                record_path, fingerprint, reason="process_timeout"
+            )
+            return _build_sequential_report(
+                engine=engine,
+                engine_version=engine_version,
+                sim_backend=sim_backend,
+                status="inconclusive",
+                gold=gold,
+                gate=gate,
+                port_map=port_map or None,
+                timeout_s=effective_timeout_s,
+                elapsed_s=total_elapsed_s,
+                induction_depth=induction_depth,
+                counterexample=None,
+                diagnostics=refinement_diagnostics
+                + [
+                    {
+                        "severity": "error",
+                        "code": "process_timeout",
+                        "message": (
+                            f"yosys (stage 1: equiv_make/equiv_induct) did not "
+                            f"complete within {effective_timeout_s}s (process "
+                            "killed) -- proof is inconclusive, not 'equivalent'"
+                        ),
+                    }
+                ],
+                stage1_script_path=script1_path,
+                stage1_log_path=log1_path,
+                stage2_script_path=None,
+                stage2_log_path=None,
+                netlist_path=netlist_path,
+                stage1_blacklist_path=active_blacklist_path,
+                resume=resume_block,
+            )
+
+        if stage1.returncode != 0:
+            # No `select -assert-none` sequential-cell guard exists in this
+            # engine's own script (unlike the combinational engine's -- this
+            # engine exists specifically *for* sequential designs), so a
+            # nonzero return here is always a genuine elaboration/build error,
+            # never the combinational engine's own scope-rejection shape.
+            _write_partial_stage_record(record_path, fingerprint, reason="yosys_error")
+            message = _yosys_error_message(
+                stage1.stdout, stage1.stderr, stage1.returncode
+            )
+            raise EquivError(message)
+
+        if _EQUIV_NONE_FOUND_RE.search(stage1.stdout):
+            _write_partial_stage_record(
+                record_path, fingerprint, reason="no_equiv_cells"
+            )
+            raise EquivError(
+                "yosys-sequential engine found no matching gold/gate signals to "
+                "compare (equiv_make only matches identically-named wires) -- "
+                "check that gold/gate share port and register names, or supply "
+                "request.port_map"
+            )
+
+        # Stage 1 reached a classified outcome -- commit it (issue #2280) so a
+        # later `--resume` run of this same request can re-enter from here
+        # instead of re-running the (potentially multi-pass, minutes-long)
+        # induction proof. Atomic write; `partial` forced false; see the
+        # "Resumable runs" module-docstring section.
+        stage1_all_proven = bool(_EQUIV_ALL_PROVEN_RE.search(stage1.stdout))
+        _write_stage_record(
+            record_path,
+            {
+                "stage": 1,
+                "fingerprint": fingerprint,
+                "classification": (
+                    _STAGE1_ALL_PROVEN if stage1_all_proven else _STAGE1_UNPROVEN_CELLS
+                ),
+                "blacklist": sorted(blacklisted),
+                "refinements": refinements,
+            },
         )
 
-    if stage1.returncode != 0:
-        # No `select -assert-none` sequential-cell guard exists in this
-        # engine's own script (unlike the combinational engine's -- this
-        # engine exists specifically *for* sequential designs), so a
-        # nonzero return here is always a genuine elaboration/build error,
-        # never the combinational engine's own scope-rejection shape.
-        message = _yosys_error_message(stage1.stdout, stage1.stderr, stage1.returncode)
-        raise EquivError(message)
-
-    if _EQUIV_NONE_FOUND_RE.search(stage1.stdout):
-        raise EquivError(
-            "yosys-sequential engine found no matching gold/gate signals to "
-            "compare (equiv_make only matches identically-named wires) -- "
-            "check that gold/gate share port and register names, or supply "
-            "request.port_map"
-        )
-
-    if _EQUIV_ALL_PROVEN_RE.search(stage1.stdout):
-        return _build_sequential_report(
-            engine=engine,
-            engine_version=engine_version,
-            sim_backend=sim_backend,
-            status="equivalent",
-            gold=gold,
-            gate=gate,
-            port_map=port_map or None,
-            timeout_s=effective_timeout_s,
-            elapsed_s=total_elapsed_s,
-            induction_depth=induction_depth,
-            counterexample=None,
-            diagnostics=refinement_diagnostics,
-            stage1_script_path=script1_path,
-            stage1_log_path=log1_path,
-            stage2_script_path=None,
-            stage2_log_path=None,
-            netlist_path=netlist_path,
-            stage1_blacklist_path=active_blacklist_path,
-        )
+        if stage1_all_proven:
+            return _build_sequential_report(
+                engine=engine,
+                engine_version=engine_version,
+                sim_backend=sim_backend,
+                status="equivalent",
+                gold=gold,
+                gate=gate,
+                port_map=port_map or None,
+                timeout_s=effective_timeout_s,
+                elapsed_s=total_elapsed_s,
+                induction_depth=induction_depth,
+                counterexample=None,
+                diagnostics=refinement_diagnostics,
+                stage1_script_path=script1_path,
+                stage1_log_path=log1_path,
+                stage2_script_path=None,
+                stage2_log_path=None,
+                netlist_path=netlist_path,
+                stage1_blacklist_path=active_blacklist_path,
+                resume=resume_block,
+            )
 
     # Stage 1 left one or more $equiv cells unproven -- register-
     # correspondence induction alone could not decide. Stage 2 attempts a
@@ -2684,6 +3199,7 @@ def _run_sequential(
             stage2_log_path=log2_path,
             netlist_path=netlist_path,
             stage1_blacklist_path=active_blacklist_path,
+            resume=resume_block,
         )
 
     if stage2.returncode != 0:
@@ -2733,6 +3249,7 @@ def _run_sequential(
             stage2_log_path=log2_path,
             netlist_path=netlist_path,
             stage1_blacklist_path=active_blacklist_path,
+            resume=resume_block,
         )
 
     cycles = _parse_multicycle_signal_table(stage2.stdout)
@@ -2786,4 +3303,143 @@ def _run_sequential(
         stage2_log_path=log2_path,
         netlist_path=netlist_path,
         stage1_blacklist_path=active_blacklist_path,
+        resume=resume_block,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# --check / --rerun: verify a previously committed report (issue #2224's
+# shared machinery, wired for `klt equiv` by issue #2280 so a retrieved
+# remote-run envelope can be verified against local inputs -- see
+# docs/guides/remote-evidence-runs.md)
+# --------------------------------------------------------------------------- #
+
+#: Run-scoped bookkeeping keys dropped from *both* sides of a ``--rerun``
+#: diff, via :func:`klayout_tools._report_verify.strip_keys` -- the same
+#: mechanism ``synthesize.RERUN_BOOKKEEPING_KEYS`` uses (issue #2224).
+#:
+#: ``elapsed_s`` differs between *every* pair of runs, including two runs of
+#: the identical request on the identical host -- wall-clock time is not a
+#: property of the evidence. ``resume`` is issue #2280's own run-scoped
+#: block: it records what *this* invocation reused from on-disk stage
+#: artifacts, which a fresh re-run (that did not pass ``--resume``) will
+#: legitimately not carry, or carry with a different ``resumed_stage``.
+#: Neither key is verdict-bearing: ``status``/``counterexample``/
+#: ``diagnostics`` all stay in the diff.
+RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset({"elapsed_s", "resume"})
+
+
+def _canonicalize_equiv_report_for_rerun_diff(
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """``report`` with :data:`RERUN_BOOKKEEPING_KEYS` removed at every depth
+    -- the comparison view :func:`rerun_equiv_report` diffs, never what it
+    embeds as ``fresh``. See
+    :func:`klayout_tools._report_verify.strip_keys` for why the exclusion is
+    keyed by name rather than by path."""
+    return strip_keys(report, RERUN_BOOKKEEPING_KEYS)
+
+
+def _equiv_input_hash(gold: dict[str, Any], gate: dict[str, Any]) -> str | None:
+    """The ``provenance.input.content_hash`` a fresh run of this request
+    would record -- re-derived **without invoking Yosys**, mirroring
+    :func:`_build_report`/``_build_sequential_report``'s own hashing step
+    for step (the same rule ``synthesize._synthesize_provenance_hashes``
+    documents: any divergence here would show up as permanent, unexplained
+    drift on a report that never moved, so there is exactly one recipe and
+    both call sites follow it). A single source across both sides hashes
+    through ``_content_hash`` (what ``build_provenance``'s ``input_path``
+    records); multiple sources through the order-independent
+    ``_combined_content_hash``."""
+    all_sources = gold["sources"] + gate["sources"]
+    if len(all_sources) == 1:
+        return _content_hash(all_sources[0])
+    return _combined_content_hash(all_sources)
+
+
+def check_equiv_report(report_path: str, request: str) -> dict[str, Any]:
+    """``klt equiv <request> --check <report>`` (cheap mode, issues #2224 +
+    #2280): verify a previously committed ``klt equiv --format json``
+    report at ``report_path`` still reproduces from the request at
+    ``request``, without invoking Yosys at all.
+
+    Re-resolves the request's ``gold``/``gate`` sources (the same
+    :func:`_resolve_side` a real run uses, so an unreadable source is the
+    same clean :class:`EquivError` a run would raise) and re-hashes them
+    (:func:`_equiv_input_hash`), comparing against the committed report's
+    ``provenance.input.content_hash``. Returns the shared ``--check``
+    payload built by
+    :func:`klayout_tools._report_verify.build_check_result` -- ``status:
+    "match"`` when the hash agrees, ``"drifted"`` otherwise -- the same
+    contract every other ``--check`` verb shares. A recorded hash that is
+    itself ``None`` never counts as a match (see
+    :func:`klayout_tools._report_verify.hash_check`'s "nothing recorded is
+    never a pass" rule).
+
+    Because the hash is content-derived and path-independent, this is the
+    verification step for a **retrieved remote-run envelope** (issue
+    #2280's remote round-trip): the committed report may carry the remote
+    host's absolute source paths, and ``--check`` still verifies it against
+    the local copies of the same sources.
+
+    Raises :class:`EquivError` for a missing/unparseable committed report
+    or an unresolvable request -- never a traceback.
+    """
+    committed = load_committed_report(report_path, EquivError)
+    request_doc, request_dir = load_request_arg(request)
+    gold = _resolve_side(request_doc.get("gold"), request_dir, "gold")
+    gate = _resolve_side(request_doc.get("gate"), request_dir, "gate")
+    checks = [
+        hash_check(
+            "provenance.input.content_hash",
+            get_path(committed, ("provenance", "input", "content_hash")),
+            _equiv_input_hash(gold, gate),
+        )
+    ]
+    return build_check_result(report_path=report_path, checks=checks)
+
+
+def rerun_equiv_report(
+    report_path: str,
+    request: str,
+    *,
+    timeout_s: float | None = None,
+    sim_backend: str | None = None,
+) -> dict[str, Any]:
+    """``klt equiv <request> --check <report> --rerun`` (full mode, issues
+    #2224 + #2280): verify a committed report by actually re-running the
+    proof the request declares and diffing the fresh report against the
+    committed one.
+
+    Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
+    excluding :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS`
+    (``provenance.klt_version``/``klayout_version``/``pdk.version`` plus
+    the Yosys ``engine_version`` build string) and canonicalizing
+    :data:`RERUN_BOOKKEEPING_KEYS` (``elapsed_s``, the ``resume`` block)
+    out of both sides first. ``status: "drifted"`` names every other field
+    that changed -- a moved ``status``, a different ``counterexample``,
+    new ``diagnostics``, a changed ``provenance.input.content_hash``.
+
+    **Known limitation, the mirror image of ``--check``'s cross-host
+    strength:** the echoed ``gold``/``gate`` source paths are absolute, so
+    a full-mode re-run on a *different* host (or from a moved checkout)
+    legitimately drifts on those paths even when the proof result is
+    identical -- cheap mode (:func:`check_equiv_report`) is the
+    cross-host verification path; full mode answers "does this reproduce
+    *here*". As with every ``--rerun`` verb, pass the same
+    ``--timeout-s``/``--sim-backend`` the original run used (the CLI does),
+    since the response does not echo them.
+
+    Raises :class:`EquivError` for a missing/unparseable committed report
+    or any error the re-run itself raises -- never a traceback.
+    """
+    committed = load_committed_report(report_path, EquivError)
+    fresh = run_equiv(request, timeout_s=timeout_s, sim_backend=sim_backend)
+    return build_rerun_result(
+        report_path=report_path,
+        committed=committed,
+        fresh=fresh,
+        exclude=VOLATILE_FLOW_PATHS,
+        committed_for_diff=_canonicalize_equiv_report_for_rerun_diff(committed),
+        fresh_for_diff=_canonicalize_equiv_report_for_rerun_diff(fresh),
     )
