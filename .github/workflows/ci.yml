@@ -345,6 +345,69 @@ jobs:
             exit 1
           }
 
+      - name: Install the external FastCap oracle and run the capacitance cross-check
+        # tests/test_mom_capacitance_oracle.py (issue #2015, pairing #4 of
+        # oracle tracking issue #2007) checks klt mom's *quasi-static
+        # capacitance matrix* against FastCap 2.0 -- a different solver path
+        # from the PyNEC step above, which covers the full-wave
+        # S-parameters. See docs/design/fastcap-oracle.md for the
+        # methodology, why FastCap rather than Palace, and the measured
+        # agreement.
+        #
+        # Provisioned here rather than in a separate workflow_dispatch job
+        # (magic-oracle.yml's pattern) because it is cheap enough to gate
+        # every PR: scripts/install-fastcap.sh is a ~7-second from-source
+        # build of 23 dependency-free C files, and the tests themselves run
+        # in ~7 seconds. This leg's wall-clock budget
+        # (.github/ci-wall-clock-budget.json: 240s, p90 113s) absorbs both
+        # without a change.
+        #
+        # No extra `uv sync`: the oracle needs no Python dependency at all,
+        # only the `fastcap` binary on $PATH and the klt_mom_native
+        # extension this leg already built and gated on above.
+        if: matrix.crate == 'mom'
+        working-directory: .
+        run: |
+          # An explicit prefix, so this step never has to repeat (and drift
+          # from) the pinned version in scripts/install-fastcap.sh. The
+          # script's own marker file still rebuilds when that pin moves.
+          FASTCAP_PREFIX="$HOME/.cache/klt-fastcap"
+          FASTCAP_INSTALL_PREFIX="$FASTCAP_PREFIX" scripts/install-fastcap.sh
+          echo "$FASTCAP_PREFIX/bin" >>"$GITHUB_PATH"
+
+      - name: Run the FastCap capacitance cross-validation test
+        if: matrix.crate == 'mom'
+        working-directory: .
+        # `shell: bash` is load-bearing, not decoration: it selects
+        # `bash --noprofile --norc -eo pipefail`, whereas a `run:` step
+        # WITHOUT it gets plain `bash -e`, which has no `pipefail`. Piping
+        # pytest into `tee` below means the step's exit status is *tee's*
+        # (always 0) unless pipefail is set -- so without this line a real
+        # capacitance disagreement would be swallowed and this leg would go
+        # green having proved the opposite of what it claims. The skip gate
+        # in the next step only catches skips, never failures.
+        shell: bash
+        run: |
+          uv run --frozen --extra dev --group mom \
+            pytest tests/test_mom_capacitance_oracle.py -v --capture=tee-sys \
+            | tee pytest-fastcap-oracle.log
+
+      - name: Assert the FastCap cross-check actually ran (no silent skip)
+        # pytest exits 0 on a skip, and this leg is supposed to satisfy both
+        # halves of the module's gate (a built klt_mom_native, a `fastcap`
+        # on $PATH) -- so a skip here means provisioning silently regressed,
+        # which is exactly the "green job that tested nothing" failure
+        # #2007's criterion 2 is about. Same belt-and-suspenders check
+        # magic-oracle.yml applies.
+        if: matrix.crate == 'mom'
+        working-directory: .
+        run: |
+          if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-fastcap-oracle.log; then
+            echo "::error::the FastCap oracle tests were SKIPPED, not run -- provisioning did not satisfy their gate." >&2
+            exit 1
+          fi
+          echo "FastCap capacitance oracle ran to completion (not skipped)."
+
   native-statime:
     name: Native engines (Rust) — static timing
     # `native/statime/` (issue #809, Epic #704 Phase 1c) shipped as a plain
