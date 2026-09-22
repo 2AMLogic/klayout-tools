@@ -267,6 +267,23 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   subcircuit instance) passes through untouched. A device-like `X` card
   whose subcircuit name is not in the resolved device map is a hard error,
   never a silent pass-through.
+- **Custom device classes pass through** (issue #2327). An `X` card naming
+  one of `reference.deck`'s own *custom*
+  (`kdb.GenericDeviceExtractor`-recognised) device classes — today exactly
+  its `mom_capacitors`, e.g. IHP's `cap_cmomi`/`cap_cmomf` — is left
+  untouched, `PARAMS:` separator and all, rather than converted or
+  rejected: that family has no plain-element card form to convert *to*, and
+  the round-tripped `X ... PARAMS:` card is already the shape `klt lvs`'s
+  own reader reads as a real device ("Custom device classes round-tripped
+  through an `X ... PARAMS:` card" below). So a single `form:
+  "subckt-call"` request carries a mixed netlist — curated MOS/resistor
+  cards converted, MoM-capacitor cards passed through — instead of failing
+  on the MoM card. This needs `reference.deck`: the pass-through is keyed
+  off that deck's own declared classes, never a global name list, so an
+  unrecognised name is still the hard error above. (SPICE's `PARAMS:`
+  keyword is read as the separator it is for *every* family, so a curated
+  device call written `X... <name> PARAMS: L=... W=...` converts exactly
+  like the same call written without it.)
 - **MOS** converts to a plain `M` card. `L`/`W` are carried and converted to
   explicit micrometre-suffixed literals (`0.5u` → `L=0.5U`; SI metres
   `1.5e-6` → `W=1.5U`). A `.option scale` bare-micrometre convention is
@@ -471,6 +488,16 @@ A hand- or tool-generated reference netlist for this family must emit the
 identical `X <name> <net> <net> cap_cmomi PARAMS: W=<value> L=<value>` card
 shape `klt extract`'s own writer produces (see the example above) — there is
 no plain-element card form for this device family to convert to instead.
+
+**Works under `reference.form: "subckt-call"` too** (issue #2327). A
+reference that needs the conversion for its *other* cards (a curated MOS or
+drawn-resistor `X` card) can carry such a card in the same netlist: the
+converter passes it through untouched for this reader to pick up
+("Conversion (opt-in)" above). Before #2327 it could not — `PARAMS:` was
+read as a positional token, so the resolved subcircuit name was the literal
+string `PARAMS:` and the conversion raised `subcircuit 'PARAMS:' is not a
+known device`, leaving no single request shape that compared both device
+families at once.
 
 **Residual gap: no deck given.** `layout.deck`/`reference.deck` are already
 required for `layout.file` (inline extraction) and commonly given for

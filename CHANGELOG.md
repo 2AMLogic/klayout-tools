@@ -14,6 +14,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2327, `klt lvs`'s `reference.form: "subckt-call"` conversion,
+  additive — **no** `schema_version` bump, and no change to any request
+  field or response shape): a reference netlist that mixes a curated
+  subckt-call device (a MOS or drawn-resistor `X` card) with a
+  round-tripped *custom* device class (`X D1 A B cap_cmomi PARAMS: W=4.0
+  L=10.0` — IHP's MoM capacitors, the family issue #1942 taught the reader
+  to recognise) now converts instead of failing, so one request compares
+  both device families against an extracted layout. Two defects, both in
+  `netlist_normalize.py`: SPICE's `PARAMS:` keyword carries no `=`, so it
+  was tokenized as a *positional* token — and, being the last one, read as
+  the subcircuit name itself, making every such card fail with `subcircuit
+  'PARAMS:' is not a known device`; and even spelled without `PARAMS:`, a
+  custom class is deliberately absent from the curated binding table, so
+  its carried `W=`/`L=` tripped the device-like heuristic into the same
+  error. `PARAMS:` is now read as the separator it is (matching
+  `kdb.NetlistSpiceReader`) for every family, and an `X` card naming one of
+  `reference.deck`'s own custom device classes passes through untouched —
+  that family has no plain-element card to convert *to*, and the
+  passed-through card is exactly what the #1942 recovery reader already
+  reads as a real device. Keyed off the requested deck's declared classes,
+  never a global name list, so a genuinely unknown subcircuit name is still
+  the same hard error (now naming the real subcircuit rather than
+  `PARAMS:`). This retires the caller-side workaround of splicing the
+  custom cards out, converting the remainder, and resubmitting as
+  `plain-element` — which also had to re-derive the
+  `device.placeholder_value` disclosure the `subckt-call` path emits on its
+  own.
+
 ## 0.6.0 (2026-09-22)
 
 270 commits on `main` since v0.5.0, cut under the 25-commit backstop in
