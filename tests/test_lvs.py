@@ -1213,6 +1213,245 @@ def test_minimal_cell_identical_netlists_still_match(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# The #282 recovery on the inline-extraction request shape (issue #2317):
+# `layout.file` + `deck` and pre-extracted `layout.netlist` both reach the
+# identical layout netlist, so a pure device-parameter defect must produce
+# the same `device.property` finding through either shape. The recovery's
+# name comparisons are case-insensitive (#2317): SPICE names are
+# case-insensitive and `NetlistSpiceReader` upper-cases them, so the
+# pre-extracted shape's SPICE round-trip compares upper-cased names on both
+# sides while the inline shape keeps the deck's registered spelling verbatim
+# (`nfet`, `vsubs`) against an upper-cased reference (`NFET`, `VSUBS`) --
+# an exact-name check silently declined every inline-shape recovery.
+# --------------------------------------------------------------------------- #
+
+#: Issue #2317's reference netlist verbatim: the corpus inverter's own
+#: schematic with the NMOS at its *nominal* `W=0.65U` -- the layout side
+#: (below) is the same cell with that one transistor's drawn width grown.
+_SKY130_INV_NOMINAL_SPICE = """
+.subckt sky130_fd_sc_hd__inv_1 A VGND VPB VPWR Y vsubs
+M1 Y A VGND vsubs nfet L=0.15U W=0.65U
+M2 Y A VPWR VPB pfet L=0.15U W=1.0U
+.ends
+"""
+
+
+def _write_sky130_inv_with_widened_nmos(path: Path) -> str:
+    """Issue #2317's repro layout: the real corpus cell with the NMOS
+    `diff` (65/20) island's top edge stretched from y=885 to y=990 dbu, so
+    the drawn channel width grows 0.65 um -> 0.755 um with connectivity
+    untouched -- a pure device-parameter defect on a minimal (two-device)
+    cell. The island is identified by its drawn extent (the NMOS diff box
+    tops out at y=885; the PMOS one at y=2485) per the issue's own repro
+    notes; the corpus cell is static, so these are stable."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(SKY130_INV))
+    top = layout.top_cell()
+    diff = top.shapes(layout.layer(65, 20))
+    stretched = 0
+    for shape in list(diff.each()):
+        box = shape.box
+        if box.top == 885 and box.height() == 650:
+            diff.replace(
+                shape, kdb.Polygon(kdb.Box(box.left, box.bottom, box.right, 990))
+            )
+            stretched += 1
+    assert stretched == 1
+    layout.write(str(path))
+    return str(path)
+
+
+def test_pure_width_change_reports_device_property_on_both_request_shapes(tmp_path):
+    """Issue #2317's core acceptance test: the same widened-NMOS defect,
+    compared against the same reference, produces the same `device.property`
+    finding through *both* request shapes that reach the identical layout
+    netlist. Before the fix the inline shape (`layout.file` + `deck`)
+    reported a bare `device.unmatched` + `net.unmatched` error cascade --
+    "something about this transistor is wrong" without naming the parameter
+    -- exactly on the shape a caller actually runs against a GDS."""
+    from klayout_tools.extract import run_extract
+
+    gds = _write_sky130_inv_with_widened_nmos(tmp_path / "inv_widened.gds")
+    reference_path = _write(tmp_path / "ref.spice", _SKY130_INV_NOMINAL_SPICE)
+    top = "sky130_fd_sc_hd__inv_1"
+
+    # The pre-extracted shape's layout side is literally `klt extract`'s own
+    # output for the same widened GDS (the issue's framing: both requests
+    # compare the same layout netlist against the same reference).
+    extracted_path = str(tmp_path / "extracted.spice")
+    run_extract(gds, "sky130", output=extracted_path)
+
+    inline_report = run_lvs(
+        _write_request(
+            tmp_path / "inline.json",
+            {
+                "layout": {"file": gds, "deck": "sky130"},
+                "reference": {"netlist": reference_path, "top": top},
+            },
+        )
+    )
+    preextracted_report = run_lvs(
+        _write_request(
+            tmp_path / "preextracted.json",
+            {
+                "layout": {"netlist": extracted_path, "top": top},
+                "reference": {"netlist": reference_path, "top": top},
+            },
+        )
+    )
+
+    for label, report in (
+        ("inline", inline_report),
+        ("pre-extracted", preextracted_report),
+    ):
+        assert report["status"] == "mismatch", label
+        # Five parameter entries on both shapes: `w_um`, plus the deck-
+        # measured `as`/`ad`/`ps`/`pd` against the reader's implicit zeros
+        # (the reference declares only L/W). Same category, same count.
+        assert report["category_counts"]["device.property"] == 5, label
+        errors = [m for m in report["mismatches"] if m["severity"] == "error"]
+        assert [m["category"] for m in errors] == ["device.property"] * 5, label
+        # The recovery fired on this shape: the unmatched device pair and
+        # the nets it dragged in are collateral warnings, not errors.
+        collateral = [
+            m
+            for m in report["mismatches"]
+            if m["category"]
+            in (lvs.CATEGORY_DEVICE_UNMATCHED, lvs.CATEGORY_NET_UNMATCHED)
+        ]
+        assert len(collateral) == 6, label
+        assert all(m["severity"] == "warning" for m in collateral), label
+
+    # The actionable entry names the parameter and both values, identically
+    # on both shapes (issue #2317's acceptance criterion).
+    def _w_um_entries(report):
+        return [
+            m
+            for m in report["mismatches"]
+            if m["category"] == lvs.CATEGORY_DEVICE_PROPERTY
+            and m["property"]["name"] == "w_um"
+        ]
+
+    inline_w = _w_um_entries(inline_report)
+    preextracted_w = _w_um_entries(preextracted_report)
+    assert len(inline_w) == len(preextracted_w) == 1
+    assert inline_w[0]["side"] == preextracted_w[0]["side"] == "both"
+    assert (
+        inline_w[0]["property"]
+        == preextracted_w[0]["property"]
+        == {
+            "name": "w_um",
+            "layout": pytest.approx(0.755),
+            "reference": pytest.approx(0.65),
+        }
+    )
+
+    # The shapes' warning sets legitimately differ: only the inline shape
+    # carries a deck to disclose the sky130 synthetic-substrate note
+    # (`device.body_unverified`, issue #281) and the deck's zero-instance
+    # `pnp` class note (`topology`, issue #223). Every error-severity
+    # finding agrees; that is the contract this issue pins.
+    assert sorted(
+        m["category"] for m in inline_report["mismatches"] if m["severity"] == "warning"
+    ) == [
+        "device.body_unverified",
+        "device.unmatched",
+        "device.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "topology",
+    ]
+    assert sorted(
+        m["category"]
+        for m in preextracted_report["mismatches"]
+        if m["severity"] == "warning"
+    ) == [
+        "device.unmatched",
+        "device.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+    ]
+
+
+@pytest.mark.parametrize(
+    "corruptions",
+    [
+        pytest.param(
+            [("Y A VPWR VPB pfet", "Y A VGND VPB pfet")],
+            id="rewired-device",
+        ),
+        pytest.param(
+            [("Y A VPWR VPB pfet L=0.15U W=1U", "Y A VGND VPB pfet L=0.15U W=2U")],
+            id="rewired-and-resized",
+        ),
+        pytest.param(
+            [("VPB pfet L=0.15U W=1U", "VPB nfet L=0.15U W=1U")],
+            id="device-class-swap",
+        ),
+        pytest.param(
+            [
+                ("nfet L=0.15U W=0.65U", "nfet L=0.15U W=0.8U"),
+                ("pfet L=0.15U W=1U", "pfet L=0.15U W=2U"),
+            ],
+            id="two-wrong-widths",
+        ),
+    ],
+)
+def test_inline_extraction_negative_controls(corruptions, tmp_path):
+    """Issue #2317's edge-case requirement: #282's negative controls hold on
+    the inline-extraction shape too. The recovery must not fire when the two
+    sides' unmatched devices are *not* a parameter-only difference -- a
+    rewired device (with or without a resize), a device-class swap, or two
+    corrupted widths stay plain, un-downgraded connectivity findings.
+
+    The reference is `klt extract`'s own output for the same (unmodified)
+    corpus cell with the corruption applied, so the corruption is the *only*
+    difference: a hand-written schematic would add AS/AD/PS/PD noise (the
+    reader's implicit zeros vs the deck-measured values), which is itself a
+    parameter difference and would defeat the control."""
+    from klayout_tools.extract import run_extract
+
+    extracted_path = str(tmp_path / "extracted.spice")
+    run_extract(str(SKY130_INV), "sky130", output=extracted_path)
+    reference_text = Path(extracted_path).read_text()
+    for old, new in corruptions:
+        assert old in reference_text
+        reference_text = reference_text.replace(old, new)
+    reference_path = _write(tmp_path / "ref.spice", reference_text)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {
+                    "netlist": reference_path,
+                    "top": "sky130_fd_sc_hd__inv_1",
+                },
+            },
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert "device.property" not in report["category_counts"]
+    # Nothing was downgraded: every unmatched device stayed an error -- the
+    # recovery declining must not soften the report either.
+    unmatched = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_UNMATCHED
+    ]
+    assert unmatched
+    assert all(m["severity"] == "error" for m in unmatched)
+
+
+# --------------------------------------------------------------------------- #
 # options.parameter_tolerance (issue #589): an opted-in *design* tolerance,
 # implemented as snap-and-recompare rather than by widening the float-noise
 # epsilon (`status` is always `compare()`'s own boolean)

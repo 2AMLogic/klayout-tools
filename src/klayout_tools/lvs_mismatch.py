@@ -1113,6 +1113,22 @@ def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
     * at least one parameter actually differs by more than this module's
       floating-point epsilon.
 
+    Every *name* comparison above is case-insensitive (issue #2317): SPICE
+    names are case-insensitive and ``NetlistSpiceReader`` normalises them to
+    upper case, so the pre-extracted ``layout.netlist`` request shape -- which
+    round-trips the layout netlist through SPICE -- compares two sides whose
+    class/terminal/parameter/net names were upper-cased *together*. The inline
+    ``layout.file`` + ``deck`` shape has no such round-trip: the layout side
+    keeps the deck's registered names verbatim (``nfet``, ``vsubs``) while the
+    SPICE-read reference side is upper-cased (``NFET``, ``VSUBS``). An
+    exact-name comparison therefore rejected pairs on the inline shape that
+    the pre-extracted shape recovered -- the same defect reported at two
+    different granularities depending on the request shape. Case-folding is
+    the SPICE-honest reading of "same name" (the convention
+    ``lvs.py``'s ``_find_device_class`` already applies, issue #585) and
+    loosens nothing structural: device identity here is proven by the
+    terminal-by-terminal *net* correspondence, not by any name.
+
     The verdict is untouched either way: ``compare()`` already said
     "mismatch" and still does. This only decides which entry the caller reads
     first.
@@ -1135,19 +1151,27 @@ def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
 
     class_a = a.device_class()
     class_b = b.device_class()
-    if class_a.name != class_b.name:
+    # Issue #2317: case-folded -- see the docstring. The inline-extraction
+    # request shape keeps the deck's registered class name (e.g. ``nfet``)
+    # verbatim while the SPICE-read reference side carries the reader's
+    # upper-cased spelling (``NFET``); an exact-name check silently declined
+    # every inline-shape pair and the report degraded to a bare
+    # device/net-unmatched cascade there.
+    if class_a.name.lower() != class_b.name.lower():
         return None
     if not hasattr(class_a, "terminal_definitions") or not hasattr(
         class_b, "terminal_definitions"
     ):
         return None
 
-    terminals_a = [(t.id(), t.name) for t in class_a.terminal_definitions()]
-    if terminals_a != [(t.id(), t.name) for t in class_b.terminal_definitions()]:
+    terminals_a = [(t.id(), t.name.lower()) for t in class_a.terminal_definitions()]
+    if terminals_a != [
+        (t.id(), t.name.lower()) for t in class_b.terminal_definitions()
+    ]:
         return None
     params_a = list(class_a.parameter_definitions())
-    if [(p.id(), p.name) for p in params_a] != [
-        (p.id(), p.name) for p in class_b.parameter_definitions()
+    if [(p.id(), p.name.lower()) for p in params_a] != [
+        (p.id(), p.name.lower()) for p in class_b.parameter_definitions()
     ]:
         return None
 
@@ -1181,7 +1205,10 @@ def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
         collateral = _net_is_explained_by_device(
             net_a, a
         ) and _net_is_explained_by_device(net_b, b)
-        if not collateral and net_a.expanded_name() != net_b.expanded_name():
+        if (
+            not collateral
+            and net_a.expanded_name().lower() != net_b.expanded_name().lower()
+        ):
             return None
         if collateral:
             explained_layout.add(key_a)
