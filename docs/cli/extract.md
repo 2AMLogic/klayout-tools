@@ -2861,9 +2861,10 @@ and they have to be attributed to one side. The rule, in full:
    terminals to the pin node — that is the share
    `_terminal_star_weights` already computed for those specific terminals, and
    it is physically inside the block. The net's **shunt** elements — its
-   lumped ground capacitance, and any coupling capacitance on the hub — are
-   attributed to the **parent**, together with the legs of devices outside the
-   sub-cell.
+   lumped ground capacitance, and any coupling capacitance on the hub whose
+   far side is *not* itself `internal` (when it is, rule 3 wins and the
+   capacitor is kept) — are attributed to the **parent**, together with the
+   legs of devices outside the sub-cell.
 
    This is not a coin flip. A boundary pin is driven by the testbench, and a
    shunt element hung off an ideally-driven node is not observable in the
@@ -2942,7 +2943,11 @@ the named cell:
   into a single, plausible-looking `.SUBCKT`. Refused rather than guessed.
   Extract a layout with a single placement of the cell instead;
 - **contributes no recognized device** — an empty body is exactly
-  `--abstract-cells`' deliberate black box and useless as a post-layout DUT;
+  `--abstract-cells`' deliberate black box and useless as a post-layout DUT.
+  Same refusal when the *whole layout* has no recognized device (a
+  routing-only stream, or the wrong `--deck`): the flag is placement-checked
+  before extraction runs, so being placed is not by itself evidence that the
+  deck found anything to slice;
 - **is combined with `--abstract-cells`.** An abstracted cell becomes a
   subcircuit *instance* in the flat netlist, and an instance carries no
   position to attribute it with (unlike a device). Run the two modes as

@@ -18993,6 +18993,7 @@ _STAGE_OUT_GAP_UM = 5.0
 def _make_subcircuit_slice_layout(
     *,
     aggressor: bool = False,
+    out_fanout: bool = False,
     stage_cell: str = "STAGE",
     wrapper_cell: str | None = None,
     second_placement: kdb.Trans | None = None,
@@ -19064,6 +19065,34 @@ def _make_subcircuit_slice_layout(
     top.shapes(layout.layer(67, 5)).insert(
         kdb.Text("OUT", kdb.Trans(round((r3_x_um + 1.5) * 1000), 500))
     )
+
+    if out_fanout:
+        # Two *more* resistors, also flat in `TOP`, whose heads are routed on
+        # to the same `OUT` wire -- so the boundary net carries four terminals
+        # instead of two. `--distributed-rc` puts its hub at `len(order) // 2`
+        # (`_inject_parasitics`), so with four terminals `STAGE`'s own leg (the
+        # leftmost, ladder position 0) is *not* adjacent to the hub: its
+        # bridging segment chains leg -> leg, which is exactly the shape
+        # `_reconnect_orphaned_boundary_legs` exists for (issue #2245). Two
+        # terminals (the default fixture) or three both put every leg next to
+        # the hub, so the branch never fires there.
+        # Routed over the top (y >= 2.2 um) so it clears the `FAR`/`FAR2` heads.
+        li1 = layout.layer(67, 20)
+        fanout_x_um = [r3_x_um + bar_um + _STAGE_OUT_GAP_UM]
+        fanout_x_um.append(fanout_x_um[0] + bar_um + _STAGE_OUT_GAP_UM)
+        for index, x_um in enumerate(fanout_x_um):
+            _draw_sky130_poly_resistor_at(
+                layout, top, x_um=x_um, head_b_label=f"FAR{index + 2}"
+            )
+            top.shapes(li1).insert(
+                kdb.Box(
+                    round((x_um + 1.1) * 1000), 700, round((x_um + 1.9) * 1000), 3000
+                )
+            )
+        top.shapes(li1).insert(kdb.Box(38500, 700, 39300, 3000))
+        top.shapes(li1).insert(
+            kdb.Box(38500, 2200, round((fanout_x_um[-1] + 1.9) * 1000), 3000)
+        )
 
     if aggressor:
         # met1 strip crossing directly over STAGE's own li1 `MID` bridge.
@@ -19230,6 +19259,63 @@ def test_subcircuit_attributes_boundary_net_parasitics_to_the_parent(tmp_path):
         rel=1e-6,
     )
     assert excluded["resistance_ohm"] > 0
+
+
+def test_subcircuit_reconnects_an_orphaned_distributed_rc_boundary_leg(tmp_path):
+    """`--distributed-rc` on a *boundary* net whose ladder no single segment
+    bridges to the pin node (issue #2245's documented ladder limitation).
+
+    With four terminals on `OUT`, the ladder's hub sits at `len(order) // 2`,
+    so `STAGE`'s own leg is two hops away and its bridging segment chains
+    leg -> leg rather than leg -> hub. None of that net's series resistance can
+    be attributed to the sub-cell, so the whole ladder goes to the parent and
+    the sub-cell's terminal is reconnected straight to the pin node -- stated
+    in a warning rather than silently half-kept, and with no dangling leg left
+    behind in `net_count`.
+    """
+    path = _write_gds(
+        _make_subcircuit_slice_layout(out_fanout=True), tmp_path / "block.gds"
+    )
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "block.spice"),
+        top_cell_pins_only=True,
+        parasitics=True,
+        distributed_rc=True,
+        critical_nets=["OUT"],
+        subcircuit_cell="STAGE",
+    )
+    slice_report = report["subcircuit"]
+    cards = _subcircuit_cards(slice_report["path"])
+    instances = {card.split()[0] for card in cards}
+
+    # The sub-cell's own second resistor now lands directly on the `OUT` pin:
+    # no `OUT__t*` leg node between it and the boundary.
+    assert "R$2 MID__t1 OUT 289.2 res_generic_po L=6U W=1U" in cards
+    assert not any("OUT__t" in card for card in cards)
+    # Not one ladder segment or node capacitor survived into the slice -- the
+    # documented "dropped, not partially kept" outcome.
+    assert not any(name.startswith(("ROUT_seg", "COUT_n")) for name in instances)
+    assert any(
+        "multi-segment (distributed) parasitic RC ladder that no single "
+        "segment bridges to the pin node" in warning
+        for warning in slice_report["warnings"]
+    ), slice_report["warnings"]
+
+    # `net_count` is "what the emitted .SUBCKT actually carries": the
+    # reconnected-away `OUT__t0` leg must not linger in it (it did before the
+    # pre-reconnect snapshot read in `_resolve_kept_nets` was fixed).
+    deck = Path(slice_report["path"]).read_text()
+    assert "OUT__t0" not in deck
+    # The eight nodes the cards above actually name (SPICE ground `0`
+    # included), and nothing else.
+    assert slice_report["net_count"] == 8
+
+    # The whole ladder is still accounted for on the parent side.
+    assert slice_report["excluded_parasitics"]["r_count"] == 3
+    assert slice_report["excluded_parasitics"]["resistance_ohm"] > 0
 
 
 def test_subcircuit_keeps_boundary_crossing_coupling_and_pins_the_aggressor(tmp_path):
@@ -19445,6 +19531,76 @@ def test_subcircuit_matching_no_extracted_device_is_an_error(tmp_path):
         )
 
 
+def _make_device_free_layout() -> kdb.Layout:
+    """A placed sub-cell in a layout that draws **no** device-recognition
+    geometry at all -- only routing metal.
+
+    The distinction from `_make_subcircuit_slice_layout` + a routing-only cell
+    matters: there, the rest of the layout still yields devices, so the
+    extracted netlist has a circuit for the top cell and only the *named cell*
+    resolves to nothing. Here the deck recognizes zero devices anywhere, so
+    `netlist.circuit_by_name(top_cell)` is `None` and `--subcircuit` has no
+    circuit to slice at all.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    sub = layout.create_cell("SUB")
+    sub.shapes(layout.layer(67, 20)).insert(kdb.Box(0, 0, 4000, 1000))  # li1 routing
+    top.insert(kdb.CellInstArray(sub.cell_index(), kdb.Trans(0, 0)))
+    return layout
+
+
+def test_subcircuit_on_a_device_free_layout_is_an_error(tmp_path):
+    """A layout the deck recognizes **no** device in at all still has placed
+    cells, so `--subcircuit` reaches the slice with no extracted circuit to
+    work from. That is a refusal, not a crash: before issue #2245's follow-up
+    this tripped a bare `assert circuit is not None` (whose stated premise --
+    "`placements > 0` implies devices exist" -- is false) and escaped as an
+    `AssertionError` traceback with no JSON envelope at all."""
+    path = _write_gds(_make_device_free_layout(), tmp_path / "nodev.gds")
+
+    with pytest.raises(ExtractError, match="matched no extracted device"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "nodev.spice"),
+            subcircuit_cell="SUB",
+        )
+
+
+def test_subcircuit_on_a_device_free_layout_emits_the_json_error_envelope(
+    tmp_path, capsys
+):
+    """The CLI half of the test above: `--format json` must still emit the
+    shared error envelope on stderr and exit 1 (`docs/json-contract.md`), not
+    propagate a Python exception to the caller."""
+    path = _write_gds(_make_device_free_layout(), tmp_path / "nodev.gds")
+
+    exit_code = main(
+        [
+            "extract",
+            path,
+            "--deck",
+            "sky130",
+            "--output",
+            str(tmp_path / "nodev.spice"),
+            "--subcircuit",
+            "SUB",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    err = json.loads(captured.err)
+    assert err["schema_version"] == 1
+    assert err["error"]["command"] == "extract"
+    assert "matched no extracted device" in err["error"]["message"]
+
+
 def test_subcircuit_cli_reports_the_slice_in_json_and_text(tmp_path, capsys):
     layout = _make_subcircuit_slice_layout()
     path = str(_write_gds(layout, tmp_path / "block.gds"))
@@ -19500,10 +19656,15 @@ def test_subcircuit_deck_simulates_standalone_in_ngspice(tmp_path):
     instantiate the emitted sub-circuit *in isolation* and run a testbench
     against it, the same way it instantiates a schematic-level `.subckt`.
 
-    Non-vacuous by construction: the measured node voltage is checked against
-    the resistive divider the slice's own cards define (the two extracted
-    resistors plus the series parasitic legs the attribution rule keeps), so a
-    slice that silently dropped or duplicated an element would not match."""
+    What this confirms is that the deck is standalone-simulatable with a
+    correct *series topology*: ngspice loads it with no singular matrix, and
+    the measured node voltage matches the resistive divider the slice's own
+    cards define, so the kept resistors really are in series on the
+    `IN -> MID -> OUT` path. It is **not** a completeness guard -- the expected
+    divider ratio is re-derived from the emitted deck itself, so an element
+    dropped by the attribution rule drops out of both sides of the comparison.
+    Attribution completeness is covered separately, and non-vacuously, by
+    `test_subcircuit_attributes_boundary_net_parasitics_to_the_parent`."""
     import subprocess
 
     layout = _make_subcircuit_slice_layout()

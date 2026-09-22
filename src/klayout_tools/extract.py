@@ -2955,7 +2955,21 @@ def _write_subcircuit_deck(
     """
     if cell_name is None:
         return None
-    assert circuit is not None  # `placements > 0` implies devices exist
+    if circuit is None:
+        # `circuit_by_name(top_cell_name)` is `None` when the deck recognized
+        # no device *anywhere* in the layout (`run_extract` degrades to empty
+        # `devices`/`nets` for that case). A cell can be placed -- so the
+        # placement-count validation above passed -- in a layout that still
+        # contributes zero devices, so this is a real user-facing refusal, not
+        # an invariant: same "refuse rather than guess" shape (and the same
+        # message prefix) `slice_subcircuit` raises for an empty
+        # `selected_ids`.
+        raise ExtractError(
+            f"--subcircuit {cell_name!r} matched no extracted device -- this "
+            "deck recognized no device anywhere in the layout, so there is "
+            "nothing to slice (check --deck, and see devices[] in a plain "
+            "`klt extract --format json` run)"
+        )
 
     from .extract_subcircuit import (
         SubcircuitSliceError,

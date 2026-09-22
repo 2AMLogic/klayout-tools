@@ -487,6 +487,15 @@ def _resolve_kept_nets(
     """
     kept: set[int] = set()
     for device_id in selection.kept_ids:
+        if device_id in selected_ids:
+            # Re-read from the live device below instead of the snapshot:
+            # `_reconnect_orphaned_boundary_legs` may have moved one of this
+            # device's terminals off an orphaned boundary leg on to the hub,
+            # and the pre-reconnect snapshot would otherwise keep that
+            # now-terminal-less, pin-less leg alive -- invisible in the
+            # emitted SPICE but counted by `net_count`, which the docs define
+            # as "what the emitted .SUBCKT actually carries".
+            continue
         for net in selection.device_nets[device_id]:
             kept.add(index.index_of(net))
     for device in devices:
