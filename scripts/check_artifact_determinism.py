@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regenerate the golden artifacts twice -- varied hash seed, varied checkout
 path -- and byte-compare the results (issue #2225; float provenance in
-issue #2279).
+issue #2279; forensics + declared platform-variable regions in #2275).
 
 Three nondeterminism classes ship past a suite that only ever regenerates an
 artifact **once**, under one hash seed, from one checkout:
@@ -66,6 +66,25 @@ The scan's boundary is the generator **script** -- not the library modules it
 imports. Floats in analysis code are legitimate (issue #2279's stated
 non-goal); only the committed-byte path is held to the rule.
 
+**Declared platform-variable regions (issue #2275).** A fourth discipline,
+`platform-variable`, is the loud middle ground between `integer-exact` (no
+host-libm floats at all) and `pinned-artifact` (bytes never regenerated): the
+generator *is* allowed to compute through host libm, but only into artifacts
+it declares, and only under an explicit guarantee -- a format, a set of
+enumerated JSON field paths, and a max-|ulp| threshold. Declared fields are
+threshold-compared across the two runs; **everything else in the artifact
+must remain byte-identical**, and an undeclared artifact (or an undeclared
+field inside a declared one) that drifts still fails. The default remains
+byte-exact; the declaration is a per-artifact, per-field act recorded in the
+manifest and named in every report, never a blanket tolerance. This is the
+mechanical half of #2275's "declare platform-variable regions" pattern for
+irreducibly host-libm outputs (e.g. transcendental digests); the triage
+half -- forensics before blaming code -- is the `--forensics-dir` flag:
+on failure the check writes the report, a rerun recipe (the exact seeds and
+command), and **both variants of every differing artifact** so the
+"inputs bit-identical, one green rerun at the same head" triage can happen
+from the CI evidence alone.
+
 It is deliberately *not* a pytest test: the whole point is two checkouts at
 two paths, which is a property of the job, not of the process. `ci.yml`'s
 `Golden artifacts (hash seed + path varied)` job supplies them.
@@ -79,12 +98,14 @@ Usage:
 
 Exit codes (mirroring `scripts/check_ci_wall_clock.py`'s tiering):
 
-  0  every regenerated artifact was byte-identical across both runs, no
-     generator carries an undeclared host-libm float path, and every pin
-     verified
-  1  at least one artifact differed, embeds a host-absolute path, computes
-     through host libm without a pinned-artifact declaration, or carries a
-     stale/drifted pin
+  0  every regenerated artifact was byte-identical across both runs (or
+      differed only inside a declared platform-variable region, within its
+      declared threshold -- named in the output either way), no generator
+      carries an undeclared host-libm float path, and every pin verified
+   1  at least one artifact differed, embeds a host-absolute path, computes
+      through host libm without a pinned-artifact declaration, carries a
+      stale/drifted pin, or drifted outside a declared platform-variable
+      guarantee (or drifted at all in a non-declared region)
   2  the check itself could not run (a generator failed, fewer than two
      distinct checkouts, an unreadable or malformed manifest) -- a check that
      silently stops checking is worse than no check at all, so this is never
@@ -100,11 +121,14 @@ from __future__ import annotations
 import argparse
 import ast
 import difflib
+import fnmatch
 import hashlib
 import json
+import math
 import os
 import random
 import re
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -150,11 +174,13 @@ DEFAULT_GENERATORS: tuple[dict[str, object], ...] = (
 )
 
 #: The float-discipline vocabulary a manifest entry may declare (issue
-#: #2279). See the module docstring for what each promises.
+#: #2279; `platform-variable` in issue #2275). See the module docstring for
+#: what each promises.
 FLOAT_DISCIPLINES: tuple[str, ...] = (
     "integer-exact",
     "pinned-table",
     "pinned-artifact",
+    "platform-variable",
 )
 
 #: Discipline assumed for a manifest entry that declares none. The safe
@@ -165,6 +191,37 @@ DEFAULT_FLOAT_DISCIPLINE = "integer-exact"
 #: The escape-hatch discipline: its generators are never regenerated (drift
 #: detection compares against the pin, not silent regeneration).
 PINNED_ARTIFACT = "pinned-artifact"
+
+#: The threshold-compared discipline (issue #2275): its generators ARE
+#: regenerated, but the artifacts they declare are compared field-by-field
+#: under an explicit guarantee instead of byte-exactly. Everything outside
+#: the declared fields stays byte-exact; the declaration is named in every
+#: report.
+PLATFORM_VARIABLE = "platform-variable"
+
+#: The only payload format a platform-variable guarantee can speak today
+#: (issue #2275). The comparison parses both runs' bytes as JSON and walks
+#: them field-by-field; anything else is refused at manifest load so a
+#: declaration never silently checks nothing.
+PLATFORM_VARIABLE_FORMATS: tuple[str, ...] = ("json",)
+
+#: Required (and only permitted) keys of a manifest entry's
+#: `platform_variable` block (issue #2275). An unknown key is refused, not
+#: ignored: a typo'd `max_abs_ulp` must fail loudly, not quietly leave the
+#: guarantee without a threshold.
+_PLATFORM_VARIABLE_FIELDS = (
+    "artifacts",
+    "format",
+    "guarantee",
+    "max_abs_ulps",
+    "fields",
+)
+
+#: A declared field path: dot-separated segments, each a name, an integer
+#: index, or `*` (exactly one segment). `digests.*.value` enumerates leaves;
+#: whole-subtree wildcards ("blanket tolerance") are deliberately not part
+#: of the vocabulary.
+_FIELD_PATTERN_RE = re.compile(r"[A-Za-z0-9_*\-]+(\.[A-Za-z0-9_*\-]+)*")
 
 #: Manifest pin fields, required (and only permitted) on a `pinned-artifact`
 #: entry. `artifact_sha256` maps each pinned artifact's repo-relative path to
@@ -318,6 +375,29 @@ class CannotRun(Exception):
 
 
 @dataclass(frozen=True)
+class PlatformVariable:
+    """One declared platform-variable region (issue #2275): the explicit
+    guarantee under which a regenerated artifact is threshold-compared
+    instead of byte-compared.
+
+    `artifacts` scopes the declaration to repo-relative globs (segment-wise,
+    so `*` matches within one path segment exactly like the manifest's
+    artifact globs do). `fields` enumerates the JSON leaf paths the
+    threshold applies to -- everything else in those artifacts stays
+    byte-exact. `guarantee` is the human-readable name recorded in every
+    report (e.g. `libm-transcendental-digest`); `max_abs_ulps` is the
+    threshold, in ULPs, a declared float leaf may move between runs;
+    `format` is the payload syntax the comparison parses (only `json`
+    today)."""
+
+    artifacts: tuple[str, ...]
+    format: str
+    guarantee: str
+    max_abs_ulps: int
+    fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Generator:
     """One declared artifact generator (issue #2225), plus its float
     discipline and -- for `pinned-artifact` entries (issue #2279) -- the pin:
@@ -329,6 +409,7 @@ class Generator:
     script: str
     artifacts: tuple[str, ...]
     float_discipline: str = DEFAULT_FLOAT_DISCIPLINE
+    platform_variable: PlatformVariable | None = None
     generator_sha256: str | None = None
     regenerate: str | None = None
     artifact_sha256: tuple[tuple[str, str], ...] = ()
@@ -336,6 +417,10 @@ class Generator:
     @property
     def pinned(self) -> bool:
         return self.float_discipline == PINNED_ARTIFACT
+
+    @property
+    def platform_variable_declared(self) -> bool:
+        return self.float_discipline == PLATFORM_VARIABLE
 
     def pinned_files(self) -> dict[str, str]:
         """The pinned artifact paths -> expected sha256 of the committed
@@ -417,6 +502,7 @@ def _generator_from_entry(entry: object) -> Generator:
             f"{discipline!r} (expected one of {', '.join(FLOAT_DISCIPLINES)})"
         )
 
+    platform_variable = _validated_platform_variable(entry, script_name, discipline)
     generator_sha256, regenerate, artifact_sha256 = _validated_pin(
         entry, script_name, discipline
     )
@@ -424,10 +510,141 @@ def _generator_from_entry(entry: object) -> Generator:
         script=script_name,
         artifacts=tuple(str(g) for g in globs),
         float_discipline=discipline,
+        platform_variable=platform_variable,
         generator_sha256=generator_sha256,
         regenerate=regenerate,
         artifact_sha256=artifact_sha256,
     )
+
+
+def _validated_platform_variable(
+    entry: dict[str, object], script_name: str, discipline: str
+) -> PlatformVariable | None:
+    """The `platform_variable` declaration for one entry (issue #2275),
+    validated with the same loudness as the pin fields (issue #2279): the
+    block is *required* on a `platform-variable` entry, refused everywhere
+    else (an integer-exact or pinned entry carrying one would look like a
+    declared guarantee while the check byte-compared -- or never
+    regenerated -- the artifact), and every shape error is `CannotRun`
+    (exit 2), never a silent fall-through to byte-exact."""
+    block = entry.get("platform_variable")
+    if block is None and discipline != PLATFORM_VARIABLE:
+        return None
+    if block is None:
+        raise CannotRun(
+            f"generator {script_name!r}: float_discipline "
+            f"{PLATFORM_VARIABLE!r} requires a platform_variable block "
+            f"({', '.join(_PLATFORM_VARIABLE_FIELDS)}) -- a declared region "
+            "without a guarantee format + threshold is a blanket tolerance "
+            "in disguise, which is exactly what issue #2275 rules out"
+        )
+    if discipline != PLATFORM_VARIABLE:
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable only mean "
+            f"something with float_discipline {PLATFORM_VARIABLE!r}; on "
+            f"{discipline!r} the check would either byte-compare the "
+            "artifact anyway (integer-exact) or never regenerate it "
+            "(pinned-artifact), so the declaration could never bind"
+        )
+    if not isinstance(block, dict):
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable must be an object"
+        )
+    return PlatformVariable(**_validated_pv_block(block, script_name))
+
+
+def _validated_pv_block(
+    block: dict[str, object], script_name: str
+) -> dict[str, object]:
+    """The field-level validation of a `platform_variable` block: every key
+    required, unknown keys refused, every value the type its promise needs."""
+    missing = [name for name in _PLATFORM_VARIABLE_FIELDS if name not in block]
+    if missing:
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable requires "
+            f"{', '.join(_PLATFORM_VARIABLE_FIELDS)} (missing: "
+            f"{', '.join(missing)})"
+        )
+    unknown = [key for key in block if key not in _PLATFORM_VARIABLE_FIELDS]
+    if unknown:
+        raise CannotRun(
+            f"generator {script_name!r}: unknown platform_variable key(s) "
+            f"{', '.join(sorted(unknown))} -- a typo'd key must fail loudly, "
+            "not quietly leave the guarantee without a threshold"
+        )
+    _validated_pv_globs(block, script_name)
+    fmt = block["format"]
+    if fmt not in PLATFORM_VARIABLE_FORMATS:
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable.format "
+            f"{fmt!r} is not supported (expected one of "
+            f"{', '.join(PLATFORM_VARIABLE_FORMATS)})"
+        )
+    guarantee = block["guarantee"]
+    if not isinstance(guarantee, str) or not guarantee.strip():
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable.guarantee must "
+            "be a non-empty name -- it is what every report records as the "
+            "declared guarantee"
+        )
+    _validated_pv_threshold_and_fields(block, script_name)
+    return {
+        "artifacts": tuple(block["artifacts"]),
+        "format": str(fmt),
+        "guarantee": guarantee,
+        "max_abs_ulps": block["max_abs_ulps"],
+        "fields": tuple(block["fields"]),
+    }
+
+
+def _validated_pv_globs(block: dict[str, object], script_name: str) -> None:
+    """`platform_variable.artifacts`: a non-empty list of non-empty
+    repo-relative globs -- a declaration scoped to nothing would declare a
+    guarantee while checking nothing."""
+    globs = block["artifacts"]
+    if (
+        not isinstance(globs, list)
+        or not globs
+        or not all(isinstance(g, str) and g.strip() for g in globs)
+    ):
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable.artifacts must "
+            "be a non-empty list of repo-relative artifact globs"
+        )
+
+
+def _validated_pv_threshold_and_fields(
+    block: dict[str, object], script_name: str
+) -> None:
+    """`max_abs_ulps` (integer >= 1: zero is byte-exactness, i.e. no
+    declaration) and `fields` (enumerated dotted leaf paths, `*` for one
+    segment -- whole-subtree wildcards would be a blanket tolerance, which
+    is exactly what issue #2275 rules out)."""
+    max_abs_ulps = block["max_abs_ulps"]
+    if (
+        not isinstance(max_abs_ulps, int)
+        or isinstance(max_abs_ulps, bool)
+        or max_abs_ulps < 1
+    ):
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable.max_abs_ulps must "
+            "be an integer >= 1 (0 would be byte-exact, which is what not "
+            "declaring the region means)"
+        )
+    fields = block["fields"]
+    if (
+        not isinstance(fields, list)
+        or not fields
+        or not all(
+            isinstance(f, str) and _FIELD_PATTERN_RE.fullmatch(f) for f in fields
+        )
+    ):
+        raise CannotRun(
+            f"generator {script_name!r}: platform_variable.fields must be a "
+            "non-empty list of dotted leaf paths (segments: a key, an "
+            "integer index, or '*') -- enumerated regions, never a whole-"
+            "artifact wildcard"
+        )
 
 
 def _validated_pin(
@@ -755,11 +972,18 @@ def _pin_findings(checkout: Path, generator: Generator) -> list[Finding]:
 
 def static_findings(checkout: Path, generators: list[Generator]) -> list[Finding]:
     """The checkout-independent findings: the float-provenance scan for every
-    non-pinned generator and the pin verification for every pinned one.
+    non-pinned, non-declared generator and the pin verification for every
+    pinned one.
 
     These run against *both* checkouts (they are the same commit, but each
     copy is scanned, and the results deduped, so a checkout-specific
     corruption cannot slip between the cracks).
+
+    A `platform-variable` generator (issue #2275) is skipped by the scan on
+    purpose: its whole point is that host-libm computation is *declared* --
+    flagged here anyway, it could never pass -- and the dynamic comparison
+    enforces its guarantee instead (declared fields within threshold,
+    everything else byte-exact).
     """
     findings: list[Finding] = []
     for generator in generators:
@@ -768,6 +992,8 @@ def static_findings(checkout: Path, generators: list[Generator]) -> list[Finding
             raise CannotRun(f"generator {generator.script} not found under {checkout}")
         if generator.pinned:
             findings.extend(_pin_findings(checkout, generator))
+            continue
+        if generator.platform_variable_declared:
             continue
         source = script_path.read_text(encoding="utf-8")
         for op in scan_float_ops(source, generator.script):
@@ -784,6 +1010,301 @@ def _pinned_artifact_paths(generators: list[Generator]) -> set[str]:
         if generator.pinned:
             paths.update(generator.pinned_files())
     return paths
+
+
+# --------------------------------------------------------------------------
+# Declared platform-variable regions (issue #2275)
+# --------------------------------------------------------------------------
+
+
+def _glob_matches(relpath: str, pattern: str) -> bool:
+    """Whether a repo-relative artifact path matches a manifest glob --
+    segment-wise, so `*` matches within one path segment exactly as the
+    declared artifact globs do under `pathlib.glob`."""
+    parts, segments = relpath.split("/"), pattern.split("/")
+    if len(parts) != len(segments):
+        return False
+    return all(fnmatch.fnmatchcase(p, s) for p, s in zip(parts, segments, strict=True))
+
+
+def _matching_declaration(
+    artifact: str, generators: list[Generator]
+) -> PlatformVariable | None:
+    """The first platform-variable declaration whose globs cover `artifact`,
+    in manifest order (a duplicate coverage is a manifest-authoring smell,
+    but deterministic first-match beats nondeterministic refusal here)."""
+    for generator in generators:
+        declaration = generator.platform_variable
+        if declaration is None:
+            continue
+        if any(_glob_matches(artifact, glob) for glob in declaration.artifacts):
+            return declaration
+    return None
+
+
+def _ordered_int(value: float) -> int:
+    """IEEE 754 bit pattern as a monotonically increasing integer, so float
+    ordering and ULP distance become integer arithmetic (the standard
+    trick: positive floats already order by their bits; negative floats are
+    mirrored around zero)."""
+    (bits,) = struct.unpack(">Q", struct.pack(">d", value))
+    if bits < (1 << 63):
+        return bits
+    return -(bits - (1 << 63)) - 1
+
+
+def _ulp_distance(a: float, b: float) -> int | None:
+    """|a - b| measured in ULPs (None when either side is non-finite, which
+    no ULP threshold can meaningfully bound). Equal *values* (including
+    -0.0 vs 0.0) are distance 0; a value-equal-but-format-different leaf
+    (`1.0` vs `1e0`) is within any guarantee by construction."""
+    if a == b:
+        return 0
+    if not (math.isfinite(a) and math.isfinite(b)):
+        return None
+    return abs(_ordered_int(a) - _ordered_int(b))
+
+
+def _pv_path_matches(path: tuple[str, ...], patterns: tuple[str, ...]) -> bool:
+    """Whether a walked leaf path (the segments of e.g. `digests.coeffs.3`)
+    is enumerated by any declared field pattern -- segment-wise, with `*`
+    matching exactly one segment."""
+    return any(
+        len(path) == len(pattern.split("."))
+        and all(
+            fnmatch.fnmatchcase(segment, want)
+            for segment, want in zip(path, pattern.split("."), strict=True)
+        )
+        for pattern in patterns
+    )
+
+
+def _pv_note(found: dict[str, list], kind: str, path: tuple[str, ...], detail: str):
+    found[kind].append((".".join(path), detail))
+
+
+def _pv_leaf(
+    ref: object,
+    other: object,
+    path: tuple[str, ...],
+    declaration: PlatformVariable,
+    found: dict[str, list],
+    matched: set[int],
+) -> None:
+    """One leaf pair: declared fields are threshold-compared (a move within
+    `max_abs_ulps` is recorded as named, accepted drift; anything else is a
+    finding), non-declared leaves must be equal with equal types -- the
+    "byte-drift inside a non-declared region still fails" half of #2275."""
+    index = next(
+        (
+            i
+            for i, pattern in enumerate(declaration.fields)
+            if _pv_path_matches(path, (pattern,))
+        ),
+        None,
+    )
+    if index is None:
+        if type(ref) is not type(other) or ref != other:
+            _pv_note(
+                found,
+                "leak",
+                path,
+                f"non-declared region moved: {ref!r} -> {other!r} "
+                "(declare it, or fix the generator)",
+            )
+        return
+    matched.add(index)
+    numeric = (
+        isinstance(ref, (int, float))
+        and isinstance(other, (int, float))
+        and not isinstance(ref, bool)
+        and not isinstance(other, bool)
+    )
+    if not numeric:
+        _pv_note(
+            found,
+            "structure",
+            path,
+            f"declared field is not numeric: {type(ref).__name__}/"
+            f"{type(other).__name__} -- a ULP threshold bounds floats only",
+        )
+        return
+    distance = _ulp_distance(float(ref), float(other))
+    if distance is None:
+        _pv_note(
+            found,
+            "exceeded",
+            path,
+            f"non-finite value ({ref!r} / {other!r}): a ULP guarantee cannot bound it",
+        )
+    elif distance > declaration.max_abs_ulps:
+        _pv_note(
+            found,
+            "exceeded",
+            path,
+            f"moved {distance} ulp (declared max "
+            f"{declaration.max_abs_ulps}): {ref!r} -> {other!r}",
+        )
+    elif distance > 0:
+        found["moved"].append((".".join(path), distance, repr(ref), repr(other)))
+
+
+def _pv_container(
+    ref: object,
+    other: object,
+    path: tuple[str, ...],
+    declaration: PlatformVariable,
+    found: dict[str, list],
+    matched: set[int],
+) -> None:
+    """Walk one container pair in parallel; shape disagreements (missing or
+    extra keys, unequal lengths, dict-vs-list) are findings regardless of
+    what the declaration covers -- a guarantee over fields that no longer
+    line up says nothing."""
+    if isinstance(ref, dict) and isinstance(other, dict):
+        for key in sorted(set(ref) ^ set(other)):
+            _pv_note(
+                found,
+                "structure",
+                path + (str(key),),
+                f"key present in one run only ({'run 1' if key in ref else 'run 2'})",
+            )
+        for key in sorted(set(ref) & set(other)):
+            _pv_walk(
+                ref[key], other[key], path + (str(key),), declaration, found, matched
+            )
+        return
+    if isinstance(ref, list) and isinstance(other, list):
+        if len(ref) != len(other):
+            _pv_note(
+                found,
+                "structure",
+                path,
+                f"list length changed: {len(ref)} -> {len(other)}",
+            )
+        for index in range(min(len(ref), len(other))):
+            _pv_walk(
+                ref[index],
+                other[index],
+                path + (str(index),),
+                declaration,
+                found,
+                matched,
+            )
+        return
+    _pv_note(
+        found,
+        "structure",
+        path,
+        f"container type changed: {type(ref).__name__} -> {type(other).__name__}",
+    )
+
+
+def _pv_walk(
+    ref: object,
+    other: object,
+    path: tuple[str, ...],
+    declaration: PlatformVariable,
+    found: dict[str, list],
+    matched: set[int],
+) -> None:
+    """Dispatch one (run 1, run 2) value pair during the declared-artifact
+    comparison: containers recurse in parallel, leaves go to the
+    declared/undeclared rules."""
+    if isinstance(ref, (dict, list)) or isinstance(other, (dict, list)):
+        _pv_container(ref, other, path, declaration, found, matched)
+        return
+    _pv_leaf(ref, other, path, declaration, found, matched)
+
+
+def _pv_finding(
+    artifact: str, kind: str, key: str, detail: str, guarantee: str
+) -> Finding:
+    name = {
+        "structure": "platform_variable_structure",
+        "exceeded": "platform_variable_exceeded",
+        "leak": "platform_variable_region_leak",
+    }[kind]
+    return Finding(
+        artifact=artifact,
+        kind=name,
+        detail=(
+            f"declared platform-variable guarantee {guarantee!r} violated at "
+            f"{key}: {detail} -- a declaration bounds a region, it does not "
+            "excuse the artifact from checking (issue #2275)"
+        ),
+    )
+
+
+def _compare_platform_variable(
+    artifact: str,
+    baseline: bytes,
+    payload: bytes,
+    declaration: PlatformVariable,
+    reference_label: str,
+    other_label: str,
+) -> tuple[list[Finding], dict[str, object]]:
+    """Threshold-compare one declared artifact pair under its guarantee
+    (issue #2275). Returns (findings, comparison record); the record feeds
+    the report so accepted drift is named, never silent."""
+    findings: list[Finding] = []
+
+    def parse(label: str, raw: bytes) -> object:
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            findings.append(
+                Finding(
+                    artifact=artifact,
+                    kind="platform_variable_unparseable",
+                    detail=(
+                        f"declared platform-variable guarantee "
+                        f"{declaration.guarantee!r} with format "
+                        f"{declaration.format!r}, but the {label} payload "
+                        f"does not parse as JSON: {exc}"
+                    ),
+                )
+            )
+            return None
+
+    left, right = parse(reference_label, baseline), parse(other_label, payload)
+    comparison: dict[str, object] = {
+        "artifact": artifact,
+        "guarantee": declaration.guarantee,
+        "format": declaration.format,
+        "max_abs_ulps": declaration.max_abs_ulps,
+        "moved": [],
+        "max_observed_ulps": 0,
+        "unmatched_patterns": [],
+    }
+    if left is None or right is None:
+        return findings, comparison
+
+    found: dict[str, list] = {
+        "structure": [],
+        "exceeded": [],
+        "leak": [],
+        "moved": [],
+    }
+    matched: set[int] = set()
+    _pv_walk(left, right, (), declaration, found, matched)
+    for kind in ("structure", "exceeded", "leak"):
+        for key, detail in found[kind]:
+            findings.append(
+                _pv_finding(artifact, kind, key, detail, declaration.guarantee)
+            )
+    moved = [
+        {"field": key, "ulp": distance, "run1": old, "run2": new}
+        for key, distance, old, new in found["moved"]
+    ]
+    comparison["moved"] = moved
+    comparison["max_observed_ulps"] = max((entry["ulp"] for entry in moved), default=0)
+    comparison["unmatched_patterns"] = [
+        declaration.fields[i]
+        for i in range(len(declaration.fields))
+        if i not in matched
+    ]
+    return findings, comparison
 
 
 # --------------------------------------------------------------------------
@@ -979,11 +1500,20 @@ def _embedded_checkout_path(payload: bytes, run: Run) -> bool:
     return str(run.checkout.resolve()).encode() in payload
 
 
-def compare_runs(runs: list[Run]) -> list[Finding]:
-    """Byte-compare every artifact across every run, and scan each for a
-    host-absolute path. Findings name the artifact by repo-relative path."""
+def compare_runs(
+    runs: list[Run], generators: list[Generator]
+) -> tuple[list[Finding], list[dict[str, object]]]:
+    """Compare every artifact across every run: byte-exact by default,
+    threshold-compared under its declared guarantee for artifacts a
+    `platform_variable` declaration covers (issue #2275). Also scans each
+    artifact for a host-absolute path -- a declared region excuses last-ulp
+    float movement, never a committed `/Users/...` path. Findings name the
+    artifact by repo-relative path; the returned comparison records feed the
+    report so declared artifacts (and any accepted drift inside them) are
+    named either way."""
     reference = runs[0]
     findings: list[Finding] = []
+    comparisons: list[dict[str, object]] = []
 
     every_artifact: set[str] = set()
     for run in runs:
@@ -1009,7 +1539,22 @@ def compare_runs(runs: list[Run]) -> list[Finding]:
             )
             continue
 
+        declaration = _matching_declaration(artifact, generators)
         baseline = reference.artifacts[artifact]
+        if declaration is not None:
+            for run in runs[1:]:
+                run_findings, comparison = _compare_platform_variable(
+                    artifact,
+                    baseline,
+                    run.artifacts[artifact],
+                    declaration,
+                    reference.label,
+                    run.label,
+                )
+                findings.extend(run_findings)
+                comparisons.append(comparison)
+            continue
+
         for run in runs[1:]:
             payload = run.artifacts[artifact]
             if payload == baseline:
@@ -1048,7 +1593,7 @@ def compare_runs(runs: list[Run]) -> list[Finding]:
                 detail=f"host-absolute path embedded in the artifact: {context}",
             )
         )
-    return findings
+    return findings, comparisons
 
 
 def _host_path_context(payload: bytes, offset: int) -> str:
@@ -1063,8 +1608,13 @@ def _host_path_context(payload: bytes, offset: int) -> str:
 
 
 def render_text(
-    runs: list[Run], findings: list[Finding], *, pinned_artifact_count: int = 0
+    runs: list[Run],
+    findings: list[Finding],
+    *,
+    pinned_artifact_count: int = 0,
+    comparisons: list[dict[str, object]] | None = None,
 ) -> str:
+    comparisons = comparisons or []
     lines = ["Golden-artifact determinism check (hash seed + path varied)"]
     for index, run in enumerate(runs, start=1):
         lines.append(f"  run {index}: {run.label}")
@@ -1074,10 +1624,13 @@ def render_text(
             f"  pinned artifacts (pin-verified, not regenerated): "
             f"{pinned_artifact_count}"
         )
+    for line in _platform_variable_header(comparisons):
+        lines.append(line)
     lines.append("")
 
     if not findings:
         lines.append("OK: every regenerated artifact was byte-identical across runs.")
+        lines.extend(_platform_variable_drift_lines(comparisons))
         return "\n".join(lines)
 
     lines.append(f"FAIL: {len(findings)} differing/suspect artifact(s):")
@@ -1086,6 +1639,7 @@ def render_text(
         lines.append(f"  {finding.artifact}  [{finding.kind}]")
         for detail_line in finding.detail.splitlines():
             lines.append(f"      {detail_line}")
+    lines.extend(_platform_variable_drift_lines(comparisons))
     lines.append("")
     lines.append("Differing artifact paths:")
     for artifact in sorted({f.artifact for f in findings}):
@@ -1093,8 +1647,57 @@ def render_text(
     return "\n".join(lines)
 
 
+def _platform_variable_header(comparisons: list[dict[str, object]]) -> list[str]:
+    """The loud part of the declaration (issue #2275): every artifact
+    compared under a declared guarantee is named in every report -- a
+    threshold-compared region must never masquerade as byte-exact."""
+    if not comparisons:
+        return []
+    lines = [
+        "  platform-variable artifacts (threshold-compared under declared "
+        "guarantees, not byte-exact):"
+    ]
+    for comparison in comparisons:
+        unmatched = comparison.get("unmatched_patterns") or []
+        note = (
+            f" -- WARNING: declared field(s) {', '.join(unmatched)} matched "
+            "no leaf in this artifact"
+            if unmatched
+            else ""
+        )
+        lines.append(
+            f"    {comparison['artifact']} -- guarantee "
+            f"{comparison['guarantee']!r}: format {comparison['format']}, "
+            f"max_abs_ulps {comparison['max_abs_ulps']}{note}"
+        )
+    return lines
+
+
+def _platform_variable_drift_lines(comparisons: list[dict[str, object]]) -> list[str]:
+    """Named, accepted drift (issue #2275): a declared field that moved
+    within its threshold is an OK-line, not silence -- the whole artifact
+    did not byte-compare and the report must say which fields did not."""
+    lines: list[str] = []
+    for comparison in comparisons:
+        moved = comparison.get("moved") or []
+        if not moved:
+            continue
+        fields = ", ".join(f"{entry['field']}={entry['ulp']}ulp" for entry in moved)
+        lines.append(
+            f"OK (declared platform-variable drift): {comparison['artifact']} "
+            f"-- guarantee {comparison['guarantee']!r}: max observed "
+            f"{comparison['max_observed_ulps']} ulp (declared max "
+            f"{comparison['max_abs_ulps']}); fields: {fields}"
+        )
+    return lines
+
+
 def render_json(
-    runs: list[Run], findings: list[Finding], *, pinned_artifact_count: int = 0
+    runs: list[Run],
+    findings: list[Finding],
+    *,
+    pinned_artifact_count: int = 0,
+    comparisons: list[dict[str, object]] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -1112,6 +1715,11 @@ def render_json(
             # Pinned artifacts sit outside the byte-compare (issue #2279);
             # reported so a consumer can see they were verified, not skipped.
             "pinned_artifact_count": pinned_artifact_count,
+            # Declared platform-variable regions (issue #2275): every
+            # threshold-compared artifact is recorded here, accepted drift
+            # included, so a consumer never mistakes a green for "byte-
+            # identical everywhere".
+            "platform_variable": comparisons or [],
             "findings": [finding.as_dict() for finding in findings],
             "differing_artifacts": sorted({f.artifact for f in findings}),
         },
@@ -1125,6 +1733,84 @@ def render_annotations(findings: list[Finding]) -> list[str]:
         f"{finding.detail.splitlines()[0] if finding.detail else 'differs across runs'}"
         for finding in findings
     ]
+
+
+def _recipe_command(runs: list[Run]) -> str:
+    """The exact command that reproduces this check's result: same two
+    checkouts, same two seeds (issue #2275's rerun step of the triage --
+    a failure must come with its reproduction, not a description)."""
+    parts = ["python3 scripts/check_artifact_determinism.py"]
+    parts.extend(f"--checkout {run.checkout}" for run in runs)
+    parts.extend(f"--seed {run.seed}" for run in runs)
+    parts.append("--annotate")
+    return " \\\n    ".join(parts)
+
+
+def rerun_recipe_text(runs: list[Run], *, forensics_dir: Path | None = None) -> str:
+    """The triage block appended to a failing report (issue #2275): the
+    rerun recipe plus the order of operations -- prove the inputs
+    bit-identical from the forensics evidence, get one green rerun at the
+    identical head, and only then suspect the code."""
+    lines = [
+        "Reproduce this failure (rerun recipe -- same checkouts, same seeds):",
+        *(f"  {line}" for line in _recipe_command(runs).splitlines()),
+    ]
+    if forensics_dir is not None:
+        lines.append(
+            f"  forensics (both variants of every differing artifact, plus\n"
+            f"  this report and rerun.sh) were written to: {forensics_dir}"
+        )
+    lines.append(
+        "  Triage before blaming code (issue #2275): confirm the inputs were\n"
+        "  bit-identical between the failing and passing runs, then get one\n"
+        "  green rerun at this exact head -- only then treat it as a\n"
+        "  regression. See docs/guides/golden-artifact-determinism.md."
+    )
+    return "\n".join(lines)
+
+
+def write_forensics(
+    directory: Path,
+    runs: list[Run],
+    findings: list[Finding],
+    *,
+    report_text: str,
+    report_json: str,
+) -> None:
+    """Write the failure evidence pack (issue #2275): the text and JSON
+    reports, a rerun script carrying the exact seeds and checkouts, and --
+    the part a log cannot give you -- **both variants of every differing
+    artifact**, laid out run-by-run so the bit-identical-inputs question can
+    be answered from the CI artifacts alone. Caller handles OSErrors: this
+    is evidence, not the verdict."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "report.txt").write_text(report_text, encoding="utf-8")
+    (directory / "report.json").write_text(report_json, encoding="utf-8")
+    (directory / "rerun.sh").write_text(
+        "#!/bin/sh\n"
+        "# Re-run the failing golden-artifact determinism check with the\n"
+        "# exact checkouts and seeds of this run (issue #2275 triage).\n"
+        f"{_recipe_command(runs)}\n",
+        encoding="utf-8",
+    )
+    differing = {finding.artifact for finding in findings}
+    for index, run in enumerate(runs, start=1):
+        for artifact in sorted(differing & set(run.artifacts)):
+            path = directory / "artifacts" / f"run-{index}" / artifact
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(run.artifacts[artifact])
+
+
+def write_cannot_run_forensics(directory: Path, message: str) -> None:
+    """The exit-2 twin of `write_forensics`: a check that could not run
+    writes why, so the uploaded evidence explains its own absence."""
+    directory.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"schema_version": SCHEMA_VERSION, "status": "cannot_run", "error": message},
+        indent=2,
+    )
+    (directory / "report.txt").write_text(f"cannot run: {message}\n", encoding="utf-8")
+    (directory / "report.json").write_text(payload, encoding="utf-8")
 
 
 def write_step_summary(text: str) -> None:
@@ -1222,6 +1908,15 @@ def main(argv: list[str] | None = None) -> int:
         help="emit GitHub Actions ::error:: annotations",
     )
     parser.add_argument(
+        "--forensics-dir",
+        type=Path,
+        default=None,
+        help="on failure, write the evidence pack here: both reports, a "
+        "rerun script with the exact seeds/checkouts, and both variants of "
+        "every differing artifact (issue #2275 triage; created only on "
+        "failure)",
+    )
+    parser.add_argument(
         "--python",
         default=sys.executable,
         help="interpreter used to run each generator",
@@ -1275,15 +1970,58 @@ def main(argv: list[str] | None = None) -> int:
                 "no artifacts were collected -- the generators wrote nothing this "
                 "check knows about, so it would have passed without checking anything"
             )
-        findings = list(static.values()) + compare_runs(runs)
+        dynamic, comparisons = compare_runs(runs, generators)
+        findings = list(static.values()) + dynamic
     except CannotRun as exc:
         print(f"cannot run: {exc}", file=sys.stderr)
+        _forensics_on_cannot_run(args.forensics_dir, exc)
         return EXIT_CANNOT_RUN
+    return _report(runs, findings, comparisons, generators, args)
 
+
+def _report(
+    runs: list[Run],
+    findings: list[Finding],
+    comparisons: list[dict[str, object]],
+    generators: list[Generator],
+    args: argparse.Namespace,
+) -> int:
+    """Render, annotate, summarize -- and on failure, echo the rerun recipe
+    and (when requested) write the forensics evidence pack (issue #2275)."""
     pinned_count = sum(len(g.pinned_files()) for g in generators if g.pinned)
-    text = render_text(runs, findings, pinned_artifact_count=pinned_count)
+    text = render_text(
+        runs,
+        findings,
+        pinned_artifact_count=pinned_count,
+        comparisons=comparisons,
+    )
+    if findings:
+        # The rerun recipe rides on EVERY failure (issue #2275: a failure
+        # must be reproducible from its own log); the evidence pack is
+        # written only when a forensics directory was requested.
+        text = "\n".join(
+            [text, rerun_recipe_text(runs, forensics_dir=args.forensics_dir)]
+        )
+        if args.forensics_dir is not None:
+            _forensics_on_fail(
+                args.forensics_dir,
+                runs,
+                findings,
+                report_text=text,
+                report_json=render_json(
+                    runs,
+                    findings,
+                    pinned_artifact_count=pinned_count,
+                    comparisons=comparisons,
+                ),
+            )
     print(
-        render_json(runs, findings, pinned_artifact_count=pinned_count)
+        render_json(
+            runs,
+            findings,
+            pinned_artifact_count=pinned_count,
+            comparisons=comparisons,
+        )
         if args.format == "json"
         else text
     )
@@ -1292,6 +2030,47 @@ def main(argv: list[str] | None = None) -> int:
             print(annotation)
     write_step_summary(text)
     return EXIT_DIFFER if findings else EXIT_OK
+
+
+def _forensics_on_fail(
+    directory: Path,
+    runs: list[Run],
+    findings: list[Finding],
+    *,
+    report_text: str,
+    report_json: str,
+) -> None:
+    """Best-effort evidence pack on a differ (issue #2275): an OSError while
+    writing forensics is warned about on stderr, never allowed to mask the
+    verdict -- but the CI upload step (if-no-files-found: ignore) will then
+    find nothing, which is its own loud signal."""
+    try:
+        write_forensics(
+            directory,
+            runs,
+            findings,
+            report_text=report_text,
+            report_json=report_json,
+        )
+    except OSError as exc:
+        print(
+            f"warning: could not write forensics to {directory}: {exc}", file=sys.stderr
+        )
+
+
+def _forensics_on_cannot_run(directory: Path | None, exc: CannotRun) -> None:
+    """The exit-2 twin: write why the check could not run, so the uploaded
+    evidence explains its own absence."""
+    if directory is None:
+        return
+    try:
+        write_cannot_run_forensics(directory, str(exc))
+    except OSError as write_exc:
+        print(
+            f"warning: could not write cannot-run forensics to {directory}: "
+            f"{write_exc}",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

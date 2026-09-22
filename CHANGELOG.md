@@ -14,6 +14,28 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2275, `scripts/check_artifact_determinism.py` + CI + docs,
+  additive — **no** `schema_version` bump): flake-triage forensics and
+  declared platform-variable regions for golden-artifact evidence. The
+  determinism check gains a fourth float discipline, `platform-variable`:
+  a manifest entry that declares it — per artifact glob, per enumerated
+  JSON field path, under a stated format and a `max_abs_ulps` threshold —
+  is regenerated and threshold-compared instead of byte-compared, so
+  irreducibly host-libm outputs (transcendental digests) get an explicit
+  guarantee while everything else stays byte-exact (an undeclared region
+  or artifact that drifts still fails, and every report names the declared
+  regions and any accepted drift). A failing run also writes a forensics
+  pack (`--forensics-dir`; both CI jobs running the check upload it on
+  failure): both variants of every differing artifact, both reports, and a
+  rerun script carrying the exact seeds and checkouts — the
+  triage-before-blaming-code pattern of issue #2275, from the CI artifacts
+  alone. The CI jobs document which dispatch-variance classes do and do
+  not apply to this stack (no BLAS/PyTorch/oneDNN exists here, so no
+  `ATEN_CPU_CAPABILITY`/`MKL_CBWR`/`ONEDNN_MAX_CPU_ISA`; no runtime CPU
+  dispatch in `native/`; host libm is the one real class, handled by the
+  scan + declaration, not env pinning). See
+  [`docs/guides/golden-artifact-determinism.md`](docs/guides/golden-artifact-determinism.md)
+  → "Flake triage".
 - **Added** (#2280, `klt equiv` + docs, additive — **no** `schema_version`
   bump: two new optional CLI flags, one request-independent
   present-only-under-`--resume` envelope block, one new diagnostic code,

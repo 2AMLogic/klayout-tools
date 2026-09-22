@@ -1174,12 +1174,37 @@ jobs:
         # only in the numpy-less `artifact-determinism` job). Exit 1 = an
         # artifact differed; exit 2 = the check could not run -- both red,
         # never a silent pass.
+        #
+        # --forensics-dir (issue #2275): same evidence pack as the
+        # `artifact-determinism` job -- both variants of every differing
+        # artifact plus the rerun recipe -- uploaded by the next step under
+        # a distinct name so the two jobs' uploads never 409 each other.
+        # Dispatch-env note: identical reasoning to that job's header
+        # comment -- no ATEN/MKL/oneDNN pinning applies to this stack (no
+        # BLAS/PyTorch/oneDNN; numpy is dev-oracle-only, never on a
+        # committed-byte path), and the host-libm class is handled by the
+        # check's static scan + declared platform-variable regions.
         working-directory: primary
         run: |
           uv run --frozen --extra dev --group numerical python scripts/check_artifact_determinism.py \
             --checkout "$GITHUB_WORKSPACE/primary" \
             --checkout "$GITHUB_WORKSPACE/second-checkout/nested/deeper-than-the-primary" \
+            --forensics-dir "$GITHUB_WORKSPACE/determinism-forensics-numerical" \
             --annotate
+
+      - name: Upload failure forensics (artifact pairs + rerun recipe)
+        # Issue #2275 triage evidence for the dep-full leg: written only on
+        # failure, uploaded only on failure, retained like the repo's other
+        # evidence artifacts. Distinct `name` from the
+        # `artifact-determinism` job's upload -- both can fail in the same
+        # workflow run, and sharing a name would 409 the second upload.
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: determinism-forensics-numerical
+          path: determinism-forensics-numerical/
+          retention-days: 90
+          if-no-files-found: ignore
 
   action-smoke-test:
     name: klt verify Action smoke test
@@ -1278,6 +1303,31 @@ jobs:
     # (~1.5 s of work between them), so queueing behind the heavy pool --
     # four times over, once per Python version -- would cost far more than
     # the check.
+    #
+    # Dispatch-env pinning, scoped honestly to this stack (issue #2275's
+    # "pin the dispatch environment" step): there is deliberately NO
+    # ATEN_CPU_CAPABILITY / MKL_CBWR / ONEDNN_MAX_CPU_ISA here. This repo
+    # has no PyTorch/MKL/oneDNN/BLAS dependency, so those variables would
+    # pin nothing -- adding them would be cargo cult, not determinism. The
+    # variance classes, enumerated:
+    #   - klayout's Python API: the checked generators reach their
+    #     committed bytes through integer-dbu geometry and layer tables
+    #     only -- no float kernels, no dispatch to vary.
+    #   - native/ Rust crates: no runtime CPU dispatch exists -- no
+    #     `std::arch`, no `is_x86_feature_detected`, no `target_feature`
+    #     anywhere under native/*/src (verified when wiring #2275) -- and
+    #     no generator's committed bytes flow through them anyway.
+    #   - the one real class is host libm under the Python generators,
+    #     which legitimately differs between a macOS laptop and an ubuntu
+    #     runner (and across Python versions). That is handled
+    #     structurally -- #2279's static float scan plus the
+    #     `platform-variable` declaration -- not by env pinning, and it is
+    #     invisible to this job's two same-host runs by construction.
+    # The concrete host heterogeneity this job's results could see is the
+    # runner-pool split (`[self-hosted, heavy]` vs `ubuntu-latest`); a
+    # byte-exact numeric fixture evaluated for this repo must be judged
+    # against THAT split (see docs/guides/golden-artifact-determinism.md,
+    # "Flake triage", and docs/design/numeric-fixture-comparison-convention.md).
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1315,12 +1365,37 @@ jobs:
         # Exit 1 = an artifact differed (the failure this job exists for);
         # exit 2 = the check could not run, which is also a red, never a
         # silent pass.
+        #
+        # --forensics-dir (issue #2275): on failure the check writes the
+        # evidence pack -- both variants of every differing artifact, both
+        # reports, and a rerun script with the exact seeds/checkouts -- to
+        # the directory the next step uploads. Triage happens from that
+        # evidence (inputs bit-identical? one green rerun at this head?)
+        # BEFORE the code is blamed; see
+        # docs/guides/golden-artifact-determinism.md, "Flake triage".
         working-directory: primary
         run: |
           uv run --frozen --extra dev python scripts/check_artifact_determinism.py \
             --checkout "$GITHUB_WORKSPACE/primary" \
             --checkout "$GITHUB_WORKSPACE/second-checkout/nested/deeper-than-the-primary" \
+            --forensics-dir "$GITHUB_WORKSPACE/determinism-forensics" \
             --annotate
+
+      - name: Upload failure forensics (artifact pairs + rerun recipe)
+        # Issue #2275: a byte-compare failure must arrive with its own
+        # evidence. The pack is written only on failure, so on a green run
+        # this step is skipped (`if: failure()`) and the upload would find
+        # no files anyway (`if-no-files-found: ignore` keeps a cannot-run
+        # crash from failing the upload step on top of the real red).
+        # retention-days matches the repo's other evidence artifacts
+        # (design-agent-benchmark, kb-drift-canary).
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: determinism-forensics
+          path: determinism-forensics/
+          retention-days: 90
+          if-no-files-found: ignore
 
   wall-clock-budget:
     name: CI wall-clock budget
