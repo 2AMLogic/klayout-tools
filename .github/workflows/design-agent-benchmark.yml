@@ -107,16 +107,28 @@ jobs:
 
       - name: Regression-test the reference-passes/degraded-variant-fails contract
         # tests/test_design_agent_benchmark.py's `deliberately_broken`/
-        # `medium_tier_gates` integration tests need a full sky130A ngspice
+        # `mutation_gate` integration tests need a full sky130A ngspice
         # PDK (issue #1736), which ci.yml's main `test` job deliberately
         # does not provision (liberty-only, see that job's own `pytest`
         # step comment) -- they skip there and run for real here instead,
-        # against the real PDK this job already fetched above.
+        # against the real PDK this job already fetched above. The
+        # `mutation_gate` selector replaced `medium_tier_gates` in issue
+        # #2262, when the hand-written mutation list moved out of that test
+        # and into per-task `tasks/<id>.mutations.json` documents; it also
+        # picks up that section's fast (stubbed-`klt eval`) unit tests,
+        # deliberately.
         run: |
           uv run --frozen --extra dev pytest tests/test_design_agent_benchmark.py \
-            -k "deliberately_broken or medium_tier_gates" -v
+            -k "deliberately_broken or mutation_gate" -v
 
-      - name: Validate task set + reference solutions
+      - name: Validate task set + reference solutions + mutation gates
+        # `validate` also enforces every task's declared mutation gate as of
+        # issue #2262 (each `tasks/<id>.mutations.json` mutant must be
+        # rejected by its own task's gate), which adds one more real corner
+        # sweep per declared mutant -- 4 as of this issue, against the 12
+        # reference-solution sweeps this step already paid for. Measuring and
+        # (if needed) caching that added cost is deferred to issue #2263,
+        # when there is more than 3 tasks' worth of it to measure.
         run: |
           uv run --frozen python scripts/design_agent_benchmark.py validate \
             | tee design-agent-benchmark-validate.json

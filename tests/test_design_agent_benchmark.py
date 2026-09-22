@@ -339,6 +339,377 @@ def test_validate_rejects_missing_reference_artifact():
 
 
 # --------------------------------------------------------------------------
+# Unit tests: per-task mutation gates (issue #2262)
+#
+# These exercise the mutation-gate *mechanism* -- schema validation, anchor
+# uniqueness, the killed/survived/unbuildable/declared-equivalent
+# classification, and `validate`'s own pass/fail wiring -- with `klt eval`
+# stubbed out (`dab.run_eval` monkeypatched), so they run everywhere without
+# `ngspice`/a real sky130A PDK. Whether the *shipped* mutants are actually
+# killed by the *real* gates is the real-ngspice integration test further
+# down (`test_declared_mutation_gate_kills_every_mutant`).
+# --------------------------------------------------------------------------
+
+MUTATIONS_SCHEMA_PATH = (
+    REPO_ROOT / "benchmarks" / "design-agent" / "schema" / "mutations.schema.json"
+)
+
+#: Every task shipping a mutation gate today, derived from the tasks
+#: directory rather than hardcoded -- issue #2263 adds more.
+MUTATION_TASK_IDS = sorted(
+    path.name[: -len(dab.MUTATIONS_SUFFIX)]
+    for path in TASKS_DIR.glob(f"*{dab.MUTATIONS_SUFFIX}")
+)
+
+#: The exact (task, mutant) set migrated out of this module's former
+#: hand-written `parametrize` list (issue #1734's discrimination check) into
+#: per-task mutations documents by issue #2262. Asserted below so the
+#: migration cannot silently change *which* mutants are exercised.
+MIGRATED_MUTANTS = {
+    ("telescopic-cascode-amp", "cascode-devices-removed"),
+    ("miller-integrator", "integrating-cap-removed"),
+    ("schmitt-trigger", "schmitt-feedback-deleted"),
+    ("schmitt-trigger", "schmitt-feedback-undersized"),
+}
+
+
+def _stub_eval(valid: bool):
+    """A `dab.run_eval` stand-in returning a fixed verdict -- `valid: True`
+    means "the gate accepted this mutant" (i.e. a survivor)."""
+
+    def _run_eval(*_args, **_kwargs):
+        return {"valid": valid, "gates": [], "objective": None}
+
+    return _run_eval
+
+
+def _mutations_tasks_dir(tmp_path: Path, task_id: str, document: dict) -> Path:
+    """A scratch tasks directory holding one shipped task plus a (possibly
+    deliberately broken) mutations document for it. Reference paths stay
+    repository-relative, so `REPO_ROOT` remains the repo root to pass."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy(TASKS_DIR / f"{task_id}.json", tasks_dir / f"{task_id}.json")
+    (tasks_dir / f"{task_id}{dab.MUTATIONS_SUFFIX}").write_text(json.dumps(document))
+    return tasks_dir
+
+
+def _shipped_mutations(task_id: str) -> dict:
+    return json.loads((TASKS_DIR / f"{task_id}{dab.MUTATIONS_SUFFIX}").read_text())
+
+
+def test_task_paths_skips_mutations_documents():
+    """A `<id>.mutations.json` sits beside the task it belongs to, so the
+    task glob must not pick it up as a task descriptor."""
+    names = {path.name for path in dab._task_paths(TASKS_DIR)}
+    assert names
+    assert not any(name.endswith(dab.MUTATIONS_SUFFIX) for name in names)
+    assert "telescopic-cascode-amp.json" in names
+
+
+def test_shipped_mutations_documents_validate_against_their_schema():
+    validator = dab._mutations_validator(MUTATIONS_SCHEMA_PATH)
+    assert MUTATION_TASK_IDS
+    for task_id in MUTATION_TASK_IDS:
+        task = dab.load_task(TASKS_DIR / f"{task_id}.json")
+        path = TASKS_DIR / f"{task_id}{dab.MUTATIONS_SUFFIX}"
+        document, errors = dab._mutations_errors(path, task, validator)
+        assert errors == [], f"{task_id}: {errors}"
+        assert document is not None
+
+
+def test_shipped_mutation_files_declare_exactly_the_migrated_mutants():
+    """Issue #2262 is a *mechanical* port of the four mutants issue #1734's
+    hand-written `parametrize` list exercised -- not a redesign of which
+    mutants are tested. This pins that set."""
+    declared = {
+        (task_id, mutant["name"])
+        for task_id in MUTATION_TASK_IDS
+        for mutant in _shipped_mutations(task_id)["targeted"]
+    }
+    assert declared == MIGRATED_MUTANTS
+
+
+def test_mutation_gate_kills_every_declared_mutant_when_the_gate_rejects(monkeypatch):
+    """The aggregate happy path over the whole shipped tasks directory: the
+    three tasks with a mutations document are checked, the nine without are
+    skipped entirely (neither a pass nor a failure)."""
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(False))
+    result = dab.check_mutation_gates(TASKS_DIR, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is True, result
+    assert result["task_count"] == len(MUTATION_TASK_IDS)
+    assert result["mutant_count"] == len(MIGRATED_MUTANTS)
+    assert result["survived_count"] == 0
+    assert {t["id"] for t in result["tasks"]} == set(MUTATION_TASK_IDS)
+    for task_result in result["tasks"]:
+        assert task_result["killed"] == task_result["total"]
+        assert all(m["status"] == "killed" for m in task_result["mutants"])
+
+
+def test_mutation_gate_fails_on_a_survivor(monkeypatch, tmp_path):
+    """A mutant the task's own gate *accepts* is a survivor: the gate is not
+    discriminating what the mutant changes, and `validate` must fail."""
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(True))
+    tasks_dir = _mutations_tasks_dir(
+        tmp_path, "miller-integrator", _shipped_mutations("miller-integrator")
+    )
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert result["survived_count"] == 1
+    mutant = result["tasks"][0]["mutants"][0]
+    assert mutant["status"] == "survived"
+    assert mutant["name"] == "integrating-cap-removed"
+
+
+def test_mutation_gate_accepts_a_survivor_declared_equivalent(monkeypatch, tmp_path):
+    """A survivor is only forgiven when `equivalent[]` declares it, with a
+    written reason AND a code anchor that still occurs in the mutated
+    netlist."""
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(True))
+    document = _shipped_mutations("miller-integrator")
+    document["equivalent"] = [
+        {
+            "name": "integrating-cap-removed",
+            "code": "Cf gate out 1f",
+            "reason": "fixture: not a real equivalence argument",
+        }
+    ]
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is True, result
+    mutant = result["tasks"][0]["mutants"][0]
+    assert mutant["status"] == "declared-equivalent"
+    assert mutant["equivalence_declared"] is True
+    assert result["tasks"][0]["declared_equivalent"] == 1
+
+
+def test_mutation_gate_reverts_to_survived_on_a_stale_equivalence_anchor(
+    monkeypatch, tmp_path
+):
+    """Issue #2254's requirement 2: a declaration whose code anchor no
+    longer occurs reverts to SURVIVED until re-verified -- an equivalence
+    argument cannot outlive the text it was written about."""
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(True))
+    document = _shipped_mutations("miller-integrator")
+    document["equivalent"] = [
+        {
+            "name": "integrating-cap-removed",
+            "code": "Cf gate out 4711f",
+            "reason": "fixture: anchor no longer present",
+        }
+    ]
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    mutant = result["tasks"][0]["mutants"][0]
+    assert mutant["status"] == "survived"
+    assert "stale" in mutant["note"]
+
+
+def test_mutation_gate_reports_unverified_for_an_anchorless_equivalence(
+    monkeypatch, tmp_path
+):
+    """A declaration with an explicitly null anchor is UNVERIFIED, and still
+    fails -- it is never a way to silence a survivor."""
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(True))
+    document = _shipped_mutations("miller-integrator")
+    document["equivalent"] = [
+        {
+            "name": "integrating-cap-removed",
+            "code": None,
+            "reason": "fixture: no anchor given",
+        }
+    ]
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert result["tasks"][0]["unverified"] == 1
+    assert result["tasks"][0]["mutants"][0]["status"] == "unverified"
+
+
+def test_mutation_gate_rejects_an_equivalence_naming_no_targeted_mutant(tmp_path):
+    document = _shipped_mutations("miller-integrator")
+    document["equivalent"] = [
+        {"name": "no-such-mutant", "code": "Cf", "reason": "fixture"}
+    ]
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert any(
+        "names no targeted mutant" in error for error in result["tasks"][0]["errors"]
+    )
+
+
+def test_mutation_gate_rejects_a_find_anchor_matching_several_sites(tmp_path):
+    """Issue #2254's requirement 1: an anchor must match exactly one site in
+    the netlist it targets, or validation errors out -- a mutant applied to
+    two sites at once is not the mutant that was declared."""
+    document = _shipped_mutations("schmitt-trigger")
+    document["targeted"] = [
+        {
+            "name": "ambiguous-anchor",
+            "netlist": "schmitt.spice",
+            "find": "L=1 W=10 nf=1 mult=1",
+            "replace": "L=1 W=1 nf=1 mult=1",
+            "why": "fixture: matches all three NMOS cards",
+        }
+    ]
+    tasks_dir = _mutations_tasks_dir(tmp_path, "schmitt-trigger", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert any(
+        "must match exactly one" in error for error in result["tasks"][0]["errors"]
+    )
+    assert result["tasks"][0]["mutants"][0]["status"] == "unapplied"
+
+
+def test_mutation_gate_rejects_a_find_anchor_matching_nothing(tmp_path):
+    document = _shipped_mutations("miller-integrator")
+    document["targeted"][0]["find"] = "Cf gate out {this-is-not-in-the-netlist}"
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert any("matches 0 sites" in error for error in result["tasks"][0]["errors"])
+
+
+def test_mutation_gate_rejects_an_empty_targeted_list(tmp_path):
+    """Issue #2254's requirement 3: a task shipping a mutations document
+    cannot pass its own discrimination gate vacuously."""
+    document = _shipped_mutations("miller-integrator")
+    document["targeted"] = []
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert result["tasks"][0]["total"] == 0
+    assert result["tasks"][0]["errors"]
+
+
+def test_mutation_gate_rejects_a_mismatched_task_field(tmp_path):
+    document = _shipped_mutations("miller-integrator")
+    document["task"] = "some-other-task"
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert any(
+        "does not match filename stem" in error
+        for error in result["tasks"][0]["errors"]
+    )
+
+
+def test_mutation_gate_rejects_a_netlist_outside_the_tasks_reference_netlists(tmp_path):
+    document = _shipped_mutations("miller-integrator")
+    document["targeted"][0]["netlist"] = "not_a_declared_netlist.spice"
+    tasks_dir = _mutations_tasks_dir(tmp_path, "miller-integrator", document)
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is False
+    assert any(
+        "reference.netlists entries" in error for error in result["tasks"][0]["errors"]
+    )
+
+
+def test_mutation_gate_reports_an_unscorable_mutant_as_unbuildable(
+    monkeypatch, tmp_path
+):
+    """A mutant whose gate cannot be scored at all (`EvalError`: ngspice
+    refused the deck, a measurement had nothing to read) is reported in its
+    own bucket. It is certainly not a survivor, so it does not fail
+    validation -- but it is not counted as a kill either."""
+
+    def _raise(*_args, **_kwargs):
+        raise dab.EvalError("fixture: simulator refused the deck")
+
+    monkeypatch.setattr(dab, "run_eval", _raise)
+    tasks_dir = _mutations_tasks_dir(
+        tmp_path, "miller-integrator", _shipped_mutations("miller-integrator")
+    )
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["valid"] is True, result
+    task_result = result["tasks"][0]
+    assert task_result["unbuildable"] == 1
+    assert task_result["killed"] == 0
+    assert task_result["mutants"][0]["status"] == "unbuildable"
+
+
+def test_mutation_gate_never_touches_the_reference_solution_cache(
+    monkeypatch, tmp_path
+):
+    """A mutant's `klt eval` result must never land in the cross-step
+    reference-solution cache (issue #1783) -- a later `run` step would then
+    score the *mutant* as if it were the reference."""
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(False))
+    writes: list[str] = []
+    monkeypatch.setattr(
+        dab,
+        "_write_reference_cache",
+        lambda *args, **kwargs: writes.append(str(args)),
+    )
+    tasks_dir = _mutations_tasks_dir(
+        tmp_path, "miller-integrator", _shipped_mutations("miller-integrator")
+    )
+    dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert writes == []
+
+
+def test_validate_cli_fails_and_reports_the_mutation_gate_block(
+    monkeypatch, tmp_path, capsys
+):
+    """End-to-end through `validate`'s own CLI entry point: a stubbed gate
+    that accepts everything makes the reference-solution check pass and every
+    mutant survive, so `validate` must exit non-zero and say why in its
+    `mutation_gates` block."""
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(True))
+    # Own repo root, so the reference-solution cache this writes lands in a
+    # throwaway tree rather than the checkout's own .klt/ directory.
+    scratch_repo = tmp_path / "repo"
+    reference_rel = Path("benchmarks", "design-agent", "reference", "miller-integrator")
+    (scratch_repo / reference_rel).parent.mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / reference_rel, scratch_repo / reference_rel)
+    tasks_dir = _mutations_tasks_dir(
+        tmp_path, "miller-integrator", _shipped_mutations("miller-integrator")
+    )
+
+    exit_code = dab.main(
+        [
+            "validate",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--repo-root",
+            str(scratch_repo),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 1
+    assert payload["reference_solutions"]["valid"] is True
+    assert payload["mutation_gates"]["valid"] is False
+    assert payload["mutation_gates"]["survived_count"] == 1
+
+
+def test_validate_cli_can_skip_the_mutation_gates(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(dab, "run_eval", _stub_eval(True))
+    scratch_repo = tmp_path / "repo"
+    reference_rel = Path("benchmarks", "design-agent", "reference", "miller-integrator")
+    (scratch_repo / reference_rel).parent.mkdir(parents=True)
+    shutil.copytree(REPO_ROOT / reference_rel, scratch_repo / reference_rel)
+    tasks_dir = _mutations_tasks_dir(
+        tmp_path, "miller-integrator", _shipped_mutations("miller-integrator")
+    )
+
+    exit_code = dab.main(
+        [
+            "validate",
+            "--tasks-dir",
+            str(tasks_dir),
+            "--repo-root",
+            str(scratch_repo),
+            "--skip-mutation-gates",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == 0
+    assert payload["mutation_gates"] is None
+
+
+# --------------------------------------------------------------------------
 # Unit tests: tier aggregation
 # --------------------------------------------------------------------------
 
@@ -723,127 +1094,48 @@ def test_deliberately_broken_reference_netlist_fails_its_gate_and_drops_pass_rat
         assert broken_run["tiers"]["easy"]["solved_count"] == 0
 
 
-def _scratch_task_with_patched_netlist(
-    tmp_path: Path, task_id: str, netlist_name: str, replacements: list[tuple[str, str]]
-) -> tuple[Path, Path]:
-    """Copy one shipped task and its whole reference directory into a
-    scratch repo root, applying ``replacements`` to the named netlist.
-    Returns ``(scratch_tasks_dir, scratch_repo_root)`` ready to hand to
-    :func:`dab.check_reference_solutions`."""
-    scratch_repo = tmp_path / "repo"
-    scratch_tasks = scratch_repo / "benchmarks" / "design-agent" / "tasks"
-    ref_rel = Path("benchmarks", "design-agent", "reference", task_id)
-    scratch_tasks.mkdir(parents=True)
-    shutil.copytree(REPO_ROOT / ref_rel, scratch_repo / ref_rel)
-
-    task = dab.load_task(TASKS_DIR / f"{task_id}.json")
-    (scratch_tasks / f"{task_id}.json").write_text(json.dumps(task))
-
-    netlist_path = scratch_repo / ref_rel / netlist_name
-    body = netlist_path.read_text()
-    for old, new in replacements:
-        assert old in body, f"{netlist_name}: pattern not found: {old!r}"
-        body = body.replace(old, new)
-    netlist_path.write_text(body)
-    return scratch_tasks, scratch_repo
-
-
 @_SKIP_NO_NGSPICE
-@pytest.mark.parametrize(
-    ("task_id", "netlist_name", "replacements", "why"),
-    [
-        pytest.param(
-            "telescopic-cascode-amp",
-            "casc_amp.spice",
-            [
-                (
-                    "XM1 n1  gate 0   0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 "
-                    "mult=1",
-                    "XM1 out gate 0   0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 "
-                    "mult=1",
-                ),
-                (
-                    "XM2 out nbc  n1  0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 "
-                    "mult=1\n",
-                    "",
-                ),
-                (
-                    "XM3 out pbc  n2  vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 "
-                    "mult=1\n",
-                    "",
-                ),
-                (
-                    "XM4 n2  pbs  vdd vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 "
-                    "mult=1",
-                    "XM4 out pbs  vdd vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 "
-                    "mult=1",
-                ),
-            ],
-            "both cascode devices removed -> plain common-source stage",
-            id="cascode-devices-removed",
-        ),
-        pytest.param(
-            "miller-integrator",
-            "integrator.spice",
-            [("Cf gate out {cf}", "Cf gate out 1f")],
-            "integrating capacitor shrunk to 1 fF -> flat gain stage",
-            id="integrating-cap-removed",
-        ),
-        pytest.param(
-            "schmitt-trigger",
-            "schmitt.spice",
-            [
-                (
-                    "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1\n",
-                    "",
-                ),
-                (
-                    "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1\n",
-                    "",
-                ),
-            ],
-            "feedback devices deleted -> plain CMOS inverter",
-            id="schmitt-feedback-deleted",
-        ),
-        pytest.param(
-            "schmitt-trigger",
-            "schmitt.spice",
-            [
-                (
-                    "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1",
-                    "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=1 nf=1 mult=1",
-                ),
-                (
-                    "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1",
-                    "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=2 nf=1 mult=1",
-                ),
-            ],
-            "feedback devices under-sized -> ~0.1 V of hysteresis, not 0.3 V",
-            id="schmitt-feedback-undersized",
-        ),
-    ],
-)
-def test_medium_tier_gates_reject_a_plausible_but_wrong_topology(
-    task_id, netlist_name, replacements, why
-):
+@pytest.mark.parametrize("task_id", MUTATION_TASK_IDS)
+def test_declared_mutation_gate_kills_every_mutant(task_id, tmp_path):
     """Issue #1734's "thresholds actually discriminate correct from
-    incorrect sizing" check, as a regression test rather than a one-off
-    manual sweep.
+    incorrect sizing" check, now driven off each task's own
+    ``<id>.mutations.json`` through the same :func:`dab.check_mutation_gates`
+    enforcement path ``design_agent_benchmark.py validate`` uses (issue
+    #2262) -- rather than off a hand-written ``parametrize`` list of
+    find/replace pairs living in this test file.
 
-    Each mutation below leaves a circuit that still simulates cleanly and
+    Every declared mutant leaves a circuit that still simulates cleanly and
     still *looks* like an answer -- a well-biased common-source stage, a
     working gain stage, a working CMOS inverter -- and differs from the
     reference only in the property its task is actually about. A gate that
-    passed any of these would not be measuring the named circuit class. The
-    Schmitt trigger cases matter most: its criterion is behavioral
+    passed any of them would not be measuring the named circuit class. The
+    Schmitt trigger's mutants matter most: its criterion is behavioral
     (hysteresis width under a transient ramp), so a DC- or small-signal-
-    shaped gate would wave both of them through."""
-    with tempfile.TemporaryDirectory() as tmp:
-        scratch_tasks, scratch_repo = _scratch_task_with_patched_netlist(
-            Path(tmp), task_id, netlist_name, replacements
-        )
-        result = dab.check_reference_solutions(scratch_tasks, scratch_repo)
-        assert result["valid"] is False, f"{task_id} gate accepted: {why}"
+    shaped gate would wave both of them through.
+
+    Generic by construction: a task added to ``MUTATION_TASK_IDS`` simply by
+    shipping a mutations file is exercised here with no change to this test
+    (issue #2263 adds the currently-uncovered tasks)."""
+    tasks_dir = tmp_path / "tasks"
+    tasks_dir.mkdir()
+    shutil.copy(TASKS_DIR / f"{task_id}.json", tasks_dir / f"{task_id}.json")
+    shutil.copy(
+        TASKS_DIR / f"{task_id}{dab.MUTATIONS_SUFFIX}",
+        tasks_dir / f"{task_id}{dab.MUTATIONS_SUFFIX}",
+    )
+
+    result = dab.check_mutation_gates(tasks_dir, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
+    assert result["task_count"] == 1
+    task_result = result["tasks"][0]
+    survivors = [
+        f"{m['name']} ({m['why']}): {m['status']}"
+        for m in task_result["mutants"]
+        if m["status"] != "killed"
+    ]
+    assert not survivors, f"{task_id} gate accepted: {survivors}"
+    assert task_result["total"] >= 1
+    assert task_result["killed"] == task_result["total"]
+    assert result["valid"] is True, task_result["errors"]
 
 
 # --------------------------------------------------------------------------

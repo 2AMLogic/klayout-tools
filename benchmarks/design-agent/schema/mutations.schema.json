@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/benchmarks/design-agent/schema/mutations.schema.json",
+  "title": "Design-agent benchmark mutation gate",
+  "description": "The discrimination gate for one design-agent benchmark task (issue #2262): the set of deliberately-wrong variants of that task's own reference netlist(s) that the task's `reference.eval_descriptor` gate MUST reject. Lives beside the task it belongs to, at benchmarks/design-agent/tasks/<task-id>.mutations.json, and is enforced by `scripts/design_agent_benchmark.py validate` -- a declared mutant whose reference gate still returns `valid: true` fails validation, so a task's thresholds cannot silently drift into accepting a plausible-but-wrong answer. Methodology reference only: AHRR (ZijD/AHRR, ICCAD'26, MIT) makes the same 'every non-equivalent mutant of the reference must be killed' check a per-task build gate; nothing is reproduced from it. Only targeted mutants exist here -- analog SPICE has no meaningful generic operator mutations (AHRR's `<`->`<=` regex pass has no analogue).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["task", "targeted"],
+  "properties": {
+    "task": {
+      "type": "string",
+      "description": "The task id these mutants belong to; must match both the owning task's `id` and this file's own name (benchmarks/design-agent/tasks/<task>.mutations.json).",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "targeted": {
+      "type": "array",
+      "description": "Every deliberately-wrong variant of this task's reference solution. Non-empty by construction: a task that ships a mutations file but declares no mutant would pass its own discrimination gate vacuously (issue #2254's `total > 0` requirement), so the empty array is a schema error, not a free pass.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/targetedMutant" }
+    },
+    "equivalent": {
+      "type": "array",
+      "description": "Mutants that are expected to SURVIVE their task's own gate because they are semantically equivalent to the reference. Each declaration must name a `targeted[]` mutant, carry a written `reason`, and anchor itself to a `code` snippet in the mutated netlist -- if that anchor no longer occurs in the reference (someone edited the netlist out from under the declaration), the declaration is treated as stale and the mutant reverts to SURVIVED. Optional; omit or leave empty when every mutant is expected to be killed.",
+      "items": { "$ref": "#/$defs/equivalentDeclaration" }
+    }
+  },
+  "$defs": {
+    "mutantName": {
+      "type": "string",
+      "description": "Stable slug identifying one mutant within this file; unique across `targeted[]`, and what an `equivalent[]` declaration refers to.",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "exactText": {
+      "description": "One byte-exact netlist text span, or an ordered list of them. A list is how a single *conceptual* mutant (e.g. 'remove both cascode devices') expresses the several coordinated edits it takes: `find` and `replace` must then be lists of the same length, paired element by element. Every element is matched literally -- no regex, no whitespace normalization.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      ]
+    },
+    "targetedMutant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "netlist", "find", "replace", "why"],
+      "properties": {
+        "name": { "$ref": "#/$defs/mutantName" },
+        "netlist": {
+          "type": "string",
+          "description": "Which of the owning task's `reference.netlists` entries this mutant edits -- either the full repository-relative path as written there, or just its filename when that is unambiguous.",
+          "minLength": 1
+        },
+        "find": {
+          "allOf": [{ "$ref": "#/$defs/exactText" }],
+          "description": "The byte-exact span(s) of the reference netlist this mutant replaces. Each must match EXACTLY ONE site in that netlist -- zero or two or more matches is a validation error, never a silently-unapplied (or over-applied) mutant."
+        },
+        "replace": {
+          "allOf": [{ "$ref": "#/$defs/exactText" }],
+          "description": "What each corresponding `find` span becomes, byte for byte. Must be non-empty and differ from its `find`: express a deleted device by commenting its card out (prefix the line with `* `, which ngspice ignores) rather than by replacing it with the empty string, so the mutated netlist still shows what was removed."
+        },
+        "why": {
+          "type": "string",
+          "description": "What this mutant makes the circuit be instead, and therefore what the task's gate is being proven to discriminate (e.g. 'both cascode devices removed -> plain common-source stage'). Free text, echoed into the validation report, never parsed.",
+          "minLength": 1
+        }
+      }
+    },
+    "equivalentDeclaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "code", "reason"],
+      "properties": {
+        "name": { "$ref": "#/$defs/mutantName" },
+        "code": {
+          "description": "A byte-exact snippet of the *mutated* netlist text this equivalence argument depends on -- normally the mutant's own `replace` text. Validation re-checks that it still occurs in the mutated netlist; if it does not, the declaration is stale and the mutant is reported as SURVIVED again. Explicitly `null` means 'declared without an anchor', which is reported as UNVERIFIED and fails validation -- it is never a way to silence a survivor.",
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "reason": {
+          "type": "string",
+          "description": "The written argument for why this mutant cannot change the task's measured outcome. Free text for a human reviewer; never parsed.",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

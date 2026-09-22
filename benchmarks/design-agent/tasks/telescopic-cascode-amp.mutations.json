@@ -1,0 +1,23 @@
+{
+  "task": "telescopic-cascode-amp",
+  "targeted": [
+    {
+      "name": "cascode-devices-removed",
+      "netlist": "casc_amp.spice",
+      "find": [
+        "XM1 n1  gate 0   0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 mult=1",
+        "XM2 out nbc  n1  0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 mult=1\n",
+        "XM3 out pbc  n2  vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 mult=1\n",
+        "XM4 n2  pbs  vdd vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 mult=1"
+      ],
+      "replace": [
+        "XM1 out gate 0   0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 mult=1",
+        "* [mutant cascode-devices-removed] XM2 out nbc  n1  0   sky130_fd_pr__nfet_01v8 L=4 W=40  nf=1 mult=1\n",
+        "* [mutant cascode-devices-removed] XM3 out pbc  n2  vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 mult=1\n",
+        "XM4 out pbs  vdd vdd sky130_fd_pr__pfet_01v8 L=4 W=100 nf=1 mult=1"
+      ],
+      "why": "both cascode devices removed -> plain common-source stage"
+    }
+  ],
+  "equivalent": []
+}

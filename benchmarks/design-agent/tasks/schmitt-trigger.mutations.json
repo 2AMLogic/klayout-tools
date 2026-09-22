@@ -1,0 +1,32 @@
+{
+  "task": "schmitt-trigger",
+  "targeted": [
+    {
+      "name": "schmitt-feedback-deleted",
+      "netlist": "schmitt.spice",
+      "find": [
+        "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1\n",
+        "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1\n"
+      ],
+      "replace": [
+        "* [mutant schmitt-feedback-deleted] XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1\n",
+        "* [mutant schmitt-feedback-deleted] XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1\n"
+      ],
+      "why": "feedback devices deleted -> plain CMOS inverter"
+    },
+    {
+      "name": "schmitt-feedback-undersized",
+      "netlist": "schmitt.spice",
+      "find": [
+        "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=10 nf=1 mult=1",
+        "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=25 nf=1 mult=1"
+      ],
+      "replace": [
+        "XMN3 vdd out na 0 sky130_fd_pr__nfet_01v8 L=1 W=1 nf=1 mult=1",
+        "XMP3 0 out nb vdd sky130_fd_pr__pfet_01v8 L=1 W=2 nf=1 mult=1"
+      ],
+      "why": "feedback devices under-sized -> ~0.1 V of hysteresis, not 0.3 V"
+    }
+  ],
+  "equivalent": []
+}
