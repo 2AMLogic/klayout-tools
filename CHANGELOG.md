@@ -32,6 +32,25 @@ not `klt --version`, if you need to detect this kind of drift. See
   `value_um: null` plus their own `limits` rather than the unused `0` they
   author as a placeholder; an unknown `--rule` id is a clean error envelope
   (exit 1), never an empty `rules` list.
+- **Fixed** (#2306, `scripts/install-fastcap.sh`, developer tooling only —
+  **no** `klt` behaviour or JSON shape change): the FastCap 2.0 capacitance
+  oracle now builds on macOS without hand-rolled local aids. Two 1992-C
+  problems made a clean macOS checkout fail where Linux/CI passed:
+  `src/mulGlobal.h` includes `<malloc.h>`, a glibc-only header macOS does
+  not ship (BSD declares `malloc`/`calloc` in `<stdlib.h>`), and
+  `src/mulSetup.c`'s unprototyped K&R `getnbrs` returns no value from an
+  `int`-returning function, which Apple Clang treats as a hard
+  `-Wreturn-mismatch` error that the build's existing `-w` does not demote.
+  The script now generates a two-line `<malloc.h>` shim into its own
+  scratch source tree and passes `-I<shim> -Wno-error=return-mismatch`,
+  both guarded on `uname -s == Darwin` so the Linux `make` invocation is
+  byte-identical to before. Both aids are build-only and live in the
+  script's shell logic rather than the committed
+  `scripts/patches/fastcap-2.0-modern-toolchain.patch`, because `patch`
+  hunks apply unconditionally and these are platform-conditional; the
+  pinned commit, asset URL, checksum gate and patch file are unchanged, so
+  the built solver is bit-for-bit the same FastCap CI already compares
+  against.
 - **Fixed** (#2285, `klt functional-verification`, additive — **no**
   `schema_version` bump): `options.sdf` no longer hard-fails on a zero-delay
   `INTERCONNECT` entry whose destination is a top-level output port bit the

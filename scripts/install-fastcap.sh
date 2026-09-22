@@ -38,6 +38,10 @@
 #                   were something optimisers exploited.
 #   -w              Suppresses the (very large) legacy warning stream; this
 #                   is a pinned third-party build, not code this repo edits.
+# On macOS only, two further build-time aids are added (issue #2306): an
+# -I pointing at a generated <malloc.h> shim, and
+# -Wno-error=return-mismatch. See the `uname -s` branch before the build
+# step for why each is needed and why it is Darwin-only.
 #
 # Usage: scripts/install-fastcap.sh [--force]
 #   Installs into $FASTCAP_INSTALL_PREFIX (default: ~/.cache/fastcap-<version>).
@@ -108,13 +112,50 @@ echo "Applying $(basename "$PATCH_FILE") ..."
 # archive above, and fail loudly if it ever does not.
 patch -p1 --directory="$src_dir" --input="$PATCH_FILE"
 
+# macOS-only build aids -- issue #2306.
+#
+# These are deliberately NOT folded into $PATCH_FILE: `patch` hunks apply
+# unconditionally, and both fixes are inherently platform-conditional. They
+# stay in shell so `extra_cflags` is the empty string everywhere except
+# Darwin, leaving the Linux/CI `make` invocation byte-identical to what it
+# was before this block existed. Both are build-only, like the patch
+# itself: no discretisation, kernel, or solve source is touched, and the
+# checksum-gated fetch above is untouched.
+extra_cflags=""
+if [[ "$(uname -s)" == "Darwin" ]]; then
+    # 1. <malloc.h> shim. src/mulGlobal.h:46 includes <malloc.h>, which is
+    #    a glibc-only header; BSD/macOS declare malloc()/calloc() in
+    #    <stdlib.h> and ship no <malloc.h> at all, so every translation
+    #    unit fails with "fatal error: 'malloc.h' file not found". The
+    #    shim is written into the scratch source tree (never a tracked
+    #    path) and reached only via the -I below, so it cannot leak into
+    #    any other build.
+    shim_include_dir="$src_dir/klt-macos-shim-include"
+    mkdir -p "$shim_include_dir"
+    cat >"$shim_include_dir/malloc.h" <<'MALLOC_SHIM'
+#pragma once
+#include <stdlib.h>
+MALLOC_SHIM
+
+    # 2. -Wno-error=return-mismatch. With the shim in place the next
+    #    failure is src/mulSetup.c:744, `if(depth == 0) return;` inside
+    #    the int-returning, unprototyped K&R `getnbrs` -- the same class of
+    #    1992-C problem $PATCH_FILE already fixes for `static` linkage.
+    #    Apple Clang promotes -Wreturn-mismatch to an error by default and
+    #    the -w above does not demote it; -Wno-error=return-mismatch does,
+    #    leaving it a warning. Not added on Linux, where the CI toolchain
+    #    does not need it and adding it would silently widen what is
+    #    normally a hard error on the path CI actually gates.
+    extra_cflags=" -I$shim_include_dir -Wno-error=return-mismatch"
+fi
+
 echo "Building (parallel=$nproc_val) ..."
 # `bin/` is where the upstream Makefile links the executable, and the
 # archive does not ship it (git does not track empty directories), so the
 # link step would fail with "cannot open output file".
 mkdir -p "$src_dir/bin"
 make -C "$src_dir/src" -j"$nproc_val" fastcap \
-    CFLAGS="-O2 -DOTHER -std=gnu89 -fcommon -fno-strict-aliasing -w"
+    CFLAGS="-O2 -DOTHER -std=gnu89 -fcommon -fno-strict-aliasing -w${extra_cflags}"
 
 echo "Installing into $PREFIX ..."
 rm -rf "$PREFIX"
