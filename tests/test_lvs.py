@@ -9443,6 +9443,82 @@ XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
     assert "M2 Y A VPWR VPWR pfet L=0.15U W=1U" in out
 
 
+# --------------------------------------------------------------------------- #
+# Issue #2327: a custom-device-class `X` card survives the subckt-call
+# conversion alongside the curated devices it converts
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_passes_through_custom_device_class_params_card():
+    """This issue's own repro: a reference mixing a curated drawn resistor
+    (`rppd`, converted) with a round-tripped MoM-capacitor card
+    (`cap_cmomi PARAMS: W=... L=...`, a *custom* -- GenericDeviceExtractor --
+    class with no plain-element form to convert to) converts instead of
+    raising `subcircuit 'PARAMS:' is not a known device`, and leaves the
+    custom card byte-for-byte intact for the downstream recovery reader
+    (issue #1942) to read as a device."""
+    text = """.subckt t A B
+XR1 A B rppd w=1u l=10u m=1
+XD1 A B cap_cmomi PARAMS: W=4.0 L=10.0
+.ends t
+"""
+    out = normalize_reference_netlist(text, deck="sg13cmos5l")
+    assert "R1 A B 0 rppd L=10U W=1U" in out
+    assert "XD1 A B cap_cmomi PARAMS: W=4.0 L=10.0" in out
+
+
+def test_normalize_passes_through_custom_device_class_without_params_keyword():
+    """The pre-#1942 spelling of the same card (no `PARAMS:` separator, and
+    unit-suffixed `w=`/`l=`) is recognised by class name alone -- its
+    device-like `w`/`l` no longer trips the unknown-device error."""
+    text = """.subckt t A B
+XR1 A B rppd w=1u l=10u m=1
+XD1 A B cap_cmomi w=4u l=10u
+.ends t
+"""
+    out = normalize_reference_netlist(text, deck="sg13cmos5l")
+    assert "R1 A B 0 rppd L=10U W=1U" in out
+    assert "XD1 A B cap_cmomi w=4u l=10u" in out
+
+
+def test_normalize_custom_device_class_needs_the_deck_that_declares_it():
+    """The pass-through is keyed off the *requested deck's* own custom
+    classes, never a global name list: a deck that declares no
+    `mom_capacitors` (sky130) still rejects the same card."""
+    text = "XD1 A B cap_cmomi PARAMS: W=4.0 L=10.0\n"
+    with pytest.raises(NormalizeError, match="cap_cmomi"):
+        normalize_reference_netlist(text, deck="sky130")
+
+
+def test_normalize_params_keyword_does_not_hide_an_unknown_device():
+    """Recognising `PARAMS:` as the separator it is must not weaken the
+    unknown-device check: a name that is neither curated nor a custom device
+    class still raises -- now naming the real subcircuit rather than the
+    literal string `PARAMS:`."""
+    with pytest.raises(NormalizeError, match="subcircuit 'not_a_device'"):
+        normalize_reference_netlist(
+            "XD1 A B not_a_device PARAMS: W=4.0 L=10.0\n", deck="sg13cmos5l"
+        )
+
+
+def test_normalize_params_keyword_converts_a_curated_device_call():
+    """`PARAMS:` is a SPICE separator, not a token, for every family -- a
+    curated MOS call written with it converts exactly like the same call
+    written without it."""
+    out = normalize_reference_netlist(
+        "XM1 d g s b sg13_lv_nmos PARAMS: L=0.13u W=1u\n", deck="sg13cmos5l"
+    )
+    assert "M1 d g s b nfet L=0.13U W=1U" in out
+
+
+def test_normalize_params_keyword_leaves_a_hierarchical_subckt_alone():
+    """A genuine hierarchical instance carrying `PARAMS:` still passes
+    through untouched -- the separator changes which token is read as the
+    subcircuit name, not the passthrough-vs-convert decision."""
+    text = "X1 A Y VPWR VGND some_hierarchical_block PARAMS: mult=2\n"
+    assert normalize_reference_netlist(text).strip() == text.strip()
+
+
 def test_detect_reports_undefined_known_device():
     assert detect_subckt_call_devices(_INVERTER_SUBCKT_CALL_SKY130) == [
         "sky130_fd_pr__nfet_01v8",
@@ -15205,6 +15281,59 @@ def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
 
     assert report["status"] == "match"
     assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+
+
+_MIXED_FAMILY_LAYOUT = """.subckt mixed IN MID OUT
+R1 IN MID 1200 rppd L=10U W=1U
+XD1 MID OUT cap_cmomi PARAMS: W=4.0 L=10.0
+.ends mixed
+"""
+
+_MIXED_FAMILY_REFERENCE = """.subckt mixed IN MID OUT
+XR1 IN MID rppd w=1u l=10u
+XD1 MID OUT cap_cmomi PARAMS: W=4.0 L=10.0
+.ends mixed
+"""
+
+
+def test_subckt_call_reference_carries_a_custom_device_class_card(tmp_path):
+    """Issue #2327 end to end: one `reference.form: "subckt-call"` request
+    now compares a reference that mixes a curated drawn resistor (`rppd`,
+    converted to a plain `R` card) with a round-tripped MoM-capacitor `X ...
+    PARAMS:` card (a custom device class, passed through for the #1942
+    recovery reader). Before, the conversion raised `subcircuit 'PARAMS:' is
+    not a known device` and the only way through was to splice the custom
+    cards out, convert the remainder, and resubmit as `plain-element` --
+    which also meant re-deriving the `device.placeholder_value` disclosure
+    the `subckt-call` path emits for free (asserted below)."""
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", _MIXED_FAMILY_LAYOUT),
+            "top": "mixed",
+            "deck": "sg13cmos5l",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", _MIXED_FAMILY_REFERENCE),
+            "top": "mixed",
+            "deck": "sg13cmos5l",
+            "form": "subckt-call",
+        },
+    }
+
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    # Both device families reach the census in one request -- the resistor
+    # via conversion, the MoM capacitor via pass-through + recovery reader.
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["error_count"] == 0
+    # The converted resistor's placeholder `R` is still disclosed by the
+    # subckt-call path itself (issue #1907) -- the caller does not have to
+    # re-derive it, which the splice workaround did.
+    assert report["category_counts"] == {"device.placeholder_value": 1}
+    (placeholder,) = report["mismatches"]
+    assert placeholder["device"]["class"] == "RPPD"
+    assert placeholder["severity"] == "warning"
 
 
 def test_mom_capacitor_parameter_tolerance_now_reaches_the_device(tmp_path):
