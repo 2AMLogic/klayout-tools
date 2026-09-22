@@ -63,6 +63,31 @@ not `klt --version`, if you need to detect this kind of drift. See
   (checksum-verified, smoke-tested); `.github/workflows/xyce-oracle.yml`
   runs the oracle on dispatch, off the per-PR budget. `klt size` remains
   ngspice-only.
+- **Fixed** (#1157, `klt extract` bare-mode cards for bulk-bearing drawn
+  resistors — **no** `schema_version` bump; the written SPICE card shape for
+  3-terminal resistor classes changes, see below): a drawn-resistor class
+  whose recognised terminal set includes a bulk/tap node — sky130's
+  `res_high_po`/`res_xhigh_po`, gf180mcu's `ppolyf_u` family, sg13g2's
+  `rsil`/`rppd`/`rhigh` — is no longer written (without `--pdk`) as the
+  KLayout-shaped 3-net `R` card (`R$1 A B W 12000 res_xhigh_po`), which
+  ngspice cannot parse at all: its native `R` element accepts exactly two
+  nodes, so it consumed the third net and the value as the
+  `<value>`/`<model>` positions and aborted with
+  `unknown parameter (res_xhigh_po)` — the netlist was not a simulatable
+  deck for such a layout, not merely a fidelity tradeoff. Those classes now
+  write `X$1 A B W res_xhigh_po r=12000 L=6U W=1U`: the class name becomes a
+  **caller-suppliable subcircuit name** (the testbench supplies a matching
+  3-pin `.subckt <class> a b w r= l= w=` wrapper declaring every parameter
+  the card carries), and the extracted resistance moves onto a declared
+  `r=` parameter so it stays on the written card the way issues #521/#588
+  established. Two-terminal classes keep the `R` card + `.model <class> r`
+  convention byte-for-byte. `klt lvs` re-ingests the new card shape
+  transparently whenever `layout.deck`/`reference.deck` is given, restoring
+  the identical `DeviceClassResistorWithBulk` (A/B/W, R/L/W) the old card's
+  read-back produced — series `combine_devices` folding and the deferred
+  `fixed_offset_ohm` correction (issue #585) behave exactly as before; see
+  `docs/cli/extract.md`'s "Verified compatible with `klt sim`" and
+  `docs/cli/lvs.md`'s new round-trip section.
 
 ## 0.6.0 (2026-09-22)
 

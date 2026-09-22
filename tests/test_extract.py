@@ -5586,6 +5586,155 @@ def test_gf180mcu_resistor_bulk_terminal_ties_to_substrate_global(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Bare-mode (non-`--pdk`) output for 3-terminal (bulk-bearing) drawn-resistor
+# classes (issue #1157): ngspice's native `R` element accepts exactly two
+# nodes, so the KLayout-shaped `R<name> a b w <value> <class>` card is not a
+# valid deck at all -- ngspice consumes the third net and the value as the
+# `<value>`/`<model>` positions and aborts with `unknown parameter (...)`.
+# Such a class is written as an `X` subcircuit call instead, against a
+# documented caller-suppliable `.subckt <class> a b w r= l= w=` convention;
+# 2-terminal classes keep the `R` card (see
+# `test_drawn_poly_resistor_extracts_with_expected_value` and the
+# "Verified compatible with `klt sim`" docs section).
+# --------------------------------------------------------------------------- #
+
+
+_BARE_XHIGH_EXPECTED_R_OHM = _RES_SQUARES * 2000.0  # 6 squares, 2 kohm/sq
+
+
+def test_bare_three_terminal_resistor_card_is_an_x_subckt_call(tmp_path):
+    """Issue #1157's regression: bare-mode `klt extract` writes a
+    bulk-bearing sky130 resistor class (`res_xhigh_po`: heads + substrate
+    bulk) as an `X` subcircuit call carrying the extracted resistance on a
+    declared `r=` parameter plus the #1927 `L=`/`W=` geometry -- never as
+    the 3-node `R` card ngspice cannot parse."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "sky130",
+            extra=(
+                (79, 20, _RES_MARKED.enlarged(200, 200)),  # urpm -> xhigh
+                (94, 20, _RES_MARKED.enlarged(200, 200)),  # psdm
+            ),
+        ),
+        tmp_path / "res_xhigh_po.gds",
+    )
+    out = str(tmp_path / "res_xhigh_po.spice")
+    report = run_extract(path, "sky130", output=out)
+    assert report["device_counts"] == {"res_xhigh_po": 1}
+
+    cards = _device_cards(out)
+    (card,) = cards
+    substrate = get_extraction_deck("sky130").substrate_net
+    # `X$name <a> <b> <w> <class> r=<extracted ohms> L=<um>U W=<um>U`.
+    assert card.startswith("X"), card
+    assert card.split()[1:4] == ["RA", "RB", substrate], card
+    assert card.split()[4] == "res_xhigh_po", card
+    assert card.split()[5] == f"r={_BARE_XHIGH_EXPECTED_R_OHM:.12g}", card
+    assert card.split()[6:] == ["L=6U", "W=1U"], card
+    # Negative control: the pre-fix shape (an `R` card with three nets) is
+    # gone entirely.
+    assert not any(c.startswith("R") for c in cards), cards
+
+    # The written value stays load-bearing (issues #521/#588): it is the
+    # same extracted (and, where a deck declares one, offset-corrected)
+    # resistance the JSON report carries.
+    (device,) = report["devices"]
+    assert float(card.split()[5][2:]) == pytest.approx(device["params"]["r_ohm"])
+
+
+def test_bare_gf180mcu_three_terminal_resistor_card_is_an_x_subckt_call(tmp_path):
+    """The same #1157 shape on gf180mcu: `ppolyf_u` is declared
+    `bulk_to_substrate` too, so its bare-mode card is an `X` call with the
+    substrate bulk as the third node -- the deck-agnostic rule keys on the
+    recognised terminal count, not on any one PDK."""
+    path = _write_gds(_make_poly_resistor_layout("gf180mcu"), tmp_path / "res.gds")
+    out = str(tmp_path / "res.spice")
+    report = run_extract(path, "gf180mcu", output=out)
+    assert report["device_counts"] == {"ppolyf_u": 1}
+
+    cards = _device_cards(out)
+    (card,) = cards
+    substrate = get_extraction_deck("gf180mcu").substrate_net
+    assert card.startswith("X"), card
+    assert card.split()[1:4] == ["RA", "RB", substrate], card
+    assert card.split()[4] == "ppolyf_u", card
+    assert card.split()[5] == f"r={_RES_SQUARES * 350.0:.12g}", card
+
+
+@_SKIP_NO_NGSPICE
+def test_bare_three_terminal_resistor_card_simulates_in_ngspice(tmp_path):
+    """Issue #1157's acceptance bar, end to end: the bare-mode netlist
+    containing a 3-terminal drawn-resistor card elaborates and solves in a
+    real `ngspice -b` run once the testbench supplies the documented 3-pin
+    `.subckt <class>` wrapper -- and the pre-fix 3-node `R` card, reconstructed
+    as the negative control, is still rejected by the same simulator."""
+    import subprocess
+
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "sky130",
+            extra=(
+                (79, 20, _RES_MARKED.enlarged(200, 200)),  # urpm -> xhigh
+                (94, 20, _RES_MARKED.enlarged(200, 200)),  # psdm
+            ),
+        ),
+        tmp_path / "res_xhigh_po.gds",
+    )
+    out = str(tmp_path / "res_xhigh_po.spice")
+    run_extract(path, "sky130", output=out)
+    device_card = _device_cards(out)[0]
+    assert device_card.startswith("X"), device_card
+
+    def simulate(instance_line: str, name: str) -> str:
+        deck = tmp_path / f"{name}.spice"
+        # The caller-suppliable 3-pin wrapper the docs' contract describes:
+        # the class name is the subckt name, and every parameter the card
+        # carries must be declared (ngspice rejects undeclared ones).
+        deck.write_text(
+            f"* {name}\n"
+            ".subckt res_xhigh_po a b w r=1 l=1 w=1\n"
+            "Rmain a b {r}\n"
+            ".ends res_xhigh_po\n"
+            "V1 RA 0 DC 1.0\n"
+            f"{instance_line}\n"
+            "Rload RB 0 1meg\n"
+            ".control\n"
+            "op\n"
+            "print v(RB)\n"
+            "quit\n"
+            ".endc\n"
+            ".end\n"
+        )
+        completed = subprocess.run(
+            ["ngspice", "-b", str(deck)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return completed.stdout + completed.stderr
+
+    written = simulate(device_card, "as_written")
+    assert "unknown parameter" not in written, written
+    assert "Simulation interrupted due to error" not in written, written
+    load_voltage = re.search(r"v\(rb\)\s*=\s*(\S+)", written, re.IGNORECASE)
+    assert load_voltage is not None, written
+    # 1V across `r` (~12kohm) + 1megohm divider: a solved, sane operating
+    # point -- the extracted `r=` actually reached the simulation.
+    expected = 1e6 / (1e6 + _BARE_XHIGH_EXPECTED_R_OHM)
+    assert float(load_voltage.group(1)) == pytest.approx(expected, rel=1e-3), written
+
+    # The pre-#1157 card shape, reconstructed: the same net + value +
+    # class-name tokens on an `R` card. ngspice's `R` primitive is strictly
+    # 2-node, so the third net lands in the value position and the abort is
+    # the issue's own `unknown parameter (...)` diagnostic.
+    legacy = simulate(
+        f"R$1 VIN NB vsubs {_BARE_XHIGH_EXPECTED_R_OHM:.12g} res_xhigh_po",
+        "legacy_r_card",
+    )
+    assert "unknown parameter" in legacy, legacy
+
+
+# --------------------------------------------------------------------------- #
 # sky130 drawn metal resistors (`res_generic_m1`..`res_generic_m5`, issue
 # #1621) -- the metal-body analogue of `_make_poly_resistor_layout` above,
 # following the same shape sg13g2's own `_make_metal_resistor_layout`
@@ -6688,14 +6837,26 @@ def _spice_card_value(netlist_path, prefix: str) -> float:
     KLayout's ``NetlistSpiceWriter`` emits e.g.
     ``R$1 RA RB vsubs 3627.977587 res_high_po`` -- the value is the last
     token that parses as a float (the trailing token is the device-class
-    name)."""
+    name). Issue #1157: a bulk-bearing (3-terminal) resistor class is
+    written as an ``X`` subcircuit call instead -- ngspice's ``R``
+    primitive is strictly 2-node -- with the resistance on a declared
+    ``r=`` parameter (``X$1 RA RB vsubs res_high_po r=3627.977587
+    L=10U W=1U``), so those cards are matched too and the ``r=`` literal
+    is what comes back."""
     cards = [
         line.split()
         for line in Path(netlist_path).read_text().splitlines()
         if line.startswith(prefix)
+        or (
+            prefix == "R"
+            and line.startswith("X")
+            and any(token.startswith("r=") for token in line.split())
+        )
     ]
     assert len(cards) == 1, f"expected exactly one '{prefix}' card, got {cards}"
     for token in reversed(cards[0]):
+        if token.startswith("r="):
+            return float(token[2:])
         try:
             return float(token)
         except ValueError:

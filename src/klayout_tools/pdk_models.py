@@ -536,6 +536,38 @@ def geometry_style_for_family(family: str) -> str:
     return _GEOMETRY_STYLE_BY_FAMILY.get(family, GEOMETRY_STYLE_UNIT_SUFFIX)
 
 
+def _unbound_resistor_card(
+    name: str,
+    pins: str,
+    class_name: str,
+    resistance: float,
+    length_um: float,
+    width_um: float,
+) -> str:
+    """The plain-element card for one *unbound* (no curated model binding)
+    named resistor device, with its measured geometry carried (issue #1927).
+
+    Two-terminal classes get the KLayout-shaped ``R`` card (value + trailing
+    model-name token + the ``L=``/``W=`` suffix KLayout's own writer omits).
+    A **three-terminal** (bulk-bearing) class instead gets the issue #1157
+    ``X`` subcircuit-call form -- ngspice's native ``R`` element accepts
+    exactly two nodes, so a 3-net ``R`` card is not a parseable deck at all
+    -- with the resistance on a declared ``r=`` parameter so the extracted,
+    offset-corrected value (issues #521/#588) stays on the written card.
+    See ``create_model_binding_delegate``'s docstring for the full contract.
+    """
+    if len(pins.split()) > 2:
+        return (
+            f"X{name} {pins} {class_name} "
+            f"r={resistance:.12g} "
+            f"L={_format_um(length_um)} W={_format_um(width_um)}"
+        )
+    return (
+        f"R{name} {pins} {resistance:.12g} {class_name} "
+        f"L={_format_um(length_um)} W={_format_um(width_um)}"
+    )
+
+
 class ModelBindingError(Exception):
     """Raised when a resolved PDK variant has no curated MOS device-model
     table entry for the extraction deck in use.
@@ -1375,7 +1407,11 @@ def create_model_binding_delegate(
     ``extract_parasitics.py`` creates uses an anonymous
     ``kdb.DeviceClassResistor()`` with ``L``/``W`` never set (always
     ``0.0``, not a real measurement), so those are left to ``super()``
-    unchanged rather than gaining a meaningless ``L=0U W=0U``.
+    unchanged rather than gaining a meaningless ``L=0U W=0U``. One further
+    carve-out (issue #1157): a *three-terminal* (bulk-bearing) resistor
+    class is written as an ``X`` subcircuit call rather than an ``R``
+    card, because ngspice's ``R`` primitive accepts exactly two nodes --
+    see ``_write_resistor_card_with_geometry``'s own docstring.
 
     ``global_nets`` (issue #1503) is an independent, additive concern: when
     non-empty, the delegate's ``write_header`` override emits one
@@ -1467,7 +1503,7 @@ def create_model_binding_delegate(
             """Write a *named* (deck-declared) resistor device's plain ``R``
             card with its own `` L=...U W=...U`` geometry suffix appended,
             and report ``True``; report ``False`` (writing nothing) for any
-            device this narrow rewrite does not own.
+            device this rewrite does not own.
 
             Issue #1927: see :func:`create_model_binding_delegate`'s own
             docstring for the full rationale -- KLayout's default writer
@@ -1478,6 +1514,32 @@ def create_model_binding_delegate(
             terminal order, the same ``%.12g`` value formatting, and the
             same trailing class-name token) -- this only appends the
             geometry suffix KLayout's own writer omits.
+
+            A **three-terminal** (bulk-bearing) resistor class instead gets
+            an ``X``-prefixed subcircuit call (issue #1157): ngspice's
+            native ``R`` element accepts exactly two nodes, so the
+            KLayout-shaped ``R<name> a b w <value> <class>`` card is not a
+            valid deck for it at all -- ngspice consumes the third net and
+            the resistance value as ``<value>``/``<model>`` positions and
+            aborts with ``unknown parameter (...)``. The ``X`` card keeps
+            the same terminal order and class-name token -- the class name
+            becomes a *caller-suppliable subcircuit name*: the simulating
+            testbench declares ``.subckt <class> <a> <b> <w> r=... l=...
+            w=...`` and ngspice binds the written literals onto those
+            declared parameters (case-insensitively). The extracted
+            resistance rides a declared ``r=`` parameter -- not dropped:
+            the written card's value is load-bearing (issue #521's
+            two-term `res_high_po` correction reaches ``klt sim`` and
+            ``klt lvs`` through the written netlist, and issue #588's
+            deferred-offset contract reads it back), so losing it would
+            trade one silent fidelity loss for another. ``L``/``W`` keep
+            the #1927 suffix spelling. This is a documented caller
+            contract, not a resolvable binding -- ``klt extract`` cannot
+            know the caller's model, it only stops writing a card no
+            simulator can parse. Two-terminal classes keep the ``R``
+            card: ngspice's semiconductor-resistor primitive handles that
+            shape natively (see ``docs/cli/extract.md``'s "Verified
+            compatible with ``klt sim``'s netlist convention" section).
             """
             device_class = device.device_class()
             # An anonymous class (every `--parasitics` shunt/leg/DC-tie
@@ -1507,8 +1569,14 @@ def create_model_binding_delegate(
             name = self.format_name(device.expanded_name())
             pins = " ".join(self.net_to_string(net) for net in nets)
             self.emit_line(
-                f"R{name} {pins} {resistance:.12g} {device_class.name} "
-                f"L={_format_um(length_um)} W={_format_um(width_um)}"
+                _unbound_resistor_card(
+                    name,
+                    pins,
+                    device_class.name,
+                    resistance,
+                    length_um,
+                    width_um,
+                )
             )
             return True
 

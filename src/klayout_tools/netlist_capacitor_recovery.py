@@ -75,6 +75,29 @@ card already does. Without a resolved deck on that side (``layout.deck``/
 ``reference.deck`` omitted), this recognition cannot run -- the ``X`` card
 still degrades to the pre-#1942 abstract-circuit fallback described above;
 see ``docs/cli/lvs.md``'s "Custom device classes" section.
+
+**Drawn-resistor classes round-tripped as ``X`` subcircuit calls (issue
+#1157).** The same reader-side recovery pattern, one deck table over: a
+*three-terminal* (bulk-bearing) drawn-resistor class -- sky130's
+``res_high_po``/``res_xhigh_po``, gf180mcu's ``ppolyf_u`` family, sg13g2's
+``rsil``/``rppd``/``rhigh`` -- is written by ``klt extract`` as an ``X``
+subcircuit call (``X$1 A B W <class> r=<ohms> L=<um>U W=<um>U``, see
+:func:`klayout_tools.pdk_models.create_model_binding_delegate`'s
+docstring), because ngspice's native ``R`` element accepts exactly two
+nodes and the pre-#1157 3-net ``R`` card was not a simulatable deck at
+all. Read back through a plain ``kdb.NetlistSpiceReader()``, that card
+degrades to exactly the mangled abstract-circuit fallback the #1942
+paragraph describes -- so :func:`resistor_classes_for_deck` reads the
+deck's own ``ExtractionDeck.resistors`` table and
+:func:`make_capacitor_class_recovery_reader`'s ``resistor_classes``
+parameter recovers the device as a real 3-terminal
+``kdb.DeviceClassResistor`` (terminals ``A``/``B``/``W``, parameters
+``R``/``L``/``W`` in ohms/micrometres) named with the deck's canonical
+class name, byte-compatible with what the pre-#1157 ``R`` card's own
+read-back produced. The card's declared ``r=`` parameter keeps the
+extracted (offset-corrected, issues #521/#588) resistance on the
+round-tripped device -- the value rides the card exactly so this recovery
+need not guess it from geometry.
 """
 
 from __future__ import annotations
@@ -214,10 +237,180 @@ def custom_device_classes_for_deck(
     }
 
 
+def resistor_classes_for_deck(
+    deck: ExtractionDeck | None,
+) -> dict[str, str]:
+    """``{<UPPER-CASED class name>: <canonical class name>}`` for every drawn
+    resistor class ``deck`` declares -- the table
+    :func:`make_capacitor_class_recovery_reader`'s ``resistor_classes``
+    parameter wants (issue #1157), built exactly like
+    :func:`custom_device_classes_for_deck` builds the MoM-capacitor table
+    (issue #1942), from ``ExtractionDeck.resistors`` instead.
+
+    Only the *bulk-bearing* (3-terminal) classes ever receive an ``X`` card
+    from ``klt extract`` -- a 2-terminal class keeps its native ``R`` card,
+    which ``kdb.NetlistSpiceReader`` reads without any help -- but every
+    declared class is listed anyway: recognition is keyed on the card's own
+    subcircuit-name token *plus* its 3-net shape (a name match alone never
+    hijacks a card), so an unused 2-terminal entry is unreachable dead-table
+    at worst. Every declared flavour name (``ResistorDevice.flavours``, e.g.
+    gf180mcu's ``ppolyf_u_1k``/``_2k``/``_3k`` sheet-rho variants) is listed
+    alongside its base entry's name, so the table is **independent of
+    ``deck_options``**: a netlist extracted with ``--deck-option
+    poly_res=2k`` round-trips through a ``klt lvs`` request that names no
+    ``deck_options`` of its own -- exactly as it did before #1157, when the
+    pre-extracted card was a plain ``R`` card needing no deck table at all.
+    ``None`` (no deck resolved for this side of the compare) returns ``{}``:
+    recognition cannot run, and the ``X`` card degrades to the
+    abstract-circuit fallback, the same graceful degradation every other
+    unrecognised card takes.
+    """
+    if deck is None:
+        return {}
+    table: dict[str, str] = {}
+    for resistor in deck.resistors:
+        table[resistor.name.upper()] = resistor.name
+        for flavour in resistor.flavours:
+            table.setdefault(flavour.name.upper(), flavour.name)
+    return table
+
+
+def bulk_resistor_device_class(name: str) -> kdb.DeviceClass:
+    """Build the ``kdb.DeviceClass`` one bulk-bearing drawn-resistor class
+    named ``name`` round-trips through (issue #1157): KLayout's native
+    ``DeviceClassResistorWithBulk`` -- terminals ``A``/``B``/``W``,
+    parameters ``R``/``L``/``W``/``A``/``P`` -- the exact class type
+    ``kdb.NetlistSpiceReader`` itself synthesises when it reads the
+    pre-#1157 3-net ``R`` card (verified against the installed
+    ``klayout.db`` module), so a recovered device is parameter-for-
+    parameter and terminal-for-terminal what ``klt lvs``'s compare saw
+    before the card shape changed -- including ``Netlist.combine_devices``'s
+    series-fold behaviour, which a plain ``DeviceClassResistor`` with a
+    hand-added third terminal does *not* support (the ``WithBulk`` class is
+    what teaches the fold to leave the shared bulk connection alone).
+    Shared by every recovery of the same class name in one netlist via the
+    caller's ``device_class_by_name`` registry lookup, the same
+    one-class-object-per-name discipline the capacitor recovery follows.
+    """
+    import klayout.db as kdb
+
+    device_class = kdb.DeviceClassResistorWithBulk()
+    device_class.name = name
+    return device_class
+
+
+def _recover_bulk_resistor_x_card(
+    circuit: kdb.Circuit,
+    name: str,
+    nets: list,
+    params: dict,
+    resistor_name: str,
+) -> bool:
+    """Recover one ``X`` card naming a deck drawn-resistor class as a real
+    3-terminal resistor device (issue #1157) -- see this module's docstring
+    and :func:`make_capacitor_class_recovery_reader`'s ``resistor_classes``
+    parameter. Reports whether the card was handled.
+
+    The writer's own card contract is ``X$name a b w <class> r=<ohms>
+    L=<um>U W=<um>U``. The reader's parameter parsing delivers ``L``/``W``
+    SI-scaled (``10U`` -> ``1e-5``), so they are converted to the
+    micrometre domain ``DeviceClassResistor`` reports. ``L``/``W`` are
+    optional on the card (a hand-written call may carry ``r=`` alone);
+    ``r=`` itself is required, and a card without it -- or without the
+    writer's 3-net shape -- reports ``False`` and falls through to the
+    default handler rather than being silently recovered as a zero-ohm
+    device or one with a misconnected terminal.
+    """
+    if len(nets) != 3 or "R" not in params:
+        return False
+    netlist = circuit.netlist()
+    device_class = netlist.device_class_by_name(resistor_name)
+    if device_class is None:
+        device_class = bulk_resistor_device_class(resistor_name)
+        netlist.add(device_class)
+    terminals = device_class.terminal_definitions()
+    if len(nets) != len(terminals):
+        return False
+    device = circuit.create_device(device_class, name)
+    for net, terminal in zip(nets, terminals, strict=True):
+        device.connect_terminal(terminal.name, net)
+    # Ids are read back off `parameter_definitions()` because the Python
+    # `DeviceClass` binding has no by-name lookup -- the same guarded
+    # pattern `extract._parameter_id` performs.
+    for param_def in device_class.parameter_definitions():
+        if param_def.name == "R":
+            device.set_parameter(param_def.id(), params["R"])
+        elif param_def.name == "L" and "L" in params:
+            device.set_parameter(param_def.id(), params["L"] * 1e6)
+        elif param_def.name == "W" and "W" in params:
+            device.set_parameter(param_def.id(), params["W"] * 1e6)
+    return True
+
+
+def _recover_mom_x_card(
+    circuit: kdb.Circuit,
+    name: str,
+    model: str,
+    nets: list,
+    params: dict,
+    custom_lookup: Mapping[str, str],
+) -> bool:
+    """Recover one ``X`` card naming a deck custom (MoM-capacitor) device
+    class as a real device of that class (issue #1942) -- see this module's
+    docstring. Reports whether the card was handled; a name match whose
+    net count does not fit the class's own terminal shape reports ``False``
+    (defensive only, never seen in practice) and the caller falls through
+    to the default handler rather than silently misconnecting a terminal.
+    """
+
+    from .extract import mom_capacitor_device_class
+
+    class_name = custom_lookup.get(model.upper())
+    if class_name is None:
+        return False
+    netlist = circuit.netlist()
+    device_class = netlist.device_class_by_name(class_name)
+    if device_class is None:
+        device_class = mom_capacitor_device_class(class_name)
+        netlist.add(device_class)
+    terminals = device_class.terminal_definitions()
+    if len(nets) != len(terminals):
+        return False
+    device = circuit.create_device(device_class, name)
+    for net, terminal in zip(nets, terminals, strict=True):
+        device.connect_terminal(terminal.name, net)
+    for param_def in device_class.parameter_definitions():
+        if param_def.name in params:
+            device.set_parameter(param_def.id(), params[param_def.name])
+    return True
+
+
+def _recover_resistor_x_card(
+    circuit: kdb.Circuit,
+    name: str,
+    model: str,
+    nets: list,
+    params: dict,
+    resistor_lookup: Mapping[str, str],
+) -> bool:
+    """Recover one ``X`` card naming a deck drawn-resistor class as a real
+    3-terminal resistor device (issue #1157). Reports whether the card was
+    handled: ``False`` when the card's subcircuit-name token is not in
+    ``resistor_lookup``, and for a matching name without the writer's
+    3-net shape or declared ``r=`` parameter (the caller falls through to
+    the default handler rather than recovering a zero-ohm or misconnected
+    device)."""
+    resistor_name = resistor_lookup.get(model.upper())
+    if resistor_name is None:
+        return False
+    return _recover_bulk_resistor_x_card(circuit, name, nets, params, resistor_name)
+
+
 def make_capacitor_class_recovery_reader(
     recovered: Mapping[tuple[str, str], str],
     *,
     custom_device_classes: Mapping[str, str] | None = None,
+    resistor_classes: Mapping[str, str] | None = None,
 ) -> kdb.NetlistSpiceReader:
     """Build a ``kdb.NetlistSpiceReader`` whose delegate reattaches a
     recovered capacitor device-class name (see
@@ -246,16 +439,25 @@ def make_capacitor_class_recovery_reader(
     name abstract circuit for it. ``None``/``{}`` (the default) leaves every
     ``X`` card to that default handling, byte-for-byte unchanged from before
     this parameter existed.
+
+    ``resistor_classes`` (issue #1157, see :func:`resistor_classes_for_deck`
+    and this module's own docstring) recognises the same way an ``X`` card
+    naming a *drawn-resistor* class as a real 3-terminal
+    ``DeviceClassResistor`` device (:func:`bulk_resistor_device_class`),
+    carrying the card's declared ``r=``/``L=``/``W=`` parameters onto the
+    device (``L``/``W`` arrive SI-scaled by the reader's own parameter
+    parsing -- ``10U`` is ``1e-5`` -- and are converted to the micrometre
+    domain ``DeviceClassResistor`` reports). ``None``/``{}`` (the default)
+    leaves every such card to the default handling, unchanged.
     """
     import klayout.db as kdb
 
-    from .extract import mom_capacitor_device_class
-
     custom_lookup: dict[str, str] = dict(custom_device_classes or {})
+    resistor_lookup: dict[str, str] = dict(resistor_classes or {})
 
     class _CapacitorClassRecoveringDelegate(kdb.NetlistSpiceReaderDelegate):
         def wants_subcircuit(self, name: str) -> bool:
-            if name.upper() in custom_lookup:
+            if name.upper() in custom_lookup or name.upper() in resistor_lookup:
                 return True
             return super().wants_subcircuit(name)
 
@@ -293,29 +495,14 @@ def make_capacitor_class_recovery_reader(
                     # through to the default handler below is safer than
                     # silently misconnecting a terminal.
             elif element_type == "X":
-                class_name = custom_lookup.get(model.upper())
-                if class_name is not None:
-                    netlist = circuit.netlist()
-                    device_class = netlist.device_class_by_name(class_name)
-                    if device_class is None:
-                        device_class = mom_capacitor_device_class(class_name)
-                        netlist.add(device_class)
-                    terminals = device_class.terminal_definitions()
-                    if len(nets) == len(terminals):
-                        device = circuit.create_device(device_class, name)
-                        for net, terminal in zip(nets, terminals, strict=True):
-                            device.connect_terminal(terminal.name, net)
-                        for param_def in device_class.parameter_definitions():
-                            if param_def.name in params:
-                                device.set_parameter(
-                                    param_def.id(), params[param_def.name]
-                                )
-                        return True
-                    # Defensive only -- never seen in practice (this class's
-                    # own shape is always 2 terminals, matching the writer's
-                    # own X-card net count). Falling through to the default
-                    # handler is safer than silently misconnecting a
-                    # terminal.
+                if _recover_mom_x_card(
+                    circuit, name, model, nets, params, custom_lookup
+                ):
+                    return True
+                if _recover_resistor_x_card(
+                    circuit, name, model, nets, params, resistor_lookup
+                ):
+                    return True
             return super().element(
                 circuit, element_type, name, model, value, nets, params
             )

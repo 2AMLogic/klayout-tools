@@ -3148,6 +3148,7 @@ modelname`. The same mistake in the other direction (bare numbers for
 gf180mcu) would be wrong by the same factor, which is why the convention is
 resolved per PDK family rather than picked globally.
 
+
 **Coverage** (issue #339 extended #209's MOS-only binding to the other
 recognised analog device classes):
 
@@ -5340,6 +5341,39 @@ testbench adds a matching `.model res_generic_po r`. (Unrelated to
 `--parasitics`, whose injected R/C elements are deliberately emitted as
 *bare* `R`/`C` cards with no model token and no `L=`/`W=` — see "Drawn
 resistors" below for the scope of the geometry suffix.)
+
+**Three-terminal (bulk-bearing) resistor classes are written as `X` calls,
+not `R` cards (issue #1157).** A drawn-resistor class whose recognised
+terminal set includes a bulk/tap node — sky130's `res_high_po`/
+`res_xhigh_po`, gf180mcu's `ppolyf_u` family, sg13g2's `rsil`/`rppd`/
+`rhigh` — has **three** nets, and ngspice's native `R` element accepts
+exactly two: the KLayout-shaped `R$1 A B W 3248.27 res_high_po` card makes
+ngspice consume `W` as the resistance position and abort with
+`unknown parameter (res_high_po)`. Those classes are therefore written as
+
+```
+X$1 A B W res_high_po r=3248.27 L=6U W=1U
+```
+
+— same terminal order, the class name now as a **caller-suppliable
+subcircuit name**, the extracted (offset-corrected, issue #521) resistance
+on a declared `r=` parameter so it stays on the written card, and the same
+`L=`/`W=` geometry suffix. The testbench supplies a matching 3-pin wrapper
+subcircuit, declaring **every parameter the card carries** (ngspice rejects
+an `X`-card parameter its subcircuit does not declare):
+
+```
+.subckt res_high_po a b w r=1 l=1 w=1
+Rmain a b {r}        * or a real model computed from r / l / w
+.ends res_high_po
+```
+
+This is a caller contract, not a resolved binding: `klt extract` cannot
+know the caller's model, it only stops writing a card no simulator can
+parse. (`klt lvs` re-reads these cards transparently — see
+`docs/cli/lvs.md`; `klt extract --pdk` resolves the same classes to real
+PDK subcircuits, see "SPICE model binding" above.) Two-terminal classes
+keep the `R` card and the `.model <class> r` convention above.
 
 **No substrate tie needs hand-authoring (issue #1263), and it reaches every
 instantiation (issue #1503).** A `--parasitics` extraction carries its own DC

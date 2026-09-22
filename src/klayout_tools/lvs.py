@@ -183,6 +183,7 @@ from .netlist_capacitor_recovery import (
     custom_device_classes_for_deck,
     make_capacitor_class_recovery_reader,
     parse_capacitor_class_comments,
+    resistor_classes_for_deck,
 )
 from .pdk import PdkNotFoundError, find_pdk
 from .verilog_netlist import (
@@ -2731,6 +2732,7 @@ def _resolve_layout(
     # `None`/empty when `layout.deck` was never given, unchanged from every
     # request that predates this parameter.
     custom_device_classes: dict[str, str] = {}
+    resistor_classes: dict[str, str] = {}
     deck_name = layout_spec.get("deck")
     if deck_name:
         try:
@@ -2741,9 +2743,17 @@ def _resolve_layout(
             custom_device_classes = custom_device_classes_for_deck(
                 layout_deck_for_recovery
             )
+            # Issue #1157: recognise a round-tripped bulk-bearing drawn-
+            # resistor class's `X` card (the bare-mode card shape ngspice
+            # can parse) as a real 3-terminal resistor device again -- the
+            # exact recovery the MoM-capacitor table above established,
+            # keyed off `layout.deck`'s own `resistors` table.
+            resistor_classes = resistor_classes_for_deck(layout_deck_for_recovery)
     netlist = kdb.Netlist()
     reader = make_capacitor_class_recovery_reader(
-        recovered_capacitor_classes, custom_device_classes=custom_device_classes
+        recovered_capacitor_classes,
+        custom_device_classes=custom_device_classes,
+        resistor_classes=resistor_classes,
     )
     try:
         netlist.read(layout_netlist_path, reader)
@@ -2942,6 +2952,7 @@ def _read_reference_netlist(
     # never given, unchanged from every request that predates this
     # parameter.
     custom_device_classes: dict[str, str] = {}
+    resistor_classes: dict[str, str] = {}
     if deck:
         try:
             reference_deck_for_recovery = get_extraction_deck(deck)
@@ -2951,8 +2962,14 @@ def _read_reference_netlist(
             custom_device_classes = custom_device_classes_for_deck(
                 reference_deck_for_recovery
             )
+            # Issue #1157: the reference side gets the same drawn-resistor
+            # `X`-card recovery the layout side wired above -- a bare-mode
+            # extract output is a legitimate reference netlist too.
+            resistor_classes = resistor_classes_for_deck(reference_deck_for_recovery)
     reader = make_capacitor_class_recovery_reader(
-        recovered_capacitor_classes, custom_device_classes=custom_device_classes
+        recovered_capacitor_classes,
+        custom_device_classes=custom_device_classes,
+        resistor_classes=resistor_classes,
     )
     try:
         netlist.read(read_path, reader)
