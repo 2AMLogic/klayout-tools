@@ -426,12 +426,12 @@ def _resolve_via_drop_layer(
       ``metal_b``, all at the pin's own position, exactly as the single-hop
       case always has; consecutive hops' pads merge on their common
       intermediate level, with each sized for its own via enclosure.
-      Since issue #1894, a ``port_layer`` on the deck's
-      diffusion role (``deck.active``) also resolves this way: the ladder's
-      first hop is ``deck.contact`` (the licon/comp-contact that lands on
-      ``deck.metals[0]``), followed by the ordinary metals-stack hops up to
-      ``route_layer`` -- a real contact reaching the diffusion, not just a
-      metal stub sitting near it.
+      Since issue #1894, a ``port_layer`` on a deck diffusion-class role
+      (``deck.active``, and -- since issue #2312 -- ``deck.tap``) also
+      resolves this way: the ladder's first hop is ``deck.contact`` (the
+      licon/comp-contact that lands on ``deck.metals[0]``), followed by the
+      ordinary metals-stack hops up to ``route_layer`` -- a real contact
+      reaching the diffusion, not just a metal stub sitting near it.
     * ``(None, reason)`` -- a drop is needed but not resolvable (the deck
       declares no via for one of the hops the ladder needs, or the pin sits
       on the deck's bare ``poly`` layer, which no via in the metals stack
@@ -478,19 +478,21 @@ def _resolve_via_drop_layer(
                 "reports a contacted metal landing pad (issue #492), or name "
                 "the gate with pins[] instead of routing to it"
             )
-        if port_layer == deck.active:
+        if port_layer == deck.active or (
+            deck.tap is not None and port_layer == deck.tap
+        ):
             # Issue #1894: a diffusion-role port intended for a *new* strap
             # from outside its own generator-time footprint (e.g.
-            # `bjt_array`'s `COLL_*` collector-ring tap, reported on
-            # `deck.active` specifically so a caller can tie a fresh
+            # `bjt_array`'s `COLL_*` collector-ring tap, reported on a
+            # diffusion-class role specifically so a caller can tie a fresh
             # connection onto the ring -- see `gen.py`'s
             # `_bjt_array_describe`). Unlike an ordinary `TAP_*` ring port
             # (always reported on the metals-stack `"metal"` role itself,
             # already resolved above or by the ordinary metals-ladder branch
             # below), there is no pre-existing via at this exact landing
             # point -- `deck.contact` (licon/comp-contact) is the one thing
-            # that connects `deck.active` up to `deck.metals[0]`, so it is
-            # prepended as the ladder's first hop, then the ordinary
+            # that connects a diffusion-class layer up to `deck.metals[0]`,
+            # so it is prepended as the ladder's first hop, then the ordinary
             # metals-stack ladder below carries it the rest of the way up to
             # `route_layer`. Before this fix, this branch fell into the
             # generic "unrelated role, nothing to do" case: no via, no
@@ -499,6 +501,18 @@ def _resolve_via_drop_layer(
             # open connection (`klt extract` recovers an unstrapped node) or
             # a silent short to whatever else the resulting uncontacted metal
             # stub happened to sit on.
+            #
+            # Both diffusion-*class* roles resolve here, not just
+            # `deck.active` (issue #2312): a tie ring's own shape belongs on
+            # the deck's `tap` role -- that is the mask an extraction deck
+            # recognises a substrate/well tie from (`extract.py`'s
+            # `tap_substrate`) -- and `deck.contact` lands on it exactly as
+            # it lands on `deck.active`. Before #2312 a `deck.tap` port fell
+            # through to the "unrelated role, nothing to do" branch below,
+            # i.e. the identical uncontacted-stub failure #1894 fixed for
+            # `deck.active`. On a family whose `tap` role *is* its `active`
+            # role (gf180mcu, both `(22, 0)`) the two tests coincide and
+            # this is a no-op.
             if not deck.metals:
                 return None, (
                     "this pin is drawn on the resolved PDK's diffusion role, "
@@ -525,11 +539,9 @@ def _resolve_via_drop_layer(
                     )
                 )
             return tuple(ladder), None
-        # Any other non-metals-stack role (e.g. a guard ring's ordinary
-        # substrate/well tap port drawn on a distinct `deck.tap` layer, which
-        # the ring's own metal already covers at that position -- no current
-        # `klt gen` generator reports a port this way, but the deck models
-        # the layer) keeps the pre-#454 behavior: drawn directly on
+        # Any other non-metals-stack, non-diffusion-class role (no current
+        # `klt gen` generator reports a port this way, but a deck may model
+        # such a layer) keeps the pre-#454 behavior: drawn directly on
         # route_layer, no via.
         return None, None
     lo, hi = (route_idx, port_idx) if route_idx < port_idx else (port_idx, route_idx)
@@ -1293,15 +1305,16 @@ def _ring_conductor_layers(
     * every ring port's own reported ``layer``. A ``TAP_``/``COLL_`` tap port
       reports the layer that makes it a tie (``guard_ring``/``diff_pair``/
       ``mos_array`` report their tap on the family's ``"metal"`` role;
-      ``bjt_array``'s ``COLL_*`` collector tap reports the *diffusion* role,
-      which is what makes it a collector tie), and a ``GAP_*`` opening marker
+      ``bjt_array``'s ``COLL_*`` collector tap reports the ``"tap"`` role,
+      which is what makes it a collector tie -- issue #2312; it reported the
+      bare ``"active"`` role before), and a ``GAP_*`` opening marker
       reports "the layer a route would cross the ring on" (see ``gen.py``'s
       :func:`~klayout_tools.gen._ring_ports`).
     * ``deck.metals[0]`` -- the local-interconnect level every ``klt gen``
       ring draws its *metal* loop on, whether or not a tap port happens to
       report it. ``bjt_array``'s collector ring is the case that matters:
-      its ``COLL_*`` ports report only the diffusion role, but the ring is
-      drawn "on both the diffusion and the local-metal role" (``gen.py``'s
+      its ``COLL_*`` ports report only the ``"tap"`` role, but the ring is
+      drawn "on both the tap and the local-metal role" (``gen.py``'s
       ``_bjt_array_describe``), so a check that trusted the tap port's layer
       alone would conclude a ``"metal"``-role (li1) backbone flies over a
       ring it in fact runs straight into. ``deck.metals[0]`` *is* the
@@ -1365,7 +1378,7 @@ def _leg_plane_clears_ring(
     no ``GAP_*`` opening, therefore no route may touch its other ports*. That
     is exactly right for a backbone drawn on the ring's own metal, and wrong
     for one drawn two via levels above it -- a ``metal3``-role (met2)
-    backbone crossing a diffusion/li1 collector ring shares no conductor with
+    backbone crossing a tap/li1 collector ring shares no conductor with
     it, yet was rejected with the same message and pushed the caller into
     breaking the ring (``params.ring_gap_side``) for what is a routing-layer
     decision. This predicate is the plane term that branch was missing.

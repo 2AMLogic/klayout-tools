@@ -239,9 +239,29 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     if ring["gap"] is not None
                     else None
                 )
+                # The ring's own diffusion-role shape goes on the deck's
+                # *tap* role, not its `active` role (issue #2312). A
+                # collector/substrate guard ring is a substrate *tie*, and a
+                # tie is exactly what an extraction deck recognises off the
+                # tap mask: `klt extract` derives its substrate-tie region
+                # as `tap` outside every `nwell` and unifies it with the
+                # deck's synthesized `substrate_net` global via
+                # `connect_global` (see `extract.py`'s `tap_substrate`).
+                # Drawn on bare `active` -- as this ring was before #2312 --
+                # the ring is just an unrecognised diffusion island: a
+                # `klt gen-compose` strap onto a `COLL_*` port could be
+                # physically real and DRC-clean and *still* leave every
+                # device's collector on a separate `vsubs` node in the
+                # extracted netlist, because nothing ever tied the ring's
+                # routed net to the substrate identity. This is the same
+                # role `guard_ring`'s own tap ring and each unit's own
+                # base-tie box (above) already draw on, so the tie
+                # mechanism is now one mechanism rather than two. On a
+                # family whose `tap` role *is* its `active` role (gf180mcu,
+                # both `(22, 0)`) this is byte-identical geometry.
                 _insert_ring(
                     self.cell,
-                    li_active,
+                    li_tap,
                     dbu,
                     _shift_box(ring["outer_box_um"], ox, oy),
                     _shift_box(ring["inner_box_um"], ox, oy),
@@ -260,7 +280,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 )
                 if self.ring_implant_present:
                     # Exactly coincident with the collector ring's own
-                    # active-layer shape (issue #1580, mirrors
+                    # tap-layer shape (issue #1580, mirrors
                     # `well_island`'s own `well_tap_implant` ring precedent)
                     # -- never a blanket over the enclosed base well/array.
                     _insert_ring(

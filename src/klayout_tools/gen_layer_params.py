@@ -2700,9 +2700,11 @@ def _bjt_layer_params(
 
     Also resolves ``ring_implant_layer``/``ring_implant_present`` (issue
     #1580, :func:`_ring_tap_implant_layer`) for the collector ring's own
-    ``Comp`` shape (drawn on ``active_layer`` directly -- see
-    ``_BjtArrayPCell.produce_impl``, not a separate ``tap``-role ring the way
-    ``guard_ring``/``mos_array``/``diff_pair``/``esd_device`` draw theirs).
+    ``Comp`` shape -- drawn on ``tap_layer`` since issue #2312 (it used to be
+    drawn on ``active_layer`` directly), so the ring is the same ``tap``-role
+    ring ``guard_ring``/``mos_array``/``diff_pair``/``esd_device`` already
+    draw, and therefore a substrate tie an extraction deck actually
+    recognises; see ``_BjtArrayPCell.produce_impl``.
     Always resolved with ``well_tie=False``: the collector ring is composed
     *outside* the shared base well's own footprint (``well_box_um`` plus
     ``BJT_COLLECTOR_GAP_UM``, see :func:`_bjt_array_layout`'s docstring), so

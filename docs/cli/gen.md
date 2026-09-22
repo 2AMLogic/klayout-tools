@@ -1327,10 +1327,23 @@ Ports are named `Q<i>_E` (emitter) and `Q<i>_B` (base) per unit device, plus
 `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` on the collector ring when
 `add_collector_ring` is `true` (and a `GAP_<side>` marker when that ring
 carries a routing opening — see `guard_ring`'s "Ring routing openings" above;
-the `COLL_*` taps sit on the diffusion role, the `GAP_*` marker on the metal
+the `COLL_*` taps sit on the **`tap` role**, the `GAP_*` marker on the metal
 role a route crosses the ring on). `device_count` is `rows * cols` (dummies
 excluded). `drc_hints.matched_group_id` is
 `"bjt_array:<rows>x<cols>:<topology>:ratio<ratio>"`.
+
+The collector ring's own tie shape is drawn on the resolved family's `tap`
+role — the same role `guard_ring`'s ring and each unit's own base-tie pad
+already use — not on the bare `active`/diffusion role (issue #2312). That
+role is what makes the ring a **recognised** substrate tie: `klt extract`
+derives its substrate-tie region as `tap` outside every `nwell` and unifies
+it with the deck's synthesized substrate net. Drawn on bare `active`, the
+ring was an unrecognised diffusion island, so a `klt gen-compose` strap onto
+a `COLL_*` port could be physically real *and* `klt drc`-clean and still
+leave every device's collector on a separate, floating `vsubs` node in the
+extracted netlist. On `sky130` this moves the ring from `diff.drawing`
+(65/20) to `tap.drawing` (65/44); on `gf180mcu`, whose `tap` role *is* its
+`active` role (`22/0`), the geometry is unchanged.
 
 **This generator draws from base layers, not from a vendor library cell.** The
 result is a DRC-clean, matching-faithful *floorplan* of the device (layer
