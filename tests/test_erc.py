@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import klayout.db as kdb
 import pytest
@@ -21,6 +22,8 @@ from klayout_tools.cli import main
 from klayout_tools.erc import ErcError, run_erc
 
 DBU = 0.001
+
+CORPUS_DIR = Path(__file__).parent / "corpus"
 
 
 def _um(v: float) -> int:
@@ -3318,13 +3321,11 @@ def test_cli_json_error_shape(tmp_path, capsys):
 # poly resistor body that never overlaps diffusion (no gate oxide, no
 # antenna mechanism). `stackup[0].active_layer` (optional) fixes this by
 # computing gate identification and the antenna-ratio denominator from
-# `poly ∩ diff` instead of raw poly-net area. These fixtures are
-# constructed programmatically rather than reusing a checked-in real
-# `sky130_fd_sc_hd__conb_1`/`inv_1` GDS (no such fixture is in this repo's
-# corpus -- `tests/corpus/sky130/` has only `sky130_fd_sc_hd__inv_1.gds`,
-# no `conb_1`), but the "conb1-like" reproduction below uses the exact
-# ~1.2048 um^2 gate area and 81-87 antenna-ratio band issue #1979 itself
-# reports from the real cell.
+# `poly ∩ diff` instead of raw poly-net area. The fixtures below are
+# constructed programmatically; the real checked-in
+# `sky130_fd_sc_hd__conb_1` corpus cell is replayed in its own block further
+# down ("the real corpus cell the constructed fixture stood in for",
+# issue #1986).
 
 
 def _antenna_spec_variant(*, active_layer: str | None) -> dict:
@@ -3520,6 +3521,191 @@ def test_active_layer_conb1_like_reproduction_excluded_with_active_layer(tmp_pat
 
     with pytest.raises(ErcError, match="no net"):
         run_erc(str(gds), str(spec), pdk="sky130")
+
+
+# --- run_erc: the real corpus cell the constructed fixture stood in for -----
+#
+# Issue #1986: `sky130_fd_sc_hd__conb_1` itself, checked into
+# `tests/corpus/sky130/` (verbatim from the same pinned upstream commit as
+# the rest of that corpus -- see tests/corpus/README.md), replays the exact
+# measurement issue #1979 reports from a real routed design: the tie cell's
+# `HI` net -- a 1.2048 um^2 poly resistor with `poly ∩ diff` structurally 0
+# (the cell draws no diffusion at all) -- joined to a synthetic VPWR rail
+# reproduces the real design's false gate signature
+# `('HI,VPWR', 1.2048, 86.66)` bit for bit under the raw-poly gate model.
+# The synthetic `VPWR` rail is sized so the shared net's li1 cumulative
+# area lands the li1 antenna ratio at 86.66, the top of the 56-87 band the
+# issue measured on real one-tie-cell rails, and the merged net name
+# `HI,VPWR` (in-cell `HI` label + synthetic `VPWR` label on one net) is the
+# exact spelling the real design reported.
+
+
+def _conb1_corpus_cell(path: Path) -> None:
+    """One `TOP` cell instantiating the checked-in real `conb_1` verbatim,
+    plus the two pieces of synthetic geometry the real design supplied
+    around each tie cell:
+
+    - a `VPWR`-labelled li1 rail extending the cell's own top li1 rail
+      (the `HI` net) far enough to the right that the shared net's li1
+      cumulative area puts the raw-poly antenna ratio at 86.66 -- the real
+      design's row rail, shrunk to one tie cell's worth;
+    - a `REAL` positive-control gate (poly fully over diffusion, its own
+      80 um^2 li1 rail, ratio 81 against sky130's 75 limit) in a separate
+      y-band, so a gate-model change cannot silently break genuine gates
+      while the tie-cell nets come and go.
+    """
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+
+    cell_layout = kdb.Layout()
+    cell_layout.read(str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__conb_1.gds"))
+    conb = layout.create_cell(cell_layout.top_cell().name)
+    conb.copy_tree(cell_layout.top_cell())
+    top.insert(kdb.CellInstArray(conb.cell_index(), kdb.Trans()))
+
+    poly = layout.layer(66, 20)
+    licon1 = layout.layer(66, 44)
+    li1 = layout.layer(67, 20)
+    li1_label = layout.layer(67, 5)
+    diff = layout.layer(65, 20)
+
+    # The cell's own top li1 rail (its `HI` net) spans x 0..1.38 um,
+    # y 1.91..2.805 um (dbu, from the checked-in cell). Extending it by
+    # 113.922 um of 0.895 um-tall rail adds 101.96019 um^2, which with the
+    # in-cell li1 (1.24605 um^2) and the 1.2048 um^2 poly resistor lands
+    # the li1 cumulative ratio at (1.2048 + 1.24605 + 101.96019) / 1.2048
+    # = 86.66 (issue #1979's real-design measurement).
+    top.shapes(li1).insert(kdb.Box(1380, 1910, 1380 + 113922, 2805))
+    top.shapes(li1_label).insert(kdb.Text("VPWR", kdb.Trans(_um(1.5), _um(2.4))))
+
+    # The REAL positive control, in its own y-band (um -10..-9).
+    y0 = _um(-10)
+    top.shapes(poly).insert(kdb.Box(_um(0), y0, _um(1), y0 + _um(1)))
+    top.shapes(diff).insert(kdb.Box(_um(0), y0, _um(1), y0 + _um(1)))
+    top.shapes(licon1).insert(
+        kdb.Box(_um(0.02), y0 + _um(0.02), _um(0.05), y0 + _um(0.05))
+    )
+    top.shapes(li1).insert(kdb.Box(_um(0), y0, _um(80), y0 + _um(1)))
+    top.shapes(li1_label).insert(kdb.Text("REAL", kdb.Trans(_um(0.5), y0 + _um(0.5))))
+
+    layout.write(str(path))
+
+
+def _conb1_corpus_spec(*, active_layer: str | None) -> dict:
+    """The poly -> li1 stackup with the real cell's own sky130 layer
+    numbers (poly 66/20, licon1 66/44, li1 67/20, li1 label 67/5), with
+    `stackup[0].active_layer` set to the given diffusion layer (sky130's
+    diff.drawing, 65/20) when given."""
+    stackup0: dict = {"name": "poly", "layer": "66/20", "role": "gate"}
+    if active_layer is not None:
+        stackup0["active_layer"] = active_layer
+    return {
+        "stackup": [
+            stackup0,
+            {"name": "li1", "layer": "67/20", "label_layer": "67/5"},
+        ],
+        "vias": [
+            {"name": "licon1", "layer": "66/44", "between": ["poly", "li1"]},
+        ],
+    }
+
+
+def test_conb1_corpus_cell_reproduces_the_real_design_gate_signature(
+    tmp_path,
+):
+    """The golden artifact (issue #1986): under the raw-poly gate model
+    (no `active_layer`), the real checked-in tie cell joined to its
+    synthetic row rail reports exactly the false gate the real design
+    carried -- net `'HI,VPWR'`, gate area 1.2048 um^2, li1 antenna ratio
+    86.66, `verdict: "violate"` against sky130's 75 limit. The `REAL`
+    positive-control gate violates on the same run, so the fixture can
+    never degrade into "the model catches nothing at all"."""
+    gds = tmp_path / "conb1_corpus.gds"
+    _conb1_corpus_cell(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _conb1_corpus_spec(active_layer=None))
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    gate = next(g for g in report["gates"] if g["net"] == "HI,VPWR")
+    assert gate["gate_area_um2"] == pytest.approx(1.2048, abs=2e-3)
+    li1_level = next(lvl for lvl in gate["levels"] if lvl["layer"] == "li1")
+    assert li1_level["antenna_ratio"] == pytest.approx(86.66, abs=0.01)
+    assert li1_level["verdict"] == "violate"
+    assert gate["antenna_verdict"] == "violate"
+
+    real = next(g for g in report["gates"] if g["net"] == "REAL")
+    real_li1 = next(lvl for lvl in real["levels"] if lvl["layer"] == "li1")
+    assert real_li1["verdict"] == "violate"
+
+
+def test_conb1_corpus_cell_tie_nets_excluded_by_active_layer_real_gate_survives(
+    tmp_path,
+):
+    """With `active_layer` supplied, the real cell's tie nets are excluded
+    from `gates[]` -- the checked-in cell draws no diffusion at all, so
+    *every* net it contributes has `poly ∩ diff == 0`, tie resistor and
+    `LO` net alike -- while the `REAL` positive control survives with its
+    verdict unchanged. The corpus cell, not the synthetic stand-in, is
+    what pins this: it is the exact geometry a real design reported."""
+    gds = tmp_path / "conb1_corpus.gds"
+    _conb1_corpus_cell(gds)
+    spec = tmp_path / "spec.json"
+    _write_spec(spec, _conb1_corpus_spec(active_layer="65/20"))
+
+    report = run_erc(str(gds), str(spec), pdk="sky130")
+
+    assert [g["net"] for g in report["gates"]] == ["REAL"]
+    real = report["gates"][0]
+    real_li1 = next(lvl for lvl in real["levels"] if lvl["layer"] == "li1")
+    assert real_li1["verdict"] == "violate"
+
+
+def test_inv1_corpus_cell_real_gate_violates_before_and_after_active_layer(
+    tmp_path,
+):
+    """The issue's second real-gate positive control (issue #1986): the
+    real `sky130_fd_sc_hd__inv_1` corpus cell with a 102 um^2 li1 rail
+    joined to its `A` input -- the shape the real design's *genuine* gate
+    violations had. `A` is a real transistor gate (`poly ∩ diff > 0`), so
+    it must stay in `gates[]` and keep violating whether or not
+    `active_layer` is supplied -- a gate-model change cannot silently
+    stop catching real gates. The computed gate area *does* move (raw
+    poly 0.4689 um^2 -> `poly ∩ diff` 0.2475 um^2, the inverter's true
+    gate oxide), which is exactly the fix working, not the gate
+    disappearing."""
+    gds = tmp_path / "inv1_corpus.gds"
+
+    layout = kdb.Layout()
+    layout.dbu = DBU
+    top = layout.create_cell("TOP")
+    cell_layout = kdb.Layout()
+    cell_layout.read(str(CORPUS_DIR / "sky130" / "sky130_fd_sc_hd__inv_1.gds"))
+    inv = layout.create_cell(cell_layout.top_cell().name)
+    inv.copy_tree(cell_layout.top_cell())
+    top.insert(kdb.CellInstArray(inv.cell_index(), kdb.Trans()))
+
+    # The cell's `A` li1 pad is the (320,1075)..(650,1315) dbu strip;
+    # extending it 425 um to the left at 0.24 um tall adds exactly
+    # 102 um^2 of li1 to the `A` net -- the issue's own number.
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(320 - 425000, 1075, 320, 1315))
+    layout.write(str(gds))
+
+    ratios = {}
+    for label, active in (("before", None), ("after", "65/20")):
+        spec = tmp_path / f"spec_{label}.json"
+        _write_spec(spec, _conb1_corpus_spec(active_layer=active))
+        report = run_erc(str(gds), str(spec), pdk="sky130")
+        gate = next(g for g in report["gates"] if g["net"] == "A")
+        li1_level = next(lvl for lvl in gate["levels"] if lvl["layer"] == "li1")
+        assert li1_level["verdict"] == "violate"
+        ratios[label] = (gate["gate_area_um2"], li1_level["antenna_ratio"])
+
+    # Both runs violate; the areas differ exactly as the fix dictates.
+    assert ratios["before"][0] == pytest.approx(0.4689, abs=2e-3)
+    assert ratios["after"][0] == pytest.approx(0.2475, abs=2e-3)
+    assert ratios["after"][1] > ratios["before"][1]
 
 
 def _mixed_gate_and_resistor_fixture(path) -> None:

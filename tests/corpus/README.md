@@ -31,9 +31,15 @@ overall MIT license — see "License note" below).
 | `sky130_fd_sc_hd__nand2_2.gds` | `cells/nand2/sky130_fd_sc_hd__nand2_2.gds` | 5.0 KB |
 | `sky130_fd_sc_hd__buf_4.gds` | `cells/buf/sky130_fd_sc_hd__buf_4.gds` | 5.4 KB |
 | `sky130_fd_sc_hd__dfxtp_2.gds` | `cells/dfxtp/sky130_fd_sc_hd__dfxtp_2.gds` | 12.4 KB |
+| `sky130_fd_sc_hd__conb_1.gds` | `cells/conb/sky130_fd_sc_hd__conb_1.gds` | 3.4 KB |
 
 Chosen for variety: a minimal inverter, a 2-input gate, a buffer, and a
 D flip-flop (more cells/layers/shapes, exercising sequential-cell geometry).
+`conb_1` (added for issue #1986) is the tie/constant cell whose poly
+resistor is the real-gate-model positive control behind issue #1979 —
+its checked-in `HI`/`LO` nets are the exact nets a real design's false
+antenna violations were reported on (`tests/test_erc.py`'s "real corpus
+cell" block replays them).
 
 ### gf180mcu — `tests/corpus/gf180mcu/`
 
