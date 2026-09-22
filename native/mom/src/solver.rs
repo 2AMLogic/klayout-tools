@@ -11,18 +11,37 @@
 //! every other conductor is grounded -- and sum the resulting per-panel
 //! charge onto each conductor to get one column of the capacitance matrix.
 //!
-//! This is a *simplified* point-collocation fill (off-diagonal entries use
-//! the bare point-charge kernel between panel centroids, not a proper
-//! panel-to-panel double integral) -- adequate for the MVP's "produce a
-//! numeric result" acceptance bar (accuracy-vs-refinement is validated by
-//! the sibling issue #719), and matches how many introductory BEM codes
-//! implement the same method.
+//! Off-diagonal entries use a **near-field/far-field split** (#2061): pairs
+//! whose centroids are closer than a few panel widths integrate the charge
+//! over the source panel properly (Gauss-Legendre quadrature of the
+//! potential at the target centroid, symmetrised across the pair), while
+//! well-separated pairs keep the bare point-charge kernel between
+//! centroids. A point charge at the centroid is a good stand-in for a
+//! uniformly charged panel only while the separation is large compared to
+//! the panel size; in the near field it costs percent-level accuracy
+//! against FastCap's analytic panel integrals -- measured 3.29% worst-case
+//! on a close parallel-plate fixture by the FastCap cross-validation oracle
+//! (`tests/test_mom_capacitance_oracle.py`,
+//! `docs/design/fastcap-oracle.md`), which is what motivated the split.
+//! The correction is deliberately the *collocation* integral -- the
+//! potential of the source panel evaluated at the target centroid, which is
+//! what FastCap itself computes for near pairs (analytically, with the same
+//! constant-basis discretisation) -- rather than a Galerkin double integral
+//! over both panels: on this oracle the Galerkin variant moved the
+//! close-plate fixtures *away* from FastCap (they are the same discretised
+//! problem only in the refinement limit), while the collocation integral
+//! reproduces FastCap's own near-field kernel. The diagonal (self) entry
+//! stays on the closed form (`self_term_ln1p_sqrt2`): the self integral is
+//! genuinely singular, and a quadrature cannot integrate its own
+//! collocation point.
 //!
 //! ## The solve step: preconditioned Conjugate Gradient, not a direct LU
 //! (#799)
 //!
-//! `P` is symmetric (the off-diagonal kernel `1/(4 pi eps r)` is symmetric in
-//! `i`/`j` by construction) and positive definite: `q^T P q` is (twice) the
+//! `P` is symmetric (the centroid kernel `1/(4 pi eps r)` is symmetric in
+//! `i`/`j` by construction, and the near-field quadrature applies the same
+//! panel-to-panel rule from either side, so it inherits the double
+//! integral's Fubini symmetry) and positive definite: `q^T P q` is (twice) the
 //! electrostatic energy of the charge distribution `q`, which is strictly
 //! positive for any nonzero `q` as long as no two panels coincide (the same
 //! non-degeneracy the geometry layer already guarantees). That makes
@@ -88,6 +107,116 @@ fn self_term_ln1p_sqrt2() -> f64 {
     (1.0 + std::f64::consts::SQRT_2).ln()
 }
 
+/// How near is "near field": an off-diagonal pair uses the quadrature
+/// panel-to-panel integral when its centroid separation is below this
+/// multiple of the sum of the two panels' circumradii (half-diagonals). At
+/// 3x, the centroid point charge is still accurate to a fraction of a
+/// percent (the centroid approximation's leading error falls off as the
+/// square of panel-size-over-separation), while every pair shape that made
+/// the FastCap oracle's close-plate fixture disagree at the percent level
+/// -- facing pairs across a one-panel gap *and* the edge-adjacent
+/// neighbours within one plate, barely half a panel apart centre to centre
+/// -- sits far below the threshold. Raising it would only spend fill time
+/// on accuracy the solve does not need; the sensitivity is pinned by
+/// `far_field_pairs_agree_with_the_centroid_kernel` below.
+const NEAR_FIELD_CIRCUMRADII_MULTIPLE: f64 = 3.0;
+
+/// Gauss-Legendre 4-point rule on `[-1, 1]` (nodes ascending; exact for
+/// polynomials through degree 7; weights sum to 2, the interval length).
+/// Four points per panel axis put the double-integral kernel well inside
+/// the FastCap oracle's agreement band on every near-field pair shape the
+/// discretiser emits, including edge-sharing pairs whose integrand turns
+/// steep across the shared edge -- pinned against an order-8 reference by
+/// `panel_pair_quadrature_matches_high_order_reference`. Hand-rolled
+/// constants: a quadrature crate dependency would cost more than twelve
+/// numbers buy.
+const GL4_NODES: [f64; 4] = [
+    -0.861_136_311_594_052_6,
+    -0.339_981_043_584_856_3,
+    0.339_981_043_584_856_3,
+    0.861_136_311_594_052_6,
+];
+const GL4_WEIGHTS: [f64; 4] = [
+    0.347_854_845_137_453_8,
+    0.652_145_154_862_546_1,
+    0.652_145_154_862_546_1,
+    0.347_854_845_137_453_8,
+];
+
+/// Half a panel's diagonal (um): the radius of the smallest sphere centred
+/// on the panel centroid that contains it -- the length scale the
+/// near-field threshold (`NEAR_FIELD_CIRCUMRADII_MULTIPLE`) is measured in.
+fn panel_circumradius_um(panel: &Panel) -> f64 {
+    let u = norm3(&panel.side_vectors[0]);
+    let v = norm3(&panel.side_vectors[1]);
+    0.5 * (u * u + v * v).sqrt()
+}
+
+fn norm3(v: &[f64; 3]) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
+}
+
+/// The near-field predicate: true when the pair's circumspheres come
+/// within `NEAR_FIELD_CIRCUMRADII_MULTIPLE` of each other, i.e. when the
+/// centroid separation is no longer large compared to the panel sizes.
+fn panels_are_near_field(a: &Panel, b: &Panel) -> bool {
+    distance(&a.center, &b.center)
+        < NEAR_FIELD_CIRCUMRADII_MULTIPLE * (panel_circumradius_um(a) + panel_circumradius_um(b))
+}
+
+/// Map `(xi, eta)` in `[-1, 1]^2` onto the panel through its side vectors:
+/// the affine sweep `center + (xi/2) u + (eta/2) v`, whose Jacobian is the
+/// panel area over 4.
+fn point_on_panel(panel: &Panel, xi: f64, eta: f64) -> [f64; 3] {
+    let u = &panel.side_vectors[0];
+    let v = &panel.side_vectors[1];
+    [
+        panel.center[0] + 0.5 * (xi * u[0] + eta * v[0]),
+        panel.center[1] + 0.5 * (xi * u[1] + eta * v[1]),
+        panel.center[2] + 0.5 * (xi * u[2] + eta * v[2]),
+    ]
+}
+
+/// The area-averaged source-panel kernel `∬_S 1/|f - r'| dS' / A` -- the
+/// potential at field point `f` of a uniform unit surface charge on `S`,
+/// per unit area, evaluated by the `nodes`-point Gauss-Legendre rule per
+/// panel axis (`weights` the matching weights, summing to 2). The `(A/4)`
+/// Jacobian cancels against the `1/A` average, so a constant kernel
+/// reproduces itself exactly (`2^2 / 4`). The collocation field point is
+/// never inside or on the source panel (`geometry::discretize` keeps panel
+/// interiors disjoint), so the integrand is bounded and analytic over the
+/// panel and the rule converges geometrically -- see
+/// `panel_pair_quadrature_matches_high_order_reference`.
+fn panel_source_potential_average(
+    field: &[f64; 3],
+    source: &Panel,
+    nodes: &[f64],
+    weights: &[f64],
+) -> f64 {
+    let mut total = 0.0;
+    for (w_xi, &xi) in weights.iter().zip(nodes) {
+        for (w_eta, &eta) in weights.iter().zip(nodes) {
+            let r_prime = point_on_panel(source, xi, eta);
+            total += w_xi * w_eta / distance(field, &r_prime);
+        }
+    }
+    total / 4.0
+}
+
+/// The near-field kernel entry for one panel pair: the collocation source
+/// integral evaluated in both directions and averaged. The raw collocation
+/// fill is not symmetric (`P_ij` integrates panel `j` at panel `i`'s
+/// centroid, `P_ji` the reverse -- unequal whenever the two panels
+/// differ), but the solve and the physics want a symmetric matrix, so the
+/// pair entry is the mean -- the same symmetrisation FastCap applies to
+/// its own collocation matrix when it prints it (`mksCapDump`'s
+/// `sym_mat`), only performed before the solve, where it is what lets
+/// Conjugate Gradient stand in for FastCap's GMRES.
+fn panel_pair_near_field_kernel(panel_i: &Panel, panel_j: &Panel) -> f64 {
+    0.5 * (panel_source_potential_average(&panel_i.center, panel_j, &GL4_NODES, &GL4_WEIGHTS)
+        + panel_source_potential_average(&panel_j.center, panel_i, &GL4_NODES, &GL4_WEIGHTS))
+}
+
 /// Fill the potential-coefficient matrix and solve for the Maxwell
 /// capacitance matrix, in femtofarads.
 ///
@@ -135,6 +264,11 @@ pub fn solve_capacitance_matrix_ff_with_stats(
 /// Fill the dense, symmetric potential-coefficient matrix `P` (`V = P q`) in
 /// SI units (`eps` already includes `EPS0_SI * background_permittivity`).
 ///
+/// Diagonal: the closed-form self term. Off-diagonal: the near-field
+/// quadrature panel-to-panel integral for pairs inside the near-field
+/// threshold, the centroid point-charge kernel for everything else (see
+/// the module docstring).
+///
 /// Assumes `panels` contains no two panels at the exact same location --
 /// `geometry::discretize` deduplicates the numerically-coincident panels a
 /// box-based discretisation can otherwise produce at abutting-box corners
@@ -143,19 +277,35 @@ pub fn solve_capacitance_matrix_ff_with_stats(
 /// and `pcg_solve` reports it as a singular/ill-conditioned matrix rather
 /// than dividing by the resulting `r = 0`.
 fn build_potential_matrix(panels: &[Panel], eps: f64) -> DMatrix<f64> {
+    build_potential_matrix_with_kernel(panels, eps, true)
+}
+
+/// `use_quadrature_near_field = false` reinstates the pre-#2061 bare
+/// centroid point-charge kernel on every off-diagonal entry. No caller
+/// outside the tests wants that (it is the regression this module's
+/// near-field assertions exist to catch), so the flag lives behind this
+/// test-visible variant rather than in the public API.
+fn build_potential_matrix_with_kernel(
+    panels: &[Panel],
+    eps: f64,
+    use_quadrature_near_field: bool,
+) -> DMatrix<f64> {
     let n = panels.len();
     let ln1p_sqrt2 = self_term_ln1p_sqrt2();
+    let greens = 1.0 / (4.0 * std::f64::consts::PI * eps);
 
     let mut p = DMatrix::<f64>::zeros(n, n);
     for i in 0..n {
-        for j in 0..n {
-            p[(i, j)] = if i == j {
-                let side = panels[i].area_um2.sqrt();
-                ln1p_sqrt2 / (std::f64::consts::PI * eps * side)
+        p[(i, i)] = ln1p_sqrt2 / (std::f64::consts::PI * eps * panels[i].area_um2.sqrt());
+        for j in (i + 1)..n {
+            let r = if use_quadrature_near_field && panels_are_near_field(&panels[i], &panels[j]) {
+                panel_pair_near_field_kernel(&panels[i], &panels[j])
             } else {
-                let r = distance(&panels[i].center, &panels[j].center);
-                1.0 / (4.0 * std::f64::consts::PI * eps * r)
+                1.0 / distance(&panels[i].center, &panels[j].center)
             };
+            let entry = greens * r;
+            p[(i, j)] = entry;
+            p[(j, i)] = entry;
         }
     }
     p
@@ -349,15 +499,16 @@ fn solve_dense_lu(p: &DMatrix<f64>, rhs: &DMatrix<f64>) -> Option<DMatrix<f64>> 
 /// -- and return one human-readable warning per violation.
 ///
 /// A violation is never a solver bug in the linear algebra; it means the
-/// point-collocation fill itself has broken down, which happens when
-/// `panel_size_um` is comparable to or larger than the smallest
-/// conductor-to-conductor separation: two panels on facing conductors are
-/// then far closer to each other than the panels are wide, and the
-/// centroid-to-centroid `1/r` kernel badly overestimates their coupling.
-/// The result is still returned (this command's bar is "produces a numeric
-/// result"), but the caller is told plainly not to trust it -- silently
-/// handing back a sign-flipped mutual capacitance would be worse than an
-/// inaccurate one. Refine `panel_size_um` and re-run.
+/// fill itself has broken down. The near-field quadrature kernel (#2061)
+/// removed the historical trigger -- panels far wider than the gap they
+/// face no longer flip the mutual term's sign -- so a violation today
+/// points at something more genuinely degenerate (overlapping conductor
+/// surfaces, an extreme scale mismatch). The result is still returned
+/// (this command's bar is "produces a numeric result"), but the caller is
+/// told plainly not to trust it -- silently handing back a sign-flipped
+/// mutual capacitance would be worse than an inaccurate one. See also
+/// [`discretisation_warnings`], the coarseness diagnostic that replaces the
+/// warning this check used to emit on coarse-over-narrow-gap geometry.
 pub fn physicality_warnings(c: &[Vec<f64>], names: &[String]) -> Vec<String> {
     let name_of = |i: usize| -> &str {
         names
@@ -401,6 +552,73 @@ fn distance(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     let dy = a[1] - b[1];
     let dz = a[2] - b[2];
     (dx * dx + dy * dy + dz * dz).sqrt()
+}
+
+/// One warning per conductor pair whose facing panels are wider (centroid
+/// distance-wise) than the conductors are separated: a constant-density
+/// panel cannot represent the charge distribution that piles up on surfaces
+/// facing a gap narrower than the panel itself, so the returned coupling is
+/// structurally unreliable for that pair even though the near-field
+/// quadrature kernel (#2061) keeps its sign and its symmetry. The result is
+/// still returned; the warning names the knob -- reduce `panel_size_um`.
+///
+/// The trigger is the closest cross-conductor panel pair: its centroid
+/// separation (an upper bound on the true surface-to-surface gap) against
+/// the larger panel's equivalent side `sqrt(area)`. At the default 0.5 um
+/// panels, conductor separations of 1 um and up stay a factor of two clear
+/// of the threshold; the FastCap oracle's coupled-line and shielded
+/// fixtures (1 um gaps) therefore emit none, while the pre-#2061 sign-flip
+/// fixture (2 um panels across a 0.01 um gap) does.
+pub fn discretisation_warnings(panels: &[Panel], names: &[String]) -> Vec<String> {
+    let name_of = |i: usize| -> &str {
+        names
+            .get(i)
+            .map(String::as_str)
+            .unwrap_or("<unnamed conductor>")
+    };
+    let conductor_count = names.len();
+    // Per conductor pair: the narrowest panel-centroid separation seen and
+    // the widest panel involved. One O(n^2) pass, the same order as the
+    // fill itself; a warning fires when the pair's panels are wider than
+    // its separation.
+    let slot = |j: usize, k: usize| j.min(k) * conductor_count + j.max(k);
+    let mut min_separation = vec![f64::INFINITY; conductor_count * conductor_count];
+    let mut widest_panel = vec![0.0_f64; conductor_count * conductor_count];
+    for (i, panel_i) in panels.iter().enumerate() {
+        for panel_j in panels[i + 1..].iter() {
+            let (j, k) = (panel_i.conductor_index, panel_j.conductor_index);
+            if j == k {
+                continue;
+            }
+            let s = slot(j, k);
+            min_separation[s] = min_separation[s].min(distance(&panel_i.center, &panel_j.center));
+            widest_panel[s] = widest_panel[s]
+                .max(panel_i.area_um2.sqrt())
+                .max(panel_j.area_um2.sqrt());
+        }
+    }
+
+    let mut warnings = Vec::new();
+    for j in 0..conductor_count {
+        for k in (j + 1)..conductor_count {
+            let s = slot(j, k);
+            if widest_panel[s] > min_separation[s] {
+                warnings.push(format!(
+                    "conductors {j_name:?} and {k_name:?} are separated by as \
+                     little as {min_sep:.4} um (panel-centroid scale) while \
+                     discretised with panels up to {widest:.4} um wide -- a \
+                     constant-density panel cannot resolve the charge facing a \
+                     gap narrower than the panel, so their coupling should not \
+                     be trusted; reduce panel_size_um and re-run",
+                    j_name = name_of(j),
+                    k_name = name_of(k),
+                    min_sep = min_separation[s],
+                    widest = widest_panel[s],
+                ));
+            }
+        }
+    }
+    warnings
 }
 
 #[cfg(test)]
@@ -471,22 +689,64 @@ mod tests {
         let panels = discretize(&conductors, 0.5).unwrap();
         let c = solve_capacitance_matrix_ff(&panels, 2, 1.0).unwrap();
         assert!(physicality_warnings(&c, &names).is_empty());
+        // Same bar for the coarseness diagnostic: 0.5 um panels across a
+        // 1 um gap is a factor of two clear of the trigger.
+        assert!(discretisation_warnings(&panels, &names).is_empty());
     }
 
     #[test]
-    fn under_resolved_solve_warns_instead_of_silently_returning_a_bad_sign() {
+    fn panels_wider_than_the_gap_flag_the_coarseness_diagnostic_not_a_sign_flip() {
         // Plates 0.05 um apart discretised with 2 um panels: each panel is
-        // 40x wider than the gap it faces, so the centroid-to-centroid 1/r
-        // kernel breaks down and the mutual term comes back with the wrong
-        // (positive) sign. The solve still returns numbers, but must say so.
+        // 40x wider than the gap it faces. Pre-#2061 this flipped the
+        // mutual term's sign (the centroid 1/r kernel badly overestimated
+        // the coupling); the near-field quadrature kernel keeps the sign
+        // and the symmetry physical -- but a constant-density panel still
+        // cannot represent the charge facing a narrower gap, so the
+        // coupling's magnitude is structurally unreliable and the solve
+        // must say so instead of staying silent.
         let conductors = vec![plate("top", 0.05), plate("bottom", 0.0)];
         let names: Vec<String> = conductors.iter().map(|c| c.name.clone()).collect();
         let panels = discretize(&conductors, 2.0).unwrap();
         let c = solve_capacitance_matrix_ff(&panels, 2, 1.0).unwrap();
-        assert!(c[0][1] > 0.0, "expected the unphysical sign flip: {c:?}");
+        // The sign flip itself is gone: the corrected kernel is physical.
+        assert!(c[0][1] < 0.0, "mutual should stay negative: {c:?}");
 
+        let warnings = discretisation_warnings(&panels, &names);
+        assert!(!warnings.is_empty(), "coarse-over-narrow-gap must warn");
+        assert!(
+            warnings.iter().all(|w| w.contains("panel_size_um")),
+            "every warning should name the knob to change: {warnings:?}"
+        );
+        // One warning for the offending conductor pair, not one per
+        // offending panel pair (a coarse mesh produces thousands).
+        let pair: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.contains("top") && w.contains("bottom"))
+            .collect();
+        assert_eq!(pair.len(), 1, "{warnings:?}");
+        let physicality = physicality_warnings(&c, &names);
+        assert!(
+            physicality.is_empty(),
+            "the physicality backstop should stay quiet for this fixture: {physicality:?}"
+        );
+    }
+
+    #[test]
+    fn physicality_warnings_flag_a_hand_built_nonphysical_matrix() {
+        // The sign-flip failure mode that used to be reachable from a
+        // coarse mesh is now corrected at the kernel (#2061), so the
+        // physicality backstop is exercised with a deliberately corrupted
+        // matrix -- the coverage that keeps it diagnosable if some future
+        // fill regression reintroduces a genuine physicality break.
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut c = vec![
+            vec![2.0, -0.5, -0.3],
+            vec![-0.5, 1.5, -0.2],
+            vec![-0.3, -0.2, 1.0],
+        ];
+        c[0][1] = 0.4;
+        c[1][0] = 0.4;
         let warnings = physicality_warnings(&c, &names);
-        assert!(!warnings.is_empty());
         assert!(
             warnings.iter().all(|w| w.contains("panel_size_um")),
             "every warning should name the knob to change: {warnings:?}"
@@ -495,11 +755,11 @@ mod tests {
             .iter()
             .filter(|w| w.contains("mutual capacitance"))
             .collect();
-        // Symmetric matrix -> the (top, bottom) violation is reported once,
-        // not once per triangle.
+        // Symmetric matrix -> the (a, b) violation is reported once, not
+        // once per triangle.
         assert_eq!(mutual.len(), 1, "{warnings:?}");
         assert!(
-            mutual[0].contains("top") && mutual[0].contains("bottom"),
+            mutual[0].contains("a") && mutual[0].contains("b"),
             "warning should name both conductors: {mutual:?}"
         );
     }
@@ -761,5 +1021,274 @@ mod tests {
              O(k * iterations * n^2) iterative path is not actually cheaper \
              than the O(n^3) direct factorisation at this operating point"
         );
+    }
+
+    // --- near-field quadrature kernel (#2061) ---
+
+    /// One axis-aligned square panel of the given side, centred on `center`.
+    fn square_panel(center: [f64; 3], side: f64, conductor: usize) -> Panel {
+        Panel {
+            center,
+            area_um2: side * side,
+            conductor_index: conductor,
+            side_vectors: [[side, 0.0, 0.0], [0.0, side, 0.0]],
+        }
+    }
+
+    /// Gauss-Legendre order 8 on [-1, 1]: the near-field reference rule the
+    /// production order-4 rule is checked against. 16 significant digits,
+    /// straight from Abramowitz & Stegun table 25.4.
+    const GL8_NODES: [f64; 8] = [
+        -0.960_289_856_497_536_3,
+        -0.796_666_477_413_626_7,
+        -0.525_463_096_128_398_2,
+        -0.183_434_642_495_649_8,
+        0.183_434_642_495_649_8,
+        0.525_463_096_128_398_2,
+        0.796_666_477_413_626_7,
+        0.960_289_856_497_536_3,
+    ];
+    const GL8_WEIGHTS: [f64; 8] = [
+        0.101_228_536_290_376_3,
+        0.222_381_034_453_374_5,
+        0.313_706_645_877_887_3,
+        0.362_683_783_378_362,
+        0.362_683_783_378_362,
+        0.313_706_645_877_887_3,
+        0.222_381_034_453_374_5,
+        0.101_228_536_290_376_3,
+    ];
+
+    #[test]
+    fn panel_pair_quadrature_matches_high_order_reference() {
+        // The two near-field pair shapes the discretiser can emit: facing
+        // panels across a one-panel gap (the parallel-plate case), and
+        // edge-sharing neighbours within one plate -- the pair whose
+        // integrand turns steepest across the shared edge. The production
+        // order-4 rule must sit close enough to the order-8 reference that
+        // the kernel is never the accuracy bottleneck of the solve (the
+        // FastCap oracle's band is 3%; the kernel's own convergence error
+        // here must be orders of magnitude under it).
+        let facing = (
+            square_panel([0.0, 0.0, 1.0], 1.0, 0),
+            square_panel([0.0, 0.0, 0.0], 1.0, 1),
+        );
+        let edge_sharing = (
+            square_panel([0.5, 0.0, 0.0], 1.0, 0),
+            square_panel([-0.5, 0.0, 0.0], 1.0, 1),
+        );
+        for (label, (a, b)) in [
+            ("facing across a gap", facing),
+            ("edge-sharing", edge_sharing),
+        ] {
+            assert!(
+                panels_are_near_field(&a, &b),
+                "{label}: fixture is not in the near field -- the case it exists to cover"
+            );
+            let symmetrised = |nodes: &[f64], weights: &[f64]| {
+                0.5 * (panel_source_potential_average(&a.center, &b, nodes, weights)
+                    + panel_source_potential_average(&b.center, &a, nodes, weights))
+            };
+            let order4 = symmetrised(&GL4_NODES, &GL4_WEIGHTS);
+            let order8 = symmetrised(&GL8_NODES, &GL8_WEIGHTS);
+            let relative_gap = ((order4 - order8) / order8).abs();
+            println!(
+                "{label}: order-4 {order4:.9} vs order-8 {order8:.9} (gap {relative_gap:.2e})"
+            );
+            assert!(
+                relative_gap < 1e-3,
+                "{label}: order-4 quadrature is {relative_gap:.3e} off the \
+                 order-8 reference -- too coarse for the near-field kernel"
+            );
+        }
+    }
+
+    #[test]
+    fn near_field_quadrature_keeps_the_fill_symmetric() {
+        // Two 1 um plates half a panel width apart, at 0.5 um panels: every
+        // inter-plate pair is deep in the near field, so this is where a
+        // one-sided quadrature rule (each side's fill evaluating only its
+        // own panel) would show up as P[i][j] != P[j][i] and quietly break
+        // the CG solve's SPD assumption. The rule is symmetric by
+        // construction; the assertion pins it.
+        let conductors = vec![plate("top", 0.5), plate("bottom", 0.0)];
+        let panels = discretize(&conductors, 0.5).unwrap();
+        let p = build_potential_matrix(&panels, EPS0_SI);
+        for i in 0..panels.len() {
+            for j in (i + 1)..panels.len() {
+                assert_relative_eq!(p[(i, j)], p[(j, i)], max_relative = 1e-12, epsilon = 1e-25);
+            }
+        }
+    }
+
+    #[test]
+    fn far_field_pairs_agree_with_the_centroid_kernel() {
+        // The split must be continuous at the threshold: a pair well
+        // outside the near field gets the same answer from both branches
+        // (the centroid point charge *is* the converged panel-to-panel
+        // integral at large separation), so switching a pair across the
+        // threshold cannot move the matrix discontinuously. 0.1% is the
+        // same slack `NEAR_FIELD_CIRCUMRADII_MULTIPLE`'s doc comment claims
+        // for the far side of the split.
+        let a = square_panel([0.0, 0.0, 0.0], 1.0, 0);
+        let far = square_panel([10.0, 0.0, 0.0], 1.0, 1);
+        assert!(!panels_are_near_field(&a, &far));
+        let centroid = 1.0 / distance(&a.center, &far.center);
+        let quadrature = 0.5
+            * (panel_source_potential_average(&a.center, &far, &GL4_NODES, &GL4_WEIGHTS)
+                + panel_source_potential_average(&far.center, &a, &GL4_NODES, &GL4_WEIGHTS));
+        assert_relative_eq!(centroid, quadrature, max_relative = 1e-3);
+    }
+
+    #[test]
+    fn the_near_field_correction_can_actually_fail() {
+        // Negative control, in the house style of the FastCap oracle's
+        // `test_the_comparison_can_actually_fail`: seed the regression this
+        // module's near-field tests exist to catch (revert the fill to the
+        // pre-#2061 bare centroid kernel) and require it to move the
+        // close-plate fixture's kernel entries by far more than the bands
+        // asserted above. Without this half, a future refactor that
+        // silently disabled the quadrature branch could pass every other
+        // test here -- the assertions would be unfalsifiable.
+        let conductors = vec![plate("top", 1.0), plate("bottom", 0.0)];
+        let panels = discretize(&conductors, 1.0).unwrap();
+        let with_split = build_potential_matrix(&panels, EPS0_SI);
+        let seeded = build_potential_matrix_with_kernel(&panels, EPS0_SI, false);
+
+        let n = panels.len();
+        let mut worst_off_diagonal = 0.0_f64;
+        for i in 0..n {
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                let relative = ((with_split[(i, j)] - seeded[(i, j)]) / with_split[(i, j)]).abs();
+                worst_off_diagonal = worst_off_diagonal.max(relative);
+            }
+        }
+        println!(
+            "seeded centroid-kernel regression moves near-field entries by \
+             up to {:.3}% (order-4 vs order-8 band: 0.1%)",
+            worst_off_diagonal * 100.0
+        );
+        assert!(
+            worst_off_diagonal > 10.0 * 1e-3,
+            "reverting to the centroid kernel moved the near-field entries by \
+             only {:.3}% -- the quadrature-vs-reference assertions above would \
+             pass without a real near-field correction",
+            worst_off_diagonal * 100.0
+        );
+    }
+
+    /// One box-shaped conductor, for building the oracle fixtures below.
+    fn box_conductor(
+        name: &str,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+        z0: f64,
+        z1: f64,
+    ) -> ConductorRequest {
+        ConductorRequest {
+            name: name.to_string(),
+            boxes: vec![BoxRequest {
+                x0_um: x0,
+                y0_um: y0,
+                x1_um: x1,
+                y1_um: y1,
+                z0_um: z0,
+                z1_um: z1,
+            }],
+            conductivity_s_per_m: None,
+        }
+    }
+
+    /// The FastCap oracle's largest fixture verbatim (coupled lines over a
+    /// grounded plane), so the runtime report below measures the geometry
+    /// the AC's "no material runtime regression" claim is about.
+    fn shielded_pair_fixture() -> Vec<ConductorRequest> {
+        vec![
+            box_conductor("a", 0.0, 0.0, 20.0, 2.0, 0.0, 0.6),
+            box_conductor("b", 0.0, 3.0, 20.0, 5.0, 0.0, 0.6),
+            box_conductor("shield", -2.0, -3.0, 22.0, 8.0, -1.6, -1.0),
+        ]
+    }
+
+    /// Measures where the near-field split's cost lands on the oracle's
+    /// largest fixture (3068 panels): the quadrature fill versus the
+    /// seeded centroid-kernel fill, and the CG solve over each -- pinning
+    /// issue #2061's "no material runtime regression" acceptance bar with
+    /// numbers `docs/design/fastcap-oracle.md` transcribes.
+    ///
+    /// `#[ignore]`d like `iterative_solve_scaling_report`: a 3068-panel
+    /// solve is seconds-slow in an unoptimised debug build. Run it in
+    /// release mode:
+    ///
+    /// ```text
+    /// cargo test --release near_field_runtime_report -- --ignored --nocapture
+    /// ```
+    ///
+    /// The structural gate (each right-hand side must still converge in
+    /// well under `n` iterations) runs in both profiles.
+    #[test]
+    #[ignore = "multi-second solve is slow in debug builds -- run with --release"]
+    fn near_field_runtime_report() {
+        let conductors = shielded_pair_fixture();
+        let panels = discretize(&conductors, 0.5).unwrap();
+        let rhs = build_rhs(&panels, conductors.len());
+
+        let t_split_fill = std::time::Instant::now();
+        let p_split = build_potential_matrix(&panels, EPS0_SI);
+        let split_fill = t_split_fill.elapsed();
+
+        let t_old_fill = std::time::Instant::now();
+        let p_centroid = build_potential_matrix_with_kernel(&panels, EPS0_SI, false);
+        let centroid_fill = t_old_fill.elapsed();
+
+        let t_split_solve = std::time::Instant::now();
+        let (split_c, split_stats) =
+            pcg_solve(&p_split, &rhs, ITERATIVE_REL_TOL, ITERATIVE_MAX_ITER).expect("split solve");
+        let split_solve = t_split_solve.elapsed();
+
+        let t_old_solve = std::time::Instant::now();
+        let (centroid_c, centroid_stats) =
+            pcg_solve(&p_centroid, &rhs, ITERATIVE_REL_TOL, ITERATIVE_MAX_ITER)
+                .expect("centroid solve");
+        let centroid_solve = t_old_solve.elapsed();
+
+        let max_split_iters = *split_stats.iterations.iter().max().unwrap();
+        let max_centroid_iters = *centroid_stats.iterations.iter().max().unwrap();
+        let max_abs_entry = split_c
+            .iter()
+            .chain(centroid_c.iter())
+            .fold(0.0_f64, |m, v| m.max(v.abs()));
+        let relative_drift = split_c
+            .iter()
+            .zip(centroid_c.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max)
+            / max_abs_entry;
+        println!(
+            "\nmom near-field runtime report (oracle shielded fixture, n={} panels):\n\
+             \x20   fill, near-field split : {split_fill:?}\n\
+             \x20   fill, centroid kernel  : {centroid_fill:?}\n\
+             \x20   CG solve, split        : {split_solve:?} (max {max_split_iters} iterations)\n\
+             \x20   CG solve, centroid     : {centroid_solve:?} (max {max_centroid_iters} iterations)\n\
+             \x20   matrix-scale drift     : {:.3}%",
+            panels.len(),
+            relative_drift * 100.0,
+        );
+        // The corrected kernel must not degrade the solve's convergence:
+        // both fills have to resolve every right-hand side in well under
+        // n iterations, or the iterative path loses its edge over the
+        // direct one it replaced (#799).
+        for (label, max_iters) in [("split", max_split_iters), ("centroid", max_centroid_iters)] {
+            assert!(
+                max_iters < panels.len() / 2,
+                "{label} kernel: CG used {max_iters} iterations against n={} panels",
+                panels.len()
+            );
+        }
     }
 }

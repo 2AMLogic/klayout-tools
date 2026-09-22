@@ -35,11 +35,13 @@ Moments written for this repo. Two test tiers already cover it:
 
 [FastCap](https://github.com/ediloren/FastCap2) closes exactly that gap. It is
 a different implementation of the same job — 1992 M.I.T. C, no shared code,
-no shared language, and a materially **better** discretisation: analytic
-panel-to-panel potential integrals plus a multipole-accelerated iterative
-solve, where `solver.rs` deliberately uses the bare point-charge kernel
-between panel centroids (its own module docstring says so, and calls the
-simplification out as adequate-for-the-MVP).
+no shared language. Both codes are constant-panel collocation: `solver.rs`
+(since #2061) integrates the source panel's potential at the target centroid
+for near-field pairs and keeps the cheap centroid point-charge kernel for
+well-separated ones, while FastCap evaluates the same collocation integral
+analytically everywhere and accelerates the far field with multipoles.
+Agreement between them is therefore evidence about `klt mom`'s numerics
+that no amount of self-consistency testing can produce.
 
 It is also, unusually for an oracle, the *source*: `solver.rs` cites Nabors &
 White, "FastCap: A Multipole Accelerated 3-D Capacitance Extraction Program",
@@ -213,23 +215,27 @@ The export side fails closed too: boxes that overlap or touch are rejected
 
 ## Fixtures and measured results (#2007 criterion 3)
 
-Recorded 2026-09-18 on `feature/issue-2015`, FastCap **2.0 (18Sep92)**
-(`ec3479e` + the patch above), `klt` **0.5.0**, KLayout **0.30.10**,
-`klt_mom_native` fingerprint `533a05c9b421a763`, panel size 0.5 µm unless
-stated. All 12 tests pass in ~7 s.
+Recorded 2026-09-22 on `feature/issue-2061` (near-field quadrature kernel,
+#2061), FastCap **2.0 (18Sep92)** (`ec3479e` + the patch above), `klt`
+**0.5.0**, KLayout **0.30.10**, `klt_mom_native` fingerprint
+`189c88096c8c97df`, panel size 0.5 µm unless stated. All 26 tests pass in
+~12 s. The pre-#2061 measurements this table supersedes are in git history
+(0.17% / 1.29% / 3.29% worst-case) and the story of the one big mover — the
+parallel-plate fixture — is told in "Where the two solvers disagree most"
+below.
 
 | Fixture | Panels | Worst-case `klt mom` vs FastCap | Notes |
 | --- | --- | --- | --- |
-| Coupled lines (2 × 20 × 2 × 0.6 µm, 1.0 µm apart, ε_r 3.9) | 816 | **0.17%** (coupling), 0.09% (self) | the primary known-good case |
-| Same, through `klt mom`'s GDS + stackup-spec file path | 816 | **0.17%** | `run_mom`'s matrix is bit-identical to the in-memory solve's |
-| Parallel plates (10 µm square laminae, 1.0 µm apart, vacuum) | 800 | **3.29%** | flat laminae — see below |
-| Coupled lines over a grounded plane (3 conductors) | 3068 | **1.29%** | full 3×3 matrix |
-| Seeded spacing defect (1.5 µm instead of 1.0 µm) | 816 | **0.04%** | both see the defect |
-| Seeded missing conductor (ground plane deleted) | 816 | **0.17%** | both see the defect |
+| Coupled lines (2 × 20 × 2 × 0.6 µm, 1.0 µm apart, ε_r 3.9) | 816 | **0.033%** (coupling), 0.006% (self) | the primary known-good case |
+| Same, through `klt mom`'s GDS + stackup-spec file path | 816 | **0.033%** | `run_mom`'s matrix is bit-identical to the in-memory solve's |
+| Parallel plates (10 µm square laminae, 1.0 µm apart, vacuum) | 800 | **0.32%** | flat laminae — see below |
+| Coupled lines over a grounded plane (3 conductors) | 3068 | **0.46%** | full 3×3 matrix |
+| Seeded spacing defect (1.5 µm instead of 1.0 µm) | 816 | **0.065%** | both see the defect |
+| Seeded missing conductor (ground plane deleted) | 816 | **0.033%** | both see the defect |
 
 Analytic anchor, on the parallel-plate fixture: the textbook `ε₀A/d =
 0.885419 fF` is a strict lower bound for finite plates (fringing is
-additive). `klt mom` reports 1.186× it, FastCap 1.148× — both above it, by
+additive). `klt mom` reports 1.145× it, FastCap 1.148× — both above it, by
 the same magnitude, which is the three-way agreement #2007's criterion 3 asks
 for on a "historically known" geometry.
 
@@ -237,34 +243,50 @@ Seeded-defect signatures, and why they matter:
 
 | Seeded defect | `klt mom` sees | FastCap sees | vs. the 3% band |
 | --- | --- | --- | --- |
-| 0.5 µm spacing error | coupling −19.11% | coupling −18.97% | **6×** the band |
-| ground plane deleted | `C[a][a]` −39.15% | `C[a][a]` −38.67% | **13×** the band |
+| 0.5 µm spacing error | coupling −19.04% | coupling −18.97% | **6×** the band |
+| ground plane deleted | `C[a][a]` −38.62% | `C[a][a]` −38.67% | **13×** the band |
 
 That ratio is the point. An oracle whose noise floor is the size of the error
 it is meant to catch proves nothing; here the defect signature is an order of
 magnitude above the disagreement, and the two solvers size the defect to
-within 1.3% of each other (0.74% on the spacing error, 1.24% on the deleted
+within 0.4% of each other (0.37% on the spacing error, 0.13% on the deleted
 ground plane).
 
 `test_the_comparison_can_actually_fail` is the negative control on the
 comparison itself: `klt mom`'s clean answer against FastCap's *defective*
-one differs by **23.62%**, far outside the band. Without it, every agreement
+one differs by **23.45%**, far outside the band. Without it, every agreement
 test above would also pass if the exporter silently ignored its input.
 
 ### Where the two solvers disagree most
 
-The flat parallel-plate fixture is the outlier (3.3%, against 0.17% for the
-coupled lines), and the reason is specific rather than mysterious: two
-zero-thickness laminae one panel-width apart is the worst case for
-`solver.rs`'s centroid point-charge off-diagonal kernel — panel separation
-comparable to panel size is exactly where a point charge is a poor stand-in
-for a panel-to-panel double integral, and exactly where FastCap's analytic
-integral is not. It is a **declared accuracy difference between the two
-kernels**, documented here and given its own (6%) band in the tests, not a
-defect and not a number to tune away.
+Pre-#2061 this was the flat parallel-plate fixture, disagreeing by **3.29%**
+against 0.17% for the coupled lines — two zero-thickness laminae a couple of
+panel widths apart being exactly where a point charge is a poor stand-in for
+the source-panel integral, and exactly where FastCap's analytic integral is
+not. The near-field/far-field split (#2061) removed that gap: the same
+fixture now agrees to **0.32%**, and the flat-plate band collapsed from 6%
+into the common 3% envelope.
+
+What the fix exposed is worth stating plainly: the old 3.29% was the
+*visible* part of a two-error coincidence. The centroid kernel also
+overstated near-field coupling by a few percent, which — on top of the
+kernel's error — happened to offset the constant-density basis's own
+under-resolution of the charge piling up on gap-facing surfaces. Correcting
+the kernel therefore made some closed-form comparisons (Kirchhoff's fringing
+law, the square-coax line) read a couple of percent *further* from the
+textbook even as this oracle's agreement tightened tenfold — see
+[`mom-validation.md`](mom-validation.md), where those tolerances are
+recalibrated with FastCap co-witness runs on the same fixtures.
+
+Where the two solvers still disagree most is the shielded triple (0.46%,
+against 0.03% for the bare coupled lines): the grounded plane 1 µm below the
+lines is the largest near-field region in any fixture, and `solver.rs`'s
+4-point-per-axis quadrature plus its 3-circumradius near-field threshold
+leave it a shade less exact than FastCap's analytic integral. It is a
+discretisation-level residual, an order of magnitude inside the band.
 
 This is also the most useful thing this pairing tells `klt mom`'s users:
-where the in-repo solver's simplification costs accuracy, and how much.
+where the in-repo solver's simplification still costs accuracy, and how much.
 
 ### Behaviour under refinement
 
@@ -273,18 +295,20 @@ over four meshes:
 
 | Panel size | Panels | `klt mom` C[a][b] | FastCap C[a][b] | rel.diff |
 | --- | --- | --- | --- | --- |
-| 2.00 µm | 84 | −1.259152 fF | −1.377758 fF | 8.61% |
-| 1.00 µm | 248 | −1.407728 fF | −1.419067 fF | 0.80% |
-| 0.50 µm | 816 | −1.450442 fF | −1.447923 fF | 0.17% |
-| 0.25 µm | 3264 | −1.486710 fF | −1.478646 fF | 0.55% |
+| 2.00 µm | 84 | −1.321503 fF | −1.377758 fF | 4.08% |
+| 1.00 µm | 248 | −1.411542 fF | −1.419067 fF | 0.53% |
+| 0.50 µm | 816 | −1.448400 fF | −1.447923 fF | 0.033% |
+| 0.25 µm | 3264 | −1.479796 fF | −1.478646 fF | 0.078% |
 
-The disagreement is **not monotone**: both solvers approach the answer from
-below at different rates and cross over between 0.5 µm and 0.25 µm (the thin
-bars' sharp-edge charge singularity makes both converge slowly). The test
+Measured 2026-09-22 with the near-field kernel (#2061). The disagreement is
+still **not monotone** — both solvers approach the answer from below at
+different rates and cross over between 0.5 µm and 0.25 µm (the thin bars'
+sharp-edge charge singularity makes both converge slowly, the same effect
+`mom-validation.md` documents against the Richardson oracle). The test
 therefore asserts what is actually true and meaningful — both move in the
-same direction at every refinement step, the finest mesh agrees at least 4×
-better than the coarsest, and every mesh at 1.0 µm or finer is inside the
-band — rather than a monotonicity that would have required picking the mesh
+same direction at every refinement step, the finest mesh agrees far better
+than the coarsest, and every mesh at 1.0 µm or finer is inside the band —
+rather than a monotonicity that would have required picking the mesh
 sequence that produced it.
 
 ## Provenance (#2007 criterion 4)
@@ -347,9 +371,11 @@ it is absent.
 - **One host, one arithmetic.** Both solvers run on the same machine in IEEE
   double precision. Recorded on both sides as hashes and versions, which is
   what makes a future disagreement attributable rather than ambiguous.
-- **The band is empirical.** 3% (and 6% for flat laminae) is set from the
+- **The band is empirical.** 3% across every fixture is set from the
   agreement measured here, with headroom — it is not derived from an error
-  analysis of either solver. It is tight enough that every seeded defect
+  analysis of either solver. Post-#2061 the flat-plate fixture sits at
+  0.32%, so its old dedicated 6% band collapsed into the common envelope.
+  It is tight enough that every seeded defect
   above is an order of magnitude outside it, which is the property that
   matters.
 
