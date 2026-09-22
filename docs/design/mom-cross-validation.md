@@ -21,6 +21,17 @@ this harness; re-run `pytest tests/test_mom_cross_validation.py -v
 --capture=tee-sys` (after `uv sync --extra mom-cross-validation`) to reprint
 them.
 
+There are now **two** external oracles, one per solver path, each with its own
+extra and its own pair of CI steps: **NEC2++** for the full-wave
+S-parameter sweep (#895 — the benchmark, methodology, and measured results
+that make up the bulk of this document), and **PyPEEC** for the PEEC
+inductance path's spiral fixture ([#1886](https://github.com/2AMLogic/klayout-tools/issues/1886),
+closing out [#1842](https://github.com/2AMLogic/klayout-tools/issues/1842)'s
+acceptance criterion 3 — see "The spiral fixture's oracle" below for the
+oracle choice and the FastHenry ruling, and
+[`mom-validation.md`](mom-validation.md) for that fixture's measured
+numbers).
+
 ## Picking the external oracle
 
 Epic #701's own Phase 0 section, and `docs/design/em-field-sim-spike.md`'s
@@ -78,6 +89,88 @@ it touches (`ngspice`, Yosys, Icarus Verilog, Verilator — all invoked as
 its own `pyproject.toml` extra (`mom-cross-validation`), never pulled in by
 `dev`/`mom`/any default install path — a plain `pip install klayout-tools`
 or `uv sync --extra dev` never touches it.
+
+### The spiral fixture's oracle: PyPEEC (issue #1886)
+
+The section above picks the oracle for the **full-wave** cross-check (#895).
+A second, independent oracle covers the **PEEC inductance** path's spiral
+fixture — [#1842](https://github.com/2AMLogic/klayout-tools/issues/1842)'s
+generalized filament-pair formula, whose acceptance criterion 3 named
+FastHenry and which [#1886](https://github.com/2AMLogic/klayout-tools/issues/1886)
+closed out. It is a different tool for a genuinely different reason: NEC2++
+is a thin-wire *full-wave* MoM solver and has no partial-inductance matrix to
+compare against, while the quantity here is a DC/quasi-static partial
+inductance.
+
+**FastHenry is disqualified, permanently.** The operator ruling on #1886
+(2026-09-18) resolved the licensing question this document's own
+[`em-field-sim-spike.md`](em-field-sim-spike.md) source recorded as
+"unresolved, and disqualifying until resolved", on two independent grounds:
+
+1. **Unpackaged.** No `fasthenry` package exists in Debian/Ubuntu (`apt-get
+   install fasthenry` → "No such package"), Homebrew, or PyPI, so the
+   "install a distro package and invoke it as a subprocess oracle" framing
+   #1886 was originally filed around never applied — CI would have had to
+   build the sources itself.
+2. **Not open source.** Those sources carry MIT RLE's 1990s research notice
+   rather than an OSI license, in FastHenry's own core
+   (`src/fasthenry/induct.h`, `mulGlobal.h`) and in the FastCap-derived
+   `zbuf/` code in every mirror (`ediloren/FastHenry2`, `ediloren/FastCap2`,
+   and the `fasthenry-3.0wr` tarball inside `wrcad/xictools`, whose
+   Apache-2.0 wrapper explicitly does not override inherited terms):
+
+   > Permission to use, copy and modify for internal, noncommercial purposes
+   > is hereby granted. Any distribution of this program or any part thereof
+   > is strictly prohibited without prior written consent of M.I.T. […]
+   > LICENSEE agrees not to make any copies except for LICENSEE'S internal
+   > noncommercial use.
+
+   Unlike `PyNEC`'s GPL-3.0-only (a *known* category with a documented
+   subprocess-only policy — see "License: subprocess-only, never embedded"
+   above), this is not a copyleft question with a boundary to respect: the
+   distribution clause forecloses redistribution of the code or any part of
+   it, which rules out vendoring *and* any future clean port. **Never a
+   dependency, never an oracle, never ported.**
+
+**[PyPEEC](https://github.com/otvam/pypeec)** is the oracle instead: a 3-D
+quasi-magnetostatic **PEEC** solver from Dartmouth College (MPL-2.0, JOSS
+[10.21105/joss.06644](https://doi.org/10.21105/joss.06644), `pip install
+pypeec` / conda-forge) that extracts terminal R/L from a voxelised conductor
+geometry via an FFT-accelerated dense operator. It satisfies the same
+"lightest-weight *real* external tool" bar `PyNEC` does for the full-wave
+check:
+
+- **Same method class, independent implementation.** PEEC — the same family
+  as `native/mom/src/peec.rs` and as FastHenry — but a uniform voxel mesh
+  with face currents and an FFT-circulant Green's operator, against this
+  repo's per-bar filament bundles with Rosa's closed-form self terms and an
+  analytic skew-filament mutual. Different discretisation, different
+  codebase, different implementer: no correlated failure mode.
+- **Installable and runnable headlessly.** A pure-Python wheel, no compiled
+  engine to build, no GPU, no mesh generator; the CI solve takes ~2 seconds.
+  Its voxel-grid restriction is harmless for a rectangular-section spiral
+  whose every edge lands on a 1 µm grid line.
+- **License: subprocess-only, same discipline.** MPL-2.0 is file-scoped weak
+  copyleft, materially lighter than GPL-3.0-only, so this is a weaker
+  constraint than `PyNEC`'s — but the handling is identical anyway. `klt mom`,
+  `klayout_tools`, everything under `src/` never imports `pypeec`; only
+  `scripts/mom_pypeec_reference.py` does, always invoked as its own
+  subprocess exchanging JSON over stdin/stdout. It is declared in its own
+  `mom-pypeec-cross-validation` extra, never pulled in by
+  `dev`/`mom`/`mom-cross-validation` or any default install path (its
+  declared dependencies drag in a plotting/GUI stack — `vtk`, `pyvista`,
+  `pyside6`, with no extras to opt out of — so the install is ~1.6 GB: fine
+  for one opt-in CI step, unacceptable anywhere else).
+
+The fixture, the method (terminal impedance of the open spiral at a quasi-DC
+frequency), the tolerances, and the measured numbers are documented where the
+rest of the PEEC validation lives:
+[`mom-validation.md`](mom-validation.md)'s "Generalized filament-pair formula
+(issue #1842): a spiral fixture" section. Its executable form is
+`tests/test_mom_pypeec_cross_validation.py` plus
+`scripts/mom_pypeec_reference.py`, and it is wired into the same
+`.github/workflows/ci.yml` mom leg as the NEC2++ check below, with the same
+"assert the test actually ran (no silent skip)" companion step.
 
 ## The shared benchmark
 
@@ -234,3 +327,7 @@ cross-check is reproduced on every push/PR, not only locally.
   document.
 - `scripts/mom_nec_reference.py` — the external NEC2++ solver's own driver
   script (always invoked as a subprocess — see its module docs).
+- `tests/test_mom_pypeec_cross_validation.py` /
+  `scripts/mom_pypeec_reference.py` — the same pairing for the PEEC spiral
+  fixture's external oracle (#1886); the measured comparison lives in
+  [`mom-validation.md`](mom-validation.md).
