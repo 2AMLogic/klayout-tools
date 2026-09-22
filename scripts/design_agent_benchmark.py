@@ -1111,19 +1111,110 @@ class AgentInvocationError(Exception):
 AgentInvoker = Callable[[str], str]
 
 
-def _extract_agent_text(stdout: str) -> str:
-    """Pull the agent's final response text out of `claude -p --output-format
-    json`'s envelope (a top-level ``result`` string field) -- falls back to
-    the raw stdout for a CLI/stub that just prints plain text, so a minimal
-    test stub need not replicate the full envelope shape."""
+#: Token-count fields this module lifts verbatim out of an agent CLI's own
+#: ``usage`` object (issue #2294). An allow-list rather than "copy the whole
+#: object": the envelope also carries non-count members (``service_tier``, a
+#: nested ``server_tool_use``) that have no place in a per-round counter
+#: ledger. Any *other* integer-valued key whose name ends in ``_tokens`` is
+#: kept too (:func:`_normalize_token_usage`), so a CLI that adds a new
+#: cache-tier bucket is surfaced without a code change here.
+TOKEN_USAGE_KEYS: tuple[str, ...] = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _normalize_token_usage(raw: Any) -> dict[str, int] | None:
+    """The integer token counters inside an agent CLI envelope's ``usage``
+    object, or ``None`` when it carries none (a CLI version that omits
+    ``usage`` entirely, a stub that does not model it, a non-object value).
+
+    Deliberately total and non-raising: token accounting is *evidence*
+    attached to a round, never something a missing/oddly-shaped field may be
+    allowed to fail the round over -- "a CLI version that omits usage in its
+    envelope keeps ``usage: null`` or a partial object, never a hard
+    failure" (issue #2294).
+    """
+    if not isinstance(raw, dict):
+        return None
+    usage: dict[str, int] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or isinstance(value, bool):
+            continue
+        if not isinstance(value, int):
+            continue
+        if key in TOKEN_USAGE_KEYS or key.endswith("_tokens"):
+            usage[key] = value
+    return usage or None
+
+
+def _extract_agent_envelope(stdout: str) -> tuple[str, dict[str, int] | None]:
+    """Pull ``(response_text, token_usage)`` out of `claude -p --output-format
+    json`'s envelope: a top-level ``result`` string plus, when the CLI
+    reports one, its ``usage`` object's token counters
+    (:func:`_normalize_token_usage`).
+
+    Falls back to ``(raw stdout, None)`` for a CLI/stub that just prints
+    plain text, so a minimal test stub need not replicate the full envelope
+    shape -- and to a ``None`` usage for an envelope that carries no
+    ``usage`` field at all (an older CLI), which is recorded as "no usage
+    known", never as an error.
+    """
     stripped = stdout.strip()
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError:
-        return stdout
-    if isinstance(payload, dict) and isinstance(payload.get("result"), str):
-        return payload["result"]
-    return stdout
+        return stdout, None
+    if not isinstance(payload, dict):
+        return stdout, None
+    usage = _normalize_token_usage(payload.get("usage"))
+    if isinstance(payload.get("result"), str):
+        return payload["result"], usage
+    return stdout, usage
+
+
+def _extract_agent_text(stdout: str) -> str:
+    """The agent's final response text alone -- :func:`_extract_agent_envelope`
+    without its token-usage leg, for callers that only want the text."""
+    return _extract_agent_envelope(stdout)[0]
+
+
+def _invoke_agent_with_usage(
+    prompt: str, *, timeout_s: float = DEFAULT_AGENT_TIMEOUT_S
+) -> tuple[str, dict[str, int] | None]:
+    """:func:`_default_invoke_agent`'s full result: the response text *and*
+    whatever token usage the CLI envelope reported (``None`` when it
+    reported none).
+
+    Split out from :func:`_default_invoke_agent` rather than widening it so
+    the public :data:`AgentInvoker` contract stays ``str -> str``: a
+    caller-supplied stub keeps working unchanged, and
+    :func:`make_live_agent_provider` reaches for this richer form only when
+    it is driving the real CLI-backed invoker (issue #2294).
+    """
+    cli = os.environ.get(AGENT_CLI_ENV, "claude")
+    cmd = [cli, "-p", prompt, "--output-format", "json"]
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_s, check=False
+        )
+    except FileNotFoundError as exc:
+        raise AgentInvocationError(
+            f"agent CLI {cli!r} not found on PATH -- install it, or point "
+            f"{AGENT_CLI_ENV} at a stub for testing"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise AgentInvocationError(
+            f"agent invocation timed out after {timeout_s}s"
+        ) from exc
+    if proc.returncode != 0:
+        raise AgentInvocationError(
+            f"agent invocation failed (exit {proc.returncode}): "
+            f"{proc.stderr.strip()[:2000]}"
+        )
+    return _extract_agent_envelope(proc.stdout)
 
 
 def _default_invoke_agent(
@@ -1153,28 +1244,12 @@ def _default_invoke_agent(
     single-shot topology/sizing/netlist-authoring judgment against the
     skill-file guidance and the task's testbench contract, scored by the
     exact same `klt eval` gate the reference solution is.
+
+    Returns the response text only -- the :data:`AgentInvoker` contract.
+    :func:`_invoke_agent_with_usage` is the same call with the envelope's
+    token usage kept alongside it.
     """
-    cli = os.environ.get(AGENT_CLI_ENV, "claude")
-    cmd = [cli, "-p", prompt, "--output-format", "json"]
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_s, check=False
-        )
-    except FileNotFoundError as exc:
-        raise AgentInvocationError(
-            f"agent CLI {cli!r} not found on PATH -- install it, or point "
-            f"{AGENT_CLI_ENV} at a stub for testing"
-        ) from exc
-    except subprocess.TimeoutExpired as exc:
-        raise AgentInvocationError(
-            f"agent invocation timed out after {timeout_s}s"
-        ) from exc
-    if proc.returncode != 0:
-        raise AgentInvocationError(
-            f"agent invocation failed (exit {proc.returncode}): "
-            f"{proc.stderr.strip()[:2000]}"
-        )
-    return _extract_agent_text(proc.stdout)
+    return _invoke_agent_with_usage(prompt, timeout_s=timeout_s)[0]
 
 
 def _load_skill_chain_text(repo_root: Path) -> str:
@@ -1578,16 +1653,16 @@ def make_live_agent_provider(
     ephemeral CI runner reclaims them at job end regardless.
     """
 
-    def _agent_call(prompt: str) -> str:
+    def _agent_call(prompt: str) -> tuple[str, dict[str, int] | None]:
         if invoke_agent is _default_invoke_agent:
-            return _default_invoke_agent(prompt, timeout_s=agent_timeout_s)
-        return invoke_agent(prompt)
+            return _invoke_agent_with_usage(prompt, timeout_s=agent_timeout_s)
+        return invoke_agent(prompt), None
 
     def provider(
         task: dict[str, Any], attempt_index: int, repo_root: Path
     ) -> tuple[str, str | None]:
         prompt, stems = _build_live_agent_prompt(task, repo_root)
-        response_text = _agent_call(prompt)
+        response_text, token_usage = _agent_call(prompt)
         netlists_by_stem = _extract_labeled_netlists(response_text, stems)
 
         if scratch_root is not None:
@@ -1602,6 +1677,15 @@ def make_live_agent_provider(
 
         descriptor = _build_live_agent_descriptor(
             task, repo_root, netlists_by_stem, scratch_dir
+        )
+        _write_session_summary(
+            scratch_dir,
+            {
+                "task_id": task["id"],
+                "attempt": attempt_index,
+                "usage": token_usage,
+                "netlists": sorted(netlists_by_stem),
+            },
         )
         return json.dumps(descriptor), None
 
@@ -2056,20 +2140,45 @@ def _freeze_directory_readonly(path: Path) -> None:
         pass
 
 
-def _usage_from_scratch_dir(scratch_dir: Path | None) -> dict[str, Any] | None:
-    """Best-effort per-round tool-call usage, read back from whatever the
-    provider itself already wrote into its own scratch directory -- never
-    plumbed through a new :data:`CandidateProvider` return value, so every
-    existing provider's 2-tuple contract stays exactly as it is.
+def _write_session_summary(directory: Path, payload: dict[str, Any]) -> None:
+    """Write one provider's end-of-attempt ``agent-session.json``
+    (:data:`SESSION_SUMMARY_FILENAME`) into its own scratch/sandbox
+    directory -- the single side channel :func:`_usage_from_scratch_dir`
+    reads a round's usage back out of, for every agent-backed provider.
 
-    Today this only ever resolves for ``--provider interactive-agent``,
-    which already writes ``agent-session.json``
-    (:data:`SESSION_SUMMARY_FILENAME`, ``tool_calls``/``turns``) into its own
-    per-attempt sandbox (:func:`make_interactive_agent_provider`). Real
-    *token* accounting is not surfaced by any shipped provider yet -- see
-    ``benchmarks/design-agent/README.md``'s "Known limitations" for the
-    tracked follow-up; ``usage`` is ``None`` for every other provider, and
-    for a scratch directory that carries no such file.
+    Best-effort: an unwritable directory costs the round its usage evidence,
+    never the round itself.
+    """
+    try:
+        (directory / SESSION_SUMMARY_FILENAME).write_text(
+            json.dumps(payload, indent=2) + "\n"
+        )
+    except OSError:  # pragma: no cover -- unwritable scratch dir
+        pass
+
+
+def _usage_from_scratch_dir(scratch_dir: Path | None) -> dict[str, Any] | None:
+    """Best-effort per-round usage, read back from the ``agent-session.json``
+    (:data:`SESSION_SUMMARY_FILENAME`) the provider itself already wrote into
+    its own scratch directory -- never plumbed through a new
+    :data:`CandidateProvider` return value, so every existing provider's
+    2-tuple contract stays exactly as it is.
+
+    One flat dict of integer counters, merging two sources of that file:
+
+    * ``tool_calls``/``turns`` -- session shape, written by
+      :func:`make_interactive_agent_provider` only.
+    * the CLI envelope's own token counts (``input_tokens``,
+      ``output_tokens``, the cache buckets; see
+      :func:`_normalize_token_usage`) under the file's ``usage`` key --
+      written by both agent-backed providers as of issue #2294, from
+      whatever their respective `claude` CLI envelopes reported.
+
+    ``None`` for the deterministic ``reference`` provider (no live
+    invocation, so zero usage is the truth, not a gap), for a scratch
+    directory with no such file, and for a CLI version whose envelope
+    carries no usage at all -- a partial dict, never a hard failure, when
+    only some of it is known.
     """
     if scratch_dir is None:
         return None
@@ -2080,6 +2189,7 @@ def _usage_from_scratch_dir(scratch_dir: Path | None) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         return None
     usage = {key: data[key] for key in ("tool_calls", "turns") if key in data}
+    usage.update(_normalize_token_usage(data.get("usage")) or {})
     return usage or None
 
 
