@@ -815,6 +815,45 @@ repo gates its own tree with it — `git ls-files 'examples/**/*.json' | xargs
 klt env-provenance lint-envelope`, with an **empty** allow-list, in
 `.github/workflows/ci.yml`'s `Lint (ruff)` job.
 
+### Pinned derived artifacts: `pinned: true` (issue #2279)
+
+Path hygiene is necessary but not sufficient. A committed artifact can be
+path-clean and still carry bytes that depend on the *generating host's*
+floating-point environment: a value computed through `math.pow`/`math.exp`
+(or numpy `power`/`float_power`, whose `np.float32` result diverges from
+double-pow-then-round under NEP-50) legitimately differs in the last ulp
+between conforming libms, so the same generator on macOS/py3.14 and
+ubuntu/py3.12 produces different committed bytes (the gf180-surge PR #49 /
+PR #45 incidents). The rule this adds to the one above:
+
+> An evidence-generating code path must be **integer-exact**, read its
+> floats from a **committed pinned table** (a decimal literal parses to the
+> same double on every host), or commit a **pinned artifact** — bytes
+> written once, with the generator's identity + inputs recorded, so drift
+> detection compares against the pin rather than silently regenerating.
+
+A pinned artifact whose envelope is JSON carries:
+
+| Field | Meaning |
+|---|---|
+| `pinned` | `true`. The committed bytes are the reference; nothing regenerates them silently. |
+| `generator` | Repo-relative path of the generator script that produced the bytes. |
+| `generator_sha256` | sha256 of that script's source at pin time — proves the committed generator is the one that produced the committed bytes. |
+| `regenerate` | The command a human runs (on a trusted host) to regenerate before re-pinning. Recorded, never executed by tooling. |
+
+The enforcement point is the artifact-determinism check
+([`scripts/check_artifact_determinism.py`](../scripts/check_artifact_determinism.py)):
+a manifest entry declares `float_discipline: "pinned-artifact"` plus the same
+pin (`generator_sha256`, `regenerate`, per-artifact `artifact_sha256`); the
+check then never regenerates that generator, verifies the pin instead, and
+flags `stale_pin` (generator source moved after pinning) / `pin_drift`
+(committed bytes moved after pinning) at exit `1`. Generators that do *not*
+declare the escape hatch are statically scanned for host-libm float
+computation and flagged (`host_float_op`). Full rules, the flagged/not-flagged
+operator lists, and the negative controls:
+[`guides/golden-artifact-determinism.md`](guides/golden-artifact-determinism.md)
+→ "Float provenance rules for committed evidence".
+
 ## Verifying committed evidence: `--check` / `--rerun`
 
 Six verbs let a consumer verify that a previously committed `--format json`
