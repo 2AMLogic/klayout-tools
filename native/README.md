@@ -57,3 +57,34 @@ Every crate carries its own `cargo fmt --check` / `cargo clippy --all-targets
 Rust tests") for the exact invocation, and the crate's own `src/lib.rs` (or
 `src/main.rs`) doc comment for what it implements and why it's shaped the
 way it is.
+
+### Release profile: why every crate sets `debug = 1`
+
+Each crate's `[profile.release]` is `lto = true` **plus `debug = 1`**, and the
+`debug` line is a correctness fix, not a debugging convenience. Left at
+cargo's default (`debug = false`), the release profile implicitly adds
+`-C strip=debuginfo`; on macOS with Apple `ld` `PROJECT:ld-27037.1` that strip
+leaves a `LINKEDIT` string pool at an offset `dyld` rejects, so
+`maturin develop --release` builds and installs an extension that then cannot
+be imported at all:
+
+```
+ImportError: dlopen(.../klt_mom_native.cpython-312-darwin.so, 0x0002):
+  mis-aligned LINKEDIT string pool, fileOffset=0x0007D524
+```
+
+Any nonzero `debug` suppresses the implicit strip; `1` (line tables only) is
+the cheapest value that does. `lto` is **not** the trigger — issue #2261
+bisected it, and `native/mom/Cargo.toml` carries the full write-up. Keep the
+override when editing any of these profiles, and add it to a new crate's
+`[profile.release]` too.
+
+The cost is local-build-artifact size and nothing else — every crate here is
+`publish = false`, built only from a checkout, and never published to PyPI.
+Measured on Linux (x86_64, cargo 1.97.1) for `mom/`:
+`target/release/libklt_mom_native.so` grows 0.79 MiB → 7.67 MiB and the
+maturin-installed extension module 0.64 MiB → 3.44 MiB, with an incremental
+release rebuild going from ~4.3 s to ~4.8 s.
+
+`nldm-interp/` has no `[profile.release]` of its own on purpose: it is a path
+dependency compiled under whichever parent crate is being built.

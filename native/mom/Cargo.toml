@@ -50,3 +50,32 @@ approx = "0.5"
 
 [profile.release]
 lto = true
+# `debug = 1` (line tables only) is load-bearing, not a debugging nicety: with
+# cargo's default `debug = false` for this profile, cargo implicitly passes
+# `-C strip=debuginfo` to rustc, and on macOS (Apple `ld` PROJECT:ld-27037.1,
+# Darwin 27.0.0 arm64) that strip leaves a `LINKEDIT` string pool at an offset
+# dyld rejects. The resulting `.dylib` links cleanly but cannot be imported at
+# all:
+#
+#   ImportError: dlopen(... klt_mom_native.cpython-312-darwin.so, 0x0002):
+#     mis-aligned LINKEDIT string pool, fileOffset=0x0007D524
+#
+# Issue #2261 bisected it on that toolchain: the dev profile is fine,
+# `maturin develop --release` is broken, `CARGO_PROFILE_RELEASE_LTO=false` does
+# *not* help (so `lto` above is not the trigger), and
+# `CARGO_PROFILE_RELEASE_DEBUG=true` does. Any nonzero `debug` suppresses the
+# implicit strip -- verified with `cargo build --release -v`, which emits
+# `-C strip=debuginfo` under `debug = 0` and `-C debuginfo=1` with no `-C strip`
+# under `debug = 1`. `1` (line tables) is the cheapest value that does it.
+#
+# The cost is a bigger *local* build artifact and nothing else: these crates are
+# `publish = false`, resolved from an in-repo path by `[tool.uv.sources]`, and
+# never published to PyPI. Measured on Linux (x86_64, cargo 1.97.1):
+# `target/release/libklt_mom_native.so` 0.79 MiB -> 7.67 MiB, and the
+# maturin-installed `klt_mom_native...so` 0.64 MiB -> 3.44 MiB (maturin strips
+# the packaged module itself, which is why the installed delta is the smaller
+# of the two). An incremental release rebuild goes from ~4.3 s to ~4.8 s.
+#
+# Every sibling crate under `native/` carries the same override for the same
+# reason -- see `native/README.md`'s "Release profile" section.
+debug = 1

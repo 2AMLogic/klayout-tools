@@ -140,6 +140,16 @@ maturin develop --release   # builds + installs into the active venv
 > `uv sync --extra dev --group mom --reinstall-package klt-mom-native`, or
 > use `maturin develop` (which always rebuilds).
 
+> **macOS: don't strip the release build.** `native/mom/Cargo.toml`'s
+> `[profile.release]` sets `debug = 1` deliberately. Without it, cargo adds
+> `-C strip=debuginfo`, and on Apple `ld` `PROJECT:ld-27037.1` that strip
+> produces a `.dylib` that links cleanly and then fails to import with
+> `mis-aligned LINKEDIT string pool` (issue #2261). If you hit that error,
+> you have overridden the profile — check for `CARGO_PROFILE_RELEASE_DEBUG=0`
+> or a `RUSTFLAGS`/`.cargo/config.toml` `-C strip=…` in your environment
+> rather than reinstalling the venv, which does not help. Same override, same
+> reason, on every crate under [`native/`](../../native/README.md#release-profile-why-every-crate-sets-debug--1).
+
 If `klt_mom_native` cannot be imported, `klt mom` fails cleanly with exit
 code `1` and a message pointing back to this section — never a bare
 `ImportError` traceback.

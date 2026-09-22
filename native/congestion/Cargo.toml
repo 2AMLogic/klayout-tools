@@ -26,3 +26,15 @@ approx = "0.5"
 
 [profile.release]
 lto = true
+# `debug = 1` is load-bearing on macOS, not a debugging nicety: cargo's default
+# `debug = false` makes it pass `-C strip=debuginfo`, and on Apple `ld`
+# PROJECT:ld-27037.1 that strip leaves a `LINKEDIT` string pool at an offset
+# dyld rejects -- the `.dylib` links cleanly and is then unimportable
+# ("mis-aligned LINKEDIT string pool"). Any nonzero `debug` suppresses the
+# implicit strip. Diagnosed on `native/mom/`, whose `Cargo.toml` carries the
+# full bisection (issue #2261); this crate's `[profile.release]` was
+# byte-identical to mom's and it is loaded through the same `dlopen` path, so
+# the override is applied here too rather than waiting for the same trap to be
+# rediscovered per crate. Cost is local-artifact size only -- `publish = false`,
+# never shipped in a wheel.
+debug = 1
