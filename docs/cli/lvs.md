@@ -324,7 +324,29 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   purely by subcircuit name); its only real call-site parameter is an
   optional `mult`, carried onto the plain-element `Q` card's `NE`
   (KLayout's `DeviceClassBJT3Transistor` natively represents multiple
-  parallel emitters via `NE`).
+  parallel emitters via `NE`). **The emitter geometry the call site omits is
+  stated anyway** (issue #2335): the curated cell name encodes it, so the
+  converted card carries the nominal emitter area `AE=` and, for these
+  square-emitter cells, the derived perimeter `PE=` (`side = sqrt(AE)`,
+  `PE = 4 * side`) — e.g.
+
+  ```
+  XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=1
+  ```
+
+  becomes `Q1 c b e pnp AE=11.56P PE=13.6U NE=1`, matching byte-for-byte the
+  `AE=`/`PE=` the sky130 extraction deck itself writes for that cell. This
+  matters because `AE` is one of `DeviceClassBJT3Transistor`'s two *primary*
+  (compared) parameters — `AE` and `NE` — so a geometry-free reference card
+  is a zero-vs-nonzero difference against the layout side's extracted `AE`,
+  which cascades into `device.unmatched` on *every* bipolar (and cannot be
+  rescued by `options.parameter_tolerance`, which is relative). With the
+  geometry carried, the **default** full-parameter compare reaches `status:
+  "match"` — no `options.compare_parameters` override needed. `AB`/`PB`/
+  `AC`/`PC` are deliberately *not* emitted: they measure drawn
+  base/collector geometry the fixed-geometry cell name does not encode, and
+  they are *secondary* parameters — once the primary `AE`/`NE` agree the
+  devices pair and the comparer never reports them.
 - `nf`/`m`/`mult` > 1 on a resistor/capacitor call, and `m`/`mult` > 1 on a
   MOS call (a multiplied device the curated plain-element form cannot
   represent) is **rejected** with a specific error naming the device —
