@@ -80,7 +80,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -2214,58 +2214,79 @@ def _snapshot_submission(descriptor_arg: str, dest_dir: Path) -> tuple[str, list
     snapshot = copy.deepcopy(descriptor)
     copies: dict[str, Path] = {}
     request_copies: dict[str, str] = {}
+    for args in _sim_args_with_absolute_request(snapshot):
+        request = args["request"]
+        snapshotted = request_copies.get(request) or _snapshot_sim_request(
+            request, dest_dir, copies
+        )
+        if snapshotted is not None:
+            request_copies[request] = snapshotted
+            args["request"] = snapshotted
 
-    def _copy_once(src: Path) -> Path:
-        key = str(src)
-        if key not in copies:
-            dest = dest_dir / f"{len(copies)}-{src.name}"
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dest)
-            copies[key] = dest
-        return copies[key]
+    if not copies:
+        return descriptor_arg, []
+    return json.dumps(snapshot), sorted(copies.values(), key=str)
 
-    def _snapshot_request(request: str) -> str | None:
-        if request in request_copies:
-            return request_copies[request]
-        src = Path(request)
-        try:
-            doc = json.loads(src.read_text())
-        except (OSError, json.JSONDecodeError):
-            return None
-        if not isinstance(doc, dict):
-            return None
-        netlist = doc.get("netlist")
-        if isinstance(netlist, str):
-            netlist_src = Path(netlist)
-            if not netlist_src.is_absolute():
-                netlist_src = src.parent / netlist_src
-            try:
-                doc["netlist"] = str(_copy_once(netlist_src))
-            except OSError:
-                return None
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / f"{len(copies)}-{src.name}"
-        dest.write_text(json.dumps(doc, indent=2) + "\n")
-        copies[str(src)] = dest
-        request_copies[request] = str(dest)
-        return str(dest)
 
-    for entry in _reference_descriptor_check_entries(snapshot):
+def _sim_args_with_absolute_request(
+    descriptor: dict[str, Any],
+) -> Iterator[dict[str, Any]]:
+    """Every ``args`` dict in ``descriptor`` that names a ``sim`` check's
+    request by *absolute* path -- yielded live (not copied), so a caller can
+    rewrite the reference in place."""
+    for entry in _reference_descriptor_check_entries(descriptor):
         if not isinstance(entry, dict) or entry.get("check") != "sim":
             continue
         args = entry.get("args")
         if not isinstance(args, dict):
             continue
         request = args.get("request")
-        if not isinstance(request, str) or not os.path.isabs(request):
-            continue
-        snapshotted = _snapshot_request(request)
-        if snapshotted is not None:
-            args["request"] = snapshotted
+        if isinstance(request, str) and os.path.isabs(request):
+            yield args
 
-    if not copies:
-        return descriptor_arg, []
-    return json.dumps(snapshot), sorted(copies.values(), key=str)
+
+def _copy_into_snapshot(src: Path, dest_dir: Path, copies: dict[str, Path]) -> Path:
+    """Copy ``src`` into ``dest_dir`` once, recording it in ``copies`` (keyed
+    by source path, so a file named by two requests is copied a single
+    time). The ``<n>-`` filename prefix keeps two same-named files from
+    different directories from colliding."""
+    key = str(src)
+    if key not in copies:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{len(copies)}-{src.name}"
+        shutil.copyfile(src, dest)
+        copies[key] = dest
+    return copies[key]
+
+
+def _snapshot_sim_request(
+    request: str, dest_dir: Path, copies: dict[str, Path]
+) -> str | None:
+    """Copy one `klt sim` request document -- and the candidate netlist it
+    names -- into ``dest_dir``, returning the copy's path (or ``None`` when
+    the request cannot be read, in which case :func:`_snapshot_submission`
+    leaves the original reference alone)."""
+    src = Path(request)
+    try:
+        doc = json.loads(src.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    netlist = doc.get("netlist")
+    if isinstance(netlist, str):
+        netlist_src = Path(netlist)
+        if not netlist_src.is_absolute():
+            netlist_src = src.parent / netlist_src
+        try:
+            doc["netlist"] = str(_copy_into_snapshot(netlist_src, dest_dir, copies))
+        except OSError:
+            return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{len(copies)}-{src.name}"
+    dest.write_text(json.dumps(doc, indent=2) + "\n")
+    copies[str(src)] = dest
+    return str(dest)
 
 
 #: Name of the extra ``metrics`` entry :func:`_round_score_descriptor`
@@ -2416,101 +2437,196 @@ def run_task_round(
         round_task[ROUND_HISTORY_CONTEXT_KEY] = trimmed_history
 
     agent_start = time.monotonic()
-    scratch_dir: Path | None = None
-    descriptor_arg: str | None = None
-    candidate_arg: str | None = None
-    error: str | None = None
-    timed_out = False
-
-    def _subdirs(root: Path | None) -> set[Path]:
-        if root is None or not root.is_dir():
-            return set()
-        return {child for child in root.iterdir() if child.is_dir()}
-
-    try:
-        before = _subdirs(scratch_root)
-        descriptor_arg, candidate_arg = provider(round_task, round_index, repo_root)
-        new_dirs = _subdirs(scratch_root) - before
-        if len(new_dirs) == 1:
-            scratch_dir = next(iter(new_dirs))
-    except Exception as exc:  # noqa: BLE001 -- see run_attempt's identical rationale
-        error = f"provider produced no submission: {exc}"
-        timed_out = _looks_like_timeout(exc)
+    descriptor_arg, candidate_arg, scratch_dir, error, timed_out = (
+        _invoke_round_provider(
+            round_task, round_index, provider, repo_root, scratch_root
+        )
+    )
     agent_wall_s = time.monotonic() - agent_start
-    if error is None and descriptor_arg is None:
-        # A provider that returns without raising, but hands back no
-        # descriptor at all, breaks the `CandidateProvider` contract -- score
-        # it as an invalid round with its own named reason rather than
-        # letting a `None` reach `klt eval` and violate "never raises".
-        error = "provider returned no eval descriptor"
 
     # Take the harness's own copy of what was submitted *before* anything is
     # scored, and score that copy -- see `_snapshot_submission`.
     snapshot_files: list[Path] = []
     scored_arg = descriptor_arg
-    if error is None and submission_dir is not None and descriptor_arg is not None:
-        scored_arg, snapshot_files = _snapshot_submission(
-            descriptor_arg, submission_dir
-        )
-
     report: dict[str, Any] | None = None
     valid = False
     margin_metric_name: str | None = None
     if error is None:
-        scored_descriptor_arg, margin_metric_name = _round_score_descriptor(scored_arg)
-        try:
-            report = run_eval(scored_descriptor_arg, candidate_arg)
-        except EvalError:
-            # The margin augmentation must never be what turns an otherwise-
-            # valid submission into a scored failure -- retry once against
-            # the unaugmented descriptor before giving up.
-            margin_metric_name = None
-            try:
-                report = run_eval(scored_arg, candidate_arg)
-            except EvalError as exc:
-                error = f"invalid submission: {exc}"
-        if report is not None:
-            valid = bool(report.get("valid"))
+        # `error is None` already implies a non-None descriptor_arg -- that is
+        # exactly what `_invoke_round_provider`'s last guard establishes.
+        scored_arg, snapshot_files = _snapshot_for_scoring(
+            descriptor_arg, submission_dir
+        )
+        report, margin_metric_name, error = _evaluate_round(scored_arg, candidate_arg)
+        valid = report is not None and bool(report.get("valid"))
 
     score: float | None = None
     notes: str | None = error
     if error is None and report is not None:
-        if valid:
-            score = _round_score(report, margin_metric_name)
-        else:
-            failing = [
-                gate.get("name", gate.get("check"))
-                for gate in report.get("gates") or []
-                if gate.get("status") != "pass"
-            ]
-            notes = (
-                f"invalid submission: gate(s) failed: {', '.join(failing) or 'unknown'}"
-            )
+        score = _round_score(report, margin_metric_name) if valid else None
+        notes = None if valid else _invalid_round_notes(report)
 
-    submission_sha256 = (
-        _submission_sha256(descriptor_arg, candidate_arg)
-        if descriptor_arg is not None
-        else None
+    usage = _usage_from_scratch_dir(scratch_dir)
+    _freeze_round_artifacts(scratch_dir, submission_dir if snapshot_files else None)
+
+    return _round_ledger_entry(
+        task_id=task["id"],
+        round_index=round_index,
+        submission_sha256=(
+            _submission_sha256(descriptor_arg, candidate_arg)
+            if descriptor_arg is not None
+            else None
+        ),
+        seed_sha256=_round_seed_sha256(task["id"], trimmed_history),
+        agent_wall_s=agent_wall_s,
+        round_wall_s=time.monotonic() - round_start,
+        timed_out=timed_out,
+        usage=usage,
+        report=report,
+        valid=valid,
+        score=score,
+        notes=notes,
     )
-    seed_sha256 = hashlib.sha256(
+
+
+def _child_directories(root: Path | None) -> set[Path]:
+    """``root``'s immediate subdirectories (never its files -- the ledger and
+    the harness's own ``submissions/`` tree live beside a provider's sandbox
+    and must not be mistaken for one), or the empty set when ``root`` is
+    ``None``/not a directory."""
+    if root is None or not root.is_dir():
+        return set()
+    return {child for child in root.iterdir() if child.is_dir()}
+
+
+def _invoke_round_provider(
+    round_task: dict[str, Any],
+    round_index: int,
+    provider: CandidateProvider,
+    repo_root: Path,
+    scratch_root: Path | None,
+) -> tuple[str | None, str | None, Path | None, str | None, bool]:
+    """Call ``provider`` for one round, returning ``(descriptor_arg,
+    candidate_arg, scratch_dir, error, timed_out)``.
+
+    ``scratch_dir`` is the single subdirectory the call newly created under
+    ``scratch_root`` (its own sandbox), or ``None`` when it created none or
+    more than one -- there is then nothing this round can unambiguously
+    attribute to the provider. Never raises: any provider failure comes back
+    as a named ``error`` string, exactly like :func:`run_attempt`'s posture.
+    """
+    try:
+        before = _child_directories(scratch_root)
+        descriptor_arg, candidate_arg = provider(round_task, round_index, repo_root)
+    except Exception as exc:  # noqa: BLE001 -- see run_attempt's identical rationale
+        return (
+            None,
+            None,
+            None,
+            f"provider produced no submission: {exc}",
+            _looks_like_timeout(exc),
+        )
+    new_dirs = _child_directories(scratch_root) - before
+    scratch_dir = next(iter(new_dirs)) if len(new_dirs) == 1 else None
+    if descriptor_arg is None:
+        # A provider that returns without raising, but hands back no
+        # descriptor at all, breaks the `CandidateProvider` contract -- score
+        # it as an invalid round with its own named reason rather than
+        # letting a `None` reach `klt eval` and violate "never raises".
+        return None, None, scratch_dir, "provider returned no eval descriptor", False
+    return descriptor_arg, candidate_arg, scratch_dir, None, False
+
+
+def _snapshot_for_scoring(
+    descriptor_arg: str | None, submission_dir: Path | None
+) -> tuple[str | None, list[Path]]:
+    """:func:`_snapshot_submission` when the caller gave this round a
+    harness-owned submission directory; otherwise the provider's own
+    descriptor, unchanged (nothing to copy, nothing copied)."""
+    if submission_dir is None or descriptor_arg is None:
+        return descriptor_arg, []
+    return _snapshot_submission(descriptor_arg, submission_dir)
+
+
+def _evaluate_round(
+    scored_arg: str, candidate_arg: str | None
+) -> tuple[dict[str, Any] | None, str | None, str | None]:
+    """Score one round's (already snapshotted) descriptor, returning
+    ``(report, margin_metric_name, error)``.
+
+    The worst-case-margin augmentation (:func:`_round_score_descriptor`) must
+    never be what turns an otherwise-valid submission into a scored failure,
+    so an `EvalError` from the augmented descriptor retries once against the
+    unaugmented one before the round is recorded as invalid."""
+    scored_descriptor_arg, margin_metric_name = _round_score_descriptor(scored_arg)
+    try:
+        return run_eval(scored_descriptor_arg, candidate_arg), margin_metric_name, None
+    except EvalError:
+        pass
+    try:
+        return run_eval(scored_arg, candidate_arg), None, None
+    except EvalError as exc:
+        return None, None, f"invalid submission: {exc}"
+
+
+def _invalid_round_notes(report: dict[str, Any]) -> str:
+    """The machine-distinguishable ``notes`` reason for a round that ran to
+    completion but failed at least one of its own gates -- names the gates,
+    so two invalid rounds are distinguishable in the ledger."""
+    failing = [
+        gate.get("name", gate.get("check"))
+        for gate in report.get("gates") or []
+        if gate.get("status") != "pass"
+    ]
+    return f"invalid submission: gate(s) failed: {', '.join(failing) or 'unknown'}"
+
+
+def _round_seed_sha256(task_id: str, trimmed_history: list[dict[str, Any]]) -> str:
+    """Hash of this round's input context: the task id plus the trailing
+    ledger entries fed into its prompt."""
+    return hashlib.sha256(
         json.dumps(
-            {"task_id": task["id"], "history": trimmed_history},
+            {"task_id": task_id, "history": trimmed_history},
             sort_keys=True,
             default=str,
         ).encode("utf-8")
     ).hexdigest()
-    usage = _usage_from_scratch_dir(scratch_dir)
 
-    if scratch_dir is not None:
-        _freeze_directory_readonly(scratch_dir)
-    if snapshot_files and submission_dir is not None:
-        _freeze_directory_readonly(submission_dir)
 
-    round_wall_s = time.monotonic() - round_start
+def _freeze_round_artifacts(
+    scratch_dir: Path | None, submission_dir: Path | None
+) -> None:
+    """Make this round's provider sandbox and the harness's own copy of its
+    submission unwritable, now that the round has been scored -- a later
+    round that can see either finds nothing it can edit to change how this
+    one was already graded."""
+    for path in (scratch_dir, submission_dir):
+        if path is not None:
+            _freeze_directory_readonly(path)
 
+
+def _round_ledger_entry(
+    *,
+    task_id: str,
+    round_index: int,
+    submission_sha256: str | None,
+    seed_sha256: str,
+    agent_wall_s: float,
+    round_wall_s: float,
+    timed_out: bool,
+    usage: dict[str, Any] | None,
+    report: dict[str, Any] | None,
+    valid: bool,
+    score: float | None,
+    notes: str | None,
+) -> dict[str, Any]:
+    """Assemble one ``klt.design_agent_benchmark.ledger/1`` line -- the single
+    place this module's ledger shape is written, so
+    `benchmarks/design-agent/schema/ledger.schema.json` has exactly one
+    implementation to stay in step with."""
     return {
         "schema": LEDGER_SCHEMA,
-        "task_id": task["id"],
+        "task_id": task_id,
         "round": round_index,
         "submission_sha256": submission_sha256,
         "seed_sha256": seed_sha256,
