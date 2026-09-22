@@ -1,0 +1,15 @@
+{
+  "note": "Literal golden byte/digest vectors for the #2097 v1 run-identity contract pilot. canonical_manifest_sha256 is the SHA-256 of the versioned canonical JSON bytes of each manifest; input_sha256 is sha256(b'klt-functional-verification-input-v1' + b'\\x00' + canonical_manifest_bytes). The reordered vector is the same object with reversed key order / pretty printing / \\u escapes and MUST hash identically (issue #2097 acceptance item 4).",
+  "vectors": [
+    {
+      "manifest": "manifest.v1.json",
+      "canonical_manifest_sha256": "c8adf49a845034dda1f9982a33a844d630e5c67ea4083f8cb5a41395aae985cb",
+      "input_sha256": "a408dd6ff75a61add23e40c1f793cc6c9c6eb277a38cf1e7ef00e82c7c60299a"
+    },
+    {
+      "manifest": "manifest.v1.reordered.json",
+      "canonical_manifest_sha256": "c8adf49a845034dda1f9982a33a844d630e5c67ea4083f8cb5a41395aae985cb",
+      "input_sha256": "a408dd6ff75a61add23e40c1f793cc6c9c6eb277a38cf1e7ef00e82c7c60299a"
+    }
+  ]
+}
