@@ -1054,6 +1054,133 @@ jobs:
         # build the same way a real user invocation would surface it.
         run: uv run --frozen --extra dev klt kb validate --format json
 
+  test-numerical:
+    name: Tests (numpy cross-check)
+    # Issue #2276. The `test` matrix above is this repo's stdlib-only surface
+    # by contract -- the runtime dependency set is deliberately just
+    # klayout/jsonschema (src/klayout_tools/ir_solver.py's own docstring) --
+    # so tests/test_ir_solver_numpy_crosscheck.py skips itself wholesale
+    # there (`pytest.importorskip("numpy")`: a *declared* unavailability,
+    # correct behaviour, never recorded as a pass and never a failure). This
+    # job is the other half of that contract: the one place numpy is
+    # actually installed -- via the `numerical` PEP 735 dependency group,
+    # pinned in uv.lock (see pyproject.toml's comment on that group) -- so
+    # the full-strength assertions against the real numerical oracle
+    # (numpy.linalg.solve vs the pure-Python conjugate-gradient IR solver
+    # behind `klt power`, and numpy's quantiles vs sim.py's Monte Carlo
+    # statistics) run for real. docs/guides/dependency-gated-ci.md documents
+    # the skip/refuse/fail convention this split implements.
+    #
+    # It also re-runs the golden-artifact drift detector
+    # (scripts/check_artifact_determinism.py) under this dep-full
+    # environment, which the `artifact-determinism` job below only ever runs
+    # numpy-less. That is exactly the gap issue #2276's downstream evidence
+    # describes: a -numerical job that ran only unit tests left the
+    # publication --check never executed with dependencies present on CI,
+    # and the output it guards drifted cross-platform undetected. Any check
+    # that exists to catch drift must itself be EXECUTED in the dep-full
+    # job, not merely be imported by it -- otherwise a numpy-dependent code
+    # path in a generator is only ever validated by a run that cannot
+    # exercise it. The two-checkout setup is duplicated (not moved) so the
+    # numpy-less run stays independent of numpy availability and each job's
+    # failure stays independently attributable.
+    #
+    # Deliberately ubuntu-latest, like `artifact-determinism`: the
+    # cross-check suite is seconds of pure-Python CG against small dense
+    # oracles and the drift detector's generators are ~1.5 s -- no PDK, no
+    # toolchain, no reason to queue behind the heavy pool.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the primary copy
+        uses: actions/checkout@v7
+        with:
+          path: primary
+
+      - name: Check out a second copy at a different filesystem path
+        # Same two-checkout shape the `artifact-determinism` job uses: a
+        # different prefix AND a different path length, so a generator that
+        # embeds its own absolute path produces different bytes here --
+        # precisely what the byte-compare below is looking for.
+        uses: actions/checkout@v7
+        with:
+          path: second-checkout/nested/deeper-than-the-primary
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (klayout wheel + numpy)
+        # Only the primary checkout gets a venv -- same reasoning as the
+        # `artifact-determinism` job's copy of this step: each generator
+        # inserts its own repo's src/ at the front of sys.path (and the
+        # check exports a matching PYTHONPATH), so the second checkout's
+        # code is exercised without a second sync.
+        #
+        # `--group numerical` is what distinguishes this job from every
+        # stdlib-only surface: it pulls the uv.lock-pinned numpy the
+        # cross-check suite below uses as its oracle.
+        working-directory: primary
+        run: uv sync --locked --extra dev --group numerical
+
+      - name: Run the numpy cross-check suite
+        # The module path is explicit: this job exists for this suite, so a
+        # rename that left nothing running here must be a red, not a no-op.
+        # --capture=tee-sys so any printed comparison tables land in this
+        # leg's log on a green run too (the native jobs' pytest steps' same
+        # choice), and tee'd to a file for the no-silent-skip assert below.
+        # `set -o pipefail` so pytest's exit code survives the pipe (the
+        # default shell here is `bash -e`, which without it would report the
+        # tee's status).
+        working-directory: primary
+        run: |
+          set -o pipefail
+          uv run --frozen --extra dev --group numerical pytest \
+            tests/test_ir_solver_numpy_crosscheck.py -v --capture=tee-sys \
+            | tee /tmp/numpy-crosscheck-pytest.log
+
+      - name: Assert the cross-check suite actually ran (no silent skip)
+        # The whole point of this job (issue #2276): a full-strength suite
+        # that silently skips is indistinguishable from the green numpy-less
+        # runs every other job produces, so a skip here must be a red. Two
+        # gates, mirroring the native jobs' no-silent-skip posture (the
+        # freshness gate, issue #1889) and tightening it: numpy must be
+        # importable, AND the pytest summary must show real passes and zero
+        # skips -- an importable oracle with a skipped suite (a bad
+        # importorskip, a renamed fixture, a collection-order surprise) is
+        # exactly the false green this job exists to make impossible.
+        working-directory: primary
+        run: |
+          uv run --frozen --extra dev --group numerical \
+            python -c "import numpy" || {
+            echo "::error::numpy did not install -- tests/test_ir_solver_numpy_crosscheck.py would have skipped"
+            exit 1
+          }
+          summary="$(tail -n 1 /tmp/numpy-crosscheck-pytest.log)"
+          echo "pytest summary: $summary"
+          echo "$summary" | grep -qE '[1-9][0-9]* passed' || {
+            echo "::error::the numpy cross-check suite reported no passing tests -- it silently skipped (issue #2276: this job exists so the full-strength assertions RUN, never skip)"
+            exit 1
+          }
+          if echo "$summary" | grep -q 'skipped'; then
+            echo "::error::the numpy cross-check suite reported skips -- numpy is provisioned in this job, so a skip here is a bug (issue #2276)"
+            exit 1
+          fi
+
+      - name: Run the golden-artifact drift detector under the dep-full environment
+        # scripts/check_artifact_determinism.py, numpy present (issue #2276
+        # -- see this job's header comment for why this step is here and not
+        # only in the numpy-less `artifact-determinism` job). Exit 1 = an
+        # artifact differed; exit 2 = the check could not run -- both red,
+        # never a silent pass.
+        working-directory: primary
+        run: |
+          uv run --frozen --extra dev --group numerical python scripts/check_artifact_determinism.py \
+            --checkout "$GITHUB_WORKSPACE/primary" \
+            --checkout "$GITHUB_WORKSPACE/second-checkout/nested/deeper-than-the-primary" \
+            --annotate
+
   action-smoke-test:
     name: klt verify Action smoke test
     # Dogfoods action.yml (issue #268) against this repo's own fixtures on
@@ -1221,6 +1348,7 @@ jobs:
       - signoff-example
       - site
       - test
+      - test-numerical
       - action-smoke-test
       - artifact-determinism
     if: always()

@@ -22,13 +22,29 @@
     "the baseline was measured. 300s is a deliberately conservative first",
     "estimate for two checkouts + one uv sync + ~1.5s of generators (still",
     "half the 600s an unbudgeted job would inherit); re-derive it from real",
-    "timings at the next re-measure."
+    "timings at the next re-measure.",
+    "",
+    "'Tests (numpy cross-check)' (issue #2276) gets the same treatment as",
+    "the row above, for the same reasons: it did not exist at measure time,",
+    "it is the same two-checkouts + one uv sync shape plus a ~2s pytest",
+    "suite, and 300s is a deliberately conservative first estimate --",
+    "re-derive it from real timings at the next re-measure rather than",
+    "trusting this guess.",
+    "",
+    "total_job_budget_seconds is 1560, not the 1500 the pre-#2276 baseline",
+    "carried: the new numpy cross-check job is a permanent ~15s compute",
+    "addition (measured on its first PR run), and #2276 deliberately",
+    "duplicates the artifact-determinism drift detector inside it -- the",
+    "issue's point is that a drift detector must EXECUTE in the dep-full",
+    "environment, so that cost is load-bearing, not incidental. 60s of",
+    "headroom absorbs the new row with margin for runner noise; the next",
+    "baseline re-measure folds it into the derived numbers properly."
   ],
   "exclude_jobs": [
     "CI wall-clock budget"
   ],
   "default_job_budget_seconds": 600,
-  "total_job_budget_seconds": 1500,
+  "total_job_budget_seconds": 1560,
   "run_wall_clock_budget_seconds": 1800,
   "jobs": {
     "Lint (ruff)": 120,
@@ -44,7 +60,8 @@
     "Tests (Python 3.12)": 360,
     "Tests (Python 3.13)": 360,
     "klt verify Action smoke test": 120,
-    "Golden artifacts (hash seed + path varied)": 300
+    "Golden artifacts (hash seed + path varied)": 300,
+    "Tests (numpy cross-check)": 300
   },
   "baseline": {
     "measured_on": "2026-09-17",
