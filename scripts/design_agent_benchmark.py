@@ -95,7 +95,7 @@ if str(SRC_DIR) not in sys.path:
 from klayout_tools._paths import _resolve_relative  # noqa: E402
 from klayout_tools._provenance import sha256_file  # noqa: E402
 from klayout_tools._vendor import mutation_variants as _mutation_variants  # noqa: E402
-from klayout_tools.eval import EvalError, run_eval  # noqa: E402
+from klayout_tools.eval import EvalError, _load_json_arg, run_eval  # noqa: E402
 from klayout_tools.sim import SimError, _resolve_models_lib  # noqa: E402
 
 DEFAULT_TASKS_DIR = REPO_ROOT / "benchmarks" / "design-agent" / "tasks"
@@ -1298,6 +1298,66 @@ def _device_model_contract(
     )
 
 
+#: The `task` dict key round mode (:func:`run_task_round`, issue #2253)
+#: attaches the last :data:`ROUND_HISTORY_WINDOW` ledger entries under,
+#: before handing the (copied) task dict to a :data:`CandidateProvider`.
+#: Deliberately a private, underscore-prefixed key -- it is never part of
+#: `benchmarks/design-agent/schema/task.schema.json`'s own shape (that
+#: schema's `additionalProperties: false` only ever validates a task as
+#: loaded from disk, never this runtime-only copy) -- so every existing
+#: provider, and both prompt builders below, can check for it with a plain
+#: `task.get(...)` without any of them needing a signature change. This is
+#: what lets round mode reuse `reference_candidate_provider`,
+#: `make_live_agent_provider`, and `make_interactive_agent_provider`
+#: completely unmodified: the deterministic reference provider ignores the
+#: key entirely (proving the "stays deterministic" plumbing test), while the
+#: two prompt builders below render it into a "previous rounds" section.
+ROUND_HISTORY_CONTEXT_KEY = "_design_agent_benchmark_round_history"
+
+#: How many trailing ledger entries a round's prompt carries -- "each
+#: round's prompt carries the previous three rounds' evaluation results"
+#: (issue #2253's Proposal).
+ROUND_HISTORY_WINDOW = 3
+
+
+def _format_round_history(history: list[dict[str, Any]] | None) -> str:
+    """Render up to the last :data:`ROUND_HISTORY_WINDOW` ledger entries
+    (:func:`run_task_round`'s own return shape) as a prompt section -- ``""``
+    when ``history`` is empty/``None`` (round 1, or non-round `--attempts`
+    mode, whose prompt is therefore byte-identical to before this section
+    existed).
+
+    Deliberately renders only the ledger's own small evaluation-result
+    fields (``round``/``valid``/``score``/``notes``) -- never a submission's
+    netlist body or file path -- so a later round's context is the
+    *evaluation record*, not a live, writable path into an earlier round's
+    own sandbox. This is what keeps "previous rounds are readable but
+    inert" true regardless of what filesystem access a future extension
+    might grant: the prompt itself never hands out anything an agent could
+    edit to retroactively change how a past round was scored.
+    """
+    if not history:
+        return ""
+    lines = [
+        "=== Previous rounds' evaluation results (most recent last -- you "
+        "are iterating on this design, not starting fresh) ===",
+        "",
+    ]
+    for entry in history[-ROUND_HISTORY_WINDOW:]:
+        lines.append(
+            f"- round {entry.get('round')}: valid={entry.get('valid')}, "
+            f"score={entry.get('score')}, notes={entry.get('notes')!r}"
+        )
+    lines.append(
+        "\nThis harness keeps its own frozen copy of every round's "
+        "submission -- editing a previous round's files, if you can see "
+        "them, changes nothing about how that round was already scored. "
+        "You may also read `../ledger.jsonl` directly: it is the exact "
+        "record you are scored on.\n"
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _build_live_agent_prompt(
     task: dict[str, Any], repo_root: Path
 ) -> tuple[str, list[str]]:
@@ -1307,11 +1367,17 @@ def _build_live_agent_prompt(
     reference solution's own netlist body -- only the block spec (S3's
     output) and the testbench contract (`klt sim` request documents, minus
     their `netlist` field's content) the agent's own candidate must satisfy.
+
+    When ``task`` carries :data:`ROUND_HISTORY_CONTEXT_KEY` (round mode,
+    issue #2253), a "previous rounds" section (:func:`_format_round_history`)
+    is inserted before the block spec; absent that key, the prompt is
+    unchanged from before round mode existed.
     """
     stems = [Path(p).stem for p in task["reference"]["netlists"]]
     testbenches = _reference_testbenches(task, repo_root)
     skill_chain_text = _load_skill_chain_text(repo_root)
     device_model_contract = _device_model_contract(task, repo_root, testbenches)
+    round_history_section = _format_round_history(task.get(ROUND_HISTORY_CONTEXT_KEY))
 
     fence_block = "\n".join(
         f'```spice:{stem}\n<your netlist body for "{stem}">\n```' for stem in stems
@@ -1326,7 +1392,7 @@ block below, exactly as this repo's own skills instruct.
 
 {skill_chain_text}
 
-=== Block to design ===
+{round_history_section}=== Block to design ===
 
 Task id: {task["id"]}
 Title: {task["title"]}
@@ -1801,7 +1867,15 @@ def summarize_tier(
 ) -> dict[str, Any]:
     if not task_summaries:
         return {"task_count": 0, "solved_count": 0, "pass_at_k": {}}
-    solved_count = sum(1 for t in task_summaries if t["solved"] == t["attempts"])
+    # `attempts > 0` guard: a task run with zero attempts has solved == 0 ==
+    # attempts, which would otherwise count as "solved every attempt". Zero
+    # attempts became reachable with `--attempts 0 --rounds R` (issue #2253:
+    # round mode only, no pass@k) -- reporting those tasks as solved would
+    # be a false pass rate. Unreachable, and therefore a no-op, for any
+    # `--attempts >= 1` run.
+    solved_count = sum(
+        1 for t in task_summaries if t["attempts"] > 0 and t["solved"] == t["attempts"]
+    )
     pass_at_k_avg: dict[str, float] = {}
     for k in ks:
         key = str(k)
@@ -1822,6 +1896,9 @@ def run_benchmark(
     ks: Iterable[int] = (1, 5),
     provider: CandidateProvider = reference_candidate_provider,
     provider_name: str = "reference",
+    n_rounds: int = 0,
+    rounds_root: Path | None = None,
+    round_provider_factory: Callable[[Path], CandidateProvider] | None = None,
 ) -> dict[str, Any]:
     """Run ``n_attempts`` per task under every task in ``tasks_dir``,
     score with ``provider``, and report pass@k per tier and overall.
@@ -1836,20 +1913,63 @@ def run_benchmark(
     candidate provider produced it (issue #1732: a live-agent run's JSON
     artifact and one-line summary need to say so), never read by this
     module itself.
+
+    ``n_rounds`` (issue #2253, default ``0``) is orthogonal to
+    ``n_attempts``/pass@k: when positive, every task is *additionally* run
+    through :func:`run_task_rounds` and each task summary gains a purely
+    additive ``"rounds"`` key (:func:`summarize_rounds`) -- pass@k's own
+    fields are computed exactly as before and are never touched. ``0`` (the
+    default) skips round mode entirely, so a caller that never passes these
+    three new parameters gets byte-for-byte the same report this function
+    has always returned.
+
+    ``round_provider_factory``, when given, is called once per task with
+    that task's own round root and must return the :data:`CandidateProvider`
+    round mode should drive -- this is how an agent-backed provider gets a
+    sandbox root *inside* the task's round directory (so its own
+    ``../ledger.jsonl`` resolves to that task's ledger), while ``provider``
+    keeps driving `--attempts` mode with whatever sandbox root the caller
+    chose for it. Omitted, round mode simply reuses ``provider``.
     """
     ks = sorted(set(ks))
     start = time.monotonic()
+
+    effective_rounds_root = rounds_root
+    if n_rounds > 0 and effective_rounds_root is None:
+        effective_rounds_root = Path(
+            tempfile.mkdtemp(prefix="design-agent-benchmark-rounds-")
+        )
+
     task_summaries = []
     for path in _task_paths(tasks_dir):
         task = load_task(path)
         attempts = run_task_attempts(task, n_attempts, provider, repo_root)
-        task_summaries.append(summarize_task(task, attempts, ks))
+        summary = summarize_task(task, attempts, ks)
+        if n_rounds > 0:
+            task_round_root = effective_rounds_root / task["id"]
+            task_round_root.mkdir(parents=True, exist_ok=True)
+            round_provider = (
+                round_provider_factory(task_round_root)
+                if round_provider_factory is not None
+                else provider
+            )
+            round_entries = run_task_rounds(
+                task,
+                n_rounds,
+                round_provider,
+                repo_root,
+                rounds_root=effective_rounds_root,
+                scratch_root=task_round_root,
+            )
+            summary["rounds"] = summarize_rounds(round_entries)
+            summary["rounds"]["ledger_path"] = str(task_round_root / LEDGER_FILENAME)
+        task_summaries.append(summary)
 
     by_tier: dict[str, list[dict[str, Any]]] = {tier: [] for tier in TIERS}
     for summary in task_summaries:
         by_tier.setdefault(summary["tier"], []).append(summary)
 
-    return {
+    result = {
         "schema_version": 1,
         "provider": provider_name,
         "n_attempts": n_attempts,
@@ -1861,6 +1981,667 @@ def run_benchmark(
         "overall": summarize_tier(task_summaries, ks),
         "wall_clock_s": time.monotonic() - start,
     }
+    if n_rounds > 0:
+        result["n_rounds"] = n_rounds
+    return result
+
+
+# --------------------------------------------------------------------------
+# Round mode: multi-round refinement with a per-cell ledger.jsonl (#2253)
+#
+# `--attempts` (above) runs k *independent* attempts per task and scores
+# pass@k -- "can the agent produce a valid design at all". Round mode
+# instead runs R *sequential* rounds per task, feeding each round the
+# outcome of the last few, and scores the *trajectory*: does the design get
+# better as the agent iterates against feedback, the way the real pipeline
+# loops (design-sizing Loop A, design-drc-lvs Loop B) actually run. Modeled
+# on the AHRR artifact's ledger.jsonl shape (github.com/ZijD/AHRR, ICCAD'26,
+# MIT -- methodology reference only, no code reuse): one fsync'd JSON line
+# per round, `best()` is the highest-scoring *valid* round (an invalid round
+# always scores `None`, never a partial credit), and every reported number
+# regenerates from the ledger alone.
+# --------------------------------------------------------------------------
+
+#: Contract identifier for one `ledger.jsonl` line (issue #2253). Documented
+#: alongside `benchmarks/design-agent/schema/task.schema.json` in
+#: `benchmarks/design-agent/schema/ledger.schema.json`, following this
+#: repo's own `klt.<verb>.<doc>/<n>` schema-identifier convention (e.g.
+#: `klt.drc.request/1`).
+LEDGER_SCHEMA = "klt.design_agent_benchmark.ledger/1"
+
+#: Filename for a task's own append-only round ledger, written directly
+#: under `<rounds_root>/<task_id>/` -- sibling to each round's own scratch
+#: sandbox, so `../ledger.jsonl` (the path the round-history prompt section
+#: tells an interactive-agent session it may read) resolves correctly.
+LEDGER_FILENAME = "ledger.jsonl"
+
+
+def _looks_like_timeout(exc: BaseException) -> bool:
+    """Best-effort, machine-distinguishable ``timed_out`` detection: every
+    timeout this module's own agent invokers raise
+    (:class:`AgentInvocationError` from :func:`_default_invoke_agent`'s
+    ``subprocess.TimeoutExpired`` handler, and from
+    ``_default_invoke_interactive_agent``'s watchdog) phrases its message as
+    "... timed out after ...". A future provider that raises its own
+    exception type for a timeout only needs to keep that phrasing for this
+    to keep working -- no exception-type registry to maintain here."""
+    return "timed out" in str(exc).lower()
+
+
+def _freeze_directory_readonly(path: Path) -> None:
+    """Best-effort: recursively make ``path`` (a just-scored round's own
+    scratch sandbox) unwritable -- files ``0o444``, directories ``0o555``
+    (readable/listable, never writable again) -- so a later round's prompt
+    can truthfully say "previous rounds' directories are seeded read-only"
+    (issue #2253's acceptance criteria) regardless of what a future
+    extension might grant an agent read access to. Never raises: a filename
+    this process cannot chmod (already read-only, unusual ownership) is left
+    exactly as read-only as it already was, which is the safe direction to
+    fail in.
+    """
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            try:
+                os.chmod(os.path.join(root, name), 0o444)
+            except OSError:
+                pass
+        for name in dirs:
+            try:
+                os.chmod(os.path.join(root, name), 0o555)
+            except OSError:
+                pass
+    try:
+        os.chmod(path, 0o555)
+    except OSError:
+        pass
+
+
+def _usage_from_scratch_dir(scratch_dir: Path | None) -> dict[str, Any] | None:
+    """Best-effort per-round tool-call usage, read back from whatever the
+    provider itself already wrote into its own scratch directory -- never
+    plumbed through a new :data:`CandidateProvider` return value, so every
+    existing provider's 2-tuple contract stays exactly as it is.
+
+    Today this only ever resolves for ``--provider interactive-agent``,
+    which already writes ``agent-session.json``
+    (:data:`SESSION_SUMMARY_FILENAME`, ``tool_calls``/``turns``) into its own
+    per-attempt sandbox (:func:`make_interactive_agent_provider`). Real
+    *token* accounting is not surfaced by any shipped provider yet -- see
+    ``benchmarks/design-agent/README.md``'s "Known limitations" for the
+    tracked follow-up; ``usage`` is ``None`` for every other provider, and
+    for a scratch directory that carries no such file.
+    """
+    if scratch_dir is None:
+        return None
+    try:
+        data = json.loads((scratch_dir / SESSION_SUMMARY_FILENAME).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    usage = {key: data[key] for key in ("tool_calls", "turns") if key in data}
+    return usage or None
+
+
+def _submission_dependency_files(descriptor: dict[str, Any]) -> list[Path]:
+    """Every **absolute** file path a submitted `klt eval` descriptor's
+    ``sim`` gates/objective/metrics reference, walked two levels deep (the
+    named ``request`` document, then its own ``netlist``/``models.lib``
+    fields) -- the file set whose *bytes* :func:`_submission_sha256`
+    content-hashes as "the submission".
+
+    Deliberately skips a relative-path reference rather than trying to
+    resolve it: the deterministic :func:`reference_candidate_provider`'s own
+    descriptor is exactly this case (its ``request`` paths are relative to
+    its ``benchmarks/design-agent/reference/<id>/`` directory) and needs no
+    content-hash-based tamper evidence -- it is a repository-committed file
+    no provider ever writes to. Every agent-backed provider
+    (:func:`make_live_agent_provider`, :func:`make_interactive_agent_provider`)
+    already writes *absolute* paths into the descriptor it returns (see
+    :func:`_build_live_agent_descriptor`), which is the only case where "what
+    did the agent actually submit" is a real question -- so this covers it
+    without needing to know the reference provider's own directory
+    convention.
+    """
+    files: list[Path] = []
+    for entry in _reference_descriptor_check_entries(descriptor):
+        if not isinstance(entry, dict) or entry.get("check") != "sim":
+            continue
+        args = entry.get("args")
+        if not isinstance(args, dict):
+            continue
+        request = args.get("request")
+        if not isinstance(request, str) or not os.path.isabs(request):
+            continue
+        request_path = Path(request)
+        files.append(request_path)
+        try:
+            request_doc = json.loads(request_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(request_doc, dict):
+            continue
+        netlist = request_doc.get("netlist")
+        if isinstance(netlist, str) and os.path.isabs(netlist):
+            files.append(Path(netlist))
+        models = request_doc.get("models")
+        if isinstance(models, dict) and isinstance(models.get("lib"), str):
+            lib = models["lib"]
+            if os.path.isabs(lib):
+                files.append(Path(lib))
+    return files
+
+
+def _submission_sha256(descriptor_arg: str, candidate_arg: str | None) -> str:
+    """Content hash of this round's submission -- see
+    :func:`_submission_dependency_files` for what "content" means here.
+    Falls back to hashing the ``(descriptor_arg, candidate_arg)`` argument
+    strings themselves when no absolute-path dependency file is found (the
+    deterministic reference provider's own case: its fixed descriptor file
+    path is itself stable across rounds, so the fallback hash is exactly as
+    stable) -- never raises.
+    """
+    try:
+        descriptor, _base_dir = _load_json_arg(descriptor_arg, "descriptor")
+    except EvalError:
+        descriptor = None
+    files = (
+        _submission_dependency_files(descriptor) if isinstance(descriptor, dict) else []
+    )
+    if files:
+        payload: dict[str, Any] = {
+            "schema": 1,
+            "files": {
+                str(path): sha256_file(str(path))
+                for path in sorted(set(files), key=str)
+            },
+        }
+    else:
+        payload = {
+            "schema": 1,
+            "descriptor_arg": descriptor_arg,
+            "candidate_arg": candidate_arg,
+        }
+    blob = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+#: Subdirectory of a task's own round root holding the harness's private,
+#: per-round *copy* of every submission it scored (:func:`_snapshot_submission`).
+#: Never handed to a provider: no agent-backed provider is ever constructed
+#: with a scratch/sandbox root inside it, so nothing an agent runs can write
+#: here, which is what makes "scoring never reads a path the agent can still
+#: write" (issue #2253) literally true rather than merely timing-dependent.
+SUBMISSIONS_DIRNAME = "submissions"
+
+
+def _snapshot_submission(descriptor_arg: str, dest_dir: Path) -> tuple[str, list[Path]]:
+    """Copy every agent-written file this round's `klt eval` descriptor
+    references into ``dest_dir`` (harness-owned, never inside any provider's
+    sandbox) and return ``(rewritten_descriptor_arg, copied_files)`` pointing
+    at the copies -- "the harness keeps its own copy of each round's
+    submission; scoring never reads a path the agent can still write"
+    (issue #2253's acceptance criteria).
+
+    Only *absolute* ``sim``-check ``request`` references are snapshotted, for
+    exactly the reason :func:`_submission_dependency_files` gives: an
+    agent-backed provider always writes absolute paths into its own scratch
+    directory (:func:`_build_live_agent_descriptor`), while the deterministic
+    :func:`reference_candidate_provider` hands back its repository-committed
+    descriptor with *relative* request paths that no provider can write to
+    anyway. A descriptor with nothing to snapshot is returned unmodified
+    (and the reference provider's round therefore stays byte-identical to
+    what `--attempts` mode would have scored).
+
+    Only the two fields that can name an agent-written file are rewritten --
+    the descriptor's ``args.request`` and the request document's own
+    ``netlist``. A ``models.lib`` is deliberately left exactly as it is: it
+    either resolves against ``$PDK_ROOT`` (every shipped task's
+    ``models.pdk`` convention) or was already absolutised by the provider,
+    and in neither case is it a file an agent can write.
+
+    Never raises -- an unreadable/unparseable request is left pointing at
+    its original path rather than failing the round, since `klt eval` will
+    report that same problem far more usefully than this function could.
+    """
+    try:
+        descriptor, _base_dir = _load_json_arg(descriptor_arg, "descriptor")
+    except EvalError:
+        return descriptor_arg, []
+    if not isinstance(descriptor, dict):
+        return descriptor_arg, []
+
+    snapshot = copy.deepcopy(descriptor)
+    copies: dict[str, Path] = {}
+    request_copies: dict[str, str] = {}
+
+    def _copy_once(src: Path) -> Path:
+        key = str(src)
+        if key not in copies:
+            dest = dest_dir / f"{len(copies)}-{src.name}"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+            copies[key] = dest
+        return copies[key]
+
+    def _snapshot_request(request: str) -> str | None:
+        if request in request_copies:
+            return request_copies[request]
+        src = Path(request)
+        try:
+            doc = json.loads(src.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(doc, dict):
+            return None
+        netlist = doc.get("netlist")
+        if isinstance(netlist, str):
+            netlist_src = Path(netlist)
+            if not netlist_src.is_absolute():
+                netlist_src = src.parent / netlist_src
+            try:
+                doc["netlist"] = str(_copy_once(netlist_src))
+            except OSError:
+                return None
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{len(copies)}-{src.name}"
+        dest.write_text(json.dumps(doc, indent=2) + "\n")
+        copies[str(src)] = dest
+        request_copies[request] = str(dest)
+        return str(dest)
+
+    for entry in _reference_descriptor_check_entries(snapshot):
+        if not isinstance(entry, dict) or entry.get("check") != "sim":
+            continue
+        args = entry.get("args")
+        if not isinstance(args, dict):
+            continue
+        request = args.get("request")
+        if not isinstance(request, str) or not os.path.isabs(request):
+            continue
+        snapshotted = _snapshot_request(request)
+        if snapshotted is not None:
+            args["request"] = snapshotted
+
+    if not copies:
+        return descriptor_arg, []
+    return json.dumps(snapshot), sorted(copies.values(), key=str)
+
+
+#: Name of the extra ``metrics`` entry :func:`_round_score_descriptor`
+#: synthesizes to read a `sim` objective's worst-case *margin* alongside its
+#: worst-case *value* -- see that function's docstring.
+_ROUND_SCORE_MARGIN_METRIC_NAME = "__design_agent_benchmark_round_score_margin__"
+
+
+def _round_score_descriptor(descriptor_arg: str) -> tuple[str, str | None]:
+    """Best-effort: rewrite ``descriptor_arg`` (this round's already-built
+    `klt eval` descriptor, exactly as any :data:`CandidateProvider` returns
+    it) to *additionally* request the objective's own worst-case **margin**
+    sibling metric, when the objective reads a ``sim`` measurement's
+    worst-case *value* -- the ``measurements.<i>.worst_case.value`` dotted
+    path every shipped design-agent-benchmark task descriptor's own
+    ``objective.metric`` uses (see e.g.
+    ``benchmarks/design-agent/reference/five-transistor-ota/eval_descriptor.json``).
+    Returns ``(new_descriptor_arg, margin_metric_name)``.
+
+    This is what makes a round's continuous ``score`` a **spec margin**
+    (worst-corner headroom against the task's own declared limits --
+    `klt sim`'s own already-computed ``measurements[].worst_case.margin``,
+    the same per-corner headroom concept `klt size`'s
+    ``worst_case_margin`` objective searches against) rather than a raw,
+    unnormalized objective value -- without this module re-deriving a
+    threshold comparison of its own. The margin metric shares the
+    objective's exact ``check``/``args``, so `run_eval`'s own per-call cache
+    (`eval.run_eval`'s ``_run_check``) serves it from the same `klt sim`
+    invocation the objective already pays for -- adding this metric never
+    costs an extra simulation.
+
+    Returns ``(descriptor_arg, None)`` unmodified when the objective's shape
+    does not match that convention (a non-``sim`` objective, or a metric
+    path not ending in ``.value``) -- the caller then falls back to scoring
+    from the plain, polarity-oriented objective value instead
+    (:func:`_round_score`).
+    """
+    try:
+        descriptor, _base_dir = _load_json_arg(descriptor_arg, "descriptor")
+    except EvalError:
+        return descriptor_arg, None
+    if not isinstance(descriptor, dict):
+        return descriptor_arg, None
+    objective = descriptor.get("objective")
+    if not isinstance(objective, dict) or objective.get("check") != "sim":
+        return descriptor_arg, None
+    metric_path = objective.get("metric")
+    if not isinstance(metric_path, str) or not metric_path.endswith(".value"):
+        return descriptor_arg, None
+
+    augmented = copy.deepcopy(descriptor)
+    metrics = list(augmented.get("metrics") or [])
+    metrics.append(
+        {
+            "name": _ROUND_SCORE_MARGIN_METRIC_NAME,
+            "check": "sim",
+            "args": copy.deepcopy(objective.get("args") or {}),
+            "metric": metric_path[: -len(".value")] + ".margin",
+        }
+    )
+    augmented["metrics"] = metrics
+    return json.dumps(augmented), _ROUND_SCORE_MARGIN_METRIC_NAME
+
+
+def _round_score(
+    report: dict[str, Any], margin_metric_name: str | None
+) -> float | None:
+    """This round's continuous, rankable score, derived only from an
+    already-``valid`` report -- callers must not call this for an invalid
+    round (:func:`run_task_round` always sets ``score: None`` on an invalid
+    round directly, per the "an invalid round has ``score: null``, never a
+    partial score" acceptance criterion).
+
+    Prefers the worst-case margin :func:`_round_score_descriptor` may have
+    synthesized (higher is always better, regardless of the objective's own
+    ``polarity``, since a margin is already signed so that positive means
+    "passing with headroom"). Falls back to the plain objective value,
+    oriented so higher is always better (negated for a ``"minimize"``
+    objective) -- used whenever the margin convention does not apply, or the
+    margin metric could not be extracted for a task-specific reason (e.g. an
+    unextractable corner)."""
+    if margin_metric_name is not None:
+        margin_value = (report.get("metrics") or {}).get(margin_metric_name)
+        if isinstance(margin_value, int | float):
+            return float(margin_value)
+    objective = report.get("objective") or {}
+    value = objective.get("value")
+    if isinstance(value, int | float):
+        return (
+            float(value) if objective.get("polarity") == "maximize" else -float(value)
+        )
+    return None
+
+
+def run_task_round(
+    task: dict[str, Any],
+    round_index: int,
+    provider: CandidateProvider,
+    repo_root: Path,
+    history: list[dict[str, Any]],
+    *,
+    scratch_root: Path | None = None,
+    submission_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Run round ``round_index`` (1-based) for ``task`` through ``provider``,
+    and return one ``klt.design_agent_benchmark.ledger/1`` entry.
+
+    ``history`` is this task's ledger entries so far (oldest first); the
+    last :data:`ROUND_HISTORY_WINDOW` are attached to a *copy* of ``task``
+    under :data:`ROUND_HISTORY_CONTEXT_KEY` before calling ``provider`` --
+    every existing :data:`CandidateProvider` (reference, live-agent,
+    interactive-agent) is called completely unmodified; the two prompt
+    builders render the key when present, the deterministic reference
+    provider ignores it entirely (the "stays deterministic" acceptance
+    criterion).
+
+    ``scratch_root``, when given, must be the exact directory an agent-
+    backed provider was itself constructed to write its per-round sandbox
+    under (``make_live_agent_provider(scratch_root=...)`` /
+    ``make_interactive_agent_provider(sandbox_root=...)``) -- this function
+    diffs that directory's *subdirectories* before/after the ``provider``
+    call to discover the one the call created (if any), which is then
+    chmod'd read-only (:func:`_freeze_directory_readonly`) once the round is
+    scored, so a later round that can see it finds it inert: "previous
+    rounds' directories are seeded read-only". A ``None``/mismatched
+    ``scratch_root`` (the deterministic reference provider, or a caller that
+    omits it) simply skips this step -- there is nothing to freeze.
+
+    ``submission_dir``, when given, is a harness-owned directory *outside*
+    any provider's sandbox into which this round's submitted files are
+    copied (:func:`_snapshot_submission`) before scoring; `klt eval` is then
+    run against those copies, never the provider's own writable paths --
+    "the harness keeps its own copy of each round's submission; scoring
+    never reads a path the agent can still write". Omitting it scores the
+    provider's own descriptor directly (what the unit tests and the
+    repository-committed reference descriptor do, neither of which is
+    agent-writable).
+
+    Never raises: a provider failure, an `AgentInvocationError` (including a
+    timeout), or an `EvalError` from `klt eval` are all recorded as an
+    invalid round with a named ``notes`` reason, exactly like
+    :func:`run_attempt`'s identical posture for `--attempts` mode.
+    """
+    round_start = time.monotonic()
+    round_task = dict(task)
+    trimmed_history = history[-ROUND_HISTORY_WINDOW:]
+    if trimmed_history:
+        round_task[ROUND_HISTORY_CONTEXT_KEY] = trimmed_history
+
+    agent_start = time.monotonic()
+    scratch_dir: Path | None = None
+    descriptor_arg: str | None = None
+    candidate_arg: str | None = None
+    error: str | None = None
+    timed_out = False
+
+    def _subdirs(root: Path | None) -> set[Path]:
+        if root is None or not root.is_dir():
+            return set()
+        return {child for child in root.iterdir() if child.is_dir()}
+
+    try:
+        before = _subdirs(scratch_root)
+        descriptor_arg, candidate_arg = provider(round_task, round_index, repo_root)
+        new_dirs = _subdirs(scratch_root) - before
+        if len(new_dirs) == 1:
+            scratch_dir = next(iter(new_dirs))
+    except Exception as exc:  # noqa: BLE001 -- see run_attempt's identical rationale
+        error = f"provider produced no submission: {exc}"
+        timed_out = _looks_like_timeout(exc)
+    agent_wall_s = time.monotonic() - agent_start
+    if error is None and descriptor_arg is None:
+        # A provider that returns without raising, but hands back no
+        # descriptor at all, breaks the `CandidateProvider` contract -- score
+        # it as an invalid round with its own named reason rather than
+        # letting a `None` reach `klt eval` and violate "never raises".
+        error = "provider returned no eval descriptor"
+
+    # Take the harness's own copy of what was submitted *before* anything is
+    # scored, and score that copy -- see `_snapshot_submission`.
+    snapshot_files: list[Path] = []
+    scored_arg = descriptor_arg
+    if error is None and submission_dir is not None and descriptor_arg is not None:
+        scored_arg, snapshot_files = _snapshot_submission(
+            descriptor_arg, submission_dir
+        )
+
+    report: dict[str, Any] | None = None
+    valid = False
+    margin_metric_name: str | None = None
+    if error is None:
+        scored_descriptor_arg, margin_metric_name = _round_score_descriptor(scored_arg)
+        try:
+            report = run_eval(scored_descriptor_arg, candidate_arg)
+        except EvalError:
+            # The margin augmentation must never be what turns an otherwise-
+            # valid submission into a scored failure -- retry once against
+            # the unaugmented descriptor before giving up.
+            margin_metric_name = None
+            try:
+                report = run_eval(scored_arg, candidate_arg)
+            except EvalError as exc:
+                error = f"invalid submission: {exc}"
+        if report is not None:
+            valid = bool(report.get("valid"))
+
+    score: float | None = None
+    notes: str | None = error
+    if error is None and report is not None:
+        if valid:
+            score = _round_score(report, margin_metric_name)
+        else:
+            failing = [
+                gate.get("name", gate.get("check"))
+                for gate in report.get("gates") or []
+                if gate.get("status") != "pass"
+            ]
+            notes = (
+                f"invalid submission: gate(s) failed: {', '.join(failing) or 'unknown'}"
+            )
+
+    submission_sha256 = (
+        _submission_sha256(descriptor_arg, candidate_arg)
+        if descriptor_arg is not None
+        else None
+    )
+    seed_sha256 = hashlib.sha256(
+        json.dumps(
+            {"task_id": task["id"], "history": trimmed_history},
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    usage = _usage_from_scratch_dir(scratch_dir)
+
+    if scratch_dir is not None:
+        _freeze_directory_readonly(scratch_dir)
+    if snapshot_files and submission_dir is not None:
+        _freeze_directory_readonly(submission_dir)
+
+    round_wall_s = time.monotonic() - round_start
+
+    return {
+        "schema": LEDGER_SCHEMA,
+        "task_id": task["id"],
+        "round": round_index,
+        "submission_sha256": submission_sha256,
+        "seed_sha256": seed_sha256,
+        "agent_wall_s": agent_wall_s,
+        "round_wall_s": round_wall_s,
+        "timed_out": timed_out,
+        "usage": usage,
+        "functional": (
+            {"valid": valid, "gates": report.get("gates")}
+            if report is not None
+            else None
+        ),
+        "ppa": (
+            {"objective": report.get("objective"), "metrics": report.get("metrics")}
+            if report is not None
+            else None
+        ),
+        "valid": valid,
+        "score": score,
+        "notes": notes,
+    }
+
+
+def append_ledger_entry(ledger_path: Path, entry: dict[str, Any]) -> None:
+    """Append one fsync'd JSON line to ``ledger_path`` -- "one fsync'd JSON
+    line per round" (issue #2253) so a killed sweep leaves a durable record
+    of every round that completed before the kill, not just whatever the
+    OS's own write buffering happened to have flushed."""
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, sort_keys=True) + "\n"
+    with open(ledger_path, "a") as fh:
+        fh.write(line)
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def best_round(entries: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
+    """The highest-scoring **valid** round in ``entries`` -- ``None`` when no
+    round is valid. Every invalid round's own ``score`` is always ``None``
+    (:func:`run_task_round` never assigns a partial score to one), so this
+    only ever compares among rounds that are both ``valid`` and carry a
+    numeric ``score``; ties keep the earliest round (Python's ``max`` never
+    replaces its current pick with an equal one)."""
+    valid_entries = [
+        e for e in entries if e.get("valid") and e.get("score") is not None
+    ]
+    if not valid_entries:
+        return None
+    return max(valid_entries, key=lambda e: e["score"])
+
+
+def summarize_rounds(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-task round-mode summary: round count, the best valid round
+    (:func:`best_round`), and a per-round progress series (round/valid/score
+    only -- the full ledger entry is available via ``ledger_path``, added by
+    :func:`run_benchmark`)."""
+    return {
+        "count": len(entries),
+        "best": best_round(entries),
+        "series": [
+            {"round": e["round"], "valid": e["valid"], "score": e["score"]}
+            for e in entries
+        ],
+    }
+
+
+def run_task_rounds(
+    task: dict[str, Any],
+    n_rounds: int,
+    provider: CandidateProvider,
+    repo_root: Path,
+    *,
+    rounds_root: Path | None = None,
+    scratch_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Run ``n_rounds`` sequential rounds for ``task``
+    (:func:`run_task_round`), appending each round's ledger entry to
+    ``<rounds_root>/<task id>/ledger.jsonl`` (fsync'd,
+    :func:`append_ledger_entry`) as it completes. ``rounds_root`` defaults to
+    a fresh, per-task temp directory when omitted (mirrors every other
+    scratch-directory default in this module).
+
+    ``scratch_root`` must be the same directory the ``provider`` was itself
+    constructed to write its per-round sandboxes under; pass the task's own
+    round root (which is what :func:`run_benchmark` does, by building the
+    provider per task) so a sandbox sits *beside* the ledger and the
+    ``../ledger.jsonl`` path a round's prompt advertises really does resolve
+    to this task's ledger.
+
+    Each round's submitted files are copied into
+    ``<task root>/submissions/round-<N>/`` and scored from there
+    (:func:`_snapshot_submission`) -- that directory tree is created up
+    front so it is never mistaken for a provider-created sandbox by
+    :func:`run_task_round`'s own before/after subdirectory diff.
+
+    Once every round has run, the ledger file itself is chmod'd read-only
+    (best-effort) -- "the ledger is published read-only ... next to the
+    results" (issue #2253's Reference shape).
+    """
+    if n_rounds <= 0:
+        return []
+    task_root = (
+        (rounds_root / task["id"])
+        if rounds_root is not None
+        else Path(
+            tempfile.mkdtemp(prefix=f"design-agent-benchmark-rounds-{task['id']}-")
+        )
+    )
+    ledger_path = task_root / LEDGER_FILENAME
+    submissions_root = task_root / SUBMISSIONS_DIRNAME
+    submissions_root.mkdir(parents=True, exist_ok=True)
+
+    entries: list[dict[str, Any]] = []
+    for round_index in range(1, n_rounds + 1):
+        entry = run_task_round(
+            task,
+            round_index,
+            provider,
+            repo_root,
+            entries,
+            scratch_root=scratch_root,
+            submission_dir=submissions_root / f"round-{round_index}",
+        )
+        append_ledger_entry(ledger_path, entry)
+        entries.append(entry)
+
+    try:
+        os.chmod(ledger_path, 0o444)
+    except OSError:
+        pass
+    return entries
 
 
 # --------------------------------------------------------------------------
@@ -1914,26 +2695,50 @@ def _resolve_agent_timeout(provider: str, value: float | None) -> float:
     return DEFAULT_AGENT_TIMEOUT_S
 
 
-def _resolve_provider(args: argparse.Namespace) -> CandidateProvider:
+def _resolve_provider(
+    args: argparse.Namespace, *, scratch_root_override: Path | None = None
+) -> CandidateProvider:
     """Build the `CandidateProvider` `run`'s ``--provider`` flag selected.
     The agent-backed providers are built fresh (rather than reusing the
     module-level singletons) so ``--agent-timeout-s`` and friends actually
-    take effect."""
+    take effect.
+
+    ``scratch_root_override``, when given, takes priority over
+    ``--agent-sandbox-root`` -- round mode (``--rounds``, issue #2253) calls
+    this once per task with that task's own round root, so each round's
+    sandbox lands beside that task's ``ledger.jsonl`` (making the
+    ``../ledger.jsonl`` its prompt advertises resolve) and
+    :func:`run_task_round` has a directory to watch for the sandbox each
+    round creates. `--attempts` mode keeps using ``--agent-sandbox-root``
+    unchanged: the two modes get separately-built providers.
+    """
     timeout_s = _resolve_agent_timeout(args.provider, args.agent_timeout_s)
     if args.provider == "live-agent":
-        return make_live_agent_provider(agent_timeout_s=timeout_s)
+        return make_live_agent_provider(
+            agent_timeout_s=timeout_s, scratch_root=scratch_root_override
+        )
     if args.provider == "interactive-agent":
+        sandbox_root = scratch_root_override or (
+            Path(args.agent_sandbox_root) if args.agent_sandbox_root else None
+        )
         return make_interactive_agent_provider(
             agent_timeout_s=timeout_s,
             tool_call_budget=args.agent_tool_budget,
-            sandbox_root=(
-                Path(args.agent_sandbox_root) if args.agent_sandbox_root else None
-            ),
+            sandbox_root=sandbox_root,
         )
     return reference_candidate_provider
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    rounds_root = (
+        Path(args.rounds_root)
+        if args.rounds_root
+        else (
+            Path(tempfile.mkdtemp(prefix="design-agent-benchmark-rounds-"))
+            if args.rounds > 0
+            else None
+        )
+    )
     result = run_benchmark(
         tasks_dir=Path(args.tasks_dir),
         repo_root=Path(args.repo_root),
@@ -1941,6 +2746,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ks=args.k,
         provider=_resolve_provider(args),
         provider_name=args.provider,
+        n_rounds=args.rounds,
+        rounds_root=rounds_root,
+        round_provider_factory=(
+            (lambda root: _resolve_provider(args, scratch_root_override=root))
+            if args.rounds > 0
+            else None
+        ),
     )
     text = json.dumps(result, indent=2)
     if args.out:
@@ -1958,6 +2770,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         f"solved={overall['solved_count']}/{overall['task_count']} ({summary_bits})",
         file=sys.stderr,
     )
+    if args.rounds > 0:
+        round_bits = ", ".join(
+            f"{t['id']}=best:{(t['rounds']['best'] or {}).get('score')}"
+            for t in result["tasks"]
+        )
+        print(
+            f"design-agent-benchmark ({result['provider']}): "
+            f"{args.rounds} rounds/task, ledgers under {rounds_root} ({round_bits})",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -2048,7 +2870,35 @@ def main(argv: list[str] | None = None) -> int:
             "parent directory for --provider interactive-agent's per-attempt "
             "sandboxes (default: the system temp dir). Each attempt still "
             "gets its own fresh subdirectory; they are left in place as run "
-            "evidence (netlist, `klt sim` artifacts, session transcript)"
+            "evidence (netlist, `klt sim` artifacts, session transcript). "
+            "Applies to --attempts mode only -- --rounds puts each round's "
+            "sandbox under its own task directory in --rounds-root, beside "
+            "that task's ledger.jsonl"
+        ),
+    )
+    run_parser.add_argument(
+        "--rounds",
+        type=int,
+        default=0,
+        help=(
+            "run N sequential refinement rounds per task, in addition to "
+            "--attempts' pass@k (orthogonal, issue #2253): each round's "
+            "prompt carries the last 3 rounds' evaluation results, and every "
+            "round is appended to a per-task ledger.jsonl under "
+            "--rounds-root. 0 (the default) skips round mode entirely -- "
+            "--attempts' pass@k output is byte-for-byte unchanged"
+        ),
+    )
+    run_parser.add_argument(
+        "--rounds-root",
+        default=None,
+        help=(
+            "parent directory for --rounds' per-task <task-id>/ directory: "
+            "its ledger.jsonl, each round's own sandbox, and the harness's "
+            "private submissions/round-N/ copy of what it scored (default: "
+            "the system temp dir). Each round's sandbox is chmod'd read-only "
+            "once it has been scored, and the ledger.jsonl itself is chmod'd "
+            "read-only once every round has run"
         ),
     )
     run_parser.set_defaults(func=_cmd_run)

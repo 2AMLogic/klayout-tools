@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://klayout-tools.org/benchmarks/design-agent/schema/ledger.schema.json",
+  "title": "Design-agent benchmark round ledger entry (klt.design_agent_benchmark.ledger/1)",
+  "description": "One line of a task's `ledger.jsonl` under `--rounds` mode (issue #2253) -- `scripts/design_agent_benchmark.py`'s `run_task_round()`. Modeled on the AHRR artifact's ledger shape (github.com/ZijD/AHRR, ICCAD'26, MIT -- methodology reference only, no code reuse): one fsync'd JSON line per round, so a killed sweep leaves a durable record and every table regenerates from ledgers alone. See benchmarks/design-agent/README.md's 'Round mode' section for the full contract (best(), score semantics, read-only isolation).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "round",
+    "submission_sha256",
+    "seed_sha256",
+    "agent_wall_s",
+    "round_wall_s",
+    "timed_out",
+    "usage",
+    "functional",
+    "ppa",
+    "valid",
+    "score",
+    "notes"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "klt.design_agent_benchmark.ledger/1",
+      "description": "Contract identifier for this line's own shape, following this repo's `klt.<verb>.<doc>/<n>` schema-identifier convention (e.g. `klt.drc.request/1`)."
+    },
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The design-agent-benchmark task this round belongs to -- matches benchmarks/design-agent/tasks/<task_id>.json's own `id`."
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-based round number within this task's ledger; rounds are numbered and appended in run order."
+    },
+    "submission_sha256": {
+      "type": ["string", "null"],
+      "description": "Content hash of this round's submission: for an agent-backed provider, the bytes of the netlist(s)/request(s) its `klt eval` descriptor references by absolute path -- the same files the harness copies into its own `submissions/round-<N>/` directory and scores from there, so this hash identifies what was actually graded, not a path that could later be swapped. Falls back to hashing the descriptor/candidate argument strings when the descriptor names no absolute path (the repository-committed `reference` descriptor's case). `null` only when the provider itself produced no submission at all (see `notes`). Stable across rounds for the deterministic `reference` provider, which resubmits the identical fixed reference every round -- the basis of the plumbing test in issue #2253's acceptance criteria."
+    },
+    "seed_sha256": {
+      "type": "string",
+      "description": "Hash of this round's input context: the task id plus the up-to-3 trailing ledger entries fed into this round's prompt. Identical for every round-1 invocation of the same task (no prior history); differs once history accumulates. A provider that ignores context entirely (e.g. `reference`) can still produce an identical `submission_sha256` across rounds despite a differing `seed_sha256` -- the two fields are independent."
+    },
+    "agent_wall_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Wall-clock seconds spent inside the candidate-provider call alone (prompt construction plus, for an agent-backed provider, the live invocation)."
+    },
+    "round_wall_s": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Wall-clock seconds for the whole round: the provider call, `klt eval` scoring, and the read-only freeze step."
+    },
+    "timed_out": {
+      "type": "boolean",
+      "description": "Whether the provider call raised a timeout (detected from the raised exception's own message; see `_looks_like_timeout`). `false` for a round that ran to completion, valid or not."
+    },
+    "usage": {
+      "type": ["object", "null"],
+      "description": "Best-effort per-round tool-call usage, read back from whatever the provider itself already recorded (today: `tool_calls`/`turns` for `--provider interactive-agent`'s own `agent-session.json`). `null` for the `reference`/`live-agent` providers and for any provider that records nothing. Real per-round *token* usage is not wired yet for any shipped provider -- tracked as a follow-up."
+    },
+    "functional": {
+      "type": ["object", "null"],
+      "description": "The pass/fail leg: `{\"valid\": bool, \"gates\": [...]}`, echoing `klt eval`'s own `gates` array verbatim. `null` when the provider produced no submission or the descriptor could not be evaluated at all (see `notes`).",
+      "properties": {
+        "valid": { "type": "boolean" },
+        "gates": { "type": ["array", "null"] }
+      }
+    },
+    "ppa": {
+      "type": ["object", "null"],
+      "description": "The power/performance/area leg: `{\"objective\": {...}, \"metrics\": {...}}`, echoing `klt eval`'s own `objective`/`metrics` fields verbatim. `null` under the same conditions as `functional`.",
+      "properties": {
+        "objective": { "type": ["object", "null"] },
+        "metrics": { "type": ["object", "null"] }
+      }
+    },
+    "valid": {
+      "type": "boolean",
+      "description": "Whether this round's submission passed every gate in its `klt eval` descriptor. Mirrors `functional.valid` when `functional` is not null; `false` when the round produced no submission at all."
+    },
+    "score": {
+      "type": ["number", "null"],
+      "description": "Continuous, rankable score for a valid round -- the task's own `sim`-objective worst-case *margin* (worst-corner headroom against the task's declared limits) when the objective follows the `measurements.<i>.worst_case.value` convention every shipped task descriptor uses, falling back to the plain objective value oriented so higher is always better (negated for a `minimize` objective). ALWAYS `null` for an invalid round -- never a partial score."
+    },
+    "notes": {
+      "type": ["string", "null"],
+      "description": "Machine-distinguishable reason for an invalid/errored round (e.g. \"provider produced no submission: <exc>\", \"invalid submission: gate(s) failed: <names>\"). `null` for a valid round."
+    }
+  }
+}

@@ -287,12 +287,22 @@ def _build_interactive_agent_prompt(
     body-only netlist constraint, and both session bounds. Same
     never-leak-the-answer-key rule: nothing here or in the sandbox carries
     the reference netlist's body.
+
+    When ``task`` carries ``ROUND_HISTORY_CONTEXT_KEY`` (round mode, issue
+    #2253), a "previous rounds" section is inserted before the block spec --
+    see ``design_agent_benchmark._format_round_history``.
     """
-    from design_agent_benchmark import _device_model_contract, _reference_testbenches
+    from design_agent_benchmark import (
+        ROUND_HISTORY_CONTEXT_KEY,
+        _device_model_contract,
+        _format_round_history,
+        _reference_testbenches,
+    )
 
     repo_root = Path(layout["repo_root"])
     testbenches = _reference_testbenches(task, repo_root)
     device_model_contract = _device_model_contract(task, repo_root, testbenches)
+    round_history_section = _format_round_history(task.get(ROUND_HISTORY_CONTEXT_KEY))
 
     skill_lines = "\n".join(f"  - ./{name}" for name in layout["skill_files"])
     request_lines = "\n".join(
@@ -369,7 +379,7 @@ the attempt as a failure. A full corner sweep is not free -- budget your
 Loop A iterations, and make sure your best netlist is written to disk
 before you run low rather than saving it for a final message.
 
-=== Block to design ===
+{round_history_section}=== Block to design ===
 
 Task id: {task["id"]}
 Title: {task["title"]}

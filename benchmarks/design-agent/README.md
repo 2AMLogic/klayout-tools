@@ -16,6 +16,7 @@ nothing is reproduced from it.
 benchmarks/design-agent/
   schema/task.schema.json       # JSON Schema every tasks/*.json must satisfy
   schema/mutations.schema.json  # JSON Schema every tasks/*.mutations.json must satisfy
+  schema/ledger.schema.json     # JSON Schema for one --rounds ledger.jsonl line
   tasks/*.json                  # task descriptors (see "Task shape" below)
   tasks/*.mutations.json        # per-task mutation gates (see "Mutation gates" below)
   reference/<task-id>/          # each task's known-good reference solution
@@ -187,6 +188,93 @@ is re-synthesized from the repo's frozen reference request and pointed at
 the agent's netlist, so a session that weakens its local testbench (drops
 measurements, shrinks the corner matrix) only blinds its own feedback loop
 — it cannot move its score.
+
+## Round mode (`--rounds`)
+
+`--attempts` (above) runs *k independent* attempts per task and scores
+pass@k — "can the agent produce a valid design at all". That says nothing
+about how good the design gets when the agent **iterates against
+feedback**, which is how the real pipeline loops actually run
+(`design-sizing` skill's Loop A, `design-drc-lvs` skill's Loop B). `--rounds
+R` (issue #2253, orthogonal to `--attempts`) runs `R` *sequential* rounds per
+task instead, feeding each round the outcome of the last few, and writes a
+per-task, append-only `ledger.jsonl`:
+
+```
+uv run python scripts/design_agent_benchmark.py run --provider interactive-agent \
+  --attempts 0 --rounds 5 --rounds-root .klt/design-agent-rounds
+```
+
+(`--attempts 0` skips pass@k entirely when you only want round mode; drop it
+to get both in one report — the two are fully additive, see below.)
+
+Each task gets its own directory under `--rounds-root`:
+
+```
+<rounds-root>/<task-id>/
+  ledger.jsonl               # one fsync'd line per round; read-only when done
+  <round sandbox>/           # what the provider wrote this round (read-only once scored)
+  submissions/round-<N>/     # the harness's own copy of what it scored
+```
+
+Modeled on the AHRR artifact's ledger shape
+([github.com/ZijD/AHRR](https://github.com/ZijD/AHRR), ICCAD'26, MIT —
+methodology reference only, no code reuse), not reused code:
+
+- **One fsync'd JSON line per round** (`klt.design_agent_benchmark.ledger/1`,
+  `benchmarks/design-agent/schema/ledger.schema.json`), under
+  `<rounds-root>/<task-id>/ledger.jsonl`: `round`, `submission_sha256`,
+  `seed_sha256`, `agent_wall_s`/`round_wall_s`, `timed_out`, `usage`,
+  `functional` (the gate/pass-fail leg), `ppa` (the objective/metrics leg),
+  `valid`, `score`, `notes`. Full field-by-field contract in the schema
+  file's own `description`s.
+- **`score` is a spec margin, not a raw objective value.** When a task's
+  `objective` reads a `sim` measurement's worst-case *value* (the
+  `measurements.<i>.worst_case.value` convention every shipped task uses),
+  round mode additionally asks `klt eval` for that same measurement's
+  worst-case *margin* — `klt sim`'s own already-computed per-corner headroom
+  against the declared limits, the same concept `klt size`'s
+  `worst_case_margin` objective searches against — sharing the objective's
+  exact check/args so it costs no extra simulation. **An invalid round's
+  `score` is always `null`, never a partial score.**
+- **`best()` is the highest-scoring valid round** (`dab.best_round`) — never
+  the last round, since an agent's later round can regress.
+- **Each round's prompt carries the last 3 rounds' evaluation results**
+  (round/valid/score/notes only — never a submission's netlist body or file
+  path). A round's sandbox sits directly inside its task's own round
+  directory, so the `../ledger.jsonl` the prompt points a session at really
+  is that task's ledger: "the same record you are scored on".
+- **The harness scores its own copy, not the agent's files.** Before
+  anything is evaluated, every file the round's `klt eval` descriptor
+  references by absolute path (the candidate netlist(s) and the `klt sim`
+  request(s) naming them) is copied into `submissions/round-<N>/` — a
+  directory no provider is ever given a handle to — and the descriptor is
+  rewritten to point at those copies. `klt eval` therefore never reads a
+  path any agent can write, and `submission_sha256` content-hashes the
+  submitted bytes rather than a path that could be swapped afterwards.
+- **Previous rounds are readable but inert.** Each round's own sandbox is
+  chmod'd read-only (`0o444`/`0o555`) once it has been scored, as is the
+  harness's copy, so a later round that can see an earlier one finds nothing
+  it can edit to change how that round was already graded. Once every round
+  has run, `ledger.jsonl` itself is chmod'd read-only too.
+- **The `reference` provider stays deterministic**: round 1 submits the
+  task's own known-good reference solution, and — since it ignores the
+  round-history context entirely, exactly like `--attempts` mode's identical
+  provider — every later round resubmits the identical thing
+  (`submission_sha256` unchanged across rounds). This is the harness's own
+  plumbing proof, not a real optimization-quality signal — see "Known
+  limitations" above for what `reference` does and does not establish.
+- **Report fields are additive only.** `run`'s JSON report gains a top-level
+  `n_rounds` and, per task, a `"rounds"` key (`{"count", "best",
+  "series", "ledger_path"}`) when `--rounds > 0`; `--attempts`'s own pass@k
+  fields are computed exactly as before and are byte-for-byte unchanged when
+  `--rounds` is not passed.
+
+**Known gaps in this first cut** (tracked as follow-ups, not silently
+missing): real per-round *token* usage is not wired through any shipped
+provider yet (`usage` only ever reports interactive-agent's own
+`tool_calls`/`turns`); resuming a killed sweep from an existing ledger
+(AHRR's own `resume.py`) is a deliberately deferred nice-to-have.
 
 ## Current task set
 

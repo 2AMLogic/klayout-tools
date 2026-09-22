@@ -743,6 +743,743 @@ def test_summarize_tier_empty_is_zero():
 
 
 # --------------------------------------------------------------------------
+# Unit tests: round mode -- ledger schema, best(), scoring, isolation
+# (issue #2253)
+#
+# All of these stub `dab.run_eval` (never touch `ngspice`) -- what matters
+# here is the ledger/scoring/isolation *plumbing*, exactly the same tiering
+# rationale as the reference-solution-cache tests below.
+# --------------------------------------------------------------------------
+
+LEDGER_SCHEMA_PATH = (
+    REPO_ROOT / "benchmarks" / "design-agent" / "schema" / "ledger.schema.json"
+)
+
+
+def _ledger_validator():
+    import jsonschema
+
+    schema = json.loads(LEDGER_SCHEMA_PATH.read_text())
+    validator_cls = jsonschema.validators.validator_for(schema)
+    validator_cls.check_schema(schema)
+    return validator_cls(schema)
+
+
+def _counting_round_provider(call_log: list[dict]):
+    def provider(task: dict, round_index: int, _repo_root: Path):
+        call_log.append(
+            {
+                "round": round_index,
+                "history": list(task.get(dab.ROUND_HISTORY_CONTEXT_KEY, [])),
+            }
+        )
+        return f"descriptor-{round_index}", None
+
+    return provider
+
+
+def test_run_task_round_valid_entry_matches_ledger_schema(monkeypatch):
+    _stub_run_eval(monkeypatch, valid=True)
+    validator = _ledger_validator()
+    task = {"id": "fake-task"}
+    entry = dab.run_task_round(task, 1, _counting_round_provider([]), Path("/repo"), [])
+    validator.validate(entry)
+    assert entry["schema"] == dab.LEDGER_SCHEMA
+    assert entry["valid"] is True
+    assert entry["score"] is not None
+    assert entry["notes"] is None
+
+
+def test_run_task_round_invalid_entry_matches_ledger_schema_and_scores_null(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        dab,
+        "run_eval",
+        lambda *_a, **_k: {
+            "schema_version": 1,
+            "valid": False,
+            "gates": [{"check": "sim", "name": "the_gate", "status": "fail"}],
+            "objective": {"name": "obj", "value": 1.0, "polarity": "maximize"},
+            "metrics": {},
+        },
+    )
+    validator = _ledger_validator()
+    task = {"id": "fake-task"}
+    entry = dab.run_task_round(task, 1, _counting_round_provider([]), Path("/repo"), [])
+    validator.validate(entry)
+    assert entry["valid"] is False
+    assert entry["score"] is None  # never a partial score
+    assert "the_gate" in entry["notes"]
+
+
+def test_run_task_round_provider_exception_records_invalid_round_not_crash():
+    def _raising_provider(_task, _round_index, _repo_root):
+        raise RuntimeError("boom")
+
+    entry = dab.run_task_round(
+        {"id": "fake-task"}, 1, _raising_provider, Path("/repo"), []
+    )
+    assert entry["valid"] is False
+    assert entry["score"] is None
+    assert entry["submission_sha256"] is None
+    assert "boom" in entry["notes"]
+    assert entry["functional"] is None
+    assert entry["ppa"] is None
+
+
+def test_run_task_round_detects_timeout_from_exception_message():
+    def _timeout_provider(_task, _round_index, _repo_root):
+        raise dab.AgentInvocationError("agent invocation timed out after 600.0s")
+
+    entry = dab.run_task_round(
+        {"id": "fake-task"}, 1, _timeout_provider, Path("/repo"), []
+    )
+    assert entry["timed_out"] is True
+    assert entry["valid"] is False
+
+
+def test_run_task_round_non_timeout_failure_leaves_timed_out_false():
+    def _failing_provider(_task, _round_index, _repo_root):
+        raise dab.AgentInvocationError(
+            "agent response missing labeled netlist fence(s)"
+        )
+
+    entry = dab.run_task_round(
+        {"id": "fake-task"}, 1, _failing_provider, Path("/repo"), []
+    )
+    assert entry["timed_out"] is False
+
+
+def test_run_task_round_passes_trailing_three_history_entries_to_provider(
+    monkeypatch,
+):
+    """ "Round N's prompt includes the last 3 ledger entries" (issue #2253) --
+    exercised at the provider-input boundary: `run_task_round` attaches
+    `history[-3:]` to the task dict it hands the provider, under
+    `ROUND_HISTORY_CONTEXT_KEY`."""
+    _stub_run_eval(monkeypatch, valid=True)
+    call_log: list[dict] = []
+    provider = _counting_round_provider(call_log)
+    task = {"id": "fake-task"}
+
+    entries: list[dict] = []
+    for i in range(1, 6):
+        entry = dab.run_task_round(task, i, provider, Path("/repo"), entries)
+        entries.append(entry)
+
+    assert call_log[0]["history"] == []  # round 1: no history yet
+    # Round 5 should see rounds 2, 3, 4 (the trailing 3), not round 1.
+    round5_history_rounds = [e["round"] for e in call_log[-1]["history"]]
+    assert round5_history_rounds == [2, 3, 4]
+
+
+def test_format_round_history_empty_is_blank():
+    assert dab._format_round_history(None) == ""
+    assert dab._format_round_history([]) == ""
+
+
+def test_format_round_history_renders_last_three_and_mentions_ledger_file():
+    history = [
+        {"round": i, "valid": True, "score": float(i), "notes": None}
+        for i in range(1, 6)
+    ]
+    section = dab._format_round_history(history)
+    assert "round 3" in section
+    assert "round 4" in section
+    assert "round 5" in section
+    assert "round 1" not in section  # only the trailing 3 are rendered
+    assert "round 2" not in section
+    assert "../ledger.jsonl" in section
+
+
+def test_build_live_agent_prompt_includes_round_history_when_present():
+    task = dict(dab.load_task(TASKS_DIR / "common-source-amp.json"))
+    task[dab.ROUND_HISTORY_CONTEXT_KEY] = [
+        {"round": 1, "valid": False, "score": None, "notes": "invalid submission: x"}
+    ]
+    prompt, _stems = dab._build_live_agent_prompt(task, REPO_ROOT)
+    assert "Previous rounds" in prompt
+    assert "round 1" in prompt
+
+
+def test_build_live_agent_prompt_omits_round_history_section_when_absent():
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    prompt, _stems = dab._build_live_agent_prompt(task, REPO_ROOT)
+    assert "Previous rounds" not in prompt
+
+
+def test_best_round_selects_highest_scoring_valid_round():
+    entries = [
+        {"round": 1, "valid": True, "score": 0.2},
+        {"round": 2, "valid": False, "score": None},
+        {"round": 3, "valid": True, "score": 0.9},
+        {"round": 4, "valid": True, "score": 0.5},
+    ]
+    best = dab.best_round(entries)
+    assert best["round"] == 3
+
+
+def test_best_round_returns_none_when_no_valid_round():
+    entries = [{"round": 1, "valid": False, "score": None}]
+    assert dab.best_round(entries) is None
+
+
+def test_best_round_keeps_earliest_round_on_tie():
+    entries = [
+        {"round": 1, "valid": True, "score": 0.5},
+        {"round": 2, "valid": True, "score": 0.5},
+    ]
+    assert dab.best_round(entries)["round"] == 1
+
+
+def test_summarize_rounds_reports_count_best_and_series():
+    entries = [
+        {"round": 1, "valid": True, "score": 0.2, "notes": None},
+        {"round": 2, "valid": True, "score": 0.9, "notes": None},
+    ]
+    summary = dab.summarize_rounds(entries)
+    assert summary["count"] == 2
+    assert summary["best"]["round"] == 2
+    assert summary["series"] == [
+        {"round": 1, "valid": True, "score": 0.2},
+        {"round": 2, "valid": True, "score": 0.9},
+    ]
+
+
+def test_round_score_descriptor_adds_margin_metric_for_worst_case_value_objective():
+    descriptor = {
+        "gates": [{"check": "sim", "args": {"request": "sim_request.json"}}],
+        "objective": {
+            "check": "sim",
+            "metric": "measurements.0.worst_case.value",
+            "polarity": "maximize",
+            "args": {"request": "sim_request.json"},
+        },
+    }
+    new_arg, margin_name = dab._round_score_descriptor(json.dumps(descriptor))
+    assert margin_name is not None
+    augmented = json.loads(new_arg)
+    added = [m for m in augmented["metrics"] if m["name"] == margin_name]
+    assert len(added) == 1
+    assert added[0]["metric"] == "measurements.0.worst_case.margin"
+    assert added[0]["check"] == "sim"
+    assert added[0]["args"] == {"request": "sim_request.json"}
+
+
+def test_round_score_descriptor_leaves_non_sim_objective_unmodified():
+    descriptor = {
+        "gates": [{"check": "drc", "args": {"file": "x.gds", "deck": "sky130"}}],
+        "objective": {"check": "drc", "metric": "count", "polarity": "minimize"},
+    }
+    arg = json.dumps(descriptor)
+    new_arg, margin_name = dab._round_score_descriptor(arg)
+    assert margin_name is None
+    assert new_arg == arg
+
+
+def test_round_score_descriptor_leaves_non_value_suffixed_metric_unmodified():
+    descriptor = {
+        "gates": [{"check": "sim", "args": {"request": "sim_request.json"}}],
+        "objective": {
+            "check": "sim",
+            "metric": "measurements.0.worst_case.margin",
+            "polarity": "maximize",
+            "args": {"request": "sim_request.json"},
+        },
+    }
+    arg = json.dumps(descriptor)
+    new_arg, margin_name = dab._round_score_descriptor(arg)
+    assert margin_name is None
+    assert new_arg == arg
+
+
+def test_round_score_prefers_margin_metric_when_present():
+    report = {
+        "valid": True,
+        "objective": {"value": 10.0, "polarity": "maximize"},
+        "metrics": {"__the_margin__": 3.5},
+    }
+    assert dab._round_score(report, "__the_margin__") == pytest.approx(3.5)
+
+
+def test_round_score_falls_back_to_polarity_oriented_objective_value():
+    maximize_report = {
+        "valid": True,
+        "objective": {"value": 10.0, "polarity": "maximize"},
+        "metrics": {},
+    }
+    minimize_report = {
+        "valid": True,
+        "objective": {"value": 10.0, "polarity": "minimize"},
+        "metrics": {},
+    }
+    assert dab._round_score(maximize_report, None) == pytest.approx(10.0)
+    assert dab._round_score(minimize_report, None) == pytest.approx(-10.0)
+
+
+def test_round_score_none_when_no_margin_and_no_objective_value():
+    assert (
+        dab._round_score({"valid": True, "objective": {}, "metrics": {}}, None) is None
+    )
+
+
+def test_submission_sha256_stable_for_identical_reference_style_arguments():
+    """The deterministic reference provider's descriptor_arg is a fixed,
+    repository-relative file path every round -- `_submission_dependency_files`
+    deliberately skips its relative `request` refs, so the hash falls back to
+    the argument strings themselves, which are still stable across calls."""
+    h1 = dab._submission_sha256(
+        "benchmarks/design-agent/reference/x/eval_descriptor.json", None
+    )
+    h2 = dab._submission_sha256(
+        "benchmarks/design-agent/reference/x/eval_descriptor.json", None
+    )
+    assert h1 == h2
+
+
+def test_submission_sha256_content_hashes_absolute_referenced_files(tmp_path):
+    netlist = tmp_path / "candidate.spice"
+    netlist.write_text("* v1\n")
+    request = tmp_path / "sim_request.json"
+    request.write_text(json.dumps({"netlist": str(netlist)}))
+    descriptor_arg = json.dumps(
+        {
+            "gates": [{"check": "sim", "args": {"request": str(request)}}],
+            "objective": {
+                "check": "sim",
+                "metric": "measurements.0.worst_case.value",
+                "args": {"request": str(request)},
+            },
+        }
+    )
+    h1 = dab._submission_sha256(descriptor_arg, None)
+    netlist.write_text("* v2 -- different content\n")
+    h2 = dab._submission_sha256(descriptor_arg, None)
+    assert h1 != h2  # content changed under the same path -- hash must move
+
+
+def test_freeze_directory_readonly_blocks_further_writes(tmp_path):
+    target = tmp_path / "sandbox"
+    target.mkdir()
+    victim = target / "netlist.spice"
+    victim.write_text("* original\n")
+
+    dab._freeze_directory_readonly(target)
+
+    assert not os.access(victim, os.W_OK)
+    with pytest.raises(PermissionError):
+        victim.write_text("* tampered\n")
+    # Restore write perms so pytest's own tmp_path cleanup can remove it.
+    os.chmod(victim, 0o644)
+    os.chmod(target, 0o755)
+
+
+def test_run_task_round_freezes_provider_created_scratch_directory(
+    monkeypatch, tmp_path
+):
+    _stub_run_eval(monkeypatch, valid=True)
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+
+    def _provider(_task, round_index, _repo_root):
+        d = scratch_root / f"attempt{round_index}"
+        d.mkdir()
+        (d / "netlist.spice").write_text("* candidate\n")
+        return "descriptor", None
+
+    dab.run_task_round(
+        {"id": "fake-task"}, 1, _provider, Path("/repo"), [], scratch_root=scratch_root
+    )
+
+    frozen_file = scratch_root / "attempt1" / "netlist.spice"
+    assert not os.access(frozen_file, os.W_OK)
+    os.chmod(frozen_file, 0o644)
+    os.chmod(scratch_root / "attempt1", 0o755)
+
+
+def test_usage_from_scratch_dir_reads_tool_calls_and_turns(tmp_path):
+    (tmp_path / dab.SESSION_SUMMARY_FILENAME).write_text(
+        json.dumps({"tool_calls": 4, "turns": 2, "wall_clock_s": 12.0})
+    )
+    usage = dab._usage_from_scratch_dir(tmp_path)
+    assert usage == {"tool_calls": 4, "turns": 2}
+
+
+def test_usage_from_scratch_dir_none_when_no_summary_file(tmp_path):
+    assert dab._usage_from_scratch_dir(tmp_path) is None
+    assert dab._usage_from_scratch_dir(None) is None
+
+
+def test_run_task_rounds_appends_fsynced_ledger_and_locks_it_when_done(
+    monkeypatch, tmp_path
+):
+    _stub_run_eval(monkeypatch, valid=True)
+    task = {"id": "fake-task"}
+    entries = dab.run_task_rounds(
+        task, 3, _counting_round_provider([]), Path("/repo"), rounds_root=tmp_path
+    )
+    assert [e["round"] for e in entries] == [1, 2, 3]
+
+    ledger_path = tmp_path / "fake-task" / dab.LEDGER_FILENAME
+    lines = ledger_path.read_text().splitlines()
+    assert len(lines) == 3
+    for line, entry in zip(lines, entries, strict=True):
+        assert json.loads(line) == entry
+
+    assert not os.access(ledger_path, os.W_OK)
+    os.chmod(ledger_path, 0o644)  # restore so tmp_path cleanup can remove it
+
+
+def test_run_task_rounds_zero_rounds_returns_empty_list():
+    assert (
+        dab.run_task_rounds(
+            {"id": "x"}, 0, dab.reference_candidate_provider, Path("/repo")
+        )
+        == []
+    )
+
+
+def test_reference_provider_round_mode_resubmits_identical_reference(monkeypatch):
+    """The required "plumbing test" (issue #2253): the deterministic
+    reference provider ignores round-history context entirely, so round 1
+    submits the task's own reference and every later round resubmits the
+    identical thing -- `submission_sha256` must not move across rounds."""
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    _stub_run_eval(monkeypatch, valid=True)
+
+    entries = [
+        dab.run_task_round(task, i, dab.reference_candidate_provider, REPO_ROOT, [])
+        for i in range(1, 4)
+    ]
+    hashes = {e["submission_sha256"] for e in entries}
+    assert len(hashes) == 1, "reference provider must resubmit byte-identical rounds"
+    assert all(e["valid"] for e in entries)
+
+
+def test_run_benchmark_rounds_are_additive_when_requested(monkeypatch, tmp_path):
+    task = _write_reference_cache_fixture(tmp_path)
+    _stub_run_eval(monkeypatch, valid=True)
+
+    result = dab.run_benchmark(
+        tasks_dir=tmp_path / "tasks",
+        repo_root=tmp_path,
+        n_attempts=0,
+        ks=[1],
+        provider=dab.reference_candidate_provider,
+        provider_name="reference",
+        n_rounds=2,
+        rounds_root=tmp_path / "rounds",
+    )
+    assert result["n_rounds"] == 2
+    assert len(result["tasks"]) == 1
+    rounds_summary = result["tasks"][0]["rounds"]
+    assert rounds_summary["count"] == 2
+    assert rounds_summary["best"] is not None
+    assert len(rounds_summary["series"]) == 2
+    assert Path(rounds_summary["ledger_path"]).is_file()
+    _ = task  # fixture return value unused beyond building the tree on disk
+
+
+def test_run_benchmark_without_rounds_output_is_byte_for_byte_unchanged(
+    monkeypatch, tmp_path
+):
+    """Regression guard for "pass@k output is unchanged (additive JSON
+    fields only)" -- omitting the three new parameters must not add
+    `"rounds"`/`"n_rounds"` anywhere in the report."""
+    _write_reference_cache_fixture(tmp_path)
+    _stub_run_eval(monkeypatch, valid=True)
+
+    result = dab.run_benchmark(
+        tasks_dir=tmp_path / "tasks",
+        repo_root=tmp_path,
+        n_attempts=1,
+        ks=[1],
+        provider=dab.reference_candidate_provider,
+        provider_name="reference",
+    )
+    assert "n_rounds" not in result
+    assert "rounds" not in result["tasks"][0]
+
+
+def _restore_writable(root: Path) -> None:
+    """Undo `_freeze_directory_readonly` so pytest's own `tmp_path` retention
+    policy can delete the tree later. `0o555` directories are still
+    listable/traversable, so a top-down walk reaches everything."""
+    for dirpath, _dirnames, filenames in os.walk(root):
+        os.chmod(dirpath, 0o755)
+        for name in filenames:
+            os.chmod(os.path.join(dirpath, name), 0o644)
+
+
+def _agent_style_descriptor(sandbox: Path) -> str:
+    """An `eval` descriptor shaped exactly like the one an agent-backed
+    provider returns (`_build_live_agent_descriptor`): absolute `request`
+    paths into the provider's own writable sandbox, and a request document
+    naming the candidate netlist by absolute path."""
+    sandbox.mkdir(parents=True, exist_ok=True)
+    netlist = sandbox / "cand.spice"
+    netlist.write_text("* candidate v1\n")
+    request = sandbox / "sim_request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "netlist": str(netlist),
+                "models": {"pdk": "sky130A", "lib": "libs.tech/ngspice/x.lib.spice"},
+            }
+        )
+    )
+    return json.dumps(
+        {
+            "gates": [{"check": "sim", "name": "g", "args": {"request": str(request)}}],
+            "objective": {
+                "check": "sim",
+                "metric": "measurements.0.worst_case.value",
+                "polarity": "maximize",
+                "args": {"request": str(request)},
+            },
+        }
+    )
+
+
+def test_snapshot_submission_copies_referenced_files_and_rewrites_descriptor(tmp_path):
+    """ "The harness keeps its own copy of each round's submission; scoring
+    never reads a path the agent can still write" (issue #2253): every
+    absolute-path file the descriptor names is copied out of the provider's
+    sandbox, and the descriptor handed to `klt eval` points only at copies."""
+    sandbox = tmp_path / "sandbox"
+    descriptor_arg = _agent_style_descriptor(sandbox)
+    dest = tmp_path / "submissions" / "round-1"
+
+    new_arg, copied = dab._snapshot_submission(descriptor_arg, dest)
+
+    rewritten = json.loads(new_arg)
+    scored_request = Path(rewritten["gates"][0]["args"]["request"])
+    assert scored_request.parent == dest
+    # The same request referenced twice is snapshotted once, not twice.
+    assert rewritten["objective"]["args"]["request"] == str(scored_request)
+    assert len(copied) == 2  # the request document and the netlist it names
+
+    scored_doc = json.loads(scored_request.read_text())
+    scored_netlist = Path(scored_doc["netlist"])
+    assert scored_netlist.parent == dest
+    assert scored_netlist.read_text() == "* candidate v1\n"
+    # `models` is never rewritten: it resolves against $PDK_ROOT, and is not
+    # a file any agent can write.
+    assert scored_doc["models"] == {
+        "pdk": "sky130A",
+        "lib": "libs.tech/ngspice/x.lib.spice",
+    }
+
+    # The copy is genuinely independent of the agent's own file.
+    (sandbox / "cand.spice").write_text("* tampered after submission\n")
+    assert scored_netlist.read_text() == "* candidate v1\n"
+
+
+def test_snapshot_submission_leaves_relative_reference_descriptor_untouched(tmp_path):
+    """The deterministic `reference` provider hands back a repository-
+    committed descriptor with *relative* request paths -- nothing an agent
+    can write, so nothing to snapshot, and the descriptor must come back
+    byte-identical (the reference round stays exactly what `--attempts` mode
+    would have scored)."""
+    descriptor_arg = json.dumps(
+        {"gates": [{"check": "sim", "args": {"request": "sim_request.json"}}]}
+    )
+    new_arg, copied = dab._snapshot_submission(descriptor_arg, tmp_path / "dest")
+    assert new_arg == descriptor_arg
+    assert copied == []
+    assert not (tmp_path / "dest").exists()
+
+
+def test_run_task_round_scores_the_harness_copy_not_the_agent_sandbox(
+    monkeypatch, tmp_path
+):
+    scored_calls = _stub_run_eval(monkeypatch, valid=True)
+    sandbox = tmp_path / "sandbox"
+    descriptor_arg = _agent_style_descriptor(sandbox)
+    submission_dir = tmp_path / "submissions" / "round-1"
+
+    entry = dab.run_task_round(
+        {"id": "fake-task"},
+        1,
+        lambda *_a: (descriptor_arg, None),
+        Path("/repo"),
+        [],
+        submission_dir=submission_dir,
+    )
+
+    scored_descriptor = json.loads(scored_calls[-1][0])
+    scored_request = Path(scored_descriptor["gates"][0]["args"]["request"])
+    assert scored_request.parent == submission_dir
+    assert sandbox not in scored_request.parents
+    # ... and the harness's copy is frozen once the round is scored.
+    assert not os.access(scored_request, os.W_OK)
+    assert entry["valid"] is True
+    _restore_writable(tmp_path)
+
+
+def test_run_task_rounds_sandbox_sits_beside_the_ledger(monkeypatch, tmp_path):
+    """Round N's prompt tells the session it may read `../ledger.jsonl`; that
+    only holds if each round's sandbox is a direct child of the task's own
+    round directory. Also guards that the harness's pre-created
+    `submissions/` tree is never mistaken for a provider-created sandbox by
+    the before/after subdirectory diff (which would attribute the wrong
+    `usage` to the round, and freeze the wrong directory)."""
+    _stub_run_eval(monkeypatch, valid=True)
+    task_root = tmp_path / "fake-task"
+
+    def _provider(_task, round_index, _repo_root):
+        sandbox = task_root / f"round-{round_index}"
+        sandbox.mkdir(parents=True)
+        (sandbox / dab.SESSION_SUMMARY_FILENAME).write_text(
+            json.dumps({"tool_calls": round_index, "turns": 1})
+        )
+        return "descriptor", None
+
+    entries = dab.run_task_rounds(
+        {"id": "fake-task"},
+        2,
+        _provider,
+        Path("/repo"),
+        rounds_root=tmp_path,
+        scratch_root=task_root,
+    )
+
+    assert [e["usage"] for e in entries] == [
+        {"tool_calls": 1, "turns": 1},
+        {"tool_calls": 2, "turns": 1},
+    ]
+    ledger = task_root / dab.LEDGER_FILENAME
+    assert (task_root / "round-1" / ".." / dab.LEDGER_FILENAME).resolve() == (
+        ledger.resolve()
+    )
+    assert (task_root / dab.SUBMISSIONS_DIRNAME).is_dir()
+    _restore_writable(tmp_path)
+
+
+def test_run_benchmark_builds_one_round_provider_per_task_round_root(
+    monkeypatch, tmp_path
+):
+    _write_reference_cache_fixture(tmp_path)
+    _stub_run_eval(monkeypatch, valid=True)
+    seen: list[Path] = []
+
+    def _factory(root: Path):
+        seen.append(root)
+        return dab.reference_candidate_provider
+
+    result = dab.run_benchmark(
+        tasks_dir=tmp_path / "tasks",
+        repo_root=tmp_path,
+        n_attempts=0,
+        ks=[1],
+        provider=dab.reference_candidate_provider,
+        provider_name="reference",
+        n_rounds=2,
+        rounds_root=tmp_path / "rounds",
+        round_provider_factory=_factory,
+    )
+
+    assert seen == [tmp_path / "rounds" / "fixture-task"]
+    assert result["tasks"][0]["rounds"]["ledger_path"] == str(
+        tmp_path / "rounds" / "fixture-task" / dab.LEDGER_FILENAME
+    )
+
+
+def test_summarize_tier_does_not_count_zero_attempt_tasks_as_solved():
+    """`--attempts 0 --rounds R` (round mode only) must not report every task
+    as solved just because it passed all zero of its attempts."""
+    summaries = [
+        {
+            "id": "t",
+            "tier": "easy",
+            "attempts": 0,
+            "solved": 0,
+            "pass_at_k": {},
+            "total_wall_clock_s": 0.0,
+        }
+    ]
+    assert dab.summarize_tier(summaries, [1]) == {
+        "task_count": 1,
+        "solved_count": 0,
+        "pass_at_k": {},
+    }
+
+
+def test_cli_run_passes_round_flags_through_to_run_benchmark(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    def _fake_run_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {
+            "schema_version": 1,
+            "provider": "reference",
+            "n_attempts": 0,
+            "ks": [1],
+            "tasks": [
+                {
+                    "id": "t",
+                    "tier": "easy",
+                    "attempts": 0,
+                    "solved": 0,
+                    "pass_at_k": {},
+                    "total_wall_clock_s": 0.0,
+                    "rounds": {
+                        "count": 2,
+                        "best": {"round": 2, "score": 0.5},
+                        "series": [],
+                        "ledger_path": "x",
+                    },
+                }
+            ],
+            "tiers": {},
+            "overall": {"task_count": 1, "solved_count": 0, "pass_at_k": {}},
+            "wall_clock_s": 0.0,
+            "n_rounds": 2,
+        }
+
+    monkeypatch.setattr(dab, "run_benchmark", _fake_run_benchmark)
+    rc = dab.main(
+        [
+            "run",
+            "--attempts",
+            "0",
+            "--rounds",
+            "2",
+            "--rounds-root",
+            str(tmp_path / "r"),
+        ]
+    )
+    assert rc == 0
+    assert captured["n_rounds"] == 2
+    assert captured["rounds_root"] == tmp_path / "r"
+    assert captured["round_provider_factory"] is not None
+
+
+def test_cli_run_without_rounds_passes_no_round_provider_factory(monkeypatch):
+    captured: dict = {}
+
+    def _fake_run_benchmark(**kwargs):
+        captured.update(kwargs)
+        return {
+            "schema_version": 1,
+            "provider": "reference",
+            "n_attempts": 1,
+            "ks": [1],
+            "tasks": [],
+            "tiers": {},
+            "overall": {"task_count": 0, "solved_count": 0, "pass_at_k": {}},
+            "wall_clock_s": 0.0,
+        }
+
+    monkeypatch.setattr(dab, "run_benchmark", _fake_run_benchmark)
+    assert dab.main(["run", "--attempts", "1", "--k", "1"]) == 0
+    assert captured["n_rounds"] == 0
+    assert captured["rounds_root"] is None
+    assert captured["round_provider_factory"] is None
+
+
+# --------------------------------------------------------------------------
 # Unit tests: cross-step reference-solution cache (issue #1783)
 #
 # These stub `run_eval` (a spy counting calls) rather than running real
