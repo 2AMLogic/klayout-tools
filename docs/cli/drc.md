@@ -588,8 +588,9 @@ no per-net isolation) than it actually has.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 57
+design rule manual (which spans hundreds of rules). It currently covers 59
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
+`tap` (issue #2321),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
 `nwell` (issue #1420) layers — transcribed directly from the official
@@ -608,13 +609,13 @@ Broken down by check kind:
 
 | kind         | count |
 | ------------ | ----: |
-| `width`      |    15 |
+| `width`      |    16 |
 | `space`      |    13 |
 | `isolated`   |     1 |
-| `enclosing`  |    16 |
+| `enclosing`  |    17 |
 | `separation` |     2 |
 | `area`       |    10 |
-| **total**    |**57** |
+| **total**    |**59** |
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
@@ -637,12 +638,18 @@ boolean expression no `klt gen` generator draws today) — are deliberately
 **not** transcribed; see the "nwell (well-layer) rule coverage" note in
 `sky130.py`'s own module docstring for the full reasoning.
 
-Two of these rules approximate an official rule defined on a
-*compound* layer expression (a boolean union of two mask layers, e.g.
-`diff.or(tap)`) as a check against a single drawn layer, because the native
+Four of these rules approximate official rules our engine cannot transcribe
+literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
+curated halves of one rule defined on a *compound* layer expression (a
+boolean union of two mask layers — `difftap.1`'s `diff.or(tap)`), each
+checking one drawn layer of the union, because the native
 `Region` check primitives check one layer, or one layer against one other
 layer, at a time — they do not evaluate arbitrary layer expressions the way
-the DRC-DSL script runner does. Four more (`met2.width.1`, `via.width.1`,
+the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
+`tap.enclosing.licon.1` (issue #2321) approximate `second_edges`-conditional
+enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
+floor, the one positive-margin transcription that provably flags no
+correct-by-construction geometry. Four more (`met2.width.1`, `via.width.1`,
 `met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
 that additionally bounds a max size, length, or a periphery-scoped/
 corner-relaxed refinement our single-layer/two-layer check primitives don't
@@ -650,7 +657,7 @@ support — the same class of approximation `met1.enclosing.mcon.1` and
 gf180mcu's `contact.width.1` already make. Every approximation is called
 out explicitly in its rule's docstring; the threshold *values* used are
 always the real, unmodified source values, with exactly one documented
-exception described next.
+exception pattern (the `second_edges` zero floor above) described next.
 
 **No deck authors a `"density"` rule, and that is a decision, not an
 unstated gap (issue #1975).** The `"density"` check kind exists (issue #812,
@@ -1610,9 +1617,11 @@ claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this
 field existed). sky130's five `met{1..5}.area.1` rules (issue #1955) each
 carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
-(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), and its five
+(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), its five
 `met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
-`m3.7`/`m4.7`/`m5.7`, so 39 of its 57 rules are covered.
+`m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
+`difftap.1` source id `diff.width.1` already carries (both halve the same
+compound rule), so 40 of its 59 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 

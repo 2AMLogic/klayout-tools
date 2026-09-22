@@ -344,7 +344,7 @@ asked for a rule id that does not exist":
   "schema_version": 1,
   "error": {
     "command": "deck rules",
-    "message": "deck 'sky130' has no rule with id 'CO.7' (57 rules registered; run `klt deck rules --deck sky130` to list them)"
+    "message": "deck 'sky130' has no rule with id 'CO.7' (59 rules registered; run `klt deck rules --deck sky130` to list them)"
   }
 }
 ```
