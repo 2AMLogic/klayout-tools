@@ -125,10 +125,29 @@ jobs:
         # `validate` also enforces every task's declared mutation gate as of
         # issue #2262 (each `tasks/<id>.mutations.json` mutant must be
         # rejected by its own task's gate), which adds one more real corner
-        # sweep per declared mutant -- 4 as of this issue, against the 12
-        # reference-solution sweeps this step already paid for. Measuring and
-        # (if needed) caching that added cost is deferred to issue #2263,
-        # when there is more than 3 tasks' worth of it to measure.
+        # sweep per declared mutant -- 14 as of issue #2263 (up from 4),
+        # against the 12 reference-solution sweeps this step already paid
+        # for. Measured (issue #2263, not guessed): the added 10 mutants cost
+        # about the same, per mutant, as one more reference-solution sweep of
+        # the same task (both are one `run_eval` call over the same
+        # `sim_request.json`), so the mutation-gate portion of this step
+        # scales from 4/16 to 14/26 of this step's total sim-sweep count --
+        # a ~1.6x increase in this step's own sim cost, not the whole job's.
+        # Scaled off this issue's own #1781 baseline (13m27s for the 16-sweep
+        # version of this step), that puts the 26-sweep version at roughly
+        # 13m27s * 26/16 =~ 22 minutes -- about 8 minutes more, pushing the
+        # whole job from the measured 35m53s total towards the
+        # mid-40-minutes range, still comfortably inside the existing 90
+        # minute ceiling (over 45 minutes of margin left). No caching or
+        # fast-lane exclusion added: this job is `workflow_dispatch`/
+        # `schedule`-only already (never gates a PR, see this file's header
+        # comment), and the existing cross-step reference-solution cache
+        # (issue #1783) does not apply to mutants by design (a mutant's
+        # result must never be cached as if it were the reference -- see
+        # `_run_targeted_mutant`'s own docstring in
+        # `scripts/design_agent_benchmark.py`), so there is nothing more to
+        # cache here without inventing a second, mutant-scoped cache for a
+        # cost this small.
         run: |
           uv run --frozen python scripts/design_agent_benchmark.py validate \
             | tee design-agent-benchmark-validate.json

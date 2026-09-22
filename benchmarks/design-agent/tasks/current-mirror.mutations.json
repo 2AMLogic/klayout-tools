@@ -1,0 +1,13 @@
+{
+  "task": "current-mirror",
+  "targeted": [
+    {
+      "name": "mirror-ratio-doubled",
+      "netlist": "mirror.spice",
+      "find": "XMout out ref 0 0 sky130_fd_pr__nfet_01v8 L=2 W=10 nf=1 mult=1",
+      "replace": "XMout out ref 0 0 sky130_fd_pr__nfet_01v8 L=2 W=20 nf=1 mult=1",
+      "why": "output device widened to 2x the reference device's W -> mirror ratio becomes ~2:1 instead of 1:1, so the output current lands near 100 uA, well outside the +/-10% (45-55 uA) window around the 50 uA reference"
+    }
+  ],
+  "equivalent": []
+}

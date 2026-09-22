@@ -421,24 +421,31 @@ def test_shipped_mutations_documents_validate_against_their_schema():
 def test_shipped_mutation_files_declare_exactly_the_migrated_mutants():
     """Issue #2262 is a *mechanical* port of the four mutants issue #1734's
     hand-written `parametrize` list exercised -- not a redesign of which
-    mutants are tested. This pins that set."""
+    mutants are tested. This pins that set as an unconditional subset of
+    everything currently declared: issue #2263 (and any later task-set
+    growth) only ever adds (task, mutant) pairs on top, never renames or
+    drops one of the four migrated ones out from under this pin."""
     declared = {
         (task_id, mutant["name"])
         for task_id in MUTATION_TASK_IDS
         for mutant in _shipped_mutations(task_id)["targeted"]
     }
-    assert declared == MIGRATED_MUTANTS
+    assert MIGRATED_MUTANTS <= declared, MIGRATED_MUTANTS - declared
 
 
 def test_mutation_gate_kills_every_declared_mutant_when_the_gate_rejects(monkeypatch):
-    """The aggregate happy path over the whole shipped tasks directory: the
-    three tasks with a mutations document are checked, the nine without are
-    skipped entirely (neither a pass nor a failure)."""
+    """The aggregate happy path over the whole shipped tasks directory: every
+    task that ships a mutations document is checked (as of issue #2263,
+    that is every task in the set -- none are skipped today, though a task
+    added without one would still be skipped rather than failed)."""
     monkeypatch.setattr(dab, "run_eval", _stub_eval(False))
     result = dab.check_mutation_gates(TASKS_DIR, REPO_ROOT, MUTATIONS_SCHEMA_PATH)
     assert result["valid"] is True, result
     assert result["task_count"] == len(MUTATION_TASK_IDS)
-    assert result["mutant_count"] == len(MIGRATED_MUTANTS)
+    expected_mutant_count = sum(
+        len(_shipped_mutations(task_id)["targeted"]) for task_id in MUTATION_TASK_IDS
+    )
+    assert result["mutant_count"] == expected_mutant_count
     assert result["survived_count"] == 0
     assert {t["id"] for t in result["tasks"]} == set(MUTATION_TASK_IDS)
     for task_result in result["tasks"]:

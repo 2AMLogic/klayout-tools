@@ -1,0 +1,20 @@
+{
+  "task": "differential-pair",
+  "targeted": [
+    {
+      "name": "diff-gain-load-shrunk",
+      "netlist": "diff_pair_diff.spice",
+      "find": ".param rd=8k",
+      "replace": ".param rd=800",
+      "why": "drain load resistors shrunk 10x on the differential-drive testbench -> differential-mode voltage gain (gm*rd) collapses well below the 8 dB minimum, while the untouched common-mode testbench still passes its own gate on its own"
+    },
+    {
+      "name": "cm-device-mismatch-widened",
+      "netlist": "diff_pair_cm.spice",
+      "find": "XMn outn inn tail 0 sky130_fd_pr__nfet_01v8 L=1 W=20 nf=1 mult=1",
+      "replace": "XMn outn inn tail 0 sky130_fd_pr__nfet_01v8 L=1 W=30 nf=1 mult=1",
+      "why": "the 'n' branch input device widened 50% on the common-mode testbench only -> under common-mode drive the fixed ideal tail current now splits unevenly between the mismatched gm's, converting the common-mode input into a non-negligible differential output and pushing common-mode-driven output above the 0 dB ceiling, while the untouched differential-drive testbench still passes its own gate on its own"
+    }
+  ],
+  "equivalent": []
+}

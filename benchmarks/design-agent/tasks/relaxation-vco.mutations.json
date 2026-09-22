@@ -1,0 +1,13 @@
+{
+  "task": "relaxation-vco",
+  "targeted": [
+    {
+      "name": "vco-gain-undersized",
+      "netlist": "vco.spice",
+      "find": ".param kvco=18u",
+      "replace": ".param kvco=9u",
+      "why": "control-voltage-to-current gain halved -> both measured frequencies (and the Hz/V sensitivity between them, which scales with kvco since the 3x frequency ratio between the two fixed control points is kvco-independent) drop by roughly half, pushing freq_lo below its 230 kHz floor and the sensitivity below its 800 kHz/V floor"
+    }
+  ],
+  "equivalent": []
+}
