@@ -76,6 +76,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   committed report: `--check`") and `docs/cli/version.md` ("These fields
   describe the install, not only the commit"), which also now names the
   byte-canonical provisioning route for a gate script.
+- **Changed** (#2242, no code change — committed example artifacts only):
+  `examples/critical-net-mom-fidelity/`'s three `klt extract` reports
+  (`phase1-baseline.json`, `phase2a-critical-net.json`,
+  `phase2b-distributed-rc.json`), their sibling `.spice` netlists, the
+  `lateral-coupling.gds` fixture, and the `dfxtp2-{lumped,distributed}.spice`
+  netlists are regenerated from the current `klt extract`. They had not been
+  re-run since #978 and still showed `schema_version: 2` under
+  `klt_version 0.2.0`; the current verb emits `schema_version: 3` plus
+  `metrics`, `matched_device_groups`, per-net `net_id`/`pin_index`/
+  `label_positions_um`, per-net `by_layer`/`inductance_nh`/
+  `*_top_cell`, `parasitics.substrate_dc_tie`/`mom_rlc_override`/`l_count`/
+  `top_cell_only`, and `provenance.deck.released`/`provenance.input.role`.
+  The emitted netlists gained the matching `.GLOBAL vsubs` +
+  `Rvsubs_dctie` substrate DC tie. A new dated evidence record is written
+  under `evidence/sim/sky130-critical-net-fixture/mom-coupling-fidelity/`
+  and `HEAD` repointed to it. The MoM-vs-extract conclusion is unchanged
+  (`AGR`/`VIC` 0.044 fF vs a 0.09795 fF converged MoM oracle, −55.1%), but
+  the `dfxtp_2` distributed-RC invariance check's shared
+  `total_coupling_capacitance_ff` moved from `1.054535` to `0.10731` under
+  the newer coupling model and deck — lumped and distributed still agree
+  exactly, which is the property that check exists to assert.
+  `docs/design/critical-net-mom-fidelity-phase2c.md`'s table is updated to
+  the new value.
 - **Fixed** (#2244, `klt lvs`, no `schema_version` bump — the `side` field
   already documented `"layout"`/`"reference"`/`"both"` as valid values;
   this changes when each is emitted, not the shape): a
