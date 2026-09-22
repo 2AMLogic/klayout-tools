@@ -117,3 +117,7 @@ native/*/target/
 .loom/gh-config/
 .loom/gh-config-by-owner/
 # <<< loom-managed <<<
+
+# repo-remote per-repo config (issue #2277): instance sizing + pinned instance id.
+# Contains no credentials; kept out of git because it is machine-local state.
+.env
