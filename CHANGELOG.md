@@ -14,6 +14,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2312, `klt gen bjt_array` geometry + `klt gen-compose`
+  via-drop, **no** `schema_version` bump — but the `COLL_*` ports' reported
+  `layer` and the drawn collector-ring layer both change on sky130, see
+  below): a `bjt_array` collector ring strapped to an already-connected net
+  by `klt gen-compose` now actually shows up merged in `klt extract`'s
+  netlist. The reported failure was a silent one — `gen-compose` reported
+  the `COLL_*` leg `routed: true`, `klt drc --deck sky130` was clean, and
+  `klt extract --deck sky130` still recovered the collector diffusion as a
+  separate, floating `vsubs` node with no connection to the strapped net.
+  The strap itself was real (#1894's contact ladder draws it); what was
+  missing was *recognition*. An extraction deck derives its substrate-tie
+  region from the **`tap`** mask outside every `nwell` and unifies it with
+  the deck's synthesized substrate net via `connect_global`, and this
+  generator drew its collector ring on the bare `active`/diffusion role
+  instead — making the ring an unrecognised diffusion island no strap could
+  ever tie to the substrate identity every collector-less bipolar's
+  collector terminal carries. The ring (and therefore the `COLL_*` ports'
+  reported `layer`) now uses the `tap` role, the same role `guard_ring`'s
+  ring and each `bjt_array` unit's own base-tie pad already used: on sky130
+  that moves the ring from `diff.drawing` 65/20 to `tap.drawing` 65/44; on
+  gf180mcu, whose `tap` role *is* its `active` role (`22/0`), the geometry
+  is byte-identical. `gen_compose`'s via-drop resolution treats both
+  diffusion-*class* roles (`ExtractionDeck.active` **and**
+  `ExtractionDeck.tap`) as reachable through `ExtractionDeck.contact`, so a
+  port on either still gets a real licon/mcon ladder rather than the
+  uncontacted metal stub a `tap`-role port used to get.
 - **Added** (#2308, `klt deck rules` + docs, additive — **no**
   `schema_version` bump, a new verb with its own `schema_version: 1`): a
   read-only query for the *numbers* a built-in deck enforces —

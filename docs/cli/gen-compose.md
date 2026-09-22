@@ -252,11 +252,11 @@ cleanly.
   `connectivity[]` entry is rejected (exit 1) — a shape the router already
   labels must not carry a second, possibly inconsistent `pins[]` label. A port
   whose layer has no label convention (e.g. a `bjt_array` collector-ring
-  `COLL_*` tap on the diffusion layer) is a **partial success**: the pin is
+  `COLL_*` tap on the `tap` layer) is a **partial success**: the pin is
   left unlabelled with a `drc_hints.notes[]` entry, never a hard failure.
   This is unrelated to wiring the same `COLL_*` port into `connectivity[]`
-  instead — see the diffusion-role bullet under "Via-drop routing" below
-  (issue #1894) for how that path draws a real contact.
+  instead — see the diffusion-class-role bullet under "Via-drop routing"
+  below (issues #1894/#2312) for how that path draws a real contact.
 - **Blocks this command did not generate (#1189)** — a `blocks[]` entry names
   its geometry source in exactly one of two ways. `generator_report` is a
   `klt` verb's own JSON response — [`klt gen`](gen.md), [`klt draw`](draw.md),
@@ -705,11 +705,11 @@ into the circuit.)
   - **The ring's conductor layers** are the union of every ring port's own
     reported `layer` (a `guard_ring`/`diff_pair`/`mos_array` `TAP_*` reports
     the family's local-metal role; a `bjt_array` `COLL_*` reports the
-    *diffusion* role; a `GAP_*` marker reports the layer a route would cross
+    *`tap`* role; a `GAP_*` marker reports the layer a route would cross
     the ring on) **plus the deck's `metals[0]`** — the local-metal level every
     `klt gen` ring draws its metal loop on whether or not a tap port reports
     it. Without that second term, an li1 backbone would look like it "cleared"
-    a collector ring whose `COLL_*` ports only name diffusion.
+    a collector ring whose `COLL_*` ports only name the `tap` role.
   - **The backbone's own plane** must differ from every one of those layers
     *and* be separated from each by at least one via in the resolved PDK
     family's own `ExtractionDeck` `metals`/`vias` stack — resolved through the
@@ -744,7 +744,7 @@ into the circuit.)
     --params '{"emitter_um": 3.4, "rows": 1, "cols": 2, "dummy": 0,
                "topology": "common_centroid", "ratio": 1,
                "add_collector_ring": true}' > array.json
-  # Its COLL_* taps report diffusion (65/20) and its ring metal is li1
+  # Its COLL_* taps report the tap role (65/44) and its ring metal is li1
   # (67/20). With routing.layer_role "metal" (li1) a route out of Q0_B is
   # still rejected -- that is the ring's own plane. With "metal3" (met2) the
   # same composition routes (exit 0), the ring stays closed, and `klt
@@ -771,7 +771,7 @@ into the circuit.)
   label any port whose drawn layer has a label convention — every MOS
   `mos_array`/`diff_pair` gate (poly), and every metal S/D, resistor, or
   guard-ring tap port — but a `bjt_array` collector-ring `COLL_*` tap sits on
-  the diffusion/`active` layer, which has no label layer in either curated
+  the `tap` layer, which has no label layer in either curated
   extraction deck, so promoting one is a partial success (unlabelled, with a
   `drc_hints.notes[]` entry). Giving that port a labelable layer is a
   `klt gen`-side follow-up, not part of #210.
@@ -1205,14 +1205,17 @@ reported on the metals-stack `"metal"` role itself), is left exactly as
 before #454 — drawn directly on `routing.layer_role`, no via-drop attempted,
 since via-drop only ever applies between two declared routing-metal levels.
 
-One case draws a *contact* ladder down to the deck's diffusion role instead of
-declining to act, one case draws a multi-level *ladder* between two metal
+One case draws a *contact* ladder down to a deck diffusion-class role instead
+of declining to act, one case draws a multi-level *ladder* between two metal
 levels, and one case is rejected outright, reporting the net unroutable
 rather than drawing something that does not connect:
 
-- A pin reported on the deck's **diffusion role** (`ExtractionDeck.active`) —
-  `bjt_array`'s `add_collector_ring` collector-tie tap ports, `COLL_N`/
-  `COLL_S`/`COLL_E`/`COLL_W` (issue #1894). Unlike an ordinary `TAP_*` ring
+- A pin reported on a deck **diffusion-class role** — `ExtractionDeck.active`
+  or `ExtractionDeck.tap` (issue #2312 added the latter; on a family whose
+  `tap` role *is* its `active` role, e.g. gf180mcu's `22/0`, the two
+  coincide) — such as `bjt_array`'s `add_collector_ring` collector-tie tap
+  ports, `COLL_N`/`COLL_S`/`COLL_E`/`COLL_W` (issue #1894, reported on the
+  `tap` role since #2312). Unlike an ordinary `TAP_*` ring
   port above, `COLL_*` is reported this way specifically so a caller can
   strap a **new** connection onto the ring from outside its own
   generator-time footprint — there is no pre-existing via at the new landing
@@ -1238,6 +1241,21 @@ rather than drawing something that does not connect:
   there still has no label convention to attach to and stays a "partial
   success," since `pins[]` never draws metal or a contact at all — only
   `connectivity[]` routing gained this fix.
+
+  **A drawn strap is not the same as a *recognised* one (issue #2312).**
+  #1894's contact ladder makes the strap physically real, but a strap onto a
+  ring whose own tie shape sits on the bare `active`/diffusion role is still
+  invisible to `klt extract`: an extraction deck derives its substrate-tie
+  region from the **`tap`** mask outside every `nwell`, so a bare-`active`
+  ring is just an unrecognised diffusion island and every device's collector
+  stays on a separate, floating `vsubs` node no matter how the ring is
+  strapped. Both success signals — `gen-compose`'s `routed: true` and a clean
+  `klt drc` — held while the extracted netlist was wrong. `klt gen
+  bjt_array` now draws its collector ring on the `tap` role (see
+  [`gen.md`](gen.md)'s `bjt_array` section), so `klt extract` recovers the
+  `COLL_*`-bearing net and the substrate net as **one** node. Regression:
+  `tests/test_gen_compose.py`'s
+  `test_compose_bjt_array_collector_strap_merges_the_substrate_net_under_extract`.
 
 - A pin whose layer is a *different* metals-stack level than
   `routing.layer_role`, more than one via hop away (issue #1567). Every

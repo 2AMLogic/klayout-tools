@@ -4529,9 +4529,9 @@ def _bjt_array_describe(
         params["ring_gap_offset_um"],
     )
     unit = info["unit"]
-    active_pair = _PDK_ROLE_LAYERS[family]["active"]
+    tap_pair = _PDK_ROLE_LAYERS[family]["tap"]
     metal_pair = _PDK_ROLE_LAYERS[family]["metal"]
-    active_layer = {"layer": active_pair[0], "datatype": active_pair[1], "name": None}
+    tap_layer = {"layer": tap_pair[0], "datatype": tap_pair[1], "name": None}
     metal_layer = {"layer": metal_pair[0], "datatype": metal_pair[1], "name": None}
     well_supported = _PDK_ROLE_LAYERS[family]["well"] is not None
     mark_supported = _PDK_ROLE_LAYERS[family]["bjt_mark"] is not None
@@ -4567,16 +4567,17 @@ def _bjt_array_describe(
     ring_drawn = info["ring"] is not None and params["add_collector_ring"]
     if ring_drawn:
         ring_w = CONTACT_SIZE_UM + 2 * ENCLOSURE_MARGIN_UM
-        # The collector ring is drawn on both the diffusion and the local-metal
-        # role, so its tap ports report the diffusion layer (what makes them a
-        # collector tie) while a ring opening reports the metal layer -- the one
+        # The collector ring is drawn on both the tap and the local-metal
+        # role, so its tap ports report the tap layer (what makes them a
+        # collector/substrate tie an extraction deck actually recognises --
+        # issue #2312) while a ring opening reports the metal layer -- the one
         # a `klt gen-compose` route actually crosses it on.
         ports.extend(
             _ring_ports(
                 info["ring"],
                 info["ring_offset_um"],
                 "COLL_",
-                active_layer,
+                tap_layer,
                 ring_w,
                 metal_layer,
             )
