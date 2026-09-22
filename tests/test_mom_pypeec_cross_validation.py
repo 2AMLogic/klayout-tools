@@ -99,6 +99,14 @@ FREQUENCY_HZ = 1.0e8  # quasi-DC (skin depth ~6.6 um >> 2 um) -- see the script
 RESISTIVITY_OHM_M = 1.75e-8
 CONDUCTIVITY_S_PER_M = 1.0 / RESISTIVITY_OHM_M
 
+# The band the two solvers' spiral inductances must agree inside -- 2%
+# (measured: 0.339%), the same tolerance native/mom/src/peec.rs's own spiral
+# fixture states against its in-repo oracle. Named rather than inlined so the
+# falsifiability control below asserts against *this* number and a future
+# retune of it cannot leave the control checking a stale bound. See
+# docs/design/mom-cross-validation.md's "Tolerance and metric" section.
+AGREEMENT_TOL = 0.02
+
 
 def _spiral_vertices() -> list[tuple[float, float]]:
     """The square spiral's centreline vertices, in micrometres -- east,
@@ -231,11 +239,11 @@ def klt_mom_spiral(tmp_path_factory) -> dict:
     }
 
 
-@pytest.fixture(scope="module")
-def pypeec_spiral() -> dict:
-    """The external PyPEEC oracle's solve of the same benchmark -- see
-    `scripts/mom_pypeec_reference.py` for the method (terminal impedance of
-    the open spiral at a quasi-DC frequency)."""
+def _run_pypeec(**overrides: float) -> dict:
+    """Solve one spiral with the external PyPEEC oracle, in its own
+    subprocess (`pypeec` is never imported by this module -- see the module
+    docs). `overrides` perturbs the shared benchmark's geometry, which is how
+    the falsifiability control below seeds its defect."""
     request = {
         "turns": TURNS,
         "start_side_um": START_SIDE_UM,
@@ -246,6 +254,7 @@ def pypeec_spiral() -> dict:
         "frequency_hz": FREQUENCY_HZ,
         "resistivity_ohm_m": RESISTIVITY_OHM_M,
     }
+    request.update(overrides)
     result = subprocess.run(
         [sys.executable, str(_PYPEEC_SCRIPT)],
         input=json.dumps(request),
@@ -254,6 +263,14 @@ def pypeec_spiral() -> dict:
         check=True,
     )
     return json.loads(result.stdout)
+
+
+@pytest.fixture(scope="module")
+def pypeec_spiral() -> dict:
+    """The external PyPEEC oracle's solve of the same benchmark -- see
+    `scripts/mom_pypeec_reference.py` for the method (terminal impedance of
+    the open spiral at a quasi-DC frequency)."""
+    return _run_pypeec()
 
 
 # --- spiral inductance: klt mom vs the external PyPEEC oracle ----------------
@@ -273,14 +290,14 @@ def test_spiral_inductance_matches_pypeec_reference(klt_mom_spiral, pypeec_spira
         f"{pypeec_spiral['pypeec_version']})  rel.err={rel_err * 100:.4f}%"
     )
     assert klt_nh > 0.0, "spiral self-inductance must be positive"
-    # Stated tolerance: 2% (measured: 0.339%) -- the same band
+    # AGREEMENT_TOL is 2% (measured: 0.339%) -- the same band
     # native/mom/src/peec.rs's own spiral fixture states against its in-repo
     # oracle, and for the same reason: each solver carries its own
     # discretisation error (klt mom's 2x2 filament bundle per leg vs.
     # PyPEEC's 1 um voxel mesh), and the two budgets can add rather than
     # cancel. See docs/design/mom-cross-validation.md's "Tolerance and
     # metric" section for the derivation.
-    assert rel_err < 0.02, (
+    assert rel_err < AGREEMENT_TOL, (
         f"klt mom's spiral inductance {klt_nh:.6f} nH should agree with the "
         f"external PyPEEC oracle's {pypeec_nh:.6f} nH (rel.err "
         f"{rel_err * 100:.4f}% exceeds the 2% tolerance)"
@@ -315,4 +332,54 @@ def test_spiral_resistance_matches_pypeec_reference(klt_mom_spiral, pypeec_spira
         f"klt mom's spiral resistance {klt_ohm:.6f} ohm should agree with the "
         f"external PyPEEC oracle's {pypeec_ohm:.6f} ohm to within 10% "
         f"(measured {rel_err * 100:.4f}%)"
+    )
+
+
+# --- falsifiability: the comparison can actually fail ------------------------
+
+# The seeded defect: the spiral's innermost side shrinks 60 um -> 45 um (25%),
+# every outer turn following it in. A geometry parameter both solvers consume,
+# perturbed far enough to move the answer well outside the agreement band --
+# the same role `gap_um=1.0` vs `gap_um=1.5` plays in
+# tests/test_mom_capacitance_oracle.py's FastCap control. Shrinking rather
+# than growing is deliberate: the defective solve meshes to *fewer* voxels
+# than the clean one (16744 vs 22684), so the control costs CI less than the
+# fixture it guards.
+DEFECT_START_SIDE_UM = 45.0
+
+
+def test_the_comparison_can_actually_fail(klt_mom_spiral):
+    """Negative control for the comparison itself: `klt mom`'s answer for the
+    *clean* spiral, checked against PyPEEC's answer for a *seeded-defect*
+    spiral, must land outside the agreement band.
+
+    Without this, both agreement tests above would pass just as happily if
+    the oracle ignored the geometry it was handed and re-solved some cached
+    or default spiral -- the two sides would be the same fixture twice and
+    "they agree" would be a tautology. This is the evidence that it is a
+    falsifiable claim: perturb the geometry on one side only, and the
+    comparison notices. Parity with
+    tests/test_mom_capacitance_oracle.py::test_the_comparison_can_actually_fail
+    (issue #2307).
+    """
+    pypeec_defect = _run_pypeec(start_side_um=DEFECT_START_SIDE_UM)
+
+    klt_clean_nh = klt_mom_spiral["total_nh"]
+    defect_nh = pypeec_defect["L_nH"]
+    difference = abs(klt_clean_nh - defect_nh) / abs(defect_nh)
+
+    print(
+        f"\nmismatched-geometry control: klt mom (clean, START_SIDE_UM="
+        f"{START_SIDE_UM:.1f}) L={klt_clean_nh:.6f} nH vs PyPEEC (defect, "
+        f"start_side_um={DEFECT_START_SIDE_UM:.1f}) L={defect_nh:.6f} nH  "
+        f"rel.diff={difference * 100:.2f}% (measured: 32.54%; the same "
+        f"comparison with the defect removed lands at 0.34%, inside the band)"
+    )
+    assert difference > AGREEMENT_TOL, (
+        f"comparing klt mom's clean spiral answer ({klt_clean_nh:.6f} nH) "
+        f"against PyPEEC's seeded-defect answer ({defect_nh:.6f} nH) differed "
+        f"by only {difference * 100:.2f}%, inside the "
+        f"{AGREEMENT_TOL * 100:.0f}% agreement band -- this comparison cannot "
+        "distinguish the two geometries, so the agreement tests above prove "
+        "nothing"
     )

@@ -566,7 +566,22 @@ uv run --extra dev --group mom --extra mom-pypeec-cross-validation \
 
 The test skips with an explicit reason when `pypeec` is not installed, and
 `.github/workflows/ci.yml`'s mom leg carries a matching "no silent skip"
-assertion step so a skip can never be the only thing CI sees.
+assertion step so a skip can never be the only thing CI sees — it greps the
+tee'd pytest log for skip markers rather than re-asserting `import pypeec`
+(issue #2307), which observes what pytest actually did instead of only one of
+the module's two skip gates.
+
+The module also carries a **falsifiability control**,
+`test_the_comparison_can_actually_fail`, in the same role
+`tests/test_mom_capacitance_oracle.py`'s control plays for the FastCap
+pairing ([`fastcap-oracle.md`](fastcap-oracle.md)): it checks `klt mom`'s
+clean-spiral answer against PyPEEC's answer for a *seeded-defect* spiral
+(`start_side_um` 60 → 45 µm, the innermost side shrunk 25%) and requires the
+result to land **outside** the 2% agreement band — measured **32.54%**,
+versus 0.34% when the defect is removed. Without it, both agreement tests
+above would pass just as happily if the oracle ignored the geometry it was
+handed and re-solved a cached or default spiral, making "they agree" a
+tautology rather than a falsifiable claim.
 
 ## Full-wave frequency sweep
 
