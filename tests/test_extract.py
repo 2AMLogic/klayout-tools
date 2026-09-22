@@ -18878,6 +18878,8 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
                 "defer_resistor_fixed_offset": True,
                 "abstract_cells": "sky130_fd_sc_hd__*",
                 "abstract_cell_lef": ["lib/cells.lef"],
+                "subcircuit": "delaywin_hv",
+                "subcircuit_output": "design.delaywin_hv.spice",
                 "matched_groups": {"mirror": ["$1", "$2"]},
             }
         )
@@ -18914,6 +18916,8 @@ def test_extract_request_document_maps_every_field_onto_its_flag(tmp_path):
     assert resolved.defer_resistor_fixed_offset is True
     assert resolved.abstract_cells == ["sky130_fd_sc_hd__*"]
     assert resolved.abstract_cell_lef == [str(tmp_path / "lib" / "cells.lef")]
+    assert resolved.subcircuit == "delaywin_hv"
+    assert resolved.subcircuit_output == str(tmp_path / "design.delaywin_hv.spice")
     assert resolved.matched_groups == ["mirror=$1,$2"]
 
 
@@ -18929,3 +18933,631 @@ def test_extract_check_mode_still_takes_a_json_report_not_a_request(tmp_path, ca
 
     assert main(["extract", "--check", str(report_path), "--format", "json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
+# `--subcircuit`: sub-circuit isolation from the flat extraction (issue #2245)
+# --------------------------------------------------------------------------- #
+
+
+def _draw_sky130_poly_resistor_at(
+    layout: kdb.Layout,
+    cell: kdb.Cell,
+    *,
+    x_um: float = 0.0,
+    head_a_label: str | None = None,
+    head_b_label: str | None = None,
+    device_length_um: float = 6.0,
+) -> float:
+    """:func:`_draw_sky130_poly_resistor`'s geometry, offset along x and with
+    each contacted head's ``li1.pin`` label independently optional -- what
+    issue #2245's ``--subcircuit`` fixtures need to build a *chain* of
+    resistors inside one cell and label only the nets a test cares about.
+
+    Returns the drawn bar's own length in micrometres, so a caller can place
+    the next element (or the metal that bridges two heads) without
+    re-deriving the geometry.
+    """
+    poly = (66, 20)  # poly.drawing
+    marker = (66, 13)  # poly.res
+    contact = (66, 44)  # licon1.drawing
+    metal = (67, 20)  # li1.drawing
+    metal_label = (67, 5)  # li1.pin
+
+    x0 = round(x_um * 1000)
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        cell.shapes(layout.layer(*layer)).insert(box.moved(x0, 0))
+
+    def label(layer: tuple[int, int], text: str, x: int) -> None:
+        cell.shapes(layout.layer(*layer)).insert(kdb.Text(text, kdb.Trans(x + x0, 500)))
+
+    device_length_dbu = round(device_length_um * 1000)
+    bar_length_dbu = device_length_dbu + 6000
+    draw(poly, kdb.Box(0, 0, bar_length_dbu, 1000))
+    draw(marker, kdb.Box(3000, 0, 3000 + device_length_dbu, 1000))
+    for x, text in ((1500, head_a_label), (bar_length_dbu - 1500, head_b_label)):
+        draw(contact, kdb.Box(x - 100, 400, x + 100, 600))
+        draw(metal, kdb.Box(x - 400, 200, x + 400, 800))
+        if text is not None:
+            label(metal_label, text, x)
+    return bar_length_dbu / 1000.0
+
+
+#: x positions (um) the `--subcircuit` fixture below places its three
+#: resistors at: two inside `STAGE`, one flat in `TOP`.
+_STAGE_R2_X_UM = 20.0
+_STAGE_OUT_GAP_UM = 5.0
+
+
+def _make_subcircuit_slice_layout(
+    *,
+    aggressor: bool = False,
+    stage_cell: str = "STAGE",
+    wrapper_cell: str | None = None,
+    second_placement: kdb.Trans | None = None,
+) -> kdb.Layout:
+    """A routed two-element sub-block with exactly the four net classes
+    ``--subcircuit`` has to tell apart (issue #2245).
+
+    ``STAGE`` (placed once in ``TOP``) holds two series poly resistors joined
+    by an in-cell ``li1`` bridge:
+
+    - ``IN``  -- the sub-block's input, labelled **in the top cell** (a real
+      external port: only ``STAGE``'s own device touches it, but it is a pin
+      of the flat deck) -> a ``boundary`` pin of the slice.
+    - ``MID`` -- the bridge between the two resistors, labelled **inside
+      STAGE** (so ``top_cell_pins_only=True`` keeps it off the flat deck's
+      pin list) and touched by nothing else -> an ``internal`` node.
+    - ``OUT`` -- routed on to a third resistor drawn flat in ``TOP``, so it
+      carries one device terminal from each side -> a ``boundary`` pin.
+    - ``FAR`` -- the far end of that third resistor -> ``outside``; must not
+      appear in the slice at all.
+
+    ``aggressor`` additionally lays a labelled ``met1`` strip directly across
+    the in-cell ``MID`` bridge, giving ``MID`` a vertical-overlap coupling
+    partner that lives entirely outside ``STAGE`` -- the boundary-crossing
+    *coupling* case (as opposed to boundary-crossing connectivity).
+
+    ``wrapper_cell`` nests ``STAGE`` one level deeper (``TOP`` -> wrapper ->
+    ``STAGE``); ``second_placement`` places ``STAGE`` a second time, the
+    ambiguous case ``--subcircuit`` must refuse.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+    stage = layout.create_cell(stage_cell)
+
+    bar_um = _draw_sky130_poly_resistor_at(layout, stage, head_b_label="MID")
+    _draw_sky130_poly_resistor_at(layout, stage, x_um=_STAGE_R2_X_UM)
+    # In-cell li1 bridge joining R1's right head to R2's left head -> `MID`.
+    bridge_left = round((bar_um - 1.9) * 1000)
+    bridge_right = round((_STAGE_R2_X_UM + 1.9) * 1000)
+    stage.shapes(layout.layer(67, 20)).insert(
+        kdb.Box(bridge_left, 200, bridge_right, 800)
+    )
+
+    if wrapper_cell is None:
+        top.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, 0)))
+    else:
+        wrapper = layout.create_cell(wrapper_cell)
+        wrapper.insert(kdb.CellInstArray(stage.cell_index(), kdb.Trans(0, 0)))
+        top.insert(kdb.CellInstArray(wrapper.cell_index(), kdb.Trans(0, 0)))
+    if second_placement is not None:
+        top.insert(kdb.CellInstArray(stage.cell_index(), second_placement))
+
+    # `IN`: a top-cell li1 pad landing on R1's left head, labelled in TOP.
+    top.shapes(layout.layer(67, 20)).insert(kdb.Box(1100, 200, 1900, 800))
+    top.shapes(layout.layer(67, 5)).insert(kdb.Text("IN", kdb.Trans(1500, 500)))
+
+    # `OUT`/`FAR`: the third resistor, drawn flat in TOP, bridged to STAGE's
+    # R2 right head by a top-cell li1 wire labelled `OUT`.
+    r3_x_um = _STAGE_R2_X_UM + bar_um + _STAGE_OUT_GAP_UM
+    _draw_sky130_poly_resistor_at(layout, top, x_um=r3_x_um, head_b_label="FAR")
+    top.shapes(layout.layer(67, 20)).insert(
+        kdb.Box(
+            round((_STAGE_R2_X_UM + bar_um - 1.9) * 1000),
+            200,
+            round((r3_x_um + 1.9) * 1000),
+            800,
+        )
+    )
+    top.shapes(layout.layer(67, 5)).insert(
+        kdb.Text("OUT", kdb.Trans(round((r3_x_um + 1.5) * 1000), 500))
+    )
+
+    if aggressor:
+        # met1 strip crossing directly over STAGE's own li1 `MID` bridge.
+        top.shapes(layout.layer(68, 20)).insert(kdb.Box(13000, -3000, 15000, 5000))
+        top.shapes(layout.layer(68, 5)).insert(kdb.Text("AGG", kdb.Trans(14000, 4000)))
+
+    return layout
+
+
+def _subcircuit_cards(path: str) -> list[str]:
+    """Every device card in a written deck (comments/directives dropped),
+    each collapsed to its instance name plus node list."""
+    cards = []
+    for line in Path(path).read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("*") or stripped.startswith("."):
+            continue
+        cards.append(stripped)
+    return cards
+
+
+def test_subcircuit_emits_a_named_block_with_the_sub_cells_own_devices(tmp_path):
+    """Issue #2245's core acceptance criterion: `--subcircuit STAGE` writes a
+    second deck whose `.SUBCKT STAGE` body carries *that sub-cell's own two
+    extracted resistors* -- not an empty black box (`--abstract-cells`' shape)
+    and not the whole flat extraction -- with the boundary-crossing nets
+    promoted to pins and the outside net absent entirely."""
+    layout = _make_subcircuit_slice_layout()
+    path = _write_gds(layout, tmp_path / "block.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "block.spice"),
+        top_cell_pins_only=True,
+        subcircuit_cell="STAGE",
+    )
+
+    slice_report = report["subcircuit"]
+    assert slice_report["cell"] == "STAGE"
+    assert slice_report["path"] == str(tmp_path / "block.STAGE.spice")
+    assert slice_report["device_count"] == 2
+    assert [entry["name"] for entry in slice_report["pins"]] == ["IN", "OUT"]
+    assert {entry["role"] for entry in slice_report["pins"]} == {"boundary"}
+    assert slice_report["instance_line"] == "XDUT IN OUT STAGE"
+    from klayout_tools._provenance import sha256_file
+
+    assert slice_report["sha256"] == sha256_file(slice_report["path"])
+
+    spice = Path(slice_report["path"]).read_text()
+    assert ".SUBCKT STAGE IN OUT" in spice
+    assert ".ENDS STAGE" in spice
+    # Exactly the two resistors drawn inside STAGE, chained through the
+    # internal `MID` node -- and nothing from the flat top cell.
+    assert _subcircuit_cards(slice_report["path"]) == [
+        "R$1 IN MID 289.2 res_generic_po L=6U W=1U",
+        "R$2 MID OUT 289.2 res_generic_po L=6U W=1U",
+    ]
+    assert "FAR" not in spice
+    # `TOP`'s own flat `.SUBCKT` is gone from the sliced deck: a sub-block
+    # testbench must not be able to instantiate the whole block by accident.
+    assert ".SUBCKT TOP" not in spice
+
+    # `MID` carries a layout label but is not a port -- surfaced rather than
+    # silently swallowed (a caller who meant it as a probe point needs to know).
+    assert any(
+        "'MID' carry a layout label but stay internal" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
+
+
+def test_subcircuit_leaves_the_flat_extraction_byte_identical(tmp_path):
+    """`--subcircuit` is additive: the flat netlist it writes first, and every
+    field of the JSON response other than the new `subcircuit` block, are
+    byte-for-byte what the same run produces without the flag -- the same
+    "additive, off by default" bar `--abstract-cells` holds itself to.
+
+    Asserted with `--parasitics` on, which is where it could plausibly break:
+    the slice needs `_inject_parasitics` to tag its nodes, and those tags must
+    be invisible to the SPICE writer."""
+    layout = _make_subcircuit_slice_layout(aggressor=True)
+    path = _write_gds(layout, tmp_path / "block.gds")
+
+    plain = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "plain.spice"),
+        top_cell_pins_only=True,
+        parasitics=True,
+    )
+    sliced = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "sliced.spice"),
+        top_cell_pins_only=True,
+        parasitics=True,
+        subcircuit_cell="STAGE",
+    )
+
+    assert (tmp_path / "plain.spice").read_bytes() == (
+        tmp_path / "sliced.spice"
+    ).read_bytes()
+    assert plain["netlist_sha256"] == sliced["netlist_sha256"]
+    assert plain["subcircuit"] is None
+
+    volatile = {"netlist_path", "subcircuit", "warnings", "provenance"}
+    assert {k: v for k, v in plain.items() if k not in volatile} == {
+        k: v for k, v in sliced.items() if k not in volatile
+    }
+    # Only the slice's own warnings are added -- no flat-extraction warning
+    # appears, disappears or changes wording.
+    assert plain["warnings"] == [
+        warning
+        for warning in sliced["warnings"]
+        if warning not in sliced["subcircuit"]["warnings"]
+    ]
+
+
+def test_subcircuit_attributes_boundary_net_parasitics_to_the_parent(tmp_path):
+    """The documented boundary-crossing **parasitic attribution rule** (issue
+    #2245's key design decision), asserted element by element.
+
+    An `internal` net keeps its whole star: both per-terminal leg resistors
+    *and* its lumped ground capacitor. A `boundary` net keeps only the series
+    leg from the sub-cell's own terminal to the pin node -- its ground
+    capacitor (a shunt on a testbench-driven pin, where it is unobservable)
+    and the leg of the device outside the sub-cell are attributed to the
+    parent deck and reported in `excluded_parasitics`, never dropped silently.
+    """
+    layout = _make_subcircuit_slice_layout()
+    path = _write_gds(layout, tmp_path / "block.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "block.spice"),
+        top_cell_pins_only=True,
+        parasitics=True,
+        subcircuit_cell="STAGE",
+    )
+    slice_report = report["subcircuit"]
+    instances = {card.split()[0] for card in _subcircuit_cards(slice_report["path"])}
+
+    # `MID` (internal): both legs and the ground capacitor.
+    assert {"RMID_t0", "RMID_t1", "CMID"} <= instances
+    # `IN`/`OUT` (boundary): the sub-cell's own leg only.
+    assert {"RIN_t0", "ROUT_t0"} <= instances
+    assert "CIN" not in instances  # boundary ground C -> parent
+    assert "COUT" not in instances
+    assert "ROUT_t1" not in instances  # the outside resistor's own leg
+    # Nothing at all from the `FAR` net, which the sub-cell never touches.
+    assert not any(name.startswith(("RFAR", "CFAR")) for name in instances)
+
+    # The excluded elements are accounted for: two boundary ground capacitors
+    # (IN, OUT) and one outside leg resistor (OUT's second terminal).
+    excluded = slice_report["excluded_parasitics"]
+    assert excluded["c_count"] == 2
+    assert excluded["r_count"] == 1
+    assert excluded["l_count"] == 0
+    parasitics_by_net = {entry["net"]: entry for entry in report["parasitics"]["nets"]}
+    assert excluded["capacitance_ff"] == pytest.approx(
+        parasitics_by_net["IN"]["capacitance_ff"]
+        + parasitics_by_net["OUT"]["capacitance_ff"],
+        rel=1e-6,
+    )
+    assert excluded["resistance_ohm"] > 0
+
+
+def test_subcircuit_keeps_boundary_crossing_coupling_and_pins_the_aggressor(tmp_path):
+    """A coupling capacitor between an `internal` net and a net that lives
+    entirely *outside* the sub-cell is kept, with the aggressor promoted to a
+    `parasitic`-role pin so a testbench can terminate it.
+
+    Dropping it instead would silently remove real capacitive load from an
+    internal node and make every post-layout timing number optimistic -- the
+    "wrong but plausible, still passes" outcome this feature has to avoid."""
+    layout = _make_subcircuit_slice_layout(aggressor=True)
+    path = _write_gds(layout, tmp_path / "block.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "block.spice"),
+        top_cell_pins_only=True,
+        parasitics=True,
+        subcircuit_cell="STAGE",
+    )
+    # The fixture really does couple MID to the outside aggressor.
+    coupled = {
+        entry["net"]: [c["net"] for c in entry["coupled"]]
+        for entry in report["parasitics"]["nets"]
+    }
+    assert coupled["MID"] == ["AGG"], coupled
+
+    slice_report = report["subcircuit"]
+    pins = {entry["name"]: entry["role"] for entry in slice_report["pins"]}
+    assert pins["IN"] == "boundary"
+    assert pins["OUT"] == "boundary"
+    # The aggressor's hub node (`AGG` has no device terminal at all, so its
+    # hub is the Gamma-shunt's own internal node) is exposed as a pin.
+    aggressor_pins = [
+        name
+        for name, role in pins.items()
+        if role == "parasitic" and name.startswith("AGG")
+    ]
+    assert len(aggressor_pins) == 1, pins
+    cards = _subcircuit_cards(slice_report["path"])
+    coupling_cards = [card for card in cards if card.startswith("Ccc_")]
+    assert len(coupling_cards) == 1, cards
+    assert aggressor_pins[0] in coupling_cards[0].split()
+    assert "MID" in coupling_cards[0].split()
+
+
+def test_subcircuit_keeps_the_substrate_dc_tie(tmp_path):
+    """The 1 Tohm substrate DC-tie shunt to SPICE node `0` (issue #1263) is
+    carried into the slice for every substrate net that survives it, so the
+    sub-deck inherits the same no-floating-substrate guarantee the flat deck
+    has -- and node `0` itself is never exposed as a pin (it already means the
+    same node in every scope)."""
+    layout = _make_subcircuit_slice_layout()
+    path = _write_gds(layout, tmp_path / "block.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "block.spice"),
+        top_cell_pins_only=True,
+        parasitics=True,
+        subcircuit_cell="STAGE",
+    )
+    slice_report = report["subcircuit"]
+    spice = Path(slice_report["path"]).read_text()
+
+    tie_devices = {
+        entry["device"] for entry in report["parasitics"]["substrate_dc_tie"]["nets"]
+    }
+    assert tie_devices
+    for device in tie_devices:
+        assert any(
+            card.startswith(f"{device} ")
+            for card in _subcircuit_cards(slice_report["path"])
+        ), spice
+    assert ".GLOBAL vsubs" in spice
+    assert "0" not in [entry["name"] for entry in slice_report["pins"]]
+    # The substrate reference is reachable from a testbench as a pin, so the
+    # parasitic ground capacitance it anchors is measurable rather than
+    # computed against a node nothing can drive.
+    assert "vsubs" in [entry["name"] for entry in slice_report["pins"]]
+
+
+def test_subcircuit_resolves_a_cell_nested_two_levels_deep(tmp_path):
+    """Attribution follows the whole instance path, not just the outermost
+    placement: `STAGE` nested inside a `WRAPPER` inside `TOP` slices exactly
+    the same way."""
+    layout = _make_subcircuit_slice_layout(wrapper_cell="WRAPPER")
+    path = _write_gds(layout, tmp_path / "nested.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "nested.spice"),
+        top_cell_pins_only=True,
+        subcircuit_cell="STAGE",
+    )
+    assert report["subcircuit"]["device_count"] == 2
+    assert [entry["name"] for entry in report["subcircuit"]["pins"]] == ["IN", "OUT"]
+
+    # ...and slicing the *wrapper* selects the same devices (everything below
+    # it belongs to it too).
+    wrapper = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "wrapper.spice"),
+        top_cell_pins_only=True,
+        subcircuit_cell="WRAPPER",
+    )
+    assert wrapper["subcircuit"]["device_count"] == 2
+    assert ".SUBCKT WRAPPER IN OUT" in Path(wrapper["subcircuit"]["path"]).read_text()
+
+
+def test_subcircuit_output_overrides_the_default_path(tmp_path):
+    layout = _make_subcircuit_slice_layout()
+    path = _write_gds(layout, tmp_path / "block.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "block.spice"),
+        top_cell_pins_only=True,
+        subcircuit_cell="STAGE",
+        subcircuit_output=str(tmp_path / "decks" / "stage.cir"),
+    )
+    assert report["subcircuit"]["path"] == str(tmp_path / "decks" / "stage.cir")
+    assert (tmp_path / "decks" / "stage.cir").is_file()
+
+
+def test_subcircuit_naming_the_top_cell_is_an_error(tmp_path):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "block.gds")
+    with pytest.raises(ExtractError, match="names the top cell itself"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "block.spice"),
+            subcircuit_cell="TOP",
+        )
+
+
+def test_subcircuit_naming_an_unplaced_cell_is_an_error(tmp_path):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "block.gds")
+    with pytest.raises(ExtractError, match="names no cell placed under top cell"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "block.spice"),
+            subcircuit_cell="NOT_A_CELL",
+        )
+
+
+def test_subcircuit_refuses_a_cell_placed_more_than_once(tmp_path):
+    """The ambiguity `devices[].instance_path` cannot resolve: two sibling
+    placements of one cell are indistinguishable by name, so a slice would
+    silently merge both copies' devices into one `.SUBCKT`. Refused up front
+    rather than producing a plausible-looking, doubled netlist."""
+    layout = _make_subcircuit_slice_layout(
+        second_placement=kdb.Trans(kdb.Vector(0, 80000))
+    )
+    path = _write_gds(layout, tmp_path / "twice.gds")
+    with pytest.raises(ExtractError, match="is placed 2 times under top cell"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "twice.spice"),
+            subcircuit_cell="STAGE",
+        )
+
+
+def test_subcircuit_is_mutually_exclusive_with_abstract_cells(tmp_path):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "block.gds")
+    with pytest.raises(ExtractError, match="cannot be combined with --abstract-cells"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "block.spice"),
+            subcircuit_cell="STAGE",
+            abstract_cell_patterns=("SC_*",),
+        )
+
+
+def test_subcircuit_output_without_subcircuit_is_an_error(tmp_path):
+    path = _write_gds(_make_subcircuit_slice_layout(), tmp_path / "block.gds")
+    with pytest.raises(ExtractError, match="--subcircuit-output requires --subcircuit"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "block.spice"),
+            subcircuit_output=str(tmp_path / "stage.spice"),
+        )
+
+
+def test_subcircuit_matching_no_extracted_device_is_an_error(tmp_path):
+    """A cell that *is* placed but draws no device-recognition geometry would
+    slice to an empty `.SUBCKT` -- indistinguishable from `--abstract-cells`'
+    deliberate black box, and useless as a post-layout DUT. Refused with an
+    error that points at `devices[].instance_path` for diagnosis."""
+    layout = _make_subcircuit_slice_layout()
+    routing_only = layout.create_cell("ROUTING_ONLY")
+    routing_only.shapes(layout.layer(67, 20)).insert(kdb.Box(0, 40000, 4000, 41000))
+    layout.cell("TOP").insert(
+        kdb.CellInstArray(routing_only.cell_index(), kdb.Trans(0, 0))
+    )
+    path = _write_gds(layout, tmp_path / "block.gds")
+
+    with pytest.raises(ExtractError, match="matched no extracted device"):
+        run_extract(
+            path,
+            "sky130",
+            output=str(tmp_path / "block.spice"),
+            subcircuit_cell="ROUTING_ONLY",
+        )
+
+
+def test_subcircuit_cli_reports_the_slice_in_json_and_text(tmp_path, capsys):
+    layout = _make_subcircuit_slice_layout()
+    path = str(_write_gds(layout, tmp_path / "block.gds"))
+    output = str(tmp_path / "block.spice")
+
+    assert (
+        main(
+            [
+                "extract",
+                path,
+                "--deck",
+                "sky130",
+                "--output",
+                output,
+                "--top-cell-pins",
+                "--subcircuit",
+                "STAGE",
+                "--format",
+                "json",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["subcircuit"]["cell"] == "STAGE"
+    assert report["subcircuit"]["instance_line"] == "XDUT IN OUT STAGE"
+
+    assert (
+        main(
+            [
+                "extract",
+                path,
+                "--deck",
+                "sky130",
+                "--output",
+                output,
+                "--top-cell-pins",
+                "--subcircuit",
+                "STAGE",
+            ]
+        )
+        == 0
+    )
+    text = capsys.readouterr().out
+    assert "subcircuit (STAGE):" in text
+    assert "instance_line: XDUT IN OUT STAGE" in text
+    assert "IN [boundary]" in text
+
+
+@_SKIP_NO_NGSPICE
+def test_subcircuit_deck_simulates_standalone_in_ngspice(tmp_path):
+    """Issue #2245's closing acceptance criterion: a downstream simulator can
+    instantiate the emitted sub-circuit *in isolation* and run a testbench
+    against it, the same way it instantiates a schematic-level `.subckt`.
+
+    Non-vacuous by construction: the measured node voltage is checked against
+    the resistive divider the slice's own cards define (the two extracted
+    resistors plus the series parasitic legs the attribution rule keeps), so a
+    slice that silently dropped or duplicated an element would not match."""
+    import subprocess
+
+    layout = _make_subcircuit_slice_layout()
+    path = _write_gds(layout, tmp_path / "block.gds")
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "block.spice"),
+        top_cell_pins_only=True,
+        parasitics=True,
+        subcircuit_cell="STAGE",
+    )
+    slice_report = report["subcircuit"]
+    deck = Path(slice_report["path"])
+
+    # Total series resistance between the `IN` and `OUT` pins, read straight
+    # off the emitted cards (two `res_generic_po` devices plus every parasitic
+    # leg resistor on the IN -> MID -> OUT path).
+    series_ohm = 0.0
+    for card in _subcircuit_cards(str(deck)):
+        if not card.startswith("R") or card.startswith("Rvsubs"):
+            continue
+        series_ohm += float(card.split()[3])
+    assert series_ohm > 0
+
+    load_ohm = 1000.0
+    nodes = " ".join(
+        {"IN": "drv", "OUT": "outn"}.get(entry["name"], "0")
+        for entry in slice_report["pins"]
+    )
+    testbench = tmp_path / "tb.spice"
+    testbench.write_text(
+        f'.include "{deck}"\n'
+        # The deck's `R` cards carry the deck's own device-class name as a
+        # trailing model token (the flat deck's long-standing shape); a bare
+        # `.model` declaration is all ngspice needs to accept it, and the
+        # explicit resistance on each card still wins.
+        ".model res_generic_po r\n"
+        "Vin drv 0 dc 1.0\n"
+        f"Rload outn 0 {load_ohm:g}\n"
+        f"XDUT {nodes} {slice_report['cell']}\n"
+        ".control\nop\nprint v(outn)\n.endc\n.end\n"
+    )
+
+    completed = subprocess.run(
+        ["ngspice", "-b", str(testbench)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    combined = completed.stdout + completed.stderr
+    assert "singular matrix" not in combined, combined
+    match = re.search(r"v\(outn\)\s*=\s*(\S+)", combined)
+    assert match is not None, combined
+    assert float(match.group(1)) == pytest.approx(
+        load_ohm / (load_ohm + series_ohm), rel=1e-3
+    )

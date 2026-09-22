@@ -1951,6 +1951,42 @@ def _add_extract_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     extract_parser.add_argument(
+        "--subcircuit",
+        dest="subcircuit",
+        default=None,
+        metavar="CELL",
+        help=(
+            "additionally write a second SPICE deck carrying one named "
+            "'.SUBCKT CELL' block for that sub-cell's own extracted devices, "
+            "so a post-layout testbench can instantiate a routed block's "
+            "sub-circuit standalone (issue #2245). Devices are attributed "
+            "positionally, by the same instance path devices[].instance_path "
+            "reports; nets that also carry a device terminal from outside the "
+            "sub-cell (or are a pin of the flat deck) become .SUBCKT pins, "
+            "with their series parasitic legs kept inside and their shunt "
+            "(ground/coupling) capacitance attributed to the parent -- see "
+            "docs/cli/extract.md's 'Sub-circuit isolation' section for the "
+            "full attribution rule. Near-inverse of --abstract-cells (which "
+            "emits an empty black box), and mutually exclusive with it. The "
+            "cell must be placed exactly once under the top cell. The flat "
+            "netlist is written first and is byte-for-byte unchanged; off by "
+            "default."
+        ),
+    )
+    extract_parser.add_argument(
+        "--subcircuit-output",
+        dest="subcircuit_output",
+        default=None,
+        metavar="PATH",
+        help=(
+            "where --subcircuit writes its sliced deck (default: the flat "
+            "netlist path with '.CELL' inserted before its extension, e.g. "
+            "build/gcd.spice -> build/gcd.delaywin_hv.spice). Requires "
+            "--subcircuit. See docs/cli/extract.md's 'Sub-circuit isolation' "
+            "section."
+        ),
+    )
+    extract_parser.add_argument(
         "--matched-group",
         dest="matched_groups",
         action="append",

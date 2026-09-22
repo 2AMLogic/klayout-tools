@@ -85,6 +85,36 @@ SPICE_HIERARCHY_SEPARATOR = "."
 SPICE_SAFE_HIERARCHY_JOIN = "_"
 
 
+#: ``kdb.Net`` property key tagging every node :func:`_inject_parasitics`
+#: creates (and the original net it descends from) with the *identity of that
+#: original net* -- the pre-injection electrical net whose measured R/C the
+#: node is part of (issue #2245). The value is the original net's
+#: ``net_id``/``Net.cluster_id``, which is unique per extracted net object
+#: within a circuit (see :func:`_inject_parasitics`'s own "resolved by
+#: ``net_id``, not by name" docstring paragraph, issue #765) -- unlike
+#: ``Net.name``, which two genuinely distinct nets can share.
+#:
+#: Written only when ``_inject_parasitics`` is called with
+#: ``record_slice_topology=True`` (i.e. only for a ``--subcircuit`` run), and
+#: never observable in output: ``kdb.NetlistSpiceWriter`` has no net-property
+#: syntax and ignores these entirely (verified against a live writer run).
+#: ``klt extract --subcircuit`` reads them back to tell a *per-terminal leg*
+#: node apart from the electrical net it hangs off, which is the only way to
+#: decide whether a parasitic element belongs inside a sliced sub-circuit or
+#: to its parent -- see :mod:`klayout_tools.extract_subcircuit`.
+PARASITIC_ORIGIN_PROPERTY = "klt_parasitic_origin"
+
+#: ``kdb.Net`` property key marking the one node per original net that is its
+#: parasitic **hub** -- the star's centre, or the distributed ladder's middle
+#: leg (issue #2245). Same value as :data:`PARASITIC_ORIGIN_PROPERTY` (the
+#: original net's ``net_id``), same "only under ``record_slice_topology``"
+#: gating. The hub is the attachment point everything that used to sit
+#: directly on the net now uses (coupling capacitors, the lumped ground
+#: capacitor), so it is also the node a sliced sub-circuit promotes to a pin
+#: when the net crosses the slice boundary.
+PARASITIC_HUB_PROPERTY = "klt_parasitic_hub"
+
+
 def _n_squares(area_um2: float, perimeter_um: float) -> float:
     """Estimate the number of resistive *squares* of a net's copper on one
     layer from its total area and perimeter.
@@ -1286,6 +1316,29 @@ def _distributed_rc_segments(
     return order, segment_r_ohm, node_c_ff
 
 
+def _tag_slice_origin(node: kdb.Net, origin_id: int, enabled: bool) -> None:
+    """Tag ``node`` as part of original net ``origin_id``'s parasitic chain
+    (issue #2245) -- a no-op unless ``enabled``.
+
+    A module-level function rather than a closure inside
+    :func:`_inject_parasitics` so the tagging adds no measured branch to that
+    (already complexity-baselined) function.
+    """
+    if enabled:
+        node.set_property(PARASITIC_ORIGIN_PROPERTY, origin_id)
+
+
+def _tag_slice_hub(hub: kdb.Net, origin_id: int, enabled: bool) -> None:
+    """Mark ``hub`` as original net ``origin_id``'s parasitic **hub** -- its
+    coupling/ground-capacitor attachment point, and the node a sliced
+    sub-circuit promotes to a pin when the net crosses the slice boundary
+    (issue #2245). A no-op unless ``enabled``; see :func:`_tag_slice_origin`
+    for why this is not a closure.
+    """
+    if enabled:
+        hub.set_property(PARASITIC_HUB_PROPERTY, origin_id)
+
+
 def _inject_parasitics(
     kdb: Any,
     circuit: kdb.Circuit,
@@ -1294,6 +1347,7 @@ def _inject_parasitics(
     ground_net_name: str,
     distributed_rc_nets: frozenset[str] | None = None,
     mom_rlc_inductor: tuple[str, float] | None = None,
+    record_slice_topology: bool = False,
 ) -> dict[str, Any]:
     """Inject a star-topology parasitic RC per net (or a distributed
     multi-segment ladder for a caller-declared subset, see below), plus one
@@ -1405,6 +1459,18 @@ def _inject_parasitics(
     terminals. A per-entry ``instance_name`` counter below keeps device
     instance names unique even now that every entry resolves to its own,
     correct net object.
+
+    ``record_slice_topology`` (issue #2245) additionally tags every node this
+    function creates -- and every original net it splits -- with
+    :data:`PARASITIC_ORIGIN_PROPERTY` / :data:`PARASITIC_HUB_PROPERTY`, so
+    ``klt extract --subcircuit`` can later tell a per-terminal *leg* node
+    apart from the electrical net it hangs off and attribute each injected
+    R/C/L to one original net (or, for a coupling capacitor, to a pair of
+    them). ``False`` (the default) is byte-for-byte the pre-#2245 behavior:
+    no property is written at all. Even when ``True`` nothing about the
+    written SPICE changes -- ``kdb.NetlistSpiceWriter`` has no net-property
+    syntax and ignores these tags (verified against a live writer run) -- the
+    flag exists only so a run that never asks for a slice pays nothing.
     """
     # Deferred (call-time) import -- see `_detect_dead_metal`'s identical
     # comment above for why this can't be a module-level import.
@@ -1500,6 +1566,13 @@ def _inject_parasitics(
         if net is None:
             continue
 
+        # The original net this entry's whole parasitic chain descends from
+        # (issue #2245) -- `entry["net_id"]` is `net.cluster_id`, unique per
+        # net *object* within this circuit (unlike `entry["net"]`), which is
+        # exactly why `nets_by_id` above is keyed by it.
+        origin_id = int(entry["net_id"])
+        _tag_slice_origin(net, origin_id, record_slice_topology)
+
         base_instance_name = _sanitize_instance_name(entry["net"])
         dup_count = instance_name_counts.get(base_instance_name, 0)
         instance_name_counts[base_instance_name] = dup_count + 1
@@ -1570,6 +1643,7 @@ def _inject_parasitics(
                     )
                     existing_names.add(leg_name)
                     leg = circuit.create_net(leg_name)
+                    _tag_slice_origin(leg, origin_id, record_slice_topology)
                     device.disconnect_terminal(terminal_def.id())
                     device.connect_terminal(terminal_def.id(), leg)
 
@@ -1638,6 +1712,7 @@ def _inject_parasitics(
                 )
                 existing_names.add(leg_name)
                 leg = circuit.create_net(leg_name)
+                _tag_slice_origin(leg, origin_id, record_slice_topology)
 
                 device = term_ref.device()
                 terminal_def = term_ref.terminal_def()
@@ -1669,6 +1744,7 @@ def _inject_parasitics(
             hub_name = _unique_net_name(entry["net"], existing_names)
             existing_names.add(hub_name)
             hub = circuit.create_net(hub_name)
+            _tag_slice_origin(hub, origin_id, record_slice_topology)
 
             r_dev = circuit.create_device(res_class, instance_name)
             r_dev.connect_terminal("A", net)
@@ -1699,6 +1775,7 @@ def _inject_parasitics(
                 )
                 existing_names.add(l_node_name)
                 l_node = circuit.create_net(l_node_name)
+                _tag_slice_origin(l_node, origin_id, record_slice_topology)
                 l_dev = circuit.create_device(ind_class, f"{instance_name}_l")
                 l_dev.connect_terminal("A", hub)
                 l_dev.connect_terminal("B", l_node)
@@ -1717,6 +1794,12 @@ def _inject_parasitics(
             c_dev.set_parameter("C", c_farad)
             net_c_count = 1
 
+        # Marks this net's coupling/ground-capacitor attachment point (issue
+        # #2245) -- the star's centre (`net` itself), the ladder's middle leg,
+        # or the Gamma-shunt's fresh internal node, whichever this entry took.
+        # A sliced sub-circuit promotes exactly this node to a pin when the
+        # net crosses the slice boundary.
+        _tag_slice_hub(hub, origin_id, record_slice_topology)
         hub_by_net[entry["net"]] = hub
         total_r += r_total_ohm
         total_c_ff += entry["capacitance_ff"]

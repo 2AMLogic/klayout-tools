@@ -237,6 +237,8 @@ _REQUEST_FIELD_DESTS = {
         "defer_resistor_fixed_offset",
         "abstract_cells",
         "abstract_cell_lef",
+        "subcircuit",
+        "subcircuit_output",
         "matched_groups",
     )
 }
@@ -248,6 +250,7 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
 
     Relative paths inside the document (``file``, ``output``, ``spef``,
     ``def_pins``, ``def_net_connections``, ``abstract_cell_lef``,
+    ``subcircuit_output``,
     ``pdk_root``) resolve against the document's own directory for the file
     form, or the current working directory for the stdin/inline forms --
     ``klt lvs``'s convention, implemented by the same shared helper.
@@ -332,6 +335,8 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "defer_resistor_fixed_offset": _bool("defer_resistor_fixed_offset"),
             "abstract_cells": _str_list("abstract_cells"),
             "abstract_cell_lef": _str_list("abstract_cell_lef", paths=True),
+            "subcircuit": _str("subcircuit"),
+            "subcircuit_output": _path("subcircuit_output"),
             "matched_groups": reqdoc.get_group_map_as_pairs(
                 request,
                 "matched_groups",
@@ -465,6 +470,13 @@ def run(args: argparse.Namespace) -> int:
             # `None` when the flag was never given, unchanged from every
             # call site that predates it.
             pin_source_cells=pin_source_cells,
+            # `--subcircuit`/`--subcircuit-output` (issue #2245): additionally
+            # writes one named `.SUBCKT <cell>` deck for a sub-cell's own
+            # extracted devices, so a post-layout testbench can instantiate a
+            # routed block's sub-circuit standalone. `None` when the flags were
+            # never given, unchanged from every call site that predates them.
+            subcircuit_cell=args.subcircuit,
+            subcircuit_output=args.subcircuit_output,
         )
     except ExtractError as exc:
         return emit_error("extract", str(exc), args.format)
@@ -623,12 +635,42 @@ def _print_text(report: dict) -> None:
             if group["unresolved_instances"]:
                 print(f"    unresolved: {', '.join(group['unresolved_instances'])}")
 
+    # Additive (issue #2245): a no-op unless --subcircuit was given.
+    _print_subcircuit_text(report.get("subcircuit"))
+
     warnings = report["warnings"]
     if warnings:
         print()
         print("warnings:")
         for warning in warnings:
             print(f"  {warning}")
+
+
+def _print_subcircuit_text(subcircuit: dict | None) -> None:
+    """Render the `subcircuit` block (issue #2245) -- nothing at all when
+    `--subcircuit` was never given."""
+    if subcircuit is None:
+        return
+    print()
+    print(f"subcircuit ({subcircuit['cell']}):")
+    print(f"  path: {subcircuit['path']}")
+    print(
+        f"  devices: {subcircuit['device_count']}  "
+        f"nets: {subcircuit['net_count']}  "
+        f"pins: {len(subcircuit['pins'])}"
+    )
+    for pin in subcircuit["pins"]:
+        print(f"    {pin['name']} [{pin['role']}]")
+    print(f"  instance_line: {subcircuit['instance_line']}")
+    excluded = subcircuit["excluded_parasitics"]
+    if excluded["r_count"] or excluded["c_count"] or excluded["l_count"]:
+        print(
+            "  excluded_parasitics (attributed to the parent deck): "
+            f"{excluded['r_count']} R  {excluded['c_count']} C  "
+            f"{excluded['l_count']} L  "
+            f"{excluded['capacitance_ff']} fF  "
+            f"{excluded['resistance_ohm']} ohm"
+        )
 
 
 def _print_check_text(result: dict) -> None:
