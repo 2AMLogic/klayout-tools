@@ -320,10 +320,18 @@ spec declares.
   ring, or of any L/T/comb-shaped bus — is **decomposed, not
   approximated**. See "Non-rectangular segments" below.
 - Each via role's net geometry becomes **one via edge per merged via
-  polygon**, connecting the node *nearest* (straight-line distance) the
-  via's center on each of the two metal roles it bridges — not a true
-  T-junction split of the rail it taps partway along. See "Scope and
+  polygon**, connecting, on each of the two metal roles it bridges, the node
+  *nearest* (straight-line distance) the via's center **among the nodes of
+  the merged polygon that via actually lands on** — not a true T-junction
+  split of the rail it taps partway along, and never a node on some other
+  polygon of the same net that happens to be closer. See "Scope and
   limitations" below for what this approximates away.
+- Every island's emitted network is **one connected component**, matching
+  the one island the connectivity model found. When it is not — a via layer
+  the spec never declared, or one whose `between` roles do not name the
+  layers it really joins — that is reported in `warnings`, because nodes
+  stranded off the pad's component are silently dropped from both the droop
+  and the EM verdict.
 
 Node/edge ids (`n0`, `n1`, ... / `e0`, `e1`, ...) are scoped **per island**,
 not globally unique across the whole response — a later per-island IR-drop
@@ -738,7 +746,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
 | `em_verdict`         | object \| null     | The per-net EM current-density verdict, or `null` when the spec declared neither `pads` nor `current_model` (the same condition under which `ir_drop_map` is `null`) — see below. |
-| `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via with no matching rail on one side, a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
+| `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via that lands on no modelled segment of one of the roles it declares, an island whose emitted network is more than one connected component (some real connection is not modelled), a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
 
 ### `ir_drop_map` (Phase 1b)
 
@@ -987,26 +995,43 @@ criterion 4):**
   finite-difference approximation of a 2-D current distribution (current
   is routed centre-to-boundary per cell), and it is biased *toward* higher
   resistance, not lower. See "Non-rectangular segments" above.
-- **Via taps snap to the nearest existing rail node, not a true
+- **Via taps snap to an endpoint of the rail they land on, not a true
   T-junction.** A via landing partway along a long rail is wired to
-  whichever of that rail's two *endpoints* is closer, not to a new node
-  spliced in at the via's exact position. This preserves every island's
-  real connectivity and each rail's total resistance, at the cost of a
-  small positional error in exactly where along a rail a given tap
+  whichever of *that rail's* two endpoints is closer, not to a new node
+  spliced in at the via's exact position. The search is scoped to the
+  merged polygon the via shape actually touches, per role — so it preserves
+  every island's real connectivity and each rail's total resistance, at the
+  cost of a small positional error in exactly where along a rail a given tap
   electrically lands — immaterial for a short rail (the common case; see
   the worked example above), more so for a very long strap with several
   taps along its length. Precise T-junction splitting is a natural
-  follow-up once needed.
+  follow-up once needed. (Before issue #2259 the search ran over every rail
+  the *net* owned on that role, which on a trunk-and-stub rail wired a
+  trunk tap to an unrelated stub that happened to be nearer — fragmenting a
+  single island into disconnected components that then reported `no_pad`
+  behind a `worst_case_droop_mv` of `0.0`.)
+- **A via that lands on no modelled segment of a role it declares is
+  skipped**, with a `warnings` entry naming the via, its position, and the
+  missing role. That normally means the spec's `vias[].between` does not
+  name the roles the shape really joins; wiring it to the nearest rail it
+  does *not* touch would invent connectivity the layout has not got.
 - **One via shape = one resistor, at the spec's given `resistance_ohm`.** A
   via drawn as a single merged shape covering what a real design would cut
   as an array of several via cuts is not split into a parallel-resistor
   combination — the spec's `resistance_ohm` is used verbatim per merged
   via polygon. Model a via array's true (lower) parallel resistance by
   passing that already-combined value in the spec.
-- **Pads and instances snap to existing nodes, like via taps.** A pad or an
-  instance is wired to the nearest *extracted* node on its net, not spliced
-  into a rail at its exact position — same trade, and same "immaterial for
-  a short rail, less so for a long strap" caveat, as via taps above.
+- **Pads and instances snap to existing nodes.** A pad or an instance is
+  wired to the nearest *extracted* node on its net, not spliced into a rail
+  at its exact position — same trade, and same "immaterial for a short
+  rail, less so for a long strap" caveat, as via taps above. Unlike a via
+  tap, this search is **not** scoped to one merged polygon: a pad/instance
+  coordinate is a spec-declared point that need not sit on any drawn shape,
+  so there is not always a polygon to scope to. It can therefore attach a
+  pad sitting on a long trunk to a nearer stub node instead of the trunk's
+  own end. That is a positional error only — it cannot sever connectivity
+  the way the via case could, because the stub and the trunk are in the
+  same island either way.
 - **The IR-drop solve itself is still a single DC operating point.** This is
   a resistor-network solve at one instant, not a transient (`di/dt`)
   simulation: no decoupling capacitance, no package/board parasitics, and no

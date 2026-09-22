@@ -55,6 +55,39 @@ not `klt --version`, if you need to detect this kind of drift. See
   caught by the existing skipped-work gate and renders
   `supply_spec_incomplete`. See `docs/cli/erc.md`'s "A block with no drawn
   well at all" and `docs/design-evidence-tiers.md` item 11.
+- **Fixed** (#2259, `klt power`, no `schema_version` bump — the
+  `networks[].islands[].edges[]` shape is unchanged; what changes is which
+  nodes a `kind: "via"` edge connects, plus one new `warnings` string): a via
+  edge now attaches to the merged polygon the via **physically lands on**,
+  per metal role, instead of to the nearest node anywhere on the net.
+  Previously the nearest-node search ran over every rail the net owned on
+  that role, so on any trunk-and-stub rail — a PDN strap with drop-downs, a
+  cell-row rail with per-row risers, a long Metal1 trunk tapped by Poly2
+  risers — a via tapping the trunk partway along was nearer an unrelated
+  short stub's endpoint than either of the trunk's own ends, and was wired to
+  the stub. That is not a positional approximation: it severed the trunk from
+  every tap it fed and shorted two electrically unrelated segments together,
+  fragmenting one physical island into several disconnected components inside
+  the resistor network. Because `worst_case_droop_mv` is computed over
+  *solved* nodes only, the orphaned nodes reported
+  `unsolved_reason: "no_pad"` while the headline droop came out `0.0` — a
+  silent false pass, in the unsafe direction, on both the IR and the EM
+  verdict (orphaned edges carry no current). The documented behaviour in
+  [`docs/cli/power.md`](docs/cli/power.md)'s "Scope and limitations" — a via
+  snapping to an endpoint of *that rail*, preserving every island's real
+  connectivity — is now what the code does. Two supporting changes: a via
+  shape that lands on no modelled segment of a role it declares is skipped
+  with a `warnings` entry naming it (rather than reaching across to a rail it
+  does not touch), and each island's emitted network is checked to be **one
+  connected component** — matching the one island the connectivity model
+  found — with any shortfall reported in `warnings`, since that condition is
+  otherwise invisible behind an unchanged `island_count`. Pad/instance
+  attachment still snaps to the nearest node net-wide and is unchanged: a
+  pad coordinate is a spec-declared point that need not sit on any drawn
+  shape, so there is not always a polygon to scope to, and the error there is
+  positional only — it cannot sever connectivity, because the node it picks
+  is in the same island either way. That trade is now stated explicitly in
+  the docs.
 - **Added** (#2247, `klt erc` + `klt signoff`, additive — **no**
   `schema_version` bump on either verb: one new optional spec sub-key, one
   new coverage reason token it can record, and one new item-11 reason
