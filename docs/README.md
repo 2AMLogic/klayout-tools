@@ -137,6 +137,7 @@ docs/
     wasm-spice-playground-spike.md
     waveform-query-contract-spike.md
     waveform-query-survey.md
+    xyce-oracle.md
     yosys-synthesis-spike.md
   library/                # standing resource library: mined resources -> what changed here
     README.md

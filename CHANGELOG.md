@@ -42,6 +42,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   `device.placeholder_value` disclosure the `subckt-call` path emits on its
   own.
 
+- **Added** (#2016, `klt sim`, no `schema_version` bump — the response shape
+  is unchanged, `environment.engine` simply may now read `"xyce"`): a Xyce
+  execution path and cross-validation oracle. `engine: "xyce"` (Sandia's
+  Xyce, a from-scratch SPICE implementation — a genuinely independent oracle
+  for the ngspice results, pairing #5 of oracle-tracking #2007) runs DC/OP/
+  TRAN analyses over process/temperature corners on the `local`/
+  `local-parallel` backends, with waveforms via Xyce's ASCII rawfile.
+  Everything else the engine does not implement — `corners.supply_v` (Xyce
+  has no `alter`; and Xyce's `.temp` card is a silent no-op, so temperature
+  rides `.options device temp=`), `monte_carlo`, `options.fail_fast_probe`,
+  `remote`/`batch` — is refused up front with an error naming what is
+  supported. The oracle itself (`tests/test_sim_xyce_oracle.py`, real-binary
+  gated on both `Xyce` and `ngspice`) asserts ngspice-vs-Xyce agreement
+  within 3e-3 relative on DC/transient/temperature fixtures, a 21-point
+  sweep evidence check, and a seeded-defect negative control both engines
+  must flag; measured agreement and the divergences that shaped the deck
+  generator are recorded in `docs/design/xyce-oracle.md`.
+  `scripts/install-xyce.sh` installs the pinned official macOS arm64 build
+  (checksum-verified, smoke-tested); `.github/workflows/xyce-oracle.yml`
+  runs the oracle on dispatch, off the per-PR budget. `klt size` remains
+  ngspice-only.
+
 ## 0.6.0 (2026-09-22)
 
 270 commits on `main` since v0.5.0, cut under the 25-commit backstop in

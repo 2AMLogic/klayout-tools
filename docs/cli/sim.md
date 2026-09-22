@@ -62,9 +62,46 @@ this document (and the code) win.
 needs a fresh `.lib` parse regardless, a hung engine must be killable without
 taking down `klt`'s own process, and process fan-out is the whole parallelism
 story for a future `max_parallel`. The JSON contract does not name the engine
-in its *shape* — `request.engine` is a data field, not a code path — but only
-`"ngspice"` is implemented in this version; an unsupported value is an
-application error (exit 1).
+in its *shape* — `request.engine` is a data field, not a code path.
+`"ngspice"` is the reference path; `"xyce"` is implemented as a narrower
+cross-validation oracle (below); any other value is an application error
+(exit 1).
+
+## Xyce engine
+
+`engine: "xyce"` runs the same corner matrix through Sandia's
+[Xyce](https://xyce.sandia.gov/) — a from-scratch SPICE implementation, not
+a SPICE 3f5 derivative — as an independent cross-validation oracle for the
+ngspice results (issue #2016, pairing #5 of oracle-tracking #2007). Same
+subprocess-per-corner model, same response contract
+(`environment.engine`/`engine_version` record which engine ran), a
+deliberately narrower support surface; everything below that `xyce` does
+not yet implement is refused **before any corner runs** with an error
+naming what *is* supported:
+
+- **Analyses**: `dc`, `op`, and `tran`. (`ac`/`sp` are ngspice-only for
+  now.) There is no `.measure op` in Xyce either — the same
+  `measurements[]` constraint as ngspice applies.
+- **Corners**: `process` (`.lib` sections — note Xyce requires a *named*
+  `.endl <section>` in the library file where ngspice accepts a bare
+  `.endl`) and `temperature`. **`corners.supply_v` is refused**: Xyce has
+  no netlist equivalent of ngspice's `alter`, so per-corner supply rails
+  cannot be patched into the deck — keep the supply hardcoded in the
+  netlist body.
+- **Backends**: `local` and `local-parallel` only; `remote`/`batch` pin
+  the ngspice toolchain and are refused for this engine.
+- **Refused**: `monte_carlo` (no seed wiring) and
+  `options.fail_fast_probe` (reads ngspice's rawfile stream).
+
+Two syntax divergences the deck generator handles for you (both verified
+against Xyce 7.10.0; the full list with the measured ngspice-vs-Xyce
+agreement lives in `docs/design/xyce-oracle.md`): Xyce has no `.control`
+block, and `.temp` is a silent no-op in Xyce — the generated deck writes
+`.options device temp=<T>` instead, so temperature corners behave
+identically to ngspice's. The `Xyce` binary itself is an external,
+PATH-discovered dependency (`scripts/install-xyce.sh` installs the pinned
+build); a missing binary folds into per-corner `status: "error"`
+diagnostics ("could not launch Xyce"), exactly like a missing ngspice.
 
 ## Execution backends
 
@@ -1583,7 +1620,7 @@ the *response* echoes back.
 | Field                    | Type              | Description                                                                                                                                                             |
 | ------------------------ | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `netlist`                | string, required  | Path to the circuit-body netlist under test (see "Netlist convention" above). Relative paths resolve against the request file's directory.                            |
-| `engine`                 | string            | Engine selector. Defaults to, and currently only supports, `"ngspice"`.                                                                                                |
+| `engine`                 | string            | Engine selector. Defaults to `"ngspice"`; `"xyce"` (Sandia's Xyce, the cross-validation oracle — issue #2016) is implemented for DC/OP/TRAN analyses, process/temperature corners, and the local backends — see the "Xyce engine" section below. Any other value is an application error.                                                                                                |
 | `backend`                | string            | Execution backend for the corner matrix. Defaults to `"local"` (runs corners sequentially in-process); `"local-parallel"` runs the same matrix across a bounded local worker pool; `"remote"` provisions an EC2 instance and runs it there; `"batch"` submits an S3 job contract to 2am's EDA batch fleet (see "Execution backends", "Remote backend", and "Batch backend" above). Overridable with the `--backend` CLI flag. |
 | `remote.*`               | object            | Request fields for the `remote` backend (`region`, `key_name`, `ssh_key_path`, `launcher_cidr`/`launcher_cidrs`/`security_group_id`, `subnet_id`, `ssh_user`, `provider`, `spot`, `max_hourly_cost_usd`, `ssh_ready_timeout_s`, `ssh_timeout_s`, `ami_manifest`) — see "Remote backend" above. Only read/validated when `backend: "remote"` is selected. |
 | `batch.*`                | object            | Request fields for the `batch` backend (`provision_script_path`, `bucket`, `jobs_prefix`, `region`, `profile`, `poll_interval_s`, `poll_timeout_s`) — see "Batch backend" above. Only read/validated when `backend: "batch"` is selected. |
