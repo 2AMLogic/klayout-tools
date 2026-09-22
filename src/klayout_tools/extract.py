@@ -798,6 +798,8 @@ def run_extract(
     matched_device_groups: Mapping[str, Sequence[str]] | None = None,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
+    subcircuit_cell: str | None = None,
+    subcircuit_output: str | None = None,
 ) -> dict[str, Any]:
     """Extract a schematic-equivalent netlist from the layout at ``path``.
 
@@ -1577,6 +1579,49 @@ def run_extract(
     list, empty when ``abstract_cell_patterns`` is empty or matches no
     instantiated cell.
 
+    ``subcircuit_cell``/``subcircuit_output`` (``klt extract --subcircuit
+    <cell> [--subcircuit-output <path>]``, issue #2245) additionally write a
+    **second, independent SPICE deck** carrying one named ``.SUBCKT <cell>``
+    block for that sub-cell's own extracted devices, so a post-layout
+    testbench can instantiate a routed block's sub-circuit standalone the
+    same way a schematic-level campaign instantiates a named ``.subckt``.
+    This is the near-inverse of ``abstract_cell_patterns`` above (which emits
+    an *empty* black box per matched cell type, with device recognition
+    suppressed inside it): here the sub-cell's devices are exactly what the
+    block is populated with. The flat netlist at ``output`` is written first
+    and is byte-for-byte unchanged -- the slice is a purely additive second
+    artifact, and the two decks are **alternatives, never combined**, so a
+    parasitic element present in both is not double-counted in any one
+    simulation.
+
+    Devices are attributed to the sub-cell positionally, by the same
+    GDS-level instance path ``devices[].instance_path`` reports (issue #1666);
+    nets whose terminals are all inside stay internal nodes, and nets that
+    also carry an outside device terminal (or are a pin of the flat deck) are
+    promoted to ``.SUBCKT`` pins. See
+    :mod:`klayout_tools.extract_subcircuit`'s module docstring and
+    ``docs/cli/extract.md``'s "Sub-circuit isolation" section for the full
+    boundary-crossing **parasitic attribution rule** -- a boundary net's
+    series legs belong to the sub-cell, its shunt (ground/coupling)
+    capacitance to the parent. ``subcircuit_output`` defaults to the flat
+    netlist path with ``.<cell>`` inserted before its extension. An
+    :class:`ExtractError` is raised when the named cell is not placed under
+    the resolved top cell, *is* the top cell, is placed more than once
+    (``devices[].instance_path`` records cell names, not per-placement
+    identities, so the two copies are indistinguishable), contributes no
+    recognized device, or when ``abstract_cell_patterns`` was also given (an
+    abstracted instance has no position to attribute it with).
+
+    ``subcircuit`` reports the slice: ``{"cell", "path", "sha256", "pins":
+    [{"name", "role"}, ...], "device_count", "net_count", "instance_line",
+    "excluded_parasitics": {...}, "warnings": [...]}``, or ``None`` when
+    ``subcircuit_cell`` was not given. ``pins`` is in the order the written
+    ``.SUBCKT`` header declares them (``role`` is ``"boundary"`` for a real
+    port, ``"parasitic"`` for a reference node only a kept parasitic element
+    needs); ``instance_line`` is a ready-to-paste ``X`` card;
+    ``excluded_parasitics`` counts every element the boundary rule attributed
+    to the parent deck instead, so nothing is dropped silently.
+
     The written SPICE gains one ``.SUBCKT <cell type> <pins...> ... .ENDS``
     block per distinct matched cell type (empty body -- a black box declares
     no devices) and one ``X<instance>`` card per matched instance in the top
@@ -1925,6 +1970,16 @@ def run_extract(
                     "needs at least two instances to compare"
                 )
 
+    # `--subcircuit` (issue #2245): validated up front, before the extraction
+    # engine runs, for the two combinations that can never work regardless of
+    # what the layout contains. The layout-dependent checks (cell placed
+    # exactly once, contributes devices) need the resolved hierarchy and run
+    # after extraction, below.
+    _validate_subcircuit_flags(
+        subcircuit_cell, subcircuit_output, abstract_cell_patterns
+    )
+    subcircuit_info: dict[str, Any] = {}
+
     (
         netlist,
         top_cell_name,
@@ -1959,6 +2014,15 @@ def run_extract(
         parasitics_top_cell_only=parasitics_top_cell_only,
         def_pins=def_pins,
         pin_source_cells=pin_source_cells,
+        subcircuit_cell=subcircuit_cell,
+        subcircuit_info=subcircuit_info,
+    )
+
+    # `--subcircuit` (issue #2245), layout-dependent half: both rejections
+    # below are about the *hierarchy*, so they need the resolved top cell
+    # `extract_netlist_from_layout` just reported through `subcircuit_info`.
+    _validate_subcircuit_placement(
+        subcircuit_cell, top_cell_name, subcircuit_info.get("placements", 0)
     )
 
     if mom_net is not None:
@@ -2016,6 +2080,12 @@ def run_extract(
         nets = _describe_nets(circuit, net_label_positions)
     else:
         devices, device_counts, nets = [], {}, []
+
+    # Snapshotted *here* -- before `_inject_parasitics` below can add a single
+    # R/C/L -- so `--subcircuit` (issue #2245) can tell a real device from an
+    # injected parasitic element when it slices the post-injection circuit.
+    # See `_pre_parasitic_device_ids`' own docstring.
+    pre_parasitic_device_ids = _pre_parasitic_device_ids(circuit, subcircuit_cell)
 
     # `--matched-group` (issue #1018): a caller-declared set of device
     # instances expected to stay geometrically matched (a differential pair,
@@ -2353,6 +2423,11 @@ def run_extract(
                     if mom_rlc_net is not None and mom_rlc_inductance_nh is not None
                     else None
                 ),
+                # `--subcircuit` (issue #2245) only: tag each injected node
+                # with the original net it descends from, so the slice below
+                # can attribute every parasitic element to one electrical net.
+                # `False` (every other run) writes no property at all.
+                record_slice_topology=subcircuit_cell is not None,
             )
         else:
             parasitics_report = {
@@ -2605,6 +2680,31 @@ def run_extract(
 
     netlist_sha256 = sha256_file(netlist_path)
 
+    # `--subcircuit` (issue #2245): a *second*, independent deck carrying one
+    # named `.SUBCKT <cell>` for the sub-cell's own extracted devices. Run
+    # strictly after the flat netlist above has been written and hashed --
+    # `slice_subcircuit` mutates the live circuit destructively, and the whole
+    # point of the flag is that the flat output stays byte-for-byte what it
+    # would have been without it.
+    subcircuit_report = _write_subcircuit_deck(
+        kdb,
+        netlist,
+        circuit,
+        cell_name=subcircuit_cell,
+        output=subcircuit_output,
+        netlist_path=netlist_path,
+        deck_name=deck_name,
+        top_cell_name=top_cell_name,
+        device_instance_paths=device_instance_paths,
+        pre_parasitic_device_ids=pre_parasitic_device_ids,
+        model_bindings=model_bindings,
+        substrate_global_nets=substrate_global_nets,
+        parasitics=parasitics_report is not None,
+    )
+    # The slice's own warnings are also surfaced in the top-level `warnings[]`,
+    # so a caller reading only that (the documented contract) still sees them.
+    warnings.extend(_subcircuit_warnings(subcircuit_report))
+
     result: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "file": path,
@@ -2708,6 +2808,12 @@ def run_extract(
     # docstring paragraph and `docs/cli/extract.md`'s "SPEF export" section.
     result["spef_path"] = spef_path
 
+    # Additive, independently-optional field (issue #2245): `null` unless
+    # `--subcircuit` was given, the sliced sub-circuit's own report otherwise
+    # -- see `run_extract`'s `subcircuit_cell` docstring paragraph and
+    # `docs/cli/extract.md`'s "Sub-circuit isolation" section.
+    result["subcircuit"] = subcircuit_report
+
     # Additive `metrics` block (issue #1848, adopting the declared metric
     # namespace registry from #247 beyond its `layout-metrics`/`klt drc`
     # (#1847) adopters) -- see `run_extract`'s docstring "metrics" paragraph
@@ -2734,6 +2840,201 @@ def run_extract(
 # --------------------------------------------------------------------------- #
 # --check / --rerun: verify a previously committed report (issue #1149)
 # --------------------------------------------------------------------------- #
+
+
+def _validate_subcircuit_flags(
+    subcircuit_cell: str | None,
+    subcircuit_output: str | None,
+    abstract_cell_patterns: tuple[str, ...],
+) -> None:
+    """The ``--subcircuit`` rejections that need no layout at all (issue
+    #2245), checked before the extraction engine runs."""
+    if subcircuit_output is not None and subcircuit_cell is None:
+        raise ExtractError("--subcircuit-output requires --subcircuit")
+    if subcircuit_cell is None:
+        return
+    if abstract_cell_patterns:
+        raise ExtractError(
+            "--subcircuit cannot be combined with --abstract-cells -- an "
+            "abstracted cell becomes a subcircuit *instance* in the flat "
+            "netlist, and an instance carries no position to attribute it to "
+            "a sub-cell with (unlike a device, issue #1666). Run the two "
+            "modes as separate extractions."
+        )
+    if not subcircuit_cell.strip():
+        raise ExtractError("--subcircuit was given an empty cell name")
+
+
+def _validate_subcircuit_placement(
+    subcircuit_cell: str | None, top_cell_name: str, placements: int
+) -> None:
+    """The ``--subcircuit`` rejections that depend on the resolved layout
+    hierarchy (issue #2245) -- see ``docs/cli/extract.md``'s "Sub-circuit
+    isolation" section for why each is an error rather than a best guess.
+
+    ``placements`` is :func:`~klayout_tools.extract_subcircuit.cell_placement_
+    count`'s result, reported back through ``extract_netlist_from_layout``'s
+    ``subcircuit_info`` out-parameter.
+    """
+    if subcircuit_cell is None:
+        return
+    if subcircuit_cell == top_cell_name:
+        raise ExtractError(
+            f"--subcircuit {subcircuit_cell!r} names the top cell itself -- "
+            "the flat netlist already is that cell's .SUBCKT; pass a cell "
+            "instantiated *below* the top cell"
+        )
+    if placements == 0:
+        raise ExtractError(
+            f"--subcircuit {subcircuit_cell!r} names no cell placed under top "
+            f"cell {top_cell_name!r} -- pass the name of a cell instantiated "
+            "in this layout's hierarchy"
+        )
+    if placements > 1:
+        raise ExtractError(
+            f"--subcircuit {subcircuit_cell!r} is placed {placements} times "
+            f"under top cell {top_cell_name!r} -- a flat extraction records "
+            "only the cell *name* each device came from "
+            "(devices[].instance_path, issue #1666), never which of two "
+            "sibling placements, so slicing would silently merge every copy's "
+            "devices into one .SUBCKT. Extract a layout with a single "
+            "placement of it instead"
+        )
+
+
+def _pre_parasitic_device_ids(
+    circuit: Any | None, subcircuit_cell: str | None
+) -> frozenset[int]:
+    """The *real* extracted device ids, snapshotted before ``--parasitics``
+    injection can add a single R/C/L (issue #2245).
+
+    ``--subcircuit`` needs this to tell a real device from an injected
+    parasitic element when it slices the post-injection circuit. Keyed by
+    ``Device.id()``, which is stable across the rest of the pipeline (the same
+    reason ``device_instance_paths`` is). Empty (and unused) unless
+    ``--subcircuit`` was given.
+    """
+    if subcircuit_cell is None or circuit is None:
+        return frozenset()
+    return frozenset(device.id() for device in circuit.each_device())
+
+
+def _subcircuit_warnings(report: dict[str, Any] | None) -> list[str]:
+    """``report["warnings"]``, or ``[]`` when ``--subcircuit`` was never given
+    (issue #2245)."""
+    if report is None:
+        return []
+    return list(report["warnings"])
+
+
+def _write_subcircuit_deck(
+    kdb: Any,
+    netlist: Any,
+    circuit: Any,
+    *,
+    cell_name: str | None,
+    output: str | None,
+    netlist_path: str,
+    deck_name: str,
+    top_cell_name: str,
+    device_instance_paths: dict[int, list[dict[str, Any]]],
+    pre_parasitic_device_ids: frozenset[int],
+    model_bindings: Mapping[str, Any] | None,
+    substrate_global_nets: list[str],
+    parasitics: bool,
+) -> dict[str, Any] | None:
+    """Slice ``cell_name`` out of the already-written flat extraction and write
+    it as its own ``.SUBCKT`` deck -- ``klt extract --subcircuit`` (issue
+    #2245). Returns the response's ``subcircuit`` block, or ``None`` when
+    ``cell_name`` is ``None`` (the flag was never given).
+
+    Called by :func:`run_extract` **after** the flat netlist has been written
+    and hashed: :func:`~klayout_tools.extract_subcircuit.slice_subcircuit`
+    mutates ``circuit`` destructively, and the whole point of the flag is that
+    the flat output stays byte-for-byte what it would have been without it.
+    """
+    if cell_name is None:
+        return None
+    if circuit is None:
+        # `circuit_by_name(top_cell_name)` is `None` when the deck recognized
+        # no device *anywhere* in the layout (`run_extract` degrades to empty
+        # `devices`/`nets` for that case). A cell can be placed -- so the
+        # placement-count validation above passed -- in a layout that still
+        # contributes zero devices, so this is a real user-facing refusal, not
+        # an invariant: same "refuse rather than guess" shape (and the same
+        # message prefix) `slice_subcircuit` raises for an empty
+        # `selected_ids`.
+        raise ExtractError(
+            f"--subcircuit {cell_name!r} matched no extracted device -- this "
+            "deck recognized no device anywhere in the layout, so there is "
+            "nothing to slice (check --deck, and see devices[] in a plain "
+            "`klt extract --format json` run)"
+        )
+
+    from .extract_subcircuit import (
+        SubcircuitSliceError,
+        selected_device_ids,
+        slice_subcircuit,
+    )
+
+    subcircuit_path = (
+        output
+        if output is not None
+        else _default_subcircuit_output_path(netlist_path, cell_name)
+    )
+    out_dir = os.path.dirname(os.path.abspath(subcircuit_path))
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as exc:
+        raise ExtractError(f"cannot create output directory {out_dir}: {exc}") from exc
+    try:
+        report = slice_subcircuit(
+            circuit,
+            cell_name=cell_name,
+            selected_ids=selected_device_ids(device_instance_paths, cell_name),
+            pre_parasitic_device_ids=pre_parasitic_device_ids,
+        )
+    except SubcircuitSliceError as exc:
+        raise ExtractError(str(exc)) from exc
+
+    # Same writer configuration as the flat deck (so device cards, net
+    # spellings and `--pdk` model bindings are identical), with the `.GLOBAL`
+    # substrate declarations narrowed to the nets that survived the slice.
+    surviving_nets = {
+        spice_safe_net_name(net.expanded_name()) for net in circuit.each_net()
+    }
+    writer = kdb.NetlistSpiceWriter(
+        create_model_binding_delegate(
+            model_bindings if model_bindings is not None else {},
+            global_nets=[
+                name for name in substrate_global_nets if name in surviving_nets
+            ],
+        )
+    )
+    writer.use_net_names = True
+    # Only the *first* description line is comment-prefixed by
+    # `NetlistSpiceWriter`; every continuation line has to carry its own `* `
+    # or ngspice reads it as a card (verified: an unprefixed prose line aborts
+    # the run with "Undefined parameter"). Same convention
+    # `_parasitic_model_header_comment` already follows.
+    description = (
+        f"extracted by klt extract --deck {deck_name} --subcircuit {cell_name}\n"
+        f"* one sub-circuit sliced out of the flat extraction of "
+        f"{top_cell_name} -- boundary nets are pins, and their shunt "
+        f"(ground/coupling) parasitics belong to the parent deck\n"
+        "* see docs/cli/extract.md, section: Sub-circuit isolation"
+    )
+    if parasitics:
+        description += "\n" + _parasitic_model_header_comment()
+    try:
+        netlist.write(subcircuit_path, writer, description)
+    except Exception as exc:
+        raise ExtractError(
+            f"could not write sub-circuit netlist '{subcircuit_path}': {exc}"
+        ) from exc
+    report["path"] = subcircuit_path
+    report["sha256"] = sha256_file(subcircuit_path)
+    return report
 
 
 def check_extract_report(report_path: str) -> dict[str, Any]:
@@ -3020,7 +3321,8 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
     ``--critical-net``, ``--distributed-rc``, ``--def-net-names``,
     ``--def-net-connections``, ``--mom-rlc-*``, ``--top-cell-pins``,
     ``--pins``, ``--defer-resistor-fixed-offset``, ``--abstract-cells``,
-    ``--abstract-cell-lef``, ``--matched-group``, ``--pdk``/``--pdk-root``)
+    ``--abstract-cell-lef``, ``--matched-group``, ``--subcircuit``/
+    ``--subcircuit-output``, ``--pdk``/``--pdk-root``)
     is never echoed anywhere in the response, so none of them can be
     reconstructed here -- a committed report produced with any of those will
     legitimately (and unhelpfully) show drift in the corresponding
@@ -3103,6 +3405,8 @@ def extract_netlist_from_layout(
     parasitics_top_cell_only: bool = False,
     def_pins: frozenset[str] | None = None,
     pin_source_cells: frozenset[str] | None = None,
+    subcircuit_cell: str | None = None,
+    subcircuit_info: dict[str, Any] | None = None,
 ) -> tuple[
     kdb.Netlist,
     str,
@@ -3144,6 +3448,18 @@ def extract_netlist_from_layout(
     ``abstract_cell_lef_paths`` is consulted only as the *fallback* pin
     source, when a matched cell type draws no in-cell pin label -- see
     :func:`_resolve_abstract_cell_pins`.
+
+    ``subcircuit_cell``/``subcircuit_info`` (``--subcircuit``, issue #2245):
+    a pure out-parameter pair that changes nothing about the extraction
+    itself. When ``subcircuit_cell`` is given and ``subcircuit_info`` is a
+    dict, ``subcircuit_info["placements"]`` is filled in with how many times
+    that cell is placed under the resolved top cell (see
+    :func:`~klayout_tools.extract_subcircuit.cell_placement_count`) -- the
+    count ``run_extract`` needs to reject an ambiguous slice, computed here
+    because this is where the layout hierarchy is live. Passed as a mutable
+    out-parameter rather than appended to the return tuple so the (already
+    14-element) tuple contract, and every other caller of this function,
+    stays exactly as it was.
 
     ``deck_options`` (issue #595): forwarded to
     :func:`~klayout_tools.decks.get_extraction_deck` -- selects a
@@ -3277,6 +3593,17 @@ def extract_netlist_from_layout(
         raise ExtractError(f"could not read layout '{path}': {exc}") from exc
 
     top_cell = resolve_top_cell(layout, top, ExtractError, path=path)
+
+    # `--subcircuit` (issue #2245): the one fact about the slice that needs the
+    # live layout hierarchy, reported back through the out-parameter (see this
+    # function's docstring). Computed here -- before `--abstract-cells` erasure
+    # below can touch anything -- since it is purely a hierarchy question.
+    if subcircuit_cell is not None and subcircuit_info is not None:
+        from .extract_subcircuit import cell_placement_count
+
+        subcircuit_info["placements"] = cell_placement_count(
+            layout, top_cell, subcircuit_cell
+        )
 
     # `--abstract-cells` (issue #620): resolved *before* `_extract_netlist`
     # runs, by mutating `layout` in place -- see
@@ -3413,6 +3740,20 @@ def _default_output_path(path: str) -> str:
     """``<file>`` with its extension replaced by ``.spice`` (spike section 2a)."""
     stem, _ext = os.path.splitext(path)
     return f"{stem}.spice"
+
+
+def _default_subcircuit_output_path(netlist_path: str, cell_name: str) -> str:
+    """Where ``--subcircuit <cell>`` writes its sliced deck when
+    ``--subcircuit-output`` was not given (issue #2245): the flat netlist's own
+    path with ``.<cell>`` inserted before its extension, e.g.
+    ``build/gcd.spice`` -> ``build/gcd.delaywin_hv.spice``.
+
+    Derived from the *flat netlist* path rather than from the input layout, so
+    an ``--output`` redirect takes the slice with it and both artifacts of one
+    run always land side by side.
+    """
+    stem, ext = os.path.splitext(netlist_path)
+    return f"{stem}.{cell_name}{ext or '.spice'}"
 
 
 #: Wall-clock budget (seconds) for the ``klayout`` subprocess

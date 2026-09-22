@@ -118,6 +118,39 @@ not `klt --version`, if you need to detect this kind of drift. See
   wire", not "this is a 3.4 kΩ resistor"; device impedance is still not
   modelled. Written up in [`docs/cli/power.md`](docs/cli/power.md)'s new
   "Device bodies are not wires" section.
+- **Added** (#2245, `klt extract`, additive — **no** `schema_version` bump:
+  two new optional flags and one new optional top-level field, `null` unless
+  the flags are used; an extraction that does not pass them writes a
+  byte-identical netlist and a report differing only by that field's
+  presence): `--subcircuit <cell>` (with optional `--subcircuit-output
+  <path>`) additionally writes a **second, standalone SPICE deck** carrying
+  one named `.SUBCKT <cell>` block for that sub-cell's own extracted
+  devices, so a post-layout testbench can instantiate a routed block's
+  sub-circuit in isolation the way a schematic-level campaign instantiates a
+  named `.subckt`. Extraction stays flat: the flag runs the same flat pass,
+  writes the same flat netlist first, then *slices* one named sub-cell out
+  of the finished circuit. Devices are attributed positionally, by the same
+  `devices[].instance_path` placement chain (#1666); a net whose terminals
+  are all inside stays an internal node, and a net that also carries an
+  outside device terminal (or is a pin of the flat deck) is promoted to a
+  `.SUBCKT` pin. **Boundary-crossing parasitic attribution rule**: an
+  internal net keeps its whole star (legs, ground capacitance, ladder,
+  inductor); a boundary net becomes a pin at its hub keeping only the series
+  legs of the sub-cell's *own* terminals, with its shunt (ground/coupling)
+  capacitance attributed to the parent — a shunt on a testbench-driven pin
+  is not observable, while its series share is. A coupling capacitor is kept
+  whenever either side is internal, with the far net promoted to a
+  `parasitic`-role pin (dropping it would silently make post-layout timing
+  optimistic); the 1 Tohm substrate DC tie (#1263) survives for every
+  substrate net in the slice. Everything the boundary rule hands to the
+  parent is counted in the new `subcircuit.excluded_parasitics`, so nothing
+  vanishes silently, and the two decks are alternatives never co-simulated,
+  so nothing is double-counted either. Near-inverse of `--abstract-cells`
+  (#620), which emits an *empty* black box, and mutually exclusive with it.
+  Refused rather than guessed when the named cell is the top cell, is not
+  placed under it, is placed more than once (two sibling placements are
+  indistinguishable by name), or contributes no recognized device. See
+  `docs/cli/extract.md`'s "Sub-circuit isolation" section.
 - **Added** (#2247, `klt erc` + `klt signoff`, additive — **no**
   `schema_version` bump on either verb: one new optional spec sub-key, one
   new coverage reason token it can record, and one new item-11 reason

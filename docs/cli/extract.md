@@ -7,7 +7,7 @@ first-order lumped RC interconnect parasitics (see "Parasitic (RC)
 extraction" below).
 
 ```
-klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--format text|json]
+klt extract <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--parasitics] [--top-cell-pins] [--pins <A,B,VDD,VSS>] [--deck-option <key>=<value> ...] [--defer-resistor-fixed-offset] [--abstract-cells <glob> ...] [--abstract-cell-lef <path> ...] [--subcircuit <cell>] [--subcircuit-output <path>] [--format text|json]
 klt extract <request.json>|-|'{...}' [--format text|json]
 klt extract --check <report.json> [--rerun] [--format text|json]
 ```
@@ -142,6 +142,20 @@ two disagree, this document (and the code) win.
   across repeated flags wins. Has no effect (and is an application error) if
   given without `--abstract-cells`. See "Cell-level (black-box + pins)
   abstraction" below.
+- `--subcircuit` — optional, unset by default. The name of a cell,
+  instantiated exactly once below the top cell, to additionally write as its
+  own named `.SUBCKT <cell>` deck carrying *that sub-cell's own extracted
+  devices* (issue #2245) — so a post-layout testbench can instantiate a
+  routed block's sub-circuit standalone, the way a schematic-level campaign
+  instantiates a named `.subckt`. The flat netlist at `--output` is written
+  first and is byte-for-byte unchanged. Near-inverse of `--abstract-cells`
+  (which emits an *empty* black box) and mutually exclusive with it. See
+  "Sub-circuit isolation" below for the boundary-crossing parasitic
+  attribution rule.
+- `--subcircuit-output` — optional. Where `--subcircuit` writes its sliced
+  deck (default: the `--output` path with `.<cell>` inserted before its
+  extension, e.g. `build/gcd.spice` → `build/gcd.delaywin_hv.spice`).
+  Requires `--subcircuit`.
 - `--format` — `text` (default, a human-readable summary) or `json`. The
   extracted **netlist** always goes to `--output`; `--format` governs only
   the summary report.
@@ -298,7 +312,18 @@ subcircuit-call circuit to pair against the reference's — see
 [`docs/cli/lvs.md`](lvs.md) → `options.flatten_reference` for the fix (an
 in-process flatten of the *reference* netlist before comparing, so both
 sides are flat) rather than a hierarchy-preserving extraction mode, which
-this command does not have. Device recognition splits NMOS (`active - nwell`) from PMOS
+this command does not have.
+
+The *other* consequence (issue #2245) is for re-simulation: a flat deck has
+no `.SUBCKT` boundary for a sub-block, so a post-layout testbench cannot
+measure one named sub-cell of a routed block in isolation the way a
+schematic-level campaign measures it. `--subcircuit <cell>` closes that
+specific gap without making extraction hierarchical: it runs the same flat
+pass, then *slices* one named sub-cell's own devices out into a second,
+independent `.SUBCKT` deck — see "Sub-circuit isolation" below, including the
+boundary-crossing parasitic attribution rule.
+
+Device recognition splits NMOS (`active - nwell`) from PMOS
 (`active & nwell`) and runs KLayout's native `DeviceExtractorMOS4Transistor`
 for each — one generic `nfet`/`pfet` device class per deck (no
 voltage-flavor distinction). A deck may additionally declare one or more
@@ -897,6 +922,17 @@ separately — see issue #620's discussion for the rationale (this keeps the
 initial delivery to a single bounded change, reusing KLayout's existing
 `NetlistSpiceWriter` machinery rather than adding a new output-format code
 path).
+
+**Not the same thing as `--subcircuit`** (issue #2245). Both emit a named
+`.SUBCKT <cell>`, but for opposite purposes, and they are mutually exclusive:
+
+| | `--abstract-cells <glob>` | `--subcircuit <cell>` |
+|---|---|---|
+| Purpose | gate-level LVS at the standard-cell boundary | post-layout re-simulation of one sub-block |
+| `.SUBCKT` body | **empty** — device recognition is erased inside the matched cells | the sub-cell's **own extracted devices** |
+| Scope | every matched cell *type*, all instances, wired into the parent | exactly one named cell, placed exactly once |
+| Output | the same, single netlist file | a **second**, standalone deck; the flat netlist is untouched |
+| Instantiated by | the flat top-level circuit, via `X` cards | a testbench you write, via an `X` card |
 
 ### Bipolar (BJT) device recognition
 
@@ -2733,6 +2769,208 @@ placement, not a fifth array element.
 - **It does not change extraction.** No device, net, parameter, or written
   netlist line differs with this field present; it is disclosure only, in
   the same spirit as `nets[].label_positions_um`.
+
+## Sub-circuit isolation (`--subcircuit`, issue #2245)
+
+Extraction is flat (see "Engine"), so the written netlist is one
+`.SUBCKT <top cell>` body with every recognized device in it. That is the
+right default for DRC/LVS/sign-off, but it leaves a specific gap for
+**post-layout re-simulation**: a schematic-level characterization campaign
+measures sub-blocks *by name* — a bare `.subckt delaywin_hv` deck, a bare
+`.subckt schmitt_hv` deck — and the flat extraction has no equivalent for any
+of them. There is no `.SUBCKT` boundary to instantiate, so the post-layout
+counterpart of a committed schematic-level row cannot be produced at all
+without hand-editing the netlist.
+
+`--subcircuit <cell>` closes that gap **without making extraction
+hierarchical**. It runs the same flat pass, writes the same flat netlist, and
+then *slices* one named sub-cell's own devices out of the finished circuit
+into a second, standalone deck:
+
+```bash
+klt extract routed.gds --deck sky130 --parasitics \
+  --output build/routed.spice \
+  --subcircuit delaywin_hv \
+  --format json
+# writes build/routed.spice            (the flat deck -- unchanged)
+#    and build/routed.delaywin_hv.spice (the sliced sub-block deck)
+```
+
+```spice
+* build/routed.delaywin_hv.spice (abridged)
+.SUBCKT delaywin_hv A Y VGND VPWR vsubs
+M$1 net1 A VGND VGND nfet ...
+M$2 net1 A VPWR VPWR pfet ...
+Rnet1_t0 net1__t0 net1 214.5
+Cnet1 net1 vsubs 3.71e-16
+...
+.ENDS delaywin_hv
+```
+
+A testbench then instantiates it exactly like a schematic-level sub-circuit;
+the response's `subcircuit.instance_line` is the `X` card, already in the
+emitted pin order:
+
+```spice
+.include "build/routed.delaywin_hv.spice"
+XDUT in out 0 vdd 0 delaywin_hv
+```
+
+**Additive, off by default.** With the flag unset, nothing changes — the same
+convention `--abstract-cells` holds itself to. With it set, the flat netlist
+at `--output` is written (and hashed) *first* and is byte-for-byte what the
+same run produces without the flag; the slice is a purely additive second
+artifact plus one additive `subcircuit` JSON block.
+
+### How devices and nets are attributed
+
+**Devices, positionally.** A device belongs to the slice when the named cell
+appears anywhere in the GDS-level placement chain
+[`devices[].instance_path`](#per-device-gds-instance-attribution-devicesinstance_path-issue-1666)
+already reports. Nesting is followed: naming an outer cell selects everything
+below it too.
+
+**Nets, electrically.** Each net is then classified from that device
+attribution:
+
+| Class | Definition | In the emitted `.SUBCKT` |
+|---|---|---|
+| `internal` | every device terminal on it belongs to the sub-cell, and it is not a pin of the flat deck | an internal node |
+| `boundary` | it also carries a terminal of a device *outside* the sub-cell, **or** it is a pin of the flat deck (`--pins`/`--def-pins`/label promotion) | a pin, named after the net |
+| `outside` | no terminal of the sub-cell touches it | absent — unless a kept parasitic element references it (below) |
+
+`pins[]` reports the declared pin order with a `role` per pin: `boundary` for
+a real port of the block, `parasitic` for a node exposed only because a kept
+parasitic element needs somewhere to attach (the substrate/ground reference,
+or a coupling aggressor).
+
+### The boundary-crossing parasitic attribution rule
+
+With `--parasitics`, a net's model is a star: each device terminal sits on its
+own leg node, a series resistor bridges each leg back to the net's **hub**,
+and the lumped ground capacitor (plus any coupling capacitor) hangs off that
+hub (see "The model: a star topology"). A net that crosses the sub-cell
+boundary therefore has parasitics that are genuinely shared with the parent,
+and they have to be attributed to one side. The rule, in full:
+
+1. **An `internal` net keeps everything.** Both per-terminal legs, the lumped
+   ground capacitor, a `--distributed-rc` ladder, a `--mom-rlc-net` series
+   inductor — all carried over unchanged.
+2. **A `boundary` net becomes a pin at its hub, keeping only its series
+   legs.** The sub-cell keeps the leg resistor from each of *its own* device
+   terminals to the pin node — that is the share
+   `_terminal_star_weights` already computed for those specific terminals, and
+   it is physically inside the block. The net's **shunt** elements — its
+   lumped ground capacitance, and any coupling capacitance on the hub whose
+   far side is *not* itself `internal` (when it is, rule 3 wins and the
+   capacitor is kept) — are attributed to the **parent**, together with the
+   legs of devices outside the sub-cell.
+
+   This is not a coin flip. A boundary pin is driven by the testbench, and a
+   shunt element hung off an ideally-driven node is not observable in the
+   measurement, while its series share is. Attributing the shunt to the parent
+   therefore costs nothing in the sub-block measurement and keeps the number
+   in exactly one place.
+3. **A coupling capacitor is kept whenever either side is `internal`**, with
+   the far net promoted to a `parasitic`-role pin. Dropping it instead would
+   silently remove real capacitive load from an internal node and make every
+   post-layout timing number optimistic; keeping it lets the testbench
+   terminate the aggressor (tying it to a quiet rail is the conservative
+   default). A coupling capacitor between two *non*-internal nets is dropped —
+   both ends are ideally-driven pins.
+4. **The substrate DC tie survives.** The 1 Tohm shunt to SPICE node `0` (see
+   "Substrate DC reference") is kept for every substrate net that survives the
+   slice, so the sub-deck inherits the same no-floating-substrate guarantee
+   the flat deck has. Node `0` is never exposed as a pin — it already means
+   the same node in every scope.
+
+**Nothing vanishes silently.** Every element rule 2 attributes to the parent
+is counted in `subcircuit.excluded_parasitics` (`r_count`, `c_count`,
+`l_count`, plus the total `resistance_ohm`/`capacitance_ff`), so a caller can
+reconcile the slice against the flat `parasitics` block.
+
+**Nothing is double-counted either.** The flat deck and the sliced deck are
+**alternatives, never combined** — the slice is a standalone DUT, not a
+sub-circuit the flat deck instantiates. A boundary-crossing coupling capacitor
+appears in both files, but no single simulation ever reads both.
+
+### JSON (`subcircuit`)
+
+`null` unless `--subcircuit` was given. Otherwise:
+
+```json
+{
+  "subcircuit": {
+    "cell": "delaywin_hv",
+    "path": "build/routed.delaywin_hv.spice",
+    "sha256": "…",
+    "pins": [
+      {"name": "A", "role": "boundary"},
+      {"name": "Y", "role": "boundary"},
+      {"name": "vsubs", "role": "parasitic"}
+    ],
+    "device_count": 14,
+    "net_count": 17,
+    "instance_line": "XDUT A Y vsubs delaywin_hv",
+    "excluded_parasitics": {
+      "r_count": 2,
+      "c_count": 3,
+      "l_count": 0,
+      "resistance_ohm": 612.4,
+      "capacitance_ff": 4.918
+    },
+    "warnings": []
+  }
+}
+```
+
+`device_count`/`net_count` count what the emitted `.SUBCKT` actually carries,
+parasitic R/C/L included — unlike the top-level `device_count`/`net_count`,
+which stay the schematic-equivalent counts for the whole flat extraction.
+`subcircuit.warnings[]` entries are also appended to the top-level
+`warnings[]`, so a caller that only reads `warnings[]` still sees them.
+
+### Errors and limitations
+
+`--subcircuit` is an application error (exit 1), never a silent fallback, when
+the named cell:
+
+- **is the top cell** — the flat netlist already *is* that cell's `.SUBCKT`;
+- **is not placed under the resolved top cell** at all;
+- **is placed more than once.** `devices[].instance_path` records cell
+  *names*, not per-placement identities, so two sibling placements of one cell
+  are indistinguishable and a slice would silently merge both copies' devices
+  into a single, plausible-looking `.SUBCKT`. Refused rather than guessed.
+  Extract a layout with a single placement of the cell instead;
+- **contributes no recognized device** — an empty body is exactly
+  `--abstract-cells`' deliberate black box and useless as a post-layout DUT.
+  Same refusal when the *whole layout* has no recognized device (a
+  routing-only stream, or the wrong `--deck`): the flag is placement-checked
+  before extraction runs, so being placed is not by itself evidence that the
+  deck found anything to slice;
+- **is combined with `--abstract-cells`.** An abstracted cell becomes a
+  subcircuit *instance* in the flat netlist, and an instance carries no
+  position to attribute it with (unlike a device). Run the two modes as
+  separate extractions.
+
+Known limitations:
+
+- **One cell per run.** The flag is not repeatable; measuring two sub-blocks
+  means two `klt extract` runs today.
+- **A labelled net with no outside connection stays internal.** It is a node
+  of the block, not a port, so it is not promoted — but it *is* reported in
+  `subcircuit.warnings[]` (and `warnings[]`) by name, so a label meant as a
+  probe point is never silently swallowed. Draw the label in the top cell, or
+  declare it with `--pins`/`--def-pins`, to force it to a pin.
+- **A `--distributed-rc` ladder on a boundary net is dropped, not partially
+  kept**, when no single segment bridges the sub-cell's own terminal to the
+  pin node: the terminal is connected straight to the pin instead, with a
+  named `warnings[]` entry. The star model (the default, and every net not
+  named by `--distributed-rc`) always keeps its leg.
+- `--check --rerun` cannot reconstruct this flag (like every other optional
+  `klt extract` flag — see "Full mode"), so a report committed from a
+  `--subcircuit` run legitimately shows drift under `--rerun`. Use cheap
+  `--check`.
 
 ## Matched-device geometry check (`--matched-group`, issue #1018)
 
@@ -5240,6 +5478,7 @@ exit codes).
 | `pdk`              | object \| `null`           | `{"variant", "root", "version"}` when `--pdk`/`--pdk-root` were given and resolved; `null` otherwise. `root` is `{"path", "scope"}` (issue #1376, schema_version 3) -- not the raw `--pdk-root` argument -- via the same `{path, scope}` shape `klt env-provenance` and `klt pex`/`klt sim`/`klt size` use: `scope: "repo"` with a repo-relative `path` when the PDK install lives inside the invoking repo, `scope: "external"` with `path: null` otherwise (a PDK install almost always is). Committing this response as evidence (the normal use of `--format json`) no longer bakes the resolving machine's absolute PDK install path (and possibly a username) into the record; `provenance.pdk` below already carries the same PDK's reproducible identity (name/source/version) without a path. |
 | `parasitics`       | object \| `null`           | Lumped RC summary when `--parasitics` was given; `null` otherwise. See "Parasitic (RC) extraction".     |
 | `spef_path`        | string \| `null`           | Additive field (issue #948). Resolved path of the written SPEF file when `--spef` was given; `null` otherwise. See "SPEF export".                       |
+| `subcircuit`       | object \| `null`           | Additive field (issue #2245). The sliced sub-circuit deck when `--subcircuit` was given -- `{"cell", "path", "sha256", "pins": [{"name", "role"}, ...], "device_count", "net_count", "instance_line", "excluded_parasitics": {"r_count", "c_count", "l_count", "resistance_ohm", "capacitance_ff"}, "warnings": [...]}` -- `null` otherwise. `pins` is in the order the written `.SUBCKT` header declares them (`role`: `"boundary"` for a real port, `"parasitic"` for a reference node only a kept parasitic element needs); `device_count`/`net_count` count what that `.SUBCKT` carries, parasitic R/C/L included (unlike the top-level counts, which stay the schematic-equivalent whole-extraction figures); `excluded_parasitics` accounts for every element the boundary rule attributed to the parent deck. See "Sub-circuit isolation". |
 | `provenance`       | object                     | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). Its `pdk` mirrors the resolved PDK as `{name, source, version}` (the richer `pdk` field above carries `root`); `deck` pins the extraction deck by name and `sha256:` content hash, plus a `released` tri-state signal (issue #1193, non-fatal) for whether that hash ships in any released `klayout-tools` version -- `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing) -- and an `options` key (issue #595) echoing `--deck-option`'s resolved mapping when non-empty (omitted entirely otherwise) -- see "Selecting a shared-geometry resistor flavour" below; `input` pins the input layout file (`path`, distinct from `netlist_sha256`, which hashes the *written* netlist) by `sha256:` content hash. |
 
 The `devices[]`/`nets[]` report is a *convenience view* for agents that want
