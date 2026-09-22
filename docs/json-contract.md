@@ -469,7 +469,11 @@ stability statement, concrete precedents, and drift-detection guidance, and
     layout to see; `klt deck info` (issue #1209) reports this install's own
     deck `content_hash` plus its structural device-class coverage
     (`ExtractionDeck.device_classes`) directly, with no input layout needed —
-    see `docs/cli/deck.md`.
+    see `docs/cli/deck.md`. `klt deck rules` (issue #2308) reports that same
+    `content_hash` alongside the deck's actual rule values (`id`,
+    `description`, `value_um`, `provenance`), so a constant read out of the
+    deck for pre-layout arithmetic can be pinned to — and re-checked
+    against — the exact deck revision it came from.
 - `input` — the single input artifact the run was made against, as
   `{content_hash, role}` (mirroring `deck`'s `{name, content_hash,
   released}`). `content_hash` is a `sha256:`-prefixed hex digest of the file,

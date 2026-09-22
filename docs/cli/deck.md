@@ -4,21 +4,26 @@ Identify klayout-tools' built-in DRC/LVS rule decks (`sky130`, `gf180mcu`,
 `sg13g2`): report the content hash *this* build ships for a deck (`hash`),
 look up which release shipped a given revision (`resolve`, by content hash
 or by `(name, version)`, against klayout-tools' own generated release
-history, issue #623), or report this install's own deck content hash,
+history, issue #623), report this install's own deck content hash,
 structural device-class coverage, and release status directly, with no
-input layout needed (`info`, issue #1209).
+input layout needed (`info`, issue #1209), or list the rule values a deck
+enforces (`rules`, issue #2308).
 
 ```
 klt deck hash    --deck <name>                              [--format text|json]
 klt deck resolve --content-hash <sha256:hex> [--deck <name>] [--format text|json]
 klt deck resolve --deck <name> --version <X.Y.Z>            [--format text|json]
 klt deck info    [--deck <name>]                             [--format text|json]
+klt deck rules   --deck <name> [--rule <id>]                 [--format text|json]
 ```
 
-The three are complements: `hash` answers "which deck revision will this
+The four are complements: `hash` answers "which deck revision will this
 build use?" (issue #1202), `resolve` answers "which release shipped that
-revision?" (issue #623), and `info` answers "what does this install
-actually recognise, right now, with no input layout at all?" (issue #1209).
+revision?" (issue #623), `info` answers "what does this install
+actually recognise, right now, with no input layout at all?" (issue #1209),
+and `rules` answers "what numbers does this deck actually enforce?" (issue
+#2308) — the pre-layout question `klt drc`, which needs a stream, cannot
+answer.
 
 ## `klt deck hash`
 
@@ -245,6 +250,110 @@ Omitting `--deck` reports every registered deck in one call — useful for a
 install klayout-tools` (or a from-source build), before running any
 extraction at all. An unrecognised `--deck` name is a clean error (exit 1),
 matching `klt extract`'s own "unknown deck" message.
+
+## `klt deck rules`
+
+Report the **numbers a deck enforces** — every registered rule's id,
+description, check kind, drawn layers, and distance threshold in micrometres
+— with **no layout file and no check run** (issue #2308).
+
+```
+klt deck rules --deck sky130                          # every rule in the deck
+klt deck rules --deck sky130 --rule poly.width.1      # one rule, by exact id
+klt deck rules --deck sky130 --format json
+```
+
+`klt drc` reports *violations* and therefore needs a stream; `klt deck info`
+reports a deck's identity and device coverage but not its rule table. Neither
+answers the pre-layout question — area budgeting, device pitch, whether a
+proposed segmentation is drawable at all — that has to be settled *before* any
+GDS exists. Answering it used to mean transcribing a constant out of a deck
+comment by hand, producing a copy that silently stops tracking the deck the
+moment the deck moves, and a citation ("0.15 µm, `poly.1a`") that no reviewer
+could re-check mechanically.
+
+```json
+{
+  "schema_version": 1,
+  "deck": "sky130",
+  "content_hash": "sha256:a1d90e066e822d0a8f36e2d4f4969b83df4360692f689b5815be9c3f151f7c8e",
+  "nominal_dbu_um": 0.001,
+  "rules": [
+    {
+      "id": "poly.width.1",
+      "description": "minimum poly width",
+      "check": "width",
+      "layers": ["poly.drawing"],
+      "scope": "poly",
+      "value_um": 0.15,
+      "value_dbu": 150,
+      "limits": {},
+      "provenance": {
+        "source_repo": "fossi-foundation/open-pdks",
+        "source_path": "sky130/klayout/sky130.lydrc",
+        "rule_id": "poly.1a",
+        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+      }
+    }
+  ]
+}
+```
+
+- `content_hash` — this install's own deck module hash, the same value
+  `klt deck info`/`provenance.deck.content_hash` report. Cite it alongside a
+  constant and the citation becomes re-checkable: the next PDK bump changes
+  the hash, so a stale transcription is detectable instead of invisible.
+- `nominal_dbu_um` — the deck's `NOMINAL_DBU_UM`, the factor `value_dbu` was
+  converted by.
+- `id` — **this deck's** rule id (`poly.width.1`), following klt's own
+  `<layer>.<check>.<n>` convention. The *upstream PDK's* rule number
+  (`poly.1a`, `DF.6_LV`) is reported separately as `provenance.rule_id` — the
+  two namespaces are deliberately distinct (see
+  [`drc.md`](drc.md)'s note that rule ids are a stable public contract).
+- `value_um` / `value_dbu` — the rule's distance threshold, in micrometres and
+  in the deck's nominal database units. Both are `null` for the check kinds
+  that do not use a distance threshold (`area`, `density`, `antenna`) rather
+  than reporting the unused `0` those rules author as a placeholder — "this
+  rule publishes no distance" is a machine-readable answer, not a fabricated
+  `0.0`.
+- `limits` — the kind-specific numerics for exactly those kinds:
+  `area_min_um2`/`area_max_um2`, `density_window_um`/`density_min`/
+  `density_max`, or `antenna_ratio_max`. Always present; `{}` for a plain
+  distance check, whose one number is `value_um`. Unset bounds are `null`.
+- `layers` — the drawn layer name(s) the rule reads, in `layer`/`other_layer`
+  order (`"poly.drawing"`; the raw `"<layer>/<datatype>"` pair when the deck
+  publishes no name for it).
+- `scope` — the DRM section or rule-id family this rule implements
+  (`coverage.deck_scope`'s per-rule source), or `null` when unscoped.
+- `provenance` — the rule's structured upstream citation, or `null` when the
+  rule carries no structured provenance yet (its inline comment in the deck
+  module remains the only record). `commit` is `""` when the deck pins no
+  upstream commit for that citation.
+
+Rules are reported in the deck's own declaration order (stable, not sorted —
+it groups rules by layer the way the deck module itself reads).
+
+An unknown `--deck` is a clean error (exit 1) through the standard envelope,
+matching `klt deck info`'s. So is an unknown `--rule` id — deliberately an
+error rather than an empty `rules` list, since a silent empty result reads as
+"this deck has no such constraint", a materially different claim from "you
+asked for a rule id that does not exist":
+
+```json
+{
+  "schema_version": 1,
+  "error": {
+    "command": "deck rules",
+    "message": "deck 'sky130' has no rule with id 'CO.7' (57 rules registered; run `klt deck rules --deck sky130` to list them)"
+  }
+}
+```
+
+Note the deck tables are klt's own curated transcriptions, not the PDK's
+executable deck — coverage is the set of rules klt implements, not the full
+DRM. `provenance` is what ties each value back to the upstream source it came
+from; `klt drc`'s `coverage.deck_scope` answers the complementary "what
+sections does this deck claim" question.
 
 ## The generated history table
 

@@ -295,6 +295,164 @@ def test_deck_info_unknown_deck_raises(_history_table):
 
 
 # --------------------------------------------------------------------------- #
+# library: deck_rules (issue #2308)
+# --------------------------------------------------------------------------- #
+
+
+def test_deck_rules_reports_every_rule_with_the_deck_content_hash():
+    from klayout_tools.decks import get_deck
+
+    report = history.deck_rules("sky130")
+
+    assert report["schema_version"] == 1
+    assert report["deck"] == "sky130"
+    # The same content hash `deck info`/`provenance.deck` report -- what
+    # makes a constant read out of this table pinnable to a deck revision.
+    assert report["content_hash"] == _real_deck_hash("sky130")
+    assert report["nominal_dbu_um"] == 0.001
+    assert len(report["rules"]) == len(get_deck("sky130"))
+
+    by_id = {rule["id"]: rule for rule in report["rules"]}
+    poly_width = by_id["poly.width.1"]
+    # sky130.py's own inline comment on this rule reads "0.15um".
+    assert poly_width["value_um"] == 0.15
+    assert poly_width["value_dbu"] == 150
+    assert poly_width["check"] == "width"
+    assert poly_width["layers"] == ["poly.drawing"]
+    assert poly_width["limits"] == {}
+    assert poly_width["provenance"]["rule_id"] == "poly.1a"
+
+
+@pytest.mark.parametrize(
+    ("deck", "rule_id", "expected_um"),
+    [
+        # One spot-check per registered deck, each against that rule's own
+        # inline "# 0.NN um" comment in the deck module.
+        ("sky130", "poly.width.1", 0.15),
+        ("gf180mcu", "poly2.width.1", 0.18),
+        ("sg13g2", "activ.width.1", 0.15),
+        ("sg13cmos5l", "activ.width.1", 0.15),
+    ],
+)
+def test_deck_rules_value_um_matches_the_deck_comment(deck, rule_id, expected_um):
+    report = history.deck_rules(deck, rule_id=rule_id)
+
+    assert [rule["id"] for rule in report["rules"]] == [rule_id]
+    # Exactly the decimal a human would write -- not 0.15000000000000002.
+    assert report["rules"][0]["value_um"] == expected_um
+
+
+def test_deck_rules_value_um_is_threshold_times_nominal_dbu_for_every_rule():
+    """The conversion, checked across every registered deck rather than at
+    the spot-checked rules above -- a distance rule always reports
+    ``threshold_dbu * nominal_dbu``, and a non-distance rule never reports a
+    distance at all."""
+    from klayout_tools.decks import deck_names, get_deck, get_nominal_dbu
+
+    for deck in deck_names():
+        nominal = get_nominal_dbu(deck)
+        source = {rule.id: rule for rule in get_deck(deck)}
+        for entry in history.deck_rules(deck)["rules"]:
+            rule = source[entry["id"]]
+            if entry["check"] in history._NON_DISTANCE_CHECKS:
+                assert entry["value_um"] is None
+                assert entry["value_dbu"] is None
+            else:
+                assert entry["value_dbu"] == rule.threshold_dbu
+                assert entry["value_um"] == pytest.approx(rule.threshold_dbu * nominal)
+
+
+def test_deck_rules_narrows_to_a_single_rule():
+    report = history.deck_rules("sky130", rule_id="poly.width.1")
+
+    assert len(report["rules"]) == 1
+    assert report["rules"][0]["id"] == "poly.width.1"
+    # The deck-level pin travels with the narrowed answer too.
+    assert report["content_hash"] == _real_deck_hash("sky130")
+
+
+def test_deck_rules_unknown_deck_raises():
+    with pytest.raises(history.DeckHistoryError, match="unknown deck 'nope'"):
+        history.deck_rules("nope")
+
+
+def test_deck_rules_unknown_rule_raises_rather_than_returning_empty():
+    # A silent empty list would read as "this deck has no such constraint",
+    # a materially different claim from "you asked for a rule id that does
+    # not exist" (issue #2308).
+    with pytest.raises(history.DeckHistoryError, match="no rule with id 'CO.7'"):
+        history.deck_rules("sky130", rule_id="CO.7")
+
+
+def test_deck_rules_area_rule_reports_its_own_limits_not_a_fabricated_zero():
+    # "area" rules author `threshold_dbu=0` as an unused placeholder -- that
+    # 0 must never surface as a 0.0 um threshold.
+    entry = history.deck_rules("sky130", rule_id="met1.area.1")["rules"][0]
+
+    assert entry["check"] == "area"
+    assert entry["value_um"] is None
+    assert entry["value_dbu"] is None
+    # sky130.py: area_min_dbu2=83_000 at dbu_um=0.001 -> 0.083 um^2.
+    assert entry["limits"] == {"area_min_um2": 0.083, "area_max_um2": None}
+
+
+def test_deck_rules_reports_null_provenance_for_an_uncited_rule():
+    from klayout_tools.decks import get_deck
+
+    uncited = next(rule.id for rule in get_deck("sky130") if rule.provenance is None)
+
+    entry = history.deck_rules("sky130", rule_id=uncited)["rules"][0]
+
+    # Explicit null, not a missing key and not an exception.
+    assert "provenance" in entry
+    assert entry["provenance"] is None
+
+
+def test_deck_rules_projects_density_and_antenna_limits():
+    """No registered deck carries a ``density``/``antenna`` rule today, so
+    this exercises the projection directly against synthetic rules -- the
+    edge case issue #2308's acceptance criteria call out, so that adding
+    such a rule to a deck later cannot silently report a fabricated
+    ``0.0``."""
+    from klayout_tools.decks.rules import DrcRule
+
+    density = DrcRule(
+        id="met1.density.1",
+        description="met1 density window",
+        layer=(68, 20),
+        check="density",
+        threshold_dbu=0,
+        density_window_um=100.0,
+        density_min=0.3,
+        density_max=0.7,
+    )
+    antenna = DrcRule(
+        id="met1.antenna.1",
+        description="met1 antenna ratio",
+        layer=(68, 20),
+        other_layer=(66, 20),
+        check="antenna",
+        threshold_dbu=0,
+        antenna_ratio_max=400.0,
+    )
+
+    projected_density = history._project_rule(density, 0.001, {})
+    projected_antenna = history._project_rule(antenna, 0.001, {})
+
+    assert projected_density["value_um"] is None
+    assert projected_density["limits"] == {
+        "density_window_um": 100.0,
+        "density_min": 0.3,
+        "density_max": 0.7,
+    }
+    assert projected_antenna["value_um"] is None
+    assert projected_antenna["limits"] == {"antenna_ratio_max": 400.0}
+    # No published layer names in this synthetic deck -- fall back to the
+    # raw (layer, datatype) pair rather than dropping the layer entirely.
+    assert projected_antenna["layers"] == ["68/20", "66/20"]
+
+
+# --------------------------------------------------------------------------- #
 # CLI wiring
 # --------------------------------------------------------------------------- #
 
@@ -396,6 +554,73 @@ def test_cli_info_unknown_deck_error_envelope(capsys):
     assert err["schema_version"] == 1
     assert err["error"]["command"] == "deck info"
     assert "unknown deck 'nope'" in err["error"]["message"]
+
+
+def test_cli_rules_json_reports_values_and_content_hash(capsys):
+    exit_code = main(["deck", "rules", "--deck", "sky130", "--format", "json"])
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["deck"] == "sky130"
+    assert payload["content_hash"] == _real_deck_hash("sky130")
+    assert payload["nominal_dbu_um"] == 0.001
+    entry = next(r for r in payload["rules"] if r["id"] == "poly.width.1")
+    assert entry["value_um"] == 0.15
+    assert entry["description"] == "minimum poly width"
+    assert entry["provenance"]["source_repo"] == "fossi-foundation/open-pdks"
+
+
+def test_cli_rules_json_single_rule(capsys):
+    exit_code = main(
+        [
+            "deck",
+            "rules",
+            "--deck",
+            "sky130",
+            "--rule",
+            "poly.width.1",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [rule["id"] for rule in payload["rules"]] == ["poly.width.1"]
+
+
+def test_cli_rules_text(capsys):
+    exit_code = main(["deck", "rules", "--deck", "sky130", "--rule", "poly.width.1"])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "deck: sky130" in out
+    assert "poly.width.1 (width)" in out
+    assert "value_um: 0.15" in out
+    assert "layers: poly.drawing" in out
+    assert "provenance: fossi-foundation/open-pdks" in out
+
+
+def test_cli_rules_unknown_deck_error_envelope(capsys):
+    exit_code = main(["deck", "rules", "--deck", "nope", "--format", "json"])
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["schema_version"] == 1
+    assert err["error"]["command"] == "deck rules"
+    assert "unknown deck 'nope'" in err["error"]["message"]
+
+
+def test_cli_rules_unknown_rule_error_envelope(capsys):
+    exit_code = main(
+        ["deck", "rules", "--deck", "sky130", "--rule", "CO.7", "--format", "json"]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "deck rules"
+    assert "no rule with id 'CO.7'" in err["error"]["message"]
 
 
 # --------------------------------------------------------------------------- #
