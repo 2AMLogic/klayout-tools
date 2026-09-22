@@ -10587,6 +10587,180 @@ def test_compose_bjt_array_collector_ring_strap_does_not_short_an_unrelated_net(
     assert not (net_base[:2] == net_ebus[:2] and net_base[2] == net_ebus[2])
 
 
+def test_compose_bjt_array_collector_ring_strap_merges_alongside_channel_track_leg(
+    tmp_path, pdk_root
+):
+    """Issue #2008: PR #1930's own two regression tests above only ever wire
+    a `COLL_*` port into a net whose *other* legs are same-block self-nets
+    (no inter-block leg at all) -- the one combination they never exercised
+    is a `COLL_*` port sharing a net with an already-channel-track-eligible
+    (#1467) inter-block leg to an external stub, the shape the issue's own
+    downstream reproduction hit.
+
+    This net has 8 same-block base pins (`Q{i}_B`) plus one inter-block pin
+    on a north-facing `stub` block -- both `Q6_B` and `stub.CONN` face
+    north, so their leg is `route_two_pin`'s both-vertical-facing/channel
+    branch (#1467's own eligibility gate) -- *and* an unrelated `decoy` net
+    is declared (and therefore accepted) first, sitting squarely in that
+    same channel, so the `Q6_B`/`stub` leg is actually forced onto a
+    *nonzero* channel track (`channel_track: 2`) rather than merely being
+    eligible for one. `COLL_E` is then added to the identical net. Root
+    cause investigation (instrumenting `route_bundle`'s accepted-edges list
+    and a systematic sweep over `bjt_array` row/col/ratio/`ring_gap_side`/
+    `routing.layer_role` combinations, see the issue's own comment log) found
+    neither hypothesis holds on current `main`: `route_bundle`'s Kruskal-MST
+    always accepts a same-block edge straight from `COLL_E` to the nearest
+    base pin (never a same-net edge that merely satisfies pin-coverage
+    without threading the diffusion contact through), and the channel-track
+    retry's fixed via-drop landing-pad position (pinned at each pin's own
+    reported ``x_um``/``y_um``, unaffected by ``channel_offset_um`` -- see
+    ``route_two_pin``'s via-drop resolution loop) never collides with, or
+    otherwise interacts with, a *different* leg's own track choice. This is
+    the regression guard for that finding: `COLL_E` must keep landing on the
+    same physical node as the base bus even when the net's other leg is
+    genuinely channel-tracked, not merely eligible for it.
+    """
+    bjt = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "coll_channel_repro",
+        emitter_um=3.4,
+        rows=2,
+        cols=4,
+        dummy=0,
+        topology="common_centroid",
+        ratio=8,
+        add_collector_ring=True,
+        ring_gap_side="N",
+        ring_gap_um=1.0,
+    )
+    stub_gds = _write_empty_library_gds(tmp_path / "cc_stub.gds", "cc_stub")
+    decoy_a_gds = _write_empty_library_gds(tmp_path / "cc_decoyA.gds", "cc_decoyA")
+    decoy_b_gds = _write_empty_library_gds(tmp_path / "cc_decoyB.gds", "cc_decoyB")
+
+    def _north_port_block(block_id, gds_path, cell_name, port_x_um=0.0):
+        return {
+            "id": block_id,
+            "cell": {
+                "gds_path": gds_path,
+                "cell_name": cell_name,
+                "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 1.0, "y1": 0.34},
+                "ports": [
+                    {
+                        "name": "CONN",
+                        "layer": {"layer": 67, "datatype": 20},
+                        "x_um": port_x_um,
+                        "y_um": 0.0,
+                        "width_um": 0.17,
+                        "direction_deg": 90,
+                    }
+                ],
+            },
+        }
+
+    def _build(include_coll, output):
+        vss_pins = [{"block": "array", "port": f"Q{i}_B"} for i in range(8)]
+        vss_pins.append({"block": "stub", "port": "CONN"})
+        if include_coll:
+            vss_pins.append({"block": "array", "port": "COLL_E"})
+        return {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "array", "generator_report": bjt},
+                _north_port_block("stub", stub_gds, "cc_stub", port_x_um=0.5),
+                _north_port_block("decoyA", decoy_a_gds, "cc_decoyA"),
+                _north_port_block("decoyB", decoy_b_gds, "cc_decoyB"),
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["array", "stub", "decoyA", "decoyB"],
+                "origins_um": {
+                    "array": {"x": 0.0, "y": 0.0},
+                    "stub": {"x": 21.0, "y": 3.0},
+                    # Sits squarely in the untracked (`channel_track: 0`)
+                    # horizontal jog `Q6_B`/`stub.CONN` would otherwise
+                    # share (both north-facing, #1467's own degenerate-
+                    # channel shape) -- just clear of the array's own
+                    # collector ring on its E side, so this net's own
+                    # rejection is a route-vs-route conflict with the decoy
+                    # (forcing the channel-track retry), never a ring
+                    # crossing.
+                    "decoyA": {"x": 19.8, "y": 2.35},
+                    "decoyB": {"x": 20.6, "y": 2.35},
+                },
+            },
+            "connectivity": [
+                {
+                    "net": "decoy",
+                    "pins": [
+                        {"block": "decoyA", "port": "CONN"},
+                        {"block": "decoyB", "port": "CONN"},
+                    ],
+                },
+                {"net": "vss", "pins": vss_pins},
+            ],
+            "routing": {"layer_role": "metal2", "width_um": 0.17},
+            "options": {
+                "cell_name": "coll_channel_" + ("coll" if include_coll else "nocoll"),
+                "output": str(output),
+            },
+        }
+
+    # Step 1 (mirrors the issue's own reproduction step 1): the 9-pin net
+    # composes clean, and the array-to-stub leg genuinely lands on a
+    # nonzero channel track -- the decoy net actually contended for the
+    # channel, this is not merely "eligible" for the retry.
+    out1 = tmp_path / "cc_step1.gds"
+    report1 = compose(_build(False, out1))
+    assert report1["unrouted_nets"] == []
+    vss_legs1 = report1["nets"][1]["legs"]
+    stub_leg1 = next(
+        leg
+        for leg in vss_legs1
+        if {p["block"] for p in leg["pins"]} == {"array", "stub"}
+    )
+    assert stub_leg1["routed"] is True
+    assert stub_leg1["channel_track"] > 0, (
+        "test fixture no longer forces a genuine channel-track retry -- "
+        "widen/move the decoy net so it actually contends"
+    )
+    drc1 = run_drc(str(out1), "sky130")
+    assert drc1["status"] == "clean", drc1["violations"]
+
+    # Step 2 (mirrors the issue's own reproduction steps 2-6): adding
+    # `COLL_E` to the identical net must still report `routed: true`, `klt
+    # drc` must stay clean, and -- unlike the issue's reported false
+    # positive -- `klt extract`'s own connectivity walk must actually show
+    # `COLL_E`'s diffusion merged into the same physical node as the base
+    # bus, not a separate/isolated node.
+    out2 = tmp_path / "cc_step2.gds"
+    request2 = _build(True, out2)
+    report2 = compose(request2)
+    assert report2["unrouted_nets"] == []
+    assert report2["nets"][1]["net"] == "vss"
+    assert report2["nets"][1]["routed"] is True
+
+    drc2 = run_drc(str(out2), "sky130")
+    assert drc2["status"] == "clean", drc2["violations"]
+
+    deck = get_extraction_deck("sky130")
+    coll_e = next(p for p in bjt["ports"] if p["name"] == "COLL_E")
+    q5_b = next(p for p in bjt["ports"] if p["name"] == "Q5_B")
+    net_coll, net_base = _bjt_array_collector_net_id(
+        str(out2),
+        request2["options"]["cell_name"],
+        deck,
+        (coll_e["x_um"], coll_e["y_um"]),
+        (q5_b["x_um"], q5_b["y_um"]),
+    )
+    assert net_coll is not None and net_base is not None
+    assert net_coll[:2] == net_base[:2] and net_coll[2] == net_base[2], (
+        "COLL_E's diffusion did not merge into the base bus's own node -- "
+        "issue #2008's reported false positive"
+    )
+
+
 def test_compose_routes_mos_array_device_port_to_its_own_ring_tap_port(
     tmp_path, pdk_root
 ):
