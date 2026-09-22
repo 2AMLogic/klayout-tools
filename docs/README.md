@@ -168,6 +168,7 @@ docs/
     github-action.md
     golden-artifact-determinism.md
     pdk-family-port-checklist.md
+    remote-evidence-runs.md
     rtl-mutation-testing.md
     waveform-first-debugging.md
 ```

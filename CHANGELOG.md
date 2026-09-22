@@ -14,6 +14,47 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2280, `klt equiv` + docs, additive — **no** `schema_version`
+  bump: two new optional CLI flags, one request-independent
+  present-only-under-`--resume` envelope block, one new diagnostic code,
+  and one new verification mode): long-run operations for evidence verbs.
+  `klt equiv --resume` re-enters a killed run from committed stage
+  artifacts instead of restarting: the `"yosys-sequential"` engine's
+  stage 1 commits `.klt/equiv/stage1.commit.json` atomically once it
+  reaches a classified outcome (request fingerprint over source *content*
+  hashes — path-independent, so remote-pulled artifact sets resume;
+  classification; cut-point blacklist; refinement count), and a
+  fingerprint-matched, log-corroborated record skips stage 1 — an
+  `all_proven` record yields the final `"equivalent"` envelope without
+  re-running Yosys; an `unproven_cells` record re-enters at stage 2. The
+  new additive `resume` envelope block (`{resumed_stage, record_path}`)
+  appears only when the flag was given, so runs without it are
+  byte-identical to before; a resumed envelope drifts from an
+  uninterrupted one only in the declared fields (`elapsed_s`, the
+  `resume` block, and host-scoped identity when resuming elsewhere).
+  Partial artifacts are structurally never verdict-bearing: a timed-out
+  stage writes a `partial: true` record, and the loader rejects any
+  record whose `partial` is not exactly `false`, whose fingerprint
+  mismatches, or whose committed log bytes do not corroborate the
+  recorded classification — a discarded record re-runs the stage and is
+  never silent (`resume_stage_record_discarded` warning). An envelope
+  itself is never partial: a killed run emits no JSON. The combinational
+  engine accepts `--resume` and re-runs its single stage (uniform retry
+  command for agent fleets). `klt equiv <request> --check <report>
+  [--rerun]` joins the shared committed-evidence verification contract
+  (#2224, `_report_verify.py`) — cheap mode re-hashes without an engine
+  (the cross-host verification step for retrieved remote-run envelopes,
+  whose content hashes are path-independent), full mode re-runs and diffs
+  verdict-bearing fields excluding volatile identity plus
+  `elapsed_s`/`resume`; exit codes reuse the run mode's 0 (match) /
+  3 (drifted) / 1 (unverifiable). New guide
+  `docs/guides/remote-evidence-runs.md`: driving `equiv`/long `sim` on a
+  remote host via the existing `remote_launcher`/`remote_transport`
+  machinery (no new orchestration infrastructure), provenance continuity
+  (the envelope describes the run truthfully wherever it executed), the
+  checkpoint-push convention for agent fleets (commit and push after
+  every green stage), and the remote round-trip walkthrough.
+
 - **Added** (#2255, `klt erc` + `klt signoff`, additive — **no**
   `schema_version` bump on either verb: one new optional spec key, one
   *widened* existing one, one new coverage skip reason, one new

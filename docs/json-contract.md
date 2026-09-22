@@ -856,7 +856,7 @@ operator lists, and the negative controls:
 
 ## Verifying committed evidence: `--check` / `--rerun`
 
-Six verbs let a consumer verify that a previously committed `--format json`
+Seven verbs let a consumer verify that a previously committed `--format json`
 report still reproduces, built on one shared implementation
 (`src/klayout_tools/_report_verify.py`):
 
@@ -868,6 +868,7 @@ report still reproduces, built on one shared implementation
 | `synthesize` | `klt synthesize REQUEST --check REPORT [--rerun]` | #2224 |
 | `place-and-route` | `klt place-and-route REQUEST --check REPORT [--rerun]` | #2224 |
 | `signoff` | `klt signoff --manifest\|--fleet M --check REPORT` | #2249 |
+| `equiv` | `klt equiv REQUEST --check REPORT [--rerun]` | #2280 |
 
 All six share one contract:
 
@@ -914,21 +915,25 @@ only the commit".
 
 **The flow verbs take the request back.** `drc`/`lvs`/`extract` echo their own
 inputs into the report, so `--check REPORT` is self-sufficient. A
-`synthesize`/`place-and-route` report echoes *outputs* and provenance hashes
-but never the request document or the source/netlist paths it resolved — so
-those two keep their positional `REQUEST` argument alongside `--check`, and
-the question answered becomes "does this committed record still reproduce
-*from this request*". Run-scoped bookkeeping is canonicalized out of the
-`--rerun` diff on both sides (`synthesize`'s per-run `run_id` and the artifact
-paths under it; `place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4`
-per OpenROAD invocation) — without that, `--rerun` would report `"drifted"`
-unconditionally. `klt signoff` is the same shape one level up: a tier/fleet
-report echoes graded verdicts, never the manifest, so `--check` sits beside
-the `--manifest`/`--fleet` argument it re-grades. Per-verb detail:
+`synthesize`/`place-and-route`/`equiv` report echoes *outputs* and
+provenance hashes but never the request document or the source paths it
+resolved — so those three keep their positional `REQUEST` argument
+alongside `--check`, and the question answered becomes "does this
+committed record still reproduce *from this request*". Run-scoped
+bookkeeping is canonicalized out of the `--rerun` diff on both sides
+(`synthesize`'s per-run `run_id` and the artifact paths under it;
+`place-and-route`'s `engine_logs[]`, keyed by a fresh `uuid4` per
+OpenROAD invocation; `equiv`'s `elapsed_s` and its `resume` block,
+issue #2280) — without that, `--rerun` would report `"drifted"`
+unconditionally. `klt signoff` is the same shape one level up: a
+tier/fleet report echoes graded verdicts, never the manifest, so
+`--check` sits beside the `--manifest`/`--fleet` argument it re-grades.
+Per-verb detail:
 [`cli/drc.md`](cli/drc.md), [`cli/lvs.md`](cli/lvs.md),
 [`cli/extract.md`](cli/extract.md),
 [`cli/synthesize.md`](cli/synthesize.md),
 [`cli/place-and-route.md`](cli/place-and-route.md),
+[`cli/equiv.md`](cli/equiv.md),
 [`cli/signoff.md`](cli/signoff.md).
 
 ## Checked-work coverage (`coverage.schema_version: 1`)

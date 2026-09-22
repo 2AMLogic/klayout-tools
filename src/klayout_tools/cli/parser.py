@@ -2186,6 +2186,60 @@ def _add_equiv_parser(subparsers: argparse._SubParsersAction) -> None:
             "docs/cli/equiv.md."
         ),
     )
+    equiv_parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=False,
+        help=(
+            "resume from committed stage artifacts under .klt/equiv/ (issue "
+            "#2280): a completed stage 1 whose stage1.commit.json record "
+            "fingerprint-matches this request and whose committed log "
+            "corroborates it is reused instead of re-run (an `all_proven` "
+            "record yields the final verdict without re-running Yosys; an "
+            "`unproven_cells` record re-enters at stage 2); anything else "
+            "re-runs from stage 1. The `yosys` (combinational) engine is a "
+            "single stage, so the flag is accepted and re-runs its one "
+            "stage -- kept uniform so an agent fleet can use one retry "
+            "command regardless of engine. See docs/cli/equiv.md, "
+            "'Resumable runs', and docs/guides/remote-evidence-runs.md."
+        ),
+    )
+    # `request` (positional) stays required alongside --check, exactly as
+    # the #2224 flow verbs' own --check does: an equiv report echoes outputs
+    # and provenance hashes, not the request document, so the request
+    # supplies the inputs to re-hash (cheap mode) or re-run (full mode)
+    # against. Registered inline rather than via _add_flow_verify_args
+    # because that shared helper's help text names a deck hash `klt equiv`
+    # never records (`provenance.deck` is always null -- no deck exists).
+    equiv_parser.add_argument(
+        "--check",
+        default=None,
+        metavar="REPORT",
+        help=(
+            "verify a previously committed 'klt equiv --format json' "
+            "report (REPORT) instead of running a fresh proof, against the "
+            "request given positionally (issues #2224 + #2280). Cheap mode "
+            "(default): re-resolve and re-hash the request's gold/gate "
+            "sources and compare against REPORT's recorded "
+            "provenance.input.content_hash -- no Yosys run. Combine with "
+            "--rerun for full mode. Exits 0 if still consistent, 3 if "
+            "drifted -- see docs/cli/equiv.md, '--check / --rerun'"
+        ),
+    )
+    equiv_parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "full mode for --check (issues #2224 + #2280): re-run the proof "
+            "the positional request declares and diff verdict-bearing "
+            "fields against the committed report, excluding "
+            "provenance.klt_version/klayout_version/pdk.version, "
+            "engine_version, and run-scoped bookkeeping (elapsed_s, the "
+            "resume block; see docs/cli/equiv.md, '--check / --rerun'). "
+            "Requires --check; a clean error (exit 1) otherwise"
+        ),
+    )
     _add_format_arg(equiv_parser)
     equiv_parser.set_defaults(func=equiv_cmd.run)
 

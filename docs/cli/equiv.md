@@ -19,6 +19,8 @@ describes standalone.
 ```
 klt equiv <request> [--timeout-s <seconds>]
                     [--sim-backend iverilog|verilator|both]
+                    [--resume]
+                    [--check <report> [--rerun]]
                     [--format text|json]
 ```
 
@@ -46,6 +48,14 @@ cleanly.
 - `--sim-backend` — which simulator **replays** a counterexample
   (`iverilog`, default; `verilator`; or `both`), overriding the request's
   own `sim_backend` field when given. See "Replay backend" below.
+- `--resume` — resume from committed stage artifacts under `.klt/equiv/`
+  (issue #2280) instead of always starting from scratch. See
+  "Resumable runs" below, and
+  [`guides/remote-evidence-runs.md`](../guides/remote-evidence-runs.md)
+  for the agent-fleet operations contract this is part of.
+- `--check <report>` (with optional `--rerun`) — verify a previously
+  committed `--format json` report instead of running a fresh proof
+  (issues #2224 + #2280). See "--check / --rerun" below.
 - `--format` — `text` (default) or `json`.
 
 ## Scope
@@ -319,6 +329,7 @@ before `equiv_make` runs.
 | `port_map` | object \| null | Echo of the request field. |
 | `timeout_s` | number | The effective timeout used (request field, or `--timeout-s`, or the `60` default). |
 | `elapsed_s` | number | Wall-clock time the Yosys subprocess actually ran, in seconds. |
+| `resume` | object \| null | **Present only when `--resume` was given** (issue #2280) — the same present-only-when-requested convention `klt sim`'s `environment.resume` block uses; omitted entirely otherwise, so a run without the flag is byte-identical to pre-#2280 output. `{"resumed_stage": 0 \| 1, "record_path": string \| null}`: `resumed_stage` is `1` when a committed stage-1 record was adopted (stage 1 did not re-run) and `0` when the run started from scratch (including when a record existed but was discarded — in which case `diagnostics` carries the `resume_stage_record_discarded` warning naming why). `record_path` is the stage record's path for the sequential engine; `null` for the combinational engine (it commits no stage records). See "Resumable runs" below. |
 | `counterexample` | object \| null | Present when `status == "counterexample"`, and also (issue #1349) when a solver-reported counterexample was downgraded to `status: "inconclusive"` because `counterexample.confirmed_by_simulation` came back `false` — the object itself is unchanged either way, it is only the top-level `status` that reflects whether the divergence was actually demonstrated. `null` for every other `"inconclusive"` cause (timeout, unproven-by-induction) and for `"equivalent"`. See "Counterexample shape" below. |
 | `diagnostics` | array\<object\> | `{severity, code, message}` entries — a timeout's own explanation, a degraded (but non-fatal) counterexample-confirmation outcome (e.g. `iverilog` unavailable), or a replay-backend cross-check outcome (`sim_backend_disagreement`, severity `error`; `sim_backend_cross_check_unavailable`, `warning`; `sim_backend_output_difference`, `info`). Empty on a clean `"equivalent"`/`"counterexample"` run. |
 | `artifacts` | object | `{script_path, netlist_path, log_path}` — the generated `.ys` script, the flattened combined `gold`/`gate` Verilog netlist, and the raw Yosys log, all absolute paths under `.klt/equiv/` next to the request file. `netlist_path`/`log_path` are `null` when the run timed out before they were written. Never deleted — kept as debuggable artifacts, the same convention `klt synthesize`'s `.klt/synthesize/` uses. |
@@ -440,6 +451,136 @@ one, generalising it for a genuinely sequential trace:
 | `simulation.cycles` | array\<object\> | The independent `iverilog`/`vvp` run's own per-cycle `{time, gold_outputs, gate_outputs, diverging_outputs}` (raw `{name: bin_string}` values, not the richer `{bin, width, value}` shape). |
 | `simulation.diverging_outputs` | array\<string\> | The union of every simulated cycle's own divergence. |
 | `simulation_cross_check` | object \| null | **`sim_backend: "both"` only** (#2223). The same shape as the combinational cross-check block, with `cycles` in place of `gold_outputs`/`gate_outputs`, and each `output_mismatches` entry carrying an extra `cycle` field. The start-state cycles are exactly where the declared 2-state/4-state difference shows up — `explained_by: "two_state_backend"` — because Verilator starts registers at `0` where Icarus starts them at `x`. |
+
+## Resumable runs (`--resume`, issue #2280)
+
+Long evidence runs die mid-way in autonomous-agent fleets (rate limits,
+session reaping). `--resume` makes re-entry idempotent instead of
+all-or-nothing, using the stage structure the `"yosys-sequential"` engine
+already has. The full operations context — running the verb on a remote
+host, retrieving the envelope, and the checkpoint-push convention — is in
+[`guides/remote-evidence-runs.md`](../guides/remote-evidence-runs.md).
+
+**What commits, what resumes:**
+
+- When stage 1 (the `equiv_make`/`equiv_induct` induction proof, including
+  its bounded cut-point refinement loop) reaches a classified outcome, the
+  run commits `.klt/equiv/stage1.commit.json` **atomically** (temp file +
+  `os.replace`, the same never-partially-written discipline `klt sim`'s
+  checkpoint uses). The record carries:
+  - `fingerprint` — SHA-256 over everything that determines what the
+    stages compute: the gold/gate source **content hashes** (path-independent,
+    so a moved checkout — or an artifact set pulled back from a remote
+    host — is still resumable), tops, liberty, `port_map`, `engine`,
+    `induction_depth`, `sim_backend`, `timeout_s`.
+  - `classification` — `"all_proven"` or `"unproven_cells"`.
+  - `blacklist` / `refinements` — the cut-point refinement loop's exact
+    outcome (issue #1353), so a resumed run reconstructs the
+    `equiv_cutpoint_refinement` diagnostic byte-identically.
+  - `partial` — `false` on a commit; `true` on the marker a timed-out or
+    failed stage attempt leaves (see below).
+- `klt equiv <request> --resume` then re-enters from that record instead
+  of restarting: an **`all_proven`** record produces the final
+  `"equivalent"` envelope **without re-running Yosys at all**; an
+  **`unproven_cells`** record re-enters directly at stage 2 (the bounded
+  counterexample search). Stage 2 itself always re-runs when it is the
+  re-entry point — it runs at most once per run and is bounded by the
+  same `timeout_s`, and its result (including the counterexample's
+  independent simulation replay) is re-derived deterministically.
+- Anything else re-runs stage 1 from scratch. A discarded record is never
+  silent: `diagnostics` carries a warning-severity
+  `resume_stage_record_discarded` entry naming the reason, and `resume.
+  resumed_stage` stays `0`.
+
+**Partial artifacts can never satisfy a verdict check** (issue #2280's
+negative-control criterion, enforced structurally in `equiv.py` and pinned
+by `tests/test_equiv_resume.py`):
+
+- A stage record is adoptable only if it is `partial: false`, structurally
+  intact (right stage, valid classification, well-typed blacklist and
+  refinement count), fingerprint-matched to *this* request, and — the
+  integrity core — **corroborated by its own committed log bytes**: an
+  `all_proven` record requires Yosys's `Equivalence successfully proven!`
+  line in `equiv_seq_stage1.log`; an `unproven_cells` record requires
+  unproven-`$equiv` report lines and the success line's absence. A
+  fabricated, truncated, or doctored record fails this and is re-run
+  past, never trusted. (An `unproven_cells` record additionally requires
+  the committed `equiv_seq_netlist.v` — stage 2's input — to still be on
+  disk.)
+- **An envelope is never partial.** A run that dies mid-way emits no JSON
+  at all; what it left behind says `partial` on itself. A committed
+  `--format json` envelope exists only for a run that reached a verdict.
+  The only code path from a stage record to an envelope `status` runs the
+  full validation above.
+
+**Byte-identity and its declared exceptions.** A resumed run's envelope is
+byte-identical to an uninterrupted run's except in:
+
+- `elapsed_s` — wall-clock bookkeeping, never evidence;
+- the `resume` block itself — present only under `--resume`;
+- when the resume happens on a different host: `provenance.klt_version`
+  and `engine_version` (install/build identity, the same fields
+  `--check`/`--rerun` already exclude as volatile).
+
+Nothing else may drift. `tests/test_equiv_resume.py::
+test_killed_run_resumes_from_committed_stage_artifacts` (with its
+`all_proven` and refinement-reconstruction variants) pins this against an
+uninterrupted control run.
+
+**The combinational engine** is a single Yosys subprocess — there is no
+earlier stage artifact to re-enter from, so `--resume` is accepted,
+re-runs its one stage, and reports `resume.resumed_stage: 0` with
+`record_path: null`. Kept uniform so an agent fleet can issue one retry
+command regardless of engine.
+
+## `--check` / `--rerun` (issues #2224 + #2280)
+
+`klt equiv` joins the shared committed-evidence verification contract
+(`drc`/`lvs`/`extract`/`synthesize`/`place-and-route`/`signoff` — see
+[`../json-contract.md`](../json-contract.md)'s "Verifying committed
+evidence" table), built on the same `src/klayout_tools/_report_verify.py`
+machinery:
+
+```
+klt equiv <request> --check <report>           # cheap mode: re-hash, no engine
+klt equiv <request> --check <report> --rerun   # full mode: re-run and diff
+```
+
+`klt equiv`'s report echoes its resolved inputs (`gold`/`gate` sources)
+and provenance hashes but not the request document itself, so — exactly
+like the #2224 flow verbs — the request stays positional alongside
+`--check`, and the question answered is "does this committed record still
+reproduce *from this request*".
+
+- **Cheap mode** re-resolves the request's gold/gate sources (the same
+  `_resolve_side` a run uses) and re-hashes them, comparing against the
+  report's `provenance.input.content_hash`. No Yosys run. Because the
+  hash is content-derived and path-independent, this is the verification
+  step for a **retrieved remote-run envelope** — the report may carry the
+  remote host's absolute paths and `--check` still verifies it against
+  local copies of the same sources (see
+  [`guides/remote-evidence-runs.md`](../guides/remote-evidence-runs.md)'s
+  round-trip).
+- **Full mode** (`--rerun`) re-runs the proof the request declares and
+  diffs verdict-bearing fields against the committed report, excluding
+  the shared volatile identity set (`provenance.klt_version`,
+  `provenance.klayout_version`, `provenance.pdk.version`, and the Yosys
+  `engine_version` build string) plus this verb's run-scoped bookkeeping:
+  `elapsed_s` and the `resume` block. Its known limitation is the mirror
+  image of cheap mode's strength: the echoed `gold`/`gate` paths are
+  absolute, so a full-mode re-run on a different host legitimately drifts
+  on those paths even when the verdict is identical — cheap mode is the
+  cross-host path, full mode answers "does this reproduce *here*". Pass
+  the same `--timeout-s`/`--sim-backend` the original run used (the
+  response does not echo them).
+- **Exit codes in verification mode** reuse the run mode's numeric
+  vocabulary, the same deliberate reuse `klt drc --check` and
+  `klt synthesize --check` make (issue #2224): `0` = `status: "match"`,
+  `3` = `status: "drifted"` (naming which hash moved or which fields
+  changed), `1` = the report could not be verified at all (missing,
+  unparseable, unresolvable request). A recorded hash of `null` is never
+  a pass — a report predating the field renders `"drifted"`, never a
+  false `"match"`.
 
 ## Timeout and the inconclusive verdict
 
