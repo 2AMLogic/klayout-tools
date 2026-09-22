@@ -14,6 +14,31 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2285, `klt functional-verification`, additive — **no**
+  `schema_version` bump): `options.sdf` no longer hard-fails on a zero-delay
+  `INTERCONNECT` entry whose destination is a top-level output port bit the
+  gate-level netlist drives through a Verilog `assign` alias — the shape
+  every P&R backend produces for a constant/tie-cell-driven output
+  (`assign uio_oe[0] = net0;`). Icarus 13.0 cannot insert an intermodpath
+  across that `assign` join, so each such entry cost one `SDF ERROR: ...
+  Could not find intermodpath!` and a real post-route SDF could not pass the
+  diagnostic gate at all, even though every failing entry was
+  `(0.000:0.000:0.000)` and modelled no delay. Rewriting the endpoint
+  through the netlist's alias map was tried and refuted live (the rewritten
+  entry names the net its own source pin drives and fails with `Could not
+  find handles for both ports!`), so such entries are now removed from the
+  SDF text handed to `$sdf_annotate` and counted in `environment.sdf.dropped`
+  as a new class, `zero_delay_alias_port_interconnect` (beside #1102's
+  `timingcheck`), with `partial: true`. The exemption is bounded by the
+  entry's delay value, not by the diagnostic text: an entry is dropped only
+  when *every* `min:typ:max` member of every rvalue is zero, so a
+  non-zero-delay entry on the identical destination is left in place and
+  still fails loudly (exit 1) — real delay is never silently discarded. The
+  alias map is read from `hdl_toplevel`'s own module via the same gate-level
+  `assign` parser `klt lvs` already reuses (#2021); a top module it cannot
+  read yields no drops and unchanged behavior. See
+  [`docs/cli/functional-verification.md`](docs/cli/functional-verification.md)'s
+  "SDF back-annotation" section.
 - **Added** (#2275, `scripts/check_artifact_determinism.py` + CI + docs,
   additive — **no** `schema_version` bump): flake-triage forensics and
   declared platform-variable regions for golden-artifact evidence. The

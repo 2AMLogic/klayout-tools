@@ -8,7 +8,12 @@ elaboration-root generation (:func:`_write_sdf_annotate_shim`,
 :func:`_parse_toplevel_ports`, :func:`_write_sdf_dut_wrapper`), SDF-text
 paren/clause scanning and bit-selected top-level-port ``INTERCONNECT``
 deferral (:func:`_sdf_matching_paren`, :func:`_sdf_top_level_clauses`,
-:func:`_split_sdf_bus_port_interconnects`), and post-run diagnostics
+:func:`_split_sdf_bus_port_interconnects`), ``assign``-aliased-port
+``INTERCONNECT`` normalization (:func:`_collect_sdf_alias_port_bits`,
+:func:`_sdf_interconnect_is_zero_delay`,
+:func:`_sdf_interconnect_is_droppable`, :func:`_sdf_cell_delay_spans`,
+:func:`_sdf_cell_alias_port_removals`, :func:`_cut_sdf_spans`,
+:func:`_drop_sdf_zero_delay_alias_port_interconnects`), and post-run diagnostics
 (:func:`_check_sdf_engine_capability`, :func:`_scan_sdf_diagnostics`). This
 mirrors the shape of the earlier ``lvs.py``/``lvs_mismatch.py`` (#1721),
 ``extract.py``/``extract_parasitics.py`` (#1572), and
@@ -595,6 +600,321 @@ def _split_sdf_bus_port_interconnects(
     )
 
     return safe_text, deferred_text
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2285: a zero-delay `INTERCONNECT` entry whose *destination* is a
+# top-level output port bit the gate-level netlist drives through a Verilog
+# `assign` alias -- the shape every P&R backend produces for a
+# constant-driven output:
+#
+#     sg13cmos5l_tielo const_drive_0 (.L_LO(net0));
+#     assign uio_oe[0] = net0;
+#     (INTERCONNECT const_drive_0.L_LO uio_oe[0] (0.000:0.000:0.000))
+#
+# Icarus 13.0 cannot insert an intermodpath across that `assign` join, so
+# every such entry costs one `SDF ERROR: <file>:<line>: Could not find
+# intermodpath!` -- and since the diagnostic gate (correctly) treats an
+# unapplied annotation as a hard failure, a real post-route SDF could not
+# pass the gate at all, even though every failing entry was
+# `(0.000:0.000:0.000)` and therefore modelled no delay whatsoever.
+#
+# Two resolutions were tried live against raw `iverilog`/`vvp` 13.0 (the
+# same methodology #1069/#1619 used -- see
+# `docs/design/sdf-annotate-feasibility-spike.md`):
+#
+# 1. **Rewrite the endpoint through the netlist's alias map** (resolve
+#    `uio_oe[0]` to its canonical net `net0` before annotation, so the entry
+#    actually applies): **refuted.** The rewritten entry names the very net
+#    its own source pin drives -- a degenerate zero-length interconnect --
+#    and Icarus then fails it with a *different* diagnostic (`Could not find
+#    handles for both ports!`) instead of resolving it. There is no
+#    endpoint spelling that makes an entry across an `assign` join
+#    insertable.
+# 2. **Drop the entry, with a counted exemption** (what is implemented
+#    here): remove it from the SDF text handed to `$sdf_annotate` and report
+#    the count as an `environment.sdf.dropped` class, so the run is
+#    machine-distinguishable from an ordinary clean annotation.
+#
+# The exemption is bounded by the delay value, not by the diagnostic text,
+# which is what keeps it from ever masking a real annotation failure: an
+# entry is dropped only when *every* delay value it carries (all three
+# `min:typ:max` members of every rvalue, not just the `-T`-selected one) is
+# zero, so dropping it cannot change any simulated timing at any corner. A
+# **non**-zero-delay entry on the identical alias-aliased port bit is left
+# in place, fails to annotate exactly as before, and still raises
+# `FunctionalVerificationError` -- loud, not silently retimed.
+#
+# Keying on the *entry's* delay value rather than on the diagnostic line is
+# also the only workable shape: Icarus's `SDF ERROR: <file>:<line>:` locator
+# cannot be mapped back to an entry once more than one `$sdf_annotate` call
+# is in play, because its line counter is **cumulative across calls** rather
+# than reset per file (verified live: with #1619's two-call split, an entry
+# on line 10 of the second file is reported as line 24 -- 14 lines of the
+# first file plus 10).
+#
+# The removal cleans up after itself structurally, because Icarus's SDF
+# parser rejects an emptied clause outright (verified live): a `(DELAY
+# (ABSOLUTE))` with no entries left is `Invalid/malformed delay type`, and a
+# `(DELAYFILE ...)` with no `CELL` at all is `Invalid DELAYFILE format`. So
+# emptying a delay-type clause removes that clause, emptying every
+# delay-type clause of a `(DELAY ...)` removes the `(DELAY ...)`, and the
+# `(CELL ...)` itself is always kept (a `CELL` carrying only `CELLTYPE`/
+# `INSTANCE` and no `DELAY` annotates cleanly).
+# --------------------------------------------------------------------------- #
+
+#: Every numeric literal in an SDF delay value list -- integers, decimals,
+#: and exponent forms, signed or not. :func:`_sdf_interconnect_is_zero_delay`
+#: applies this to the *delay* portion of an ``INTERCONNECT`` entry only
+#: (never to the endpoint tokens, whose bit selects carry digits of their
+#: own), and requires every match to be zero.
+_SDF_DELAY_NUMBER_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+
+#: The head of an ``INTERCONNECT`` entry: the keyword plus its two endpoint
+#: tokens (source, destination). Everything past the match is the entry's
+#: delay value list.
+_SDF_INTERCONNECT_HEAD_RE = re.compile(r"\(INTERCONNECT\s+(\S+)\s+(\S+)")
+
+
+def _collect_sdf_alias_port_bits(
+    source_paths: list[str], hdl_toplevel: str
+) -> set[str]:
+    """Every top-level port (bit-expanded: ``uio_oe[0]``, or a bare scalar
+    port name) of ``hdl_toplevel`` whose only Verilog-level connection is an
+    ``assign`` alias -- the port references an SDF ``INTERCONNECT``
+    destination can name but Icarus cannot insert an intermodpath onto
+    (issue #2285).
+
+    Reuses :func:`klayout_tools.verilog_netlist.collect_gate_level_port_aliases`
+    (issue #2021's own alias map, already reused by
+    ``klayout_tools.lvs._apply_gate_level_port_aliases``) rather than
+    re-parsing ``assign`` statements a third time -- but applies it to
+    *only* ``hdl_toplevel``'s own ``module``/``endmodule`` chunk, never to
+    the whole of ``request.sources``: a real request's sources also carry
+    the PDK's behavioural cell models (``specify`` blocks, ``always``
+    blocks, non-alias continuous assignments), none of which that
+    deliberately narrow gate-level grammar models.
+
+    Returns an empty set -- never raises -- whenever the alias map cannot be
+    derived: no such module in any source, an unreadable file, or a top
+    module outside that gate-level subset (notably an **ANSI-style** module
+    header, ``module top (input a, output [1:0] y);`` -- ``verilog_netlist``
+    supports only the non-ANSI ``module top (a, y); input a; output [1:0]
+    y;`` form, which is what every real ``write_verilog`` post-route netlist
+    -- the only kind that carries this issue's tie-cell shape -- emits).
+    An empty set makes
+    :func:`_drop_sdf_zero_delay_alias_port_interconnects` a no-op, i.e. the
+    exact behaviour this path had before #2285: this is a *normalization*
+    pass, and failing to normalize must never be worse than not having
+    tried.
+    """
+    from .verilog_netlist import collect_gate_level_port_aliases
+
+    chunk_re = re.compile(
+        r"\bmodule\s+" + re.escape(hdl_toplevel) + r"\b.*?\bendmodule\b",
+        re.DOTALL,
+    )
+    for path in source_paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        chunk_match = chunk_re.search(text)
+        if chunk_match is None:
+            continue
+        try:
+            aliases = collect_gate_level_port_aliases(chunk_match.group(0))
+        except Exception:
+            # Not parseable as gate-level Verilog (a hand-written RTL top,
+            # a construct outside verilog_netlist's narrow grammar) -- no
+            # alias map, so no normalization. Never fatal.
+            return set()
+        return set(aliases.get(hdl_toplevel, {}))
+    return set()
+
+
+def _sdf_interconnect_is_zero_delay(entry_text: str) -> bool:
+    """``True`` when every delay value in the ``INTERCONNECT`` entry
+    ``entry_text`` is zero -- all three ``min:typ:max`` members of every
+    rvalue, not just the one ``iverilog -T <corner>`` selects.
+
+    Requiring *all* members (rather than only the requested corner's) is
+    deliberately conservative: it is what lets
+    :func:`_drop_sdf_zero_delay_alias_port_interconnects`'s exemption be
+    stated as "dropping this entry cannot change simulated timing at any
+    corner", with no dependence on which corner this particular run asked
+    for. An entry carrying no delay value at all is zero-delay by the same
+    reasoning (it annotates nothing).
+
+    ``False`` for text that is not an ``INTERCONNECT`` entry at all, so a
+    caller can never widen the exemption by mis-classifying an
+    ``IOPATH``/``PORT``/``DEVICE`` entry as zero-delay.
+    """
+    head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
+    if head is None:
+        return False
+    return all(
+        float(value) == 0.0
+        for value in _SDF_DELAY_NUMBER_RE.findall(entry_text[head.end() :])
+    )
+
+
+def _sdf_interconnect_is_droppable(entry_text: str, alias_port_bits: set[str]) -> bool:
+    """``True`` when ``entry_text`` is an ``INTERCONNECT`` entry whose
+    *destination* endpoint is one of ``alias_port_bits`` **and** whose every
+    delay value is zero -- the sole condition
+    :func:`_drop_sdf_zero_delay_alias_port_interconnects` removes an entry
+    on (issue #2285). Both halves are load-bearing: the destination match
+    narrows the pass to the one shape Icarus structurally cannot annotate,
+    and the zero-delay test is what makes removing it provably unable to
+    change simulated timing.
+    """
+    head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
+    if head is None or head.group(2) not in alias_port_bits:
+        return False
+    return _sdf_interconnect_is_zero_delay(entry_text)
+
+
+def _sdf_cell_delay_spans(
+    text: str, cell_start: int
+) -> tuple[tuple[int, int], list[tuple[int, int]]] | None:
+    """``((DELAY clause span), [delay-type clause spans])`` for the ``(CELL``
+    opening at ``cell_start``, or ``None`` when the cell carries no
+    ``(DELAY ...)`` clause -- or when the SDF text around it is malformed.
+
+    A malformed cell is skipped rather than reported: diagnosing a
+    not-well-formed SDF belongs to the simulator's own parser (and to
+    :func:`_split_sdf_bus_port_interconnects`, which raises on unbalanced
+    parens), not to a normalization pass that must never be able to turn a
+    working run into a failing one.
+    """
+    try:
+        cell_end = _sdf_matching_paren(text, cell_start) + 1
+        delay_match = re.search(r"\(DELAY\b", text[cell_start:cell_end])
+        if delay_match is None:
+            return None
+        delay_start = cell_start + delay_match.start()
+        delay_end = _sdf_matching_paren(text, delay_start) + 1
+        return (
+            (delay_start, delay_end),
+            _sdf_top_level_clauses(text, delay_start + 1, delay_end - 1),
+        )
+    except Exception:
+        return None
+
+
+def _sdf_cell_alias_port_removals(
+    text: str, cell_start: int, alias_port_bits: set[str]
+) -> tuple[list[tuple[int, int]], int]:
+    """``([spans to cut], how many entries that accounts for)`` for one
+    ``(CELL ...)`` block -- :func:`_drop_sdf_zero_delay_alias_port_
+    interconnects`'s per-cell half, including the structural cleanup.
+
+    The returned spans are not always the entry spans themselves: emptying a
+    delay-type clause returns *that clause's* span instead (Icarus rejects a
+    ``(DELAY (ABSOLUTE))`` with no entries as ``Invalid/malformed delay
+    type``), and emptying every delay-type clause of a ``(DELAY ...)``
+    returns the ``(DELAY ...)`` span. The ``(CELL ...)`` itself is never
+    returned: a cell carrying only ``CELLTYPE``/``INSTANCE`` annotates
+    cleanly, while a ``(DELAYFILE ...)`` with no ``CELL`` at all is
+    ``Invalid DELAYFILE format``. The count is always the number of
+    *entries* dropped, however they were cut.
+    """
+    spans = _sdf_cell_delay_spans(text, cell_start)
+    if spans is None:
+        return [], 0
+    delay_span, type_spans = spans
+
+    removals: list[tuple[int, int]] = []
+    emptied_type_spans: list[tuple[int, int]] = []
+    dropped = 0
+    for type_start, type_end in type_spans:
+        entry_spans = _sdf_top_level_clauses(text, type_start + 1, type_end - 1)
+        doomed = [
+            (start, end)
+            for start, end in entry_spans
+            if _sdf_interconnect_is_droppable(text[start:end], alias_port_bits)
+        ]
+        if not doomed:
+            continue
+        dropped += len(doomed)
+        if len(doomed) == len(entry_spans):
+            emptied_type_spans.append((type_start, type_end))
+        else:
+            removals.extend(doomed)
+
+    if not emptied_type_spans:
+        return removals, dropped
+    if len(emptied_type_spans) == len(type_spans):
+        removals.append(delay_span)
+    else:
+        removals.extend(emptied_type_spans)
+    return removals, dropped
+
+
+def _cut_sdf_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` with each ``(start, end)`` span in ``spans`` cut out, leaving
+    every surrounding paren, clause, and untouched entry byte-identical."""
+    parts: list[str] = []
+    cursor = 0
+    for start, end in sorted(spans):
+        parts.append(text[cursor:start])
+        cursor = end
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
+def _drop_sdf_zero_delay_alias_port_interconnects(
+    sdf_path: str, alias_port_bits: set[str]
+) -> tuple[str, int] | None:
+    """Remove every zero-delay ``INTERCONNECT`` entry in ``sdf_path`` whose
+    *destination* is one of ``alias_port_bits``, returning ``(text with
+    those entries removed, how many were removed)`` -- or ``None`` when
+    there is nothing to remove, in which case the caller keeps handing
+    ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    See the module-level comment above for issue #2285's live findings: why
+    the entry cannot be made to annotate by rewriting its endpoint, why the
+    exemption is keyed on the entry's own delay value rather than on
+    Icarus's diagnostic line, and why an emptied clause has to be removed
+    along with its entries.
+
+    ``alias_port_bits`` is empty for every design with no ``assign``-aliased
+    top-level port (the overwhelmingly common case), in which case this
+    returns ``None`` immediately without reading the file -- a real
+    post-route SDF can be large, and this pass's whole cost should be paid
+    only when it can possibly matter.
+
+    Only the *destination* endpoint is matched. That is the side every
+    observed failure carries (a constant driver's output pin feeding an
+    aliased output port bit), and the source side has its own separate,
+    unrelated Icarus limitation already pinned down by
+    ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
+    unresolvable`` (issue #1619 shape (b)) -- widening this pass to sources
+    would silently take over that documented case without evidence that
+    dropping is the right answer there.
+    """
+    if not alias_port_bits:
+        return None
+    try:
+        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+
+    removed_spans: list[tuple[int, int]] = []
+    dropped = 0
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        spans, count = _sdf_cell_alias_port_removals(
+            text, cell_match.start(), alias_port_bits
+        )
+        removed_spans.extend(spans)
+        dropped += count
+
+    if not dropped:
+        return None
+    return _cut_sdf_spans(text, removed_spans), dropped
 
 
 # --------------------------------------------------------------------------- #
