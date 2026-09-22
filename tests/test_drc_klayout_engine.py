@@ -986,6 +986,380 @@ def test_klayout_engine_cleans_up_work_dir_on_error(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# A PDK driver's *host* assumptions (issue #2333)
+#
+# Running a vendor's own driver script makes its host assumptions part of
+# this engine's contract, and those assumptions routinely have nothing to do
+# with rule checking -- a real open-PDK driver installs a Ruby `Logger`
+# formatter that shells out to procps `pmap(1)` on every log line, so on a
+# host without `pmap` the deck dies on its *first* `logger.info`, before a
+# single rule runs, with a nil dereference that reads like a broken rule
+# deck. Two defences, tested below: the deck-abort message no longer drops
+# the causal (non-`ERROR`-prefixed) line, and a static preflight refuses to
+# start a deck whose shelled-out commands are missing from PATH.
+# --------------------------------------------------------------------------- #
+
+#: The issue's own reproduction: a `sh: ...: command not found` line from a
+#: failed shell-out, followed by the DRC-DSL error it *causes*. Only the
+#: latter lines start with `ERROR`, so quoting `ERROR` lines alone drops the
+#: one line that identifies the real problem.
+_MISSING_HOST_TOOL_STDERR = (
+    "sh: pmap: command not found\n"
+    "ERROR: In /pdk/main.drc: undefined method 'strip' for nil\n"
+    "ERROR: NoMethodError: undefined method 'strip' for nil in "
+    "Executable::execute\n"
+)
+
+#: A command name no host has, so the preflight's verdict does not depend on
+#: what happens to be installed where the suite runs.
+_ABSENT_HOST_COMMAND = "klt-definitely-not-a-real-command-2333"
+
+
+def test_klayout_engine_deck_error_message_keeps_the_non_error_prefixed_cause(
+    tmp_path, monkeypatch
+):
+    """Issue #2333: the line that explains an abort is routinely *not*
+    `ERROR`-prefixed. Quoting only `ERROR` lines surfaced a nil dereference
+    and dropped the `sh: pmap: command not found` line that caused it."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        rdb_xml=_EMPTY_RDB,
+        returncode=1,
+        stderr=_MISSING_HOST_TOOL_STDERR,
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError) as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    message = str(excinfo.value)
+    assert "sh: pmap: command not found" in message
+    # ...without losing what it already surfaced.
+    assert "undefined method 'strip' for nil" in message
+
+
+def test_klayout_engine_deck_error_message_does_not_duplicate_error_lines(
+    tmp_path, monkeypatch
+):
+    """Today's common case -- output that is *only* `ERROR` lines -- must
+    still read as one sensible block, not the same lines twice."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch, rdb_xml=_EMPTY_RDB, returncode=1, stderr=_DECK_ABORT_STDERR
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError) as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    assert str(excinfo.value).count("ERROR: NameError:") == 1
+
+
+def test_klayout_engine_deck_error_message_carries_both_streams_stdout_first(
+    tmp_path, monkeypatch
+):
+    """`klayout -b -r` splits its diagnostics across stdout and stderr
+    depending on build/platform, so neither may be dropped."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        rdb_xml=_EMPTY_RDB,
+        returncode=1,
+        stdout="Executing rule W.1\n",
+        stderr=_MISSING_HOST_TOOL_STDERR,
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError) as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    message = str(excinfo.value)
+    assert message.index("Executing rule W.1") < message.index("sh: pmap:")
+
+
+def test_klayout_engine_deck_error_message_truncation_keeps_the_error_lines(
+    tmp_path, monkeypatch
+):
+    """A deck printing a progress line per rule must not turn one error into
+    a multi-megabyte message -- but truncation may never cost the `ERROR`
+    lines themselves, even when they scrolled off the head."""
+    noise = "\n".join(
+        f"Executing rule R{index}"
+        for index in range(2 * drc_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES)
+    )
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        rdb_xml=_EMPTY_RDB,
+        returncode=1,
+        stdout=_DECK_ABORT_STDERR + noise + "\n",
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    with pytest.raises(DrcError) as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    message = str(excinfo.value)
+    assert "earlier lines omitted" in message
+    assert "this_method_does_not_exist_in_the_drc_dsl" in message
+    # The tail -- where the abort is -- survives; the head does not.
+    assert "Executing rule R0\n" not in message
+    assert (
+        f"Executing rule R{2 * drc_module._KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES - 1}"
+        in message
+    )
+
+
+def test_cli_drc_klayout_engine_error_envelope_names_the_missing_utility(
+    tmp_path, monkeypatch, capsys
+):
+    """End to end through the JSON error envelope: the causal line reaches
+    the caller, not just the confusing downstream one."""
+    _stub_klayout_drc_subprocess(
+        monkeypatch,
+        rdb_xml=_EMPTY_RDB,
+        returncode=1,
+        stderr=_MISSING_HOST_TOOL_STDERR,
+    )
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc")
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert "sh: pmap: command not found" in payload["error"]["message"]
+
+
+# --- The static host preflight ---------------------------------------------- #
+
+
+def test_scan_deck_host_commands_finds_the_real_pmap_logger_formatter(tmp_path):
+    """The issue's own driver shape, scanned statically (host-independent):
+    the interpolated pid is not a command word, but `pmap` and the `tail`
+    it pipes into both are."""
+    deck_file = _write_deck_file(
+        tmp_path / "main.drc",
+        "logger.formatter = proc do |_severity, datetime, _progname, msg|\n"
+        '  "#{datetime}: Memory Usage (" + `pmap #{Process.pid} | tail -1`'
+        '[10, 40].strip + ") : #{msg}"\n'
+        "end\n",
+    )
+
+    found = drc_module._scan_deck_host_commands(deck_file)
+
+    assert set(found) == {"pmap", "tail"}
+    assert found["pmap"].endswith("main.drc:2")
+
+
+def test_scan_deck_host_commands_skips_what_it_cannot_be_sure_about(tmp_path):
+    """Every command reported here fails a run by default, so the scan
+    reports only words it is sure name a command: not a comment, not an
+    interpolated/computed command, not a shell builtin."""
+    deck_file = _write_deck_file(
+        tmp_path / "main.drc",
+        "# `not-a-real-tool --version` in a comment is documentation\n"
+        "`#{@runner} --check`\n"
+        "`cd /tmp && echo hello`\n"
+        'system("true")\n',
+    )
+
+    assert drc_module._scan_deck_host_commands(deck_file) == {}
+
+
+def test_scan_deck_host_commands_follows_require_relative_includes(tmp_path):
+    """A driver split across files (a shared logging prologue is the usual
+    shape) is scanned as a whole."""
+    _write_deck_file(
+        tmp_path / "util.rb",
+        "def mem\n  `pmap 1`\nend\n",
+    )
+    deck_file = _write_deck_file(
+        tmp_path / "main.drc",
+        'require_relative "util"\nsource($input)\n',
+    )
+
+    found = drc_module._scan_deck_host_commands(deck_file)
+
+    assert set(found) == {"pmap"}
+    assert found["pmap"].endswith("util.rb:2")
+
+
+def test_klayout_engine_preflight_refuses_a_deck_missing_a_host_utility(
+    tmp_path, monkeypatch
+):
+    """The whole point: fail *before* the deck runs, naming the utility --
+    instead of letting the deck surface an unrelated nil dereference."""
+    captured_cmds: list = []
+    _stub_klayout_drc_subprocess(monkeypatch, captured_cmds=captured_cmds)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", f"logger.info(`{_ABSENT_HOST_COMMAND} -x`)\n"
+    )
+
+    with pytest.raises(DrcError) as excinfo:
+        run_drc_klayout_engine(gds, deck_file)
+
+    message = str(excinfo.value)
+    assert f"deck requires '{_ABSENT_HOST_COMMAND}' (not found on PATH)" in message
+    assert "deck.lydrc:1" in message
+    assert "--allow-missing-host-tools" in message
+    # Nothing was launched: the preflight is a fail-fast, not a post-mortem.
+    assert captured_cmds == []
+
+
+def test_klayout_engine_preflight_passes_when_the_utility_is_on_path(
+    tmp_path, monkeypatch
+):
+    """A shell-out to something the host *does* have is not an error --
+    the check reports absence, not the existence of a shell-out."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(tmp_path / "deck.lydrc", "x = `sh -c 'true'`\n")
+
+    report = run_drc_klayout_engine(gds, deck_file)
+
+    assert report["status"] == "coverage_unknown"
+
+
+def test_klayout_engine_allow_missing_host_tools_skips_the_preflight(
+    tmp_path, monkeypatch
+):
+    """The escape hatch for a driver whose shell-out is on a branch this run
+    never takes -- a false positive must never be a dead end."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", f"`{_ABSENT_HOST_COMMAND} -x` if false\n"
+    )
+
+    report = run_drc_klayout_engine(gds, deck_file, allow_missing_host_tools=True)
+
+    assert report["status"] == "coverage_unknown"
+
+
+def test_cli_drc_klayout_engine_missing_host_tool_exits_one(
+    tmp_path, monkeypatch, capsys
+):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", f"`{_ABSENT_HOST_COMMAND} -x`\n"
+    )
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    payload = json.loads(capsys.readouterr().err)
+    assert (
+        f"deck requires '{_ABSENT_HOST_COMMAND}' (not found on PATH)"
+        in payload["error"]["message"]
+    )
+
+
+def test_cli_drc_klayout_engine_allow_missing_host_tools_flag(
+    tmp_path, monkeypatch, capsys
+):
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", f"`{_ABSENT_HOST_COMMAND} -x`\n"
+    )
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--engine",
+            "klayout",
+            "--deck-file",
+            deck_file,
+            "--allow-missing-host-tools",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 4
+    assert json.loads(capsys.readouterr().out)["status"] == "coverage_unknown"
+
+
+def test_cli_drc_klayout_engine_request_document_allow_missing_host_tools(
+    tmp_path, monkeypatch, capsys
+):
+    """Issue #1867's rule: every flag is reachable as a request field."""
+    _stub_klayout_drc_subprocess(monkeypatch, rdb_xml=_EMPTY_RDB)
+    gds = _write_gds(tmp_path / "test.gds")
+    deck_file = _write_deck_file(
+        tmp_path / "deck.lydrc", f"`{_ABSENT_HOST_COMMAND} -x`\n"
+    )
+    request = tmp_path / "request.json"
+    request.write_text(
+        json.dumps(
+            {
+                "schema": "klt.drc.request/1",
+                "file": gds,
+                "engine": "klayout",
+                "deck_file": deck_file,
+                "allow_missing_host_tools": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = main(["drc", str(request), "--format", "json"])
+
+    assert exit_code == 4
+    assert json.loads(capsys.readouterr().out)["status"] == "coverage_unknown"
+
+
+def test_cli_drc_allow_missing_host_tools_ignored_for_curated_engine(
+    tmp_path, monkeypatch, capsys
+):
+    """A klayout-engine-only flag, ignored (not rejected) under the curated
+    engine -- the same treatment `--deck-file`/`--allow-deck-errors` get."""
+    gds = _write_gds(tmp_path / "test.gds")
+
+    exit_code = main(
+        [
+            "drc",
+            gds,
+            "--deck",
+            "sky130",
+            "--allow-missing-host-tools",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code in (0, 3, 4)
+    assert "engine" not in json.loads(capsys.readouterr().out)
+
+
+# --------------------------------------------------------------------------- #
 # `klt drc --engine klayout` -- CLI dispatch
 # --------------------------------------------------------------------------- #
 

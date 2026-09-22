@@ -14,6 +14,41 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2333, `klt drc --engine klayout`, additive — **no**
+  `schema_version` bump and no change to any response field; one new opt-out
+  flag, `--allow-missing-host-tools`, plus its request-document field
+  `allow_missing_host_tools`): a PDK's own DRC-DSL driver script carries that
+  vendor's *host* assumptions, and they routinely have nothing to do with
+  rule checking — a real open-PDK driver installs a Ruby `Logger` formatter
+  that shells out to procps `pmap(1)` on every log line, so on a host without
+  `pmap` (macOS, minimal container images) the backtick yields `""`,
+  `""[10, 40]` is `nil`, and `nil.strip` raises: the deck dies on its
+  **first** `logger.info`, before executing a single rule. Two defects made
+  that a ~30-minute misdiagnosis rather than a one-line answer, both fixed
+  here. (1) The deck-abort error quoted only klayout's `ERROR`-prefixed
+  lines, so the surfaced message was a nil dereference that reads like a
+  broken rule deck, while the `sh: pmap: command not found` line that
+  explains it — captured, but not `ERROR`-prefixed — was dropped. The raised
+  error now carries the full captured stdout/stderr (stdout first, tail-
+  truncated with an explicit marker for an enormous capture, never losing an
+  `ERROR` line). What counts as a *deck error* is unchanged: still the
+  `ERROR`-prefix test, so a rule named `ERROR_CHECK.1` is still not misread
+  as a failure. (2) There was no way to learn this before paying for the
+  run. `klt drc` now scans the deck script and its literal-path Ruby includes
+  for shelled-out commands (backticks, `%x{...}`, `system`/`exec`/`spawn`,
+  `IO.popen`, `Open3.*`) *before* launching `klayout`, and refuses to start
+  when one is missing from `PATH`: `deck requires 'pmap' (not found on
+  PATH) -- shelled out to at <file>:<line>`. The scan is static and
+  deliberately conservative — an interpolated/computed command, a shell
+  builtin, or a commented-out one is never reported, so a shell-out it cannot
+  see still fails the way it always did (now with the causal line quoted),
+  and a shell-out on a branch the run never takes is skipped with
+  `--allow-missing-host-tools`. klt deliberately supplies no stand-ins for
+  what a driver shells out to: that does not generalise, and it would
+  silently change what the run measured. Still open, and deliberately not
+  addressed here: a PDK's rule tables are the portable part, and there is
+  still no way to run them without the vendor's driver.
+
 - **Fixed** (#2327, `klt lvs`'s `reference.form: "subckt-call"` conversion,
   additive — **no** `schema_version` bump, and no change to any request
   field or response shape): a reference netlist that mixes a curated
