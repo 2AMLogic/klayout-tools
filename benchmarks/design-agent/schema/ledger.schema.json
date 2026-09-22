@@ -66,7 +66,40 @@
     },
     "usage": {
       "type": ["object", "null"],
-      "description": "Best-effort per-round tool-call usage, read back from whatever the provider itself already recorded (today: `tool_calls`/`turns` for `--provider interactive-agent`'s own `agent-session.json`). `null` for the `reference`/`live-agent` providers and for any provider that records nothing. Real per-round *token* usage is not wired yet for any shipped provider -- tracked as a follow-up."
+      "description": "Best-effort per-round usage evidence, read back from the `agent-session.json` the provider itself wrote into its own scratch/sandbox directory (`_usage_from_scratch_dir`): session shape (`tool_calls`/`turns`, `--provider interactive-agent` only) merged with whatever token counts the underlying `claude` CLI envelope reported for that round (issue #2294) -- `input_tokens`/`output_tokens` plus any cache bucket it names, for both `--provider live-agent` and `--provider interactive-agent`. Every member is optional and additive: a CLI version whose envelope omits `usage` leaves the token keys out (a partial object, or `null` when nothing at all is known) rather than failing the round. `null` for the deterministic `reference` provider, which never invokes an agent, and for any provider that records nothing.",
+      "additionalProperties": { "type": ["integer", "number"] },
+      "properties": {
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Tool invocations the round's session made (`--provider interactive-agent` only -- the single-turn `live-agent` provider grants no tool access)."
+        },
+        "turns": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Assistant turns in the round's session (`--provider interactive-agent` only)."
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Input tokens the CLI envelope reported for this round, verbatim."
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Output tokens the CLI envelope reported for this round, verbatim."
+        },
+        "cache_creation_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cache-write input tokens, when the CLI envelope reports the bucket."
+        },
+        "cache_read_input_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cache-read input tokens, when the CLI envelope reports the bucket."
+        }
+      }
     },
     "functional": {
       "type": ["object", "null"],

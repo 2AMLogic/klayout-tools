@@ -280,12 +280,20 @@ methodology reference only, no code reuse), not reused code:
   "series", "ledger_path"}`) when `--rounds > 0`; `--attempts`'s own pass@k
   fields are computed exactly as before and are byte-for-byte unchanged when
   `--rounds` is not passed.
+- **`usage` reports what the agent CLI itself reported.** Each agent-backed
+  provider writes an `agent-session.json` into its own round sandbox, and
+  the ledger's `usage` is read back from it: the token counts the `claude`
+  CLI envelope reported for that round (`input_tokens`/`output_tokens` plus
+  any cache bucket it names) for both `--provider live-agent` and
+  `--provider interactive-agent`, merged with interactive-agent's own
+  `tool_calls`/`turns`. Every member is optional — a CLI version whose
+  envelope omits usage yields a partial object (or `null`), never a failed
+  round — and `usage` stays `null` for the deterministic `reference`
+  provider, which invokes no agent at all.
 
 **Known gaps in this first cut** (tracked as follow-ups, not silently
-missing): real per-round *token* usage is not wired through any shipped
-provider yet (`usage` only ever reports interactive-agent's own
-`tool_calls`/`turns`); resuming a killed sweep from an existing ledger
-(AHRR's own `resume.py`) is a deliberately deferred nice-to-have.
+missing): resuming a killed sweep from an existing ledger (AHRR's own
+`resume.py`) is a deliberately deferred nice-to-have.
 
 ## Current task set
 

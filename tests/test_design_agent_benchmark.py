@@ -813,6 +813,49 @@ def test_run_task_round_invalid_entry_matches_ledger_schema_and_scores_null(
     assert "the_gate" in entry["notes"]
 
 
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {},
+        {"tool_calls": 3, "turns": 2},
+        {"input_tokens": 100, "output_tokens": 7},
+        {
+            "tool_calls": 3,
+            "turns": 2,
+            "input_tokens": 100,
+            "output_tokens": 7,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 512,
+        },
+        # A CLI that names a cache bucket this schema never enumerated is
+        # still a valid ledger line -- `usage` is additive by contract.
+        {"cache_creation_1h_input_tokens": 42},
+    ],
+)
+def test_ledger_schema_accepts_null_partial_and_full_usage(usage):
+    """Issue #2294: every shape `_usage_from_scratch_dir` can produce --
+    `null` (no provider evidence at all), tool-call-only (an agent CLI whose
+    envelope omits usage), token-only (`--provider live-agent`), and the
+    merged form -- must validate. A missing usage field is never a hard
+    failure."""
+    entry = dab._round_ledger_entry(
+        task_id="fake-task",
+        round_index=1,
+        submission_sha256=None,
+        seed_sha256="0" * 64,
+        agent_wall_s=0.5,
+        round_wall_s=0.6,
+        timed_out=False,
+        usage=usage,
+        report=None,
+        valid=False,
+        score=None,
+        notes="provider produced no submission: boom",
+    )
+    _ledger_validator().validate(entry)
+
+
 def test_run_task_round_provider_exception_records_invalid_round_not_crash():
     def _raising_provider(_task, _round_index, _repo_root):
         raise RuntimeError("boom")
@@ -1109,6 +1152,176 @@ def test_usage_from_scratch_dir_reads_tool_calls_and_turns(tmp_path):
 def test_usage_from_scratch_dir_none_when_no_summary_file(tmp_path):
     assert dab._usage_from_scratch_dir(tmp_path) is None
     assert dab._usage_from_scratch_dir(None) is None
+
+
+def test_usage_from_scratch_dir_merges_envelope_token_usage(tmp_path):
+    """Issue #2294: the session-summary file's `usage` object (whatever the
+    agent CLI's own envelope reported) is merged into the ledger's flat
+    per-round counters alongside `tool_calls`/`turns` -- and the envelope's
+    non-count members are dropped, not copied blindly."""
+    (tmp_path / dab.SESSION_SUMMARY_FILENAME).write_text(
+        json.dumps(
+            {
+                "tool_calls": 4,
+                "turns": 2,
+                "wall_clock_s": 12.0,
+                "usage": {
+                    "input_tokens": 1234,
+                    "output_tokens": 56,
+                    "cache_read_input_tokens": 78,
+                    "service_tier": "standard",
+                    "server_tool_use": {"web_search_requests": 0},
+                },
+            }
+        )
+    )
+    assert dab._usage_from_scratch_dir(tmp_path) == {
+        "tool_calls": 4,
+        "turns": 2,
+        "input_tokens": 1234,
+        "output_tokens": 56,
+        "cache_read_input_tokens": 78,
+    }
+
+
+def test_usage_from_scratch_dir_tolerates_missing_or_partial_envelope_usage(tmp_path):
+    """A CLI version that omits `usage` from its envelope must leave the
+    round's other usage evidence intact -- a partial object, never a hard
+    failure (issue #2294's own acceptance criterion)."""
+    summary = tmp_path / dab.SESSION_SUMMARY_FILENAME
+    summary.write_text(json.dumps({"tool_calls": 4, "turns": 2, "usage": None}))
+    assert dab._usage_from_scratch_dir(tmp_path) == {"tool_calls": 4, "turns": 2}
+
+    summary.write_text(json.dumps({"usage": {"output_tokens": 9}}))
+    assert dab._usage_from_scratch_dir(tmp_path) == {"output_tokens": 9}
+
+    summary.write_text(json.dumps({"usage": "not-an-object"}))
+    assert dab._usage_from_scratch_dir(tmp_path) is None
+
+
+def test_live_agent_round_ledger_reports_envelope_token_usage(tmp_path, monkeypatch):
+    """Issue #2294, `--provider live-agent`: with only the agent binary
+    stubbed, the token counts its `--output-format json` envelope reports
+    land in the round's own ledger entry -- the whole point of the
+    plumbing, asserted end-to-end rather than at the invoker alone."""
+    _stub_run_eval(monkeypatch, valid=True)
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    reference_body = (REPO_ROOT / task["reference"]["netlists"][0]).read_text()
+    script = tmp_path / "fake-claude"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json\n"
+        f"NETLIST = {reference_body!r}\n"
+        "print(json.dumps({\n"
+        '    "result": "```spice:cs_amp\\n" + NETLIST + "\\n```",\n'
+        '    "usage": {"input_tokens": 4321, "output_tokens": 98,\n'
+        '              "cache_read_input_tokens": 7, "service_tier": "standard"},\n'
+        "}))\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(script))
+
+    scratch_root = tmp_path / "rounds" / task["id"]
+    scratch_root.mkdir(parents=True)
+    entry = dab.run_task_round(
+        task,
+        1,
+        dab.make_live_agent_provider(scratch_root=scratch_root),
+        REPO_ROOT,
+        [],
+        scratch_root=scratch_root,
+    )
+
+    assert entry["notes"] is None, entry
+    assert entry["usage"] == {
+        "input_tokens": 4321,
+        "output_tokens": 98,
+        "cache_read_input_tokens": 7,
+    }
+    _ledger_validator().validate(entry)
+    _restore_writable(tmp_path)
+
+
+def test_interactive_agent_round_ledger_reports_tokens_beside_tool_calls(
+    tmp_path, monkeypatch
+):
+    """Issue #2294, `--provider interactive-agent`: the streamed `result`
+    event's own `usage` object lands in the ledger *in addition to* the
+    `tool_calls`/`turns` that were already captured."""
+    _stub_run_eval(monkeypatch, valid=True)
+    task = dab.load_task(TASKS_DIR / "common-source-amp.json")
+    reference_body = (REPO_ROOT / task["reference"]["netlists"][0]).read_text()
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv("KLT_FAKE_AGENT_MODE", "write")
+    monkeypatch.setenv(
+        "KLT_FAKE_AGENT_NETLISTS", json.dumps({"cs_amp": reference_body})
+    )
+    monkeypatch.setenv(
+        "KLT_FAKE_AGENT_USAGE",
+        json.dumps({"input_tokens": 999, "output_tokens": 12, "service_tier": "std"}),
+    )
+
+    sandbox_root = tmp_path / "rounds" / task["id"]
+    sandbox_root.mkdir(parents=True)
+    entry = dab.run_task_round(
+        task,
+        1,
+        dab.make_interactive_agent_provider(
+            sandbox_root=sandbox_root, agent_timeout_s=120.0
+        ),
+        REPO_ROOT,
+        [],
+        scratch_root=sandbox_root,
+    )
+
+    assert entry["notes"] is None, entry
+    usage = entry["usage"]
+    assert usage["input_tokens"] == 999
+    assert usage["output_tokens"] == 12
+    assert "service_tier" not in usage
+    assert usage["tool_calls"] == 2
+    assert usage["turns"] >= 1
+    _ledger_validator().validate(entry)
+    _restore_writable(tmp_path)
+
+
+def test_default_interactive_session_captures_result_event_usage(tmp_path, monkeypatch):
+    """The CLI's streamed `result` event carries the session's own token
+    accounting on the same event the final text comes off of."""
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_interactive_cli(tmp_path)))
+    monkeypatch.setenv(
+        "KLT_FAKE_AGENT_USAGE", json.dumps({"input_tokens": 7, "output_tokens": 3})
+    )
+    request = _session_request(tmp_path)
+    result = dab._default_invoke_interactive_agent(request)
+    assert result.usage == {"input_tokens": 7, "output_tokens": 3}
+
+    # ... and a CLI version whose result event carries no usage at all is
+    # reported as "unknown", never as a failure.
+    monkeypatch.delenv("KLT_FAKE_AGENT_USAGE")
+    assert dab._default_invoke_interactive_agent(_session_request(tmp_path)).usage is (
+        None
+    )
+
+
+def test_normalize_token_usage_keeps_only_integer_token_counts():
+    assert dab._normalize_token_usage(None) is None
+    assert dab._normalize_token_usage({"service_tier": "standard"}) is None
+    assert dab._normalize_token_usage(
+        {
+            "input_tokens": 10,
+            "output_tokens": 20,
+            # A future cache bucket this module has never heard of is still
+            # surfaced, as long as it is an integer token count.
+            "cache_creation_1h_input_tokens": 5,
+            "is_error": False,
+            "duration_ms": 12,
+        }
+    ) == {
+        "input_tokens": 10,
+        "output_tokens": 20,
+        "cache_creation_1h_input_tokens": 5,
+    }
 
 
 def test_run_task_rounds_appends_fsynced_ledger_and_locks_it_when_done(
@@ -2223,6 +2436,7 @@ def test_device_model_contract_falls_back_when_no_model_library_is_readable():
 
 _FAKE_AGENT_CLI = """#!/usr/bin/env python3
 import json
+import os
 import sys
 import time
 
@@ -2236,7 +2450,11 @@ if prompt == "PLAIN":
 if prompt == "SLEEP":
     time.sleep(5)
     sys.exit(0)
-print(json.dumps({"type": "result", "result": f"ECHO:{prompt}"}))
+envelope = {"type": "result", "result": f"ECHO:{prompt}"}
+usage = os.environ.get("KLT_FAKE_AGENT_USAGE")
+if usage:
+    envelope["usage"] = json.loads(usage)
+print(json.dumps(envelope))
 """
 
 
@@ -2250,6 +2468,46 @@ def _fake_agent_cli(tmp_path: Path) -> Path:
 def test_default_invoke_agent_parses_output_format_json_envelope(tmp_path, monkeypatch):
     monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_agent_cli(tmp_path)))
     assert dab._default_invoke_agent("hello", timeout_s=10) == "ECHO:hello"
+
+
+def test_invoke_agent_with_usage_captures_envelope_token_counts(tmp_path, monkeypatch):
+    """Issue #2294: `claude -p --output-format json`'s envelope carries a
+    `usage` object next to `result`; the single-turn invoker must keep it
+    rather than discarding it with the rest of the envelope."""
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_agent_cli(tmp_path)))
+    monkeypatch.setenv(
+        "KLT_FAKE_AGENT_USAGE",
+        json.dumps(
+            {
+                "input_tokens": 4321,
+                "output_tokens": 98,
+                "cache_creation_input_tokens": 0,
+                "service_tier": "standard",
+            }
+        ),
+    )
+    text, usage = dab._invoke_agent_with_usage("hello", timeout_s=10)
+    assert text == "ECHO:hello"
+    assert usage == {
+        "input_tokens": 4321,
+        "output_tokens": 98,
+        "cache_creation_input_tokens": 0,
+    }
+    # The narrow `AgentInvoker` contract (str -> str) is unchanged.
+    assert dab._default_invoke_agent("hello", timeout_s=10) == "ECHO:hello"
+
+
+def test_invoke_agent_with_usage_reports_none_when_envelope_omits_usage(
+    tmp_path, monkeypatch
+):
+    """An older CLI whose envelope has no `usage` field is "usage unknown",
+    never an error -- the text still comes back exactly as before."""
+    monkeypatch.setenv(dab.AGENT_CLI_ENV, str(_fake_agent_cli(tmp_path)))
+    monkeypatch.delenv("KLT_FAKE_AGENT_USAGE", raising=False)
+    assert dab._invoke_agent_with_usage("hello", timeout_s=10) == ("ECHO:hello", None)
+    text, usage = dab._invoke_agent_with_usage("PLAIN", timeout_s=10)
+    assert text.strip() == "plain text response, no envelope"
+    assert usage is None
 
 
 def test_default_invoke_agent_falls_back_to_raw_stdout_for_plain_text(
@@ -2536,14 +2794,16 @@ emit(
         "message": {"content": [{"type": "text", "text": "sized it"}]},
     }
 )
-emit(
-    {
-        "type": "result",
-        "subtype": "success",
-        "num_turns": 3,
-        "result": os.environ.get("KLT_FAKE_AGENT_RESULT", "done"),
-    }
-)
+result_event = {
+    "type": "result",
+    "subtype": "success",
+    "num_turns": 3,
+    "result": os.environ.get("KLT_FAKE_AGENT_RESULT", "done"),
+}
+usage = os.environ.get("KLT_FAKE_AGENT_USAGE")
+if usage:
+    result_event["usage"] = json.loads(usage)
+emit(result_event)
 '''
 
 
