@@ -171,7 +171,10 @@ layer a PDK deck already uses for device recognition, and which
 ``extract.py`` already consults) and the ``stackup``/``vias`` role it sits
 on, and that region is **subtracted** from the role's conductor region
 before it is registered -- so the body breaks the net instead of bridging
-it. See :func:`_device_body_cuts`.
+it. See :func:`klayout_tools._devices._device_body_cuts` -- the whole
+``devices[]`` fragment (schema, validation, subtraction, area accounting)
+lives in ``_devices.py``, shared verbatim with ``klt power`` (issue #2260)
+so a caller can hand the same declaration to either verb.
 
 Deck-driven device-marker auto-detection (``--deck``, issue #2204): hand-
 transcribing a PDK's device-body marker layer/datatype into ``devices[]``
@@ -213,9 +216,14 @@ See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
+from ._devices import (
+    _conductor_role_layers,
+    _cut_device_bodies,
+    _device_body_cuts,
+    _validate_devices,
+)
 from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
@@ -1248,199 +1256,6 @@ def _validate_ties_disclosure(
     return disclosure
 
 
-def _validate_device_entry(
-    entry: Any, spec_path: str, index: int, conductor_names: list[str]
-) -> dict[str, Any]:
-    """One ``devices[]`` entry (issue #2183). Split out of
-    :func:`_validate_devices` to keep that function under the repo's C901
-    complexity ratchet, exactly as :func:`_parse_tap_requires` is split out
-    of :func:`_validate_ties`."""
-    if not isinstance(entry, dict):
-        raise ErcError(f"spec '{spec_path}': devices[{index}] must be a JSON object")
-    for key in ("body_layer", "on"):
-        if key not in entry:
-            raise ErcError(f"spec '{spec_path}': devices[{index}] missing {key!r}")
-
-    body_layer = _parse_layer_datatype(
-        str(entry["body_layer"]), spec_path, f"devices[{index}].body_layer", ErcError
-    )
-    on = str(entry["on"])
-    if on not in conductor_names:
-        raise ErcError(
-            f"spec '{spec_path}': devices[{index}].on must name a 'stackup' or "
-            f"'vias' entry (got {on!r}; declared: {', '.join(conductor_names)})"
-        )
-
-    return {
-        "name": str(entry.get("name", f"device{index}")),
-        "body_layer": body_layer,
-        "on": on,
-    }
-
-
-def _validate_devices(
-    spec: dict[str, Any],
-    spec_path: str,
-    stackup_names: list[str],
-    vias: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """Validate the optional ``devices`` array (issue #2183): where a drawn
-    *device body* sits on an already-declared conductor role, so the
-    connectivity model stops reading it as a wire.
-
-    Each entry is ``{"name" (optional, defaults to "device<index>"),
-    "body_layer": "<layer>/<datatype>", "on": "<stackup or vias name>"}``.
-    ``body_layer`` is the PDK's own device-body marker layer (gf180mcu's
-    ``Resistor``/``RES_MK``/``SAB`` for a poly resistor, ``CAP_MK``/
-    ``MIM_L_MK``/``FuseTop`` for a MiM cap -- the same markers a deck
-    already uses for device recognition and ``klt extract`` already
-    consults), and ``on`` names the role that body's geometry is drawn on:
-    a ``stackup`` role for a poly/metal body, or a ``vias`` entry for a
-    device whose *bridge* between two declared roles is the via-role
-    geometry itself (a MiM cap's top-plate/fuse layer). Omitted or empty ->
-    no carve-out, today's behaviour exactly.
-
-    A ``body_layer`` absent from the given layout is not an error -- it
-    subtracts nothing, and is reported with ``body_area_um2: 0.0`` in
-    ``provenance.devices`` so a caller can see the declaration matched no
-    geometry -- matching the same convention ``stackup``/``vias`` already
-    follow for a layer a particular fixture doesn't use. A ``body_layer``
-    that *is* drawn here but nowhere near its declared ``on`` role reports
-    the same ``0.0`` (issue #2226) -- that number is the intersection with
-    the role, not the marker's own area -- plus a stderr warning, since
-    that case is a spec bug rather than an unused layer."""
-    raw = spec.get("devices", [])
-    if raw is None:
-        raw = []
-    if not isinstance(raw, list):
-        raise ErcError(f"spec '{spec_path}': 'devices' must be an array")
-
-    conductor_names = stackup_names + [via["name"] for via in vias]
-    entries: list[dict[str, Any]] = []
-    names: list[str] = []
-    for i, entry in enumerate(raw):
-        device = _validate_device_entry(entry, spec_path, i, conductor_names)
-        if device["name"] in names:
-            raise ErcError(
-                f"spec '{spec_path}': duplicate device name {device['name']!r}"
-            )
-        names.append(device["name"])
-        entries.append(device)
-    return entries
-
-
-def _warn_device_body_missed_role(name: str, body_layer: str, role: str) -> None:
-    """The stderr warning printed once per ``devices[]`` declaration whose
-    marker layer *is* drawn on this layout but does not touch the role it
-    was declared ``on`` (issue #2226) -- so it subtracts nothing at all.
-
-    That combination is almost always a spec bug (the wrong ``on`` role, or
-    a marker drawn on a different datatype than the one declared) rather
-    than a deliberate no-op, and the report alone makes it quiet: a
-    ``body_area_um2`` of ``0.0`` is only visible to a caller who thinks to
-    look. Printed to stderr, following
-    :func:`klayout_tools._provenance._warn_klayout_version_mismatch`'s
-    precedent, so a caller piping ``--format json`` to a file still sees it
-    (JSON goes to stdout only -- ``docs/json-contract.md``)."""
-    print(
-        f"klt erc: warning: devices[] entry {name!r} declares body_layer "
-        f"{body_layer} on role {role!r}, but that marker layer carries "
-        f"geometry which does not overlap the region drawn for {role!r} -- "
-        "the carve-out subtracted nothing (body_area_um2: 0.0). Check the "
-        "'on' role and the marker's layer/datatype.",
-        file=sys.stderr,
-    )
-
-
-def _device_body_cuts(
-    layout: Any,
-    top_cell: Any,
-    devices: list[dict[str, Any]],
-    role_layers: dict[str, tuple[int, int]],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Resolve ``devices[]`` into ``(cuts, applied)`` (issue #2183).
-
-    ``cuts`` maps a ``stackup``/``vias`` role name to the merged region of
-    every declared device body on it -- what :func:`_extract_connectivity`
-    subtracts from that role's conductor region before registering it, so a
-    drawn device body breaks the net rather than bridging it. Two devices
-    declared ``on`` the same role are unioned, not the last one winning.
-
-    ``applied`` is the per-declaration echo for ``provenance.devices``:
-    name, the ``"<layer>/<datatype>"`` string as declared, the role, and
-    the **actual** subtracted area in µm².
-
-    That last field is the honest part, and honest means *intersected*
-    (issue #2226). It is ``area(marker ∩ the role's own drawn conductor
-    region)``, not ``area(marker)``: a device-body marker is conventionally
-    drawn with enclosure past the conductor it marks, so the marker's own
-    area over-states the carve-out for a well-formed declaration -- and,
-    worse, is identically non-zero for a declaration whose ``on`` names a
-    role the marker never touches, which is the one failure the field
-    exists to expose. Intersected, ``0.0`` means what the docs say it
-    means: *this declaration changed nothing* -- whether because its marker
-    layer is absent from this layout, drawn on a different datatype, or
-    declared ``on`` the wrong role.
-
-    ``role_layers`` (from :func:`_deck_role_layers`) supplies each declared
-    role's own ``(layer, datatype)`` so that conductor region can be
-    resolved here; it is read once per role that a declaration actually
-    names. The intersection is computed per declaration against the role's
-    *pre-cut* drawn region -- never against the accumulating ``cuts[role]``
-    union -- so two declarations sharing one ``on`` each report their own
-    subtracted area rather than the union's.
-
-    ``cuts`` still carries the raw marker region: ``region - marker`` and
-    ``region - (marker ∩ region)`` are the same set, so connectivity is
-    byte-identical to before this issue. Only the reported area changes.
-
-    A declaration that subtracts nothing *while its marker layer is drawn
-    somewhere on this layout* additionally gets a one-line stderr warning
-    (:func:`_warn_device_body_missed_role`) -- the wrong-``on`` case the
-    report alone renders too quietly."""
-    dbu2_um2 = layout.dbu * layout.dbu
-    cuts: dict[str, Any] = {}
-    applied: list[dict[str, Any]] = []
-    conductors: dict[str, Any] = {}
-    for device in devices:
-        body = _region(layout, top_cell, device["body_layer"]).merged()
-        role = device["on"]
-        if role not in conductors:
-            conductors[role] = _region(layout, top_cell, role_layers.get(role))
-        subtracted = (body & conductors[role]).merged()
-        cuts[role] = (cuts[role] + body).merged() if role in cuts else body
-        layer, datatype = device["body_layer"]
-        body_layer = f"{layer}/{datatype}"
-        if subtracted.is_empty() and not body.is_empty():
-            _warn_device_body_missed_role(device["name"], body_layer, role)
-        applied.append(
-            {
-                "name": device["name"],
-                "body_layer": body_layer,
-                "on": role,
-                "body_area_um2": round(subtracted.area() * dbu2_um2, 9),
-            }
-        )
-    return cuts, applied
-
-
-def _deck_role_layers(
-    stackup: list[dict[str, Any]], vias: list[dict[str, Any]]
-) -> dict[str, tuple[int, int]]:
-    """``stackup``/``vias`` role name -> declared ``(layer, datatype)``, in
-    declaration order (issue #2204) -- the map :func:`_deck_device_cuts`
-    matches a curated deck's own device-conductor layers against, and (issue
-    #2226) the map :func:`_device_body_cuts` resolves each declared role's
-    own conductor region from so it can report the area a ``devices[]``
-    entry *actually* subtracted. Built unconditionally by ``run_erc``, not
-    only when ``--deck`` is given, since the second caller always runs."""
-    layers: dict[str, tuple[int, int]] = {
-        entry["name"]: entry["layer"] for entry in stackup
-    }
-    layers.update({via["name"]: via["layer"] for via in vias})
-    return layers
-
-
 def _deck_device_cuts(
     layout: Any,
     top_cell: Any,
@@ -1450,8 +1265,8 @@ def _deck_device_cuts(
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Resolve a curated extraction ``deck``'s own device-marker
     declarations into ``(cuts, applied)`` -- the deck-driven analogue of
-    :func:`_device_body_cuts` (issue #2204, built on #2183's hand-declared
-    ``devices[]``).
+    :func:`klayout_tools._devices._device_body_cuts` (issue #2204, built on
+    #2183's hand-declared ``devices[]``).
 
     **The mapping rule** (this issue's own "Marker-to-role mapping" design
     note): a deck device applies to a declared ``stackup``/``vias`` role
@@ -1591,14 +1406,6 @@ def _deck_device_cuts(
             )
 
     return cuts, applied
-
-
-def _cut_device_bodies(region: Any, cut: Any | None) -> Any:
-    """``region`` minus the declared device bodies on the same role (issue
-    #2183), or ``region`` unchanged when this role declares none."""
-    if cut is None:
-        return region
-    return (region - cut).merged()
 
 
 def _bbox_dict(box: Any) -> dict[str, int]:
@@ -2667,7 +2474,16 @@ def run_erc(
     nets_decl = _validate_nets(spec, spec_path)
     ties = _validate_ties(spec, spec_path, stackup_names)
     ties_disclosure = _validate_ties_disclosure(spec, spec_path)
-    devices = _validate_devices(spec, spec_path, stackup_names, vias)
+    # The `devices[]` fragment is shared verbatim with `klt power` (issue
+    # #2260), so it lives in `_devices.py` and takes the flat list of
+    # conductor role names -- `stackup` first, then `vias` -- this module
+    # would otherwise assemble internally.
+    devices = _validate_devices(
+        spec,
+        spec_path,
+        stackup_names + [via["name"] for via in vias],
+        ErcError,
+    )
 
     layout = load_layout(file, ErcError)
     top_cells = select_top_cells(layout, top, ErcError)
@@ -2697,9 +2513,9 @@ def run_erc(
     # subtracted -- `marker ∩ that role's own drawn region` -- rather than
     # the marker layer's own area (issue #2226). `--deck` reuses the same
     # map below for its exact-layer-equality matching rule.
-    role_layers = _deck_role_layers(stackup, vias)
+    role_layers = _conductor_role_layers(stackup, vias)
     device_cuts, devices_applied = _device_body_cuts(
-        layout, top_cell, devices, role_layers
+        layout, top_cell, devices, role_layers, verb="klt erc"
     )
 
     # `--deck` (issue #2204): a curated deck's own device-marker
