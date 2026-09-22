@@ -110,6 +110,7 @@ docs/
     native-extension-freshness.md
     native-routing-survey.md
     netlist-driven-layout-spike.md
+    numeric-fixture-comparison-convention.md
     openroad-invocation-survey.md
     parasitics-hierarchy-attribution-spike.md
     pdk-device-corner-metadata-spike.md

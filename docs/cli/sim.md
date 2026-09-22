@@ -1841,7 +1841,11 @@ divider — no real PDK dependency, see the module's docstring for why),
 (a 2×2×2 process/supply/temperature matrix with one `.meas`-backed
 measurement). Unlike `examples/drc/`, there is no committed golden JSON
 output — `runtime_s`/`engine_version` make a byte-exact fixture flaky by
-construction — but running
+construction (see
+[`../design/numeric-fixture-comparison-convention.md`](../design/numeric-fixture-comparison-convention.md)
+for the repo-wide convention this follows: declare which regions of a
+numeric fixture are byte-exact vs. tolerance-compared, never a blanket
+comparison style for the whole artifact) — but running
 
 ```
 klt sim examples/sim/request.json --format json
