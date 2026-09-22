@@ -157,6 +157,29 @@ implemented deliberately rather than rediscovered:
     ability to tell the two apart, pinned by
     ``test_integration_real_icarus_sdf_constant_zero_is_a_timing_outcome``.
 
+11. **An ``INTERCONNECT`` entry whose destination is a top-level port bit
+    the netlist drives through an ``assign`` alias cannot be annotated at
+    all -- but when it is zero-delay, it does not need to be** (issue
+    #2285, live on Icarus 13.0). This is the shape every P&R backend
+    produces for a constant-driven output (a tie cell driving ``net0``,
+    plus ``assign uio_oe[0] = net0;``), so a real post-route SDF could not
+    pass finding 3's diagnostic gate at all even though every failing entry
+    carried ``(0.000:0.000:0.000)``. Rewriting the endpoint through the
+    netlist's own alias map does **not** help (the rewritten entry names
+    the net its own source pin drives and fails with a different
+    diagnostic, ``Could not find handles for both ports!``), so the entry
+    is instead dropped from the SDF text handed to ``$sdf_annotate`` and
+    counted as an ``environment.sdf.dropped`` class
+    (:data:`SDF_ALIAS_PORT_DROPPED_CLASS`,
+    :func:`_drop_sdf_zero_delay_alias_port_interconnects`). The exemption
+    is bounded by the entry's own delay value, not by the diagnostic text:
+    an entry with a non-zero value at *any* corner is left in place and
+    still fails the gate loudly. See the module comment above
+    :func:`_drop_sdf_zero_delay_alias_port_interconnects` for the full
+    write-up, including why Icarus's ``<file>:<line>:`` locator cannot be
+    mapped back to an entry (its line counter is cumulative across
+    ``$sdf_annotate`` calls, not reset per file).
+
 Engines: ``"icarus"`` (default -- the CI-cheap interpreter) and
 ``"verilator"`` (opt-in, required for coverage). cocotb itself is an
 *optional* runtime dependency, deliberately not in ``pyproject.toml``'s
@@ -189,6 +212,8 @@ from ._paths import validate_request_shape as _shared_validate_request_shape
 from ._vendor import mutation_variants as _mutation_variants
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
+    _collect_sdf_alias_port_bits,
+    _drop_sdf_zero_delay_alias_port_interconnects,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
     _reject_sdf_with_functional_models,
@@ -293,10 +318,24 @@ SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS = ("TIMINGCHECK",)
 #: below is applied only to lines that match.
 SDF_DIAGNOSTIC_LINE_RE = re.compile(r"^SDF (?:WARNING|ERROR): .+?:\d+: .+$")
 
-#: A human-readable reason per benign class (:data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS`,
-#: lowercased), surfaced in ``environment.sdf.dropped`` (issue #1102) so a
-#: caller can explain *why* a class was dropped without re-deriving it from
-#: this module's own comments.
+#: The ``environment.sdf.dropped`` class counting the zero-delay
+#: ``INTERCONNECT`` entries removed before annotation because their
+#: destination is a top-level port bit the netlist drives through an
+#: ``assign`` alias -- issue #2285's counted exemption, the second member of
+#: this shape after #1102's ``timingcheck``. Unlike ``timingcheck`` this
+#: class is *not* derived from a diagnostic substring: the entries are
+#: dropped from the SDF text up front
+#: (:func:`_drop_sdf_zero_delay_alias_port_interconnects`), so Icarus never
+#: emits a diagnostic for them at all.
+SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
+
+#: A human-readable reason per dropped class, surfaced in
+#: ``environment.sdf.dropped`` (issue #1102) so a caller can explain *why* a
+#: class was dropped without re-deriving it from this module's own comments.
+#: Keyed by the lowercased :data:`SDF_BENIGN_DIAGNOSTIC_SUBSTRINGS` member
+#: whose diagnostics were filtered out, plus
+#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS` (issue #2285) for the one class that
+#: is dropped from the SDF text instead of from the transcript.
 SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
     "timingcheck": (
         "Icarus Verilog implements SDF delay annotation (IOPATH/INTERCONNECT) "
@@ -304,6 +343,17 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "dropped, so $setup/$hold/$width checks run against the cell "
         "library's own placeholder timing, not the characterised limits in "
         "the SDF"
+    ),
+    SDF_ALIAS_PORT_DROPPED_CLASS: (
+        "Icarus Verilog cannot insert an intermodpath onto a top-level port "
+        "bit the gate-level netlist drives through a Verilog 'assign' alias "
+        "(the shape a P&R backend produces for a constant/tie-cell-driven "
+        "output: 'assign uio_oe[0] = net0;'), so every INTERCONNECT entry "
+        "with such a destination fails with 'Could not find intermodpath!'. "
+        "Entries whose every min:typ:max delay value is zero model no delay "
+        "at any corner, so they are removed before annotation and counted "
+        "here instead of failing the run -- a non-zero-delay entry on the "
+        "same destination is left in place and still fails loudly"
     ),
 }
 
@@ -1906,6 +1956,11 @@ def run_functional_verification(request: str) -> dict[str, Any]:
     # for this build+test -- the real DUT unless `options.sdf` swaps in the
     # generated wrapper below (issue #1056).
     build_hdl_toplevel = hdl_toplevel
+    # `environment.sdf.dropped` classes decided *before* the run, by the
+    # SDF-text normalization passes below, rather than by the post-run
+    # transcript scan (issue #2285). Merged with the scan's own counts once
+    # the run is over.
+    sdf_pre_dropped_counts: dict[str, int] = {}
     if coverage_requested:
         build_args += list(COVERAGE_BUILD_ARGS)
     if sdf is not None:
@@ -1958,10 +2013,34 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # of the two confirmed mechanisms this actually fixes) is a no-op
         # for a design with only scalar top-level ports (#1069's own case)
         # -- `sdf_paths` stays a single-element list in that case.
+        # Issue #2285: an `INTERCONNECT` entry whose destination is a
+        # top-level port bit the netlist drives through an `assign` alias
+        # (a P&R backend's tie-cell shape, `assign uio_oe[0] = net0;`)
+        # cannot be annotated by Icarus at all -- and cannot be made
+        # annotatable by rewriting the endpoint either (verified live; see
+        # the module comment above
+        # :func:`_drop_sdf_zero_delay_alias_port_interconnects`). When such
+        # an entry is zero-delay at every corner, dropping it cannot change
+        # any simulated timing, so it is removed from the SDF text here and
+        # counted in `environment.sdf.dropped` instead of failing the run.
+        # A non-zero-delay entry is left in place and still fails the
+        # diagnostic gate loudly.
+        alias_port_bits = _collect_sdf_alias_port_bits(sources, hdl_toplevel)
+        alias_drop = _drop_sdf_zero_delay_alias_port_interconnects(
+            sdf["file"], alias_port_bits
+        )
+        annotate_source_path = sdf["file"]
+        if alias_drop is not None:
+            alias_text, alias_dropped_count = alias_drop
+            annotate_source_path = os.path.join(output_dir, "klt_sdf_alias_dropped.sdf")
+            with open(annotate_source_path, "w", encoding="utf-8") as handle:
+                handle.write(alias_text)
+            sdf_pre_dropped_counts[SDF_ALIAS_PORT_DROPPED_CLASS] = alias_dropped_count
+
         vector_ports = {name for _, width, name in ports if width}
-        split = _split_sdf_bus_port_interconnects(sdf["file"], vector_ports)
+        split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)
         if split is None:
-            sdf_paths = [sdf["file"]]
+            sdf_paths = [annotate_source_path]
         else:
             safe_text, deferred_text = split
             safe_path = os.path.join(output_dir, "klt_sdf_safe.sdf")
@@ -2026,7 +2105,12 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # transcripts is the only signal there is, and it runs before the
         # verdict is parsed so an annotation failure is reported as one
         # rather than as a (misleadingly green) result.
-        diagnostics, sdf_dropped_counts = _scan_sdf_diagnostics(build_log, test_log)
+        diagnostics, scanned_dropped_counts = _scan_sdf_diagnostics(build_log, test_log)
+        # The two dropped-class sources are disjoint by construction: the
+        # transcript scan counts diagnostic *lines* Icarus emitted, while
+        # `sdf_pre_dropped_counts` counts SDF *entries* removed before the
+        # run (issue #2285), for which Icarus emits nothing at all.
+        sdf_dropped_counts = {**sdf_pre_dropped_counts, **scanned_dropped_counts}
         if diagnostics:
             shown = " | ".join(diagnostics[:5])
             more = f" (+{len(diagnostics) - 5} more)" if len(diagnostics) > 5 else ""
