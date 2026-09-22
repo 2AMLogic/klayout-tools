@@ -521,9 +521,34 @@ def _print_t1_scope_shortfall(row: dict, source_doc: str, palette: Palette) -> N
     )
 
 
+def _print_partition_boundary(result: dict) -> None:
+    """Print a `"mixed-signal"` manifest's declared partition boundary (issue
+    #2278) under the `block:`/`kind:` header, or nothing when it declared
+    none.
+
+    Printed **once per declared partition**, not on each of that partition's
+    eleven rows: unlike `coverage`/`body_bias` (per-citation facts, shown
+    beside the citation they qualify), the boundary is one constant statement
+    per partition, and restating it eleven times would bury the checklist it
+    qualifies. The JSON carries it per row as well, where a consumer
+    filtering `.items[]` needs each row to be self-contained.
+
+    Absent entirely when nothing was declared -- "no statement" must not read
+    as "the partitions were defined" -- exactly as an undeclared boundary is
+    absent from the JSON rather than rendered `null`.
+    """
+    boundary = result.get("partition_boundary") or {}
+    if not boundary:
+        return
+    print("partition boundary:")
+    for partition, text in boundary.items():
+        print(f"  {partition}: {text}")
+
+
 def _print_tier_report_text(result: dict, palette: Palette) -> None:
     block = result["block"] or "(unnamed block)"
     print(f"block: {block}  kind: {result['kind']}")
+    _print_partition_boundary(result)
     print(f"tier: {result['tier'] or 'none'}")
     print(f"T1: {result['t1_met_count']}/{result['t1_item_count']} items met")
     # Issue #2202: the reverse of the per-row `graded_by_build` note below.

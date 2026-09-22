@@ -898,6 +898,17 @@ DESCRIBE_GRADER_SCHEMA_VERSION = 1
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
 _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
 
+#: The one block kind that grades more than one partition, and therefore the
+#: only kind a ``partition_boundary`` declaration (issue #2278) is meaningful
+#: for -- an ``analog``/``digital`` block has a single partition, so it has no
+#: boundary to state.
+_PARTITIONED_BLOCK_KIND = "mixed-signal"
+
+#: The partition names a ``"mixed-signal"`` manifest may declare a boundary
+#: for (issue #2278) -- the same two names :func:`build_tier_report` renders
+#: rows for and :func:`_lookup_evidence` accepts as an evidence key suffix.
+_MIXED_SIGNAL_PARTITIONS = ("analog", "digital")
+
 #: Per-T1-item-id, **per-block-kind** restriction on which :func:`_classify`
 #: kinds may satisfy that item (issue #871, Phase 2b of epic #706; made
 #: per-block-kind by issue #1959) -- resolved by :func:`_allowed_kinds_for`
@@ -3818,6 +3829,17 @@ def build_tier_report(
         {
             "block": "my-block",              # optional, echoed back verbatim
             "kind": "analog" | "digital" | "mixed-signal",   # required
+            # optional, "mixed-signal" only (issue #2278): what this block's
+            # two partitions denote -- which nets/pins/cells belong to which
+            # side, as the tiers doc's "Block kind" subsection requires a
+            # mixed-signal claim to state. Echoed back verbatim, onto the
+            # report and onto every row of the partition it names; never
+            # graded. Either partition may be declared alone. See
+            # :func:`_read_partition_boundary`.
+            "partition_boundary": {
+                "analog": "bandgap + LDO: nets vref/vbg, cells bg_core, ota",
+                "digital": "trim SPI: nets sclk/sdi/csb, cells trim_ctl",
+            },
             "evidence": {                      # optional, default {}
                 "3": "drc.json",
                 "4": {"file": "lvs.json", "content_hash": "sha256:..."},
@@ -3856,6 +3878,10 @@ def build_tier_report(
             "schema_version": 1,
             "block": "my-block" | None,
             "kind": "analog",
+            # Present only when the manifest declared one (issue #2278) --
+            # a "mixed-signal" manifest's own statement of its partition
+            # boundary, echoed verbatim and never graded.
+            "partition_boundary": {"analog": "...", "digital": "..."},
             "tier": "T1" | None,
             "t1_item_count": 11,
             # How many T1 rows this build's *own* shipped doc would have
@@ -3888,6 +3914,9 @@ def build_tier_report(
                     "id": 3,
                     "title": "DRC clean",
                     "partition": None,
+                    # `"partition_boundary": "<text>"` here too, on every row
+                    # of a partition the manifest declared one for (issue
+                    # #2278) -- absent otherwise, as above.
                     "text": "latest `klt drc` JSON report: ...",
                     "notes": [],
                     "status": "met",
@@ -4229,7 +4258,10 @@ def build_tier_report(
 
     Raises :class:`SignoffError` if ``manifest`` is not a JSON object, its
     ``kind`` is missing or not one of ``analog``/``digital``/``mixed-signal``,
-    or its ``evidence`` field (when given) is not a JSON object. Raises
+    its ``evidence`` field (when given) is not a JSON object, or its
+    ``partition_boundary`` field (when given) is not a well-formed
+    declaration for a ``mixed-signal`` block
+    (:func:`_read_partition_boundary`). Raises
     :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
     (re-exported here for convenient ``except`` handling alongside
     :class:`SignoffError`) if ``docs/design-evidence-tiers.md`` itself
@@ -4254,9 +4286,11 @@ def build_tier_report(
             f"{type(evidence).__name__}"
         )
 
+    partition_boundary = _read_partition_boundary(manifest, kind)
+
     doc = parse_tier_doc(tiers_doc)
     partitions: tuple[str, ...] = (
-        ("analog", "digital") if kind == "mixed-signal" else (kind,)
+        _MIXED_SIGNAL_PARTITIONS if kind == _PARTITIONED_BLOCK_KIND else (kind,)
     )
     # Issue #2176: the item ids *this build* was written against, so an item
     # the parsed doc lists but this build has no rules for is reported as
@@ -4282,6 +4316,7 @@ def build_tier_report(
                     notes=list(t1_item["notes"]),
                     partition=partition if kind == "mixed-signal" else None,
                     partition_kind=partition,
+                    partition_boundary=partition_boundary.get(partition),
                     evidence=evidence,
                     graded_by_build=graded_by_build,
                 )
@@ -4293,6 +4328,7 @@ def build_tier_report(
                     text=_t1_item_text(t1_item, partition),
                     notes=list(t1_item["notes"]),
                     partition=partition if kind == "mixed-signal" else None,
+                    partition_boundary=partition_boundary.get(partition),
                     evidence=evidence,
                     allowed_kinds=_allowed_kinds_for(t1_item["id"], partition),
                     require_post_layout=(
@@ -4328,6 +4364,13 @@ def build_tier_report(
         "schema_version": TIER_REPORT_SCHEMA_VERSION,
         "block": manifest.get("block"),
         "kind": kind,
+        # Issue #2278: the manifest's own statement of what its two
+        # partitions denote, echoed verbatim -- present only when the
+        # manifest declared one, so a report from a manifest that declares
+        # nothing is byte-identical to the one this build rendered before the
+        # field existed (and therefore does not read as `--check` drift on an
+        # upgrade alone). Never graded: see `_read_partition_boundary`.
+        **({"partition_boundary": partition_boundary} if partition_boundary else {}),
         "tier": tier,
         "t1_item_count": total,
         # Issue #2202: what this build's *own* doc would have rendered, so a
@@ -4341,6 +4384,95 @@ def build_tier_report(
         "build": _build_identity(),
         "items": items,
     }
+
+
+def _read_partition_boundary(manifest: dict[str, Any], kind: str) -> dict[str, str]:
+    """Validate and normalize a manifest's optional ``partition_boundary``
+    declaration (issue #2278), returning ``{}`` when none was made.
+
+    ``docs/design-evidence-tiers.md``'s "Block kind" subsection requires a
+    mixed-signal claim to "state the partition boundary explicitly (which
+    nets/pins/cells belong to which side) so a reviewer can tell which
+    evidence covers which silicon". ``kind: "mixed-signal"`` already asserts
+    that two partitions exist -- every T1 row of such a report carries
+    ``"partition": "analog"``/``"digital"``, and an evidence key may select
+    one with the ``"<id>.<analog|digital>"`` form -- but nothing in the
+    manifest said what those two words denote for *this* block. This field is
+    where that declaration lives::
+
+        {
+            "kind": "mixed-signal",
+            "partition_boundary": {
+                "analog": "bandgap + LDO: nets vref/vbg/vout, cells bg_core, ota",
+                "digital": "trim SPI: nets sclk/sdi/csb, cells trim_ctl"
+            }
+        }
+
+    It is a **declaration, not a verdict** -- reported, never graded, exactly
+    like ``drc_coverage`` (issue #2002) and ``body_bias`` (issue #1983). A
+    mixed-signal manifest that declares nothing still grades identically and
+    can still reach ``tier: "T1"``; `klt signoff` has no way to check a
+    free-text boundary against the silicon and must not pretend otherwise.
+    Declaring only one of the two partitions is likewise allowed: a partial
+    disclosure is worth carrying, and refusing it would make the honest
+    half-statement unrepresentable.
+
+    What *is* refused, as an authoring mistake rather than a missing
+    disclosure (:class:`SignoffError`):
+
+    - a declaration on an ``analog``/``digital`` manifest -- a single-partition
+      block has no boundary to state, and silently dropping the field would
+      leave the manifest looking like it made a disclosure it did not;
+    - a non-object declaration, or an empty one;
+    - a key that is not ``"analog"``/``"digital"`` (a typo'd partition name
+      would otherwise vanish from the report with no signal);
+    - a value that is not a non-blank string.
+
+    The returned mapping is ordered by :data:`_MIXED_SIGNAL_PARTITIONS`, not
+    by the manifest's own key order, so two manifests declaring the same
+    boundary render the same report bytes.
+    """
+    raw = manifest.get("partition_boundary")
+    if raw is None:
+        return {}
+    if kind != _PARTITIONED_BLOCK_KIND:
+        raise SignoffError(
+            "block manifest 'partition_boundary' is only meaningful for a "
+            f"{_PARTITIONED_BLOCK_KIND!r} block, which grades one partition "
+            f"per side (got kind {kind!r}, which has a single partition)"
+        )
+    if not isinstance(raw, dict):
+        raise SignoffError(
+            "block manifest 'partition_boundary' must be a JSON object keyed "
+            f"by partition name ({_join_partitions()}), got "
+            f"{type(raw).__name__}"
+        )
+    if not raw:
+        raise SignoffError(
+            "block manifest 'partition_boundary' must name at least one "
+            f"partition ({_join_partitions()}), got an empty object"
+        )
+    for name, text in raw.items():
+        if name not in _MIXED_SIGNAL_PARTITIONS:
+            raise SignoffError(
+                f"block manifest 'partition_boundary' key {name!r} is not a "
+                f"partition of a {_PARTITIONED_BLOCK_KIND!r} block "
+                f"({_join_partitions()})"
+            )
+        if not isinstance(text, str) or not text.strip():
+            raise SignoffError(
+                f"block manifest 'partition_boundary.{name}' must be a "
+                "non-empty string stating which nets/pins/cells belong to "
+                f"that side, got {text!r}"
+            )
+    return {name: raw[name] for name in _MIXED_SIGNAL_PARTITIONS if name in raw}
+
+
+def _join_partitions() -> str:
+    """``"'analog'/'digital'"`` -- the partition names an error message
+    offers, derived from :data:`_MIXED_SIGNAL_PARTITIONS` so the message can
+    never name a set the grading does not render."""
+    return "/".join(repr(name) for name in _MIXED_SIGNAL_PARTITIONS)
 
 
 def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
@@ -5709,6 +5841,7 @@ def _build_power_delivery_item(
     notes: list[str],
     partition: str | None,
     partition_kind: str,
+    partition_boundary: str | None = None,
     evidence: dict[str, Any],
     graded_by_build: bool = True,
 ) -> dict[str, Any]:
@@ -5721,6 +5854,9 @@ def _build_power_delivery_item(
     the whole item :data:`_REASON_INVALID_EVIDENCE` rather than being
     silently dropped from the cited set), and that grading is delegated to
     :func:`_grade_power_delivery`.
+
+    ``partition_boundary`` (issue #2278) is echoed exactly as in
+    :func:`_build_tier_item`.
 
     ``graded_by_build`` (issue #2176) is reported and honoured exactly as in
     :func:`_build_tier_item`. In practice it is always ``True`` here --
@@ -5752,6 +5888,11 @@ def _build_power_delivery_item(
         "id": item_id,
         "title": title,
         "partition": partition,
+        **(
+            {"partition_boundary": partition_boundary}
+            if partition_boundary is not None
+            else {}
+        ),
         "text": text,
         "notes": notes,
         "status": status,
@@ -5770,6 +5911,7 @@ def _build_tier_item(
     text: str | None,
     notes: list[str],
     partition: str | None,
+    partition_boundary: str | None = None,
     evidence: dict[str, Any],
     allowed_kinds: set[str] | None = None,
     require_post_layout: bool = False,
@@ -5790,6 +5932,17 @@ def _build_tier_item(
     #2044 only T1 items 1, 2, 9 and 10 (the four naming no evidence at all)
     still pass ``None`` (see :data:`_ITEM_ALLOWED_KINDS` and
     :func:`_allowed_kinds_for`).
+
+    ``partition_boundary`` (issue #2278) is the manifest's own statement of
+    what *this row's* partition denotes, resolved by
+    :func:`_read_partition_boundary` and echoed verbatim onto the entry so a
+    row and the definition of the silicon it covers are readable together.
+    Omitted entirely (not rendered as ``None``) when the manifest declared
+    none for this partition -- an absent statement must not be
+    indistinguishable from a declared-empty one, and an undeclared manifest's
+    report must stay byte-identical to what this build rendered before the
+    field existed. It never touches ``status``/``reason``: there is no way to
+    check free text against silicon.
 
     ``require_post_layout`` (issue #1959) is forwarded to
     :func:`_grade_evidence` for the items in
@@ -5867,6 +6020,11 @@ def _build_tier_item(
         "id": item_id,
         "title": title,
         "partition": partition,
+        **(
+            {"partition_boundary": partition_boundary}
+            if partition_boundary is not None
+            else {}
+        ),
         "text": text,
         "notes": notes,
         "status": status,

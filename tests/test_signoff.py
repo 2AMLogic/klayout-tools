@@ -4045,6 +4045,205 @@ def test_mixed_signal_manifest_doubles_up_kind_independent_items():
     assert partitions == {"analog", "digital"}
 
 
+# --------------------------------------------------------------------------- #
+# Declared partition boundary (issue #2278): the tiers doc's "Block kind"
+# subsection requires a mixed-signal claim to state its partition boundary
+# explicitly, and the manifest had nowhere to put it -- so every report's
+# `"partition": "analog"`/`"digital"` rows named a side no artifact defined.
+# `partition_boundary` is a declaration, never a verdict: reported, never
+# graded, exactly like `drc_coverage` and `body_bias`.
+# --------------------------------------------------------------------------- #
+
+
+_ANALOG_BOUNDARY = (
+    "bandgap core and the LDO pass device: nets vref/vbg/vout, "
+    "cells bg_core, ota_2stage, pass_dev"
+)
+_DIGITAL_BOUNDARY = (
+    "trim/telemetry SPI: nets sclk/sdi/sdo/csb, cells trim_ctl, spi_slave"
+)
+
+
+def _mixed_signal_manifest(**overrides) -> dict:
+    return _manifest(
+        kind="mixed-signal",
+        partition_boundary={
+            "analog": _ANALOG_BOUNDARY,
+            "digital": _DIGITAL_BOUNDARY,
+        },
+        **overrides,
+    )
+
+
+def test_mixed_signal_report_echoes_the_declared_partition_boundary():
+    """The declaration travels with the report, once at the top level and
+    again on every row it qualifies -- so a row and the definition of the
+    silicon it covers are readable together."""
+    result = build_tier_report(_mixed_signal_manifest())
+
+    assert result["partition_boundary"] == {
+        "analog": _ANALOG_BOUNDARY,
+        "digital": _DIGITAL_BOUNDARY,
+    }
+    t1_items = [item for item in result["items"] if item["tier"] == "T1"]
+    assert len(t1_items) == 22
+    assert all(
+        item["partition_boundary"]
+        == (_ANALOG_BOUNDARY if item["partition"] == "analog" else _DIGITAL_BOUNDARY)
+        for item in t1_items
+    )
+    # A T2-T4 ladder row belongs to no partition, so it states no boundary.
+    ladder = [item for item in result["items"] if item["tier"] != "T1"]
+    assert ladder and all("partition_boundary" not in item for item in ladder)
+
+
+def test_partition_boundary_is_absent_when_the_manifest_declares_none():
+    """Additive, not a shape change: a manifest that declares nothing renders
+    exactly the report it rendered before this field existed -- no top-level
+    key, no per-item key -- so an already-committed report does not read as
+    drifted under `--check` on an upgrade alone."""
+    result = build_tier_report(_manifest(kind="mixed-signal"))
+
+    assert "partition_boundary" not in result
+    assert all("partition_boundary" not in item for item in result["items"])
+
+
+def test_partition_boundary_may_name_one_partition_only():
+    """Declaring one side is a partial disclosure, not an error -- the rows it
+    covers carry it and the other side's rows stay silent, rather than the
+    whole declaration being refused."""
+    result = build_tier_report(
+        _manifest(kind="mixed-signal", partition_boundary={"analog": _ANALOG_BOUNDARY})
+    )
+
+    assert result["partition_boundary"] == {"analog": _ANALOG_BOUNDARY}
+    t1_items = [item for item in result["items"] if item["tier"] == "T1"]
+    analog = [item for item in t1_items if item["partition"] == "analog"]
+    digital = [item for item in t1_items if item["partition"] == "digital"]
+    assert analog and all(
+        item["partition_boundary"] == _ANALOG_BOUNDARY for item in analog
+    )
+    assert digital and all("partition_boundary" not in item for item in digital)
+
+
+def test_partition_boundary_changes_no_verdict(tmp_path):
+    """Reported, never graded: declaring a boundary (or not) moves no item's
+    status, no count, and no tier -- the two reports differ in exactly the
+    declared field and nothing else."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    undeclared = build_tier_report(
+        _manifest(kind="mixed-signal", evidence={"3": drc_path})
+    )
+    declared = build_tier_report(_mixed_signal_manifest(evidence={"3": drc_path}))
+
+    assert declared["t1_met_count"] == undeclared["t1_met_count"] > 0
+    assert declared["tier"] == undeclared["tier"]
+    stripped = {
+        key: value for key, value in declared.items() if key != "partition_boundary"
+    }
+    stripped["items"] = [
+        {key: value for key, value in item.items() if key != "partition_boundary"}
+        for item in declared["items"]
+    ]
+    assert stripped == undeclared
+
+
+def test_partition_boundary_is_refused_for_a_single_partition_block():
+    """An `analog`/`digital` block has one partition, so there is no boundary
+    to state -- a declaration there is an authoring mistake, refused by name
+    rather than silently dropped."""
+    for kind in ("analog", "digital"):
+        with pytest.raises(SignoffError) as excinfo:
+            build_tier_report(
+                _manifest(kind=kind, partition_boundary={"analog": _ANALOG_BOUNDARY})
+            )
+        assert "partition_boundary" in str(excinfo.value)
+        assert "mixed-signal" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "analog is the bandgap, digital is the SPI",
+        ["analog", "digital"],
+        {},
+        {"rf": "the PA driver"},
+        {"analog": ""},
+        {"analog": "   "},
+        {"analog": 17},
+        {"analog": None},
+    ],
+)
+def test_partition_boundary_rejects_a_malformed_declaration(raw):
+    """A typo'd partition name or an empty/non-string body is refused, never
+    accepted-and-ignored: a boundary the report silently drops is worse than
+    one that was never declared, because the manifest looks like it made the
+    disclosure."""
+    with pytest.raises(SignoffError) as excinfo:
+        build_tier_report(_manifest(kind="mixed-signal", partition_boundary=raw))
+
+    assert "partition_boundary" in str(excinfo.value)
+
+
+def test_partition_boundary_null_reads_as_undeclared():
+    """An explicit JSON `null` is "declared nothing", the same as omitting the
+    key -- not a malformed declaration."""
+    result = build_tier_report(_manifest(kind="mixed-signal", partition_boundary=None))
+
+    assert "partition_boundary" not in result
+
+
+def test_check_reports_drift_when_the_declared_boundary_changed(tmp_path):
+    """The boundary is part of the claim the committed report records, so
+    re-pointing it at different silicon no longer reproduces -- the same
+    treatment every other manifest-derived field gets."""
+    committed_path = _write(
+        tmp_path, "committed.json", build_tier_report(_mixed_signal_manifest())
+    )
+
+    result = check_tier_report(
+        committed_path,
+        _manifest(
+            kind="mixed-signal",
+            partition_boundary={
+                "analog": _ANALOG_BOUNDARY,
+                "digital": "trim SPI plus the clock divider",
+            },
+        ),
+    )
+
+    assert result["status"] == "drifted"
+    assert {entry["field"] for entry in result["drift"]} >= {
+        "partition_boundary.digital"
+    }
+
+
+def test_cli_manifest_text_states_the_declared_partition_boundary(tmp_path, capsys):
+    """The terminal rendering a reviewer actually reads states both sides in
+    the header, once -- beside the `kind: mixed-signal` line that asserts the
+    two partitions exist in the first place."""
+    manifest_path = _write(tmp_path, "manifest.json", _mixed_signal_manifest())
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "partition boundary:" in out
+    assert f"analog: {_ANALOG_BOUNDARY}" in out
+    assert f"digital: {_DIGITAL_BOUNDARY}" in out
+
+
+def test_cli_manifest_text_omits_the_boundary_when_none_is_declared(tmp_path, capsys):
+    """An undeclared boundary prints no line at all -- an absent statement
+    must not read as "the partitions were defined"."""
+    manifest_path = _write(tmp_path, "manifest.json", _manifest(kind="mixed-signal"))
+
+    main(["signoff", "--manifest", manifest_path, "--format", "text"])
+
+    out = capsys.readouterr().out
+    assert "kind: mixed-signal" in out
+    assert "partition boundary:" not in out
+
+
 def test_t2_t4_ladder_items_are_always_unmet_and_use_ladder_text():
     result = build_tier_report(_manifest(kind="analog"))
 
