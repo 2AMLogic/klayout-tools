@@ -93,7 +93,7 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   **indistinguishable from an ordinary source/drain contact** -- no
   ``tap_requires`` narrowing, no ``tap_is_dedicated`` affirmation -- is
   reported as *skipped* work rather than as a passing check (issue #2199,
-  see :func:`_degenerate_tie_names`).
+  see :func:`_degenerate_tie_reasons`).
 
   **Caller-asserted taps** (``ties[].tap_boxes``, issue #2234): a stream
   whose taps are genuinely drawn but carry no distinguishing implant/marker
@@ -110,6 +110,29 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   omitted ``tap_requires`` (issue #2199's test is geometric, not "which key
   was given"), and an assertion matching no drawn geometry at all produces
   an honest "no tap" finding rather than a silent pass.
+
+  **Caller-asserted substrate regions** (``ties[].well_layer: null`` +
+  ``ties[].well_boxes``, issue #2255): a block sitting in a *native
+  substrate* -- NMOS-in-bulk, with no drawn pwell/tub shape anywhere in the
+  stream because the well is diffusion-derived rather than layer-marked --
+  has nothing to name as ``well_layer`` at all, so before this it could not
+  declare its substrate tie in any form. Such a spec sets ``well_layer`` to
+  ``null`` and names the substrate region it is claiming directly, as the
+  same ``[left, bottom, right, top]`` micrometre box list ``tap_boxes``
+  uses. Unlike ``tap_boxes``, which *narrows* an already-required drawn
+  layer, this **substitutes** for one -- so it carries its own falsifiability
+  test and its own coverage classification
+  (``erc_coverage.checked_by_well_assertion``, see
+  :func:`_connectivity_coverage`), never folded into either an ordinary
+  geometrically-derived pass or the tap-side ``checked_by_assertion`` list.
+  The test: an asserted region that covers (to within
+  :data:`_WELL_ASSERTION_MIN_UNCOVERED_FRACTION` of) the **whole top-cell
+  extent** is indistinguishable from "the entire die is the substrate",
+  which makes ``erc.missing_tie`` trivially satisfiable by any contact
+  anywhere that reaches the declared net -- exactly the unfalsifiable pass
+  issue #2199 exists to rule out -- so it is graded as *skipped* work
+  (:data:`REASON_DEGENERATE_WELL_ASSERTION`, see
+  :func:`_degenerate_tie_reasons`) rather than accepted as evidence.
 
   **Disclosed non-declaration** (top-level ``ties_disclosure``, issues
   #2234 and #2247): a run that deliberately declares no tap can say so
@@ -235,7 +258,7 @@ from .extract import (
 #: report except for the new (empty) `provenance.devices` list.
 #: Issue #2199 adds the optional `ties[].tap_is_dedicated` spec key and
 #: classifies a *degenerate* tie declaration as skipped rather than checked
-#: work in `erc_coverage` (see `_degenerate_tie_names`). No field is added,
+#: work in `erc_coverage` (see `_degenerate_tie_reasons`). No field is added,
 #: removed, or retyped: the change is which coverage list an existing
 #: identity lands in, and the `erc_status` token that follows from it.
 #: Issue #2204 adds the optional `--deck` CLI flag (no new spec key):
@@ -273,6 +296,16 @@ from .extract import (
 #: declared it, and the new reason token can only appear for a spec that
 #: asked for it -- so every existing spec's report is byte-identical. No
 #: bump.
+#: Issue #2255 adds one more optional spec key (``ties[].well_boxes``),
+#: widens an existing one (``ties[].well_layer`` accepts ``null`` when
+#: ``well_boxes`` is given -- a *widening*, so no previously-valid spec
+#: becomes invalid), adds one new
+#: ``erc_coverage.skipped[].reason`` token it can record
+#: (:data:`REASON_DEGENERATE_WELL_ASSERTION`), and adds one new
+#: ``erc_coverage`` list beside #2234's ``checked_by_assertion``
+#: (``checked_by_well_assertion``, empty unless used). Additive in exactly
+#: the sense every entry above is: a spec that declares no ``well_boxes``
+#: produces byte-identical output except for that new empty list. No bump.
 SCHEMA_VERSION = 1
 
 
@@ -325,9 +358,38 @@ def _antenna_coverage(
 
 #: The stable ``erc_coverage`` skip reason for a ``ties[]`` entry whose
 #: declared tap region is indistinguishable from ordinary source/drain
-#: contacts (issue #2199). See :func:`_degenerate_tie_names` for exactly
+#: contacts (issue #2199). See :func:`_degenerate_tie_reasons` for exactly
 #: when it applies and `docs/cli/erc.md` for how a spec clears it.
 REASON_DEGENERATE_TAP_DECLARATION = "degenerate_tap_declaration"
+
+#: The stable ``erc_coverage`` skip reason for a ``ties[]`` entry whose
+#: caller-asserted substrate region (``well_layer: null`` + ``well_boxes``,
+#: issue #2255) is geometrically indistinguishable from the whole top-cell
+#: extent. The tap-side counterpart of
+#: :data:`REASON_DEGENERATE_TAP_DECLARATION`, and kept distinct from it
+#: because the two name different things to go fix: that one says "narrow
+#: the tap", this one says "name the substrate region you are actually
+#: claiming, not the die". See :func:`_degenerate_tie_reasons`.
+REASON_DEGENERATE_WELL_ASSERTION = "degenerate_well_assertion"
+
+#: How much of the top cell's own extent a caller-asserted substrate region
+#: (``ties[].well_boxes``, issue #2255) must leave **uncovered** to count as
+#: a real claim rather than "the whole die is the substrate" -- as a
+#: fraction of the top cell's bounding-box area.
+#:
+#: The bar is *indistinguishability*, not size: an assertion may legitimately
+#: cover most of a block (a native substrate genuinely is everything outside
+#: the n-wells), and nothing here requires it to be small. What it may not be
+#: is the entire extent, because a single die-sized "well" polygon reduces
+#: ``erc.missing_tie`` to "does any contact anywhere reach the declared
+#: net?" -- satisfiable by every PMOS source on the rail, tap or not, which
+#: is the same unfalsifiable pass issue #2199 rejected on the tap side. The
+#: tolerance exists so a region drawn flush to the cell boundary, or one
+#: rounded to the DBU grid, is not accepted on a technicality; it is
+#: deliberately small, because the *evidence* an assertion carries grows
+#: with how finely it partitions the block (each merged asserted polygon
+#: must independently contain a tap that reaches the net).
+_WELL_ASSERTION_MIN_UNCOVERED_FRACTION = 0.01
 
 #: The stable ``erc_coverage.inapplicable`` reason for the undeclared
 #: ``erc.missing_tie`` work when the spec's top-level ``ties_disclosure``
@@ -403,9 +465,10 @@ def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
     ties: list[dict[str, Any]],
-    degenerate_ties: set[str] | None = None,
+    degenerate_ties: dict[str, str] | None = None,
     asserted_ties: set[str] | None = None,
     ties_disclosure: dict[str, str] | None = None,
+    well_asserted_ties: set[str] | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -438,8 +501,10 @@ def _connectivity_coverage(
       the degenerate ones (``degenerate_ties``, issue #2199): a tie whose
       declared tap region cannot be told apart from an ordinary
       source/drain contact is requested work that could not actually be
-      performed, so it is recorded as **skipped**
-      (:data:`REASON_DEGENERATE_TAP_DECLARATION`) and the whole
+      performed, so it is recorded as **skipped** (the reason
+      ``degenerate_ties`` carries for it:
+      :data:`REASON_DEGENERATE_TAP_DECLARATION`, or issue #2255's
+      :data:`REASON_DEGENERATE_WELL_ASSERTION`) and the whole
       connectivity scope reads ``clean_partial`` rather than ``clean``.
       Without that, the one rule ``docs/design-evidence-tiers.md`` item 11
       requires to be zero can be satisfied by a declaration that never
@@ -452,6 +517,18 @@ def _connectivity_coverage(
       block carries (``asserted_ties``), so a consumer can tell it apart
       from a tie a bare ``tap_requires``/``tap_is_dedicated`` graded without
       re-reading the spec document.
+
+    ``checked_by_well_assertion`` (``well_asserted_ties``, issue #2255) is
+    the same idea applied one level down, and deliberately a **separate**
+    list rather than more entries in ``checked_by_assertion``: there, the
+    caller asserted which of the drawn ``tap_layer`` geometry counts as the
+    tap, inside a well the layout actually draws; here, the caller asserted
+    the **well region itself**, because the block sits in a native substrate
+    that draws no well/tub layer at all. Those are different claims with
+    different evidence value, and a reader grading the report of record must
+    be able to tell which one was made. A tie can appear in both lists (an
+    asserted substrate region whose tap is also named by ``tap_boxes``) or
+    in either alone.
 
     A spec that declares no ``nets``/``ties`` asked for none of that work,
     so those rules are recorded as **inapplicable**, never skipped: a skip
@@ -471,12 +548,14 @@ def _connectivity_coverage(
     build that must produce this evidence cannot grade a declared tie
     safely". See :func:`_ties_disclosure_reason`.
     """
-    degenerate = degenerate_ties or set()
+    degenerate = degenerate_ties or {}
     asserted = asserted_ties or set()
+    well_asserted = well_asserted_ties or set()
     checked = [work_id("erc.floating_gate", gate["gate_id"]) for gate in gates]
     inapplicable: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
     checked_by_assertion: list[str] = []
+    checked_by_well_assertion: list[str] = []
 
     checked.extend(work_id("erc.net_connectivity", decl["name"]) for decl in nets_decl)
     if not nets_decl:
@@ -487,13 +566,13 @@ def _connectivity_coverage(
     for tie in ties:
         identity = work_id("erc.missing_tie", tie["name"])
         if tie["name"] in degenerate:
-            skipped.append(
-                {"id": identity, "reason": REASON_DEGENERATE_TAP_DECLARATION}
-            )
+            skipped.append({"id": identity, "reason": degenerate[tie["name"]]})
         else:
             checked.append(identity)
             if tie["name"] in asserted:
                 checked_by_assertion.append(identity)
+            if tie["name"] in well_asserted:
+                checked_by_well_assertion.append(identity)
     if not ties:
         inapplicable.append(
             {
@@ -508,6 +587,7 @@ def _connectivity_coverage(
             checked=checked, skipped=skipped, inapplicable=inapplicable
         ),
         "checked_by_assertion": sorted(checked_by_assertion),
+        "checked_by_well_assertion": sorted(checked_by_well_assertion),
     }
 
 
@@ -823,7 +903,7 @@ def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -
     It is not a hint and it changes no geometry: it is the one declarative
     way to say "there is nothing to narrow here", which is what keeps such
     a tie *checked* work instead of the skipped-degenerate classification
-    :func:`_degenerate_tie_names` otherwise assigns. Omitted/``null`` ->
+    :func:`_degenerate_tie_reasons` otherwise assigns. Omitted/``null`` ->
     ``False``. Anything but a JSON boolean is rejected rather than coerced:
     a truthy ``"false"`` string quietly asserting the opposite of what it
     reads is exactly the silent-pass shape issue #2199 is about.
@@ -841,33 +921,34 @@ def _parse_tap_is_dedicated(entry: dict[str, Any], spec_path: str, index: int) -
     return raw
 
 
-def _parse_tap_boxes(
-    entry: dict[str, Any], spec_path: str, index: int
+def _parse_um_boxes(
+    entry: dict[str, Any], key: str, spec_path: str, index: int
 ) -> list[tuple[float, float, float, float]]:
-    """``ties[].tap_boxes`` (optional, issue #2234): a caller *assertion* of
-    where the tap geometry is, as a list of ``[left, bottom, right, top]``
-    micrometre boxes intersected into ``tap_layer`` -- the same
-    ``(left, bottom, right, top)`` shape :func:`~klayout_tools._layout.clip_box`
-    already converts for ``klt clip``/``components.py``. Composes with
-    ``tap_requires`` (both narrow the same region) but, unlike it, needs no
-    PDK marker layer to exist at all: a stream whose taps are genuinely
-    drawn but carry no distinguishing implant/marker layer can point
-    directly at them instead. Omitted/``null`` -> ``[]`` (no assertion,
-    pre-#2234 behaviour, byte-identical). Split out of :func:`_validate_ties`
-    to keep that function under the repo's C901 complexity ratchet, as
-    :func:`_parse_tap_requires` is.
+    """One ``ties[]`` entry's ``[left, bottom, right, top]`` micrometre box
+    list under ``key`` -- the shared parser behind ``tap_boxes`` (issue
+    #2234, :func:`_parse_tap_boxes`) and ``well_boxes`` (issue #2255,
+    :func:`_parse_well_boxes`), which take the identical literal-geometry
+    shape and differ only in what the boxes *mean*.
+
+    ``[left, bottom, right, top]`` is the same tuple
+    :func:`~klayout_tools._layout.clip_box` already converts for ``klt
+    clip``/``components.py``. Omitted/``null`` -> ``[]``. Every box is
+    validated rather than coerced: a 3-element array, a non-number, a bool
+    (JSON ``true`` is not a coordinate), or an inverted/degenerate extent is
+    a spec error, since a silently-dropped box would weaken an assertion the
+    caller believes they made.
     """
-    raw = entry.get("tap_boxes", [])
+    raw = entry.get(key, [])
     if raw is None:
         raw = []
     if not isinstance(raw, list):
         raise ErcError(
-            f"spec '{spec_path}': ties[{index}].tap_boxes must be an array of "
+            f"spec '{spec_path}': ties[{index}].{key} must be an array of "
             "[left, bottom, right, top] micrometre boxes"
         )
     boxes: list[tuple[float, float, float, float]] = []
     for j, value in enumerate(raw):
-        field = f"ties[{index}].tap_boxes[{j}]"
+        field = f"ties[{index}].{key}[{j}]"
         if (
             not isinstance(value, list)
             or len(value) != 4
@@ -886,6 +967,102 @@ def _parse_tap_boxes(
             )
         boxes.append((left, bottom, right, top))
     return boxes
+
+
+def _parse_tap_boxes(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[float, float, float, float]]:
+    """``ties[].tap_boxes`` (optional, issue #2234): a caller *assertion* of
+    where the tap geometry is, as a list of ``[left, bottom, right, top]``
+    micrometre boxes intersected into ``tap_layer``. Composes with
+    ``tap_requires`` (both narrow the same region) but, unlike it, needs no
+    PDK marker layer to exist at all: a stream whose taps are genuinely
+    drawn but carry no distinguishing implant/marker layer can point
+    directly at them instead. Omitted/``null`` -> ``[]`` (no assertion,
+    pre-#2234 behaviour, byte-identical). Split out of :func:`_validate_ties`
+    to keep that function under the repo's C901 complexity ratchet, as
+    :func:`_parse_tap_requires` is.
+    """
+    return _parse_um_boxes(entry, "tap_boxes", spec_path, index)
+
+
+def _parse_well_boxes(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> list[tuple[float, float, float, float]]:
+    """``ties[].well_boxes`` (optional, issue #2255): a caller *assertion*
+    of the substrate/well region this tie is about, for a block that draws
+    no well/tub layer for it to name -- the same ``[left, bottom, right,
+    top]`` micrometre box list ``tap_boxes`` takes, and deliberately so, but
+    a fundamentally different kind of claim.
+
+    ``tap_boxes`` **narrows** a required, drawn ``tap_layer``: it composes
+    with the geometry, and the geometry is still what is measured. This
+    **substitutes** for a required drawn layer, so the region it names is
+    not corroborated by anything in the stream at all. That is why it is
+    valid only with ``well_layer: null`` (:func:`_parse_well_declaration`),
+    why it is graded under its own coverage classification rather than
+    folded into ``checked_by_assertion``, and why it carries its own
+    degeneracy test (:func:`_degenerate_tie_reasons`).
+    """
+    return _parse_um_boxes(entry, "well_boxes", spec_path, index)
+
+
+def _parse_well_declaration(
+    entry: dict[str, Any], spec_path: str, index: int
+) -> tuple[tuple[int, int] | None, list[tuple[float, float, float, float]]]:
+    """One ``ties[]`` entry's well declaration -- ``(well_layer,
+    well_boxes)``, where exactly one of the two is populated (issue #2255).
+
+    Two mutually exclusive forms, because they are different evidence and
+    conflating them would let an assertion hide behind drawn geometry:
+
+    - ``"well_layer": "<layer>/<datatype>"`` (every spec before #2255) --
+      the drawn well/tub layer, each of whose merged shapes is checked
+      independently. ``well_boxes`` alongside it is rejected rather than
+      silently applied: there is nothing this module could do with a box
+      list over a drawn well that is not either a narrowing ``tap_boxes``
+      already expresses better, or a second, unstated claim.
+    - ``"well_layer": null`` + a non-empty ``well_boxes`` -- the
+      native-substrate form: nothing is drawn, so the caller names the
+      region they are claiming.
+
+    ``well_layer: null`` with no ``well_boxes`` is an error, not a tie that
+    quietly checks nothing: "there is no well to name and I am not asserting
+    one" is *exactly* the state a spec already expresses by omitting the
+    ``ties[]`` entry and disclosing it with ``ties_disclosure`` -- and
+    unlike this, that route cannot be mistaken for a graded check. The key
+    itself stays required (an entry that omits ``well_layer`` altogether
+    still raises the same "missing 'well_layer'" error it always has): the
+    absence of a drawn well must be *declared*, never inferred from a typo.
+
+    Split out of :func:`_validate_ties` to keep that function under the
+    repo's C901 complexity ratchet, as :func:`_parse_tap_requires` is.
+    """
+    well_boxes = _parse_well_boxes(entry, spec_path, index)
+    raw = entry["well_layer"]
+    if raw is None:
+        if not well_boxes:
+            raise ErcError(
+                f"spec '{spec_path}': ties[{index}].well_layer is null, so "
+                f"ties[{index}].well_boxes must assert the substrate region "
+                "this tie covers (a non-empty array of [left, bottom, right, "
+                "top] micrometre boxes); to declare no tie at all, omit the "
+                "entry and state why in the top-level 'ties_disclosure'"
+            )
+        return None, well_boxes
+    if well_boxes:
+        raise ErcError(
+            f"spec '{spec_path}': ties[{index}].well_boxes asserts a substrate "
+            f"region for a tie with no drawn well, so ties[{index}].well_layer "
+            f"must be null (got {str(raw)!r}); to narrow a drawn well's taps, "
+            "use 'tap_boxes'"
+        )
+    return (
+        _parse_layer_datatype(
+            str(raw), spec_path, f"ties[{index}].well_layer", ErcError
+        ),
+        [],
+    )
 
 
 def _validate_ties(
@@ -912,7 +1089,7 @@ def _validate_ties(
     to say the same thing for a PDK that draws taps on their own layer:
     nothing needs narrowing because the layer is already tap-only. A tie
     that declares neither is *degenerate* -- see
-    :func:`_degenerate_tie_names` -- and is graded as skipped rather than
+    :func:`_degenerate_tie_reasons` -- and is graded as skipped rather than
     checked work.
 
     ``tap_boxes`` (optional array of ``[left, bottom, right, top]``
@@ -925,8 +1102,20 @@ def _validate_ties(
     own coverage classification (:func:`_connectivity_coverage`'s
     ``checked_by_assertion``) rather than folded into an ordinary
     geometrically-derived pass, and held to the same falsifiability test as
-    every other narrowing form (:func:`_degenerate_tie_names`): an assertion
-    that removes nothing from the drawn ``tap_layer`` is still degenerate."""
+    every other narrowing form (:func:`_degenerate_tie_reasons`): an
+    assertion that removes nothing from the drawn ``tap_layer`` is still
+    degenerate.
+
+    ``well_boxes`` (optional array of the same micrometre boxes, issue
+    #2255) is the *well*-side counterpart, and the one thing on this entry
+    that substitutes for a required field rather than narrowing one: with
+    ``"well_layer": null``, it asserts the substrate region of a block that
+    draws no well/tub layer at all (a native-substrate, NMOS-in-bulk
+    block), which before this could not declare a substrate tie in any
+    form. Exactly one of the two well forms may be given -- see
+    :func:`_parse_well_declaration` -- and an assertion covering the whole
+    top-cell extent is graded as skipped work, not as evidence (see
+    :func:`_degenerate_tie_reasons`)."""
     raw = spec.get("ties", [])
     if raw is None:
         raw = []
@@ -947,9 +1136,7 @@ def _validate_ties(
             raise ErcError(f"spec '{spec_path}': duplicate tie name {name!r}")
         names.append(name)
 
-        well_layer = _parse_layer_datatype(
-            str(entry["well_layer"]), spec_path, f"ties[{i}].well_layer", ErcError
-        )
+        well_layer, well_boxes = _parse_well_declaration(entry, spec_path, i)
         tap_layer = _parse_layer_datatype(
             str(entry["tap_layer"]), spec_path, f"ties[{i}].tap_layer", ErcError
         )
@@ -973,6 +1160,7 @@ def _validate_ties(
             {
                 "name": name,
                 "well_layer": well_layer,
+                "well_boxes": well_boxes,
                 "tap_layer": tap_layer,
                 "tap_requires": tap_requires,
                 "tap_is_dedicated": tap_is_dedicated,
@@ -1955,8 +2143,11 @@ def _tie_findings(
     ``ties`` spec section.
 
     For every physically distinct well/tub shape (each merged polygon of a
-    tie's ``well_layer``), a tap (the derived ``tap_layer`` ∩
-    ``tap_requires`` region, clipped to the well itself) must be drawn
+    tie's ``well_layer`` -- or of its caller-asserted ``well_boxes``, issue
+    #2255, which this function cannot and need not tell apart: the region
+    arrives already resolved from :func:`_extract_connectivity`), a tap (the
+    derived ``tap_layer`` ∩ ``tap_requires`` region, clipped to the well
+    itself) must be drawn
     inside it *and* at least one such tap must be electrically connected --
     via the tie connectivity graph, where the tap is wired to
     ``connect_to``'s ``stackup`` region during registration, see
@@ -2023,10 +2214,12 @@ def _tie_findings(
     return findings
 
 
-def _degenerate_tie_names(tie_layers: list[dict[str, Any]]) -> set[str]:
+def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     """The declared ties whose ``erc.missing_tie`` verdict is unfalsifiable
-    (issue #2199) -- reported as skipped work by
-    :func:`_connectivity_coverage` rather than as a check that passed.
+    (issues #2199 and #2255), each mapped to the stable
+    ``erc_coverage.skipped[].reason`` naming *why* -- reported as skipped
+    work by :func:`_connectivity_coverage` rather than as a check that
+    passed.
 
     There is no device recognition here: a tap and an ordinary source/drain
     contact drawn on the same diffusion/contact layer are the *same
@@ -2039,7 +2232,8 @@ def _degenerate_tie_names(tie_layers: list[dict[str, Any]]) -> set[str]:
     is the same spec and the same GDS answering "tied" for ``vdd`` and
     "untied" for ``vss``.
 
-    A tie is degenerate when all three hold:
+    A tie is **tap-degenerate** (:data:`REASON_DEGENERATE_TAP_DECLARATION`)
+    when all three hold:
 
     - the spec did not affirm ``tap_is_dedicated`` -- a tap-only layer
       (sky130's ``tap``) needs no narrowing and is a real tap by
@@ -2056,18 +2250,95 @@ def _degenerate_tie_names(tie_layers: list[dict[str, Any]]) -> set[str]:
       as having no tap drawn, which is an honest finding, not a silent
       clean.
 
+    A tie is **well-degenerate** (:data:`REASON_DEGENERATE_WELL_ASSERTION`,
+    issue #2255) when it *asserted* its substrate region (``well_layer:
+    null`` + ``well_boxes``) instead of naming drawn geometry, and that
+    region covers the whole top-cell extent to within
+    :data:`_WELL_ASSERTION_MIN_UNCOVERED_FRACTION` (measured in
+    :func:`_extract_connectivity`, where both regions exist). "The entire
+    die is the substrate" collapses :func:`_tie_findings`'s per-well loop to
+    one polygon spanning everything, so the check degrades to "does any
+    contact anywhere reach the declared net?" -- satisfied by every PMOS
+    source sitting on the rail, tap or not. The same unfalsifiable pass as
+    the tap case, one level up. A tie with a *drawn* ``well_layer`` is never
+    well-degenerate however much of the die that layer covers: a blanket
+    drawn well is a fact about the stream, not an unverifiable claim, and
+    rejecting it would break every spec written before this test existed.
+
+    **The well test is applied first**, and wins when both hold, because the
+    tap measurement is taken *inside* the well region: ``tap_narrowed`` is
+    ``(drawn_tap ∩ well) - tap_sites``, so an unfalsifiable well makes the
+    tap-side answer a statement about the die rather than about a tap.
+    Reporting "narrow your tap" for a declaration whose actual defect is
+    "you claimed the whole die" would send a reader to fix the wrong half.
+
     Deliberately *not* a change to ``erc_findings``: the same findings are
     emitted for the same geometry as before. What changes is that the
     envelope now says the check could not be performed, instead of letting
     ``erc_status: "clean"`` stand for it.
     """
-    return {
-        tie["name"]
-        for tie in tie_layers
-        if not tie["tap_is_dedicated"]
-        and not tie["tap_narrowed"]
-        and not tie["tap_region"].is_empty()
-    }
+    reasons: dict[str, str] = {}
+    for tie in tie_layers:
+        if tie["well_degenerate"]:
+            reasons[tie["name"]] = REASON_DEGENERATE_WELL_ASSERTION
+        elif (
+            not tie["tap_is_dedicated"]
+            and not tie["tap_narrowed"]
+            and not tie["tap_region"].is_empty()
+        ):
+            reasons[tie["name"]] = REASON_DEGENERATE_TAP_DECLARATION
+    return reasons
+
+
+def _tie_well_region(
+    kdb: Any,
+    layout: Any,
+    top_cell: Any,
+    tie: dict[str, Any],
+) -> tuple[Any, bool]:
+    """This tie's well/substrate region and whether a caller-asserted one is
+    degenerate -- ``(well_region, well_degenerate)``.
+
+    Two sources, decided by :func:`_parse_well_declaration` at spec-validation
+    time, not here:
+
+    - a drawn ``well_layer`` (every tie before issue #2255) -- the merged
+      layer region, exactly as before, never degenerate (see
+      :func:`_degenerate_tie_reasons`);
+    - ``well_boxes`` (issue #2255) -- the union of the caller's asserted
+      micrometre boxes, for a native-substrate block that draws no well/tub
+      layer at all. Degenerate when it covers the top cell's own extent to
+      within :data:`_WELL_ASSERTION_MIN_UNCOVERED_FRACTION`, i.e. when the
+      claim is indistinguishable from "the whole die".
+
+    The assertion is measured against ``top_cell.bbox()`` rather than against
+    the die/frame or a caller-supplied extent because that bounding box is
+    the one bound this module can derive from the stream itself -- the same
+    "verify against geometry, not against the caller's word" discipline
+    ``tap_narrowed`` applies on the tap side.
+
+    Split out of :func:`_extract_connectivity` to keep that function under
+    the repo's C901 complexity ratchet.
+    """
+    if not tie["well_boxes"]:
+        return _region(layout, top_cell, tie["well_layer"]).merged(), False
+
+    from ._layout import clip_box as _clip_box
+
+    asserted = kdb.Region()
+    for box_um in tie["well_boxes"]:
+        asserted += kdb.Region(_clip_box(kdb, box_um, layout.dbu))
+    asserted = asserted.merged()
+
+    extent = kdb.Region(top_cell.bbox())
+    extent_area = extent.area()
+    if extent_area <= 0:
+        # A top cell with no geometry at all: there is no extent to be
+        # distinguishable from, so no assertion about it can be falsified.
+        return asserted, True
+    uncovered = (extent - asserted).area()
+    degenerate = uncovered <= _WELL_ASSERTION_MIN_UNCOVERED_FRACTION * extent_area
+    return asserted, degenerate
 
 
 def _extract_connectivity(
@@ -2117,6 +2388,16 @@ def _extract_connectivity(
     routing. The well contributes only *where the taps are*, never across
     its own extent, and taps in the same well are not shorted to each other
     through it.
+
+    **A well need not be drawn at all (issue #2255).** A tie declaring
+    ``well_layer: null`` + ``well_boxes`` -- a native-substrate block, whose
+    substrate is diffusion-derived rather than layer-marked -- resolves its
+    well region from those asserted boxes instead of from a layer
+    (:func:`_tie_well_region`), and everything downstream is identical: the
+    well is still not a conductor, the taps are still clipped to it, and the
+    same ``tap_narrowed`` measurement is still taken inside it. What the
+    assertion additionally carries is its own degeneracy verdict
+    (``well_degenerate``), measured here against the top cell's own extent.
     """
     # Imported lazily, matching `load_layout`'s lazy `klayout.db` import.
     import klayout.db as kdb
@@ -2151,7 +2432,11 @@ def _extract_connectivity(
 
     tie_layers: list[dict[str, Any]] = []
     for tie in ties:
-        well_region = _region(layout, top_cell, tie["well_layer"]).merged()
+        # Drawn `well_layer`, or -- for a native-substrate block that draws
+        # none -- the caller's asserted `well_boxes` region plus whether
+        # that assertion is degenerate (issue #2255). Everything below is
+        # identical either way: the well is the well, however it was named.
+        well_region, well_degenerate = _tie_well_region(kdb, layout, top_cell, tie)
         drawn_tap = _region(layout, top_cell, tie["tap_layer"])
         tap_region = drawn_tap
         for required in tie["tap_requires"]:
@@ -2177,7 +2462,7 @@ def _extract_connectivity(
                 "tap_index": tap_index,
                 # Issue #2199: measured here, where both regions exist,
                 # rather than re-derived later from the spec alone -- see
-                # `_degenerate_tie_names`. `tap_boxes` narrowing feeds the
+                # `_degenerate_tie_reasons`. `tap_boxes` narrowing feeds the
                 # same measurement as `tap_requires` -- an assertion that
                 # removes nothing from the drawn `tap_layer` inside the well
                 # is exactly as degenerate as omitting it (issue #2234).
@@ -2190,6 +2475,14 @@ def _extract_connectivity(
                 # non-degenerate asserted tie as `checked_by_assertion`
                 # (issue #2234).
                 "tap_asserted": bool(tie["tap_boxes"]),
+                # Issue #2255: whether this tie's *well* region was asserted
+                # by the caller (`well_layer: null` + `well_boxes`) rather
+                # than read off a drawn layer, and whether that assertion is
+                # indistinguishable from the whole top-cell extent. Read by
+                # `_degenerate_tie_reasons` and by `_connectivity_coverage`'s
+                # `checked_by_well_assertion`.
+                "well_asserted": bool(tie["well_boxes"]),
+                "well_degenerate": well_degenerate,
             }
         )
 
@@ -2242,10 +2535,12 @@ def run_erc(
       three are computed.
     - ``ties`` (optional array, default ``[]``, issue #861): substrate/well
       tie declarations -- ``{"name" (optional, defaults to "tie<index>"),
-      "well_layer": "<layer>/<datatype>", "tap_layer": "<layer>/<datatype>",
-      "tap_requires": ["<layer>/<datatype>", ...] (optional, issue #2169),
-      "tap_is_dedicated": <bool> (optional, issue #2199),
-      "connect_to": "<stackup role>", "net"}``. Drives the
+      "well_layer": "<layer>/<datatype>" | null, "well_boxes": [[left,
+      bottom, right, top], ...] (optional, issue #2255), "tap_layer":
+      "<layer>/<datatype>", "tap_requires": ["<layer>/<datatype>", ...]
+      (optional, issue #2169), "tap_is_dedicated": <bool> (optional, issue
+      #2199), "tap_boxes": [[left, bottom, right, top], ...] (optional,
+      issue #2234), "connect_to": "<stackup role>", "net"}``. Drives the
       ``erc.missing_tie`` finding; omitted entirely -> none are computed.
       ``tap_requires`` intersects further layers into the tap so the spec
       can name the boolean a real PDK tap is drawn as (``Comp ∩ Nplus``);
@@ -2253,9 +2548,14 @@ def run_erc(
       needs no narrowing. A tie that says neither, and whose tap region is
       therefore whatever that layer draws inside the well, is graded as
       *skipped* work in ``erc_coverage`` (see
-      :func:`_degenerate_tie_names`). Ties are extracted in their own
-      connectivity graph (:func:`_extract_connectivity`), so they affect
-      ``erc.missing_tie`` and nothing else.
+      :func:`_degenerate_tie_reasons`). ``well_layer: null`` +
+      ``well_boxes`` is the native-substrate form (issue #2255): a block
+      that draws no well/tub layer asserts the substrate region instead of
+      naming one, graded under ``erc_coverage.checked_by_well_assertion``
+      and skipped as degenerate when the asserted region is
+      indistinguishable from the whole top-cell extent. Ties are extracted
+      in their own connectivity graph (:func:`_extract_connectivity`), so
+      they affect ``erc.missing_tie`` and nothing else.
     - ``devices`` (optional array, default ``[]``, issue #2183): where a
       drawn *device body* sits on an already-declared conductor role --
       ``{"name" (optional, defaults to "device<index>"), "body_layer":
@@ -2343,7 +2643,7 @@ def run_erc(
     :func:`_connectivity_coverage`. A ``ties[]`` entry whose tap region is
     indistinguishable from an ordinary source/drain contact makes that
     roll-up ``"clean_partial"`` rather than ``"clean"`` (issue #2199, see
-    :func:`_degenerate_tie_names`).
+    :func:`_degenerate_tie_reasons`).
 
     Raises :class:`ErcError` for a malformed spec, an unknown ``pdk`` or
     ``deck``, a ``findings_only`` run that also names a ``pdk``, an
@@ -2555,14 +2855,15 @@ def run_erc(
     # geometry without any `ties[]` declaration -- correct, over-broad, or
     # outright wrong -- being able to reach `gates[]`, the antenna ratios,
     # or the `nets[]` findings already computed.
-    degenerate_ties: set[str] = set()
+    degenerate_ties: dict[str, str] = {}
     asserted_ties: set[str] = set()
+    well_asserted_ties: set[str] = set()
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
             layout, top_cell, stackup, vias, ties, device_cuts
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
-        degenerate_ties = _degenerate_tie_names(tie_layers)
+        degenerate_ties = _degenerate_tie_reasons(tie_layers)
         # Issue #2234: a non-degenerate tie whose tap region was derived (at
         # least in part) from a caller assertion (`tap_boxes`) rather than
         # pure PDK-marker narrowing -- graded `checked_by_assertion` by
@@ -2572,6 +2873,17 @@ def run_erc(
             tie["name"]
             for tie in tie_layers
             if tie["tap_asserted"] and tie["name"] not in degenerate_ties
+        }
+        # Issue #2255: the same distinction one level up -- a non-degenerate
+        # tie whose *well* region was asserted (`well_layer: null` +
+        # `well_boxes`) because the block draws no well/tub layer at all.
+        # Its own `checked_by_well_assertion` list, never folded into the
+        # tap-side one: asserting which drawn geometry is the tap and
+        # asserting the region itself are different claims.
+        well_asserted_ties = {
+            tie["name"]
+            for tie in tie_layers
+            if tie["well_asserted"] and tie["name"] not in degenerate_ties
         }
     erc_findings.sort(
         key=lambda f: (
@@ -2647,7 +2959,13 @@ def run_erc(
     # a tap from a source/drain contact must not be readable as the clean
     # missing-tie verdict `docs/design-evidence-tiers.md` item 11 asks for.
     erc_coverage = _connectivity_coverage(
-        gates, nets_decl, ties, degenerate_ties, asserted_ties, ties_disclosure
+        gates,
+        nets_decl,
+        ties,
+        degenerate_ties,
+        asserted_ties,
+        ties_disclosure,
+        well_asserted_ties,
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)

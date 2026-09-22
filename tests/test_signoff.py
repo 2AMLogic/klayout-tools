@@ -8326,6 +8326,9 @@ def test_item_11_digital_met_with_pdn_erc_and_power_connectivity(tmp_path):
         # Issue #2234: this fixture's ERC envelope carries no
         # `erc_coverage` at all, so no tie rested on a caller assertion.
         "ties_checked_by_assertion": [],
+        # Issue #2255: likewise for the well side -- every tie here names a
+        # drawn `well_layer`.
+        "ties_checked_by_well_assertion": [],
     }
 
 
@@ -8385,6 +8388,165 @@ def test_item_11_met_names_the_ties_that_rested_on_a_caller_assertion(tmp_path):
     assert item["citation"]["power_delivery"]["ties_checked_by_assertion"] == [
         'erc.missing_tie:["nwell_tie"]'
     ]
+    # The well side is a *separate* claim and stays empty here: this tie
+    # named a drawn `well_layer`; only its tap rested on the caller's word.
+    assert item["citation"]["power_delivery"]["ties_checked_by_well_assertion"] == []
+
+
+# --------------------------------------------------------------------------- #
+# T1 item 11 on a native-substrate block -- issue #2255
+#
+# Before this, `ties[].well_layer` required drawn geometry, so an
+# NMOS-in-bulk block with no drawn pwell/tub could not declare its substrate
+# tie at all: one half of this item was unreachable by construction, and the
+# best such a block could do was disclose it (`supply_spec_disclosed_*`,
+# always unmet). `well_layer: null` + `well_boxes` makes the declaration
+# expressible, and -- because `klt erc` falsifies the assertion where it can
+# -- gradeable to `met`, with the weaker provenance stated rather than
+# hidden.
+# --------------------------------------------------------------------------- #
+
+#: An ERC spec whose single tie sits in a native substrate: nothing drawn to
+#: name, so the region is asserted (and deliberately *not* the whole extent
+#: -- `klt erc` rejects that as degenerate before it can reach item 11).
+ERC_NATIVE_SUBSTRATE_SPEC = {
+    **ERC_SUPPLY_SPEC,
+    "ties": [
+        {
+            "name": "substrate_tie",
+            "well_layer": None,
+            "well_boxes": [[0.0, 0.0, 20.0, 4.0]],
+            "tap_layer": "65/44",
+            "tap_is_dedicated": True,
+            "connect_to": "li1",
+            "net": "VGND",
+        }
+    ],
+}
+
+
+def _erc_coverage_block(**overrides) -> dict:
+    return {
+        "schema_version": 1,
+        "scope": "connectivity",
+        "known": True,
+        "checked": [],
+        "skipped": [],
+        "inapplicable": [],
+        "unknown": [],
+        "nothing_checked": False,
+        "nothing_checked_reasons": [],
+        "checked_by_assertion": [],
+        "checked_by_well_assertion": [],
+        **overrides,
+    }
+
+
+def test_item_11_met_for_a_native_substrate_tie_naming_the_asserted_well(tmp_path):
+    """Issue #2255: a block whose substrate tie rests on a caller-asserted
+    region reaches `met` on the same terms as a drawn-well one -- the
+    assertion is falsifiable (each asserted polygon must independently hold
+    a tap that reaches the declared net) and `klt erc` rejects the
+    unfalsifiable form before it can get here. What the verdict of record
+    gains is the provenance: *which* ties rested on an asserted well."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(
+            checked=['erc.missing_tie:["substrate_tie"]'],
+            checked_by_well_assertion=['erc.missing_tie:["substrate_tie"]'],
+        ),
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=envelope,
+                    erc_spec=ERC_NATIVE_SUBSTRATE_SPEC,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    assert item["citation"]["power_delivery"]["ties_checked_by_well_assertion"] == [
+        'erc.missing_tie:["substrate_tie"]'
+    ]
+    # The two assertion classes stay distinct: this tie's *tap* was a
+    # dedicated tap layer, not a caller-named box.
+    assert item["citation"]["power_delivery"]["ties_checked_by_assertion"] == []
+
+
+def test_item_11_unmet_when_the_asserted_well_was_skipped_as_degenerate(tmp_path):
+    """The falsifiability bar, seen from the consumer side: an assertion
+    `klt erc` could not distinguish from "the whole die is the substrate" is
+    recorded as skipped work, and skipped `erc.missing_tie` work has never
+    been allowed to stand for a clean one. The same gate that already
+    rejects issue #2199's degenerate *tap* declaration catches this,
+    unchanged -- it matches the work identity, not the reason string."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(
+            skipped=[
+                {
+                    "id": 'erc.missing_tie:["substrate_tie"]',
+                    "reason": "degenerate_well_assertion",
+                }
+            ],
+        ),
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=envelope,
+                    erc_spec=ERC_NATIVE_SUBSTRATE_SPEC,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+    assert item["citation"] is None
+
+
+def test_item_11_well_assertion_list_is_empty_for_a_pre_2255_envelope(tmp_path):
+    """Every ERC report written before this field existed carries no
+    `checked_by_well_assertion` at all -- it must read as "no tie rested on
+    an asserted well", never as a missing-key error."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": {
+            key: value
+            for key, value in _erc_coverage_block(
+                checked=['erc.missing_tie:["nwell_tie"]']
+            ).items()
+            if key != "checked_by_well_assertion"
+        },
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="analog", erc_envelope=envelope
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["ties_checked_by_well_assertion"] == []
 
 
 def test_item_11_digital_unmet_when_no_pdn_was_built(tmp_path):
@@ -9393,6 +9555,50 @@ def test_cli_item_11_text_output_names_caller_asserted_taps(tmp_path, capsys):
 
     out = capsys.readouterr().out
     assert 'taps asserted by the caller: 1 (erc.missing_tie:["nwell_tie"])' in out
+    # Issue #2255: the well side is a separate claim and was not made here.
+    assert "substrate regions asserted by the caller" not in out
+
+
+def test_cli_item_11_text_output_names_caller_asserted_substrate_regions(
+    tmp_path, capsys
+):
+    """Issue #2255: a native-substrate block's tie rests on an asserted
+    *well* region, not just an asserted tap. That is the weaker of the two
+    claims, so the rendering a reviewer actually reads says so on its own
+    line rather than leaving it to the JSON."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(
+            checked=['erc.missing_tie:["substrate_tie"]'],
+            checked_by_well_assertion=['erc.missing_tie:["substrate_tie"]'],
+        ),
+    }
+    manifest_path = _write(
+        tmp_path,
+        "manifest.json",
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=envelope,
+                    erc_spec=ERC_NATIVE_SUBSTRATE_SPEC,
+                )
+            },
+        ),
+    )
+
+    main(["signoff", "--manifest", manifest_path])
+
+    out = capsys.readouterr().out
+    assert (
+        "substrate regions asserted by the caller (no drawn well): 1 "
+        '(erc.missing_tie:["substrate_tie"])'
+    ) in out
+    # The tap side stayed marker-derived (`tap_is_dedicated`), so its own
+    # line is absent -- the two are reported independently.
+    assert "taps asserted by the caller" not in out
 
 
 # --------------------------------------------------------------------------- #
