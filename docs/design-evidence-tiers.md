@@ -133,7 +133,17 @@ written to every block.
   within the same repo and satisfy **both** columns, one per partition. The
   claim must state the partition boundary explicitly (which nets/pins/cells
   belong to which side) so a reviewer can tell which evidence covers which
-  silicon.
+  silicon. A block manifest states it in its optional `partition_boundary`
+  field (issue #2278 — `{"analog": "...", "digital": "..."}`), which `klt
+  signoff --manifest` echoes onto the report and onto every row of the
+  partition it names, so the statement travels with the evidence instead of
+  living only in a prose file a reader has to find and trust is current. It
+  is **reported, not graded**: `klt signoff` cannot check free text against
+  silicon, so a manifest that declares nothing still grades identically —
+  what it loses is a reviewer's ability to answer this paragraph's question
+  from the report alone. See
+  [`docs/cli/signoff.md`](cli/signoff.md)'s "The declared partition
+  boundary" section for the field's exact rules.
 
 1. **Design sources**
    - *Analog* — committed schematic sources (or generator) plus the

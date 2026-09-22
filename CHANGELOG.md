@@ -39,6 +39,28 @@ not `klt --version`, if you need to detect this kind of drift. See
   read yields no drops and unchanged behavior. See
   [`docs/cli/functional-verification.md`](docs/cli/functional-verification.md)'s
   "SDF back-annotation" section.
+- **Added** (#2278, `klt signoff --manifest` + docs, additive — **no**
+  `schema_version` bump): an optional `partition_boundary` field on a
+  `kind: "mixed-signal"` block manifest, stating what each partition denotes
+  (`{"analog": "...", "digital": "..."}` — which nets/pins/cells belong to
+  which side). `docs/design-evidence-tiers.md`'s "Block kind" subsection
+  requires a mixed-signal claim to state that boundary explicitly, and the
+  manifest previously had nowhere to put it: every report's
+  `"partition": "analog"`/`"digital"` rows named a side nothing defined,
+  though an evidence key could already select one (`"<id>.<analog|digital>"`).
+  The declaration is echoed verbatim onto the report (top-level
+  `partition_boundary`) and onto every row of the partition it names
+  (`items[].partition_boundary`), so a row and the definition of the silicon
+  it covers are readable together; `--format text` prints it once under the
+  `kind:` header. **Reported, never graded** — it moves no item's `status`
+  and no block's `tier`, exactly like `drc_coverage` (#2002) and `body_bias`
+  (#1983); a mixed-signal manifest that declares nothing grades identically
+  and renders a byte-identical report, so `--check` sees no drift on an
+  upgrade alone. Either partition may be declared alone; a declaration on an
+  `analog`/`digital` manifest, an unknown partition key, or a blank/non-string
+  value is refused by name (exit `1`) rather than silently dropped. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md) → "The declared partition
+  boundary".
 - **Added** (#2275, `scripts/check_artifact_determinism.py` + CI + docs,
   additive — **no** `schema_version` bump): flake-triage forensics and
   declared platform-variable regions for golden-artifact evidence. The

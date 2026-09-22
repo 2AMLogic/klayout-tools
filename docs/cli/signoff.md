@@ -786,6 +786,9 @@ against a caller-supplied **block manifest**:
   doc's "Block kind" subsection). Selects which column of the doc's
   per-kind T1 items (1, 2, 5, 7) applies; a `"mixed-signal"` manifest
   renders **both** columns, once per partition.
+- `partition_boundary` — optional, `"mixed-signal"` only (issue #2278):
+  what this block's two partitions *denote*. See "The declared partition
+  boundary" below.
 - `evidence` — optional (default `{}`), a map from item id to an evidence
   entry, either **file-backed** or **command-backed**:
   - **File-backed** (issue #722) — a bare file path (a `klt
@@ -873,6 +876,82 @@ envelope kind for *envelope-aggregation mode only* — `docs/design-evidence-
 tiers.md`'s T1 checklist has no item for power-grid evidence yet, so a
 `power` citation is never graded `"met"` here (see "No T1 item accepts
 `power` evidence" below).
+
+### The declared partition boundary (issue #2278)
+
+`kind: "mixed-signal"` asserts that the block has two partitions: every T1
+item renders twice, once as `"partition": "analog"` and once as
+`"partition": "digital"`, and an evidence key may select one of them with
+the `"<item id>.<analog|digital>"` form. What those two words *denote* for a
+given block is not something the tool can infer, and
+[`../design-evidence-tiers.md`](../design-evidence-tiers.md)'s "Block kind"
+subsection requires the claim to state it: "which nets/pins/cells belong to
+which side, so a reviewer can tell which evidence covers which silicon."
+
+`partition_boundary` is where that statement lives:
+
+```json
+{
+  "block": "sky130-trimmable-bandgap",
+  "kind": "mixed-signal",
+  "partition_boundary": {
+    "analog": "bandgap core + LDO pass device: nets vref/vbg/vout, cells bg_core, ota_2stage, pass_dev",
+    "digital": "trim/telemetry SPI: nets sclk/sdi/sdo/csb, cells trim_ctl, spi_slave"
+  },
+  "evidence": {"3": "drc.json", "7.analog": "pex-analog.json"}
+}
+```
+
+It is **reported, never graded** — the same treatment "DRC coverage is
+reported, not graded" and "Device-body bias is reported, not graded" above
+describe. `klt signoff` has no way to check free text against silicon, so a
+mixed-signal manifest that declares nothing grades identically and can still
+reach `tier: "T1"`; what changes is only whether the report a reviewer opens
+answers the question the doc says the claim must answer.
+
+The report echoes it verbatim in two places, so a row and the definition of
+the silicon it covers are readable together:
+
+- top-level `partition_boundary`, the whole declaration as written;
+- `items[].partition_boundary` on every row of a partition that declared
+  one — the per-row copy is what a consumer filtering `.items[]` needs, since
+  a row selected out of the array would otherwise carry a partition name with
+  no definition attached.
+
+`--format text` prints it once, under the `block:`/`kind:` header, rather
+than repeating one constant statement on all eleven of that partition's
+rows:
+
+```
+$ klt signoff --manifest manifest.json --format text
+block: sky130-trimmable-bandgap  kind: mixed-signal
+partition boundary:
+  analog: bandgap core + LDO pass device: nets vref/vbg/vout, cells bg_core, ota_2stage, pass_dev
+  digital: trim/telemetry SPI: nets sclk/sdi/sdo/csb, cells trim_ctl, spi_slave
+tier: none
+T1: 2/22 items met
+```
+
+Rules, and why each one is a refusal rather than a silent drop:
+
+| Manifest | Result |
+|---|---|
+| Field omitted, or `null` | Nothing declared. No `partition_boundary` key anywhere in the report — an undeclared manifest renders exactly the report it rendered before this field existed, so `--check` reports no drift on an upgrade alone. |
+| One partition declared | Accepted. That partition's rows carry it; the other's stay silent. A partial disclosure is worth carrying, and refusing it would make the honest half-statement unrepresentable. |
+| Declared on an `analog`/`digital` manifest | **Error** (exit `1`). A single-partition block has no boundary to state; accepting-and-ignoring would leave the manifest looking like it made a disclosure it did not. |
+| A key other than `"analog"`/`"digital"` | **Error**. A typo'd partition name would otherwise vanish from the report with no signal — the same failure mode as a typo'd evidence key, but on a field nothing else can catch. |
+| A non-object, an empty object, or a blank/non-string value | **Error**, naming the offending key. |
+
+Additive per [`../json-contract.md`](../json-contract.md): both fields are
+present only when the manifest declares a boundary, so no `schema_version`
+bump. The declaration *is* part of the claim the report records, so changing
+it renders `--check` `"drifted"` (naming `partition_boundary.<partition>`),
+exactly like any other manifest-derived field.
+
+The fleet roll-up (`--fleet`) does not restate it: a roll-up row is a
+reduction — tier, counts, and what is blocking — and already directs a
+reader to the block's own `--manifest` report, which carries the
+declaration in full.
 
 ### Items 1, 2, 9, and 10: `klt signoff` cannot check topical relevance
 
@@ -1921,6 +2000,7 @@ distinguishable from "no samples document was ever named" (see
 | `schema_version`| integer             | Version of this report's own JSON shape (starts at `1`, independent of envelope-aggregation mode's `schema_version`). |
 | `block`         | string \| null       | Echoed from the manifest's `block` field.                                                |
 | `kind`          | string               | `"analog"`, `"digital"`, or `"mixed-signal"`, echoed from the manifest.                  |
+| `partition_boundary` | object          | **Present only when a `"mixed-signal"` manifest declared one** (issue #2278): `{"analog": <string>, "digital": <string>}` — what each partition denotes (which nets/pins/cells belong to which side), echoed verbatim from the manifest, with only the partitions it actually declared. Reported, never graded: it moves no item's `status` and no block's `tier`, exactly like `drc_coverage` and `body_bias`. Absent entirely for a manifest that declares nothing, so such a report is byte-identical to what a pre-#2278 build rendered. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). See "The declared partition boundary" above. |
 | `tier`          | string \| null       | `"T1"` only if every rendered T1 item is `"met"`; otherwise `null` — no partial credit.  |
 | `t1_item_count` | integer              | Number of rendered T1 items (11 for `analog`/`digital`, 22 for `mixed-signal`). Eleven since issue #2025 added item 11 ("Power delivery (structural)"); the value is the parsed checklist's own length, never a literal in code. |
 | `build_t1_item_count` | integer \| null | Number of T1 rows **this build's own shipped doc** would have rendered for this block (issue #2202) — the same multiplication by partition count `t1_item_count` gets, so the two are directly comparable. Equal to `t1_item_count` for the shipped doc and for any `--tiers-doc`/`$KLT_TIERS_DOC` copy with the same item list; *larger* when the parsed doc lists fewer items than this build grades, which is the whole point of the field (see "A doc the build has outrun" above). `null` — never a fabricated count — when this build cannot read its own doc at all, the same rule `graded_by_build` applies in the other direction. Additive: no `schema_version` bump, per [`../json-contract.md`](../json-contract.md). |
@@ -1938,6 +2018,7 @@ distinguishable from "no samples document was ever named" (see
 | `id`        | integer \| null     | The T1 checklist item number (1-11), or `null` for a T2-T4 ladder row.                   |
 | `title`     | string              | The item's/tier's bold title from the doc.                                               |
 | `partition` | string \| null      | `"analog"`/`"digital"` for a `mixed-signal` manifest's per-partition row, else `null`.    |
+| `partition_boundary` | string     | **Present only on a row whose partition the manifest declared a boundary for** (issue #2278) — the top-level `partition_boundary` entry for this row's `partition`, repeated here so a row selected out of `items[]` carries the definition of the silicon it covers, not just the partition's name. Absent on every row of an undeclared partition, and on every T2-T4 ladder row (a ladder row belongs to no partition). Never graded. |
 | `text`      | string \| null      | The item's body text (the matching column for a per-kind item, or the shared text).      |
 | `notes`     | array\<string\>     | Additional kind-independent caveats the doc attaches to the item (e.g. item 5's spec-ratification note). |
 | `status`    | string               | `"met"` or `"unmet"` — see above.                                                        |
