@@ -1,0 +1,20 @@
+[package]
+name = "klt-nldm-interp"
+version = "0.1.0"
+edition = "2021"
+description = "Shared bilinear-interpolation core for liberty NLDM 2D lookup tables (2AMLogic/klayout-tools, issue #2272 -- extracted from the near-verbatim fork between native/statime and native/techmap)"
+license = "MIT"
+publish = false
+
+# Deliberately a plain library crate -- no `[[bin]]` target, no `pyo3`
+# dependency, and no dependency on either `native/statime` or
+# `native/techmap` (or their own, genuinely-diverged `liberty.rs` files).
+# `native/statime` and `native/techmap` each pull this crate in as a path
+# dependency; see `src/lib.rs` for how they hand it table data without
+# either importing the other's `Table2D` type.
+
+[lib]
+name = "klt_nldm_interp"
+path = "src/lib.rs"
+
+[dependencies]

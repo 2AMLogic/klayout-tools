@@ -387,10 +387,13 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
-        # The engine's own 11 unit tests (liberty tokenizer, NLDM bilinear
-        # interpolation, netlist parser, timing-graph propagation). Issue
-        # #925 integrated this crate without touching its numerics, so these
-        # must keep passing unmodified.
+        # The engine's own unit tests (liberty tokenizer, netlist parser,
+        # timing-graph propagation). Issue #925 integrated this crate
+        # without touching its numerics, so these must keep passing
+        # unmodified. NLDM bilinear-interpolation coverage moved to
+        # `native/nldm-interp`'s own `cargo test` (issue #2272, the
+        # `native-techmap` job below) when this crate's `nldm.rs` became a
+        # thin re-export of that shared crate.
         run: cargo test
 
       - name: Set up uv
@@ -517,6 +520,34 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: cargo test
+        run: cargo test
+
+      - name: Cache cargo registry + build output (nldm-interp)
+        # `native/nldm-interp` (issue #2272) is a path dependency of both
+        # `native/statime` and `native/techmap`, but this repo has no root
+        # `Cargo.toml`/workspace -- each of those crates' own `cargo test`
+        # above only runs *its own* package's tests, never a path
+        # dependency's, so the shared crate's own union-of-both-forks test
+        # suite needs its own explicit invocation below.
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            native/nldm-interp/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('native/nldm-interp/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt --check (nldm-interp)
+        working-directory: native/nldm-interp
+        run: cargo fmt --check
+
+      - name: cargo clippy (nldm-interp)
+        working-directory: native/nldm-interp
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test (nldm-interp)
+        working-directory: native/nldm-interp
         run: cargo test
 
   native-wave:

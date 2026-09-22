@@ -23,6 +23,7 @@ shipped `klt` verb — its own `pyproject.toml` reached from the top-level
 | [`techmap/`](techmap/) | `klt-techmap-native` | `klt techmap` (Liberty-driven technology mapping, standalone binary invoked as a subprocess) | Standalone binary + library — not (yet) folded into a `pyo3` extension |
 | [`wave/`](wave/) | `klt-wave-native` | `klt wave build` / `klt wave query` (VCD/FST waveform store build + query; standalone `klt-wave` binary invoked as a subprocess) | Standalone binary crate — no `pyo3`/dependency-group wiring (issues #1599/#1600) |
 | [`legalize/`](legalize/) | `klt-legalize-native` | Nothing shipped — an Abacus-style standard-cell row legalizer spike | **No-go** verdict (issue #784); kept as the spike's own artifact, not wired into `klt place-and-route`/`klt par` |
+| [`nldm-interp/`](nldm-interp/) | `klt-nldm-interp` | Not a `klt` CLI verb — shared liberty NLDM bilinear-interpolation core, consumed as a path dependency by `statime/` and `techmap/` | Internal library crate (issue #2272, extracted from a near-verbatim fork between `statime/` and `techmap/`); no `pyo3`, no dependency-group wiring |
 
 ## Building
 

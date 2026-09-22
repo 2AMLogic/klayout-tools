@@ -312,7 +312,7 @@ native/statime/
     ├── lib.rs            # public module tree + the #[pyfunction] critical_path_json boundary
     ├── liberty.rs         # .lib tokenizer/parser (825 lines incl. tests)
     ├── netlist.rs          # Yosys write_verilog -noattr parser (367 lines incl. tests)
-    ├── nldm.rs              # bilinear interpolation + extrapolation (130 lines incl. tests)
+    ├── nldm.rs              # thin re-export of native/nldm-interp (issue #2272; was a 130-line bilinear-interpolation module, now shared with native/techmap)
     ├── sta.rs                # timing graph + rise/fall-aware propagation (537 lines incl. tests)
     └── main.rs                # `klt-statime critical-path` CLI
 ```

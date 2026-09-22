@@ -52,6 +52,7 @@ updates:
       - "/native/congestion"
       - "/native/legalize"
       - "/native/mom"
+      - "/native/nldm-interp"
       - "/native/statime"
       - "/native/techmap"
       - "/native/yield"
