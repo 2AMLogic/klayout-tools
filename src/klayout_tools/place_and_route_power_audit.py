@@ -740,3 +740,37 @@ def power_delivery_warnings(
         "request's strap layers/pitch/width against the platform's own PDN "
         "config before using this run's numbers."
     ]
+
+
+def row_rail_fallback_warning(layer: str) -> str:
+    """The caveat for a run whose row-rail fallback (issue #1442) fired.
+
+    Appended to ``warnings`` by ``place_and_route`` whenever
+    ``power.row_rail.emitted`` is ``true`` (issue #1985). The fallback's own
+    documentation says the rail is "deliberately **not** a full PDN", but
+    that statement lives only in this repo's docs -- a driver in another
+    repo described the very same Metal1-only grid as "the standard
+    treatment for a macro too small to host a multi-layer chip-level grid",
+    and cited it as such. A caller reading only the response could not tell
+    those two readings apart, so the response itself now says which one
+    applies: the fallback draws ``layer``'s follow-pin row rails (and runs
+    the route-stage ``filler_placement`` pass) and nothing else -- no
+    vertical straps, no tapcells, no multi-layer PDN vias -- so the layout
+    is not PDN-complete and this run's numbers are not a power signoff.
+
+    This is deliberately separate from :func:`power_delivery_warnings`'s
+    own output rather than folded into the omitted-``request.power``
+    warning: that warning's prose is derived from the DEF measurement and
+    already correctly refuses to claim "no rails"/"no fill" on this exact
+    path; what it does not say is the structural fact -- horizontal rails
+    only -- that makes the grid incomplete even when every measurement
+    came back nonzero.
+    """
+    return (
+        "power.row_rail fallback (issue #1442) drew only single-layer "
+        f"{layer} follow-pin row rails (plus filler cells): no vertical "
+        "straps, no tapcells and no multi-layer PDN vias exist, so this "
+        "layout is not PDN-complete. Supply request.power (see "
+        "docs/cli/place-and-route.md, 'Power delivery') before treating "
+        "this run's numbers as a power signoff."
+    )

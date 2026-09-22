@@ -653,6 +653,9 @@ from .place_and_route_power_audit import (
 from .place_and_route_power_audit import (
     power_delivery_warnings as power_delivery_warnings,
 )
+from .place_and_route_power_audit import (
+    row_rail_fallback_warning as row_rail_fallback_warning,
+)
 from .place_and_route_reports import (
     count_route_drc_violations as _count_route_drc_violations,
 )
@@ -1597,6 +1600,44 @@ def _validate_pdn_core_fit(
         raise PlaceAndRouteError(message)
 
 
+def _response_warnings(
+    placed: dict[str, Any],
+    *,
+    power_requested: bool,
+    row_rail_emitted: bool,
+    row_rail_layer: str | None,
+) -> list[str]:
+    """Compose the response's top-level ``warnings`` array for one run.
+
+    Two producers, kept in one place so the response assembly stays a
+    single call (and one fewer decision point in the already-baselined
+    :func:`run_place_and_route` -- ``complexity-baseline.json``, the same
+    reason :func:`_validate_pdn_core_fit` is a function of its own):
+
+    - the power-delivery audit's own strings (issue #2086,
+      :func:`power_delivery_warnings`): what the DEF was measured to
+      place, for an omitted ``request.power`` or a supplied one whose
+      grid came back incomplete/unverifiable;
+    - the row-rail fallback caveat (issue #1985,
+      :func:`row_rail_fallback_warning`), appended -- never folded into
+      the audit's strings, so each entry stays true to its own evidence:
+      the audit's prose is measured from the DEF and already refuses to
+      claim "no rails" on the fallback path, while the caveat states the
+      structural fact (horizontal rails only, no vertical straps, no
+      tapcells, no multi-layer PDN vias) that makes the grid incomplete
+      even when every measured count came back nonzero.
+
+    ``row_rail_emitted`` is ``True`` only when the fallback actually ran
+    (``request.power`` omitted, ``"route"`` stage reached, a
+    :data:`_ROW_RAIL_STRAP` library) -- never alongside a real PDN -- so a
+    full-PDN run's ``warnings`` is exactly what the audit alone produces.
+    """
+    warnings = power_delivery_warnings(placed, power_requested=power_requested)
+    if row_rail_emitted:
+        warnings.append(row_rail_fallback_warning(row_rail_layer))
+    return warnings
+
+
 def run_place_and_route(
     request_path: str,
     *,
@@ -2216,8 +2257,11 @@ def run_place_and_route(
         # would be a false alarm.
         expect_fillers=target_stage == "route",
     )
-    warnings = power_delivery_warnings(
-        power_info["placed"], power_requested=power is not None
+    warnings = _response_warnings(
+        power_info["placed"],
+        power_requested=power is not None,
+        row_rail_emitted=row_rail_info["emitted"],
+        row_rail_layer=row_rail_info["layer"],
     )
 
     last_stage = stages[-1]

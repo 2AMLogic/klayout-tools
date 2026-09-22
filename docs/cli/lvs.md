@@ -897,6 +897,29 @@ would silently exempt them.
 | `finding_count` | integer | `len(findings)`. |
 | `findings[].nets[]` | array\<object\> | Per finding, the nets that pin reached, each with the exact untruncated `instance_count` and a bounded `instances` sample (at most 10 `{circuit, instance, cell}` entries, with `instances_truncated` saying whether anything was left out). A real routed block puts hundreds of instances on one rail; a finding that dumped all of them would bury the few that differ. A `net` of `null` is an unconnected pin. |
 
+**Reading `power_connectivity.status: "unchecked"` on a non-`gate-level-verilog`
+reference (issue #1985).** The first `reason` case above — any `reference.form`
+other than `"gate-level-verilog"` — deserves a second look before it is cited
+as all-clear. On that path the check did not run, and the *only* thing standing
+between a fragmented power grid and a top-level `status: "match"` is the
+reference's own pin declarations: a well-formed SPICE reference declares
+`VDD`/`VSS` as pins on every instance, so the ordinary signal compare really
+does require rail continuity and the `reason`'s "the ordinary compare already
+checks" claim holds. But that protection is exactly as strong as the reference's
+own declarations — a reference whose instances declare placeholder or incomplete
+power pins gives the comparer nothing to contradict, and a fragmented PDN slips
+through under `status: "match"`. An org-wide audit (issue #1985's evidence) found
+that five of seven committed digital layouts carrying an LVS `match` compare
+against SPICE references — all five report `power_connectivity: "unchecked"`
+under klt. They happened to be fine, but a fleet remediation policy of "re-run
+LVS under new klt, check for `match`" would pass them on a technicality:
+**"re-ran LVS, got `match`" is not, on its own, a complete power-grid signoff**
+for a non-`gate-level-verilog` reference. Confirm the reference's own power pin
+declarations are real (every instantiated cell declares its supply pins, as the
+`"plain-element"` form requires of a schematic-equivalent netlist) or gate the
+block through a `gate-level-verilog` compare, where `power_connectivity` does
+run.
+
 ### Recommended usage
 
 Run the default (consistency-only) check on any gate-level compare — it
