@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Regenerate the golden artifacts twice -- varied hash seed, varied checkout
-path -- and byte-compare the results (issue #2225).
+path -- and byte-compare the results (issue #2225; float provenance in
+issue #2279).
 
-Two nondeterminism classes ship past a suite that only ever regenerates an
+Three nondeterminism classes ship past a suite that only ever regenerates an
 artifact **once**, under one hash seed, from one checkout:
 
   1. **set/dict-iteration-dependent ordering.** `PYTHONHASHSEED` only defaults
@@ -13,13 +14,57 @@ artifact **once**, under one hash seed, from one checkout:
   2. **host-absolute paths baked into a committed artifact.** A generator that
      records `str(some_path)` instead of a repo-relative path byte-compares
      clean on the machine that produced it and nowhere else.
+  3. **host-libm float provenance (issue #2279).** A generator that computes a
+     committed value through a transcendental -- `math.pow`, `math.exp`,
+     `**` on a float, numpy `power`/`float_power` -- emits bytes whose last
+     ulp is *allowed* to differ between conforming libms. gf180-surge's RTL
+     coefficients diverged exactly this way across macOS py3.14 and ubuntu
+     py3.12 (PR #49), and `np.float32` power diverged again from
+     double-pow-then-round (~0.6% of values, NEP-50 float32 contagion;
+     PR #45). Both runs of this check sit on one host, so the divergence is
+     invisible to the byte-compare by construction -- class 3 is caught
+     instead by a static scan of every declared generator script, below.
 
-Both were caught downstream (2AMLogic/gf180-surge PR #39, SXT-013) only after
-an environment happened to differ. This check makes the environment differ on
-purpose, every run: it regenerates the same artifacts from **two checkouts at
-different filesystem paths** under **two different explicit hash seeds**, then
-byte-compares. An artifact that depends on either variable differs, and the
-check names it.
+Classes 1 and 2 were caught downstream (2AMLogic/gf180-surge PR #39, SXT-013)
+only after an environment happened to differ. This check makes the environment
+differ on purpose, every run: it regenerates the same artifacts from **two
+checkouts at different filesystem paths** under **two different explicit hash
+seeds**, then byte-compares. An artifact that depends on either variable
+differs, and the check names it.
+
+**Float provenance (issue #2279).** Every manifest generator declares a
+`float_discipline`:
+
+  - `integer-exact` (default) -- only integer/exact arithmetic reaches the
+    committed bytes. The check statically scans the generator script for
+    host-libm float computation (`math.pow`/`exp`/`log`/..., `cmath`, numpy
+    transcendentals, `from math import pow` + bare `pow(...)`, the builtin
+    two-argument `pow` with a float literal, `**` with a float-literal
+    operand) and flags every hit as a `host_float_op` finding. A float
+    *literal* is never flagged: parsing `0.1` to the nearest double is
+    correctly rounded, so a committed literal table is byte-stable on every
+    host. Nor are the operations IEEE 754 defines exactly or requires to be
+    correctly rounded (`+ - * / %`, `math.sqrt`, `math.fsum`, `math.fma`,
+    `math.ldexp`, ...).
+  - `pinned-table` -- the floats come from a committed literal table in the
+    source. The scan is identical, because *computing* over table values is
+    the same hazard; the discipline's value is the promise it records (the
+    numbers must not be recomputed at all) and the remedy it suggests.
+  - `pinned-artifact` -- the escape hatch: the derived artifact is committed
+    once and pinned, because regeneration is not trusted across hosts (the
+    gf180-surge `cfg.hex` shape). The entry records `generator_sha256`,
+    `regenerate`, and per-artifact `artifact_sha256`; the check **never
+    regenerates a pinned generator** -- drift detection compares against the
+    pin, not silent regeneration -- and verifies instead that the generator
+    source still hashes to `generator_sha256` (`stale_pin` otherwise) and
+    that the committed bytes still hash to `artifact_sha256` (`pin_drift`
+    otherwise). A JSON artifact's envelope mirrors the pin as
+    `"pinned": true` plus `generator`/`generator_sha256`/`regenerate`
+    (docs/json-contract.md, "Pinned derived artifacts").
+
+The scan's boundary is the generator **script** -- not the library modules it
+imports. Floats in analysis code are legitimate (issue #2279's stated
+non-goal); only the committed-byte path is held to the rule.
 
 It is deliberately *not* a pytest test: the whole point is two checkouts at
 two paths, which is a property of the job, not of the process. `ci.yml`'s
@@ -34,11 +79,16 @@ Usage:
 
 Exit codes (mirroring `scripts/check_ci_wall_clock.py`'s tiering):
 
-  0  every regenerated artifact was byte-identical across both runs
-  1  at least one artifact differed, or embeds a host-absolute path
+  0  every regenerated artifact was byte-identical across both runs, no
+     generator carries an undeclared host-libm float path, and every pin
+     verified
+  1  at least one artifact differed, embeds a host-absolute path, computes
+     through host libm without a pinned-artifact declaration, or carries a
+     stale/drifted pin
   2  the check itself could not run (a generator failed, fewer than two
-     distinct checkouts, an unreadable manifest) -- a check that silently
-     stops checking is worse than no check at all, so this is never a green.
+     distinct checkouts, an unreadable or malformed manifest) -- a check that
+     silently stops checking is worse than no check at all, so this is never
+     a green.
 
 Everything here is standard library: the generators themselves need the
 project's dependencies, but this driver must not add a second dependency
@@ -48,6 +98,7 @@ surface to a job whose whole job is comparing bytes.
 from __future__ import annotations
 
 import argparse
+import ast
 import difflib
 import hashlib
 import json
@@ -71,22 +122,179 @@ EXIT_CANNOT_RUN = 2
 #: globs are the *declared* artifact set, which the git-dirty sweep below
 #: widens automatically if a generator ever writes somewhere undeclared.
 #:
+#: Each entry also declares its float discipline (issue #2279): all three of
+#: these generators reach their committed bytes through integer/exact
+#: arithmetic only -- dbu-level box math, byte counts and layer tables --
+#: which the static scan below re-verifies on every run. `integer-exact` is
+#: also the default for manifest entries that omit the field; spelling it out
+#: here makes the shipped manifest read as the worked example it is.
+#:
 #: Keeping the subset small and fast is a requirement, not an accident --
 #: see docs/guides/ci-wall-clock-budget.md. All three together run in ~1.5 s.
 DEFAULT_GENERATORS: tuple[dict[str, object], ...] = (
     {
         "script": "tests/golden_deck/generate_golden_deck.py",
         "artifacts": ["tests/golden_deck/*/manifest.json"],
+        "float_discipline": "integer-exact",
     },
     {
         "script": "tests/corpus/generate_golden.py",
         "artifacts": ["tests/corpus/golden/*/*.layers.json"],
+        "float_discipline": "integer-exact",
     },
     {
         "script": "tests/golden_metrics/generate_golden_metrics.py",
         "artifacts": ["tests/golden_metrics/*.json"],
+        "float_discipline": "integer-exact",
     },
 )
+
+#: The float-discipline vocabulary a manifest entry may declare (issue
+#: #2279). See the module docstring for what each promises.
+FLOAT_DISCIPLINES: tuple[str, ...] = (
+    "integer-exact",
+    "pinned-table",
+    "pinned-artifact",
+)
+
+#: Discipline assumed for a manifest entry that declares none. The safe
+#: default: an unannotated generator is held to the strictest scanning, and
+#: loosening it is a deliberate act recorded in the manifest.
+DEFAULT_FLOAT_DISCIPLINE = "integer-exact"
+
+#: The escape-hatch discipline: its generators are never regenerated (drift
+#: detection compares against the pin, not silent regeneration).
+PINNED_ARTIFACT = "pinned-artifact"
+
+#: Manifest pin fields, required (and only permitted) on a `pinned-artifact`
+#: entry. `artifact_sha256` maps each pinned artifact's repo-relative path to
+#: the sha256 of its committed bytes.
+_PIN_FIELDS = ("generator_sha256", "regenerate", "artifact_sha256")
+
+_HEX64_RE = re.compile(r"[0-9a-fA-F]{64}")
+
+#: What a reader of a `host_float_op` finding should do instead -- emitted
+#: once per finding so the JSON payload carries the remedy, not just the
+#: complaint (mirrors env_provenance.ENVELOPE_LINT_RECOMMENDATION's role for
+#: the path lint, issue #2224).
+FLOAT_PROVENANCE_RECOMMENDATION = (
+    "the result's last ulp is allowed to differ between conforming libms, so "
+    "the committed bytes can diverge across interpreters/platforms even "
+    "though every run on this host byte-compares clean (issue #2279). Make "
+    "the path integer-exact, read the values from a committed pinned table "
+    "(a decimal literal parses to the same double on every host), or declare "
+    'float_discipline "pinned-artifact" with generator_sha256 + regenerate '
+    "+ artifact_sha256 -- see docs/guides/golden-artifact-determinism.md, "
+    "'float provenance rules for committed evidence'."
+)
+
+# --------------------------------------------------------------------------
+# Host-libm float computation: what the static scan flags (issue #2279)
+# --------------------------------------------------------------------------
+
+#: Per-module callables whose floating-point result is permitted to vary in
+#: the last ulp between conforming libms -- the transcendental set, plus
+#: `hypot`/`dist`/`cbrt`, which were famously double-rounded or unspecified
+#: across libm versions (glibc only correctly-rounded `hypot` this century).
+#: Anything reached through these cannot be trusted to byte-compare across
+#: interpreters/platforms.
+_HOST_FLOAT_CALLS: dict[str, frozenset[str]] = {
+    "math": frozenset(
+        {
+            "acos",
+            "acosh",
+            "asin",
+            "asinh",
+            "atan",
+            "atan2",
+            "atanh",
+            "cbrt",
+            "cos",
+            "cosh",
+            "dist",
+            "erf",
+            "erfc",
+            "exp",
+            "exp2",
+            "expm1",
+            "gamma",
+            "hypot",
+            "lgamma",
+            "log",
+            "log10",
+            "log1p",
+            "log2",
+            "pow",
+            "sin",
+            "sinh",
+            "tan",
+            "tanh",
+        }
+    ),
+    # Complex functions are algorithmically defined, not required-correctly-
+    # rounded, so even `cmath.sqrt` is a host-libm dependence.
+    "cmath": frozenset(
+        {
+            "acos",
+            "acosh",
+            "asin",
+            "asinh",
+            "atan",
+            "atanh",
+            "cos",
+            "cosh",
+            "exp",
+            "log",
+            "log10",
+            "phase",
+            "polar",
+            "pow",
+            "rect",
+            "sin",
+            "sinh",
+            "sqrt",
+            "tan",
+            "tanh",
+        }
+    ),
+    # numpy routes elementwise transcendentals through the host libm or its
+    # own SIMD kernels -- and `np.float32` power diverges from
+    # double-pow-then-round besides (gf180-surge PR #45), which is the exact
+    # incident class. `np.sqrt` is excluded: it is the hardware square root,
+    # correctly rounded for both float32 and float64.
+    "numpy": frozenset(
+        {
+            "arccos",
+            "arccosh",
+            "arcsin",
+            "arcsinh",
+            "arctan",
+            "arctan2",
+            "arctanh",
+            "cbrt",
+            "cos",
+            "cosh",
+            "exp",
+            "exp2",
+            "expm1",
+            "float_power",
+            "log",
+            "log10",
+            "log1p",
+            "log2",
+            "power",
+            "sin",
+            "sinh",
+            "tan",
+            "tanh",
+        }
+    ),
+}
+
+
+def _flagged_calls(module: str) -> frozenset[str]:
+    return _HOST_FLOAT_CALLS.get(module, frozenset())
+
 
 #: Absolute-path shapes that must never appear inside a committed artifact.
 #: A path under the *running* checkout is caught by the byte-compare anyway
@@ -111,8 +319,28 @@ class CannotRun(Exception):
 
 @dataclass(frozen=True)
 class Generator:
+    """One declared artifact generator (issue #2225), plus its float
+    discipline and -- for `pinned-artifact` entries (issue #2279) -- the pin:
+    the generator source hash and per-artifact content hashes recorded at pin
+    time, and the command a human re-generates with. `artifact_sha256` is a
+    tuple of (path, hash) pairs rather than a dict so the dataclass stays
+    frozen/hashable; `pinned_files()` restores the mapping."""
+
     script: str
     artifacts: tuple[str, ...]
+    float_discipline: str = DEFAULT_FLOAT_DISCIPLINE
+    generator_sha256: str | None = None
+    regenerate: str | None = None
+    artifact_sha256: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def pinned(self) -> bool:
+        return self.float_discipline == PINNED_ARTIFACT
+
+    def pinned_files(self) -> dict[str, str]:
+        """The pinned artifact paths -> expected sha256 of the committed
+        bytes (empty for a non-pinned entry)."""
+        return dict(self.artifact_sha256)
 
 
 @dataclass
@@ -167,19 +395,395 @@ def load_generators(manifest_path: Path | None) -> list[Generator]:
     if not isinstance(entries, (list, tuple)) or not entries:
         raise CannotRun("manifest declares no generators")
 
-    generators: list[Generator] = []
-    for entry in entries:
-        if not isinstance(entry, dict) or "script" not in entry:
-            raise CannotRun(f"malformed generator entry: {entry!r}")
-        globs = entry.get("artifacts") or []
-        if not isinstance(globs, list):
-            raise CannotRun(f"generator {entry['script']!r}: artifacts must be a list")
-        generators.append(
-            Generator(
-                script=str(entry["script"]), artifacts=tuple(str(g) for g in globs)
+    return [_generator_from_entry(entry) for entry in entries]
+
+
+def _generator_from_entry(entry: object) -> Generator:
+    """Validate and normalise one manifest entry -- the float-discipline and
+    pin-field halves of the schema (issue #2279) included. Every malformed
+    shape is `CannotRun` (exit 2): a typo'd discipline or a pin nothing
+    verifies must be loud, never a silent fall-through."""
+    if not isinstance(entry, dict) or "script" not in entry:
+        raise CannotRun(f"malformed generator entry: {entry!r}")
+    globs = entry.get("artifacts") or []
+    if not isinstance(globs, list):
+        raise CannotRun(f"generator {entry['script']!r}: artifacts must be a list")
+
+    script_name = str(entry["script"])
+    discipline = entry.get("float_discipline", DEFAULT_FLOAT_DISCIPLINE)
+    if discipline not in FLOAT_DISCIPLINES:
+        raise CannotRun(
+            f"generator {script_name!r}: unknown float_discipline "
+            f"{discipline!r} (expected one of {', '.join(FLOAT_DISCIPLINES)})"
+        )
+
+    generator_sha256, regenerate, artifact_sha256 = _validated_pin(
+        entry, script_name, discipline
+    )
+    return Generator(
+        script=script_name,
+        artifacts=tuple(str(g) for g in globs),
+        float_discipline=discipline,
+        generator_sha256=generator_sha256,
+        regenerate=regenerate,
+        artifact_sha256=artifact_sha256,
+    )
+
+
+def _validated_pin(
+    entry: dict[str, object], script_name: str, discipline: str
+) -> tuple[str | None, str | None, tuple[tuple[str, str], ...]]:
+    """The pin triple for one entry: required (and validated) on a
+    `pinned-artifact` entry, a likely mistake anywhere else -- a
+    `generator_sha256` recorded against `integer-exact` would look like a pin
+    while nothing verified it."""
+    present = [name for name in _PIN_FIELDS if name in entry]
+    if discipline != PINNED_ARTIFACT:
+        if present:
+            raise CannotRun(
+                f"generator {script_name!r}: {', '.join(present)} only mean "
+                f"something with float_discipline {PINNED_ARTIFACT!r}; a pin "
+                "recorded against another discipline would never be verified"
+            )
+        return None, None, ()
+
+    missing = [name for name in _PIN_FIELDS if name not in entry]
+    if missing:
+        raise CannotRun(
+            f"generator {script_name!r}: float_discipline "
+            f"{PINNED_ARTIFACT!r} requires {', '.join(_PIN_FIELDS)} "
+            f"(missing: {', '.join(missing)})"
+        )
+    generator_sha256 = _validated_hash(entry, "generator_sha256", script_name)
+    regenerate = entry["regenerate"]
+    if not isinstance(regenerate, str) or not regenerate.strip():
+        raise CannotRun(
+            f"generator {script_name!r}: regenerate must be a non-empty "
+            "command string -- it is the recorded human path to regenerate "
+            "(and re-pin) the artifact"
+        )
+    return generator_sha256, regenerate, _validated_artifact_hashes(entry, script_name)
+
+
+def _validated_hash(entry: dict[str, object], name: str, script_name: str) -> str:
+    """A 64-hex sha256 recorded in a manifest entry, lower-cased -- a pin
+    whose hash is malformed would otherwise fail to ever match, or worse,
+    silently match nothing and look like drift."""
+    value = entry[name]
+    if not isinstance(value, str) or not _HEX64_RE.fullmatch(value.strip()):
+        raise CannotRun(
+            f"generator {script_name!r}: {name} must be a 64-hex sha256, got {value!r}"
+        )
+    return value.strip().lower()
+
+
+def _validated_artifact_hashes(
+    entry: dict[str, object], script_name: str
+) -> tuple[tuple[str, str], ...]:
+    """The `artifact_sha256` pin mapping, validated and normalised to sorted
+    (path, hash) pairs. Empty is refused: a pinned entry that pins no bytes
+    pins nothing and verifies nothing."""
+    mapping = entry["artifact_sha256"]
+    if not isinstance(mapping, dict) or not mapping:
+        raise CannotRun(
+            f"generator {script_name!r}: artifact_sha256 must be a non-empty "
+            "mapping of repo-relative artifact path to 64-hex sha256"
+        )
+    pairs: list[tuple[str, str]] = []
+    for path, digest in mapping.items():
+        if not isinstance(path, str) or not path:
+            raise CannotRun(
+                f"generator {script_name!r}: artifact_sha256 keys must be "
+                f"repo-relative paths, got {path!r}"
+            )
+        if not isinstance(digest, str) or not _HEX64_RE.fullmatch(digest.strip()):
+            raise CannotRun(
+                f"generator {script_name!r}: artifact_sha256[{path!r}] must be "
+                f"a 64-hex sha256, got {digest!r}"
+            )
+        pairs.append((path, digest.strip().lower()))
+    return tuple(sorted(pairs))
+
+
+# --------------------------------------------------------------------------
+# Float provenance: the static scan + pin verification (issue #2279)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FloatOp:
+    """One host-libm float computation found in a generator script."""
+
+    line: int
+    construct: str
+    source_line: str
+
+
+def _has_float_literal(node: ast.expr) -> bool:
+    """Whether any `ast.Constant` in `node`'s subtree is a float literal.
+
+    This is the scan's deliberate asymmetry: a *literal* like `0.1` is
+    host-independent (str->double parsing is correctly rounded by IEEE 754
+    and Python guarantees repr round-tripping), so literals alone are never
+    flagged -- but a literal *operand* to `**` (or to builtin `pow`) means
+    the operation goes through libm power and its last ulp is host's.
+    """
+    for child in ast.walk(node):
+        if isinstance(child, ast.Constant) and isinstance(child.value, float):
+            return True
+    return False
+
+
+def _float_import_resolutions(
+    tree: ast.AST,
+) -> tuple[dict[str, str], dict[str, str], set[str]]:
+    """Pass 1 of :func:`scan_float_ops`: resolve, across the whole module,
+    (a) the local aliases that refer to a flagged module
+    (``import numpy as np`` -> ``"np"``), (b) the bare names bound to one of
+    those modules' flagged callables (``from math import pow as p`` ->
+    ``"p"``), and (c) the flagged modules star-imported (whose bindings are
+    unknowable statically). Imports can sit anywhere in the file, so this is
+    one full walk before the construct walk."""
+    module_aliases: dict[str, str] = {}
+    bare_flagged: dict[str, str] = {}
+    star_imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.split(".")[0]
+                if root in _HOST_FLOAT_CALLS:
+                    module_aliases[alias.asname or root] = root
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            root = node.module.split(".")[0]
+            if root not in _HOST_FLOAT_CALLS:
+                continue
+            if any(alias.name == "*" for alias in node.names):
+                star_imports.add(root)
+                continue
+            for alias in node.names:
+                if alias.name in _flagged_calls(root):
+                    bare_flagged[alias.asname or alias.name] = root
+    return module_aliases, bare_flagged, star_imports
+
+
+def _flagged_call_construct(
+    node: ast.Call,
+    module_aliases: dict[str, str],
+    bare_flagged: dict[str, str],
+    star_imports: set[str],
+) -> str | None:
+    """A human-readable construct name when `node` is a host-libm call, else
+    `None` -- the per-call half of :func:`scan_float_ops`."""
+    func = node.func
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+        module = module_aliases.get(func.value.id)
+        if module and func.attr in _flagged_calls(module):
+            return f"{func.value.id}.{func.attr}(...)"
+        return None
+    if isinstance(func, ast.Name):
+        name = func.id
+        if name in bare_flagged:
+            return f"{name}(...) (imported from {bare_flagged[name]})"
+        if any(name in _flagged_calls(module) for module in star_imports):
+            # `from math import *`: the name's provenance is unknowable
+            # statically, so a bare call to a flagged name is attributed to
+            # the star import rather than missed.
+            return f"{name}(...) (star-imported float module)"
+        if (
+            name == "pow"
+            and len(node.args) == 2
+            and not node.keywords
+            and (_has_float_literal(node.args[0]) or _has_float_literal(node.args[1]))
+        ):
+            # Three-argument pow(a, b, m) is modular *integer* arithmetic.
+            return "pow(a, b) with a float-literal argument"
+    return None
+
+
+def scan_float_ops(source: str, filename: str = "<generator>") -> list[FloatOp]:
+    """Every host-libm float computation in `source`, in first-appearance
+    order (empty list when clean).
+
+    Four construct classes are flagged, all for the same reason -- the
+    result's last ulp is permitted to vary between conforming libms:
+
+    - an attribute call into `math`/`cmath`/`numpy` naming one of
+      :data:`_HOST_FLOAT_CALLS`' functions (`math.pow(1.001, n)`,
+      `np.float_power(a, b)`, ...);
+    - a bare call to a name imported from one of those modules
+      (`from math import pow` + `pow(...)`), and -- because `from math
+      import *` hides the provenance -- a bare call to a flagged name when
+      the module was star-imported;
+    - the builtin two-argument `pow(a, b)` when either argument contains a
+      float literal (three-argument `pow(a, b, m)` is modular *integer*
+      arithmetic and never flagged);
+    - `**` / `**=` with a float literal on either side -- on CPython, float
+      `**` *is* libm `pow` (the gf180-surge PR #49 incident's exact shape).
+
+    Deliberately not flagged: `+ - * / %` and comparison (IEEE-exact or
+    correctly rounded by the standard), `math.sqrt`/`fabs`/`fmod`/`fsum`/
+    `fma`/`ldexp`-family (same), float literals (pinned tables are the
+    remedy, and they are safe -- see `_has_float_literal`), and float
+    *formatting* (shortest-repr and fixed-precision rendering are correctly
+    rounded, so the same double prints the same everywhere).
+
+    The scan is a source-level screen, not a proof: it cannot see through a
+    name to a value's dtype, so `arr ** 2` on a `float32` array goes
+    unflagged. That residual risk is exactly what the `pinned-artifact`
+    discipline is for -- declare it and pin the bytes.
+    """
+    try:
+        tree = ast.parse(source, filename=filename)
+    except SyntaxError as exc:
+        raise CannotRun(f"cannot parse {filename}: {exc}") from exc
+
+    module_aliases, bare_flagged, star_imports = _float_import_resolutions(tree)
+
+    lines = source.splitlines()
+    ops: list[FloatOp] = []
+
+    def record(node: ast.AST, construct: str) -> None:
+        line_no = getattr(node, "lineno", 0)
+        source_line = lines[line_no - 1].strip() if 0 < line_no <= len(lines) else ""
+        ops.append(FloatOp(line=line_no, construct=construct, source_line=source_line))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            construct = _flagged_call_construct(
+                node, module_aliases, bare_flagged, star_imports
+            )
+            if construct is not None:
+                record(node, construct)
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Pow):
+            if _has_float_literal(node.left) or _has_float_literal(node.right):
+                record(node, "`**` with a float-literal operand")
+        elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Pow):
+            if _has_float_literal(node.value):
+                record(node, "`**=` with a float-literal operand")
+    return ops
+
+
+def _sha256_hex(payload: bytes) -> str:
+    """Full sha256 hex digest -- the pin's currency. (`_sha` above is the
+    *report* width, truncated for display; a pin recorded at 16 hex would
+    invite collisions-by-typo, so pins always compare in full.)"""
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _host_float_finding(generator: Generator, op: FloatOp) -> Finding:
+    detail = (
+        f"host-libm float computation in a committed-artifact generator: "
+        f"{op.construct} at {generator.script}:{op.line}\n"
+        f"      {op.source_line}\n"
+        f"      {FLOAT_PROVENANCE_RECOMMENDATION}"
+    )
+    return Finding(artifact=generator.script, kind="host_float_op", detail=detail)
+
+
+def _pin_findings(checkout: Path, generator: Generator) -> list[Finding]:
+    """Verify a pinned-artifact entry against its commit (issue #2279).
+
+    Two questions, both static, both against the bytes as committed:
+
+    - does the generator source still hash to `generator_sha256`? If not,
+      the committed artifacts can no longer be attributed to the committed
+      generator -- `stale_pin`.
+    - does each pinned file still exist and hash to its `artifact_sha256`?
+      If not, the committed bytes moved without a re-pin -- `pin_drift`.
+
+    Regeneration is deliberately *not* attempted: the pin exists precisely
+    because regeneration is not trusted across hosts.
+    """
+    findings: list[Finding] = []
+
+    script_path = checkout / generator.script
+    actual_generator = _sha256_hex(script_path.read_bytes())
+    assert generator.generator_sha256 is not None  # manifest-validated
+    if actual_generator != generator.generator_sha256:
+        findings.append(
+            Finding(
+                artifact=generator.script,
+                kind="stale_pin",
+                detail=(
+                    f"the pin records generator_sha256 "
+                    f"{generator.generator_sha256[:16]}..., but "
+                    f"{generator.script} now hashes to "
+                    f"{actual_generator[:16]}...: the committed artifacts can "
+                    "no longer be attributed to the committed generator. "
+                    "Regenerate on a trusted host, review the diff, and "
+                    "re-pin (update generator_sha256/artifact_sha256 in the "
+                    "same commit as the regenerated bytes), or restore the "
+                    "generator. See docs/guides/golden-artifact-determinism.md."
+                ),
             )
         )
-    return generators
+
+    for rel, expected in generator.artifact_sha256:
+        path = checkout / rel
+        if not path.is_file():
+            findings.append(
+                Finding(
+                    artifact=rel,
+                    kind="pin_drift",
+                    detail=(
+                        f"the pin records this artifact, but it is absent from "
+                        f"{checkout}: a pinned artifact must stay committed -- "
+                        "restore the bytes or re-pin after a reviewed "
+                        "regeneration"
+                    ),
+                )
+            )
+            continue
+        actual = _sha256_hex(path.read_bytes())
+        if actual != expected:
+            findings.append(
+                Finding(
+                    artifact=rel,
+                    kind="pin_drift",
+                    detail=(
+                        f"the pin records sha256 {expected[:16]}..., but the "
+                        f"committed bytes hash to {actual[:16]}...: the "
+                        "artifact moved without a re-pin. Restore the pinned "
+                        "bytes, or re-pin (update artifact_sha256 in the same "
+                        "commit as the regenerated bytes, per "
+                        "docs/guides/golden-artifact-determinism.md)."
+                    ),
+                )
+            )
+    return findings
+
+
+def static_findings(checkout: Path, generators: list[Generator]) -> list[Finding]:
+    """The checkout-independent findings: the float-provenance scan for every
+    non-pinned generator and the pin verification for every pinned one.
+
+    These run against *both* checkouts (they are the same commit, but each
+    copy is scanned, and the results deduped, so a checkout-specific
+    corruption cannot slip between the cracks).
+    """
+    findings: list[Finding] = []
+    for generator in generators:
+        script_path = checkout / generator.script
+        if not script_path.is_file():
+            raise CannotRun(f"generator {generator.script} not found under {checkout}")
+        if generator.pinned:
+            findings.extend(_pin_findings(checkout, generator))
+            continue
+        source = script_path.read_text(encoding="utf-8")
+        for op in scan_float_ops(source, generator.script):
+            findings.append(_host_float_finding(generator, op))
+    return findings
+
+
+def _pinned_artifact_paths(generators: list[Generator]) -> set[str]:
+    """Repo-relative paths pinned by any `pinned-artifact` entry. These are
+    excluded from the two-run byte-compare and from the dirty sweep: their
+    guarantee is integrity-of-the-commit (the pin), not regenerability."""
+    paths: set[str] = set()
+    for generator in generators:
+        if generator.pinned:
+            paths.update(generator.pinned_files())
+    return paths
 
 
 # --------------------------------------------------------------------------
@@ -241,6 +845,41 @@ def _declared(checkout: Path, generators: list[Generator]) -> set[str]:
     return found
 
 
+def _run_generator_script(
+    generator: Generator,
+    checkout: Path,
+    *,
+    env: dict[str, str],
+    python: str,
+    timeout: int,
+) -> None:
+    """Execute one (non-pinned) generator in `checkout`; `CannotRun` on a
+    timeout, a spawn failure, or a non-zero exit -- a generator that fails is
+    a check that cannot run, never a green."""
+    script = checkout / generator.script
+    try:
+        proc = subprocess.run(
+            [python, str(script)],
+            cwd=str(checkout),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CannotRun(
+            f"generator {generator.script} timed out after {timeout}s in {checkout}"
+        ) from exc
+    except OSError as exc:
+        raise CannotRun(f"cannot run {generator.script}: {exc}") from exc
+    if proc.returncode != 0:
+        raise CannotRun(
+            f"generator {generator.script} failed in {checkout} "
+            f"(exit {proc.returncode}):\n{proc.stdout}{proc.stderr}"
+        )
+
+
 def execute_run(
     checkout: Path,
     seed: str,
@@ -250,7 +889,13 @@ def execute_run(
     timeout: int,
     verbose: bool = True,
 ) -> Run:
-    """Regenerate every artifact in one checkout under one hash seed."""
+    """Regenerate every artifact in one checkout under one hash seed.
+
+    `pinned-artifact` generators are skipped on purpose (issue #2279): their
+    bytes are the reference, regeneration is not trusted across hosts, and
+    re-running them would overwrite the very commit the pin vouches for. The
+    pin is verified statically instead (`static_findings`).
+    """
     if not checkout.is_dir():
         raise CannotRun(f"checkout {checkout} does not exist")
 
@@ -271,34 +916,29 @@ def execute_run(
         script = checkout / generator.script
         if not script.is_file():
             raise CannotRun(f"generator {generator.script} not found under {checkout}")
+        if generator.pinned:
+            if verbose:
+                print(
+                    f"  -> {generator.script} "
+                    f"(pinned-artifact: not regenerated, pin verified against "
+                    f"the commit)",
+                    flush=True,
+                )
+            continue
         if verbose:
             print(f"  -> {generator.script} (PYTHONHASHSEED={seed})", flush=True)
-        try:
-            proc = subprocess.run(
-                [python, str(script)],
-                cwd=str(checkout),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise CannotRun(
-                f"generator {generator.script} timed out after {timeout}s in {checkout}"
-            ) from exc
-        except OSError as exc:
-            raise CannotRun(f"cannot run {generator.script}: {exc}") from exc
-        if proc.returncode != 0:
-            raise CannotRun(
-                f"generator {generator.script} failed in {checkout} "
-                f"(exit {proc.returncode}):\n{proc.stdout}{proc.stderr}"
-            )
+        _run_generator_script(
+            generator, checkout, env=env, python=python, timeout=timeout
+        )
 
     # Declared globs, widened by anything the run newly dirtied: a generator
     # that starts writing an artifact nobody declared is still compared,
-    # rather than silently dropping out of coverage.
-    relpaths = _declared(checkout, generators) | (_git_dirty(checkout) - before_dirty)
+    # rather than silently dropping out of coverage. Pinned artifacts are
+    # subtracted: nothing regenerated them, and their guarantee is the pin.
+    regenerating = [g for g in generators if not g.pinned]
+    relpaths = _declared(checkout, regenerating) | (
+        (_git_dirty(checkout) - before_dirty) - _pinned_artifact_paths(generators)
+    )
     return Run(checkout=checkout, seed=seed, artifacts=_collect(checkout, relpaths))
 
 
@@ -422,11 +1062,18 @@ def _host_path_context(payload: bytes, offset: int) -> str:
 # --------------------------------------------------------------------------
 
 
-def render_text(runs: list[Run], findings: list[Finding]) -> str:
-    lines = ["Golden-artifact determinism check (hash seed + checkout path varied)"]
+def render_text(
+    runs: list[Run], findings: list[Finding], *, pinned_artifact_count: int = 0
+) -> str:
+    lines = ["Golden-artifact determinism check (hash seed + path varied)"]
     for index, run in enumerate(runs, start=1):
         lines.append(f"  run {index}: {run.label}")
     lines.append(f"  artifacts compared: {len(runs[0].artifacts)}")
+    if pinned_artifact_count:
+        lines.append(
+            f"  pinned artifacts (pin-verified, not regenerated): "
+            f"{pinned_artifact_count}"
+        )
     lines.append("")
 
     if not findings:
@@ -446,7 +1093,9 @@ def render_text(runs: list[Run], findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
-def render_json(runs: list[Run], findings: list[Finding]) -> str:
+def render_json(
+    runs: list[Run], findings: list[Finding], *, pinned_artifact_count: int = 0
+) -> str:
     return json.dumps(
         {
             "schema_version": SCHEMA_VERSION,
@@ -460,6 +1109,9 @@ def render_json(runs: list[Run], findings: list[Finding]) -> str:
                 for run in runs
             ],
             "artifact_count": len(runs[0].artifacts),
+            # Pinned artifacts sit outside the byte-compare (issue #2279);
+            # reported so a consumer can see they were verified, not skipped.
+            "pinned_artifact_count": pinned_artifact_count,
             "findings": [finding.as_dict() for finding in findings],
             "differing_artifacts": sorted({f.artifact for f in findings}),
         },
@@ -588,6 +1240,19 @@ def main(argv: list[str] | None = None) -> int:
         checkouts = _resolve_checkouts(args.checkout, args.allow_same_path)
         seeds = _resolve_seeds(args.seed, len(checkouts))
         generators = load_generators(args.manifest)
+        pinned_paths = _pinned_artifact_paths(generators)
+
+        # Static phase first (issue #2279): the float scan and pin
+        # verification need no regeneration, so a flagged generator fails
+        # before anything runs. Both checkouts are scanned and the results
+        # deduped -- same commit, but a checkout-specific corruption of one
+        # copy must not hide behind the other's clean scan.
+        static: dict[tuple[str, str, str], Finding] = {}
+        for checkout in checkouts:
+            for finding in static_findings(checkout, generators):
+                static.setdefault(
+                    (finding.artifact, finding.kind, finding.detail), finding
+                )
 
         runs: list[Run] = []
         for checkout, seed in zip(checkouts, seeds, strict=True):
@@ -603,18 +1268,25 @@ def main(argv: list[str] | None = None) -> int:
                     verbose=args.format == "text",
                 )
             )
-        if not runs[0].artifacts:
+        # A manifest of nothing-but-pinned entries legitimately collects zero
+        # compared artifacts; anything else still needs at least one.
+        if not runs[0].artifacts and not pinned_paths:
             raise CannotRun(
                 "no artifacts were collected -- the generators wrote nothing this "
                 "check knows about, so it would have passed without checking anything"
             )
-        findings = compare_runs(runs)
+        findings = list(static.values()) + compare_runs(runs)
     except CannotRun as exc:
         print(f"cannot run: {exc}", file=sys.stderr)
         return EXIT_CANNOT_RUN
 
-    text = render_text(runs, findings)
-    print(render_json(runs, findings) if args.format == "json" else text)
+    pinned_count = sum(len(g.pinned_files()) for g in generators if g.pinned)
+    text = render_text(runs, findings, pinned_artifact_count=pinned_count)
+    print(
+        render_json(runs, findings, pinned_artifact_count=pinned_count)
+        if args.format == "json"
+        else text
+    )
     if args.annotate:
         for annotation in render_annotations(findings):
             print(annotation)
