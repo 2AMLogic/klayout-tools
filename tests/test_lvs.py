@@ -15068,3 +15068,301 @@ def test_mom_capacitor_without_deck_still_degrades_to_the_pre_1942_fallback(
     assert report["counts"]["devices"]["layout"] == 0
     assert report["status"] == "mismatch"
     assert "device.property" not in report["category_counts"]
+
+
+# --------------------------------------------------------------------------- #
+# No-PDN power-grid regression suite (issue #1986)
+#
+# Issue #1982's surviving regression core: a *generated* standard-cell block
+# whose rows have no power distribution network -- only per-row rails, no
+# straps -- reproduces the real no-PDN design's exact signature (flipped
+# rows sharing rails; 113 rows collapsed to 57/57 supply fragments; exactly
+# one rail named per supply; nothing left unconnected). The
+# `power_connectivity` check must flag it, and a strapped twin of the same
+# generator must come back clean, so the check cannot silently stop
+# catching the defect it was added for.
+#
+# Novelty vs current main (issue #1986's first AC step): #1964 landed the
+# check itself and #2009 landed the #1978 refinements (remedy text naming
+# `request.power`, `unchecked_expected_pins`, the signoff FAIL-line
+# suffix), each with its own tests in this file. What main does NOT cover
+# -- and what survives here -- is the multi-row fragmentation shape at
+# scale (many instances per fragment net, not the 2-instance miswire the
+# #1952 tests use), the strapped-twin recovery to `"match"`, the
+# `_POWER_INSTANCE_SAMPLE_LIMIT` truncation path (only `is False` was ever
+# asserted), and a *real* `run_lvs` report pushed through `build_signoff`
+# (every signoff-side `power_connectivity` test feeds a synthetic
+# envelope). The offered #1978 pair ("`expected_nets` naming VNB / a pin
+# in no library is accepted silently") is dropped outright: #2009's
+# `unchecked_expected_pins` removed the silence those tests were written
+# to tolerate, and the `flags_unchecked_expected_pin` test now pins the
+# stronger behaviour.
+#
+# These run against the `layout.netlist` seam (the same shape `klt
+# place-and-route`'s own output netlists take): `klt lvs`'s inline GDS
+# extraction always flattens cells into devices (no subcircuit instances
+# survive), so an instance-level power check has nothing to walk on that
+# path -- which is exactly why a no-PDN GDS reports `unchecked` today.
+# --------------------------------------------------------------------------- #
+
+
+def _make_power_grid_layout_spice(rows: int, *, strapped: bool) -> str:
+    """A `rows`-row, 2-instances-per-row standard-cell block as a
+    hierarchical layout netlist.
+
+    Rows are paired the way flipped standard-cell rows share rails
+    (issue #1982's own arithmetic: 113 rows -> 57 rails per supply), so
+    `rows` rows produce `ceil(rows / 2)` rail fragments per supply. With
+    `strapped=False`, each fragment is its own net and exactly one
+    fragment per supply carries the plain `VPWR`/`VGND` name -- the
+    "one named rail per supply" of the real signature; the others are
+    numbered stand-ins (`VPWR_R1`, ...) for the anonymous `$N` nets the
+    real design extracted, since hand-written SPICE cannot write an
+    anonymous net. Every instance's supply pin lands on *some* net --
+    "nothing unconnected" is part of the signature being reproduced.
+
+    With `strapped=True`, every fragment joins into one net per supply --
+    the twin the real design became once `request.power` ran, and the
+    positive control for the check below.
+    """
+
+    def supply(prefix: str, row: int) -> str:
+        if strapped:
+            return prefix
+        fragment = row // 2
+        return prefix if fragment == 0 else f"{prefix}_R{fragment}"
+
+    lines = [".subckt top in out"]
+    instances = rows * 2
+    for k in range(instances):
+        row = k // 2
+        a = "in" if k == 0 else f"m{k - 1}"
+        y = "out" if k == instances - 1 else f"m{k}"
+        cell = "mylib__buf_1" if k == instances - 1 else "mylib__inv_1"
+        lines.append(f"X{k} {a} {y} {supply('VGND', row)} {supply('VPWR', row)} {cell}")
+    lines.append(".ends")
+    lines.append(".subckt mylib__inv_1 A Y VGND VPWR")
+    lines.append(".ends")
+    lines.append(".subckt mylib__buf_1 A Y VGND VPWR")
+    lines.append(".ends")
+    return "\n".join(lines) + "\n"
+
+
+def _make_power_grid_reference_verilog(rows: int) -> str:
+    """The signal-side twin of `_make_power_grid_layout_spice`: one chain
+    of `rows * 2` inverters ending in a buffer, supplies unconnected --
+    exactly the shape a `klt place-and-route` `verilog_path` writes
+    (power pins never appear in a gate-level netlist)."""
+    instances = rows * 2
+    lines = ["module top(in, out);", "  input in;", "  output out;"]
+    wires = [f"m{k}" for k in range(instances - 1)]
+    if wires:
+        lines.append("  wire " + ", ".join(wires) + ";")
+    for k in range(instances):
+        a = "in" if k == 0 else f"m{k - 1}"
+        y = "out" if k == instances - 1 else f"m{k}"
+        cell = "mylib__buf_1" if k == instances - 1 else "mylib__inv_1"
+        lines.append(f"  {cell} u{k} (.A({a}), .Y({y}));")
+    lines.append("endmodule")
+    return "\n".join(lines) + "\n"
+
+
+def _power_grid_request(tmp_path, rows: int, *, strapped: bool) -> str:
+    root = _make_fake_pdk_library(
+        tmp_path,
+        "myvariant",
+        "mylib",
+        ".subckt mylib__inv_1 A Y VGND VPWR\n.ends\n"
+        ".subckt mylib__buf_1 A Y VGND VPWR\n.ends\n",
+    )
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        _make_power_grid_layout_spice(rows, strapped=strapped),
+    )
+    reference_path = _write(
+        tmp_path / "ref.v", _make_power_grid_reference_verilog(rows)
+    )
+    return json.dumps(
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "form": "gate-level-verilog",
+                "library": "mylib",
+                "pdk": "myvariant",
+                "pdk_root": root,
+            },
+        }
+    )
+
+
+def test_power_grid_no_pdn_row_rail_fragmentation_is_detected(tmp_path):
+    """Issue #1982's no-PDN signature, caught: every instance's supply pin
+    reaches *a* net, but the per-row-rail fragments disagree, so both
+    supplies report `power.inconsistent_pin_net` while the signal-side
+    compare stays clean -- the exact way a no-PDN block passes LVS and
+    still has no power grid.
+
+    Six rows paired into three fragments per supply (the flipped-row
+    sharing arithmetic), one fragment named `VPWR`/`VGND`, the other two
+    numbered stand-ins for the real design's anonymous rails, four
+    instances per fragment, nothing unconnected. On the pre-#1964 build
+    this test fails with `KeyError: 'power_connectivity'` -- the report
+    block it reads did not exist yet."""
+    report = run_lvs(_power_grid_request(tmp_path, rows=6, strapped=False))
+
+    # The signal half never saw a defect: the chain matches instance for
+    # instance. The failure is purely the power half.
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+    power = report["power_connectivity"]
+    assert power["status"] == "mismatch"
+    assert power["expected_nets"] is None
+    assert power["power_pins"] == ["VGND", "VPWR"]
+
+    findings = {finding["pin"]: finding for finding in power["findings"]}
+    assert set(findings) == {"VGND", "VPWR"}
+    instances_per_supply = 12
+    assert all(
+        finding["rule"] == "power.inconsistent_pin_net" for finding in power["findings"]
+    )
+    assert all(
+        finding["instance_count"] == instances_per_supply
+        for finding in power["findings"]
+    )
+    for finding in power["findings"]:
+        # Three fragments, each carrying the two rows that share it --
+        # and no `None` group anywhere: "nothing unconnected" is part of
+        # the signature. The one *named* rail is always among the groups;
+        # which fragment it is has no bearing on the verdict.
+        assert {group["net"] for group in finding["nets"]} == {
+            finding["pin"],
+            f"{finding['pin']}_R1",
+            f"{finding['pin']}_R2",
+        }
+        assert all(group["net"] is not None for group in finding["nets"])
+        assert [group["instance_count"] for group in finding["nets"]] == [4, 4, 4]
+    # The remedy text must keep pointing a no-PDN caller at `request.power`
+    # (issue #1978) alongside the option-based advice.
+    assert all(
+        "request.power" in finding["description"] for finding in power["findings"]
+    )
+
+
+def test_power_grid_strapped_twin_reports_match(tmp_path):
+    """The positive control: the same generator with the fragments strapped
+    into one rail per supply -- what `request.power` adds -- reports
+    `power_connectivity.status: "match"` with zero findings, so the check
+    above is detecting the fragmentation, not the fixture."""
+    report = run_lvs(_power_grid_request(tmp_path, rows=6, strapped=True))
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+    power = report["power_connectivity"]
+    assert power["status"] == "match"
+    assert power["findings"] == []
+    assert power["finding_count"] == 0
+    assert power["power_pins"] == ["VGND", "VPWR"]
+
+
+def test_power_grid_fragmented_rail_group_sample_truncates(tmp_path):
+    """The finding's `instances[]` sample is capped at
+    `_POWER_INSTANCE_SAMPLE_LIMIT` with `instances_truncated` saying when
+    anything was left out -- a contract every existing test sails under
+    (their largest group is 2 instances). A fragment carrying twelve
+    instances beside a two-instance fragment: the big group reports the
+    exact untruncated count (12), lists exactly the cap's worth (10), and
+    sets `instances_truncated`."""
+    lines = [".subckt top in out"]
+    instances = 14
+    for k in range(instances):
+        row = k // 2
+        # Rows 0-5 share the named rail (twelve instances); row 6 sits on
+        # its own fragment, which is what makes the pin inconsistent and
+        # forces the finding whose sample then has to truncate.
+        a = "in" if k == 0 else f"m{k - 1}"
+        y = "out" if k == instances - 1 else f"m{k}"
+        cell = "mylib__buf_1" if k == instances - 1 else "mylib__inv_1"
+        vpwr = "VPWR" if row <= 5 else "VPWR_R1"
+        vgnd = "VGND" if row <= 5 else "VGND_R1"
+        lines.append(f"X{k} {a} {y} {vgnd} {vpwr} {cell}")
+    lines.append(".ends")
+    lines.append(".subckt mylib__inv_1 A Y VGND VPWR")
+    lines.append(".ends")
+    lines.append(".subckt mylib__buf_1 A Y VGND VPWR")
+    lines.append(".ends")
+    root = _make_fake_pdk_library(
+        tmp_path,
+        "myvariant",
+        "mylib",
+        ".subckt mylib__inv_1 A Y VGND VPWR\n.ends\n"
+        ".subckt mylib__buf_1 A Y VGND VPWR\n.ends\n",
+    )
+    layout_path = _write(tmp_path / "layout.spice", "\n".join(lines) + "\n")
+    reference_path = _write(tmp_path / "ref.v", _make_power_grid_reference_verilog(7))
+    report = run_lvs(
+        json.dumps(
+            {
+                "layout": {"netlist": layout_path, "top": "top"},
+                "reference": {
+                    "netlist": reference_path,
+                    "top": "top",
+                    "form": "gate-level-verilog",
+                    "library": "mylib",
+                    "pdk": "myvariant",
+                    "pdk_root": root,
+                },
+            }
+        )
+    )
+
+    power = report["power_connectivity"]
+    assert power["status"] == "mismatch"
+    vpwr = next(f for f in power["findings"] if f["pin"] == "VPWR")
+    assert vpwr["instance_count"] == 14
+    named = next(group for group in vpwr["nets"] if group["net"] == "VPWR")
+    assert named["instance_count"] == 12
+    assert len(named["instances"]) == 10  # _POWER_INSTANCE_SAMPLE_LIMIT
+    assert named["instances_truncated"] is True
+    small = next(group for group in vpwr["nets"] if group["net"] == "VPWR_R1")
+    assert small["instance_count"] == 2
+    assert small["instances_truncated"] is False
+
+
+def test_power_grid_real_run_lvs_report_through_signoff_fail_and_pass(tmp_path):
+    """Issue #1986, tying #1964 to #1974 end to end: the *real* reports
+    `run_lvs` returns for the fragmentation fixture and its strapped twin,
+    written to disk and graded by `build_signoff` -- no synthetic envelope
+    in between, which is exactly how the signoff gate sees them. The
+    no-PDN report must fail the signoff (a `status: "match"` LVS check
+    that fails only because of `power_connectivity`, the #1974 rule), and
+    the strapped twin must pass. On the pre-#1964 build this test fails
+    with `KeyError: 'power_connectivity'` -- the block did not exist.
+
+    The two layouts are graded in two separate `build_signoff` calls:
+    their `provenance.input.content_hash` values legitimately differ
+    (they describe two different layouts), and a mixed-hash source set is
+    `build_signoff`'s own `"refused"` case, not a pass/fail pair."""
+    from klayout_tools.signoff import build_signoff
+
+    no_pdn = run_lvs(_power_grid_request(tmp_path / "a", rows=6, strapped=False))
+    strapped = run_lvs(_power_grid_request(tmp_path / "b", rows=6, strapped=True))
+    no_pdn_path = _write(tmp_path / "no_pdn.json", json.dumps(no_pdn))
+    strapped_path = _write(tmp_path / "strapped.json", json.dumps(strapped))
+
+    fail_result = build_signoff([no_pdn_path])
+    assert fail_result["status"] == "fail"
+    (check,) = fail_result["checks"]
+    assert check["kind"] == "lvs"
+    assert check["status"] == "match"  # the signal compare is clean...
+    assert check["passed"] is False  # ...but the power half failed it
+    assert check["detail"]["power_connectivity_status"] == "mismatch"
+
+    pass_result = build_signoff([strapped_path])
+    assert pass_result["status"] == "pass"
+    (check,) = pass_result["checks"]
+    assert check["kind"] == "lvs"
+    assert check["passed"] is True
+    assert check["detail"]["power_connectivity_status"] == "match"
