@@ -24,7 +24,8 @@ this document (and the code) win.
   request's own `backend` field when given. See "Execution backends" below.
 - `--max-workers` — worker-pool size for the `local-parallel` backend,
   overriding the request's own `options.max_workers` when given. Ignored by
-  `local`. See "Execution backends" below.
+  `local`. Capped by the host's `KLT_SIM_MAX_WORKERS`, when set (a larger
+  value is clamped, not refused). See "Execution backends" below.
 - `--hosts` — shard the expanded corner/Monte-Carlo unit list across this
   many hosts and merge the per-shard reports, overriding the request's own
   `remote.hosts` field when given. Defaults to `1` (today's single-host
@@ -97,6 +98,59 @@ everything else running there. `local` remains the default **everywhere**
 for exactly this reason; opt into `local-parallel` deliberately (and size
 `max_workers` for the box you're actually running on), never as a blanket
 default.
+
+**Host-level cap: `KLT_SIM_MAX_WORKERS`.** Sizing `max_workers` per request
+only helps for the callers that remember to do it — and the ones that
+oversubscribe a shared box (this package's own test suite, agent-driven
+runs, several concurrent sweeps) are exactly the ones that don't. Set
+`KLT_SIM_MAX_WORKERS` once in the shared box's environment instead
+([#2286](https://github.com/2AMLogic/klayout-tools/issues/2286)):
+
+```bash
+export KLT_SIM_MAX_WORKERS=2   # nothing on this box runs a wider pool
+```
+
+The variable is a property of the *host*, not of the design, so it lives in
+the environment rather than in a request document — which is also why it
+bounds every entry point identically: the `klt sim` CLI, a direct
+`klayout_tools.sim.run_sim(...)` library call, and `pytest` (whose
+simulation fixtures call `run_sim` on the same code path the CLI does).
+
+| `KLT_SIM_MAX_WORKERS` | `max_workers` given? | Effective worker count |
+| --------------------- | -------------------- | ---------------------- |
+| unset (or empty)      | no                   | `os.cpu_count() // 8`, floored to `1` — unchanged |
+| unset (or empty)      | yes                  | exactly what was asked for — unchanged |
+| `N`                   | no                   | `min(os.cpu_count() // 8, N)`, floored to `1` |
+| `N`, request ≤ `N`    | yes                  | exactly what was asked for |
+| `N`, request > `N`    | yes                  | `N` — **clamped, not refused** |
+
+A request above the cap is clamped rather than rejected — the caller's
+number is a preference about one sweep, the cap is a fact about the box —
+but never silently: a one-line notice is printed to **stderr** once per
+sweep, so a caller piping `--format json` to a file still sees it on the
+terminal and the report JSON is unaffected.
+
+```
+klt: notice: max_workers=16 exceeds this host's KLT_SIM_MAX_WORKERS=2 cap; clamping the local-parallel worker pool to 2.
+```
+
+The cap must be a positive integer. `KLT_SIM_MAX_WORKERS=0`, `-1`, or a
+non-integer such as `many` is an application error (exit 1, same as a
+non-positive `options.max_workers`) rather than a silently-ignored value — a
+typo'd cap that degraded to "uncapped" would defeat the point of setting it.
+Unset, or set to the empty string (`KLT_SIM_MAX_WORKERS=`, what an empty
+entry in a shell env file produces), means "no cap": behaviour is then
+identical to a host without the variable at all.
+
+The cap is deliberately **not** cross-process coordination — it is a static
+per-process upper bound, so `K` concurrent sweeps on a capped box can still
+run `K × N` workers between them. Sizing it for the number of sweeps the box
+is expected to host is the operator's call.
+
+It applies to whichever box actually runs the pool. The `remote` and `batch`
+backends re-invoke `klt sim --backend local-parallel` on the provisioned
+instance, so *that* host's environment decides its cap — the caller's cap
+describes the caller's box and does not travel with the job.
 
 **Ordering and failure isolation.** `local-parallel`'s report lists corners
 in the same order `local` would produce, regardless of which corner's
@@ -1550,7 +1604,7 @@ the *response* echoes back.
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
-| `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag. |
+| `options.max_workers`    | integer           | Worker-pool size for the `local-parallel` backend; ignored by `local`. Must be a positive integer. Defaults to a conservative estimate derived from the local CPU count (see "Execution backends" above). Overridable with the `--max-workers` CLI flag, and capped by the host's `KLT_SIM_MAX_WORKERS` when set (a larger value is clamped, not refused). |
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
