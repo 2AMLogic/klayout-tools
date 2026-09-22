@@ -3139,6 +3139,18 @@ vendor deck expects:
 | gf180mcu | explicit unit suffixes — `L=0.28U W=10U AS=0.5P` | No `.option scale` anywhere in `libs.tech/ngspice/`; its subcircuits declare raw-metre defaults (`.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7`), so an absolute literal is correct. |
 | sg13g2 | explicit unit suffixes — `l=6U w=1U` | Confirmed (issue #1457) against a real fetched IHP-Open-PDK v0.3.0 install: no `.option scale` anywhere in `libs.tech/ngspice/`; its `sg13_lv_nmos`/`rsil`/`rppd`/`rhigh` subcircuits all declare raw-metre defaults, same convention as gf180mcu. |
 
+The sky130 convention covers the **resistor classes by name** (issue #1159's
+repro): a `--pdk`-bound `res_high_po`/`res_xhigh_po`/`res_generic_po` `X`
+card carries its geometry suffix-free (`X$1 A B W sky130_fd_pr__res_xhigh_po
+l=6 w=1`). This is load-bearing for the with-bulk poly flavours specifically:
+their vendor subcircuit's own `.param` block computes `leff = {l-0.0592}`
+and `Efac = {1/leff*(1+...*log(leff/w))}` in bare micron-scale units, so a
+unit-suffixed `l=6U` made `leff` negative at *any* drawn length and the
+`Efac` `log()` a `NaN` — ngspice aborted with `The internal check of parse
+tree ... ( nan ) ... failed` / `parameter value out of range or the wrong
+type`. (Verified against the real unmodified
+`sky130_fd_pr__res_xhigh_po.model.spice`: the suffix-free card solves to a
+sane divider, the suffixed one reproduces the exact `nan` abort.)
 This matters because `.option scale` is applied **on top of** the parsed
 literal — ngspice multiplies a MOS card's `l`/`w`/`ps`/`pd` by `scale` and its
 `as`/`ad` by `scale²`. Writing sky130's cards with unit suffixes therefore

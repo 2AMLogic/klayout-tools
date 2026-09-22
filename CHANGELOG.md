@@ -88,6 +88,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `fixed_offset_ohm` correction (issue #585) behave exactly as before; see
   `docs/cli/extract.md`'s "Verified compatible with `klt sim`" and
   `docs/cli/lvs.md`'s new round-trip section.
+- **Documented** (#1159, `klt extract --pdk` sky130 resistor geometry — the
+  code fix already shipped with issue #1396's bare-micrometre convention,
+  one week after #1159 was filed; this closes the loop with a regression
+  lock + vendor-deck proof, and the docs it asked for): the sky130
+  geometry-convention table in `docs/cli/extract.md`'s "SPICE model
+  binding" section now names the affected classes explicitly — a
+  `--pdk`-bound `res_high_po`/`res_xhigh_po`/`res_generic_po` `X` card
+  carries its geometry suffix-free (`l=6 w=1`) because those vendor
+  subcircuits' own `.param` blocks compute `leff = {l-0.0592}` and
+  `Efac = {... log(leff/w)}` in bare micron-scale units, so the
+  unit-suffixed spelling the issue reported (`l=180U w=0.42U`) drove `leff`
+  negative at any drawn length and ngspice's `Efac` parse-tree check to a
+  `nan` / `parameter value out of range` abort. Verified against the real
+  unmodified `sky130_fd_pr__res_xhigh_po.model.spice`: the suffix-free card
+  solves a sane operating point, the suffixed one reproduces the exact
+  failure. Regression-locked for the with-bulk classes by
+  `tests/test_extract.py`'s
+  `test_pdk_resolved_binds_three_terminal_resistor_sky130_suffix_free`, and
+  end-to-end against the real vendor deck (where an install + ngspice
+  resolve) by `test_real_sky130_bound_resistor_card_simulates_against_the_vendor_deck`.
 
 ## 0.6.0 (2026-09-22)
 

@@ -4953,6 +4953,92 @@ def test_real_sky130_bound_mos_card_simulates_against_the_vendor_deck(tmp_path):
     assert "could not find a valid modelname" in legacy, legacy
 
 
+@pytest.mark.skipif(not HAVE_NGSPICE, reason="ngspice is not installed on this machine")
+@pytest.mark.skipif(
+    _REAL_SKY130_LIB_SPICE is None,
+    reason="no real sky130 combined/sky130.lib.spice resolves via list_pdks()",
+)
+def test_real_sky130_bound_resistor_card_simulates_against_the_vendor_deck(tmp_path):
+    """Issue #1159's acceptance criterion, end to end (the resistor sibling
+    of the MOS proof above): the `X` card `klt extract --pdk sky130A` writes
+    for a drawn `res_xhigh_po` solves an operating point against the real,
+    unmodified vendor subcircuit -- whose own `.param` block computes
+    `leff = {l-0.0592}` and `Efac = {... log(leff/w)}` assuming bare
+    micron-scale `l`/`w` -- without the `parse tree ... ( nan )` /
+    `parameter value out of range` abort the unit-suffixed spelling
+    produced. The counter-assertion restores the pre-#1396 suffixes and
+    pins that failure, so the proof cannot pass vacuously."""
+    import subprocess
+
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "sky130",
+            extra=(
+                (79, 20, _RES_MARKED.enlarged(200, 200)),  # urpm -> xhigh
+                (94, 20, _RES_MARKED.enlarged(200, 200)),  # psdm
+            ),
+        ),
+        tmp_path / "res_xhigh_po.gds",
+    )
+    root = _make_pdk_install(tmp_path, "sky130A")
+    run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=root,
+        output=str(tmp_path / "res_xhigh_po.spice"),
+    )
+
+    text = Path(tmp_path / "res_xhigh_po.spice").read_text()
+    card = next(
+        line for line in text.splitlines() if "sky130_fd_pr__res_xhigh_po" in line
+    )
+    # Everything from the subcircuit name onward: `<subckt> l=.. w=..`.
+    tail = card[card.index("sky130_fd_pr__res_xhigh_po") :].strip()
+
+    def restore_unit_suffixes(instance_tail: str) -> str:
+        """The pre-#1396 spelling of the same card: `U` on every length."""
+        return " ".join(
+            f"{token}U" if token.partition("=")[1] else token
+            for token in instance_tail.split()
+        )
+
+    def simulate(instance_tail: str, name: str) -> str:
+        deck = tmp_path / f"{name}.spice"
+        deck.write_text(
+            f".lib {_REAL_SKY130_LIB_SPICE} tt\n"
+            "Vtest t1 0 dc 1.0\n"
+            f"Xr t1 t2 0 {instance_tail}\n"
+            "Rload t2 0 1meg\n"
+            ".control\n"
+            "op\n"
+            "print v(t1) v(t2)\n"
+            "quit\n"
+            ".endc\n"
+            ".end\n"
+        )
+        completed = subprocess.run(
+            ["ngspice", "-b", str(deck)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        return completed.stdout + completed.stderr
+
+    written = simulate(tail, "res_as_written")
+    # The vendor model's own Efac arithmetic must not produce NaN anywhere.
+    assert "nan" not in written.lower(), written
+    assert "out of range" not in written.lower(), written
+    load_voltage = re.search(r"v\(t2\)\s*=\s*(\S+)", written)
+    assert load_voltage is not None, written
+    # A ~12kohm drawn resistor into a 1megohm load dividers to ~0.99 of the
+    # 1V supply -- a solved operating point, not a degenerate one.
+    assert 0.9 < float(load_voltage.group(1)) < 1.0, written
+
+    legacy = simulate(restore_unit_suffixes(tail), "res_legacy_suffixes")
+    assert "nan" in legacy.lower() or "out of range" in legacy.lower(), legacy
+
+
 def test_pdk_resolved_x_card_carries_asadpspd(tmp_path):
     """Issue #695: a `--pdk`-bound MOS `X` card carries the extractor's
     measured source/drain junction area+perimeter (`AS`/`AD`/`PS`/`PD`)
@@ -5139,6 +5225,50 @@ def test_pdk_resolved_binds_resistor_gf180mcu(tmp_path):
     # Three terminals: the two heads plus the substrate-tied bulk.
     assert card.split()[1:4] == ["RA", "RB", substrate]
     assert "r_length=6U" in card and "r_width=1U" in card
+
+
+def test_pdk_resolved_binds_three_terminal_resistor_sky130_suffix_free(tmp_path):
+    """Issue #1159's regression lock: the `--pdk`-bound `X` card for a
+    bulk-bearing sky130 poly resistor (`res_xhigh_po`, the issue's own
+    device) carries its `l=`/`w=` call-site geometry as *bare micron-scale
+    numbers* (`l=6 w=1`) -- the form the vendor subcircuit's own `.param`
+    block consumes (`leff = {l-0.0592}`, `Efac = {... log(leff/w)}` under
+    the model library's ambient `.option scale=1.0u`). The pre-#1396
+    explicit-unit-suffixed spelling (`l=6U w=1U`) drove `leff` negative at
+    any drawn length and the `Efac` `log()` to NaN, aborting ngspice with
+    `parameter value out of range` -- the family-wide bare-micrometre
+    convention #1396 introduced, locked here for the with-bulk resistor
+    class whose repro #1159 records (its 2-terminal sibling is pinned by
+    `test_pdk_resolved_binds_resistor_sky130` above)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "sky130",
+            extra=(
+                (79, 20, _RES_MARKED.enlarged(200, 200)),  # urpm -> xhigh
+                (94, 20, _RES_MARKED.enlarged(200, 200)),  # psdm
+            ),
+        ),
+        tmp_path / "res_xhigh_po.gds",
+    )
+    out = str(tmp_path / "res_xhigh_po.spice")
+    run_extract(
+        path,
+        "sky130",
+        pdk_variant="sky130A",
+        pdk_root=_make_pdk_install(tmp_path, "sky130A"),
+        output=out,
+    )
+    (card,) = _device_cards(out)
+    assert card.startswith("X")
+    assert " sky130_fd_pr__res_xhigh_po " in card
+    substrate = get_extraction_deck("sky130").substrate_net
+    # Three terminals: the two heads plus the substrate-tied bulk.
+    assert card.split()[1:4] == ["RA", "RB", substrate]
+    # Bare micron-scale numbers -- exactly the tokens the vendor `.param`
+    # block's `l`-relative arithmetic assumes -- and the negative control
+    # is the issue's own failing spelling.
+    assert card.split()[-2:] == ["l=6", "w=1"], card
+    assert "l=6U" not in card and "w=1U" not in card
 
 
 @pytest.mark.parametrize(
