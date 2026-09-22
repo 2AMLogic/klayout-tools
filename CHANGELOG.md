@@ -14,6 +14,24 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2308, `klt deck rules` + docs, additive — **no**
+  `schema_version` bump, a new verb with its own `schema_version: 1`): a
+  read-only query for the *numbers* a built-in deck enforces —
+  `klt deck rules --deck sky130 [--rule poly.width.1]` lists every
+  registered rule's `id`, `description`, `check`, `layers`, `scope`,
+  `value_um`/`value_dbu`, kind-specific `limits`, and structured
+  `provenance`, alongside the deck's own `content_hash`. No layout file and
+  no check run: `klt drc` reports violations and therefore needs a stream,
+  so pre-layout arithmetic (area budgeting, device pitch, whether a proposed
+  segmentation is drawable at all) previously had to transcribe constants
+  out of deck comments by hand — a copy that silently stops tracking the
+  deck when the deck moves, and a citation no reviewer could re-check
+  mechanically. Carrying `content_hash` with the values makes a cited
+  constant pinnable to the exact deck revision it was read from. `area`/
+  `density`/`antenna` rules, which do not use a distance threshold, report
+  `value_um: null` plus their own `limits` rather than the unused `0` they
+  author as a placeholder; an unknown `--rule` id is a clean error envelope
+  (exit 1), never an empty `rules` list.
 - **Fixed** (#2285, `klt functional-verification`, additive — **no**
   `schema_version` bump): `options.sdf` no longer hard-fails on a zero-delay
   `INTERCONNECT` entry whose destination is a top-level output port bit the

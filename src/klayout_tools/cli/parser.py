@@ -3490,15 +3490,16 @@ def _add_pdk_parser(subparsers: argparse._SubParsersAction) -> None:
 
 def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``deck`` verb with nested ``resolve`` (issue #623),
-    ``hash`` (issue #1202), and ``info`` (issue #1209) subcommands, mirroring
-    ``pdk``/``kb``'s grouped-verb pattern (see ``_add_pdk_parser``) so future
-    deck-identity/deck-history operations (e.g. listing the full table) have
-    a natural home alongside them.
+    ``hash`` (issue #1202), ``info`` (issue #1209), and ``rules`` (issue
+    #2308) subcommands, mirroring ``pdk``/``kb``'s grouped-verb pattern (see
+    ``_add_pdk_parser``) so future deck-identity/deck-history operations
+    (e.g. listing the full table) have a natural home alongside them.
     """
     deck_parser = subparsers.add_parser(
         "deck",
-        help="identify a built-in rule deck, resolve one to its release, or "
-        "report the installed build's own deck coverage",
+        help="identify a built-in rule deck, resolve one to its release, "
+        "report the installed build's own deck coverage, or list the rule "
+        "values a deck enforces",
         description=(
             "Identify klt's built-in DRC/LVS rule decks (sky130, gf180mcu, "
             "sg13g2). `hash` reports the `provenance.deck.content_hash` this "
@@ -3512,9 +3513,13 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
             "against an older deck revision (`resolve`), or report this "
             "install's own deck content hash, structural device-class "
             "coverage, and release status directly, with no input layout "
-            "needed (`info`). Resolve-only: this does not fetch, check out, "
-            "or build a historical revision -- install the reported version "
-            "yourself to reproduce against it."
+            "needed (`info`). `rules` reports what the deck actually "
+            "requires -- every rule's id, description, and threshold in "
+            "micrometres, with the deck's content hash -- so pre-layout "
+            "arithmetic can read a constant from the installed deck instead "
+            "of transcribing it out of a deck comment. Resolve-only: this "
+            "does not fetch, check out, or build a historical revision -- "
+            "install the reported version yourself to reproduce against it."
         ),
     )
     deck_sub = deck_parser.add_subparsers(dest="deck_command", metavar="<subcommand>")
@@ -3613,6 +3618,42 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
         help="output format (default: text)",
     )
     info_parser.set_defaults(func=deck_cmd.run_info)
+
+    rules_parser = deck_sub.add_parser(
+        "rules",
+        help="list the rule values a built-in deck enforces (id, "
+        "description, threshold in um), with no layout needed",
+        description=(
+            "Report the *numbers* a built-in deck enforces -- every "
+            "registered rule's id, description, check kind, drawn layers, "
+            "and distance threshold in micrometres -- alongside the deck's "
+            "own content hash, with no layout file and no check run (issue "
+            "#2308). `klt drc` reports violations and therefore needs a "
+            "stream; this answers the pre-layout question (area budgeting, "
+            "device pitch, whether a proposed segmentation is drawable at "
+            "all) that has to be settled before any GDS exists. Rule ids "
+            "are this deck's own (`poly.width.1`), not the upstream PDK's "
+            "numbering -- that is reported per rule under "
+            "`provenance.rule_id`. Pair the reported `content_hash` with a "
+            "cited constant to make the citation re-checkable against the "
+            "installed deck on the next PDK bump."
+        ),
+    )
+    rules_parser.add_argument(
+        "--deck",
+        required=True,
+        help=f"built-in deck name whose rules to list (e.g. {_deck_names_str()})",
+    )
+    rules_parser.add_argument(
+        "--rule",
+        default=None,
+        help=(
+            "narrow to a single rule by exact id (e.g. poly.width.1); an id "
+            "the deck does not carry is a clean error, not an empty list"
+        ),
+    )
+    _add_format_arg(rules_parser)
+    rules_parser.set_defaults(func=deck_cmd.run_rules)
 
 
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
