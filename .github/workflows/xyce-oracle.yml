@@ -1,0 +1,99 @@
+name: xyce cross-validation oracle (sim)
+
+# Issue #2016 (pairing #5 of tracking issue #2007): a CI-runnable execution
+# path for the Xyce-backed cross-validation oracle --
+# tests/test_sim_xyce_oracle.py runs the same request documents through BOTH
+# `klt sim` engines (ngspice, the reference; Xyce, Sandia's from-scratch
+# SPICE implementation) and requires their measurement values to agree
+# inside a stated band, plus a seeded-defect negative control proving the
+# comparison can fail. See docs/design/xyce-oracle.md for the methodology.
+#
+# All oracle modules are real-binary-gated: without both engines they skip
+# cleanly, so the ordinary ci.yml test job stays green and silent on them.
+# This job is what makes the pairing actually run.
+#
+# Platform choice, and why this is NOT the eda-sim docker image (the other
+# place a heavy tool could live): Sandia publishes no Ubuntu/Debian binary,
+# and the image bakes from a Debian-based loom-worker base -- a from-source
+# Xyce + Trilinos build would add hours to that image's stage 1. The macOS
+# arm64 official installer, installed by the same pinned,
+# checksum-verified scripts/install-xyce.sh used locally, is the cheapest
+# honest path; `macos-latest` runners are arm64 and brew provides ngspice
+# from a bottle. `workflow_dispatch` only, matching magic-oracle.yml and the
+# other oracle/canary workflows: nothing here gates a PR. Trigger from the
+# Actions tab, or `gh workflow run xyce-oracle.yml`, whenever
+# src/klayout_tools/sim.py, the oracle, or scripts/install-xyce.sh change --
+# and before a release.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xyce-oracle-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  XYCE_VERSION: "7.10.0"
+
+jobs:
+  xyce-oracle:
+    name: klt sim ngspice vs. Xyce (agreement + seeded defect)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (includes the klayout wheel)
+        run: uv sync --locked --extra dev
+
+      - name: Install ngspice (the reference side of the pairing)
+        # Bottle install on the arm64 runner; no source build.
+        timeout-minutes: 15
+        run: brew install ngspice
+
+      - name: Install pinned Xyce (cache miss only)
+        id: xyce-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/xyce-${{ env.XYCE_VERSION }}
+          key: xyce-${{ env.XYCE_VERSION }}-${{ runner.os }}-${{ hashFiles('scripts/install-xyce.sh', 'scripts/_install_common.sh') }}
+
+      - if: steps.xyce-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: scripts/install-xyce.sh
+
+      - name: Add pinned Xyce to PATH
+        run: echo "$HOME/.cache/xyce-${{ env.XYCE_VERSION }}/bin" >>"$GITHUB_PATH"
+
+      - name: Verify both engines run
+        run: |
+          ngspice --version | head -1
+          Xyce -v
+
+      - name: Run the Xyce cross-validation oracle
+        run: |
+          uv run --frozen --extra dev pytest \
+            tests/test_sim_xyce_oracle.py \
+            -v -rs | tee pytest-xyce-oracle.log
+
+      - name: Confirm the oracle ran to completion, not skipped
+        # pytest exits 0 on a skip, and both halves of this oracle's gate
+        # (an `Xyce` and an `ngspice` on $PATH) are supposed to be satisfied
+        # by the steps above -- so a skip here means provisioning silently
+        # regressed, which is exactly the "green job that tested nothing"
+        # failure #2007's criterion 2 is about. Same belt-and-suspenders
+        # check magic-oracle.yml applies.
+        run: |
+          if grep -Eq "^SKIPPED \[|[0-9]+ skipped" pytest-xyce-oracle.log; then
+            echo "::error::xyce oracle tests were SKIPPED, not run -- provisioning did not satisfy their gate." >&2
+            exit 1
+          fi
+          echo "xyce oracle ran to completion (not skipped)."
