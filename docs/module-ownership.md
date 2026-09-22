@@ -106,6 +106,7 @@ The `signoff` verb grades digital RTL-flow blocks and coordinates multi-stage ve
 
 - **signoff_cmd** (`cli/signoff_cmd.py`): CLI interface, job orchestration, JSON output
 - **signoff** (`signoff.py`): Core digital RTL-flow grading, multi-stage verification coordination (STA/functional verification per kind)
+- **signoff_envelopes** (`signoff_envelopes.py`): Typed evidence-envelope shapes the ingestion boundary validates against — one `TypedDict` per `_classify` kind, the `_EvidenceEnvelope` union they narrow to, and the `_ENVELOPE_SHAPES`/`_SCALAR_CHECKS`/`_UNION_ORIGINS` lookup tables `signoff.py`'s validator walks them with (issue #2313). Pure declarations, no runtime logic
 
 ### sim
 
