@@ -2486,17 +2486,47 @@ def _insert_ring(
 
 
 def _grow_box_um(
-    box_um: tuple[float, float, float, float], margin_um: float
+    box_um: tuple[float, float, float, float], margin_um: float, dbu: float
 ) -> tuple[float, float, float, float]:
-    """``box_um`` grown by ``margin_um`` on all four sides (negative shrinks)."""
+    """``box_um`` grown by ``margin_um`` on all four sides (negative shrinks),
+    with the growth *quantized on the ``dbu`` grid*: every edge moves by
+    exactly ``round(margin_um / dbu)`` dbu away from where :func:`_insert_ring`'s
+    ``_to_box`` would place the un-grown edge, whatever the input's own grid
+    alignment.
+
+    Growing in float um first and letting ``_to_box`` round the result is
+    **not** equivalent, and that difference is a real DRC defect rather than a
+    rounding nicety. ``_to_box`` rounds each edge independently
+    (``int(round(x / dbu))``), so on an input edge sitting on a half-dbu
+    coordinate ``x0`` and ``x0 - margin_um`` can round the *same* direction --
+    yielding 159 dbu of extension where 160 was intended. This is the same
+    independent-rounding mechanism :func:`_snap_square_box_um` documents for
+    issue #685/#1551, applied to a box's growth rather than its width, and the
+    caller it matters for (:func:`_insert_implant_ring`) carries zero DRC
+    headroom above ``NP.5b``/``PP.5b``'s 0.16um extension minimum -- so a
+    single dbu lost to asymmetric rounding is instantly a violation. Observed
+    on ``diff_pair`` at ``ring_padding_um`` values such as ``0.5015``/
+    ``0.5045``/``0.5085``, which put the ring's own edges on a half-dbu
+    coordinate and tripped ``pplus.enclosing.comp.1``.
+
+    Quantizing here (rather than padding ``margin_um`` with headroom) keeps the
+    extension exact instead of merely sufficient, so no clearance is spent.
+    """
+    margin_dbu = int(round(margin_um / dbu))
     x0, y0, x1, y1 = box_um
-    return (x0 - margin_um, y0 - margin_um, x1 + margin_um, y1 + margin_um)
+    return (
+        (int(round(x0 / dbu)) - margin_dbu) * dbu,
+        (int(round(y0 / dbu)) - margin_dbu) * dbu,
+        (int(round(x1 / dbu)) + margin_dbu) * dbu,
+        (int(round(y1 / dbu)) + margin_dbu) * dbu,
+    )
 
 
 def _implant_gap_box_um(
     gap_box_um: tuple[float, float, float, float],
     gap_side: str,
     margin_um: float,
+    dbu: float,
 ) -> tuple[float, float, float, float] | None:
     """The opening cut through an *implant* ring (:func:`_insert_implant_ring`)
     that corresponds to ``gap_box_um``, the opening cut through the tap ring it
@@ -2515,18 +2545,26 @@ def _implant_gap_box_um(
     implant that simply runs across it is doping field oxide -- harmless, and
     the only shape that can satisfy the extension rule on both cut faces at
     once.
+
+    Like :func:`_grow_box_um`, the inset/widening is computed in **dbu space**
+    from a single ``round(margin_um / dbu)``, so each of the opening's four
+    edges lands exactly ``margin_dbu`` from where :func:`_insert_ring`'s
+    ``_to_box`` puts the tap ring's own corresponding edge -- never a dbu short
+    because two float-um coordinates rounded the same direction (see
+    ``_grow_box_um``'s docstring for the mechanism).
     """
-    x0, y0, x1, y1 = gap_box_um
+    margin_dbu = int(round(margin_um / dbu))
+    x0, y0, x1, y1 = (int(round(v / dbu)) for v in gap_box_um)
     if gap_side in ("N", "S"):
         # The opening runs along x; the band it cuts runs along y.
-        nx0, nx1 = x0 + margin_um, x1 - margin_um
+        nx0, nx1 = x0 + margin_dbu, x1 - margin_dbu
         if nx1 - nx0 <= 0:
             return None
-        return (nx0, y0 - margin_um, nx1, y1 + margin_um)
-    ny0, ny1 = y0 + margin_um, y1 - margin_um
+        return (nx0 * dbu, (y0 - margin_dbu) * dbu, nx1 * dbu, (y1 + margin_dbu) * dbu)
+    ny0, ny1 = y0 + margin_dbu, y1 - margin_dbu
     if ny1 - ny0 <= 0:
         return None
-    return (x0 - margin_um, ny0, x1 + margin_um, ny1)
+    return ((x0 - margin_dbu) * dbu, ny0 * dbu, (x1 + margin_dbu) * dbu, ny1 * dbu)
 
 
 def _insert_implant_ring(
@@ -2558,6 +2596,14 @@ def _insert_implant_ring(
     blanket over the enclosed area (which would re-dope whatever a caller later
     places inside the ring -- the invariant #1580's own comments call out).
 
+    The extension is quantized on the ``dbu`` grid (see :func:`_grow_box_um`),
+    so every edge of the drawn implant sits exactly ``round(margin_um / dbu)``
+    dbu from the drawn ``Comp`` edge it extends past -- regardless of whether
+    the caller's own box coordinates land on the grid. ``margin_um`` carries no
+    headroom above ``NP.5b``/``PP.5b``'s threshold (that is deliberate:
+    ``enclosed_check`` is a strict less-than, so exactly the threshold passes),
+    which is precisely why the conversion may not lose a dbu to rounding.
+
     ``margin_um <= 0`` falls through to :func:`_insert_ring` unchanged, so a
     family that resolves no margin keeps byte-for-byte identical geometry.
     """
@@ -2565,11 +2611,11 @@ def _insert_implant_ring(
         _insert_ring(cell, layer_index, dbu, outer_box_um, inner_box_um, gap_box_um)
         return
     implant_gap_um = (
-        _implant_gap_box_um(gap_box_um, gap_side or "E", margin_um)
+        _implant_gap_box_um(gap_box_um, gap_side or "E", margin_um, dbu)
         if gap_box_um is not None
         else None
     )
-    inner_um = _grow_box_um(inner_box_um, -margin_um)
+    inner_um = _grow_box_um(inner_box_um, -margin_um, dbu)
     if inner_um[2] <= inner_um[0] or inner_um[3] <= inner_um[1]:
         # A protected area narrower than `2 * margin_um` leaves no hole to
         # keep: collapse it to nothing rather than emit a degenerate/negative
@@ -2583,7 +2629,7 @@ def _insert_implant_ring(
         cell,
         layer_index,
         dbu,
-        _grow_box_um(outer_box_um, margin_um),
+        _grow_box_um(outer_box_um, margin_um, dbu),
         inner_um,
         implant_gap_um,
     )

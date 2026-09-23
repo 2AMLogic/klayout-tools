@@ -8695,6 +8695,210 @@ def test_gf180mcu_guard_ring_gap_implant_ring_matches_gap_cut_tap_ring(
     )
 
 
+# --------------------------------------------------------------------------- #
+# ... and the #2369 extension has to survive an *off-grid* input box. The
+# margin deliberately carries zero DRC headroom above `NP.5b`/`PP.5b`'s
+# 0.16um (`enclosed_check` is a strict less-than, so exactly the threshold
+# passes), so a single dbu lost while converting um -> dbu is instantly a
+# violation. Growing in float um and letting `_insert_ring`'s `_to_box` round
+# the result independently per edge does exactly that on a half-dbu
+# coordinate: `x0` and `x0 - margin_um` round the *same* direction and the
+# extension comes out 159 dbu. `_grow_box_um`/`_implant_gap_box_um` therefore
+# quantize the growth in dbu space -- the same class of defect (and the same
+# fix shape) as `_snap_square_box_um`'s issue #685/#1551 contact rounding,
+# which is why these tests mirror
+# `test_res_unit_contact_is_full_size_on_half_dbu_tie_lengths`.
+# --------------------------------------------------------------------------- #
+
+#: Box edge offsets covering an on-grid coordinate, both half-dbu ties, and a
+#: generic off-grid coordinate -- the cases whose independent rounding used to
+#: disagree.
+_ISSUE_2384_OFF_GRID_OFFSETS_UM = (0.0, 0.0005, -0.0005, 0.00025, 0.00075)
+
+
+@pytest.mark.parametrize("offset_um", _ISSUE_2384_OFF_GRID_OFFSETS_UM)
+@pytest.mark.parametrize("margin_um", [0.16, 0.24])
+def test_grow_box_um_growth_is_exactly_margin_dbu_off_grid(offset_um, margin_um):
+    """`_grow_box_um` must move every edge exactly `round(margin_um / dbu)` dbu
+    from where `_insert_ring`'s `_to_box` puts the *un-grown* edge, at any input
+    grid alignment -- not `round((x +/- margin_um) / dbu)`, which loses a dbu
+    when both roundings go the same way on a half-dbu tie."""
+    dbu = gen._GRID_DBU_UM
+    margin_dbu = int(round(margin_um / dbu))
+    box_um = (1.0 + offset_um, 2.0 + offset_um, 5.0 + offset_um, 7.0 + offset_um)
+    base_dbu = tuple(int(round(v / dbu)) for v in box_um)
+
+    for signed_margin in (margin_um, -margin_um):
+        grown_dbu = tuple(
+            int(round(v / dbu)) for v in gen._grow_box_um(box_um, signed_margin, dbu)
+        )
+        step = int(round(signed_margin / dbu))
+        assert grown_dbu == (
+            base_dbu[0] - step,
+            base_dbu[1] - step,
+            base_dbu[2] + step,
+            base_dbu[3] + step,
+        ), (offset_um, signed_margin)
+    assert margin_dbu > 0  # the parametrized margins are all grid-resolvable
+
+
+@pytest.mark.parametrize("offset_um", _ISSUE_2384_OFF_GRID_OFFSETS_UM)
+@pytest.mark.parametrize("gap_side", ["N", "S", "E", "W"])
+def test_implant_gap_box_um_inset_is_exactly_margin_dbu_off_grid(offset_um, gap_side):
+    """Same invariant for the ring opening (#434): the implant's own cut is the
+    tap ring's cut inset `margin_dbu` along the side's axis and widened
+    `margin_dbu` across the band -- exactly, at any input grid alignment."""
+    dbu = gen._GRID_DBU_UM
+    margin_um = gen._ring_implant_margin_um("gf180mcu")
+    margin_dbu = int(round(margin_um / dbu))
+    gap_box_um = (1.0 + offset_um, 2.0 + offset_um, 3.0 + offset_um, 4.0 + offset_um)
+    base = tuple(int(round(v / dbu)) for v in gap_box_um)
+
+    cut = gen._implant_gap_box_um(gap_box_um, gap_side, margin_um, dbu)
+    assert cut is not None
+    cut_dbu = tuple(int(round(v / dbu)) for v in cut)
+    if gap_side in ("N", "S"):
+        expected = (
+            base[0] + margin_dbu,
+            base[1] - margin_dbu,
+            base[2] - margin_dbu,
+            base[3] + margin_dbu,
+        )
+    else:
+        expected = (
+            base[0] - margin_dbu,
+            base[1] + margin_dbu,
+            base[2] + margin_dbu,
+            base[3] - margin_dbu,
+        )
+    assert cut_dbu == expected
+
+
+#: `guard_ring` inner sizes that put the ring's own box edges off the dbu grid.
+#: `3.0035`/`3.0055` drew a 159dbu (instead of 160dbu) extension on the ring's
+#: R/T edges before the dbu-space fix; `3.0005` is an off-grid size that
+#: happened *not* to (whether float noise lands a given tie above or below the
+#: boundary is value-dependent), kept as the control that the fix is inert
+#: where nothing was broken.
+_ISSUE_2384_OFF_GRID_RING_INNER_UM = (3.0035, 3.0055, 3.0005)
+
+
+@pytest.mark.parametrize("inner_um", _ISSUE_2384_OFF_GRID_RING_INNER_UM)
+def test_gf180mcu_guard_ring_off_grid_implant_still_extends_exactly_margin(
+    tmp_path, both_pdk_root, inner_um
+):
+    """The end-to-end counterpart at an *off-grid* `inner_width_um`/
+    `inner_height_um`: `_assert_ring_implant_tracks_comp`'s exact-extension
+    invariant held only at the on-grid defaults before this test existed, so a
+    1dbu quantization shortfall could regress silently."""
+    import klayout.db as kdb
+
+    output = tmp_path / f"guard_ring_off_grid_{inner_um}.gds"
+    generate(
+        {
+            "generator": "guard_ring",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {"inner_width_um": inner_um, "inner_height_um": inner_um},
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    nplus_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
+    ).merged()
+    assert not active_region.is_empty()
+    _assert_ring_implant_tracks_comp(active_region, nplus_region, layout.dbu)
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
+#: `diff_pair` paddings that put the automatically-sized ring's own box edges on
+#: a half-dbu coordinate. All four drew a 159dbu (instead of 160dbu) outer
+#: extension on two of the four sides before the dbu-space fix; three of them
+#: tripped `pplus.enclosing.comp.1` outright.
+_ISSUE_2384_OFF_GRID_RING_PADDINGS_UM = (0.5015, 0.5045, 0.5085, 0.5095)
+
+
+@pytest.mark.parametrize("padding_um", _ISSUE_2384_OFF_GRID_RING_PADDINGS_UM)
+def test_gf180mcu_diff_pair_off_grid_ring_padding_implant_extension_is_exact(
+    tmp_path, both_pdk_root, padding_um
+):
+    """`ring_padding_um` is a documented public param constrained only to
+    `>= 0`, so an ordinary caller can land the ring's edges off the dbu grid.
+    Every side of the ring implant must still reach exactly
+    `_ring_implant_margin_um` past the drawn `Comp` band -- measured in dbu on
+    all four sides, because two of them (L/B) were the ones that came up short.
+    """
+    import klayout.db as kdb
+
+    output = tmp_path / f"diff_pair_off_grid_ring_{padding_um}.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "splits": 1,
+                "add_guard_ring": True,
+                "ring_padding_um": padding_um,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    layout = kdb.Layout()
+    layout.read(str(output))
+    active_region = kdb.Region(
+        layout.top_cell().begin_shapes_rec(layout.layer(22, 0))
+    ).merged()
+    # The ring's implant is the outermost implant shape of either doping, so
+    # the union's bbox is the ring implant's own outer boundary.
+    implant_region = (
+        kdb.Region(layout.top_cell().begin_shapes_rec(layout.layer(32, 0)))
+        + kdb.Region(layout.top_cell().begin_shapes_rec(layout.layer(31, 0)))
+    ).merged()
+    assert not active_region.is_empty()
+
+    margin_dbu = int(round(gen._ring_implant_margin_um("gf180mcu") / layout.dbu))
+    comp_bbox = active_region.bbox()
+    implant_bbox = implant_region.bbox()
+    extension_dbu = (
+        comp_bbox.left - implant_bbox.left,
+        comp_bbox.bottom - implant_bbox.bottom,
+        implant_bbox.right - comp_bbox.right,
+        implant_bbox.top - comp_bbox.top,
+    )
+    assert extension_dbu == (margin_dbu,) * 4
+
+
+def test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean(tmp_path, both_pdk_root):
+    """DRC counterpart of the extension assertion above, on one representative
+    off-grid padding (one `run_drc` rather than one per value -- the geometry
+    assertion covers all four). Before the dbu-space fix this reported
+    `pplus.enclosing.comp.1` x2."""
+    output = tmp_path / "diff_pair_off_grid_ring_drc.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "splits": 1,
+                "add_guard_ring": True,
+                "ring_padding_um": 0.5045,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+
 @pytest.mark.parametrize(
     ("generator", "params"),
     [

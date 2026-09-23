@@ -226,7 +226,21 @@ is the only shape that can satisfy the rule on both cut faces at once. No
 extra headroom is added above the 0.16µm threshold on purpose: the inner
 edge grows *toward* whatever the ring encloses, so every extra nanometre is
 spent out of the clearance that enclosed device needs for `NP.3a`/`PP.3a`
-(implant to opposite-type COMP, also 0.16µm).
+(implant to opposite-type COMP, also 0.16µm). Because there is no headroom,
+the extension is applied as a **dbu-quantized** growth rather than as float-µm
+padding: the ring's own box is snapped to the grid first and then grown by
+exactly `round(margin_um / dbu)` database units, so every edge of the drawn
+implant sits exactly that many dbu from the drawn `Comp` edge it extends past,
+at *any* `ring_padding_um`. Growing in µm and rounding each grown coordinate
+independently is not equivalent — on a `ring_padding_um` that puts a ring edge
+on a half-dbu coordinate (`0.5015`, `0.5045`, `0.5085`, …) the un-grown and
+grown coordinates round the same direction and the extension comes out 159 dbu,
+one short, which the zero-headroom margin turns straight into an
+`NP.5b`/`PP.5b` violation. This is the same independent-rounding mechanism
+issues #685/#1551 fixed for contact squares, applied to a box's growth rather
+than its width; `ring_padding_um` is documented only as `>= 0` and is not
+required to land on the grid, so off-grid values are a supported input, not an
+edge case.
 
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired

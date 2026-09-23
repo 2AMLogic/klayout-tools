@@ -682,7 +682,16 @@ not `klt --version`, if you need to detect this kind of drift. See
   extension too (an opening of `2 × margin` or less closes over, doping only
   field oxide). `examples/dogbone-terminal`'s committed streams are
   regenerated: both families' GDS carry `mos_array`'s PCell parameter list, so
-  the new param drifts the sky130 fixture without moving a polygon.
+  the new param drifts the sky130 fixture without moving a polygon. The
+  extension is applied as a single **dbu-quantized** growth, not as float-µm
+  padding: `margin_um` deliberately carries zero headroom above the 0.16 µm
+  threshold (`enclosed_check` is a strict less-than, so exactly the threshold
+  passes), so rounding a grown µm coordinate independently of the un-grown one
+  could lose a dbu on a half-dbu input and trip the very rule the margin
+  exists to satisfy — observed on `diff_pair` at `ring_padding_um` values such
+  as `0.5015`/`0.5045`/`0.5085`. This is the same independent-rounding
+  mechanism issues #685/#1551 fixed for contact squares, applied to a box's
+  growth rather than its width.
 - **Added** (#2339, `klt erc`, additive — **no** `schema_version` bump: two
   new optional spec keys and one new coverage skip reason, no new output
   field and no new coverage list; a spec that uses neither key produces
