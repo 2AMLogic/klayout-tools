@@ -765,8 +765,16 @@ actually needs are supported — `module`/`endmodule`, `input`/`output`/
 `inout` port declarations (with an optional `[msb:lsb]` bus range, expanded
 to one boundary pin per bit), named (`.PORT(NET)`) instance connections
 only (a plain net, a single-index bit-select `bus[3]`, a `1'b0`/`1'b1`
-constant, or `.PORT()` for an explicit no-connect), and a simple `assign
-<net> = <net>;` alias. A Verilog **escaped identifier** (`\name`) is
+constant, or `.PORT()` for an explicit no-connect), a simple `assign
+<net> = <net>;` alias, and a plain concatenation alias `assign <net> =
+{ <net>, <net>, ... };` (issue #2372 — the form Yosys routinely emits for a
+vector alias or tie-off padding). A concatenation is expanded MSB-first into
+one per-bit alias using the module's own `wire`/`input`/`output`/`inout`
+declared widths; both sides must be exactly the same total width, and each
+operand must be a plain net or single-index bit-select — replication
+(`{N{x}}`), literals (`1'b0`), and part-selects (`a[7:4]`) inside a
+concatenation remain unsupported and fail with the same "only a plain
+`assign`" error. A Verilog **escaped identifier** (`\name`) is
 accepted wherever a name is, and is read exactly as Verilog defines it —
 one atomic token running from the backslash to the next whitespace, so
 every character in between belongs to the literal name. A backend-emitted
@@ -780,7 +788,8 @@ which is always a single flat module post-place-and-route, but not assumed
 away) converts correctly too — an instantiated cell type that matches
 another parsed `module` in the same file is treated as a genuine
 subcircuit reference, never confused with a library cell of the same name.
-Anything else — positional (non-named) instance connections, concatenation,
+Anything else — positional (non-named) instance connections, concatenation
+outside an `assign` right-hand side,
 a multi-bit range-slice connection, a general expression, `always`/`case`/
 other behavioral statements, an ANSI-style inline port declaration — is an
 application error (exit 1) naming the offending construct, never a silent
