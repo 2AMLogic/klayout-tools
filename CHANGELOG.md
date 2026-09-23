@@ -14,6 +14,40 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2363, `klt functional-verification` `options.sdf` on Icarus —
+  additive, **no** `schema_version` bump: one new `environment.sdf.dropped`
+  class key, emitted only on a run that has entries to drop, so a run with
+  none is byte-for-byte unchanged): an `INTERCONNECT` entry running from a
+  bit-selected top-level input port onto a pin of a **physical-only**
+  instance — a router-inserted antenna-effect diode, or any filler/tapcell
+  whose Verilog model has no `specify` block and no output pin — failed
+  `$sdf_annotate` with `Could not find intermodpath!`, which the transcript
+  gate (correctly) treats as a hard failure. This is shape (b) of the issue
+  #1619/#1857 bit-selected-port failure, so neither that issue's
+  safe/deferred SDF split nor #2285's alias-map normalization resolved it.
+  Reproduced live against Icarus 13.0, which pinned down a condition the
+  report did not state: the failure needs the port bit's net to carry more
+  than one `INTERCONNECT` entry (a net whose only entry is the diode's own
+  already annotated cleanly), which a real router produces by inserting one
+  diode per violating pin on a multi-load input bit. Such entries are now
+  removed from the SDF text handed to `$sdf_annotate` and counted under a
+  new `environment.sdf.dropped` class,
+  `zero_delay_physical_only_interconnect`, kept distinct from #2285's
+  `zero_delay_alias_port_interconnect`. The exemption carries #2285's own
+  bound verbatim: an entry is dropped only when *every* `min:typ:max` member
+  of every rvalue it carries is zero, so dropping it cannot change simulated
+  timing at any corner — a non-zero-delay entry onto the identical pin is
+  left in place and still fails the run loudly. Destinations that *can*
+  carry a modpath are untouched: an entry onto an ordinary
+  `specify`-bearing standard cell (the general shape (b) case) still fails,
+  and "physical-only" is decided structurally from the elaborated model
+  rather than from a `*_diode_*` cell-name pattern, with every ambiguity
+  (model not among `request.sources`, a top module the gate-level parser
+  cannot read, any `specify`/`output`/`inout` declaration) resolving toward
+  *not* dropping. The normalized copy is kept as
+  `.klt/functional-verification/klt_sdf_physical_only_dropped.sdf`;
+  `environment.sdf.file` still reports the caller's own SDF path. See
+  `docs/cli/functional-verification.md`'s "SDF back-annotation" section.
 - **Fixed** (#2355, `klt extract --parasitics` MoM-capacitor cards — **no**
   `schema_version` bump; `devices[].params` is unchanged, only the written
   SPICE text): an extracted `cap_cmomi`/`cap_cmomf` (MoM capacitor, issue

@@ -213,7 +213,9 @@ from ._vendor import mutation_variants as _mutation_variants
 from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
+    _collect_sdf_physical_only_instances,
     _drop_sdf_zero_delay_alias_port_interconnects,
+    _drop_sdf_zero_delay_physical_only_interconnects,
     _parse_toplevel_ports,
     _reject_sdf_escaped_divider_interconnects,
     _reject_sdf_with_functional_models,
@@ -329,6 +331,22 @@ SDF_DIAGNOSTIC_LINE_RE = re.compile(r"^SDF (?:WARNING|ERROR): .+?:\d+: .+$")
 #: emits a diagnostic for them at all.
 SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 
+#: The ``environment.sdf.dropped`` class counting the zero-delay
+#: ``INTERCONNECT`` entries removed before annotation because they run from
+#: a bit-selected top-level input port onto a pin of a *physical-only*
+#: instance -- a router-inserted antenna diode (or any filler/tapcell whose
+#: model is timing-empty), whose elaborated Verilog has no ``specify`` block
+#: and no output pin at all, so no modpath the entry could annotate exists.
+#: Issue #2363's counted exemption, kept distinct from
+#: :data:`SDF_ALIAS_PORT_DROPPED_CLASS` because the mechanism, the matched
+#: endpoint, and the condition all differ -- a caller reading
+#: ``environment.sdf.dropped`` needs to tell the two apart. Like the alias
+#: class (and unlike ``timingcheck``) it is not derived from a diagnostic
+#: substring: the entries are dropped from the SDF text up front
+#: (:func:`_drop_sdf_zero_delay_physical_only_interconnects`), so Icarus
+#: never emits a diagnostic for them at all.
+SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
+
 #: A human-readable reason per dropped class, surfaced in
 #: ``environment.sdf.dropped`` (issue #1102) so a caller can explain *why* a
 #: class was dropped without re-deriving it from this module's own comments.
@@ -354,6 +372,19 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "at any corner, so they are removed before annotation and counted "
         "here instead of failing the run -- a non-zero-delay entry on the "
         "same destination is left in place and still fails loudly"
+    ),
+    SDF_PHYSICAL_ONLY_DROPPED_CLASS: (
+        "Icarus Verilog cannot insert an intermodpath for an INTERCONNECT "
+        "entry that runs from a bit-selected top-level input port onto a pin "
+        "of a physical-only instance (a router-inserted antenna diode, or a "
+        "filler/tapcell whose model carries no timing) -- such an entry "
+        "fails with 'Could not find intermodpath!'. The destination's "
+        "elaborated model has no specify block and no output pin at all, so "
+        "there is no modpath the entry could ever annotate and no logic that "
+        "observes the pin; entries whose every min:typ:max delay value is "
+        "zero are therefore removed before annotation and counted here "
+        "instead of failing the run -- a non-zero-delay entry on the same "
+        "destination is left in place and still fails loudly"
     ),
 }
 
@@ -1853,6 +1884,48 @@ def _resolve_trace(
     return {"path": path, "format": fmt, "size_bytes": os.path.getsize(path)}
 
 
+def _apply_sdf_physical_only_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sources: list[str],
+    hdl_toplevel: str,
+    ports: list[tuple[str, int, str]],
+    sdf_pre_dropped_counts: dict[str, int],
+) -> str:
+    """Issue #2363's physical-only-destination SDF-text drop, applied as one
+    step of :func:`run_functional_verification`'s SDF-normalization pipeline
+    (parallel to the inline #2285 alias-port drop just above its own call
+    site): a zero-delay ``INTERCONNECT`` entry from a bit-selected top-level
+    input port onto a pin of a *physical-only* instance (a router-inserted
+    antenna diode, or any filler/tapcell whose model has no ``specify``
+    block and no output pin) cannot be annotated by Icarus at all, so it is
+    removed from the SDF text before ``$sdf_annotate`` and counted under
+    :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS` instead of failing the run.
+
+    Returns the path :func:`run_functional_verification` should hand to
+    ``$sdf_annotate`` next -- ``annotate_source_path`` unchanged when
+    nothing was dropped, or a new normalized-copy path otherwise. The count
+    is recorded into ``sdf_pre_dropped_counts`` in place rather than
+    returned separately, so this call site is a single expression with no
+    branch of its own in ``run_functional_verification`` -- pulled out into
+    its own function specifically to keep that already-baselined function's
+    cyclomatic complexity (`complexity-baseline.json`) from growing further.
+    """
+    physical_only_drop = _drop_sdf_zero_delay_physical_only_interconnects(
+        annotate_source_path,
+        {name for direction, width, name in ports if width and direction == "input"},
+        _collect_sdf_physical_only_instances(sources, hdl_toplevel),
+    )
+    if physical_only_drop is None:
+        return annotate_source_path
+    physical_only_text, physical_only_count = physical_only_drop
+    new_path = os.path.join(output_dir, "klt_sdf_physical_only_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(physical_only_text)
+    sdf_pre_dropped_counts[SDF_PHYSICAL_ONLY_DROPPED_CLASS] = physical_only_count
+    return new_path
+
+
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
@@ -2038,6 +2111,30 @@ def run_functional_verification(request: str) -> dict[str, Any]:
             sdf_pre_dropped_counts[SDF_ALIAS_PORT_DROPPED_CLASS] = alias_dropped_count
 
         vector_ports = {name for _, width, name in ports if width}
+
+        # Issue #2363: an `INTERCONNECT` entry from a bit-selected top-level
+        # input port onto a pin of a *physical-only* instance -- a
+        # router-inserted antenna diode, or any filler/tapcell whose model
+        # is timing-empty -- is shape (b) of the #1619/#1857 spike and
+        # cannot be annotated by Icarus at all. Unlike the general shape (b)
+        # case (which stays failing, pinned by
+        # `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
+        # unresolvable`), this destination's elaborated model carries no
+        # `specify` block and no output pin, so there is no modpath the
+        # entry could ever annotate. When such an entry is zero-delay at
+        # every corner, dropping it cannot change any simulated timing, so
+        # it is removed here and counted in `environment.sdf.dropped`
+        # instead of failing the run. A non-zero-delay entry is left in
+        # place and still fails the diagnostic gate loudly.
+        annotate_source_path = _apply_sdf_physical_only_drop(
+            annotate_source_path,
+            output_dir,
+            sources,
+            hdl_toplevel,
+            ports,
+            sdf_pre_dropped_counts,
+        )
+
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)
         if split is None:
             sdf_paths = [annotate_source_path]

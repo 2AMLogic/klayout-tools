@@ -3454,6 +3454,592 @@ def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
 
 
 # --------------------------------------------------------------------------- #
+# Issue #2363: a zero-delay `INTERCONNECT` entry from a bit-selected top-level
+# *input* port onto a pin of a **physical-only** instance -- the antenna-effect
+# diode a router inserts on an input bit:
+#
+#     klt_diode ANTENNA_diode_0 (.DIODE(ui_in[0]));
+#     (INTERCONNECT ui_in[0] ANTENNA_diode_0.DIODE (0.000:0.000:0.000))
+#
+# This is shape (b) of the #1619/#1857 spike, so neither #1619's deferral nor
+# #2285's alias-map rewrite resolves it, and it costs a `SDF ERROR: ... Could
+# not find intermodpath!` -- enough to fail the diagnostic gate outright on
+# any real post-route SDF with router-inserted diodes.
+#
+# Reproduced live against Icarus 13.0 through this module (not just read off
+# the issue), which pinned down one thing the issue's own write-up does not
+# say: the failure needs the port bit's net to carry **more than one** entry.
+# A bus-port net whose single entry is the diode's own annotates cleanly even
+# before this fix -- #1619's deferral is enough for it -- but the moment that
+# same net carries a second entry, one of them fails, exactly as #1619 shape
+# (a) describes. That is why this fixture hangs *two* diodes off `ui_in[0]`
+# (a real router inserts one diode per violating pin, so a multi-load input
+# bit collects several) and why the pinned no-fix case
+# (`test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
+# unresolvable`, where the second load is a `specify`-bearing cell) keeps
+# failing: dropping the diode entry there leaves the ordinary shape (b) entry
+# behind, still unresolvable.
+#
+# What makes this subset droppable where the *general* shape (b) case is not
+# is the destination: `klt_diode`'s model has no `specify` block and no
+# output pin at all, so no modpath the entry could annotate exists and no
+# logic observes the pin. `_drop_sdf_zero_delay_physical_only_interconnects`
+# removes exactly those entries and reports the count as its own
+# `environment.sdf.dropped` class; a **non**-zero-delay entry onto the
+# identical pin, and *any* entry onto a `specify`-bearing destination, are
+# left in place and still fail loudly (both verified live).
+# --------------------------------------------------------------------------- #
+
+#: Gate-level netlist in the shape a real post-route `write_verilog` emits (a
+#: **non-ANSI** module header with separate direction declarations -- the only
+#: form `verilog_netlist`'s narrow gate-level grammar models), with two
+#: router-inserted antenna diodes hanging off the same bit of a top-level input
+#: bus and a genuinely timed path from a scalar input through two
+#: `specify`-bearing cells to the output.
+_PHYSICAL_ONLY_DIODE_DUT_V = """\
+module klt_inv (input wire in, output wire out);
+  assign out = ~in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_buf (input wire in, output wire out);
+  assign out = in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_diode (DIODE);
+  input DIODE;
+endmodule
+
+module diode_top (a, ui_in, y);
+  input a;
+  input [1:0] ui_in;
+  output y;
+  wire w;
+  klt_diode ANTENNA_diode_0 (.DIODE(ui_in[0]));
+  klt_diode ANTENNA_diode_1 (.DIODE(ui_in[0]));
+  klt_inv u1 (.in(a), .out(w));
+  klt_buf u2 (.in(w), .out(y));
+endmodule
+"""
+
+#: The two physical-only instances `_PHYSICAL_ONLY_DIODE_DUT_V` declares --
+#: what `_collect_sdf_physical_only_instances` derives from it, and what the
+#: drop-pass unit tests hand in directly.
+_PHYSICAL_ONLY_DIODE_INSTANCES = {"ANTENNA_diode_0", "ANTENNA_diode_1"}
+
+_PHYSICAL_ONLY_DIODE_TESTBENCH_PY = '''\
+import cocotb
+from cocotb.triggers import Timer
+
+
+@cocotb.test()
+async def test_output_settles_within_one_ns(dut):
+    """`y` follows `~a` through `u1` then `u2`; `ui_in[0]` only feeds the
+    antenna diode. At zero delay `y` tracks `~a` immediately (so it reads 0
+    once `a` is 1, and this passes); once the real INTERCONNECT delay on
+    `u2.out -> y` is annotated, `y` still reads its old 1 a nanosecond after
+    `a` rises and this fails -- the same "does the testbench's own verdict
+    change" coverage metric #1069's, #1619's and #2285's own regressions use.
+    Reaching that assertion at all is already load-bearing for issue #2363:
+    before the fix the diode entry raised `FunctionalVerificationError`
+    before any report was returned."""
+    dut.a.value = 0
+    dut.ui_in.value = 0
+    await Timer(10, unit="ns")
+    dut.a.value = 1
+    await Timer(1, unit="ns")
+    assert dut.y.value == 0, f"y={dut.y.value} 1 ns after a rose (expected 0)"
+'''
+
+
+def _physical_only_diode_sdf_text(
+    diode_delay: str = "0.000:0.000:0.000", divider: str = "."
+) -> str:
+    """The SDF a post-route `write_sdf` produces for
+    `_PHYSICAL_ONLY_DIODE_DUT_V`: both antenna diodes' `INTERCONNECT` entries
+    from the same bit-selected top-level input port (issue #2363's failing
+    shape, zero-delay by default), a purely internal entry, and a genuinely
+    delayed entry onto the scalar output the testbench's verdict actually
+    observes.
+
+    `diode_delay` parameterises only the diode entries' triplets, so the same
+    fixture drives both the zero-delay (dropped) and non-zero-delay (still
+    fails loud) cases; `divider` exercises the file declaring a separator
+    other than the default `.`."""
+    return f"""\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "diode_top")
+  (DIVIDER {divider})
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "diode_top")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT ui_in[0] ANTENNA_diode_0{divider}DIODE \
+({diode_delay}) ({diode_delay}))
+      (INTERCONNECT ui_in[0] ANTENNA_diode_1{divider}DIODE \
+({diode_delay}) ({diode_delay}))
+      (INTERCONNECT u1{divider}out u2{divider}in \
+(0.000:0.000:0.000) (0.000:0.000:0.000))
+      (INTERCONNECT u2{divider}out y (2.000:2.000:2.000) (2.000:2.000:2.000))
+    ))
+  )
+)
+"""
+
+
+def test_collect_sdf_physical_only_instances_finds_the_antenna_diode(tmp_path):
+    """The instance set issue #2363's normalization keys on, decided
+    structurally from the elaborated model (no `specify` block, no output
+    pin) rather than from a `*_diode_*` cell-name pattern: only the diode
+    instances are listed, never the two `specify`-bearing cells."""
+    source = _write(tmp_path / "diode_top.v", _PHYSICAL_ONLY_DIODE_DUT_V)
+
+    assert (
+        fv._collect_sdf_physical_only_instances([source], "diode_top")
+        == _PHYSICAL_ONLY_DIODE_INSTANCES
+    )
+
+
+def test_collect_sdf_physical_only_instances_skips_a_specify_bearing_lookalike(
+    tmp_path,
+):
+    """A cell whose *name* says "diode" but whose model carries a `specify`
+    block is not physical-only -- the exact mis-classification a
+    name-pattern match would make, and the reason this is decided from the
+    model instead."""
+    source = _write(
+        tmp_path / "diode_top.v",
+        _PHYSICAL_ONLY_DIODE_DUT_V.replace(
+            "module klt_diode (DIODE);\n  input DIODE;\nendmodule",
+            "module klt_diode (DIODE, OUT);\n"
+            "  input DIODE;\n"
+            "  output OUT;\n"
+            "  assign OUT = DIODE;\n"
+            "  specify\n"
+            "    (DIODE => OUT) = (0.0, 0.0);\n"
+            "  endspecify\n"
+            "endmodule",
+        ),
+    )
+
+    assert fv._collect_sdf_physical_only_instances([source], "diode_top") == set()
+
+
+def test_collect_sdf_physical_only_instances_is_empty_without_the_model(tmp_path):
+    """A cell whose model is not among the run's own sources cannot be shown
+    to be modpath-free, so it is not treated as one -- every uncertainty on
+    this path has to resolve toward leaving the SDF entry in place."""
+    source = _write(
+        tmp_path / "diode_top.v",
+        _PHYSICAL_ONLY_DIODE_DUT_V.replace(
+            "module klt_diode (DIODE);\n  input DIODE;\nendmodule", ""
+        ),
+    )
+
+    assert fv._collect_sdf_physical_only_instances([source], "diode_top") == set()
+
+
+def test_collect_sdf_physical_only_instances_is_empty_when_the_top_is_not_gate_level(
+    tmp_path,
+):
+    """A top module outside `verilog_netlist`'s narrow gate-level subset (an
+    ANSI-style header here) yields no instance list -- and must degrade to an
+    empty set rather than raising, since this is a normalization pass and
+    failing to normalize has to be no worse than never having tried. This is
+    also what keeps `test_integration_real_icarus_sdf_bus_port_input_fanout_
+    stays_unresolvable`'s own ANSI fixture out of this pass entirely."""
+    source = _write(
+        tmp_path / "ansi_top.v",
+        "module klt_diode (input wire in);\nendmodule\n"
+        "module ansi_top (input wire [1:0] a, output wire b);\n"
+        "  klt_diode u_d (.in(a[0]));\n"
+        "  assign b = a[1];\n"
+        "endmodule\n",
+    )
+
+    assert fv._collect_sdf_physical_only_instances([source], "ansi_top") == set()
+
+
+def test_collect_sdf_physical_only_instances_is_empty_when_the_module_is_absent(
+    tmp_path,
+):
+    source = _write(tmp_path / "other.v", _PHYSICAL_ONLY_DIODE_DUT_V)
+
+    assert fv._collect_sdf_physical_only_instances([source], "not_this_module") == set()
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_drops_only_that_entry(
+    tmp_path,
+):
+    """Issue #2363's normalization, in isolation: both zero-delay entries
+    onto the antenna diodes' pins are removed; the internal entry and the
+    genuinely delayed output entry are byte-identical to their originals."""
+    sdf_path = _write(tmp_path / "route.sdf", _physical_only_diode_sdf_text())
+
+    result = fv._drop_sdf_zero_delay_physical_only_interconnects(
+        sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+    )
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 2
+    assert "ANTENNA_diode_" not in text
+    assert "(INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))" in text
+    assert "(INTERCONNECT u2.out y (2.000:2.000:2.000)" in text
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_keeps_a_nonzero_entry(
+    tmp_path,
+):
+    """Acceptance criterion #2, at the unit level: a non-zero-delay entry onto
+    the *identical* physical-only pin is not dropped, so it reaches Icarus,
+    fails to annotate, and still raises through the diagnostic gate. Dropping
+    it would silently change simulated timing -- exactly what this exemption
+    must never do."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        _physical_only_diode_sdf_text(diode_delay="1.000:1.000:1.000"),
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_physical_only_interconnects(
+            sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+        )
+        is None
+    )
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_keeps_a_nonzero_corner(
+    tmp_path,
+):
+    """The zero test spans *every* `min:typ:max` member, not just the one
+    `iverilog -T <corner>` selects: an entry that is zero at `min`/`typ` but
+    not at `max` still models real delay at a corner a caller may ask for,
+    so it stays."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        _physical_only_diode_sdf_text(diode_delay="0.000:0.000:1.000"),
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_physical_only_interconnects(
+            sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+        )
+        is None
+    )
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_keeps_a_timed_destination(
+    tmp_path,
+):
+    """Acceptance criterion #3, at the unit level: the *general* shape (b)
+    entry in the same file (`ui_in[0]` onto a `specify`-bearing cell input)
+    is untouched even though its source is the identical bit-selected input
+    port and its delay is zero -- that destination has real modpaths, and
+    `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
+    unresolvable` must keep pinning it as unresolvable."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        _physical_only_diode_sdf_text().replace(
+            "(INTERCONNECT u1.out u2.in",
+            "(INTERCONNECT ui_in[0] u1.in (0.000:0.000:0.000) "
+            "(0.000:0.000:0.000))\n      (INTERCONNECT u1.out u2.in",
+        ),
+    )
+
+    result = fv._drop_sdf_zero_delay_physical_only_interconnects(
+        sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+    )
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 2
+    assert "(INTERCONNECT ui_in[0] u1.in (0.000:0.000:0.000)" in text
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_keeps_a_scalar_source(
+    tmp_path,
+):
+    """The source half of the condition is load-bearing too: the exemption is
+    pinned to the one shape #2363 observed failing (a **bit-selected**
+    top-level input port), so an otherwise identical entry sourced from a
+    scalar port is left in place rather than quietly generalised into."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        _physical_only_diode_sdf_text().replace("ui_in[0] ANTENNA", "a ANTENNA"),
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_physical_only_interconnects(
+            sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+        )
+        is None
+    )
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_honors_the_file_divider(
+    tmp_path,
+):
+    """The destination is split on the separator the SDF file's own
+    `(DIVIDER ...)` header declares, not a hardcoded `.` -- OpenROAD's
+    `write_sdf` emits `/` for a design whose instance names contain `.`."""
+    sdf_path = _write(
+        tmp_path / "route.sdf", _physical_only_diode_sdf_text(divider="/")
+    )
+
+    result = fv._drop_sdf_zero_delay_physical_only_interconnects(
+        sdf_path, {"ui_in"}, _PHYSICAL_ONLY_DIODE_INSTANCES
+    )
+
+    assert result is not None
+    assert result[1] == 2
+    assert "ANTENNA_diode_" not in result[0]
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_is_a_noop_without_inputs(
+    tmp_path,
+):
+    """No bus input port, or no physical-only instance (every design before
+    this issue) means the file is never even read -- the pass must be free on
+    the common case."""
+    sdf_path = str(tmp_path / "does-not-exist.sdf")
+
+    assert (
+        fv._drop_sdf_zero_delay_physical_only_interconnects(sdf_path, set(), {"u_d"})
+        is None
+    )
+    assert (
+        fv._drop_sdf_zero_delay_physical_only_interconnects(sdf_path, {"ui_in"}, set())
+        is None
+    )
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_removes_an_emptied_delay(
+    tmp_path,
+):
+    """Structural cleanup, shared with #2285's pass: a `(DELAY (ABSOLUTE))`
+    left with no entries at all is `Invalid/malformed delay type` to Icarus,
+    so emptying the clause has to remove the clause. The `(CELL ...)` itself
+    is kept."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "diode_top")\n'
+        "  (DIVIDER .)\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "diode_top")\n'
+        "    (INSTANCE)\n"
+        "    (DELAY (ABSOLUTE\n"
+        "      (INTERCONNECT ui_in[0] ANTENNA_diode_0.DIODE (0.000:0.000:0.000))\n"
+        "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+
+    result = fv._drop_sdf_zero_delay_physical_only_interconnects(
+        sdf_path, {"ui_in"}, {"ANTENNA_diode_0"}
+    )
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 1
+    assert "(DELAY" not in text.replace("(DELAYFILE", "")
+    assert "ABSOLUTE" not in text
+    assert "INTERCONNECT" not in text
+    assert '(CELLTYPE "diode_top")' in text
+    assert "(DELAYFILE" in text
+
+
+def test_drop_sdf_zero_delay_physical_only_interconnects_ignores_an_iopath(tmp_path):
+    """Only `INTERCONNECT` entries are eligible. An `IOPATH` (or any other
+    delay entry) is never dropped, however its endpoints are spelled --
+    widening the exemption past net delays is not what this issue
+    establishes."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "diode_top")\n'
+        "  (DIVIDER .)\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "klt_diode")\n'
+        "    (INSTANCE ANTENNA_diode_0)\n"
+        "    (DELAY (ABSOLUTE\n"
+        "      (IOPATH ui_in[0] ANTENNA_diode_0.DIODE (0.000:0.000:0.000))\n"
+        "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_physical_only_interconnects(
+            sdf_path, {"ui_in"}, {"ANTENNA_diode_0"}
+        )
+        is None
+    )
+
+
+def test_stubbed_sdf_counts_a_dropped_physical_only_interconnect(tmp_path, monkeypatch):
+    """The JSON contract for issue #2363: a run that dropped an
+    antenna-diode-destination `INTERCONNECT` entry is machine-distinguishable
+    from an ordinary clean annotation *and* from #2285's alias-port drop --
+    `partial: true` plus its own counted `dropped` class, with
+    `environment.sdf.file` still naming the caller's own SDF rather than the
+    normalized copy handed to `$sdf_annotate`."""
+    _write(tmp_path / "diode_top.v", _PHYSICAL_ONLY_DIODE_DUT_V)
+    _write(tmp_path / "test_diode_top.py", "# stub -- never imported\n")
+    _write(tmp_path / "route.sdf", _physical_only_diode_sdf_text())
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "icarus",
+            "sources": ["diode_top.v"],
+            "hdl_toplevel": "diode_top",
+            "testbench": {"module": "test_diode_top", "testcase": None},
+            "options": {"sdf": {"file": "route.sdf"}},
+        },
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is True
+    assert sdf["dropped"].keys() == {"zero_delay_physical_only_interconnect"}
+    entry = sdf["dropped"]["zero_delay_physical_only_interconnect"]
+    assert entry["count"] == 2
+    assert "antenna diode" in entry["reason"]
+    # The normalized copy is a build artifact, and it is what the generated
+    # `$sdf_annotate` shim names -- never the caller's own file.
+    output_dir = tmp_path / ".klt" / "functional-verification"
+    normalized = output_dir / "klt_sdf_physical_only_dropped.sdf"
+    assert normalized.is_file()
+    assert "ANTENNA_diode_" not in normalized.read_text(encoding="utf-8")
+
+
+def test_stubbed_sdf_without_a_physical_only_load_reports_no_dropped_class(
+    tmp_path, monkeypatch
+):
+    """Regression guard for every design with no timing-empty cell (the
+    overwhelmingly common case, including this suite's own #1056/#1619
+    fixtures): the new pass must leave `partial`/`dropped` exactly as they
+    were, and must not write a normalized copy at all."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["partial"] is False
+    assert sdf["dropped"] == {}
+    normalized = (
+        tmp_path
+        / ".klt"
+        / "functional-verification"
+        / "klt_sdf_physical_only_dropped.sdf"
+    )
+    assert not normalized.exists()
+
+
+def _stage_physical_only_diode_design(tmp_path: Path, diode_delay: str) -> None:
+    _write(tmp_path / "diode_top.v", _PHYSICAL_ONLY_DIODE_DUT_V)
+    _write(tmp_path / "test_diode_top.py", _PHYSICAL_ONLY_DIODE_TESTBENCH_PY)
+    _write(tmp_path / "route.sdf", _physical_only_diode_sdf_text(diode_delay))
+
+
+def _physical_only_diode_request(tmp_path: Path, name: str, sdf: dict | None) -> str:
+    request = {
+        "sources": ["diode_top.v"],
+        "hdl_toplevel": "diode_top",
+        "testbench": {"module": "test_diode_top"},
+    }
+    if sdf is not None:
+        request["options"] = {"sdf": sdf}
+    return _write_request(tmp_path / name, request)
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconnect(
+    tmp_path,
+):
+    """The load-bearing regression for issue #2363, end to end against the
+    real toolchain: a post-route SDF whose antenna-diode `INTERCONNECT` lands
+    on a physical-only instance pin used to raise
+    `FunctionalVerificationError` (`did not fully apply ... Could not find
+    intermodpath!`) before any report was returned. It must now run, report
+    the drop as its own counted class, and *still* annotate the genuinely
+    delayed entry -- verified by the same "does the testbench's own verdict
+    change" coverage metric #1056's, #1619's and #2285's regressions use."""
+    _stage_physical_only_diode_design(tmp_path, diode_delay="0.000:0.000:0.000")
+    zero_delay = _physical_only_diode_request(tmp_path, "request-plain.json", None)
+    annotated = _physical_only_diode_request(
+        tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
+    )
+
+    plain_report = run_functional_verification(zero_delay)
+    # This call is the assertion: before the fix it raised instead of
+    # returning a report.
+    annotated_report = run_functional_verification(annotated)
+
+    assert plain_report["status"] == "pass"
+    assert plain_report["environment"]["sdf"] is None
+    assert annotated_report["status"] == "fail"
+    assert annotated_report["environment"]["sdf"] == {
+        "file": str(tmp_path / "route.sdf"),
+        "corner": "typ",
+        "annotated": True,
+        "partial": True,
+        "dropped": {
+            "zero_delay_physical_only_interconnect": {
+                "count": 2,
+                "reason": fv.SDF_BENIGN_DIAGNOSTIC_REASONS[
+                    fv.SDF_PHYSICAL_ONLY_DROPPED_CLASS
+                ],
+            }
+        },
+    }
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_nonzero_physical_only_interconnect_fails_loud(
+    tmp_path,
+):
+    """Acceptance criterion #2 against the real toolchain: the identical
+    physical-only destination carrying a **non**-zero delay is left in place,
+    hits the same `Could not find intermodpath!` inside Icarus, and still
+    raises. The #2363 exemption is bounded by the delay value, not by the
+    diagnostic text -- so it can never silently retime a run."""
+    _stage_physical_only_diode_design(tmp_path, diode_delay="1.000:1.000:1.000")
+    annotated = _physical_only_diode_request(
+        tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError, match="did not fully apply"
+    ) as excinfo:
+        run_functional_verification(annotated)
+    assert "Could not find intermodpath" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
 # Integration: a bit-selected top-level-port `INTERCONNECT` entry poisons a
 # *sibling* entry on the same net (issue #1619).
 #
