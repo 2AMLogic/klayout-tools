@@ -214,6 +214,7 @@ from .functional_verification_sdf import (
     _check_sdf_engine_capability,
     _collect_sdf_alias_port_bits,
     _collect_sdf_physical_only_instances,
+    _drop_sdf_non_interconnect_entries,
     _drop_sdf_zero_delay_alias_port_interconnects,
     _drop_sdf_zero_delay_physical_only_interconnects,
     _parse_toplevel_ports,
@@ -287,6 +288,23 @@ SDF_CORNERS = ("min", "typ", "max")
 #: response's echo is never ambiguous about which corner was simulated.
 DEFAULT_SDF_CORNER = "typ"
 
+#: ``options.sdf.entries`` values (issue #2364). ``"all"`` (the default, and
+#: the only behavior before this field existed) annotates every delay entry
+#: the SDF carries -- ``IOPATH`` module-path delays and ``INTERCONNECT`` net
+#: delays alike. ``"interconnect"`` drops every non-``INTERCONNECT`` delay
+#: entry from the SDF text before annotation, counted as its own
+#: :data:`SDF_IOPATH_DROPPED_CLASS` ``environment.sdf.dropped`` class: the
+#: net-delay back-annotation configuration #2364's isolation table validated
+#: on a timing-clean sky130A design (positive setup/hold slack, TNS 0), where
+#: ``INTERCONNECT``-only annotation simulates correctly while any SDF
+#: carrying ``IOPATH`` entries kills the design even at a 10x-relaxed clock
+#: period -- an annotation-mechanism kill, not a timing outcome.
+SDF_ENTRIES_MODES = ("all", "interconnect")
+
+#: See :data:`SDF_ENTRIES_MODES`; the explicit default keeps the response's
+#: echo unambiguous about which entry population was annotated.
+DEFAULT_SDF_ENTRIES = "all"
+
 #: Every SDF problem Icarus hits -- an unopenable file, an instance it cannot
 #: find, an ``IOPATH`` the cell's ``specify`` block does not declare, an
 #: ``INTERCONNECT`` without ``-ginterconnect`` -- is reported with one of
@@ -347,6 +365,21 @@ SDF_ALIAS_PORT_DROPPED_CLASS = "zero_delay_alias_port_interconnect"
 #: never emits a diagnostic for them at all.
 SDF_PHYSICAL_ONLY_DROPPED_CLASS = "zero_delay_physical_only_interconnect"
 
+#: The ``environment.sdf.dropped`` class counting the non-``INTERCONNECT``
+#: delay entries -- on a real ``write_sdf`` output, the ``IOPATH`` population
+#: -- removed before annotation because the request selected
+#: ``options.sdf.entries: "interconnect"`` (issue #2364's supported, counted
+#: exemption). Unlike the two zero-delay classes above this drop is
+#: *requested* rather than derived from an Icarus limitation: the caller
+#: asked for net-delay back-annotation only, so the count tells a consumer
+#: how many module-path delay entries that choice set aside. Like them it is
+#: not derived from a diagnostic substring -- the entries are dropped from
+#: the SDF text up front
+#: (:func:`_drop_sdf_non_interconnect_entries`), so Icarus never emits a
+#: diagnostic for them at all. Only present on a run that selected the mode
+#: *and* whose SDF carried at least one non-``INTERCONNECT`` delay entry.
+SDF_IOPATH_DROPPED_CLASS = "iopath_interconnect_only"
+
 #: A human-readable reason per dropped class, surfaced in
 #: ``environment.sdf.dropped`` (issue #1102) so a caller can explain *why* a
 #: class was dropped without re-deriving it from this module's own comments.
@@ -385,6 +418,21 @@ SDF_BENIGN_DIAGNOSTIC_REASONS: dict[str, str] = {
         "zero are therefore removed before annotation and counted here "
         "instead of failing the run -- a non-zero-delay entry on the same "
         "destination is left in place and still fails loudly"
+    ),
+    SDF_IOPATH_DROPPED_CLASS: (
+        "The request selected options.sdf.entries: 'interconnect' "
+        "(net-delay back-annotation only), so every non-INTERCONNECT delay "
+        "entry -- on a real write_sdf output, the IOPATH module-path "
+        "delays -- was removed from the SDF text before annotation and "
+        "counted here. This drop is requested, not derived from an Icarus "
+        "limitation: on a timing-clean design (positive setup/hold slack at "
+        "the SDF's own corner) IOPATH annotation on the sky130 "
+        "specify-branch models kills the design in Icarus even at a "
+        "10x-relaxed clock period, while INTERCONNECT-only annotation "
+        "simulates correctly (issue #2364) -- this mode makes that "
+        "configuration first-class and honestly reported instead of "
+        "hand-filtered. A run that did not select the mode never carries "
+        "this class"
     ),
 }
 
@@ -1884,6 +1932,45 @@ def _resolve_trace(
     return {"path": path, "format": fmt, "size_bytes": os.path.getsize(path)}
 
 
+def _apply_sdf_interconnect_only_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sdf_pre_dropped_counts: dict[str, int],
+    entries: str,
+) -> str:
+    """Issue #2364's ``options.sdf.entries: "interconnect"`` mode, applied as
+    the first step of :func:`run_functional_verification`'s SDF-normalization
+    pipeline: when the request selected net-delay back-annotation only, every
+    non-``INTERCONNECT`` delay entry (on a real ``write_sdf`` output, the
+    ``IOPATH`` population) is removed from the SDF text before
+    ``$sdf_annotate`` and counted under :data:`SDF_IOPATH_DROPPED_CLASS` --
+    a requested, honestly-counted configuration rather than a hand-filtered
+    SDF, validated on a timing-clean sky130A design where ``IOPATH``
+    annotation kills the design even at a 10x-relaxed clock while
+    ``INTERCONNECT``-only annotation simulates correctly.
+
+    Returns the path :func:`run_functional_verification` should hand to the
+    next normalization step -- ``annotate_source_path`` unchanged when the
+    mode was not selected (or nothing matched), or the filtered-copy path
+    otherwise. The count is recorded into ``sdf_pre_dropped_counts`` in place
+    rather than returned separately, so this call site is a single expression
+    with no branch of its own in ``run_functional_verification`` -- pulled
+    out into its own function for the same cyclomatic-complexity reason
+    ``_apply_sdf_physical_only_drop``'s own docstring records.
+    """
+    if entries != "interconnect":
+        return annotate_source_path
+    iopath_drop = _drop_sdf_non_interconnect_entries(annotate_source_path)
+    if iopath_drop is None:
+        return annotate_source_path
+    iopath_text, iopath_dropped_count = iopath_drop
+    new_path = os.path.join(output_dir, "klt_sdf_interconnect_only.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(iopath_text)
+    sdf_pre_dropped_counts[SDF_IOPATH_DROPPED_CLASS] = iopath_dropped_count
+    return new_path
+
+
 def _apply_sdf_physical_only_drop(
     annotate_source_path: str,
     output_dir: str,
@@ -2078,6 +2165,18 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         wrapper_path = os.path.join(output_dir, f"{SDF_WRAPPER_MODULE}.v")
         _write_sdf_dut_wrapper(wrapper_path, hdl_toplevel=hdl_toplevel, ports=ports)
 
+        # Issue #2364: `options.sdf.entries: "interconnect"` -- net-delay
+        # back-annotation only, as the first normalization step. On a
+        # timing-clean design (positive setup/hold slack at the SDF's own
+        # corner) IOPATH annotation on the sky130 specify-branch models
+        # kills the design in Icarus even at a 10x-relaxed clock period,
+        # while INTERCONNECT-only annotation simulates correctly, so that
+        # configuration is a first-class, counted mode rather than something
+        # a caller hand-filters off-tool. A run that did not select the mode
+        # never drops anything and is byte-identical to before.
+        annotate_source_path = _apply_sdf_interconnect_only_drop(
+            sdf["file"], output_dir, sdf_pre_dropped_counts, sdf["entries"]
+        )
         # Issue #1619: a bit-selected top-level-port INTERCONNECT entry
         # (any real design's bus ports produce these) can poison a sibling
         # INTERCONNECT entry on its own net within one $sdf_annotate call.
@@ -2100,9 +2199,8 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # diagnostic gate loudly.
         alias_port_bits = _collect_sdf_alias_port_bits(sources, hdl_toplevel)
         alias_drop = _drop_sdf_zero_delay_alias_port_interconnects(
-            sdf["file"], alias_port_bits
+            annotate_source_path, alias_port_bits
         )
-        annotate_source_path = sdf["file"]
         if alias_drop is not None:
             alias_text, alias_dropped_count = alias_drop
             annotate_source_path = os.path.join(output_dir, "klt_sdf_alias_dropped.sdf")
@@ -2304,6 +2402,14 @@ def run_functional_verification(request: str) -> dict[str, Any]:
                 else {
                     "file": sdf["file"],
                     "corner": sdf["corner"],
+                    # Additive (issue #2364): echoes the request's entry
+                    # population -- "all" (every delay entry) or
+                    # "interconnect" (net delays only, every non-INTERCONNECT
+                    # delay entry dropped and counted in `dropped`). Absent
+                    # on no older reader's contract: the field is new, and a
+                    # consumer that ignores unknown keys (the JSON contract's
+                    # additive rule) is unaffected.
+                    "entries": sdf["entries"],
                     "annotated": True,
                     "partial": bool(sdf_dropped_counts),
                     "dropped": {

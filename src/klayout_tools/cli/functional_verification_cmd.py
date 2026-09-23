@@ -130,7 +130,15 @@ def _print_text(report: dict) -> None:
     # verdict from a zero-delay one, and the two mean very different things.
     sdf = environment.get("sdf")
     if sdf is not None:
-        print(f"sdf: {sdf['file']}  corner: {sdf['corner']}")
+        # Issue #2364: the entry population is part of what a glance must
+        # convey -- "interconnect" means every IOPATH delay was deliberately
+        # set aside (net-delay back-annotation only), which changes what the
+        # verdict below means. Omitted on the default "all" mode so the line
+        # stays byte-identical to before the field existed.
+        entries_note = (
+            "" if sdf.get("entries", "all") == "all" else f"  entries: {sdf['entries']}"
+        )
+        print(f"sdf: {sdf['file']}  corner: {sdf['corner']}{entries_note}")
         # Printed only when a benign diagnostic class was dropped (issue
         # #1102): `annotated: true` alone cannot distinguish "every check in
         # the SDF applied" from "every TIMINGCHECK section was dropped" --

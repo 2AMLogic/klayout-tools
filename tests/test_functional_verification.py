@@ -2009,6 +2009,7 @@ def test_stubbed_sdf_defaults_to_the_typ_corner(tmp_path, monkeypatch):
     assert report["environment"]["sdf"] == {
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
+        "entries": "all",
         "annotated": True,
         "partial": False,
         "dropped": {},
@@ -2741,10 +2742,44 @@ def test_integration_real_icarus_sdf_annotation_changes_the_verdict(tmp_path):
     assert annotated_report["environment"]["sdf"] == {
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
+        "entries": "all",
         "annotated": True,
         "partial": False,
         "dropped": {},
     }
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_interconnect_mode_returns_the_zero_delay_verdict(
+    tmp_path,
+):
+    """Issue #2364's mode, end to end on the real toolchain: the *same* SDF
+    that fails the testbench under `entries: "all"` (the test above) passes
+    again once the request selects `entries: "interconnect"` -- the IOPATH
+    module-path delay that changed the verdict is the entry class the mode
+    drops, and the drop is honestly reported as a counted class rather than
+    silently discarding delay. This is the complement of the test above, and
+    together they pin that the mode's drop genuinely reaches the simulator
+    rather than only reshaping the response JSON."""
+    _stage_sdf_design(tmp_path)
+    interconnect_only = _sdf_integration_request(
+        tmp_path,
+        "request-sdf-interconnect.json",
+        {"file": "route.sdf", "corner": "typ", "entries": "interconnect"},
+    )
+
+    report = run_functional_verification(interconnect_only)
+
+    assert report["status"] == "pass"
+    sdf = report["environment"]["sdf"]
+    assert sdf["entries"] == "interconnect"
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is True
+    assert sdf["dropped"].keys() == {"iopath_interconnect_only"}
+    assert sdf["dropped"]["iopath_interconnect_only"]["count"] == 1
 
 
 @pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
@@ -3025,6 +3060,7 @@ def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_p
     assert annotated_report["environment"]["sdf"] == {
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
+        "entries": "all",
         "annotated": True,
         "partial": False,
         "dropped": {},
@@ -3306,6 +3342,143 @@ def test_drop_sdf_zero_delay_alias_port_interconnects_ignores_an_iopath(tmp_path
     )
 
 
+# --------------------------------------------------------------------------- #
+# Issue #2364: `options.sdf.entries: "interconnect"` -- net-delay
+# back-annotation as a first-class, counted mode. The sky130
+# specify-branch-model mechanism this works around (IOPATH annotation kills
+# a timing-clean design even at a 10x-relaxed clock, while
+# INTERCONNECT-only annotation simulates correctly) is reproduced and cited
+# in `docs/design/sdf-annotate-feasibility-spike.md` §3.8's addendum; these
+# unit tests pin the text-level mechanics of the drop pass itself.
+# --------------------------------------------------------------------------- #
+
+
+def _mixed_entry_sdf_text() -> str:
+    """One cell carrying both entry classes plus a TIMINGCHECK section, and
+    one cell carrying only `IOPATH` -- the two structural cases the mode's
+    drop pass has to get right (drop the entry; remove a DELAY clause the
+    drop emptied, per `_sdf_cell_entry_removals`' Icarus-forced cleanup)."""
+    return """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "dly")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "klt_inv")
+    (INSTANCE u_inv)
+    (DELAY (ABSOLUTE
+      (IOPATH a y (1.000:5.000:9.000) (1.000:5.000:9.000))
+      (INTERCONNECT u0.y u_inv.a (0.500:0.500:0.500))
+    ))
+    (TIMINGCHECK
+      (SETUPHOLD a (posedge clk) (1.000:1.000:1.000) (2.000:2.000:2.000))
+    )
+  )
+  (CELL
+    (CELLTYPE "klt_buf")
+    (INSTANCE u_buf)
+    (DELAY (ABSOLUTE
+      (IOPATH a y (2.000:2.000:2.000) (2.000:2.000:2.000))
+    ))
+  )
+)
+"""
+
+
+def test_drop_sdf_non_interconnect_entries_drops_iopath_keeps_interconnect(tmp_path):
+    """The mode's core promise: every non-INTERCONNECT delay entry is
+    removed, every INTERCONNECT entry is byte-identical to its original, and
+    TIMINGCHECK sections are untouched (Icarus drops those itself -- the
+    `timingcheck` diagnostic class already counts them honestly)."""
+    sdf_path = _write(tmp_path / "route.sdf", _mixed_entry_sdf_text())
+
+    result = fv._drop_sdf_non_interconnect_entries(sdf_path)
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 2
+    assert "IOPATH" not in text
+    assert "(INTERCONNECT u0.y u_inv.a (0.500:0.500:0.500))" in text
+    assert "(TIMINGCHECK" in text
+    assert "(SETUPHOLD" in text
+
+
+def test_drop_sdf_non_interconnect_entries_removes_an_emptied_delay_clause(
+    tmp_path,
+):
+    """A cell whose DELAY clause carried only IOPATH entries must not be
+    handed to Icarus as `(DELAY (ABSOLUTE))` -- an empty delay-type clause is
+    itself an Icarus parse error, so the shared emptied-clause cleanup
+    removes the whole clause and the cell keeps only its
+    CELLTYPE/INSTANCE pair, which annotates cleanly."""
+    sdf_path = _write(tmp_path / "route.sdf", _mixed_entry_sdf_text())
+
+    text, _dropped = fv._drop_sdf_non_interconnect_entries(sdf_path)
+
+    # u_buf's DELAY clause carried only IOPATH entries, so the emptied-clause
+    # cleanup removed it entirely -- the cell keeps just its
+    # CELLTYPE/INSTANCE pair (no `(DELAYFILE` substring can appear inside a
+    # cell, so the plain substring check is unambiguous here).
+    buf_cell = text[
+        text.index('(CELLTYPE "klt_buf")') : text.index("(INSTANCE u_buf)")
+        + len("(INSTANCE u_buf)")
+    ]
+    assert "(DELAY" not in buf_cell
+    assert "(ABSOLUTE" not in buf_cell
+    # u_inv's DELAY clause survives, carrying only its INTERCONNECT entry.
+    assert "(DELAY (ABSOLUTE" in text
+    assert "(INTERCONNECT u0.y u_inv.a (0.500:0.500:0.500))" in text
+
+
+def test_drop_sdf_non_interconnect_entries_is_a_noop_without_other_entries(
+    tmp_path,
+):
+    """An SDF that already carries only INTERCONNECT delay entries (a
+    hand-filtered net-delay file, the pre-#2364 workaround) produces no
+    filtered copy at all -- the caller's own file is handed to
+    `$sdf_annotate` unchanged, and the run reports no iopath drop class."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        """\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "dly")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "klt_inv")
+    (INSTANCE u_inv)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT u0.y u_inv.a (0.500:0.500:0.500))
+    ))
+  )
+)
+""",
+    )
+
+    assert fv._drop_sdf_non_interconnect_entries(sdf_path) is None
+
+
+def test_sdf_option_entries_must_be_all_or_interconnect(tmp_path):
+    """A typo'd entry mode (`"iopath"`, say) would otherwise degrade to a
+    silently different annotation population."""
+    request_path = _sdf_request(tmp_path, entries="iopath")
+    with pytest.raises(
+        FunctionalVerificationError, match="options.sdf.entries must be one of"
+    ):
+        run_functional_verification(request_path)
+
+
+@pytest.mark.parametrize("entries", [1, None, True, ["interconnect"]])
+def test_sdf_option_entries_rejects_non_string_values(tmp_path, entries):
+    request_path = _sdf_request(tmp_path, entries=entries)
+    with pytest.raises(
+        FunctionalVerificationError, match="options.sdf.entries must be one of"
+    ):
+        run_functional_verification(request_path)
+
+
 def test_stubbed_sdf_counts_a_dropped_alias_port_interconnect(tmp_path, monkeypatch):
     """The JSON contract for issue #2285 (acceptance criterion #3): a run
     that dropped an `assign`-aliased-port `INTERCONNECT` entry is
@@ -3344,6 +3517,56 @@ def test_stubbed_sdf_counts_a_dropped_alias_port_interconnect(tmp_path, monkeypa
     normalized = output_dir / "klt_sdf_alias_dropped.sdf"
     assert normalized.is_file()
     assert "const_drive_0.L_LO" not in normalized.read_text(encoding="utf-8")
+
+
+def test_stubbed_sdf_interconnect_mode_counts_dropped_iopath_entries(
+    tmp_path, monkeypatch
+):
+    """The JSON contract for issue #2364: a run that selected
+    `options.sdf.entries: "interconnect"` is machine-distinguishable from an
+    every-entry annotation -- the response echoes `entries`, `partial` is
+    true, and `dropped` names the `iopath_interconnect_only` class with the
+    count of module-path delay entries the mode set aside, while
+    `environment.sdf.file` still names the caller's *own* SDF rather than
+    the filtered copy handed to `$sdf_annotate`."""
+    _write(tmp_path / "dly.v", _SDF_DUT_V)
+    _write(tmp_path / "test_dly.py", "# stub -- never imported\n")
+    _write(tmp_path / "route.sdf", _mixed_entry_sdf_text())
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "icarus",
+            "sources": ["dly.v"],
+            "hdl_toplevel": "dly",
+            "testbench": {"module": "test_dly", "testcase": None},
+            "options": {"sdf": {"file": "route.sdf", "entries": "interconnect"}},
+        },
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["entries"] == "interconnect"
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is True
+    assert sdf["dropped"].keys() == {"iopath_interconnect_only"}
+    entry = sdf["dropped"]["iopath_interconnect_only"]
+    assert entry["count"] == 2
+    assert (
+        entry["reason"] == fv.SDF_BENIGN_DIAGNOSTIC_REASONS[fv.SDF_IOPATH_DROPPED_CLASS]
+    )
+    # The filtered copy is a build artifact, and it is what the generated
+    # `$sdf_annotate` shim names -- never the caller's own file. It carries
+    # only the INTERCONNECT entry, and no emptied `(DELAY (ABSOLUTE))`.
+    output_dir = tmp_path / ".klt" / "functional-verification"
+    filtered = output_dir / "klt_sdf_interconnect_only.sdf"
+    assert filtered.is_file()
+    filtered_text = filtered.read_text(encoding="utf-8")
+    assert "IOPATH" not in filtered_text
+    assert "(INTERCONNECT u0.y u_inv.a" in filtered_text
+    assert "(TIMINGCHECK" in filtered_text
 
 
 def test_stubbed_sdf_without_an_alias_port_reports_no_dropped_class(
@@ -3416,6 +3639,7 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
     assert annotated_report["environment"]["sdf"] == {
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
+        "entries": "all",
         "annotated": True,
         "partial": True,
         "dropped": {
@@ -4002,6 +4226,7 @@ def test_integration_real_icarus_sdf_drops_a_zero_delay_physical_only_interconne
     assert annotated_report["environment"]["sdf"] == {
         "file": str(tmp_path / "route.sdf"),
         "corner": "typ",
+        "entries": "all",
         "annotated": True,
         "partial": True,
         "dropped": {
@@ -4177,6 +4402,7 @@ def test_integration_real_icarus_sdf_resolves_bus_port_output_fanout_sibling(tmp
     assert annotated_report["environment"]["sdf"] == {
         "file": str(tmp_path / "route_bus_out.sdf"),
         "corner": "typ",
+        "entries": "all",
         "annotated": True,
         "partial": False,
         "dropped": {},
@@ -4304,7 +4530,9 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
 
 # --------------------------------------------------------------------------- #
 # Integration: the "constant-zero result on every test case" shape (issue
-# #1854), pinned as a *timing* outcome rather than an annotation failure.
+# #1854), pinned as a *timing* outcome rather than an annotation failure --
+# **on the timing-violating design it was built from** (see the scope note
+# below).
 #
 # Issue #1619 flagged, and #1854 investigated, a second-order effect: a
 # gate-level regression that passes with `options.sdf` omitted turns into a
@@ -4322,6 +4550,21 @@ def test_integration_real_icarus_sdf_bus_port_input_fanout_stays_unresolvable(tm
 # would ever flag it. Only the three-way comparison below separates "the
 # annotation is broken" from "the annotation worked and the design does not
 # meet this clock".
+#
+# **Scope (issue #2364): this fixture covers only the timing-*violating*
+# design #1854's repro was built from** -- sky130, −2.05 ns worst setup
+# slack at the 1.1 ns target, dead at the violating period and alive again
+# at a relaxed one (row 3 below), which is the signature of a genuine
+# timing failure. It does **not** generalize to timing-*clean* designs: on
+# a design whose SPEF-annotated STA closes both setup and hold with
+# positive slack, the same constant-zero shape is **annotation-class-
+# dependent** -- INTERCONNECT-only annotation simulates correctly while any
+# SDF carrying IOPATH entries kills the design even at a 10x-relaxed clock
+# period, which a genuine timing failure on a positive-slack design cannot
+# produce (§3.8's 2026-09-23 addendum reproduces this live). Do not read
+# this test as contradicting that finding: the two cover disjoint design
+# classes, and the `options.sdf.entries: "interconnect"` mode is the
+# supported configuration for the timing-clean one.
 # --------------------------------------------------------------------------- #
 
 _CONSTANT_ZERO_DUT_V = """\
@@ -4450,7 +4693,11 @@ def _constant_zero_request(tmp_path: Path, name: str, *, sdf: bool) -> str:
 )
 def test_integration_real_icarus_sdf_constant_zero_is_a_timing_outcome(tmp_path):
     """Issue #1854: the reported "constant-zero result on every test case once
-    `options.sdf` is set" shape, reproduced and attributed.
+    `options.sdf` is set" shape, reproduced and attributed -- **on the
+    timing-violating design the repro was built from** (−2.05 ns worst setup
+    slack at its 1.1 ns target; see the scope note above this fixture and
+    §3.8's 2026-09-23 addendum for why this attribution does not generalize
+    to timing-clean designs, issue #2364).
 
     Three runs, same design and same SDF:
 
