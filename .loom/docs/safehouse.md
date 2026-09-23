@@ -1257,6 +1257,57 @@ loop on) for background — closed 2026-09-16 as obsolete once the automated
 per-episode dedup (`#7664`/`#7680`) replaced the need for it as a manual
 duplicate-closing anchor.
 
+### The idle gate: a host that is saying nothing does not judge the silence (#8026)
+
+Raising the grace (#8276 above) treated the symptom. #8026 traced the
+mechanism, and it is structural: **advertising is entirely dispatch-gated.**
+The only two `ClaimKind::Advertise` publishers in the daemon are
+`SweepRegistry::dispatch` (one ad per newly-dispatched issue) and
+`SweepRegistry::readvertise_peer_claims`, which re-advertises **only** entries
+in `SweepState::Running`/`Pending`. A host with zero live sweeps at a given
+reaper tick publishes **zero** ads that tick. There is no periodic liveness
+heartbeat on this channel.
+
+So during a **fleet-wide dispatch lull** — nobody anywhere has work in flight,
+so nobody's reaper has anything to re-advertise — no host transmits, therefore
+no host receives, therefore every host's quiet clock runs out at roughly the
+same moment and the whole fleet reports DEGRADED simultaneously with nothing
+broken. From inside one process that is indistinguishable from a genuinely
+one-way receive path: `received` stalls while `quiet_for` grows, either way.
+
+**The rule (implemented in `loom-daemon/src/peer_claims/coordination_idle.rs`):
+the receive-quiet clock only runs while this host is itself advertising.**
+
+| This host | `evaluate_coordination` |
+|---|---|
+| Published an `Advertise` within `LOOM_PEER_COORDINATION_ADVERTISE_ACTIVITY_WINDOW_SECS` (default 180s, 6× the reaper cadence) | Judges exactly as before — same anchor, same grace, same recovery threshold |
+| Silent for longer than that | Withholds the verdict and rebases the quiet clock to now |
+
+Rebasing is what makes the second row safe across a resume: a host picking work
+back up after a three-hour lull gets a **full fresh grace window** to hear from
+its peers instead of inheriting a stale, already-blown anchor and tripping
+DEGRADED on its first tick back. Going idle is **not** a recovery signal — an
+already-DEGRADED verdict still clears only on
+`LOOM_PEER_COORDINATION_RECOVERY_THRESHOLD` sustained receives.
+
+**What it costs.** One detection loss: a genuine receive-path break on a host
+that happens to be idle is not reported *while it is idle*. That is the right
+trade — an idle host is coordinating with nobody, so a broken receive path has
+no live consequence at that moment, and the instant it dispatches again the
+gate opens and the break surfaces within one grace window. The 2026-08-13
+reference signature (a host advertising continuously into silence) is detected
+byte-for-byte as before. This is also a check that has been **diagnostic-only
+since #6317** — #6286's lease record is the sole gate on stale-claim
+reclamation — so a false DEGRADED costs auto-filed watchdog noise, not safety.
+
+**What it does not fix.** The converse case: *this* host busy while its
+**peers** are idle, which is the shape #8276's data showed (150+ dispatches
+per data point throughout its own "degraded" window). No local signal can
+separate "peers are quiet because idle" from "peers are quiet because my
+receive path is broken". Only a periodic liveness heartbeat from idle hosts
+can, and that is a wire-protocol change tracked separately in **#8736**
+rather than smuggled into this fix.
+
 ### Fleet-wide completion dedup: reusing the peer-claim channel (#6352)
 
 The [per-host completion dedup](#what-gets-narrated) documented under
@@ -1413,6 +1464,65 @@ The fix reuses the peer-claim channel exactly as #6352 and #6714 did — two mor
   time-bounded (dispatch backoff caps at `maxSecs`, default 900s; the no-op
   cooldown defaults to one hour) — well inside the 15-minute lease TTL's own
   reclaim cadence for the backoff lane.
+
+### Fleet-wide token-pool exhaustion hold: the third brake lane (#8001)
+
+#7477 above brakes **one issue**. `work_finder::pool_preflight`'s hold (#7708)
+brakes **every issue resolving to one token pool**, because a pool-wide fault is
+not any issue's fault — and it was process-local, so all four fleet hosts had to
+rediscover the same dead pool independently, each paying a doomed dispatch, a
+`loom:issue`↔`loom:building` flip and a permanent `loom:lease` comment to learn
+it. Two more `ClaimKind`s on the same envelope close that:
+
+- **Publish only the edge.** `PoolHoldState::observe_root_edge` (the per-tick
+  pre-flight) and `note_pool_dead` (the reaper's post-mortem path) each return a
+  `PoolObservation` naming the arm/clear `PoolHoldEdge` they crossed, if any;
+  `SweepRegistry::publish_peer_pool_hold_claim` broadcasts it as
+  `ClaimKind::PoolHoldArmed` / `PoolHoldCleared`. Edge-triggered, not per tick —
+  a multi-hour outage costs two ads, not one per tick per root, mirroring the
+  hold's existing "log the edge once" discipline.
+- **Keyed by account set, never by directory.** The ad carries
+  `pool_key: Option<String>` — `tokens_pool::select::pool_account_fingerprint`,
+  a hash of the pool's sorted account names. A path key is wrong in both
+  directions (two hosts sharing one pool resolve different absolute paths; two
+  hosts with genuinely different repo-local shadow pools resolve the *same*
+  relative path), and the second failure is precisely the "suppress a peer whose
+  pool is healthy" hazard that kept #7708's hold local. Exhaustion is a property
+  of the **accounts**, so the account-set key matches exactly when suppression is
+  correct. Hashed rather than plain so account names never reach the shared room.
+- **Arm *and* clear, unlike the cooldown lane.** A pool hold's TTL comes from
+  `pool_clear_estimate` (capped at 900 s) but the local pre-flight self-heals in
+  **one tick**. Without an explicit clear, an operator readmitting one account
+  would resume the arming host immediately while every peer stayed suppressed for
+  up to 15 more minutes — a latency win converted into a fleet-wide stall. A
+  `PoolHoldCleared` releases only its own sender's entry (the `FilingUnlock`
+  rule): two peers can hold the same dead pool independently, and the first to
+  recover must not speak for the second.
+- **Consume in its own map, routed beside the lanes.** `PeerClaimSink` hands
+  every cooldown-lane *and* pool-hold-lane ad to `peer_claims::brakes::
+  observe_brake_ad`, which folds a pool ad into `PeerClaimView::pool_holds`,
+  keyed `(pool_key, advertising host)` — host in the key so a clear releases only
+  its sender's hold; repo *not* in the key, because a pool is a machine-level
+  resource shared across every workspace resolving to it (#3938/#7527). Never
+  `observe_at`'s dispatch-claims map (the ad carries a sentinel issue, so folding
+  it in would manufacture a phantom claim on issue #0), and never the #6157
+  coordination-health counters.
+- **TTL against local receipt, and capped on receipt.** Expiry is
+  `received_at + min(remaining_secs, MAX_PEER_POOL_HOLD_TTL)` (900 s, matching
+  the arming side's own `pool_clear_estimate` cap), so a well-behaved ad is never
+  clamped but an ill-behaved one cannot wedge a peer's whole fleet lane — this ad
+  suppresses *all* dispatch for a pool, not one issue. An ad naming **no** pool
+  (`pool_key: None` — a pre-#8001 peer, or a malformed payload) is dropped rather
+  than applied to an arbitrary pool.
+- **Consulted as a pure addition to the local verdict.**
+  `pool_preflight::fold_peer_pool_hold` holds a root whose own live read says
+  "healthy" when a peer advertises a live hold on the same pool. A peer can only
+  ever *add* a hold, never clear one this host's own read armed. Fail-open
+  throughout: without a peer-claim view (`safehouse.enabled` false), on a dropped
+  ad, or before any ad arrives, every line collapses byte-for-byte to the
+  pre-#8001 local-only pre-flight — which still stops that host on its own next
+  tick. The broadcast removes doomed dispatches; it is never the only thing that
+  can stop them.
 
 # Phase 2 — worker-side `safehouse-mcp` injection (#3999)
 

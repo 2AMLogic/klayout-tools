@@ -180,9 +180,11 @@ test-repo-mismatch-fallback.sh
 test-require-complexity-marker.sh
 test-require-daemon-bin.sh
 test-resolve-tier-model.sh
+test-resync-installed-agent-skills-guard.sh
 test-resync-installed-gh-config-guard.sh
 test-resync-installed-guard-check.sh
 test-resync-installed-local-fix-guard.sh
+test-resync-installed-retired-dry-run.sh
 test-resync-installed.sh
 test-review-feedback-reconciliation.sh
 test-run-ci-suites-daemon-guard.sh
@@ -211,7 +213,6 @@ test-sync-labels-repo-flag.sh
 test-urgent-flip-guard.sh
 test-verdict-staleness-guard.sh
 test-verify-install-scope.sh
-test-verify-proposal-refs.sh
 test-version-bump-workflow-identity.sh
 test-version-check-gate-callsites.sh
 test-version-check-gate.sh
@@ -277,6 +278,7 @@ tests/install/test-dry-run-preview-manifest.sh
 tests/install/test-forge-detect.sh
 tests/install/test-git-repo-detection.sh
 tests/install/test-hooks-preserve.sh
+tests/install/test-initial-commit-credential-exclusion.sh
 tests/install/test-lint-ignore-configs.sh
 tests/install/test-manifest-freshness-after-hook-wiring.sh
 tests/install/test-pnpm-runnable-check.sh
