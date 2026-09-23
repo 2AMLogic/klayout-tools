@@ -11576,6 +11576,70 @@ def _write_library_gds(path, cells):
     return str(path)
 
 
+def _write_offset_origin_library_gds(path, cells):
+    """Fabricate a "library" stream whose cells' local ``(0, 0)`` need **not**
+    sit on their own ``dbbox()``'s lower-left corner (#2367).
+
+    Every fixture built by :func:`_write_library_gds` draws its rectangle from
+    the cell origin outwards, so ``dbbox()`` is always exactly
+    ``(0, 0) - (width, height)`` -- which silently satisfies a placer that
+    (wrongly) assumed a cell's origin *is* its bbox corner. A real PDK cell
+    makes no such promise: the IO cell behind #2367 measured
+    ``bbox().left = -0.16 um``, so anchoring it by a raw translation of its
+    origin mis-places its drawn geometry by that much, in a direction that
+    flips with the instance's own orientation.
+
+    ``cells`` maps a cell name to ``(x0_um, y0_um, width_um, height_um)``:
+    one solid li1 (67/20) rectangle whose lower-left corner sits at the
+    *local* ``(x0_um, y0_um)``, so the cell's ``dbbox()`` is exactly
+    ``(x0_um, y0_um) - (x0_um + width_um, y0_um + height_um)``.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    li1 = layout.layer(67, 20)
+    for name, (x0_um, y0_um, width_um, height_um) in cells.items():
+        cell = layout.create_cell(name)
+        cell.shapes(li1).insert(
+            kdb.Box(
+                int(round(x0_um / layout.dbu)),
+                int(round(y0_um / layout.dbu)),
+                int(round((x0_um + width_um) / layout.dbu)),
+                int(round((y0_um + height_um) / layout.dbu)),
+            )
+        )
+    layout.write(str(path))
+    return str(path)
+
+
+def _composed_li1_boxes_um(gds_path, cell_name):
+    """Every merged li1 (67/20) polygon *actually drawn* under ``cell_name``,
+    as sorted ``(x0, y0, x1, y1)`` tuples in um.
+
+    Read back recursively through the composed cell's instance transforms
+    (``begin_shapes_rec``), so this reports where the geometry really landed
+    -- independently of what the compose response's own ``bbox_um`` metadata
+    claims about it.
+    """
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(gds_path))
+    cell = layout.cell(cell_name)
+    assert cell is not None, f"no cell '{cell_name}' in {gds_path}"
+    merged = kdb.Region(cell.begin_shapes_rec(layout.layer(67, 20))).merged()
+    return sorted(
+        (
+            polygon.bbox().left * layout.dbu,
+            polygon.bbox().bottom * layout.dbu,
+            polygon.bbox().right * layout.dbu,
+            polygon.bbox().top * layout.dbu,
+        )
+        for polygon in merged.each()
+    )
+
+
 def _library_cell_ports(width_um, height_um):
     """Two edge ports on the li1 rectangle `_write_library_gds` draws -- an
     input on the left edge (facing 180) and an output on the right (facing 0),
@@ -11743,6 +11807,164 @@ def test_compose_cell_block_orientation_mirrors_bbox_and_ports(tmp_path, pdk_roo
     )
     assert block["ports"]["Y"]["x_um"] == pytest.approx(-2.0)
     assert block["ports"]["Y"]["direction_deg"] == 180
+
+
+def test_compose_cell_block_non_zero_origin_geometry_is_bbox_anchored(
+    tmp_path, pdk_root
+):
+    # #2367's golden case: a library cell whose local (0, 0) is NOT its own
+    # bbox's lower-left corner (the PDK IO cell behind the report measured
+    # bbox().left = -0.16um). "row" placement anchors on the block's own
+    # bbox, so the *drawn geometry* -- not merely the reported bbox_um -- must
+    # land exactly spacing_um past the previous block's drawn right edge. A
+    # placer that treated the cell origin as its bbox corner would draw this
+    # cell 0.16um to the left of where it says it put it, a mis-anchoring
+    # invisible to any bbox-metadata-only assertion.
+    gds = _write_offset_origin_library_gds(
+        tmp_path / "lib.gds",
+        {
+            "lead": (0.0, 0.0, 2.0, 1.2),
+            "pdk_io": (-0.16, 0.0, 2.0, 1.2),
+        },
+    )
+    output = tmp_path / "offset_origin.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "lead", "cell": {"gds_path": gds, "cell_name": "lead"}},
+                {"id": "io", "cell": {"gds_path": gds, "cell_name": "pdk_io"}},
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["lead", "io"],
+                "spacing_um": 1.0,
+            },
+            "options": {"cell_name": "offset_origin_0", "output": str(output)},
+        }
+    )
+
+    # The bbox read off the stream is the cell's *true* one, negative x0 and
+    # all -- not a (0, 0)-anchored assumption about where its origin sits.
+    io = next(block for block in report["blocks"] if block["id"] == "io")
+    assert io["source"] == "cell"
+    # offset_um is the raw translation applied to the instance: it must be the
+    # bbox-anchored 3.16um (= 3.0 target - the cell's own -0.16 x0), not the
+    # 3.0um a naive origin-is-the-corner placer would have used.
+    assert io["offset_um"]["x"] == pytest.approx(3.16)
+    assert io["bbox_um"] == pytest.approx({"x0": 3.0, "y0": 0.0, "x1": 5.0, "y1": 1.2})
+    assert report["bbox_um"] == pytest.approx(
+        {"x0": 0.0, "y0": 0.0, "x1": 5.0, "y1": 1.2}
+    )
+
+    # The load-bearing assertion: what was actually drawn, read back through
+    # the instance transforms, agrees with that reported metadata.
+    assert _composed_li1_boxes_um(output, "offset_origin_0") == pytest.approx(
+        [(0.0, 0.0, 2.0, 1.2), (3.0, 0.0, 5.0, 1.2)]
+    )
+
+
+@pytest.mark.parametrize(
+    ("orientation", "expected_box_um", "expected_offset_x_um"),
+    [
+        # mirror_x maps (x, y) -> (-x, y), so the cell's own -0.16 x0 becomes a
+        # +0.16 x1 -- the anchoring correction flips sign with the orientation,
+        # which is exactly the second-placement-path regression #2367 reports.
+        ("mirror_x", (3.0, 0.0, 5.0, 1.2), 4.84),
+        ("mirror_y", (3.0, -1.2, 5.0, 0.0), 3.16),
+        ("rotate_180", (3.0, -1.2, 5.0, 0.0), 4.84),
+    ],
+)
+def test_compose_cell_block_non_zero_origin_oriented_geometry_is_bbox_anchored(
+    tmp_path, pdk_root, orientation, expected_box_um, expected_offset_x_um
+):
+    # #2367, the orientation half: the same non-zero-origin library cell placed
+    # with each non-identity blocks[].orientation. Its drawn footprint must
+    # still occupy the same x span the unrotated case lands on (a row anchors
+    # on the *oriented* bbox), with only the y span flipping for the
+    # y-mirroring orientations -- and the raw instance translation differs per
+    # orientation precisely because the anchoring correction does.
+    gds = _write_offset_origin_library_gds(
+        tmp_path / "lib.gds",
+        {
+            "lead": (0.0, 0.0, 2.0, 1.2),
+            "pdk_io": (-0.16, 0.0, 2.0, 1.2),
+        },
+    )
+    output = tmp_path / f"offset_origin_{orientation}.gds"
+    cell_name = f"offset_origin_{orientation}_0"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "lead", "cell": {"gds_path": gds, "cell_name": "lead"}},
+                {
+                    "id": "io",
+                    "cell": {"gds_path": gds, "cell_name": "pdk_io"},
+                    "orientation": orientation,
+                },
+            ],
+            "placement": {
+                "strategy": "row",
+                "order": ["lead", "io"],
+                "spacing_um": 1.0,
+            },
+            "options": {"cell_name": cell_name, "output": str(output)},
+        }
+    )
+
+    io = next(block for block in report["blocks"] if block["id"] == "io")
+    assert io["orientation"] == orientation
+    assert io["offset_um"]["x"] == pytest.approx(expected_offset_x_um)
+    assert io["bbox_um"] == pytest.approx(
+        {
+            "x0": expected_box_um[0],
+            "y0": expected_box_um[1],
+            "x1": expected_box_um[2],
+            "y1": expected_box_um[3],
+        }
+    )
+    assert _composed_li1_boxes_um(output, cell_name) == pytest.approx(
+        sorted([(0.0, 0.0, 2.0, 1.2), expected_box_um])
+    )
+
+
+def test_compose_cell_block_non_zero_origin_explicit_origin_translates_verbatim(
+    tmp_path, pdk_root
+):
+    # #2367 against placement.strategy: "explicit", the one strategy whose
+    # origins_um is a raw translation rather than a bbox target
+    # (resolve_explicit_offsets). The documented semantics are translation-only
+    # -- so a cell whose local (0, 0) is not its bbox corner lands with that
+    # same offset between the two -- and the point of this test is that the
+    # *drawn* geometry and the reported bbox_um agree about it, so neither
+    # metadata nor geometry is silently 0.16um out.
+    gds = _write_offset_origin_library_gds(
+        tmp_path / "lib.gds", {"pdk_io": (-0.16, 0.0, 2.0, 1.2)}
+    )
+    output = tmp_path / "offset_origin_explicit.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "io", "cell": {"gds_path": gds, "cell_name": "pdk_io"}}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["io"],
+                "origins_um": {"io": {"x": 5.0, "y": 2.0}},
+            },
+            "options": {"cell_name": "offset_origin_explicit_0", "output": str(output)},
+        }
+    )
+
+    assert report["blocks"][0]["bbox_um"] == pytest.approx(
+        {"x0": 4.84, "y0": 2.0, "x1": 6.84, "y1": 3.2}
+    )
+    assert _composed_li1_boxes_um(output, "offset_origin_explicit_0") == pytest.approx(
+        [(4.84, 2.0, 6.84, 3.2)]
+    )
 
 
 def test_compose_cell_block_relative_gds_path_resolves_against_request_dir(
