@@ -1884,6 +1884,48 @@ def _resolve_trace(
     return {"path": path, "format": fmt, "size_bytes": os.path.getsize(path)}
 
 
+def _apply_sdf_physical_only_drop(
+    annotate_source_path: str,
+    output_dir: str,
+    sources: list[str],
+    hdl_toplevel: str,
+    ports: list[tuple[str, int, str]],
+    sdf_pre_dropped_counts: dict[str, int],
+) -> str:
+    """Issue #2363's physical-only-destination SDF-text drop, applied as one
+    step of :func:`run_functional_verification`'s SDF-normalization pipeline
+    (parallel to the inline #2285 alias-port drop just above its own call
+    site): a zero-delay ``INTERCONNECT`` entry from a bit-selected top-level
+    input port onto a pin of a *physical-only* instance (a router-inserted
+    antenna diode, or any filler/tapcell whose model has no ``specify``
+    block and no output pin) cannot be annotated by Icarus at all, so it is
+    removed from the SDF text before ``$sdf_annotate`` and counted under
+    :data:`SDF_PHYSICAL_ONLY_DROPPED_CLASS` instead of failing the run.
+
+    Returns the path :func:`run_functional_verification` should hand to
+    ``$sdf_annotate`` next -- ``annotate_source_path`` unchanged when
+    nothing was dropped, or a new normalized-copy path otherwise. The count
+    is recorded into ``sdf_pre_dropped_counts`` in place rather than
+    returned separately, so this call site is a single expression with no
+    branch of its own in ``run_functional_verification`` -- pulled out into
+    its own function specifically to keep that already-baselined function's
+    cyclomatic complexity (`complexity-baseline.json`) from growing further.
+    """
+    physical_only_drop = _drop_sdf_zero_delay_physical_only_interconnects(
+        annotate_source_path,
+        {name for direction, width, name in ports if width and direction == "input"},
+        _collect_sdf_physical_only_instances(sources, hdl_toplevel),
+    )
+    if physical_only_drop is None:
+        return annotate_source_path
+    physical_only_text, physical_only_count = physical_only_drop
+    new_path = os.path.join(output_dir, "klt_sdf_physical_only_dropped.sdf")
+    with open(new_path, "w", encoding="utf-8") as handle:
+        handle.write(physical_only_text)
+    sdf_pre_dropped_counts[SDF_PHYSICAL_ONLY_DROPPED_CLASS] = physical_only_count
+    return new_path
+
+
 # ---------------------------------------------------------------------------
 # entry point
 # ---------------------------------------------------------------------------
@@ -2084,25 +2126,14 @@ def run_functional_verification(request: str) -> dict[str, Any]:
         # it is removed here and counted in `environment.sdf.dropped`
         # instead of failing the run. A non-zero-delay entry is left in
         # place and still fails the diagnostic gate loudly.
-        physical_only_drop = _drop_sdf_zero_delay_physical_only_interconnects(
+        annotate_source_path = _apply_sdf_physical_only_drop(
             annotate_source_path,
-            {
-                name
-                for direction, width, name in ports
-                if width and direction == "input"
-            },
-            _collect_sdf_physical_only_instances(sources, hdl_toplevel),
+            output_dir,
+            sources,
+            hdl_toplevel,
+            ports,
+            sdf_pre_dropped_counts,
         )
-        if physical_only_drop is not None:
-            physical_only_text, physical_only_count = physical_only_drop
-            annotate_source_path = os.path.join(
-                output_dir, "klt_sdf_physical_only_dropped.sdf"
-            )
-            with open(annotate_source_path, "w", encoding="utf-8") as handle:
-                handle.write(physical_only_text)
-            sdf_pre_dropped_counts[SDF_PHYSICAL_ONLY_DROPPED_CLASS] = (
-                physical_only_count
-            )
 
         split = _split_sdf_bus_port_interconnects(annotate_source_path, vector_ports)
         if split is None:

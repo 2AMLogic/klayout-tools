@@ -1068,6 +1068,60 @@ def _sdf_cell_model_is_physical_only(cell: str, source_texts: list[str]) -> bool
     return found
 
 
+def _read_verilog_source_texts(source_paths: list[str]) -> list[str]:
+    """Every file in ``source_paths`` that can be read, in order, silently
+    skipping one that cannot -- the same missing-source tolerance this
+    module's other normalization passes apply, since failing to read one
+    source must never be fatal.
+    """
+    source_texts: list[str] = []
+    for path in source_paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                source_texts.append(handle.read())
+        except OSError:
+            continue
+    return source_texts
+
+
+def _find_gate_level_instances(
+    source_texts: list[str], hdl_toplevel: str
+) -> list[dict[str, Any]]:
+    """``hdl_toplevel``'s own instance list, read out of the first of
+    ``source_texts`` that contains a ``module <hdl_toplevel> ... endmodule``
+    chunk -- the per-source half of
+    :func:`_collect_sdf_physical_only_instances`, split out on its own so
+    that function's cyclomatic complexity stays low.
+
+    Returns an empty list -- never raises -- whenever the instance list
+    cannot be derived: no such module in any source, or a top module outside
+    :func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`'s narrow
+    gate-level grammar (notably an **ANSI-style** module header, which that
+    grammar does not model).
+    """
+    from .verilog_netlist import parse_gate_level_verilog
+
+    chunk_re = re.compile(
+        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(hdl_toplevel)), re.DOTALL
+    )
+    for text in source_texts:
+        chunk_match = chunk_re.search(text)
+        if chunk_match is None:
+            continue
+        try:
+            modules = parse_gate_level_verilog(chunk_match.group(0))
+        except Exception:
+            # Not parseable as gate-level Verilog (a hand-written RTL top, a
+            # construct outside verilog_netlist's narrow grammar) -- no
+            # instance list. Never fatal.
+            return []
+        for module in modules:
+            if module["name"] == hdl_toplevel:
+                return list(module["instances"])  # type: ignore[arg-type]
+        return []
+    return []
+
+
 def _collect_sdf_physical_only_instances(
     source_paths: list[str], hdl_toplevel: str
 ) -> set[str]:
@@ -1082,55 +1136,24 @@ def _collect_sdf_physical_only_instances(
     instance list -- the same parser
     :func:`_collect_sdf_alias_port_bits` already reuses for #2285's alias
     map -- applied to *only* ``hdl_toplevel``'s own ``module``/``endmodule``
-    chunk, never to the whole of ``request.sources``: a real request's
-    sources also carry the PDK's behavioural cell models (``specify``
-    blocks, ``always`` blocks, non-alias continuous assignments), none of
-    which that deliberately narrow gate-level grammar models. The *cell
-    models* are then classified by plain text scan
-    (:func:`_sdf_cell_model_is_physical_only`), which is exactly what that
-    grammar cannot parse.
+    chunk (:func:`_find_gate_level_instances`), never to the whole of
+    ``request.sources``: a real request's sources also carry the PDK's
+    behavioural cell models (``specify`` blocks, ``always`` blocks,
+    non-alias continuous assignments), none of which that deliberately
+    narrow gate-level grammar models. The *cell models* are then classified
+    by plain text scan (:func:`_sdf_cell_model_is_physical_only`), which is
+    exactly what that grammar cannot parse.
 
     Returns an empty set -- never raises -- whenever the instance list
-    cannot be derived: no such module in any source, an unreadable file, or
-    a top module outside that gate-level subset (notably an **ANSI-style**
-    module header, which ``verilog_netlist`` does not model; every real
-    ``write_verilog`` post-route netlist -- the only kind that carries a
-    router-inserted antenna diode at all -- emits the non-ANSI form). An
-    empty set makes
+    cannot be derived (see :func:`_find_gate_level_instances`): an empty
+    instance list makes
     :func:`_drop_sdf_zero_delay_physical_only_interconnects` a no-op, i.e.
     the exact behaviour this path had before #2363: this is a
     *normalization* pass, and failing to normalize must never be worse than
     not having tried.
     """
-    from .verilog_netlist import parse_gate_level_verilog
-
-    source_texts: list[str] = []
-    for path in source_paths:
-        try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                source_texts.append(handle.read())
-        except OSError:
-            continue
-
-    chunk_re = re.compile(
-        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(hdl_toplevel)), re.DOTALL
-    )
-    instances: list[dict[str, Any]] = []
-    for text in source_texts:
-        chunk_match = chunk_re.search(text)
-        if chunk_match is None:
-            continue
-        try:
-            modules = parse_gate_level_verilog(chunk_match.group(0))
-        except Exception:
-            # Not parseable as gate-level Verilog (a hand-written RTL top, a
-            # construct outside verilog_netlist's narrow grammar) -- no
-            # instance list, so no normalization. Never fatal.
-            return set()
-        for module in modules:
-            if module["name"] == hdl_toplevel:
-                instances = list(module["instances"])  # type: ignore[arg-type]
-        break
+    source_texts = _read_verilog_source_texts(source_paths)
+    instances = _find_gate_level_instances(source_texts, hdl_toplevel)
 
     physical_only: dict[str, bool] = {}
     names: set[str] = set()
