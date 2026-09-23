@@ -4050,6 +4050,13 @@ concurrency ceiling 5" and share it with the team:
       "enabled": true,
       "intervalSecs": 900,
       "windowHours": 24
+    },
+    "transcriptArchive": {
+      "enabled": true,
+      "intervalSecs": 86400,
+      "minAgeHours": 24,
+      "archiveDir": "~/.loom/transcript-archives",
+      "sinks": ["local"]
     }
   }
 }
@@ -4167,6 +4174,11 @@ knobs not yet audited here.
 | `autonomous.transcriptIngest.enabled` | `LOOM_TRANSCRIPT_INGEST` | **`true`** | Periodic transcript token/cost ingestion into `~/.loom/activity.db` (#8059, flipped default-on by #8477). **The one `autonomous.*` knob that defaults ON against the FLAGS-OFF convention**, deliberately: it generates no work (a passive, ledgered, idempotent telemetry writer), while default-*off* silently destroyed data — Claude Code deletes transcripts after `cleanupPeriodDays` (default 30), so every host that never hand-set the env var lost its cost history permanently. Env `0`/`false`/`no`/`off` opts out; an unrecognized value falls through to config/default rather than silently disabling. **Restart required** — resolved once before the thread is spawned. See [`transcript-token-ingest.md`](transcript-token-ingest.md) |
 | `autonomous.transcriptIngest.intervalSecs` | `LOOM_TRANSCRIPT_INGEST_INTERVAL` | `900` | Seconds between ingestion passes. Zero/invalid → default. **Restart required** |
 | `autonomous.transcriptIngest.windowHours` | `LOOM_TRANSCRIPT_INGEST_WINDOW_HOURS` | `24` | How far back each pass looks; `0` = full history (the unchanged-file ledger keeps that cheap after the first pass). **Restart required** |
+| `autonomous.transcriptArchive.enabled` | `LOOM_TRANSCRIPT_ARCHIVE_ENABLED` | `false` | Scheduled raw-transcript archive pass (#8758, part 1 of #8714's G2): the daemon runs the existing `archive-transcripts` pass (#8494) on `intervalSecs` cadence, no manual CLI step. FLAGS-OFF like every other `autonomous.*` toggle — the pass consumes real disk and the derived data it backstops is already preserved by `transcriptIngest`. The ledger is keyed per `(transcript, sink)`; existing pre-#8758 rows migrate to `sink='local'` on first open. **Restart required** — resolved once before the thread is spawned. See [`transcript-token-ingest.md`](transcript-token-ingest.md) |
+| `autonomous.transcriptArchive.intervalSecs` | `LOOM_TRANSCRIPT_ARCHIVE_INTERVAL` | `86400` (daily) | Seconds between scheduled archive passes — ample margin against the 30-day `cleanupPeriodDays` fuse. Zero/invalid → default. **Restart required** |
+| `autonomous.transcriptArchive.minAgeHours` | `LOOM_TRANSCRIPT_ARCHIVE_MIN_AGE_HOURS` | `24` | Skip transcripts modified more recently than this (same semantics as the CLI's `--min-age-hours`); a still-growing session is left for a later pass. Negative/invalid → default. **Restart required** |
+| `autonomous.transcriptArchive.archiveDir` | `LOOM_TRANSCRIPT_ARCHIVE_DIR` | `~/.loom/transcript-archives` | Where the scheduled pass writes its `.tar.zst` + `.manifest.json` pairs (same default as the CLI's `--archive-dir`). **Restart required** |
+| `autonomous.transcriptArchive.sinks` | *(config only)* | `["local"]` | Destination identities to ledger under. `local` is the only sink implemented (#8758's scope); unknown names are warned about and dropped, and an enabled pass whose list retains no recognized sink does not start — a future remote sink (#8759) listing must never silently disable `local`. **Restart required** |
 | `autonomous.autoUpdate.deferDeadlineSecs` | `LOOM_AUTO_UPDATE_DEFER_DEADLINE_SECS` | `21600` (6h) | Bound on the build-stampede gate (#4929): after this much **continuous** deferral for in-flight sweeps, the rebuild runs anyway at reduced CPU priority (`nice 19`) instead of deferring forever. Any check that sees zero in-flight sweeps — or a new source commit, or a completed rebuild — re-arms the clock, so short busy bursts never reach it. **Bounds the rebuild/source path only (#8252)** — a resolved release artifact is fetched immediately regardless of in-flight sweeps (niced, not deferred), so this deadline never delays an artifact roll. Zero/invalid → default; there is deliberately no "defer forever" value (set a very large one instead) |
 
 ### Idle exit for remote hosts (#4467)
@@ -6757,6 +6769,7 @@ a unit test, so this list and the code cannot drift apart silently:
 | `hermit` | 600s (10 min) | yes |
 | `guide` | 900s (15 min) | yes |
 | `architect` | 3600s (1 h) | **no** — idle-addressable-only (#5656) |
+| `concierge` | 300s (5 min) | **no** — config-gated operator-agent persona (#7947) |
 
 At startup each spawned loop logs one line naming both the resolved cadence and
 the tier that supplied it:
@@ -6825,6 +6838,41 @@ A repo that genuinely wants a timer-driven architect opts in explicitly by
 naming it in `roles` (1h default cadence). Both paths pass the resolved
 per-invocation cap through as `/loom:architect --max-proposals <n>`; see
 `architectMaxProposals` in the config table above.
+
+### Config-gated roles: `concierge` (#7947)
+
+`architect`'s carve-out above is about *cadence*: name it in `roles` and it
+ticks. **`concierge` needs a second opt-in that `roles` cannot supply.**
+
+It is the operator-agent persona (Phase 3b of #4196) — the session that reads
+free-form prose out of a safehouse room and steers the daemon through Phase 3a's
+typed ChatOps verbs. It is an **inbound control channel**, so a repo that merely
+forgot to pin `roles` must never acquire one. Two independent gates:
+
+1. `interval_default: false`, like `architect` — excluded from the "unset
+   `roles` ⇒ all defaults" fallback.
+2. `role_runner::role_is_config_gated()`, checked inside `decide_root_tick`
+   after the master switch and before sharding: the tick is refused unless
+   `safehouse.concierge` resolves for that root (block present, `enabled` not
+   `false`, and **at least one usable Matrix ID in `allowedSenders`** — an empty
+   allowlist is deny-all, never allow-everyone).
+
+`role_is_config_gated` is written as a general predicate, not an inline
+`if spec.name == "concierge"`, so the next role with a config prerequisite has
+an obvious place to declare it — and a unit test pins that `concierge` is
+currently the *only* gated role, so an existing role cannot acquire a gate (and
+silently stop ticking everywhere) by accident.
+
+```bash
+loom-daemon concierge check     # exit 1 = off; prints which gate is closed
+```
+
+It also has no forge queue, so `role_collision::probe_target_for_role` returns
+`None` for it and pre-tick collision detection is a documented no-op (#4623) —
+its trigger source is a room, not a label. Budget bounds
+(`maxMessagesPerTick`, `maxTurnsPerDay`) live in a daemon-owned ledger rather
+than the prompt, because a daily cap spans sessions; full rationale in
+[`safehouse.md` § Operator-agent persona](safehouse.md).
 
 `onIdle` (#4364) lists the subset of the shipped roles to *also* fire on the
 work-finder **idle edge** — the moment a workspace transitions from busy to
