@@ -92,6 +92,14 @@ reduction"). Concretely, per net:
 | Ground capacitance | `Σ_roles (area_um2 × cap_area_ff_um2 + perimeter_um × cap_perim_ff_um)` | `_compute_parasitics`, `extract.py:4176-4179` |
 | Series resistance | `Σ_roles (sheet_res_ohm_sq × n_squares)` | `extract.py:4180` |
 | `n_squares` | One **equivalent rectangle** per layer from `(A, P)`: `L`,`W` are roots of `t² − (P/2)t + A = 0`, squares `= L/W`, clamped `≥ 1` | `_n_squares`, `extract.py:4022`; `equivalent_rectangle_um`, `pdk_models.py:373` |
+
+> **Superseded in part (#2359).** The `n_squares` row above describes the
+> whole-*net* fit as it stood when this roadmap was written. That fit is now
+> applied **per connected fragment** and summed, and a fragment whose own
+> terminals imply a current direction across a near-rectangular shape is
+> measured as `L²/A` along that direction instead (the smaller of the two is
+> taken). The rest of the table is unchanged. See `docs/cli/extract.md` →
+> "total series R" for the current model.
 | Topology | **Star** (#592): net is the hub, each device terminal moves onto its own leg net behind a series resistor, one ground capacitor at the hub | `docs/cli/extract.md` → "The model: a star topology" |
 | Leg split | Net's total R apportioned by each terminal's Euclidean distance from the centroid of all terminal positions, read from `Device.trans` (one transform **per device**, not per terminal) | `_terminal_star_weights` / `_terminal_star_positions_um`, `extract.py:4293-4335` |
 | Coefficients | Curated per-PDK `PARASITICS` table, transcribed with citations from each PDK's **public** magic tech file | `decks/sky130.py:951`, `decks/gf180mcu.py` |
@@ -255,6 +263,15 @@ L-bend; the measurement above suggests that at block scale, with hundreds of
 branches, the bias is not a small conservatism. This is Stage 3's motivating
 number, and is flagged here as an observation worth its own check rather than
 asserted as a defect.
+
+> **Partly addressed since (#2359).** The "one equivalent rectangle per layer
+> per net" half of this observation no longer holds: squares are counted per
+> connected fragment and summed, so a net's disjoint stubs are no longer
+> merged into one long serial wire, and a short/wide fragment crossed along
+> its short axis is measured in that direction. The **series-only** half
+> still stands — fragments combine in series, never in parallel — so the
+> `RESET_B|rst_n` observation above remains Stage 3's motivating case, just
+> with a smaller starting number.
 
 ## 2. External SOTA survey
 

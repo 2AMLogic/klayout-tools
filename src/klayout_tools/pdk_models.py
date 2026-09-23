@@ -1038,9 +1038,12 @@ def equivalent_rectangle_um(
     outline, or non-positive inputs).
 
     The side lengths are the roots of ``t^2 - (P/2) t + A = 0``; this is the
-    same first-order equivalent-rectangle model ``extract.py``'s
-    :func:`~klayout_tools.extract._n_squares` uses to estimate a net's square
-    count (that helper delegates here, then takes ``length / width``), factored
+    same first-order equivalent-rectangle model
+    ``extract_parasitics.py``'s
+    :func:`~klayout_tools.extract_parasitics._n_squares` uses to estimate one
+    conductor *fragment*'s square count (that helper delegates here, then
+    takes ``length / width``; a net's total sums over its fragments -- see
+    :func:`~klayout_tools.extract_parasitics._region_n_squares`), factored
     out so the ``--pdk`` capacitor-binding path can recover a geometry-
     parameterized MiM subcircuit's ``l``/``w`` from the extracted plate
     area+perimeter without duplicating the quadratic (issue #339).
