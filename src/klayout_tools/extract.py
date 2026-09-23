@@ -7813,6 +7813,17 @@ def _extract_netlist(
             critical_nets=critical_nets,
             parasitics_nets=parasitics_nets,
             parasitics_top_cell_only=parasitics_top_cell_only,
+            # Per-fragment square counting (issue #2359): `via_index` lets
+            # the parasitics pass read each net's own via landings back
+            # through `polygons_of_net`, so it can tell where current enters
+            # and leaves a conductor fragment. The device-interface half of
+            # that question is answered from the *drawn* layers, which
+            # `_compute_parasitics` re-reads off `layout`/`top_cell` itself
+            # -- deliberately not from this function's `poly`/`active`
+            # locals, which by this point have had the recognised device
+            # geometry (resistor bodies, gates) cut out of them and so no
+            # longer show where a conductor abuts a device at all.
+            via_index=via_index,
         )
         # `klt extract --mom-net <net>` (issue #798): computed here, not in
         # `run_extract`, for the same "`l2n` must still be alive" reason as

@@ -55,7 +55,11 @@ from klayout_tools.extract import (
     run_extract,
 )
 from klayout_tools.extract_abstract import _abstract_pin_net_score
-from klayout_tools.extract_parasitics import _n_squares, spice_safe_net_name
+from klayout_tools.extract_parasitics import (
+    _n_squares,
+    _region_n_squares,
+    spice_safe_net_name,
+)
 from klayout_tools.gen_compose import _write_composed_gds
 from klayout_tools.pdk_models import (
     GEOMETRY_STYLE_BARE_UM,
@@ -11273,6 +11277,199 @@ def test_n_squares_geometric_estimate():
     assert _n_squares(0.0, 0.0) == 0.0
     # "Rounder than a rectangle" (negative discriminant) clamps to 1.
     assert _n_squares(1.0, 3.0) == 1.0
+
+
+def test_region_n_squares_counts_each_connected_fragment_separately():
+    """Issue #2359: the net-level square count splits a role's geometry into
+    connected fragments and sums, instead of fitting one equivalent rectangle
+    to the merged area/perimeter.
+
+    Two 0.42 x 1.0 um stubs on one net: merged, `A = 0.84`/`P = 5.68` fits a
+    2.505 x 0.335 um rectangle and reports 7.468 squares. Per fragment each
+    stub is 1.0/0.42 = 2.381 squares on the whole-fragment fit, so 4.762 --
+    and with no port information that is exactly what is reported (the
+    direction correction needs terminals, see the next test).
+    """
+    dbu = 0.001
+    stubs = kdb.Region(kdb.Box(0, 0, 420, 1000)) + kdb.Region(
+        kdb.Box(5420, 0, 5840, 1000)
+    )
+    assert _n_squares(0.84, 5.68) == pytest.approx(7.468, rel=1e-3)
+    assert _region_n_squares(stubs, dbu) == pytest.approx(2 * (1.0 / 0.42), rel=1e-6)
+
+    # A single fragment is byte-identical to the pre-#2359 whole-net fit --
+    # the case `_n_squares` was originally validated against.
+    wire = kdb.Region(kdb.Box(0, 0, 10000, 1000))
+    assert _region_n_squares(wire, dbu) == pytest.approx(_n_squares(10.0, 22.0))
+
+
+def test_region_n_squares_measures_across_a_short_wide_fragment_with_two_ports():
+    """Issue #2359: given terminals that say which way current crosses a
+    (near-)rectangular fragment, squares are `L^2 / A` along that direction
+    -- which for a short, wide contacted head is under one square, not the
+    reciprocal the long-axis fit reports."""
+    dbu = 0.001
+    # A 0.42 x 1.0 um contacted resistor head: one licon inside it, and its
+    # right face cut against the (removed) resistor body.
+    head = kdb.Region(kdb.Box(0, 0, 420, 1000))
+    contact = kdb.Region(kdb.Box(125, 415, 295, 585))
+    drawn_bar = kdb.Region(kdb.Box(0, 0, 5840, 1000))
+
+    # Contact alone is a single port -- no direction, conservative fit.
+    assert _region_n_squares(head, dbu, port_region=contact) == pytest.approx(
+        1.0 / 0.42, rel=1e-6
+    )
+    # Contact + the cut edge against the resistor body: current crosses the
+    # 0.42 um dimension across a 1.0 um width.
+    assert _region_n_squares(
+        head, dbu, port_region=contact, drawn_region=drawn_bar
+    ) == pytest.approx(0.42, rel=1e-6)
+
+    # A straight wire contacted at both ends is unchanged: the directed
+    # measurement reproduces L/W exactly rather than overriding it.
+    wire = kdb.Region(kdb.Box(0, 0, 10000, 1000))
+    ends = kdb.Region(kdb.Box(100, 400, 300, 600)) + kdb.Region(
+        kdb.Box(9700, 400, 9900, 600)
+    )
+    assert _region_n_squares(wire, dbu, port_region=ends) == pytest.approx(
+        10.0, rel=1e-6
+    )
+
+
+def test_region_n_squares_keeps_the_conservative_fit_for_a_bent_fragment():
+    """Issue #2359: the direction correction only fires on a fragment that is
+    (near enough) a rectangle traversed in a straight line. An L-bend's
+    port-to-port straight line is shorter than the path current actually
+    takes, so it stays on the whole-fragment fit -- under-counting resistance
+    is the one direction this model refuses to err in."""
+    dbu = 0.001
+    # Two 10 x 1 um arms meeting at a right angle, contacted at both free
+    # ends. A/(along x across) = 19/100, far below the rectangularity floor.
+    bend = kdb.Region(kdb.Box(0, 0, 10000, 1000)) + kdb.Region(
+        kdb.Box(0, 0, 1000, 10000)
+    )
+    ends = kdb.Region(kdb.Box(9000, 200, 9800, 800)) + kdb.Region(
+        kdb.Box(200, 9000, 800, 9800)
+    )
+    conservative = _n_squares(19.0, 40.0)
+    assert conservative == pytest.approx(19.0, rel=1e-6)
+    assert _region_n_squares(bend, dbu, port_region=ends) == pytest.approx(
+        conservative, rel=1e-6
+    )
+
+
+def test_region_n_squares_mixed_aspect_fragments_can_raise_a_net_total():
+    """Issue #2359: a net's total can move *up*, not only down, and that is
+    the intended reading of the per-fragment split -- pinned here so the
+    direction is a documented property rather than a surprise.
+
+    The rise comes from *aspect-ratio heterogeneity*, not from fragment count
+    on its own. A 30 x 30 um plate (1 square) plus ten 10 x 0.2 um straps (50
+    squares each) is 501 squares fragment by fragment. Merged, the plate's
+    900 um^2 of area dominates the equivalent rectangle's width while the
+    straps' 204 um of perimeter stretches its length, and the whole-net fit
+    reports 26.5 -- one intermediate shape that resembles neither the plate
+    nor a strap, and charges the straps a twentieth of the material they
+    actually hold.
+
+    The lumped total is not a single path length: the star split
+    (`_terminal_star_weights`, normalized to 1.0) apportions it across the
+    net's terminals. Fragments genuinely in *parallel* are still charged in
+    series -- an acknowledged limitation, see
+    `docs/design/extract-fidelity-roadmap.md` Stage 3."""
+    dbu = 0.001
+    mixed = kdb.Region(kdb.Box(0, 0, 30000, 30000))
+    for i in range(10):
+        mixed += kdb.Region(kdb.Box(40000, i * 1000, 50000, i * 1000 + 200))
+    merged = mixed.merged()
+    whole_net_fit = _n_squares(merged.area() * dbu * dbu, merged.perimeter() * dbu)
+    assert whole_net_fit == pytest.approx(26.49, rel=1e-3)
+    assert _n_squares(900.0, 120.0) == pytest.approx(1.0)
+    assert _n_squares(2.0, 20.4) == pytest.approx(50.0, rel=1e-9)
+    assert _region_n_squares(mixed, dbu) == pytest.approx(1.0 + 10 * 50.0, rel=1e-9)
+
+
+def _make_series_resistor_chain_layout() -> kdb.Layout:
+    """Issue #2359's minimal repro: two `res_generic_po` unit devices wired
+    in series, joined by one li1 strap.
+
+    Each unit is a 5.84 x 1.0 um poly bar with a 5.0 um `poly.res`-marked
+    body, leaving a 0.42 x 1.0 um contacted *head* at each end. The middle
+    net (``INTERNAL``) therefore owns exactly two electrically **disjoint**
+    poly fragments -- one head from each unit -- plus the li1 strap that
+    joins them: the geometry that made the merged whole-net area/perimeter
+    fit report ~7.47 squares of poly (~360 ohm) where the two heads together
+    are barely 0.84 squares (~40 ohm).
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+
+    def draw(layer: int, datatype: int, box: kdb.Box) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer: int, datatype: int, text: str, x: int, y: int) -> None:
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    for x0 in (0, 6340):
+        draw(66, 20, kdb.Box(x0, 0, x0 + 5840, 1000))  # poly.drawing
+        draw(66, 13, kdb.Box(x0 + 420, 0, x0 + 5420, 1000))  # poly.res body
+    for xc in (210, 5630, 6550, 11970):
+        draw(66, 44, kdb.Box(xc - 85, 415, xc + 85, 585))  # licon
+    draw(67, 20, kdb.Box(0, 0, 420, 1000))
+    label(67, 5, "RA", 210, 500)
+    # One li1 strap joins unit 1's right head to unit 2's left head.
+    draw(67, 20, kdb.Box(5420, 0, 6760, 1000))
+    label(67, 5, "INTERNAL", 6090, 500)
+    draw(67, 20, kdb.Box(11760, 0, 12180, 1000))
+    label(67, 5, "RB", 11970, 500)
+    return layout
+
+
+def test_parasitics_series_resistor_chain_internal_node_is_not_one_rectangle(tmp_path):
+    """Issue #2359: a net whose conductor on one role is two *disjoint*
+    short/wide contacted heads is measured per fragment, along the direction
+    current actually crosses each head -- not as one long, thin equivalent
+    rectangle fitted to the net's merged area and perimeter.
+
+    Before the fix the ``INTERNAL`` node between two series poly-resistor
+    units read 359.96 ohm of poly (7.468 squares x 48.2 ohm/sq): the merged
+    A/P fit turned two 0.42 x 1.0 um heads into a single 2.505 x 0.335 um
+    rectangle. Each head is 0.42 um long in the current direction (contact
+    -> resistor body) and 1.0 um wide, so the first-order answer is
+    2 x 0.42 x 48.2 ~= 40 ohm -- a ~9x overstatement that scales with *unit
+    count*, distorting any resistor ratio built from unit chains.
+    """
+    path = _write_gds(_make_series_resistor_chain_layout(), tmp_path / "chain.gds")
+    report = run_extract(
+        path, "sky130", output=str(tmp_path / "chain.spice"), parasitics=True
+    )
+
+    assert report["device_counts"] == {"res_generic_po": 2}
+    by_net = {entry["net"]: entry for entry in report["parasitics"]["nets"]}
+
+    def role_ohm(net: str, role: str) -> float:
+        (layer_entry,) = [e for e in by_net[net]["by_layer"] if e["layer"] == role]
+        return float(layer_entry["resistance_ohm"])
+
+    # Two heads, 0.42 squares each, at sky130's 48.2 ohm/sq poly sheet
+    # resistance. The pre-fix value was 359.96 ohm.
+    assert role_ohm("INTERNAL", "poly") == pytest.approx(2 * 0.42 * 48.2, rel=1e-3)
+    # The end terminals own a single head each -- same per-fragment model,
+    # half the squares.
+    assert role_ohm("RA", "poly") == pytest.approx(0.42 * 48.2, rel=1e-3)
+    assert role_ohm("RB", "poly") == pytest.approx(0.42 * 48.2, rel=1e-3)
+
+    # The li1 strap is a single 1.34 x 1.0 um rectangle contacted at both
+    # ends: current runs along its long axis, so its square count is
+    # unchanged by this fix (1.34 squares x 12.8 ohm/sq).
+    assert role_ohm("INTERNAL", "metal0") == pytest.approx(1.34 * 12.8, rel=1e-3)
+    # RA/RB's own li1 landing pads carry a single contact each -- no second
+    # terminal to define a current direction, so they keep the conservative
+    # whole-fragment long/short fit (1.0 / 0.42 squares).
+    assert role_ohm("RA", "metal0") == pytest.approx((1.0 / 0.42) * 12.8, rel=1e-3)
 
 
 def test_parasitics_off_by_default_is_none(tmp_path):

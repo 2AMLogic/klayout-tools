@@ -3528,11 +3528,55 @@ per-net lumped model would produce.
   perimeter/fringe term (only the *area* term moves), and zero on any deck
   that curates no overlap coefficients.
 - **total series R** (ohms) = Σ over conductor roles of `sheet_res *
-  n_squares`, where `n_squares` is estimated per layer from the net's area
-  `A` and perimeter `P` by modelling its copper as one equivalent rectangle
-  (`L`,`W` = roots of `t² − (P/2)t + A = 0`; squares = `L/W`, clamped ≥ 1;
-  exact for a single rectangular wire, → 1 for a square). This biases series
-  resistance conservatively high for L-shaped or fragmented nets.
+  n_squares`, where `n_squares` is counted **per connected fragment** of the
+  net's conductor on that role and summed (a series combination: two
+  electrically disjoint fragments are joined through some *other* layer, so
+  their squares add). Each fragment is measured one of two ways:
+
+  - **Whole-fragment fit** (the default) — model the fragment as one
+    equivalent rectangle with its area `A` and perimeter `P` (`L`,`W` = roots
+    of `t² − (P/2)t + A = 0`; squares = `L/W`, clamped ≥ 1; exact for a
+    single rectangular wire, → 1 for a square). This biases series resistance
+    conservatively high for L-shaped and other non-convex fragments.
+  - **Direction-corrected** — when the fragment's own terminals imply which
+    way current crosses it, *and* it is (near enough) a rectangle traversed
+    in a straight line. Terminals are this net's contact/via landings on the
+    fragment, plus any edge where the fragment abuts a device body cut out of
+    the conductor region (a transistor gate, a drawn resistor's marked body).
+    The path length `L` is then the fragment's extent along the axis joining
+    its two farthest-apart terminals and `A / L` its effective width, so
+    squares = `L² / A`. The smaller of the two measurements is used, so this
+    can only ever remove a long-axis artefact, never add resistance the
+    whole-fragment fit did not already charge.
+
+  > **Why not one rectangle fitted to the whole net?** Until #2359 the fit
+  > was applied once to a net's *merged* area and perimeter across all of its
+  > fragments on a role. That turned two disjoint stubs into a single long,
+  > thin rectangle, and always measured `L/W` along a fragment's long axis
+  > even when current crosses its short one. The internal node between two
+  > series poly-resistor units — two 0.42 × 1.0 µm contacted heads plus a
+  > metal jumper — read ~360 Ω of poly against a ~40 Ω first-order
+  > expectation. The "conservatively high" framing does hold per fragment
+  > (nothing reports more squares than the whole-fragment fit), but it never
+  > held *across* fragments: the inflation scales with fragment count rather
+  > than with resistance, so two legs of a divider with the same resistance
+  > but different unit counts picked up different parasitic burdens —
+  > distorting every ratio built from unit chains (dividers, ratio-set
+  > references, R-2R ladders).
+  >
+  > **A net's total can move either way, and that is expected.** A net of a
+  > few similar fragments drops, often sharply — the resistor node above
+  > loses the long-thin artefact outright. A net whose fragments differ
+  > widely in *aspect ratio* rises instead: the merged fit averaged a big
+  > plate's area together with several thin straps' perimeter into one
+  > intermediate rectangle resembling neither (a 30 × 30 µm plate plus ten
+  > 10 × 0.2 µm straps fits 26.5 squares against 501 counted fragment by
+  > fragment), understating every strap. Neither number is a single path
+  > length — the per-terminal leg split below apportions the total across the
+  > net's terminals with weights summing to `1.0`. Fragments genuinely in
+  > *parallel* are still charged in series; that limitation is unchanged by
+  > #2359 and is tracked as Stage 3 in
+  > `docs/design/extract-fidelity-roadmap.md`.
 - **per-terminal leg R** — the net's total series R distributed across its
   terminals, weighted by each terminal's Euclidean distance from the
   centroid of all of the net's terminal positions (a terminal farther from

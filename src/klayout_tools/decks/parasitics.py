@@ -33,9 +33,11 @@ class LayerRC:
     repo's open-PDK-only rule). Three coefficients per conductor role:
 
     - ``sheet_res_ohm_sq`` -- sheet resistance, ohms per square. Combined
-      with a per-net square count (estimated from the net's per-layer area
-      and perimeter, see ``klayout_tools.extract._n_squares``) to give one
-      lumped series resistance per net.
+      with a per-net square count (summed over the role's connected
+      conductor fragments, each estimated from its own area and perimeter
+      and, where its terminals imply a current direction, along that
+      direction -- see ``klayout_tools.extract_parasitics._region_n_squares``)
+      to give one lumped series resistance per net.
     - ``cap_area_ff_um2`` -- parallel-plate capacitance to substrate,
       femtofarads per square micrometre of the net's area on this layer.
     - ``cap_perim_ff_um`` -- sidewall/fringe capacitance to substrate,
