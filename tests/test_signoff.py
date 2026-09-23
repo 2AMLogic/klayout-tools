@@ -5847,9 +5847,9 @@ def test_real_extract_gate_reproduces_the_canarys_netlist_regeneration(tmp_path)
 
     assert output_netlist.exists()
 
-    # Item 9 is kind-independent (unlike per-kind items 1/2/5/7), so a plain
-    # "analog" manifest's bare "9" evidence key is what every manifest kind
-    # looks up (_lookup_evidence) -- no per-partition column to select here.
+    # Item 9 is kind-independent (unlike per-kind items 1/2/5/7/11), so its
+    # bare "9" evidence key is the only spelling any manifest kind looks up
+    # (_lookup_evidence) -- no per-partition column to select here.
     item_9 = next(item for item in result["items"] if item["id"] == 9)
     assert item_9["partition"] is None
     assert item_9["status"] == "met"
@@ -5882,8 +5882,9 @@ def test_real_sim_gate_reproduces_the_canarys_corner_sim_pass():
         )
     )
 
-    # See test_real_extract_gate_...'s comment: a plain "analog" manifest
-    # looks up the bare "5" key, not "5.analog".
+    # See test_real_extract_gate_...'s comment: this manifest cites the bare
+    # "5" key (the "5.analog" spelling would resolve too -- issue #2362 --
+    # but the row itself stays unpartitioned either way).
     item_5 = next(item for item in result["items"] if item["id"] == 5)
     assert item_5["partition"] is None
     assert item_5["status"] == "met"
@@ -5933,8 +5934,9 @@ def test_real_pex_gate_reproduces_the_canarys_post_layout_delta_pass(tmp_path):
 
     assert output_netlist.exists()
 
-    # See test_real_extract_gate_...'s comment: a plain "analog" manifest
-    # looks up the bare "7" key, not "7.analog".
+    # See test_real_extract_gate_...'s comment: this manifest cites the bare
+    # "7" key (the "7.analog" spelling would resolve too -- issue #2362 --
+    # but the row itself stays unpartitioned either way).
     item_7 = next(item for item in result["items"] if item["id"] == 7)
     assert item_7["partition"] is None
     assert item_7["status"] == "met"
@@ -8355,6 +8357,77 @@ def test_mixed_signal_analog_partition_rejects_the_digital_item_7_artifact(
     assert item_7["digital"]["status"] == "met"
 
 
+def test_pure_kind_manifest_honours_the_partition_qualified_evidence_key(tmp_path):
+    """Issue #2362: `docs/cli/signoff.md` documents
+    `"<item id>.<analog|digital>"` as the evidence key for a per-kind item
+    without restricting it to mixed-signal blocks, so `"7.digital"` on a
+    plain `kind: "digital"` manifest must resolve -- it used to be silently
+    ignored and render "unmet"/"no_evidence"."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"7.digital": fv_path})
+    )
+
+    item_7 = next(i for i in result["items"] if i["id"] == 7 and i["tier"] == "T1")
+    # The row itself is still unpartitioned -- only mixed-signal reports
+    # carry a non-null "partition" -- the *key* is what gained a spelling.
+    assert item_7["partition"] is None
+    assert item_7["status"] == "met"
+    assert item_7["citation"]["kind"] == "functional-verification"
+
+
+def test_pure_kind_manifest_ignores_a_mismatched_partition_qualifier(tmp_path):
+    """The qualifier is only ever tried for the partition actually being
+    graded, so `"7.analog"` on a `"digital"` manifest is not a match: it
+    falls through to the bare key (absent here) rather than being graded
+    against the other kind's evidence."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(kind="digital", evidence={"7.analog": fv_path})
+    )
+
+    item_7 = next(i for i in result["items"] if i["id"] == 7 and i["tier"] == "T1")
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "no_evidence"
+    assert item_7["citation"] is None
+
+
+def test_pure_kind_qualified_evidence_key_takes_precedence_over_the_bare_key(
+    tmp_path,
+):
+    """Same priority order a mixed-signal manifest already had: the
+    partition-qualified key wins, with the bare key as the fallback."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            # The bare key alone would render "wrong_kind" (a clean DRC
+            # report does not prove post-layout verification).
+            evidence={"7": drc_path, "7.digital": fv_path},
+        )
+    )
+
+    item_7 = next(i for i in result["items"] if i["id"] == 7 and i["tier"] == "T1")
+    assert item_7["status"] == "met"
+    assert item_7["citation"]["kind"] == "functional-verification"
+
+
+def test_pure_kind_bare_evidence_key_still_resolves(tmp_path):
+    """The fix is purely additive: the bare `"7"` key a pure-kind manifest
+    has always used keeps grading exactly as before."""
+    fv_path = _write(tmp_path, "fv.json", FUNCTIONAL_VERIFICATION_SDF_ENVELOPE)
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"7": fv_path}))
+
+    item_7 = next(i for i in result["items"] if i["id"] == 7 and i["tier"] == "T1")
+    assert item_7["status"] == "met"
+    assert item_7["citation"]["kind"] == "functional-verification"
+
+
 def test_generic_citation_still_rejected_on_items_5_and_7_for_digital(tmp_path):
     """Direction 3 of the issue -- widening `generic` onto items 5/7 -- is
     explicitly NOT implemented: it would weaken exactly the guarantee #1152
@@ -9680,6 +9753,39 @@ def test_item_11_keys_per_partition_for_a_mixed_signal_block(tmp_path):
     assert digital["status"] == "met"
     assert analog["citation"]["power_delivery"]["pdn"] is False
     assert digital["citation"]["power_delivery"]["pdn"] is True
+
+
+def test_item_11_honours_the_qualified_key_on_a_pure_kind_manifest(tmp_path):
+    """Issue #2362 reaches item 11's compound-evidence path too: it is a
+    per-kind item, so `"11.analog"` on a plain `kind: "analog"` manifest is
+    the documented spelling and must resolve, while a `"11.digital"`
+    qualifier on that same manifest names a partition this block does not
+    have and finds nothing."""
+    matching = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11.analog": _power_delivery_evidence(
+                    tmp_path, kind="analog", prefix="pa"
+                )
+            },
+        )
+    )
+    assert _item_11(matching)["status"] == "met"
+
+    mismatched = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11.digital": _power_delivery_evidence(
+                    tmp_path, kind="analog", prefix="pd"
+                )
+            },
+        )
+    )
+    item = _item_11(mismatched)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "no_evidence"
 
 
 @pytest.mark.parametrize("item_id", [3, 5, 6, 8, 10])

@@ -811,7 +811,7 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
 - `block` — optional, echoed back verbatim in the report.
 - `kind` — required: `"analog"`, `"digital"`, or `"mixed-signal"` (see the
   doc's "Block kind" subsection). Selects which column of the doc's
-  per-kind T1 items (1, 2, 5, 7) applies; a `"mixed-signal"` manifest
+  per-kind T1 items (1, 2, 5, 7, 11) applies; a `"mixed-signal"` manifest
   renders **both** columns, once per partition.
 - `partition_boundary` — optional, `"mixed-signal"` only (issue #2278):
   what this block's two partitions *denote*. See "The declared partition
@@ -842,12 +842,22 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
     composite document too.
 
   Keys are `"<item id>"` for a kind-independent item (3, 4, 6, 8, 9, 10), or
-  `"<item id>.<analog|digital>"` for a per-kind item — a `"mixed-signal"`
-  manifest may still use the bare `"<item id>"` key for a kind-independent
-  item to cite the same evidence in both partitions' rows, per the doc's
-  mixed-signal guidance. Item 6 ("Statistical claims carry Monte Carlo
-  evidence") is kind-independent, so a `klt yield` evidence entry is keyed
-  bare `"6"` even for a mixed-signal block.
+  `"<item id>.<analog|digital>"` for a per-kind item (1, 2, 5, 7, 11) — a
+  `"mixed-signal"` manifest may still use the bare `"<item id>"` key for a
+  kind-independent item to cite the same evidence in both partitions' rows,
+  per the doc's mixed-signal guidance. Item 6 ("Statistical claims carry
+  Monte Carlo evidence") is kind-independent, so a `klt yield` evidence entry
+  is keyed bare `"6"` even for a mixed-signal block.
+
+  **The qualified form is not mixed-signal-only** (issue #2362). A block
+  whose `kind` is plainly `"analog"` or `"digital"` grades exactly one
+  partition — its own kind — so `{"kind": "digital", "evidence":
+  {"7.digital": "pex.json"}}` resolves the same entry that the bare `"7"`
+  key would, and both spellings are accepted everywhere. Lookup always tries
+  the qualifier for the partition **being graded** first and falls back to
+  the bare key, so the qualified form never borrows the other partition's
+  evidence: `"7.analog"` on a `"digital"` manifest matches nothing and the
+  item falls through to `"7"` (and, absent that, to `unmet`/`no_evidence`).
 
 An item's `status` is `"met"` **only** when its `evidence` entry resolves to
 a *readable* `klt` JSON envelope, classifiable as one of
