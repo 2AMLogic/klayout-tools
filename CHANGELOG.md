@@ -98,6 +98,74 @@ not `klt --version`, if you need to detect this kind of drift. See
   (checksum-verified, smoke-tested); `.github/workflows/xyce-oracle.yml`
   runs the oracle on dispatch, off the per-PR budget. `klt size` remains
   ngspice-only.
+- **Fixed** (#1157, `klt extract` bare-mode cards for bulk-bearing drawn
+  resistors — **no** `schema_version` bump; the written SPICE card shape for
+  3-terminal resistor classes changes, see below): a drawn-resistor class
+  whose recognised terminal set includes a bulk/tap node — sky130's
+  `res_high_po`/`res_xhigh_po`, gf180mcu's `ppolyf_u` family, sg13g2's
+  `rsil`/`rppd`/`rhigh` — is no longer written (without `--pdk`) as the
+  KLayout-shaped 3-net `R` card (`R$1 A B W 12000 res_xhigh_po`), which
+  ngspice cannot parse at all: its native `R` element accepts exactly two
+  nodes, so it consumed the third net and the value as the
+  `<value>`/`<model>` positions and aborted with
+  `unknown parameter (res_xhigh_po)` — the netlist was not a simulatable
+  deck for such a layout, not merely a fidelity tradeoff. Those classes now
+  write `X$1 A B W res_xhigh_po r=12000 L=6U W=1U`: the class name becomes a
+  **caller-suppliable subcircuit name** (the testbench supplies a matching
+  3-pin `.subckt <class> a b w r= l= w=` wrapper declaring every parameter
+  the card carries), and the extracted resistance moves onto a declared
+  `r=` parameter so it stays on the written card the way issues #521/#588
+  established. Two-terminal classes keep the `R` card + `.model <class> r`
+  convention byte-for-byte. `klt lvs` re-ingests the new card shape
+  transparently whenever `layout.deck`/`reference.deck` is given, restoring
+  the identical `DeviceClassResistorWithBulk` (A/B/W, R/L/W) the old card's
+  read-back produced — series `combine_devices` folding and the deferred
+  `fixed_offset_ohm` correction (issue #585) behave exactly as before; see
+  `docs/cli/extract.md`'s "Verified compatible with `klt sim`" and
+  `docs/cli/lvs.md`'s new round-trip section.
+- **Fixed** (PR #2336 follow-up, the #1157 round-trip reader — no
+  `schema_version` bump): recovered `X` cards naming the same class now all
+  share one `DeviceClass` object per read, restoring the series
+  `combine_devices` fold the round-trip promised above on every platform.
+  The first cut looked the class up via `Netlist.device_class_by_name`,
+  which normalizes its argument through the netlist's case convention
+  (uppercases it for a SPICE netlist) but compares against each registered
+  class's stored name verbatim — the deck's canonical lowercase
+  `res_high_po` never matched, so every recovered card silently registered
+  another class object, and `Netlist.combine_devices()` — which groups
+  devices by class *object identity* — could no longer fold the chain
+  (Linux CI: the 3-segment `res_high_po` chain survived as 3 devices and
+  `test_pre_extracted_netlist_with_deck_applies_fixed_offset_once` failed
+  deterministically; macOS only passed because `Netlist.dup()`'s clones
+  happened to read back a shared id there — `DeviceClass`'s copy
+  constructor copies an indeterminate `tl::UniqueId` in klayout 0.30.10,
+  so that path's fold was never portable). The same latent per-card
+  registration is fixed for the #1942 MoM-capacitor and recovered-`C`-card
+  paths. Regression-locked at the reader/combine boundary by
+  `tests/test_lvs.py`'s
+  `test_recovered_resistor_x_cards_share_one_device_class_and_fold` (a
+  no-dup, no-retry `combine_devices()` call) and
+  `test_custom_class_recovery_x_cards_share_one_device_class`.
+- **Documented** (#1159, `klt extract --pdk` sky130 resistor geometry — the
+  code fix already shipped with issue #1396's bare-micrometre convention,
+  one week after #1159 was filed; this closes the loop with a regression
+  lock + vendor-deck proof, and the docs it asked for): the sky130
+  geometry-convention table in `docs/cli/extract.md`'s "SPICE model
+  binding" section now names the affected classes explicitly — a
+  `--pdk`-bound `res_high_po`/`res_xhigh_po`/`res_generic_po` `X` card
+  carries its geometry suffix-free (`l=6 w=1`) because those vendor
+  subcircuits' own `.param` blocks compute `leff = {l-0.0592}` and
+  `Efac = {... log(leff/w)}` in bare micron-scale units, so the
+  unit-suffixed spelling the issue reported (`l=180U w=0.42U`) drove `leff`
+  negative at any drawn length and ngspice's `Efac` parse-tree check to a
+  `nan` / `parameter value out of range` abort. Verified against the real
+  unmodified `sky130_fd_pr__res_xhigh_po.model.spice`: the suffix-free card
+  solves a sane operating point, the suffixed one reproduces the exact
+  failure. Regression-locked for the with-bulk classes by
+  `tests/test_extract.py`'s
+  `test_pdk_resolved_binds_three_terminal_resistor_sky130_suffix_free`, and
+  end-to-end against the real vendor deck (where an install + ngspice
+  resolve) by `test_real_sky130_bound_resistor_card_simulates_against_the_vendor_deck`.
 
 ## 0.6.0 (2026-09-22)
 

@@ -533,6 +533,42 @@ above still applies, silently, on that side. There is no separate
 diagnostic for this today; give `layout.deck`/`reference.deck` whenever a
 pre-extracted netlist may contain a custom device class.
 
+## Bulk-bearing drawn-resistor classes round-tripped through an `X` card (issue #1157)
+
+Since issue #1157, `klt extract`'s bare (non-`--pdk`) output writes a
+**three-terminal** (bulk-bearing) drawn-resistor class — sky130's
+`res_high_po`/`res_xhigh_po`, gf180mcu's `ppolyf_u` family, sg13g2's
+`rsil`/`rppd`/`rhigh` — as an `X` subcircuit call rather than the
+KLayout-shaped 3-net `R` card, because ngspice's native `R` element accepts
+exactly two nodes and the old card was not a simulatable deck at all (see
+`docs/cli/extract.md` → "Verified compatible with `klt sim`'s netlist
+convention" for the written contract and the caller-supplied `.subckt`
+wrapper it expects):
+
+```
+X$1 A B W res_high_po r=3248.27 L=6U W=1U
+```
+
+Read back through a plain `kdb.NetlistSpiceReader()`, that card degrades to
+the same mangled abstract-circuit fallback the #1942 section describes.
+**`layout.deck`/`reference.deck` fixes this too**: `klt lvs` recognises an
+`X` card naming one of that deck's own drawn-resistor classes (including
+every selectable flavour name, so a `--deck-option poly_res=2k` extraction
+round-trips even when the request names no `deck_options`) and restores a
+real `kdb.DeviceClassResistorWithBulk` device — `A`/`B`/`W` terminals,
+`R` (from the card's declared `r=`, ohms) and `L`/`W` (micrometres)
+parameters — the exact class shape and parameter set the pre-#1157 3-net
+`R` card's own read-back produced, so series `combine_devices` folding, the
+deferred `fixed_offset_ohm` correction (issue #585), `parameter_tolerance`,
+and every device-level finding behave identically to before the card shape
+changed. Two-terminal classes keep their native `R` card and never needed
+this recovery; a deck-resistor-named `X` card without the writer's 3-net
+shape or `r=` parameter is left to the default (abstract-circuit) handling.
+
+The same residual gap as #1942 applies: omit the relevant side's `deck` and
+this recognition cannot run. Give `layout.deck`/`reference.deck` whenever a
+pre-extracted netlist may contain drawn-resistor `X` cards.
+
 ## Digital gate-level LVS: `reference.form = "gate-level-verilog"` (issue #1336)
 
 `klt place-and-route`'s `verilog_path` (issue #996) writes the as-built,

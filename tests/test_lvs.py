@@ -3911,15 +3911,24 @@ def test_combine_devices_false_still_applies_fixed_offset_per_primitive(tmp_path
 
 def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
     """Issue #585: `apply_resistor_fixed_offset_corrections` must match a
-    device class read back from SPICE via `kdb.NetlistSpiceReader` -- which
-    uppercases class names to `RES_HIGH_PO` -- against the sky130 deck's own
-    lowercase `res_high_po` name.
+    device class read back from SPICE against the sky130 deck's own
+    lowercase `res_high_po` name, whatever case the reader reported.
 
-    Extract a single `res_high_po` primitive with the fixed-offset correction
-    *deferred*, write it to SPICE, read it back (uppercased class name),
-    confirm the correction is missing, then apply it via the public helper
-    and confirm it lands exactly once. Before the fix the case-sensitive
-    lookup silently missed `RES_HIGH_PO` and added nothing.
+    Extract a single `res_high_po` primitive with the fixed-offset
+    correction *deferred*, write it to SPICE, read it back, confirm the
+    correction is missing, then apply it via the public helper and confirm
+    it lands exactly once. Before the fix the case-sensitive lookup
+    silently missed `RES_HIGH_PO` and added nothing.
+
+    Since issue #1157 the written card for this bulk-bearing class is an
+    `X` subcircuit call (`X$1 RA RB vsubs res_high_po r=... L=... W=...` --
+    ngspice's `R` primitive is strictly 2-node), so the read-back that
+    `klt lvs` itself performs is the deck-aware recovery reader from
+    `netlist_capacitor_recovery` -- it restores the device under the deck's
+    canonical lowercase name. The uppercase spelling the original #585 bug
+    missed is still produced today by a *plain* `NetlistSpiceReader` on a
+    pre-#1157 (or 2-terminal-class) `R` card, so that path is asserted too,
+    via the same legacy card reconstructed by hand.
     """
     import klayout.db as kdb
 
@@ -3927,6 +3936,10 @@ def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
     from klayout_tools.extract import (
         apply_resistor_fixed_offset_corrections,
         run_extract,
+    )
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+        resistor_classes_for_deck,
     )
 
     segments = 1
@@ -3944,15 +3957,22 @@ def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
     assert len(resistor_devices) == segments
     assert resistor_devices[0]["params"]["r_ohm"] == pytest.approx(raw_body_r_ohm)
 
-    # Read the SPICE back: NetlistSpiceReader uppercases the class name.
+    # Read the SPICE back the way `klt lvs` itself does (deck-aware
+    # recovery): the #1157 `X` card restores as a real resistor device.
+    deck = get_extraction_deck("sky130")
     netlist = kdb.Netlist()
-    netlist.read(spice_path, kdb.NetlistSpiceReader())
+    netlist.read(
+        spice_path,
+        make_capacitor_class_recovery_reader(
+            {}, resistor_classes=resistor_classes_for_deck(deck)
+        ),
+    )
     class_names = {
         device.device_class().name
         for circuit in netlist.each_circuit()
         for device in circuit.each_device()
     }
-    assert "RES_HIGH_PO" in class_names  # the uppercased name the bug missed
+    assert "res_high_po" in class_names  # the deck's canonical name, restored
 
     def _only_resistor_r() -> float:
         rs = [
@@ -3966,11 +3986,42 @@ def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
 
     assert _only_resistor_r() == pytest.approx(raw_body_r_ohm)
 
-    # The public helper must fire despite the case mismatch, exactly once.
-    apply_resistor_fixed_offset_corrections(netlist, get_extraction_deck("sky130"))
+    # The public helper must fire, exactly once.
+    apply_resistor_fixed_offset_corrections(netlist, deck)
     assert _only_resistor_r() == pytest.approx(
         raw_body_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM
     )
+
+    # The uppercase spelling is what a *plain* reader reports for the
+    # pre-#1157 `R` card (still round-tripping: every 2-terminal class
+    # keeps that shape, and old committed netlists still carry it). The
+    # case-insensitive lookup exists for exactly that input -- assert it
+    # still fires on the reconstructed legacy card, uppercase and all.
+    legacy_text = (
+        ".SUBCKT RES RA RB vsubs\n"
+        f"R$1 RA RB vsubs {raw_body_r_ohm:.12g} res_high_po "
+        f"L={l_um:.0f}U W=1U\n"
+        f".ENDS RES\n"
+    )
+    legacy_path = tmp_path / "legacy.spice"
+    legacy_path.write_text(legacy_text)
+    legacy_netlist = kdb.Netlist()
+    legacy_netlist.read(str(legacy_path), kdb.NetlistSpiceReader())
+    legacy_names = {
+        device.device_class().name
+        for circuit in legacy_netlist.each_circuit()
+        for device in circuit.each_device()
+    }
+    assert "RES_HIGH_PO" in legacy_names  # uppercased by the plain reader
+    apply_resistor_fixed_offset_corrections(legacy_netlist, deck)
+    legacy_rs = [
+        device.parameter("R")
+        for circuit in legacy_netlist.each_circuit()
+        for device in circuit.each_device()
+        if device.device_class().name.lower() == "res_high_po"
+    ]
+    assert len(legacy_rs) == segments
+    assert legacy_rs[0] == pytest.approx(raw_body_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM)
 
 
 def test_pre_extracted_netlist_with_deck_applies_fixed_offset_once(tmp_path):
@@ -4043,6 +4094,80 @@ R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
     buggy_report = _run(buggy_r_ohm)
     assert buggy_report["counts"]["devices"]["layout"] == 1
     assert buggy_report["status"] == "mismatch"
+
+
+def test_recovered_resistor_x_cards_share_one_device_class_and_fold(tmp_path):
+    """PR #2336's CI regression, pinned at the reader/`combine_devices`
+    boundary: every recovered #1157 `X` card naming the same drawn-resistor
+    class must attach to ONE shared `DeviceClass` object, so a plain
+    `Netlist.combine_devices()` call -- no `dup()` retry, no platform help --
+    folds a series chain of recovered devices.
+
+    The pre-fix reader registered one fresh `DeviceClass` per recovered
+    card: `Netlist.device_class_by_name` normalizes its argument through the
+    netlist's case convention (uppercases it for a SPICE netlist) but
+    compares against each registered class's stored name verbatim, so the
+    deck's canonical lowercase `res_high_po` was never found and every card
+    added another class object. `Netlist.combine_devices()` groups devices
+    by class *object identity*, so the three segments then survived as three
+    devices -- deterministically on Linux (PR #2336's red matrix legs), and
+    on macOS only `Netlist.dup()`'s re-registration happened to merge them
+    (its cloned classes' copied ids read 0 there; `DeviceClass`'s copy
+    constructor copies an indeterminate `tl::UniqueId` in klayout 0.30.10,
+    so the dup path's fold was never anything to rely on).
+    """
+    import klayout.db as kdb
+
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.extract import run_extract
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+        resistor_classes_for_deck,
+    )
+
+    segments, l_um = 3, 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / "res_high_po_series_shared.gds", segments=segments, l_um=l_um
+    )
+    spice_path = str(tmp_path / "res_high_po_series_shared.spice")
+    run_extract(gds, "sky130", output=spice_path, apply_resistor_fixed_offset=False)
+
+    netlist = kdb.Netlist()
+    deck = get_extraction_deck("sky130")
+    netlist.read(
+        spice_path,
+        make_capacitor_class_recovery_reader(
+            {}, resistor_classes=resistor_classes_for_deck(deck)
+        ),
+    )
+
+    top = next(circuit for circuit in netlist.each_circuit() if circuit.name == "RES")
+    registered = [
+        klass for klass in netlist.each_device_class() if klass.name == "res_high_po"
+    ]
+    assert len(registered) == 1
+    assert all(
+        device.device_class().name == "res_high_po" for device in top.each_device()
+    )
+
+    # The fold itself, unassisted: no `_combine_devices_safely` retry
+    # machinery, no `dup()` -- the exact call the class-identity grouping
+    # gate on.
+    netlist.combine_devices()
+    folded = list(top.each_device())
+    assert len(folded) == 1
+    assert folded[0].parameter("R") == pytest.approx(
+        segments * (l_um / 1.0) * _RES_HIGH_PO_SHEET_RHO_OHM_SQ
+    )
+    assert folded[0].parameter("L") == pytest.approx(segments * l_um)
+    # The folded device spans the string end to end (the emptied interior
+    # nets stay behind, 0-terminal -- `run_lvs` purges those separately,
+    # issue #500).
+    assert {net.name for net in top.each_net() if net.terminal_count()} == {
+        "RA",
+        "RB",
+        "VSUBS",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -15354,6 +15479,45 @@ XD2 A B unknown_subckt
     # `XD2`'s undefined subcircuit is untouched -- still the pre-#1942
     # mangled abstract-circuit fallback, never a device.
     assert "D2" not in devices
+
+
+def test_custom_class_recovery_x_cards_share_one_device_class(tmp_path):
+    """Same one-class-object-per-name discipline as the #1157 resistor
+    recovery (PR #2336), asserted for the #1942 custom-class path: cards
+    recovered in one read must all attach to the single registered class
+    object, so a plain `combine_devices()` can group them (KLayout groups
+    devices by class object identity, and its case-insensitively-normalized
+    `device_class_by_name` never finds a lowercase stored name to reuse)."""
+    import klayout.db as kdb
+
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+    )
+
+    text = """
+.SUBCKT TOP A B
+XD1 A B cap_cmomi PARAMS: W=1.5 L=3.0
+XD2 B A cap_cmomi PARAMS: W=1.5 L=3.0
+.ENDS TOP
+"""
+    path = _write(tmp_path / "custom_class_shared.spice", text)
+    netlist = kdb.Netlist()
+    netlist.read(
+        path,
+        make_capacitor_class_recovery_reader(
+            {}, custom_device_classes={"CAP_CMOMI": "cap_cmomi"}
+        ),
+    )
+
+    registered = [
+        klass for klass in netlist.each_device_class() if klass.name == "cap_cmomi"
+    ]
+    assert len(registered) == 1
+
+    top = next(circuit for circuit in netlist.each_circuit() if circuit.name == "TOP")
+    assert all(
+        device.device_class().name == "cap_cmomi" for device in top.each_device()
+    )
 
 
 def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
