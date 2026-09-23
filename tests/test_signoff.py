@@ -10410,3 +10410,429 @@ def test_check_excludes_build_identity_and_nothing_else(tmp_path):
         result = check_tier_report(tampered, manifest)
         assert result["status"] == "drifted", field
         assert any(entry["field"].startswith(field) for entry in result["drift"]), field
+
+
+# --------------------------------------------------------------------------- #
+# Citing an envelope nested inside a composite report: `"pointer"`
+# (issue #2342)
+#
+# A composition/assembly step naturally emits one report carrying a verb's
+# verdict *plus* its own findings beside it. The verdict is a byte-for-byte
+# `klt` envelope, it is simply not the top-level object of its file -- and
+# before #2342 that made the strongest evidence in a repo (the whole-assembly
+# run) the evidence least likely to be citable. `"pointer"` (RFC 6901) names
+# where inside the cited document the envelope lives; everything downstream
+# grades the value it names exactly as if that value had been the whole file.
+# --------------------------------------------------------------------------- #
+
+#: The shape issue #2342 was filed against: a `klt drc` envelope stored under
+#: `"drc"` in a composition step's report, alongside the composition's own
+#: findings.
+COMPOSITE_DRC_REPORT = {
+    "drc": DRC_CLEAN_ENVELOPE,
+    "new_violations_from_composition": [],
+}
+
+
+def test_pointer_cites_an_envelope_nested_inside_a_composite_report(tmp_path):
+    composed = _write(tmp_path, "composed.json", COMPOSITE_DRC_REPORT)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": "/drc"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["reason"] is None
+    assert item_3["citation"]["kind"] == "drc"
+    assert item_3["citation"]["check_status"] == "clean"
+    # The citation still names the *file* the manifest named -- a pointer
+    # says where inside that document to look, it does not become a
+    # different source (and it never launders the citation through a
+    # subprocess the way the `python3 -c '...'` workaround did).
+    assert item_3["citation"]["file"] == composed
+    assert item_3["citation"]["command"] is None
+
+
+def test_pointer_resolved_envelope_grades_identically_to_the_same_file_unnested(
+    tmp_path,
+):
+    """The whole design claim of #2342: only *where in a file* the envelope is
+    allowed to live changes. Nothing about how it is graded does."""
+    unnested = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    composed = _write(tmp_path, "composed.json", COMPOSITE_DRC_REPORT)
+
+    plain = build_tier_report(_manifest(evidence={"3": unnested}))
+    pointed = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": "/drc"}})
+    )
+
+    plain_item = next(item for item in plain["items"] if item["id"] == 3)
+    pointed_item = next(item for item in pointed["items"] if item["id"] == 3)
+
+    # Same fields, same values -- except `citation.file`, which necessarily
+    # names the document each manifest actually cited.
+    assert set(plain_item["citation"]) == set(pointed_item["citation"])
+    assert {k: v for k, v in plain_item["citation"].items() if k != "file"} == {
+        k: v for k, v in pointed_item["citation"].items() if k != "file"
+    }
+    assert plain_item["status"] == pointed_item["status"] == "met"
+
+
+def test_pointer_content_hash_gate_applies_to_the_resolved_inner_envelope(tmp_path):
+    """The staleness gate is unchanged by nesting: it still compares the
+    manifest's pin against the *resolved* envelope's own
+    `provenance.input.content_hash` -- the nested one, not the citing file."""
+    composed = _write(tmp_path, "composed.json", COMPOSITE_DRC_REPORT)
+
+    matching = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {
+                    "file": composed,
+                    "pointer": "/drc",
+                    "content_hash": "sha256:layoutA",
+                }
+            }
+        )
+    )
+    item_3 = next(item for item in matching["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["content_hash"] == "sha256:layoutA"
+
+    stale = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {
+                    "file": composed,
+                    "pointer": "/drc",
+                    "content_hash": "sha256:layoutB",
+                }
+            }
+        )
+    )
+    item_3 = next(item for item in stale["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "stale_evidence"
+    assert item_3["citation"] is None
+
+
+def test_pointer_does_not_launder_a_failing_nested_envelope(tmp_path):
+    """#2342's "what this is not": a pointer changes where the envelope is
+    read from, never what counts as a passing one."""
+    composed = _write(
+        tmp_path,
+        "composed.json",
+        {"drc": DRC_VIOLATIONS_ENVELOPE, "new_violations_from_composition": []},
+    )
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": "/drc"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "check_failed"
+
+
+def test_pointer_on_a_command_backed_entry_resolves_against_stdout(
+    monkeypatch, tmp_path
+):
+    """A command's stdout can be a composite document too -- the resolution
+    step does not care which binding produced the parsed object."""
+
+    def fake_run(command, **kwargs):
+        return fake_completed(returncode=0, stdout=json.dumps(COMPOSITE_DRC_REPORT))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(
+            evidence={
+                "3": {
+                    "command": ["compose-report", "--format", "json"],
+                    "pointer": "/drc",
+                }
+            }
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+    assert item_3["citation"]["kind"] == "drc"
+    assert item_3["citation"]["file"] is None
+    assert item_3["citation"]["command"] == "compose-report --format json"
+
+
+def test_pointer_reaches_an_envelope_nested_below_the_first_level(tmp_path):
+    composed = _write(
+        tmp_path,
+        "composed.json",
+        {"partitions": {"top": {"reports": {"drc": DRC_CLEAN_ENVELOPE}}}},
+    )
+
+    result = build_tier_report(
+        _manifest(
+            evidence={"3": {"file": composed, "pointer": "/partitions/top/reports/drc"}}
+        )
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+
+
+def test_pointer_indexes_into_a_json_array(tmp_path):
+    """RFC 6901 array indices work, including against a top-level array --
+    which, with a pointer, no longer has to be a JSON object to be citable."""
+    composed = _write(tmp_path, "composed.json", COMPOSITE_DRC_REPORT)
+    Path(composed).write_text(
+        json.dumps([{"step": "assemble"}, {"drc": DRC_CLEAN_ENVELOPE}])
+    )
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": "/1/drc"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+
+
+def test_pointer_unescapes_rfc6901_tokens(tmp_path):
+    """`~1` -> `/` and `~0` -> `~`, applied in that order -- so a report key
+    containing a slash or a tilde is reachable."""
+    composed = _write(
+        tmp_path,
+        "composed.json",
+        {"blocks/top": {"a~b": DRC_CLEAN_ENVELOPE}},
+    )
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": "/blocks~1top/a~0b"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "met"
+
+
+# --- the three ways a pointer can fail, all distinguishable from a citation
+# --- that pointed at the wrong artifact ------------------------------------
+
+
+def test_pointer_naming_a_path_the_document_lacks_renders_invalid_pointer(tmp_path):
+    composed = _write(tmp_path, "composed.json", COMPOSITE_DRC_REPORT)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": "/lvs"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    # Not "unrecognized_envelope": nothing was ever classified, and the
+    # remedy is to fix the pointer, not the citation (issue #2342).
+    assert item_3["reason"] == "invalid_pointer"
+    assert item_3["citation"] is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["a string", 7, [DRC_CLEAN_ENVELOPE], None, True],
+    ids=["string", "number", "array", "null", "bool"],
+)
+def test_pointer_resolving_to_a_non_object_renders_invalid_pointer(tmp_path, value):
+    """A JSON value that is not an object can never be a `klt` envelope."""
+    composed = _write(tmp_path, "composed.json", {"drc": value})
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": "/drc"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "invalid_pointer"
+
+
+@pytest.mark.parametrize(
+    "pointer",
+    ["drc", "/drc/", "/dr~c", "/drc~", "/~2drc"],
+    ids=[
+        "no-leading-slash",
+        "trailing-empty-token",
+        "bad-escape",
+        "dangling-tilde",
+        "unknown-escape",
+    ],
+)
+def test_malformed_pointer_renders_invalid_pointer_rather_than_raising(
+    tmp_path, pointer
+):
+    composed = _write(tmp_path, "composed.json", COMPOSITE_DRC_REPORT)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": pointer}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "invalid_pointer"
+
+
+def test_pointer_on_a_command_backed_entry_can_fail_the_same_way(monkeypatch, tmp_path):
+    def fake_run(command, **kwargs):
+        return fake_completed(returncode=0, stdout=json.dumps(COMPOSITE_DRC_REPORT))
+
+    monkeypatch.setattr(signoff_module.subprocess, "run", fake_run)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"command": ["compose-report"], "pointer": "/nope"}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "invalid_pointer"
+
+
+@pytest.mark.parametrize(
+    "pointer",
+    [7, ["/drc"], {"path": "/drc"}, None],
+    ids=["int", "list", "dict", "null"],
+)
+def test_non_string_pointer_renders_invalid_evidence(tmp_path, pointer):
+    """A `pointer` that is not a string is rejected outright rather than
+    coerced away: dropping it would silently re-aim the citation at the whole
+    composite document, which is a different artifact than the one cited."""
+    composed = _write(tmp_path, "composed.json", COMPOSITE_DRC_REPORT)
+
+    result = build_tier_report(
+        _manifest(evidence={"3": {"file": composed, "pointer": pointer}})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    assert item_3["status"] == "unmet"
+    assert item_3["reason"] == "invalid_evidence"
+
+
+# --- regression: manifests with no pointer are byte-for-byte unaffected -----
+
+
+def test_evidence_entries_without_a_pointer_are_unchanged(tmp_path):
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+    bogus_path = _write(tmp_path, "bogus.json", {"not": "an envelope"})
+    scalar_path = _write(tmp_path, "scalar.json", DRC_CLEAN_ENVELOPE)
+    Path(scalar_path).write_text(json.dumps(["not", "an", "object"]))
+
+    result = build_tier_report(
+        _manifest(evidence={"3": drc_path, "4": bogus_path, "6": scalar_path})
+    )
+
+    item_3 = next(item for item in result["items"] if item["id"] == 3)
+    item_4 = next(item for item in result["items"] if item["id"] == 4)
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_3["status"] == "met"
+    assert item_4["reason"] == "unrecognized_envelope"
+    # A non-object document with no pointer is still "unrecognized_envelope",
+    # never "invalid_pointer" -- no selector was involved.
+    assert item_6["reason"] == "unrecognized_envelope"
+
+
+def test_empty_pointer_is_a_no_op_meaning_the_whole_document(tmp_path):
+    """RFC 6901's empty pointer *is* "the whole document", so it must be
+    indistinguishable from omitting the key -- right down to which reason an
+    unusable document renders."""
+    drc_path = _write(tmp_path, "drc.json", DRC_CLEAN_ENVELOPE)
+
+    bare = build_tier_report(_manifest(evidence={"3": drc_path}))
+    empty = build_tier_report(
+        _manifest(evidence={"3": {"file": drc_path, "pointer": ""}})
+    )
+
+    bare_item = next(item for item in bare["items"] if item["id"] == 3)
+    empty_item = next(item for item in empty["items"] if item["id"] == 3)
+    assert bare_item == empty_item
+
+    scalar_path = _write(tmp_path, "scalar.json", DRC_CLEAN_ENVELOPE)
+    Path(scalar_path).write_text(json.dumps("not an object"))
+    unusable = build_tier_report(
+        _manifest(evidence={"3": {"file": scalar_path, "pointer": ""}})
+    )
+    unusable_item = next(item for item in unusable["items"] if item["id"] == 3)
+    assert unusable_item["reason"] == "unrecognized_envelope"
+
+
+# --- unit coverage for the two pieces the manifest path is built out of -----
+
+
+def test_normalize_evidence_entry_carries_pointer_on_both_bindings():
+    normalize = signoff_module._normalize_evidence_entry
+
+    assert normalize("drc.json")["pointer"] is None
+    assert normalize({"file": "composed.json"})["pointer"] is None
+    assert normalize({"file": "composed.json", "pointer": "/drc"})["pointer"] == "/drc"
+    assert (
+        normalize({"command": ["klt", "drc"], "pointer": "/drc"})["pointer"] == "/drc"
+    )
+    # Empty pointer == whole document == no pointer at all.
+    assert normalize({"file": "composed.json", "pointer": ""})["pointer"] is None
+    # Present but not a string -> the whole entry is invalid.
+    assert normalize({"file": "composed.json", "pointer": 7}) is None
+    assert normalize({"command": ["klt", "drc"], "pointer": 7}) is None
+
+
+@pytest.mark.parametrize(
+    ("document", "pointer", "expected"),
+    [
+        ({"drc": {"a": 1}}, "/drc", {"a": 1}),
+        ({"a": {"b": {"c": 3}}}, "/a/b/c", 3),
+        ({"a/b": 1}, "/a~1b", 1),
+        ({"a~b": 1}, "/a~0b", 1),
+        # `~01` unescapes to `~1`, never to `/` -- the order of the two
+        # replacements is load-bearing.
+        ({"a~1b": 1}, "/a~01b", 1),
+        ([10, 20, 30], "/1", 20),
+        ({"items": [{"drc": 1}]}, "/items/0/drc", 1),
+        ({"": 1}, "/", 1),
+    ],
+)
+def test_resolve_json_pointer_happy_paths(document, pointer, expected):
+    assert signoff_module._resolve_json_pointer(document, pointer) == (expected, True)
+
+
+@pytest.mark.parametrize(
+    ("document", "pointer"),
+    [
+        ({"drc": 1}, "drc"),  # no leading slash
+        ({"drc": 1}, "/lvs"),  # absent key
+        ({"drc": 1}, "/drc/deeper"),  # steps into a scalar
+        ({"drc": 1}, "/dr~c"),  # `~` followed by neither 0 nor 1
+        ({"drc": 1}, "/drc~"),  # dangling `~`
+        ([10, 20], "/2"),  # index out of range
+        ([10, 20], "/-"),  # RFC 6901 "past the end" names no value
+        ([10, 20], "/01"),  # leading zero is not a valid index
+        ([10, 20], "/a"),  # non-numeric index
+    ],
+)
+def test_resolve_json_pointer_failures_are_total_and_never_raise(document, pointer):
+    assert signoff_module._resolve_json_pointer(document, pointer) == (None, False)
+
+
+def test_check_mode_sees_through_a_pointer_citation(tmp_path):
+    """`--check` re-grades the manifest through the very same
+    `_resolve_evidence` path, so a pointer citation needs no `--check`-side
+    awareness: a committed report reproduces, and drifts when the *nested*
+    envelope changes."""
+    composed_path = tmp_path / "composed.json"
+    composed_path.write_text(json.dumps(COMPOSITE_DRC_REPORT))
+    manifest = _manifest(
+        evidence={"3": {"file": str(composed_path), "pointer": "/drc"}}
+    )
+
+    committed = _write(tmp_path, "committed.json", build_tier_report(manifest))
+    assert check_tier_report(committed, manifest)["status"] == "match"
+
+    composed_path.write_text(
+        json.dumps(
+            {"drc": DRC_VIOLATIONS_ENVELOPE, "new_violations_from_composition": []}
+        )
+    )
+    drifted = check_tier_report(committed, manifest)
+    assert drifted["status"] == "drifted"
+    assert any(entry["field"].endswith("status") for entry in drifted["drift"])

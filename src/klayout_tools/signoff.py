@@ -1517,6 +1517,24 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: named and where this looked, so that case stays distinguishable from an
 #: envelope that recorded no samples document at all).
 _REASON_UNVERIFIABLE_PROVENANCE = "unverifiable_provenance"
+
+#: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
+#: Pointer naming where inside the cited document the envelope lives -- see
+#: :func:`_resolve_json_pointer`), and that pointer did not resolve to a JSON
+#: object: it is syntactically malformed, it names a path the document does
+#: not contain, or it names a value that is not an object (a string, number,
+#: array, or ``null`` -- none of which can ever be a `klt` envelope).
+#: Deliberately distinct from :data:`_REASON_UNRECOGNIZED_ENVELOPE`, which
+#: says "the thing this citation resolved to is not a shape I recognise": the
+#: two are different mistakes with different remedies. An unrecognised
+#: envelope means the manifest cited the wrong *item* (fix the citation);
+#: an invalid pointer means the manifest cited the right document but named
+#: the wrong *place inside it* (fix the pointer) -- and, critically, that the
+#: cited bytes were never even classified, so the reason must not imply
+#: anything about them. Grouped with the other "no runnable check exists for
+#: this item" reasons per issue #826's invariant.
+_REASON_INVALID_POINTER = "invalid_pointer"
+
 _REASON_TIER_NOT_SUPPORTED = "tier_not_supported"
 #: Issue #825 (Phase 1 of epic #706): a command-backed evidence entry's
 #: subprocess itself did not complete usably -- it could not be launched, it
@@ -3569,6 +3587,11 @@ def build_tier_report(
                     "cwd": "sim/",                  # optional, default: this cwd
                     "content_hash": "sha256:...",   # optional, same staleness gate
                 },
+                # issue #2342: cite an envelope nested inside a composite
+                # report -- "pointer" is an RFC 6901 JSON Pointer, valid on
+                # either binding, and everything downstream grades the value
+                # it names exactly as if that value were the whole document.
+                "7": {"file": "composed.json", "pointer": "/pex"},
                 # for a mixed-signal block, per-kind items (1, 2, 5, 7) key
                 # on "<item id>.<analog|digital>"; kind-independent items
                 # (3, 4, 6, 8, 9, 10) may use the bare "<item id>" key and
@@ -3584,7 +3607,12 @@ def build_tier_report(
     Phase 1, issue #825: actually run the named gate -- ``klt
     drc``/``klt lvs``/``klt extract`` (netlist regeneration)/``klt sim``
     (corner sim) -- as a subprocess and grade *that run's* exit status and
-    stdout). See :func:`_normalize_evidence_entry`/:func:`_grade_evidence`.
+    stdout). Either shape may also carry ``"pointer"`` (issue #2342), an RFC
+    6901 JSON Pointer naming where inside the resolved document the envelope
+    lives -- so a `klt drc` envelope stored under ``"drc"`` in a composition
+    step's composite report is citable as itself, rather than only as the
+    whole file that happens to contain it. See
+    :func:`_normalize_evidence_entry`/:func:`_grade_evidence`.
 
     ``_grade_evidence`` grades an item's evidence by calling the same
     :func:`_check_passed` :func:`build_signoff` uses, so a registered
@@ -3826,7 +3854,8 @@ def build_tier_report(
     - ``"invalid_evidence"`` -- the manifest's entry for this item is
       present but malformed (neither a string, nor an object with a string
       ``"file"``, nor an object with a non-empty list-of-strings
-      ``"command"``).
+      ``"command"``; or, issue #2342, one carrying a ``"pointer"`` that is
+      not a string).
     - ``"unreadable_evidence"`` -- a file-backed entry's named file does not
       exist, is not readable, or is not valid JSON; or a command-backed
       entry's subprocess exited zero but its stdout was not valid JSON.
@@ -3843,6 +3872,14 @@ def build_tier_report(
       remedy differs: re-run the check under the current ``klt``, rather
       than fix a citation that points at the wrong artifact. See
       :data:`_NEAR_MISS_MARKERS`.
+    - ``"invalid_pointer"`` (issue #2342) -- the entry carried a
+      ``"pointer"`` (an RFC 6901 JSON Pointer naming where inside the cited
+      document the envelope lives) that did not resolve to a JSON object:
+      malformed syntax, a path the document does not contain, or a value
+      that is not an object. Distinct from ``"unrecognized_envelope"``,
+      which says the resolved bytes are not a shape this build recognises:
+      here nothing was ever classified, and the remedy is to fix the
+      pointer, not the citation.
     - ``"command_failed"`` -- a command-backed entry's subprocess could not
       be launched, timed out, or exited nonzero *without* leaving a
       parseable envelope on stdout. A nonzero exit whose stdout *does* parse
@@ -4245,6 +4282,41 @@ def _lookup_evidence(
     return evidence.get(str(item_id))
 
 
+def _normalize_evidence_pointer(raw: Any) -> tuple[str | None, bool]:
+    """Normalize an evidence entry's optional ``"pointer"`` key (issue #2342)
+    into ``(pointer, ok)``.
+
+    ``pointer`` is the RFC 6901 JSON Pointer string the entry named, or
+    ``None`` when the entry named none -- which includes the **empty**
+    pointer ``""``, RFC 6901's "the whole document": an empty pointer and an
+    absent one denote exactly the same citation, so they are normalized to
+    the same ``None`` rather than to two paths that happen to agree. That
+    keeps ``"pointer": ""`` a true no-op, right down to which ``_REASON_*``
+    an unusable document renders (:data:`_REASON_UNRECOGNIZED_ENVELOPE`, as
+    it always has -- never :data:`_REASON_INVALID_POINTER`, which would be a
+    claim about a selector the caller did not really use).
+
+    ``ok`` is ``False`` when the key is present but is not a string at all.
+    That is deliberately **rejected** (the whole entry renders
+    :data:`_REASON_INVALID_EVIDENCE`) rather than coerced to ``None`` the way
+    a malformed ``content_hash`` is: dropping a malformed ``content_hash``
+    drops a *constraint*, leaving a weaker-but-honest citation, whereas
+    dropping a malformed ``pointer`` would silently re-aim the citation at
+    the whole composite document -- a different artifact than the one the
+    manifest meant to cite, which could then classify and pass on its own.
+    A citation that cannot be read as written must never be quietly read as
+    something else.
+    """
+    if "pointer" not in raw:
+        return None, True
+    pointer = raw.get("pointer")
+    if not isinstance(pointer, str):
+        return None, False
+    if pointer == "":
+        return None, True
+    return pointer, True
+
+
 def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     """Normalize a manifest ``evidence[]`` entry into one of two shapes, or
     ``None`` if it matches neither -- a malformed *single* entry degrades
@@ -4252,18 +4324,35 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     :func:`build_tier_report`'s docstring):
 
     - **File-backed** (Phase 0, issue #722): a bare file-path string, or
-      ``{"file": <str>, "content_hash": <str>?}`` -- returned as
-      ``{"kind": "file", "file": ..., "content_hash": ...}``.
+      ``{"file": <str>, "content_hash": <str>?, "pointer": <str>?}`` --
+      returned as ``{"kind": "file", "file": ..., "content_hash": ...,
+      "pointer": ...}``.
     - **Command-backed** (Phase 1, issue #825): ``{"command": [<str>, ...],
-      "cwd": <str>?, "content_hash": <str>?}`` -- a non-empty list of
-      strings is required; returned as ``{"kind": "command", "command":
-      ..., "cwd": ..., "content_hash": ...}``. Checked before the file
-      shape so a dict carrying both keys (which the schema does not ask
-      for, but a caller might send) is treated as command-backed.
+      "cwd": <str>?, "content_hash": <str>?, "pointer": <str>?}`` -- a
+      non-empty list of strings is required; returned as ``{"kind":
+      "command", "command": ..., "cwd": ..., "content_hash": ...,
+      "pointer": ...}``. Checked before the file shape so a dict carrying
+      both keys (which the schema does not ask for, but a caller might
+      send) is treated as command-backed.
+
+    ``"pointer"`` (issue #2342) is accepted on **both** shapes, and is always
+    present in the returned spec (``None`` when the entry named none). It
+    says *where inside* the cited document the `klt` envelope lives, so an
+    envelope stored as a value inside a larger composite report -- a
+    composition step's report carrying a `klt drc` envelope under ``"drc"``
+    alongside its own findings -- is citable as itself. It is not
+    file-specific: a command's stdout can equally be a composite document
+    with more than one verb's report inside it. See
+    :func:`_resolve_json_pointer` for the syntax and
+    :func:`_resolve_evidence` for where it is applied.
     """
     if isinstance(raw, str):
-        return {"kind": "file", "file": raw, "content_hash": None}
+        return {"kind": "file", "file": raw, "content_hash": None, "pointer": None}
     if not isinstance(raw, dict):
+        return None
+
+    pointer, pointer_ok = _normalize_evidence_pointer(raw)
+    if not pointer_ok:
         return None
 
     command = raw.get("command")
@@ -4283,6 +4372,7 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
             "command": command,
             "cwd": cwd,
             "content_hash": expected_hash,
+            "pointer": pointer,
         }
 
     file = raw.get("file")
@@ -4291,7 +4381,122 @@ def _normalize_evidence_entry(raw: Any) -> dict[str, Any] | None:
     expected_hash = raw.get("content_hash")
     if expected_hash is not None and not isinstance(expected_hash, str):
         expected_hash = None
-    return {"kind": "file", "file": file, "content_hash": expected_hash}
+    return {
+        "kind": "file",
+        "file": file,
+        "content_hash": expected_hash,
+        "pointer": pointer,
+    }
+
+
+def _cited_envelope(
+    document: Any, pointer: str | None
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Narrow a parsed evidence ``document`` to the single envelope the
+    citation names, returning ``(envelope, None)`` or ``(None, <_REASON_*>)``.
+
+    With no ``pointer``, the document *is* the envelope and must therefore be
+    a JSON object -- the long-standing :data:`_REASON_UNRECOGNIZED_ENVELOPE`
+    refusal, unchanged.
+
+    With one (issue #2342), the envelope is the value at that RFC 6901 path
+    (:func:`_resolve_json_pointer`) and the document itself may be any JSON
+    value -- an array is a legal thing to point into. A pointer that does not
+    resolve to a JSON object renders :data:`_REASON_INVALID_POINTER`, never
+    :data:`_REASON_UNRECOGNIZED_ENVELOPE`: nothing was classified, so the
+    reason must not read as a verdict on the cited bytes, and the two call
+    for opposite remedies (fix the pointer vs. cite a different artifact).
+    """
+    if pointer is None:
+        if not isinstance(document, dict):
+            return None, _REASON_UNRECOGNIZED_ENVELOPE
+        return document, None
+
+    value, resolved = _resolve_json_pointer(document, pointer)
+    if not resolved or not isinstance(value, dict):
+        return None, _REASON_INVALID_POINTER
+    return value, None
+
+
+def _resolve_json_pointer(document: Any, pointer: str) -> tuple[Any, bool]:
+    """Resolve ``pointer`` -- an RFC 6901 JSON Pointer -- against ``document``,
+    returning ``(value, True)`` on success or ``(None, False)`` on any
+    failure (issue #2342).
+
+    Implements RFC 6901 as written, and nothing beyond it:
+
+    - A non-empty pointer must start with ``"/"``; each subsequent
+      ``"/"``-separated token names one step down.
+    - Each token is unescaped ``~1`` -> ``"/"`` **then** ``~0`` -> ``"~"``,
+      in that order (the order matters: the reverse would turn an escaped
+      ``~1`` back into a separator). A ``~`` followed by anything other than
+      ``0`` or ``1`` is malformed.
+    - Against a JSON object, a token is a key, matched literally.
+    - Against a JSON array, a token must be ``"0"`` or a digit string with
+      no leading zero, and must be in range. ``"-"`` (RFC 6901's
+      "past the last element") never resolves to an existing value, so it is
+      a failure here.
+    - Against any other value (a string, number, boolean, or ``null``) there
+      is nothing to step into: failure.
+
+    The empty pointer ``""`` -- "the whole document" -- never reaches this
+    function: :func:`_normalize_evidence_pointer` normalizes it to ``None``
+    (an absent pointer), which is the same citation by definition.
+
+    Deliberately pure and total: no exception escapes, because a manifest is
+    caller-supplied data and a mistyped pointer must degrade *that one item*
+    to ``"unmet"``/:data:`_REASON_INVALID_POINTER`, never abort the report.
+    """
+    if not pointer.startswith("/"):
+        return None, False
+
+    current = document
+    for raw_token in pointer.split("/")[1:]:
+        token, ok = _unescape_json_pointer_token(raw_token)
+        if not ok:
+            return None, False
+        if isinstance(current, dict):
+            if token not in current:
+                return None, False
+            current = current[token]
+        elif isinstance(current, list):
+            if not token.isdigit() or (len(token) > 1 and token.startswith("0")):
+                return None, False
+            index = int(token)
+            if index >= len(current):
+                return None, False
+            current = current[index]
+        else:
+            return None, False
+    return current, True
+
+
+def _unescape_json_pointer_token(token: str) -> tuple[str, bool]:
+    """Unescape one RFC 6901 reference token: ``~1`` -> ``"/"``, then ``~0``
+    -> ``"~"``. Returns ``(unescaped, False)`` for a malformed escape -- a
+    ``~`` that is last in the token or is followed by anything other than
+    ``0``/``1`` -- which RFC 6901 leaves undefined and this module treats as
+    an error rather than silently passing through (a pointer nobody can read
+    as written must not be read as something else)."""
+    out: list[str] = []
+    index = 0
+    while index < len(token):
+        char = token[index]
+        if char != "~":
+            out.append(char)
+            index += 1
+            continue
+        if index + 1 >= len(token):
+            return "", False
+        escaped = token[index + 1]
+        if escaped == "0":
+            out.append("~")
+        elif escaped == "1":
+            out.append("/")
+        else:
+            return "", False
+        index += 2
+    return "".join(out), True
 
 
 def _normalize_evidence_parts(raw: Any) -> list[dict[str, Any]] | None:
@@ -4733,7 +4938,28 @@ def _resolve_evidence(
     ``content_hash_unresolved`` (``None`` unless `klt yield`'s
     samples-document fallback named a document it could not find anywhere it
     looked -- issue #2197; see :func:`_yield_samples_content_hash`).
+
+    **Nested envelopes** (issue #2342): when the spec carries a ``pointer``,
+    the parsed document is descended per RFC 6901
+    (:func:`_resolve_json_pointer`) *before* anything grades it, and the
+    value found there is the envelope for every subsequent step. This is the
+    only place nesting exists: ``envelope`` in the returned resolution is a
+    plain envelope dict either way, so :func:`_classify`,
+    :func:`_check_passed`, the caller's ``content_hash`` staleness gate and
+    :func:`_citation` are all unchanged by it -- a composition step's report
+    that wraps a `klt drc` envelope under ``"drc"`` alongside its own
+    findings grades exactly as the same envelope would in a file of its own.
+    A pointer that does not resolve to a JSON object renders
+    :data:`_REASON_INVALID_POINTER`, never
+    :data:`_REASON_UNRECOGNIZED_ENVELOPE`: nothing was classified, so the
+    reason must not read as a verdict on the cited bytes. Consistently for
+    both bindings -- a command's stdout can be a composite document too.
+    With a pointer, the *top-level* document need not be a JSON object at
+    all (an array is a legal thing to point into); without one, the
+    long-standing "not an object" -> :data:`_REASON_UNRECOGNIZED_ENVELOPE`
+    refusal is untouched.
     """
+    pointer = spec.get("pointer")
     if spec["kind"] == "command":
         command = spec["command"]
         command_label = shlex.join(command)
@@ -4761,9 +4987,6 @@ def _resolve_evidence(
                 return None, _REASON_UNREADABLE_EVIDENCE
             return None, _REASON_COMMAND_FAILED
 
-        if not isinstance(envelope, dict):
-            return None, _REASON_UNRECOGNIZED_ENVELOPE
-
         file_label: str | None = None
         source_label = command_label
     else:
@@ -4773,13 +4996,18 @@ def _resolve_evidence(
         except SignoffError:
             return None, _REASON_UNREADABLE_EVIDENCE
 
-        if not isinstance(envelope, dict):
-            return None, _REASON_UNRECOGNIZED_ENVELOPE
-
         file_label = file
         command_label = None
         exit_status = 0
         source_label = file
+
+    # The parsed bytes narrowed to the one envelope this citation names --
+    # the whole document, or (issue #2342) the value a `pointer` selects out
+    # of it. Done here, after the bytes are parsed and before anything grades
+    # them, so everything downstream receives a plain envelope dict.
+    envelope, envelope_reason = _cited_envelope(envelope, pointer)
+    if envelope is None:
+        return None, envelope_reason
 
     try:
         check_kind = _classify(envelope, source_label)

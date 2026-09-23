@@ -781,6 +781,33 @@ against a caller-supplied **block manifest**:
 }
 ```
 
+An entry of either shape may also carry a **`pointer`** — an [RFC
+6901](https://www.rfc-editor.org/rfc/rfc6901) JSON Pointer naming *where
+inside* the resolved document the envelope lives (issue #2342), so an
+envelope stored as a value in a larger composite report is citable as
+itself:
+
+```json
+"3": {
+  "file": "reports/composed.json",
+  "pointer": "/drc",
+  "content_hash": "sha256:<expected layout hash>"
+}
+```
+
+…against a composition step's report that carries a `klt drc` envelope under
+`"drc"` alongside its own findings:
+
+```json
+{
+  "drc": { "schema_version": 1, "status": "clean", "violations": [], "coverage": {…},
+           "provenance": { "input": { "content_hash": "sha256:…" } } },
+  "new_violations_from_composition": []
+}
+```
+
+See "Citing an envelope nested inside a composite report (`pointer`)" below.
+
 - `block` — optional, echoed back verbatim in the report.
 - `kind` — required: `"analog"`, `"digital"`, or `"mixed-signal"` (see the
   doc's "Block kind" subsection). Selects which column of the doc's
@@ -794,12 +821,15 @@ against a caller-supplied **block manifest**:
   - **File-backed** (issue #722) — a bare file path (a `klt
     drc`/`lvs`/`extract`/`sim`/`yield`/`pex` `--format json` envelope, or
     (issue #1152, item 8 only) a generic evidence envelope, or `"-"` for
-    stdin) or `{"file": ..., "content_hash": ...}` to also pin the check to
-    an expected input revision. A `klt power` envelope classifies fine here
-    too, but is never graded `"met"` for any item — see "No T1 item accepts
-    `power` evidence" below; cite it in envelope-aggregation mode instead.
+    stdin) or `{"file": ..., "content_hash": ..., "pointer": ...}` to also
+    pin the check to an expected input revision, and/or (issue #2342) to
+    name where inside that file the envelope lives. A `klt power` envelope
+    classifies fine here too, but is never graded `"met"` for any item — see
+    "No T1 item accepts `power` evidence" below; cite it in
+    envelope-aggregation mode instead.
   - **Command-backed** (issue #825, Phase 1 of epic #706) —
-    `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...}`: `klt
+    `{"command": [<argv>, ...], "cwd": ..., "content_hash": ...,
+    "pointer": ...}`: `klt
     signoff` actually runs `<argv>` (e.g. `klt drc`/`klt lvs`/`klt extract`
     for netlist regeneration/`klt sim` for corner sim/`klt yield` for
     statistical evidence — issue #870, Phase 2a of epic #706/`klt pex` for
@@ -807,7 +837,9 @@ against a caller-supplied **block manifest**:
     as a subprocess, optionally in `cwd` (default: this process's own
     working directory), and grades the item against *that run's own* exit
     status and stdout — never a pre-existing file's say-so. `content_hash`
-    pins the same staleness gate as the file-backed form.
+    pins the same staleness gate as the file-backed form, and `pointer`
+    descends *that run's* stdout the same way — a command can emit a
+    composite document too.
 
   Keys are `"<item id>"` for a kind-independent item (3, 4, 6, 8, 9, 10), or
   `"<item id>.<analog|digital>"` for a per-kind item — a `"mixed-signal"`
@@ -836,7 +868,8 @@ itself checked against the artifact it names, or only taken at its word; see
 envelope" below). Every other case — no evidence entry, a
 malformed entry, an unreadable/unparsable evidence file, a command-backed
 entry whose subprocess couldn't be launched/timed out/exited
-nonzero/produced stdout that isn't valid JSON, an unrecognised envelope
+nonzero/produced stdout that isn't valid JSON, a `pointer` that doesn't
+resolve to a JSON object, an unrecognised envelope
 shape, a failing check, or a passing check of a kind that item does not
 accept (items 3-8 each accept only the kind(s) `design-evidence-tiers.md`
 names for them — see "Item 7 is kind-restricted, per block kind" and "Items
@@ -876,6 +909,69 @@ envelope kind for *envelope-aggregation mode only* — `docs/design-evidence-
 tiers.md`'s T1 checklist has no item for power-grid evidence yet, so a
 `power` citation is never graded `"met"` here (see "No T1 item accepts
 `power` evidence" below).
+
+### Citing an envelope nested inside a composite report (`pointer`, issue #2342)
+
+A composition or assembly step naturally emits **one** report that carries a
+verb's verdict *plus* the composition's own findings beside it:
+
+```json
+{
+  "drc": { "schema_version": 1, "status": "clean", "violations": [],
+           "coverage": {…}, "provenance": { "input": { "content_hash": "sha256:…" } } },
+  "new_violations_from_composition": []
+}
+```
+
+The `"drc"` value is a byte-for-byte `klt drc` envelope — everything the
+grader needs. It is simply not the top-level object of its file, and an
+evidence entry that names only a *file* could not reach it, so it rendered
+`unmet`/`unrecognized_envelope`. That inverted the incentives: a per-cell run
+written out on its own cited fine, while the whole-assembly run — the
+strongest evidence a T1 claim could rest on — was the one most likely to be
+wrapped, and so the one hardest to cite.
+
+`pointer` closes that gap without loosening anything:
+
+```json
+{"file": "reports/composed.json", "pointer": "/drc", "content_hash": "sha256:…"}
+```
+
+- **Syntax is [RFC 6901](https://www.rfc-editor.org/rfc/rfc6901), exactly.** A
+  non-empty pointer starts with `/`; each `/`-separated token steps one level
+  down. Tokens are unescaped `~1` → `/` then `~0` → `~` (in that order).
+  Against an object a token is a key; against an array it is a `0`-or-
+  no-leading-zero index. The empty pointer `""` means "the whole document" and
+  is therefore exactly equivalent to omitting the key.
+- **Valid on either binding.** A command-backed entry's `pointer` descends
+  *that run's* parsed stdout — a command can emit a composite document too.
+- **Nothing else changes.** The pointer is resolved *before* anything grades
+  the result, so the value it names goes through the same classification, the
+  same pass rules, and the same `content_hash` staleness gate (compared, as
+  always, against the **resolved** envelope's own
+  `provenance.input.content_hash` — the nested one, not a hash of the citing
+  file). A nested envelope whose own check failed still renders
+  `check_failed`; a nested envelope of a kind the item does not accept still
+  renders `wrong_kind`. Only *where in a file* the envelope is allowed to live
+  changed.
+- **The citation still names the file.** `citation.file` is the document the
+  manifest cited and `citation.command` stays `null` — unlike the
+  `{"command": ["python3", "-c", "…json.load(…)['drc']…"]}` workaround this
+  replaces, which laundered a static citation through a subprocess and put an
+  executable string where a reviewer expects a path.
+- **A pointer that doesn't resolve is its own reason.** Malformed syntax, a
+  path the document doesn't contain, or a value that isn't a JSON object all
+  render `unmet`/`invalid_pointer` — never `unrecognized_envelope`. The two
+  are different mistakes with different remedies (fix the pointer vs. the
+  manifest cites the wrong artifact), and in the pointer case nothing was ever
+  classified, so the reason must not read as a verdict on the cited bytes. A
+  `pointer` key that is present but not a string is rejected outright
+  (`invalid_evidence`) rather than ignored: silently dropping it would re-aim
+  the citation at the whole composite document, which is a different artifact
+  than the one the manifest cited.
+- **`--check` needs no pointer awareness.** It re-grades the manifest through
+  the same resolution path, so a committed report that cites by pointer
+  reproduces, and drifts when the *nested* envelope changes.
 
 ### The declared partition boundary (issue #2278)
 
@@ -2056,10 +2152,11 @@ actually ran and failed):
 | Reason                  | No runnable check attached? | Meaning |
 | ------------------------ | :--------------------------: | ------- |
 | `"no_evidence"`           | yes | The manifest's `evidence` map has no entry for this item at all. |
-| `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`). |
+| `"invalid_evidence"`      | yes | The manifest's entry for this item is present but malformed (neither a string, nor an object with a string `"file"`, nor an object with a non-empty list-of-strings `"command"`; or, issue #2342, one carrying a `"pointer"` that is not a string). |
 | `"unreadable_evidence"`   | yes | A file-backed entry's named file does not exist, is not readable, or is not valid JSON; or a command-backed entry's subprocess exited zero but its stdout was not valid JSON. |
 | `"unrecognized_envelope"` | yes | The resolved evidence parsed as JSON but is not a JSON object, does not match any recognised `klt` envelope shape, or matches one but is malformed for it — missing a required field, or carrying one of the wrong type (see "Envelope validation" above). |
 | `"envelope_version_skew"` | yes | **(issue #2198)** The resolved evidence *is* a `klt` envelope, carrying a kind's **primary** marker but none of the shape discriminators that marker is paired with — the shape a response written before those (additive) fields existed has. Today this applies to one kind: **`sta`**, whose `geometry_source` marker shipped with the verb but whose `timing_status`/`corners` discriminators are additive (issues #1865/#1915), so any `klt sta` response committed before them lands here. Refused exactly like `"unrecognized_envelope"` — it is never graded as that kind's evidence — but reported distinguishably, because the remedy differs: re-run the check under the current `klt`, rather than fix a citation pointing at the wrong artifact. A kind whose markers are *both* original (`place-and-route`'s `stage_reached`+`power`) has no version-skew shape and is unaffected. See "Digital-flow evidence" above. |
+| `"invalid_pointer"`       | yes | **(issue #2342)** The evidence entry carried a `"pointer"` (an RFC 6901 JSON Pointer naming where inside the cited document the envelope lives) that did not resolve to a JSON object: malformed syntax (no leading `/`, a `~` followed by neither `0` nor `1`), a path the document does not contain, or a value that is not an object (a string, number, array, or `null` — none of which can ever be a `klt` envelope). Deliberately distinct from `"unrecognized_envelope"`: nothing was ever classified, so this says nothing about the cited bytes, and the remedy is to fix the pointer rather than the citation. See "Citing an envelope nested inside a composite report" above. |
 | `"tier_not_supported"`    | yes | A T2-T4 ladder row — this repository has no mechanism to run a T2+ check at all. |
 | `"ungradeable_by_build"`  | yes | **(issue #2176)** The manifest cited evidence for an item this build has no grading rules for at all (`graded_by_build: false` — an item only the `--tiers-doc`/`$KLT_TIERS_DOC` copy of the doc lists). Not a statement about the cited artifact, which is never even resolved: the *build* is the gap, so the fix is a newer `klt` (or grading against the doc this one ships), not a different citation. Without it, such a citation fell through to the unrestricted grading path and could render `met` from rules that do not exist in the running build. See "An overridden doc can outrun the build" above. |
 | `"command_failed"`        | yes | A command-backed entry's subprocess could not be launched, timed out, or exited nonzero — distinct from `"check_errored"` below, which requires the command to have actually produced a readable `klt` `error` envelope. |
