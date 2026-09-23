@@ -596,7 +596,7 @@
     {
       "file": "src/klayout_tools/place_and_route.py",
       "function": "_extract_stage_metrics",
-      "complexity": 21
+      "complexity": 23
     },
     {
       "file": "src/klayout_tools/place_and_route.py",
