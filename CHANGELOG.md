@@ -14,6 +14,47 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2365, `klt deck devices` + a `klt extract` `warnings[]`
+  near-miss diagnostic — additive, **no** `schema_version` bump on either
+  command: `klt deck devices` is a new verb with its own
+  `schema_version: 1`, and `klt extract`'s `device_classes`/`warnings[]`
+  keep their existing shapes — `warnings[]` is documented as an open-ended
+  prose list): a curated deck's device recognition can depend on drawn
+  layers that are **not** part of the device's own conductor/diffusion
+  geometry — a device-recognition marker layer plus per-terminal
+  `*_requires`/`*_excludes` predicates. None of that set was discoverable
+  from outside the deck module's Python source, and a layout missing any
+  single member extracted as `device_count: 0` with `warnings: []` — a
+  result indistinguishable from "this layout legitimately contains no
+  devices of that class", whose only downstream symptom is a `klt lvs`
+  device-count mismatch with no cause in either tool's output. Two halves:
+  - `klt deck devices --deck <name> [--class <name>]` reports, per declared
+    device class, its `marker`, each terminal's `layer`/`requires`/
+    `excludes`, a flattened `required_layers`/`excluded_layers` union, the
+    upstream PDK-LVS `provenance` citation, and two booleans
+    (`marker_gated`/`predicate_gated`) so "which classes need more than
+    drawn geometry" is answerable by filtering. Every layer carries its
+    `layer`/`datatype` numbers plus the deck's published name when it has
+    one. An unknown `--class` is a clean error, never an empty list.
+  - `klt extract` now emits one aggregate `warnings[]` entry per
+    junction-diode class that recognised nothing while geometry on the
+    layout satisfies every predicate except one or more members of its
+    marker/`requires` set, naming each missing layer and pointing at
+    `klt deck devices`. Several missing members are reported at once; a
+    terminal's own declared layer is never reported (without the
+    anode/cathode conductor there is no junction-shaped region), and
+    candidates a MOS active island or the deck's well/substrate-tap
+    geometry already explains are dropped, so an ordinary CMOS layout
+    produces no near-miss lines. `excludes` layers and the `dummy` marker
+    are never dropped from the search. Connectivity is unchanged — this is
+    a disclosure, not a re-wiring.
+  Also names three gf180mcu device-recognition layers the deck previously
+  rendered as bare pairs (`diode_mk` 115/5, `RES_MK` 110/5, `DNWELL` 12/0).
+  Diode classes only for the `warnings[]` half; the marker-gated
+  bipolar/resistor/MoM-cap families share the silent-zero shape and are
+  covered by `klt deck devices` today but not yet by the diagnostic. See
+  `docs/cli/deck.md`'s "`klt deck devices`" and `docs/cli/extract.md`'s
+  "Marker-gated and predicate-gated device classes" sections.
 - **Fixed** (#2363, `klt functional-verification` `options.sdf` on Icarus —
   additive, **no** `schema_version` bump: one new `environment.sdf.dropped`
   class key, emitted only on a run that has entries to drop, so a run with

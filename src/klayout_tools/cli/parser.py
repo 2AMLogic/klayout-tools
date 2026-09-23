@@ -3658,6 +3658,50 @@ def _add_deck_parser(subparsers: argparse._SubParsersAction) -> None:
     _add_format_arg(rules_parser)
     rules_parser.set_defaults(func=deck_cmd.run_rules)
 
+    devices_parser = deck_sub.add_parser(
+        "devices",
+        help="list the drawn-layer predicate set (marker + per-terminal "
+        "requires/excludes) each of a deck's device classes is recognised by",
+        description=(
+            "Report what has to be **drawn** for each of an extraction "
+            "deck's device classes to be recognised -- its device-"
+            "recognition marker layer plus every per-terminal "
+            "requires/excludes predicate, with layer/datatype numbers -- "
+            "alongside the deck's own content hash, with no layout file and "
+            "no extraction run (issue #2365). `klt deck info` says which "
+            "device classes a deck *can* recognise; this says what a layout "
+            "must draw for one to be found. Most classes are driven off "
+            "drawn conductor/diffusion geometry alone, but a minority are "
+            "gated on a marker layer and/or implant predicates (filter on "
+            "`marker_gated`/`predicate_gated`) -- and a layout missing any "
+            "single member of that set extracts as `device_count: 0`, which "
+            "reads exactly like 'this layout contains none of that device'. "
+            "`klt extract` names the missing layer in `warnings[]` for a "
+            "junction-diode near miss; this answers the same question "
+            "ahead of time, for every class."
+        ),
+    )
+    devices_parser.add_argument(
+        "--deck",
+        required=True,
+        help=(
+            "built-in extraction deck name whose device classes to list "
+            f"(e.g. {_deck_names_str()})"
+        ),
+    )
+    devices_parser.add_argument(
+        "--class",
+        dest="device_class",
+        default=None,
+        help=(
+            "narrow to a single device class by exact name (e.g. "
+            "diode_pd2nw_06v0); a name the deck does not declare is a clean "
+            "error, not an empty list"
+        ),
+    )
+    _add_format_arg(devices_parser)
+    devices_parser.set_defaults(func=deck_cmd.run_devices)
+
 
 def _add_env_provenance_parser(subparsers: argparse._SubParsersAction) -> None:
     """Register the ``env-provenance`` verb with nested ``emit``/``scan``/

@@ -488,7 +488,12 @@ stability statement, concrete precedents, and drift-detection guidance, and
     `content_hash` alongside the deck's actual rule values (`id`,
     `description`, `value_um`, `provenance`), so a constant read out of the
     deck for pre-layout arithmetic can be pinned to — and re-checked
-    against — the exact deck revision it came from.
+    against — the exact deck revision it came from. `klt deck devices`
+    (issue #2365) reports it alongside the *drawn-layer predicate set* each
+    device class is recognised by (marker layer + per-terminal
+    `requires`/`excludes`, with layer/datatype numbers), so "what must a
+    layout draw for this class to extract?" is answerable without reading
+    the deck module's Python source.
 - `input` — the single input artifact the run was made against, as
   `{content_hash, role}` (mirroring `deck`'s `{name, content_hash,
   released}`). `content_hash` is a `sha256:`-prefixed hex digest of the file,

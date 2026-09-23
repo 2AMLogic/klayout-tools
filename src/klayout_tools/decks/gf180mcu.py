@@ -1225,7 +1225,16 @@ DECK: list[DrcRule] = [
 
 # (layer, datatype) -> upstream layer name, from gf180mcu.lyp's layer-map
 # (google/globalfoundries-pdk-libs-gf180mcu_fd_pv), used only to render
-# violations[].layer as e.g. "Poly2" instead of the bare "30/0" fallback.
+# violations[].layer as e.g. "Poly2" instead of the bare "30/0" fallback --
+# and (issue #2365) `klt deck devices`' per-device-class drawn-layer
+# predicate sets, which is why the device-recognition layers this deck's
+# `resistors`/`diodes` entries key off -- the markers (`RES_MK` 110/5,
+# `diode_mk` 115/5), the poly-resistor `requires` pair (`SAB` 49/0,
+# `Resistor` 62/0) and the deep-well layer they exclude (`DNWELL` 12/0) --
+# are named here too: a predicate set that renders as a bare `115/5` is
+# materially harder to act on than one that renders as `diode_mk (115/5)`.
+# None of the five carries a DRC rule in `DECK` above, so naming them
+# changes no `violations[].layer` rendering.
 # Unlike sky130.lyt, gf180mcu's layer map does not use "name.purpose" pairs,
 # so names here are the bare upstream layer names (no ".drawing" suffix).
 LAYER_NAMES: dict[tuple[int, int], str] = {
@@ -1248,6 +1257,11 @@ LAYER_NAMES: dict[tuple[int, int], str] = {
     (37, 0): "Pad",
     (75, 0): "FuseTop",
     (55, 0): "Dualgate",
+    (12, 0): "DNWELL",
+    (49, 0): "SAB",
+    (62, 0): "Resistor",
+    (110, 5): "RES_MK",
+    (115, 5): "diode_mk",
     (127, 5): "DRC_BJT",
     (117, 5): "CAP_MK",
     (117, 10): "MIM_L_MK",

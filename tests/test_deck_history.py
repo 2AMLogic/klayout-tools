@@ -624,6 +624,189 @@ def test_cli_rules_unknown_rule_error_envelope(capsys):
 
 
 # --------------------------------------------------------------------------- #
+# library + CLI: deck_devices (issue #2365)
+# --------------------------------------------------------------------------- #
+
+
+def _device_class(deck: str, name: str) -> dict:
+    report = history.deck_devices(deck, device_class=name)
+    (entry,) = report["device_classes"]
+    return entry
+
+
+def _layer_pairs(entries: list[dict]) -> list[tuple[int, int]]:
+    return [(entry["layer"], entry["datatype"]) for entry in entries]
+
+
+def test_deck_devices_reports_the_full_diode_predicate_set_without_the_deck_source():
+    """The headline acceptance criterion of issue #2365: a caller can
+    enumerate a device class's complete drawn-layer requirement set -- marker
+    + every ``*_requires``/``*_excludes`` entry, with layer/datatype numbers
+    -- without opening `decks/gf180mcu.py`.
+
+    The exact set below is the one two separate passes in
+    2AMLogic/gf180-drone-fc had to reconstruct by reading that module field
+    by field (its issues #24 and #37)."""
+    entry = _device_class("gf180mcu", "diode_pd2nw_06v0")
+
+    assert entry["kind"] == "diode"
+    assert entry["marker_gated"] is True
+    assert entry["predicate_gated"] is True
+    # `diode_mk` 115/5 -- the marker the first pass had to find by reading
+    # the deck source.
+    assert entry["marker"] == {"layer": 115, "datatype": 5, "name": "diode_mk"}
+
+    anode, cathode = entry["terminals"]
+    assert anode["name"] == "anode"
+    assert anode["layer"] == {"layer": 22, "datatype": 0, "name": "Comp"}
+    # `Pplus` 31/0 + `Dualgate` 55/0 -- what the *second* pass needed, after
+    # adding the marker alone still gave `device_count: 0`.
+    assert _layer_pairs(anode["requires"]) == [(31, 0), (55, 0)]
+    assert cathode["layer"] == {"layer": 21, "datatype": 0, "name": "Nwell"}
+
+    # The flattened union is the "what am I missing?" list, marker first.
+    assert _layer_pairs(entry["required_layers"]) == [
+        (115, 5),  # diode_mk
+        (22, 0),  # Comp
+        (31, 0),  # Pplus
+        (55, 0),  # Dualgate
+        (21, 0),  # Nwell
+    ]
+    assert (12, 0) in _layer_pairs(entry["excluded_layers"])  # DNWELL
+    assert entry["provenance"]["rule_id"] == "gf180mcu_fd_pr__diode_pd2nw_06v0"
+
+
+def test_deck_devices_reports_the_deck_content_hash_and_declaration_order():
+    report = history.deck_devices("gf180mcu")
+
+    assert report["schema_version"] == 1
+    assert report["deck"] == "gf180mcu"
+    # The same pin `deck info`/`deck rules`/`provenance.deck` report, so a
+    # transcribed layer number stays re-checkable on the next PDK bump.
+    assert report["content_hash"] == _real_deck_hash("gf180mcu")
+
+    names = [entry["name"] for entry in report["device_classes"]]
+    assert names[:2] == ["nfet", "pfet"]
+    assert names[-2:] == ["diode_nd2ps_06v0", "diode_pd2nw_06v0"]
+
+
+def test_deck_devices_covers_every_declared_device_class_of_every_deck():
+    """Nothing a deck declares may be invisible here -- the whole point is
+    that a caller never has to fall back to reading the module."""
+    from klayout_tools.decks import get_extraction_deck, known_extraction_deck_names
+
+    for name in known_extraction_deck_names():
+        deck = get_extraction_deck(name)
+        reported = {
+            entry["name"] for entry in history.deck_devices(name)["device_classes"]
+        }
+        declared = {deck.nfet_class, deck.pfet_class}
+        declared |= {entry.class_name for entry in deck.bipolars}
+        declared |= {entry.name for entry in deck.capacitors}
+        declared |= {entry.name for entry in deck.mom_capacitors}
+        declared |= {entry.name for entry in deck.resistors}
+        declared |= {entry.name for entry in deck.diodes}
+        assert reported == declared, name
+
+
+def test_deck_devices_marks_markerless_classes_as_such():
+    """Marker-gated classes are the minority, and that is exactly what makes
+    them expensive -- so the distinction is a machine-readable boolean, not
+    prose a caller has to parse."""
+    nfet = _device_class("gf180mcu", "nfet")
+    assert nfet["kind"] == "mos"
+    assert nfet["marker"] is None
+    assert nfet["marker_gated"] is False
+    # MOS recognition reads the deck's own active/poly stack and nothing else.
+    assert nfet["predicate_gated"] is False
+    # `pfet` is honestly predicate-gated: a PMOS is not recognised outside
+    # the well.
+    assert _device_class("gf180mcu", "pfet")["predicate_gated"] is True
+    # gf180mcu's `Dualgate` MOS flavour marker is reported alongside.
+    assert _layer_pairs([flavour["marker"] for flavour in nfet["flavours"]]) == [
+        (55, 0)
+    ]
+
+
+def test_deck_devices_narrows_to_a_single_class():
+    report = history.deck_devices("gf180mcu", device_class="bjt")
+
+    assert [entry["name"] for entry in report["device_classes"]] == ["bjt"]
+    assert report["content_hash"] == _real_deck_hash("gf180mcu")
+
+
+def test_deck_devices_unknown_deck_raises():
+    with pytest.raises(history.DeckHistoryError, match="nope"):
+        history.deck_devices("nope")
+
+
+def test_deck_devices_unknown_class_raises_rather_than_returning_empty():
+    # A silent empty list would read as "that class has no drawn-layer
+    # requirements" -- a materially different claim from "you asked for a
+    # class this deck does not declare" (mirrors `deck rules`' contract).
+    with pytest.raises(
+        history.DeckHistoryError, match="no device class named 'diode_pw2nd'"
+    ):
+        history.deck_devices("gf180mcu", device_class="diode_pw2nd")
+
+
+def test_cli_devices_json_envelope(capsys):
+    exit_code = main(
+        [
+            "deck",
+            "devices",
+            "--deck",
+            "gf180mcu",
+            "--class",
+            "diode_pd2nw_06v0",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["schema_version"] == 1
+    (entry,) = report["device_classes"]
+    assert entry["marker"]["layer"] == 115
+
+
+def test_cli_devices_text_names_the_layers_and_their_numbers(capsys):
+    exit_code = main(
+        ["deck", "devices", "--deck", "gf180mcu", "--class", "diode_pd2nw_06v0"]
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "diode_pd2nw_06v0 (diode)" in out
+    assert "gating: marker-gated, predicate-gated" in out
+    assert "marker: diode_mk (115/5)" in out
+    # The raw pair is always present -- it is what a caller draws against.
+    assert "requires: Pplus (31/0), Dualgate (55/0)" in out
+
+
+def test_cli_devices_unknown_class_error_envelope(capsys):
+    exit_code = main(
+        [
+            "deck",
+            "devices",
+            "--deck",
+            "gf180mcu",
+            "--class",
+            "nope",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["schema_version"] == 1
+    assert err["error"]["command"] == "deck devices"
+    assert "no device class named 'nope'" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
 # the checked-in table (src/klayout_tools/decks/_history.json)
 # --------------------------------------------------------------------------- #
 
