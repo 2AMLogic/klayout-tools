@@ -3151,6 +3151,7 @@ tree ... ( nan ) ... failed` / `parameter value out of range or the wrong
 type`. (Verified against the real unmodified
 `sky130_fd_pr__res_xhigh_po.model.spice`: the suffix-free card solves to a
 sane divider, the suffixed one reproduces the exact `nan` abort.)
+
 This matters because `.option scale` is applied **on top of** the parsed
 literal — ngspice multiplies a MOS card's `l`/`w`/`ps`/`pd` by `scale` and its
 `as`/`ad` by `scale²`. Writing sky130's cards with unit suffixes therefore
@@ -3159,7 +3160,6 @@ bin at all: ngspice rejected it with the generic `could not find a valid
 modelname`. The same mistake in the other direction (bare numbers for
 gf180mcu) would be wrong by the same factor, which is why the convention is
 resolved per PDK family rather than picked globally.
-
 
 **Coverage** (issue #339 extended #209's MOS-only binding to the other
 recognised analog device classes):
