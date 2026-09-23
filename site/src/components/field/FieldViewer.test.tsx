@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { FieldViewer } from "./FieldViewer";
 import type { FieldViewerData } from "./types";
-import { makeFakeGL } from "@/test-utils/mocks";
+import { installFakeGLContext } from "@/test-utils/mocks";
 
 afterEach(() => {
   cleanup();
@@ -40,10 +40,7 @@ function scalarData(): FieldViewerData {
 }
 
 function mockWebglAvailable() {
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ((..._args: unknown[]) => makeFakeGL()) as any,
-  );
+  installFakeGLContext();
 }
 
 /**
