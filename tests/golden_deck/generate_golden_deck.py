@@ -20,9 +20,10 @@ not merely left unpopulated.
 `ALLOWED_CHECKS` is deliberately **per-deck**: issue #747 piloted `width`/
 `space` on *both* decks; issue #904 widens gf180mcu's own set to also cover
 `enclosing`/`separation` (completing gf180mcu's full DRC deck -- 42 rules at
-that issue, 44 as of issue #1110's `DF.1a`/`DF.3a` `_LV`/`_MV` split, 46 as
-of issue #1688's `metal4.width.1`/`metal4.space.1` pair, per
-Epic #711 Phase 3a's "every rule ships a golden pair" acceptance criterion),
+that issue, +2 via issue #1110's `DF.1a`/`DF.3a` `_LV`/`_MV` split, +2 more
+via issue #1688's `metal4.width.1`/`metal4.space.1` pair (46 total as of the
+latter), per Epic #711 Phase 3a's "every rule ships a golden pair"
+acceptance criterion),
 but deliberately leaves sky130's set at its original `width`/`space` pilot
 scope -- extending sky130's own enclosure coverage is a separate, unscoped
 follow-on (`docs/design/deck-compiler-proposal.md`'s own "narrow go"
@@ -105,13 +106,18 @@ ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
 }
 
 #: Fixed bar dimensions (database units), independent of any individual
-#: rule's own threshold -- chosen once, verified safe for every rule in this
-#: 37-rule pilot (largest threshold: gf180mcu's `mim.space.1`, 1200 dbu;
-#: largest width threshold: `metaltop.width.1`, 360 dbu):
+#: rule's own threshold -- chosen once, verified safe for every rule in the
+#: original 37-rule width/space pilot (issue #747: 11 sky130 + 26 gf180mcu
+#: rules, before gf180mcu's own coverage widened to `enclosing`/`separation`
+#: in issue #904; largest threshold at the time: gf180mcu's `mim.space.1`,
+#: 1200 dbu; largest width threshold: `metaltop.width.1`, 360 dbu). The
+#: per-rule margin formula in `_margin_dbu` below scales with each rule's own
+#: threshold, so these bar dimensions remain safe for every rule added since,
+#: across all four decks:
 #: - Width-check bar length: long enough that only the bar's own width (not
-#:   its end caps) trips `width_check`, for every threshold in this pilot.
+#:   its end caps) trips `width_check`, for every threshold piloted.
 #: - Space-check bar width (ordinary conductor layers): wide enough to
-#:   clear every width threshold in this pilot (so a space fixture never
+#:   clear every width threshold piloted (so a space fixture never
 #:   *also* trips a width violation on the same layer) and narrow enough
 #:   (< 3000 dbu / 3um) to stay outside sky130's own "huge metal" >=3um
 #:   morphological-opening exception (`sky130A.lydrc`'s `huge_m1`/

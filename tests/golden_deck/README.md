@@ -6,10 +6,12 @@ Declarative, rule-id-keyed golden violate/clean fixture manifest for
 -- issue #1420's other addition -- uses the
 `"isolated"` check kind as of issue #1654, so it no longer falls within this
 manifest's width/space-only scope), `sg13g2.py`'s width/space
-`DrcRule` entries (14, issue #905/#911), and **all** of `gf180mcu.py`'s
-`DrcRule` entries (44: 13 width, 14 space, 15 enclosing, 2 separation --
+`DrcRule` entries (32, issue #905/#911 initial 14, grown to 32 by issue
+#1247), and **all** of `gf180mcu.py`'s
+`DrcRule` entries (46: 14 width, 15 space, 15 enclosing, 2 separation --
 recounted for issue #1110, which both added two rules and corrected a stale
-width/space/separation split in this line) --
+width/space/separation split in this line, then grown further by issue
+#1688's `metal4.width.1`/`metal4.space.1` pair) --
 issue #747 (the first, narrow-go increment of
 [`docs/design/deck-compiler-proposal.md`](../../docs/design/deck-compiler-proposal.md)
 §5/§6, width/space only, sky130+gf180mcu) extended to gf180mcu's full DRC
@@ -31,7 +33,7 @@ ships a golden pair" acceptance criterion) widens gf180mcu's own coverage to
 also include `enclosing`/`separation` (see `generate_golden_deck.py`'s
 `_enclosing_pair`/`_separation_pair` builders) -- gf180mcu's DRC deck has no
 `area`/`density`/`antenna` rules to omit, so `enclosing`+`separation`
-completes its full 44-rule `DECK`. sky130's own manifest is deliberately left
+completes its full 46-rule `DECK`. sky130's own manifest is deliberately left
 at its original width/space pilot scope (`generate_golden_deck.py`'s
 `ALLOWED_CHECKS` is per-deck): extending sky130's enclosure (or, since issue
 #1955, area) coverage is a separate, unscoped follow-on -- issue #904 (a
@@ -56,13 +58,23 @@ tests/golden_deck/
   sky130/manifest.json     # 29 entries (11 at issue #747, width/space-only,
                             # grown since -- latest +1 is issue #2321's
                             # tap.width.1)
-  gf180mcu/manifest.json   # 44 entries (full DRC deck, issue #904;
-                            # +2 for issue #1110's DF.1a/DF.3a _LV/_MV split)
-  sg13g2/manifest.json     # 14 entries (issue #905, Epic #711 Phase 3b --
-                            # see that deck's own module docstring; width/
+  gf180mcu/manifest.json   # 46 entries (full DRC deck, issue #904;
+                            # +2 for issue #1110's DF.1a/DF.3a _LV/_MV split,
+                            # +2 for issue #1688's metal4.width.1/
+                            # metal4.space.1 pair)
+  sg13g2/manifest.json     # 32 entries (issue #905/#911, Epic #711 Phase 3b
+                            # -- see that deck's own module docstring; width/
                             # space only, same split as sky130 -- its 5
                             # enclosing/separation rules ship as hand-written
-                            # pairs in tests/test_drc.py instead)
+                            # pairs in tests/test_drc.py instead; grown from
+                            # 14 to 32 by issue #1247's extended
+                            # metals/vias-to-TopMetal2 stack)
+  sg13cmos5l/manifest.json # 27 entries (issue #1400, width/space/enclosing
+                            # on Activ/GatPoly/Metal1; issue #1417 extends
+                            # coverage to the Metal2-TopMetal1 stack's width/
+                            # space rules plus every via level's width/space/
+                            # enclosing rules -- see that deck's own module
+                            # docstring)
 ```
 
 `tests/test_golden_deck.py` is the consuming test module (not under this
@@ -129,14 +141,20 @@ git diff tests/golden_deck/
 
 Bar dimensions (4000 dbu bar length; 2000 dbu bar width for space-check
 pairs) are fixed constants independent of any individual rule's threshold,
-chosen once and verified safe for every rule in this 37-rule pilot -- see
-`generate_golden_deck.py`'s own module docstring for the exact reasoning
+chosen once and verified safe for every rule in the original 37-rule
+width/space pilot (issue #747: 11 sky130 + 26 gf180mcu rules, before
+gf180mcu's own coverage widened to `enclosing`/`separation` in issue #904) --
+see `generate_golden_deck.py`'s own module docstring for the exact reasoning
 (including sky130's "huge metal" >=3um spacing-exception boundary, which the
-2000 dbu space-fixture bar width was chosen to stay clear of). The
-violate/clean margin below/above each rule's `threshold_dbu` is `max(10,
-min(100, threshold_dbu // 3))` dbu -- proportional but capped, so it's never
-zero/negative for this pilot's smallest threshold (140 dbu) and never so
-large it swamps the real geometry for its largest (1200 dbu).
+2000 dbu space-fixture bar width was chosen to stay clear of). The per-rule
+margin formula below scales with each rule's own `threshold_dbu`, so this
+remains safe for every rule added since, including the largest threshold in
+either pilot deck at the time (`mim.space.1`, 1200 dbu) and today's widest
+count across all four decks. The violate/clean margin below/above each
+rule's `threshold_dbu` is `max(10, min(100, threshold_dbu // 3))` dbu --
+proportional but capped, so it's never zero/negative for this pilot's
+smallest threshold (140 dbu) and never so large it swamps the real geometry
+for its largest (1200 dbu).
 
 `"expected_disagreement"` is the one field the regenerator **preserves**
 across a re-run rather than deriving -- a deliberate, human-authored
@@ -180,7 +198,7 @@ Three tiers:
    `--engine klayout` **DRC** cross-check remains explicitly deferred as of
    issue #904 -- re-verified unchanged: gf180mcu's native *DRC* deck still
    has no single runnable file (see `docs/cli/drc.md`'s "Engine" ->
-   "klayout" limitation); tiers 1 and 2 cover all 44 of its rules in full.
+   "klayout" limitation); tiers 1 and 2 cover all 46 of its rules in full.
    **Unlike the DRC side, gf180mcu's native *LVS* deck is single-file and
    directly runnable** -- issue #904 cross-checks gf180mcu's LVS
    device-extraction rules against it separately; see
