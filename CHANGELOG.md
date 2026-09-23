@@ -48,8 +48,9 @@ not `klt --version`, if you need to detect this kind of drift. See
     produces no near-miss lines. `excludes` layers and the `dummy` marker
     are never dropped from the search. Connectivity is unchanged — this is
     a disclosure, not a re-wiring.
-  Also names three gf180mcu device-recognition layers the deck previously
-  rendered as bare pairs (`diode_mk` 115/5, `RES_MK` 110/5, `DNWELL` 12/0).
+  Also names five gf180mcu device-recognition layers the deck previously
+  rendered as bare pairs (`diode_mk` 115/5, `RES_MK` 110/5, `SAB` 49/0,
+  `Resistor` 62/0, `DNWELL` 12/0).
   Diode classes only for the `warnings[]` half; the marker-gated
   bipolar/resistor/MoM-cap families share the silent-zero shape and are
   covered by `klt deck devices` today but not yet by the diagnostic. See
