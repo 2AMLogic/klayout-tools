@@ -1427,6 +1427,152 @@ def test_unconnected_net_islands_locate_each_of_three_islands(tmp_path):
     }
 
 
+def _three_island_vdd_layout(tmp_path, name):
+    """The issue #2194 three-island layout (one lone li1 bar, one
+    poly+licon+li1 island, one far li1 bar, all labelled ``VDD``), written
+    to ``<name>.gds`` and returned alongside a matching spec path. Shared
+    by the declared-islands tests (issue #2400)."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    licon = layout.layer(2, 0)
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(8), _um(0), _um(9), _um(1)))
+    top.shapes(poly).insert(kdb.Box.new(_um(8.5), _um(0), _um(11), _um(1)))
+    top.shapes(licon).insert(kdb.Box.new(_um(8.6), _um(0.2), _um(8.8), _um(0.4)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(8.2), _um(0.5))))
+    top.shapes(li1).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(20.5), _um(0.5))))
+    gds = tmp_path / f"{name}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{name}.erc.json"
+    spec_dict = _nets_spec(nets=[{"name": "VDD", "kind": "supply"}])
+    spec_dict["vias"] = [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}]
+    return gds, spec, spec_dict
+
+
+def test_declared_islands_count_grades_multi_domain_net_clean(tmp_path):
+    """Issue #2400: a `nets[]` entry may declare the number of electrical
+    islands its name legitimately resolves to. The motivating shape: one
+    library PG pin name (``VPWR``-style) instantiated on two or more
+    deliberately separate supply domains -- three islands here -- which
+    pre-#2400 was indistinguishable from a fragmented net and always
+    reported `erc.unconnected_net`."""
+    gds, spec, spec_dict = _three_island_vdd_layout(tmp_path, "declared3")
+
+    spec_dict["nets"] = [{"name": "VDD", "kind": "supply", "islands": 3}]
+    _write_spec(spec, spec_dict)
+    report = run_erc(str(gds), str(spec))
+    assert not any(f["rule"] == "erc.unconnected_net" for f in report["erc_findings"])
+
+    # Regression guard against silently loosening the default: the same
+    # layout, undeclared, still reports the multi-island finding.
+    spec_dict["nets"] = [{"name": "VDD", "kind": "supply"}]
+    _write_spec(spec, spec_dict)
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+    assert len(findings) == 1
+    assert "3 disconnected electrical islands" in findings[0]["description"]
+
+
+def test_declared_islands_mismatch_is_still_a_finding(tmp_path):
+    """Issue #2400 falsifiability: the declaration grades against the
+    actual island count, it does not silence the check. Declared 2 with 3
+    actual islands, and declared 2 with 1 actual island, both still report
+    `erc.unconnected_net` -- so a domain that later fragments (3 from a
+    declared 2) or merges (1 from a declared 2) fails rather than passes."""
+    gds, spec, spec_dict = _three_island_vdd_layout(tmp_path, "mismatch")
+
+    spec_dict["nets"] = [{"name": "VDD", "kind": "supply", "islands": 2}]
+    _write_spec(spec, spec_dict)
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+    assert len(findings) == 1
+    assert "3 disconnected electrical islands" in findings[0]["description"]
+    assert "expected exactly 2" in findings[0]["description"]
+
+    # Declared 2, actual 1: a single island on a layout whose spec asserts
+    # two domains is itself a mismatch (a domain has gone missing).
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    gds1 = tmp_path / "one_island.gds"
+    layout.write(str(gds1))
+    spec1 = tmp_path / "one_island.erc.json"
+    _write_spec(
+        spec1,
+        _nets_spec(nets=[{"name": "VDD", "kind": "supply", "islands": 2}]),
+    )
+    report = run_erc(str(gds1), str(spec1))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+    assert len(findings) == 1
+    assert "1 disconnected electrical island" in findings[0]["description"]
+    assert "expected exactly 2" in findings[0]["description"]
+
+    # Declared 1 with an actual 1 (explicit form of the default) is clean,
+    # and declared 1 against the 3-island layout keeps today's wording.
+    spec_dict["nets"] = [{"name": "VDD", "kind": "supply", "islands": 1}]
+    _write_spec(spec, spec_dict)
+    report = run_erc(str(gds), str(spec))
+    findings = [f for f in report["erc_findings"] if f["rule"] == "erc.unconnected_net"]
+    assert len(findings) == 1
+    assert "(expected exactly one)" in findings[0]["description"]
+
+
+def test_declared_islands_do_not_reach_the_short_detection(tmp_path):
+    """Issue #2400 edge case: `islands` grades only the per-name island
+    count; the cross-name short detection (`cluster_to_names`) must be
+    unchanged. A two-domain ``VDD`` (declared ``islands: 2``, clean on the
+    count) sharing one island with ``VSS`` still reports
+    `erc.supply_short` exactly as an undeclared single-island short does."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    # Domain 1: VDD and VSS labels on the same bar -- a short.
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(7), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+    top.shapes(label).insert(kdb.Text("VSS", kdb.Trans(_um(6.5), _um(0.5))))
+    # Domain 2: a far VDD-only island.
+    top.shapes(li1).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(20.5), _um(0.5))))
+
+    gds = tmp_path / "two_domain_short.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two_domain_short.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VDD", "kind": "supply", "islands": 2},
+                {"name": "VSS", "kind": "supply"},
+            ]
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+    findings = report["erc_findings"]
+    shorts = [f for f in findings if f["rule"] == "erc.supply_short"]
+    assert len(shorts) == 1
+    assert {shorts[0]["net"], shorts[0]["other_net"]} == {"VDD", "VSS"}
+    assert not any(f["rule"] == "erc.unconnected_net" for f in findings)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [0, -1, "two", 1.5, True, None],
+)
+def test_declared_islands_rejects_non_positive_integer_values(tmp_path, bad):
+    """Issue #2400: `nets[].islands` must be an integer >= 1 -- a count of
+    zero is the companion N=0 concern (issue #2401, a name matching no
+    geometry at all), not a declarable partition, and a non-integer or
+    boolean value cannot be a count. Validation fails loudly rather than
+    silently grading against a coerced value."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "bad_islands.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "bad_islands.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "islands": bad}]))
+    with pytest.raises(ErcError, match=r"nets\[0\]\.islands"):
+        run_erc(str(gds), str(spec))
+
+
 def test_unconnected_net_finding_keys_are_uniform_across_rules(tmp_path):
     """Issue #2194 adds `islands` to the finding shape; it must be present
     (as `null`) on every other rule too, so the `erc_findings[]` key set

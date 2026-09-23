@@ -72,8 +72,11 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   ``erc.multiply_driven_net``): driven by the new optional ``nets`` spec
   section (named nets to check, mirroring ``klt power``'s ``power_nets``
   but with an added ``kind``). A declared net matching zero or more than
-  one disconnected electrical island is "unconnected" -- and when it is
-  more than one, the finding carries an ``islands[]`` entry locating each
+  one disconnected electrical island is "unconnected" -- the expected
+  count is the entry's declared ``islands`` (issue #2400, default 1, so
+  the pre-#2400 "one label string == one net" model is the undeclared
+  form) -- and when the actual count is more than one, the finding
+  carries an ``islands[]`` entry locating each
   island (issue #2194, see :func:`_island_entry`); two *different*
   declared net names that resolve to the same electrical island are
   "multiply-driven" (shorted together) -- or, when both are declared
@@ -351,6 +354,17 @@ from .extract import (
 #: exactly as ``tap_requires`` is. A spec that declares neither key selects
 #: nothing and produces byte-identical output, and the new reason token can
 #: only appear for a spec that asked for it. No bump.
+#: Issue #2400 adds one optional *sub*-key, ``nets[].islands`` (a declared
+#: expected electrical-island count, integer >= 1, default 1 -- see
+#: :func:`_validate_nets`). It changes only the grading of the
+#: ``erc.unconnected_net`` count check for the spec entries that declare
+#: it: declared N with N actual islands is clean (previously always a
+#: finding for N > 1), declared N with any other actual count still
+#: reports -- same rule id, same ``islands[]`` payload, with the
+#: "expected exactly" description word carrying the declared count. A spec
+#: that omits the key grades against 1 exactly as before, byte-identical,
+#: and no output field is added, removed, or renamed -- so, as with every
+#: prior additive change above, no bump.
 SCHEMA_VERSION = 1
 
 
@@ -901,7 +915,11 @@ def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]
     ``erc.multiply_driven_net``, ``erc.supply_short``). Mirrors ``klt
     power``'s ``power_nets`` name-matching convention, plus a ``kind`` used
     to classify a two-net short as a plain multiply-driven net vs. a supply
-    short. Omitted or empty -> no net-connectivity findings are computed
+    short, and (issue #2400) an ``islands`` expected electrical-island
+    count the ``erc.unconnected_net`` check grades against instead of the
+    implicit 1 -- see :func:`_net_connectivity_findings` for why a
+    declared count is the falsifiable form. Omitted or empty -> no
+    net-connectivity findings are computed
     (a caller who only wants the floating-gate check need not declare
     this)."""
     raw = spec.get("nets", [])
@@ -931,7 +949,20 @@ def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]
                 f"'supply' (got {kind!r})"
             )
 
-        entries.append({"name": name, "kind": kind})
+        # Issue #2400: the declared expected island count. Default 1 is the
+        # pre-#2400 model (one label string == one electrical net); a
+        # stream whose library PG pin names legitimately land on N separate
+        # domains declares N so `erc.unconnected_net` grades the count
+        # instead of silently failing every such name. ``islands: 1`` must
+        # behave exactly like the omitted form.
+        islands = entry.get("islands", 1)
+        if isinstance(islands, bool) or not isinstance(islands, int) or islands < 1:
+            raise ErcError(
+                f"spec '{spec_path}': nets[{i}].islands must be an integer "
+                f">= 1 (got {entry.get('islands')!r})"
+            )
+
+        entries.append({"name": name, "kind": kind, "islands": islands})
     return entries
 
 
@@ -2006,9 +2037,13 @@ def _net_connectivity_findings(
     ``erc.supply_short`` findings (issue #861), driven by the optional
     ``nets`` spec section.
 
-    A declared net matching zero, or more than one, disconnected electrical
-    island is ``erc.unconnected_net`` (nothing carries that name at all, or
-    the intended net is split into pieces that never actually touch).
+    A declared net matching zero, or a number other than the count its
+    entry declares (``nets[].islands``, issue #2400 -- default 1), of
+    disconnected electrical islands is ``erc.unconnected_net`` (nothing
+    carries that name at all, or the intended net is split into a
+    different number of pieces than the spec says to expect -- including
+    the pre-#2400 "more than one" case, which is simply the default
+    declaration of 1).
 
     A multi-island finding carries **where** each island is (issue #2194):
     an ``islands[]`` entry per island in the same ``cluster_id`` order
@@ -2035,6 +2070,15 @@ def _net_connectivity_findings(
     for decl in nets_decl:
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
+        # The expected island count is the declared one (issue #2400;
+        # ``nets[].islands``, default 1 -- the pre-#2400 "one label string
+        # == one electrical net" model). Grading the count against the
+        # declaration instead of a hardcoded 1 is what makes this finding
+        # falsifiable for a legitimately multi-domain stream: declared N
+        # with N actual islands is clean, while declared N with any other
+        # actual count -- including a later fragmentation of one domain --
+        # still fails.
+        expected = decl["islands"]
         if len(matched) == 0:
             findings.append(
                 _finding(
@@ -2046,15 +2090,17 @@ def _net_connectivity_findings(
                     net=decl["name"],
                 )
             )
-        elif len(matched) > 1:
+        elif len(matched) != expected:
             islands = [_island_entry(l2n, layer_index, net) for net in matched]
+            plural = "" if len(matched) == 1 else "s"
+            expected_word = "one" if expected == 1 else str(expected)
             findings.append(
                 _finding(
                     "erc.unconnected_net",
                     (
                         f"declared net {decl['name']!r} resolves to "
-                        f"{len(matched)} disconnected electrical islands "
-                        "(expected exactly one)"
+                        f"{len(matched)} disconnected electrical island{plural} "
+                        f"(expected exactly {expected_word})"
                     ),
                     net=decl["name"],
                     bbox=_union_bbox([island["bbox"] for island in islands]),

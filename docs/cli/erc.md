@@ -249,6 +249,26 @@ use) — matching `klt power`'s own convention.
     classifies a two-net short (see "ERC finding checks" below):
     two shorted `"supply"` nets are `erc.supply_short`; any other
     combination is the more general `erc.multiply_driven_net`.
+  - `islands` (integer ≥ 1, optional, default `1`, issue #2400) — the
+    number of disconnected electrical islands this name is *expected* to
+    resolve to; `erc.unconnected_net` grades the actual island count
+    against this declared count instead of an implicit 1. Declare it when
+    one label string legitimately names more than one net — the ordinary
+    case being a hard macro or standard-cell library instantiated on two
+    or more deliberately separate supply domains (two independently-biased
+    islands, a power-gated block beside an always-on one), so the
+    library's own PG pin name (`VPWR`, `VDD`, …) correctly names N
+    distinct nets in the layout. Undeclared (or `1`) is the previous
+    model — one label string ⇒ one electrical net — and a name resolving
+    to more than one island is reported as a finding, unchanged. The
+    declaration is falsifiable, not silencing: declared N with N actual
+    islands is clean, but declared N with *any other* actual count
+    (a domain that later fragments, or merges away) still reports
+    `erc.unconnected_net`. A mismatch finding's `islands[]` payload and
+    the `erc.supply_short` / `erc.multiply_driven_net` cross-name short
+    detection are unaffected by the declaration — a declared-multi-domain
+    name still shorts against any other name that lands on one of its
+    islands.
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
     `erc.supply_short` are never computed.
 
@@ -498,7 +518,10 @@ tiers.md`'s item 11). The finding's `islands[]` array (issue #2194, see
 what makes that triage possible per island rather than per net: one
 finding can cover a genuine floating-supply defect *and* a well-continuity
 false positive on the same net, and only the per-island boxes let you tell
-which is which.
+which is which. Once that triage has confirmed the islands are the
+*intended* partition (or a verified well-continuity artifact the spec
+cannot see), the entry can declare the count — `nets[].islands`, issue
+#2400 — so the name grades against it instead of an implicit 1.
 
 **That cross-check is not automatically an independent confirmation,
 either.** At least one widely used open-foundry LVS deck's connectivity
@@ -1142,9 +1165,17 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   signature of an uncontacted/floating gate. Computed directly from
   `gates[]`; needs no `nets`/`ties` spec section.
 - **`erc.unconnected_net`** — a declared `nets[]` entry that matches zero,
-  or more than one, disconnected electrical island. Zero matches means
-  nothing in the layout carries that net's label at all; more than one
-  means the intended net is split into pieces that never actually touch.
+  or a number of disconnected electrical islands other than the count its
+  entry declares (`nets[].islands`, issue #2400 — default 1, so
+  undeclared means "expected exactly one", the pre-#2400 model). Zero
+  matches means nothing in the layout carries that net's label at all;
+  a count mismatch means the intended net is split into a different
+  number of pieces than the spec says to expect — accidental
+  fragmentation under a default declaration, or a declared multi-domain
+  name (the ordinary case: one library PG pin name instantiated on N
+  deliberately separate supply domains) whose domains have since
+  fragmented further or merged. Either way the finding is falsifiable:
+  a declared count that matches the actual islands reports nothing.
   A multi-island finding says **where** each island is, not just how many
   there are (issue #2194): `islands[]` carries one
   `{"bbox", "layer", "shape_count"}` entry per island, and the finding's
@@ -1226,6 +1257,15 @@ Because each island is located, two reports of the same net can be diffed:
 going from 3 islands to 2 now says *which* island was resolved, instead of
 leaving "the fix worked" and "the fix broke something else and merged a
 different pair" indistinguishable.
+
+When the entry declares `nets[].islands` (issue #2400), the same payload
+appears on a declared-count mismatch — the "expected exactly" phrase in
+the description carries the declared count (e.g.
+`"… resolves to 3 disconnected electrical islands (expected exactly 2)"`
+for a declared 2 whose layout carries 3), and a declared 2 that later
+*merges* to 1 reports `"… resolves to 1 disconnected electrical island
+(expected exactly 2)"` with `islands[]` locating the survivor. A declared
+count that matches the actual islands produces no finding at all.
 
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 
