@@ -4395,6 +4395,99 @@ def test_device_body_that_misses_its_declared_role_warns_on_stderr(tmp_path, cap
     assert "'poly_resistor'" not in err
 
 
+# --- stackup label_layer diagnostics (issue #2401) ---------------------------
+
+
+def test_empty_label_layer_warns_on_stderr(tmp_path, capsys):
+    """A `stackup` entry whose declared `label_layer` carries zero text
+    objects in the analysed top cell is almost always a spec typo (the
+    wrong layer/datatype), but the report renders it exactly like a real
+    supply defect -- `null` gate nets plus `erc.unconnected_net` on every
+    declared net (issue #2401). One line on stderr names it, mirroring the
+    #2226 device-marker warning precedent; JSON goes to stdout only, so a
+    piped report stays uncorrupted."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    # No text is ever written to `label` (3/5): the entry's declared label
+    # layer is genuinely empty of text in this layout.
+
+    gds = tmp_path / "empty-label.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "empty-label.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+    # The silent symptom the issue describes: the declared net matched zero
+    # islands, because its label layer carried no text to match from.
+    assert any(
+        f["rule"] == "erc.unconnected_net" and f["net"] == "VDD"
+        for f in report["erc_findings"]
+    )
+    err = capsys.readouterr().err
+
+    assert "klt erc: warning:" in err
+    assert "'li1'" in err
+    assert "3/5" in err
+    assert "no text" in err
+    # Once per affected entry, not once per extraction.
+    assert err.count("klt erc: warning:") == 1
+
+
+def test_empty_label_layer_warns_once_even_with_ties(tmp_path, capsys):
+    """The tie graph re-extracts the same `stackup` (issue #2169's second
+    `_extract_connectivity` pass); the warning is per affected *entry*, not
+    per extraction, so a ties-declaring spec still sees it exactly once
+    (issue #2401)."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+
+    gds = tmp_path / "ties-empty-label.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "ties-empty-label.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[{"name": "VDD", "kind": "supply"}],
+            ties=[
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_boxes": [[1.0, 2.0, 3.0, 4.0]],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        ),
+    )
+
+    run_erc(str(gds), str(spec))
+    err = capsys.readouterr().err
+
+    assert err.count("klt erc: warning:") == 1
+
+
+def test_populated_label_layer_does_not_warn_on_stderr(tmp_path, capsys):
+    """The warning fires only when the declared label layer is genuinely
+    empty of text in this layout: the same fixture with one VDD label on
+    3/5 stays silent, so a normally matching declaration is not penalized
+    (issue #2401)."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+    top.shapes(label).insert(kdb.Text("VDD", kdb.Trans(_um(5.5), _um(0.5))))
+
+    gds = tmp_path / "labelled.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "labelled.erc.json"
+    _write_spec(spec, _nets_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+    assert not any(
+        f["rule"] == "erc.unconnected_net" and f["net"] == "VDD"
+        for f in report["erc_findings"]
+    )
+    assert "warning" not in capsys.readouterr().err
+
+
 def test_devices_omitted_reports_an_empty_provenance_list(tmp_path):
     report = _run_resistor_divider(tmp_path)
 

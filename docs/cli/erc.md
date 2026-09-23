@@ -166,6 +166,17 @@ The spec file is a JSON object:
     "'Per gate' means..." above) — populates `gates[].net` when a gate's
     net happens to carry a label on this layer; a `klt erc` run with no
     `label_layer` anywhere still reports every gate, just with `net: null`.
+    A `label_layer` that *is* declared but carries **no text anywhere in
+    the analysed top cell** additionally prints a one-line warning on
+    stderr (issue #2401): several PDKs draw pin polygons and pin text on
+    adjacent datatypes of the same layer number (`.pin` vs `.label`), so a
+    mis-transcribed layer/datatype is easy to hit and otherwise reports
+    exactly like a real supply defect — every gate on that role reads
+    `net: null` and every `nets[]` entry matched through it resolves zero
+    islands (`erc.unconnected_net`). The warning is advisory only: a spec
+    shared across fixtures where one legitimately doesn't use a given role
+    still runs clean, exactly as before (JSON goes to stdout only, so
+    stderr output cannot corrupt a piped report).
   - `active_layer` (string, `"<layer>/<datatype>"`, **optional, `stackup[0]`
     only**, issue #1979) — the diffusion/active layer. When supplied, gate
     identification and the antenna-ratio denominator (`gates[].gate_area_um2`)
