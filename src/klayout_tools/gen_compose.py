@@ -526,6 +526,24 @@ def resolve_bbox_target_offsets(
     }
 
 
+def _resolve_explicit_placement_offsets(
+    order: list[str],
+    bboxes_um: dict[str, dict[str, float]],
+    origins_um: dict[str, dict[str, float]] | None,
+    target_bbox_um: dict[str, dict[str, float]] | None,
+) -> dict[str, dict[str, float]]:
+    """Dispatch ``strategy: "explicit"``'s offset resolution to whichever
+    placement source was declared.
+
+    Exactly one of ``origins_um``/``target_bbox_um`` is non-``None`` here --
+    :func:`_parse_placement`'s exactly-one-of check guarantees it (#2410).
+    """
+    if origins_um is not None:
+        return resolve_explicit_offsets(order, origins_um)
+    assert target_bbox_um is not None
+    return resolve_bbox_target_offsets(order, bboxes_um, target_bbox_um)
+
+
 def array_placement_bbox_um(
     bbox_um: dict[str, float], array_params: dict[str, Any]
 ) -> dict[str, float]:
@@ -1504,6 +1522,44 @@ def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_explicit_placement_source(has_origins: bool, has_targets: bool) -> None:
+    """Raise unless exactly one of ``origins_um``/``target_bbox_um`` is
+    declared under ``strategy: "explicit"``.
+
+    The two forms are mutually exclusive per-block placement sources
+    (#2410); the "neither declared" case is left to
+    :func:`_parse_explicit_xy_map`, which rejects a missing ``origins_um``
+    the same way it rejects any other malformed value.
+    """
+    if has_origins and has_targets:
+        raise GenComposeError(
+            "request.placement.origins_um and "
+            "request.placement.target_bbox_um are mutually exclusive "
+            "under strategy 'explicit' -- declare exactly one (a raw "
+            "{x, y} translation per block, or a {x, y} bbox-corner "
+            "target per block, #2410)"
+        )
+
+
+def _parse_explicit_placement_source(
+    raw_placement: dict[str, Any], order: list[str], *, has_targets: bool
+) -> tuple[dict[str, dict[str, float]] | None, dict[str, dict[str, float]] | None]:
+    """Parse whichever of ``origins_um``/``target_bbox_um`` was declared
+    under ``strategy: "explicit"``, returning ``(origins_um,
+    target_bbox_um)`` with the other left ``None``.
+
+    Caller (:func:`_parse_placement`) has already validated that exactly one
+    source is declared (:func:`_validate_explicit_placement_source`, #2410).
+    """
+    if has_targets:
+        target_bbox_um = _parse_explicit_targets(
+            raw_placement.get("target_bbox_um"), order
+        )
+        return None, target_bbox_um
+    origins_um = _parse_explicit_origins(raw_placement.get("origins_um"), order)
+    return origins_um, None
+
+
 def _parse_placement(
     raw_placement: Any, block_ids: set[str]
 ) -> tuple[
@@ -1566,21 +1622,11 @@ def _parse_placement(
     if strategy == "explicit":
         has_origins = "origins_um" in raw_placement
         has_targets = "target_bbox_um" in raw_placement
-        if has_origins and has_targets:
-            raise GenComposeError(
-                "request.placement.origins_um and "
-                "request.placement.target_bbox_um are mutually exclusive "
-                "under strategy 'explicit' -- declare exactly one (a raw "
-                "{x, y} translation per block, or a {x, y} bbox-corner "
-                "target per block, #2410)"
-            )
-        if has_targets:
-            target_bbox_um = _parse_explicit_targets(
-                raw_placement.get("target_bbox_um"), order
-            )
-            return strategy, order, 0.0, None, target_bbox_um, None
-        origins_um = _parse_explicit_origins(raw_placement.get("origins_um"), order)
-        return strategy, order, 0.0, origins_um, None, None
+        _validate_explicit_placement_source(has_origins, has_targets)
+        origins_um, target_bbox_um = _parse_explicit_placement_source(
+            raw_placement, order, has_targets=has_targets
+        )
+        return strategy, order, 0.0, origins_um, target_bbox_um, None
 
     if strategy == "array":
         array_params = _parse_array_placement(raw_placement)
@@ -2426,13 +2472,9 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # as a separate offsets_um entry (#1053; see the module docstring).
         offsets_um = {order[0]: dict(array_params["origin_um"])}
     else:
-        # Exactly one of origins_um / target_bbox_um is non-None here --
-        # _parse_placement's exactly-one-of check guarantees it (#2410).
-        if origins_um is not None:
-            offsets_um = resolve_explicit_offsets(order, origins_um)
-        else:
-            assert target_bbox_um is not None
-            offsets_um = resolve_bbox_target_offsets(order, bboxes_um, target_bbox_um)
+        offsets_um = _resolve_explicit_placement_offsets(
+            order, bboxes_um, origins_um, target_bbox_um
+        )
 
     if strategy == "array":
         assert array_params is not None
