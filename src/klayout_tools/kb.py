@@ -20,11 +20,17 @@ import json
 import operator
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
-
-import jsonschema
+from typing import TYPE_CHECKING, Any
 
 from .sim import SimError, run_sim
+
+if TYPE_CHECKING:
+    # ``jsonschema`` is deliberately NOT imported at runtime here -- see
+    # :func:`_import_jsonschema`. ``cli/parser.py`` imports every verb module
+    # at startup, so a module-scope import would make every ``klt``
+    # invocation depend on ``jsonschema``'s native ``rpds-py`` extension
+    # loading (#2395). Annotation-only use is fine.
+    import jsonschema
 
 #: <repo root>/kb — this file lives at <repo root>/src/klayout_tools/kb.py.
 DEFAULT_KB_ROOT: Path = Path(__file__).resolve().parent.parent.parent / "kb"
@@ -510,6 +516,26 @@ def _entry_errors(
     return entry, errors
 
 
+def _import_jsonschema() -> Any:
+    """Import ``jsonschema`` at point of use (only ``klt kb validate`` needs it).
+
+    Deferred so a broken ``jsonschema`` install -- e.g. ``rpds-py``'s compiled
+    extension failing macOS code-signature validation on arm64 / Python 3.14
+    (#2395) -- only fails ``kb validate`` rather than every ``klt`` command.
+    That failure is surfaced as a :class:`KbError` (an environment problem)
+    so the CLI reports it through the shared JSON error envelope, naming the
+    dependency and the underlying cause, instead of a raw traceback.
+    """
+    try:
+        import jsonschema
+    except ImportError as exc:
+        raise KbError(
+            "kb validate requires the 'jsonschema' package, which failed to "
+            f"import: {exc}"
+        ) from exc
+    return jsonschema
+
+
 def validate_entries(
     root: Path | None = None,
     repo_root: Path | None = None,
@@ -545,6 +571,7 @@ def validate_entries(
     """
     root = root if root is not None else DEFAULT_KB_ROOT
     schema = json.loads(_schema_path(root).read_text())
+    jsonschema = _import_jsonschema()
     validator_cls = jsonschema.validators.validator_for(schema)
     validator_cls.check_schema(schema)
     validator = validator_cls(schema)
