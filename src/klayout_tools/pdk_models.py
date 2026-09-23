@@ -568,6 +568,61 @@ def _unbound_resistor_card(
     )
 
 
+#: Terminal/parameter name shape :func:`~klayout_tools.extract
+#: .mom_capacitor_device_class` registers for every MoM-capacitor device
+#: class (``cap_cmomi``/``cap_cmomf``) -- two equivalent terminals named
+#: ``A``/``B``, geometry-only parameters named ``W``/``L`` (deliberately no
+#: ``C``/``R`` value parameter -- the real device's capacitance is supplied
+#: by the model library, not computed here), on a non-empty class name that
+#: already equals the real upstream ``.subckt`` name. Verified unique among
+#: KLayout's own built-in ``kdb.DeviceClass*`` shapes (``DeviceClassResistor``
+#: has terminals ``A``/``B`` too, but a superset of parameter names
+#: including ``R``; ``DeviceClassInductor`` has terminals ``A``/``B`` but
+#: only parameter ``L``) -- confirmed against the installed ``klayout.db``
+#: module, issue #2355. ``_write_mom_capacitor_card_with_geometry`` below
+#: matches a device class against this shape structurally rather than via
+#: ``isinstance`` against a KLayout built-in class, because there is none
+#: for this shape (see that method's own docstring).
+_MOM_CAPACITOR_TERMINAL_NAMES = frozenset({"A", "B"})
+_MOM_CAPACITOR_PARAMETER_NAMES = frozenset({"W", "L"})
+
+
+def _unbound_mom_capacitor_card(
+    name: str,
+    pins: str,
+    class_name: str,
+    width_um: float,
+    length_um: float,
+) -> str:
+    """The plain-element ``X`` card for one *unbound* MoM-capacitor device
+    (``cap_cmomi``/``cap_cmomf``), with its measured ``W``/``L`` geometry
+    carried in the same unit-suffix style :func:`_unbound_resistor_card`
+    uses (issue #2355).
+
+    KLayout's own default primitive writer emits this device's generic,
+    two-terminal, no-computed-value ``kdb.DeviceClass()`` shape (see
+    ``mom_capacitor_device_class`` in ``extract.py``) as a
+    ``PARAMS:``-keyword card carrying bare-micron numbers -- e.g.
+    ``XD_$1 a b cap_cmomi PARAMS: W=40 L=40`` -- which a SPICE parser under
+    ``.option scale=1`` reads as 40 *metres*, not 40 microns (a ~1e6x
+    oversize that silently models a near-short capacitor in AC analysis).
+    This rewrite keeps the same ``X``-prefixed subcircuit-call shape (the
+    real upstream ``.subckt cap_cmomi ... w=... l=...`` interface needs
+    keyword parameters to bind onto, and this device's own trailing
+    class-name token already *is* that real subckt name -- unlike
+    :func:`_write_bare_capacitor_card`'s unbound-capacitor rewrite, nothing
+    here strips it) but drops the non-standard ``PARAMS:`` keyword and
+    formats ``W=``/``L=`` with the same unit-suffix style
+    :data:`GEOMETRY_STYLE_UNIT_SUFFIX` produces for this family's resistor
+    cards, so both geometry parameters parse as microns regardless of the
+    caller's ``.option scale``.
+    """
+    return (
+        f"X{name} {pins} {class_name} "
+        f"W={_format_um(width_um)} L={_format_um(length_um)}"
+    )
+
+
 class ModelBindingError(Exception):
     """Raised when a resolved PDK variant has no curated MOS device-model
     table entry for the extraction deck in use.
@@ -1619,6 +1674,60 @@ def create_model_binding_delegate(
             )
             return True
 
+        def _write_mom_capacitor_card_with_geometry(self, device: kdb.Device) -> bool:
+            """Write an unbound MoM-capacitor device's ``X`` card in the
+            issue #2355 ``PARAMS:``-free, unit-suffixed form, and report
+            ``True``; report ``False`` (writing nothing) for any device this
+            rewrite does not own.
+
+            Matches the device class structurally -- non-empty name,
+            terminal names exactly ``{"A", "B"}``, parameter names exactly
+            ``{"W", "L"}`` -- rather than by ``isinstance`` against a
+            KLayout built-in class, because ``mom_capacitor_device_class``
+            (``extract.py``) registers a plain ``kdb.DeviceClass()``, not a
+            ``kdb.DeviceClassCapacitor``/``DeviceClassResistor`` subclass;
+            there is no built-in class to ``isinstance``-check against. See
+            :data:`_MOM_CAPACITOR_TERMINAL_NAMES`/
+            :data:`_MOM_CAPACITOR_PARAMETER_NAMES` and
+            :func:`_unbound_mom_capacitor_card`'s own docstrings for the
+            full rationale and uniqueness verification.
+            """
+            device_class = device.device_class()
+            if not device_class.name:
+                return False
+
+            terminal_defs = list(device_class.terminal_definitions())
+            terminal_names = {terminal.name for terminal in terminal_defs}
+            if terminal_names != _MOM_CAPACITOR_TERMINAL_NAMES:
+                return False
+
+            parameter_names = {
+                param.name for param in device_class.parameter_definitions()
+            }
+            if parameter_names != _MOM_CAPACITOR_PARAMETER_NAMES:
+                return False
+
+            terminal_ids = [terminal.id() for terminal in terminal_defs]
+            nets = [device.net_for_terminal(tid) for tid in terminal_ids]
+            if not terminal_ids or any(net is None for net in nets):
+                # A dangling terminal is not a shape this rewrite models;
+                # let KLayout's own writer decide what to do with it.
+                return False
+
+            width_um = self._device_param(device, "W")
+            length_um = self._device_param(device, "L")
+            if width_um is None or length_um is None:
+                return False
+
+            name = self.format_name(device.expanded_name())
+            pins = " ".join(self.net_to_string(net) for net in nets)
+            self.emit_line(
+                _unbound_mom_capacitor_card(
+                    name, pins, device_class.name, width_um, length_um
+                )
+            )
+            return True
+
         def write_device(self, device: kdb.Device) -> None:
             device_class = device.device_class()
             binding = self._bindings.get(device_class.name)
@@ -1636,6 +1745,15 @@ def create_model_binding_delegate(
                 # case above) but gains the `L=`/`W=` geometry suffix
                 # KLayout's own default writer drops.
                 if self._write_resistor_card_with_geometry(device):
+                    return
+                # Issue #2355: an unbound MoM-capacitor class
+                # (`cap_cmomi`/`cap_cmomf`) -- a plain, generic
+                # `kdb.DeviceClass()` with no computed value, matched
+                # structurally rather than by `isinstance` (see
+                # `_write_mom_capacitor_card_with_geometry`'s docstring) --
+                # gets a `PARAMS:`-free, unit-suffixed `X` card instead of
+                # KLayout's default bare-micron `PARAMS:` one.
+                if self._write_mom_capacitor_card_with_geometry(device):
                     return
                 # Every other unbound class still defers to KLayout's
                 # default primitive-card writer.
