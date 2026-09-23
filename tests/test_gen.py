@@ -8512,7 +8512,41 @@ def test_gf180mcu_mos_array_voltage_flavor_marker_grows_past_well_margin(
 # gf180mcu's `Comp` mask (22/0) with `active` (no distinct tap layer, see
 # `_PDK_ROLE_LAYERS`'s own `"tap"` entry) -- so it needs `DF.12` ("COMP not
 # covered by Nplus or Pplus is forbidden") implant coverage too.
+#
+# Issue #2369 adds the *extension* half of that story: `DF.12` is a coverage
+# rule with no distance in it, so #1580 satisfied it with an implant drawn
+# exactly coincident with the tap ring -- which then violates `NP.5b`/`PP.5b`
+# ("Extension beyond COMP", 0.16um) on every edge of the band once those two
+# rules are checked. The implant now tracks the ring with
+# `_ring_implant_margin_um("gf180mcu")` of extension past every edge (see
+# `gen._insert_implant_ring`), so these tests assert *coverage plus extension*
+# where they used to assert an exact `^` match.
 # --------------------------------------------------------------------------- #
+
+
+def _assert_ring_implant_tracks_comp(active_region, implant_region, dbu):
+    """The shared #2369 shape check for a tap/collector-ring implant: it
+    covers every `Comp` shape the ring draws (`DF.12`), extends exactly
+    `_ring_implant_margin_um` past that band's own bounding box on all four
+    sides (`NP.5b`/`PP.5b`), and is still a *ring* -- it never blankets the
+    protected area the ring encloses, the invariant #1580's own comments call
+    out (a blanket would re-dope whatever a caller later places inside)."""
+    import klayout.db as kdb
+
+    margin_dbu = int(round(gen._ring_implant_margin_um("gf180mcu") / dbu))
+    assert margin_dbu > 0
+    # DF.12: every drawn `Comp` shape is implanted, exactly as before #2369.
+    assert (active_region - implant_region).is_empty()
+    # NP.5b/PP.5b: and the implant reaches `margin_dbu` past it on every side.
+    assert implant_region.bbox() == active_region.bbox().enlarged(
+        margin_dbu, margin_dbu
+    )
+    # Still a ring: nothing drawn over the protected area's own centre.
+    centre = active_region.bbox().center()
+    assert (
+        implant_region
+        & kdb.Region(kdb.Box(centre.x, centre.y, centre.x + 1, centre.y + 1))
+    ).is_empty()
 
 
 def test_gf180mcu_guard_ring_default_tap_ring_covered_by_well_tie_implant(
@@ -8521,8 +8555,8 @@ def test_gf180mcu_guard_ring_default_tap_ring_covered_by_well_tie_implant(
     """`add_well` defaults to `True`: the ring is enclosed in an Nwell tie,
     so its own `Comp` shape must be covered by the *same* `"well_tap_implant"`
     role (`Nplus`, 32/0) `well_island` already reuses for its own ring
-    (issue #1421) -- exactly coincident, not a blanket over the enclosed
-    area."""
+    (issue #1421) -- tracking the ring with `NP.5b`'s own extension beyond it
+    (issue #2369), not a blanket over the enclosed area."""
     import klayout.db as kdb
 
     output = tmp_path / "guard_ring_gf180mcu_well_tie_implant.gds"
@@ -8548,8 +8582,7 @@ def test_gf180mcu_guard_ring_default_tap_ring_covered_by_well_tie_implant(
         for i in layout.layer_indexes()
     }
     assert not active_region.is_empty()
-    # Exact match -- the ring's own Comp shape and nothing else.
-    assert (active_region ^ nplus_region).is_empty()
+    _assert_ring_implant_tracks_comp(active_region, nplus_region, layout.dbu)
     assert (31, 0) not in present  # no Pplus drawn for a well-tied ring
 
     drc_report = run_drc(str(output), "gf180mcu")
@@ -8589,7 +8622,7 @@ def test_gf180mcu_guard_ring_no_well_tap_ring_covered_by_pplus_implant(
         for i in layout.layer_indexes()
     }
     assert not active_region.is_empty()
-    assert (active_region ^ pplus_region).is_empty()
+    _assert_ring_implant_tracks_comp(active_region, pplus_region, layout.dbu)
     assert (32, 0) not in present  # no Nplus drawn for a substrate-tied ring
     assert (21, 0) not in present  # no Nwell drawn either (add_well=False)
 
@@ -8604,7 +8637,15 @@ def test_gf180mcu_guard_ring_gap_implant_ring_matches_gap_cut_tap_ring(
     implant ring too -- the implant tracks the same `outer_box_um`/
     `inner_box_um`/`gap_box_um` triple as the tap ring itself, never left as
     a full closed ring that would overlap a routing opening meant to land
-    there."""
+    there.
+
+    Since issue #2369 the implant's own opening is that triple *inset* by
+    `_ring_implant_margin_um` at each end along the side's axis, because the
+    tap ring's two cut faces are ordinary `Comp` edges the implant has to
+    extend `NP.5b`'s 0.16um past exactly like every other edge of the band.
+    So the opening is still there (the implant is still C-shaped, not a
+    closed annulus) and is exactly `2 * margin` shorter than the tap ring's.
+    """
     import klayout.db as kdb
 
     output = tmp_path / "guard_ring_gf180mcu_gap_implant.gds"
@@ -8630,7 +8671,28 @@ def test_gf180mcu_guard_ring_gap_implant_ring_matches_gap_cut_tap_ring(
         layout.top_cell().begin_shapes_rec(layout.layer(32, 0))
     ).merged()
     assert active_region.count() == 1  # still one connected C-shaped polygon
-    assert (active_region ^ nplus_region).is_empty()
+    _assert_ring_implant_tracks_comp(active_region, nplus_region, layout.dbu)
+    # The implant is C-shaped too, not a closed annulus: its opening is still
+    # cut, so its interior is open to the outside (no enclosed hole).
+    assert nplus_region.count() == 1
+    assert nplus_region.holes().count() == 0
+
+    # ... and that opening is `2 * margin` shorter than the tap ring's, the
+    # extension the implant owes the ring's two cut faces.
+    def _east_opening_dbu(region):
+        """Length of the stretch of ``region``'s own east edge that carries no
+        geometry -- i.e. the ``ring_gap_side="E"`` opening, measured as the
+        uncovered part of a 1-dbu-wide strip down that edge."""
+        bbox = region.bbox()
+        strip = kdb.Box(bbox.right - 1, bbox.bottom, bbox.right, bbox.top)
+        return bbox.height() - (region & kdb.Region(strip)).area()
+
+    margin_dbu = int(round(gen._ring_implant_margin_um("gf180mcu") / layout.dbu))
+    assert _east_opening_dbu(active_region) > 0
+    assert (
+        _east_opening_dbu(nplus_region)
+        == _east_opening_dbu(active_region) - 2 * margin_dbu
+    )
 
 
 @pytest.mark.parametrize(

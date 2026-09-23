@@ -15,6 +15,8 @@
       "21/0",
       "22/0",
       "30/0",
+      "31/0",
+      "32/0",
       "33/0",
       "34/0",
       "35/0",
@@ -34,12 +36,11 @@
     "layers_checked": [
       "22/0",
       "30/0",
+      "32/0",
       "33/0",
       "34/0"
     ],
-    "layers_in_stream_without_rules": [
-      "32/0"
-    ],
+    "layers_in_stream_without_rules": [],
     "rules_checked": [
       "comp.enclosing.contact.1",
       "comp.space.1",
@@ -49,6 +50,10 @@
       "metal1.enclosing.contact.1",
       "metal1.space.1",
       "metal1.width.1",
+      "nplus.enclosing.comp.1",
+      "nplus.enclosing.poly2.1",
+      "nplus.space.1",
+      "nplus.width.1",
       "poly2.enclosing.contact.1",
       "poly2.space.1",
       "poly2.width.1"
@@ -78,9 +83,15 @@
       "mim.enclosing.fusetop.1",
       "mim.enclosing.via4.1",
       "mim.space.1",
+      "nplus.space.pcomp.1",
       "nwell.enclosing.comp.1",
       "nwell.space.1",
       "pad.enclosing.metal5.1",
+      "pplus.enclosing.comp.1",
+      "pplus.enclosing.poly2.1",
+      "pplus.space.1",
+      "pplus.space.ncomp.1",
+      "pplus.width.1",
       "via1.space.1",
       "via1.width.1",
       "via2.space.1",
@@ -101,6 +112,8 @@
       "7.4 Nwell",
       "7.5 Comp",
       "7.7 Poly2",
+      "7.8 Nplus",
+      "7.9 Pplus",
       "9.1 Bond Pad"
     ],
     "schema_version": 1,
@@ -114,6 +127,10 @@
       "metal1.enclosing.contact.1",
       "metal1.space.1",
       "metal1.width.1",
+      "nplus.enclosing.comp.1",
+      "nplus.enclosing.poly2.1",
+      "nplus.space.1",
+      "nplus.width.1",
       "poly2.enclosing.contact.1",
       "poly2.space.1",
       "poly2.width.1"
@@ -217,6 +234,10 @@
         "reason": "no_applicable_geometry"
       },
       {
+        "id": "nplus.space.pcomp.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
         "id": "nwell.enclosing.comp.1",
         "reason": "no_applicable_geometry"
       },
@@ -226,6 +247,26 @@
       },
       {
         "id": "pad.enclosing.metal5.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "pplus.enclosing.comp.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "pplus.enclosing.poly2.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "pplus.space.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "pplus.space.ncomp.1",
+        "reason": "no_applicable_geometry"
+      },
+      {
+        "id": "pplus.width.1",
         "reason": "no_applicable_geometry"
       },
       {

@@ -32,6 +32,7 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         WELL_ENCLOSURE_MARGIN_UM,
         _insert_boxes,
+        _insert_implant_ring,
         _insert_ring,
         _ring_layout,
         _well_box_um,
@@ -146,8 +147,9 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
-                "Tap-ring implant drawing layer, exactly coincident with the "
-                "tap ring (only used when ring_implant_present)",
+                "Tap-ring implant drawing layer, tracking the tap ring's own "
+                "band with ring_implant_margin_um of extension beyond every "
+                "edge of it (only used when ring_implant_present)",
                 default=kdb.LayerInfo(0, 0),
             )
             self.param(
@@ -156,6 +158,14 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the tap ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
+            )
+            self.param(
+                "ring_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the tap-ring implant extends beyond "
+                "the tap ring's own band on every edge (only used when "
+                "ring_implant_present)",
+                default=0.0,
             )
 
         def display_text_impl(self) -> str:
@@ -200,17 +210,22 @@ def _build_guard_ring_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 well_box = _well_box_um(info, WELL_ENCLOSURE_MARGIN_UM)
                 _insert_boxes(self.cell, li_well, dbu, [well_box])
             if self.ring_implant_present:
-                # Exactly coincident with the tap ring -- never a blanket
-                # over the enclosed area, which would re-dope whatever a
-                # caller later places inside the ring (issue #1580, mirrors
-                # `well_island`'s own `well_tap_implant` ring precedent).
-                _insert_ring(
+                # Tracks the tap ring, extended `ring_implant_margin_um`
+                # past every one of its edges (issue #2369's NP.5b/PP.5b
+                # extension-beyond-COMP fix to #1580's originally coincident
+                # implant) -- still a ring, never a blanket over the
+                # enclosed area, which would re-dope whatever a caller later
+                # places inside it (mirrors `well_island`'s own
+                # `well_tap_implant` ring precedent).
+                _insert_implant_ring(
                     self.cell,
                     self.layout.layer(self.ring_implant_layer),
                     dbu,
                     info["outer_box_um"],
                     info["inner_box_um"],
                     gap_box,
+                    info["gap"]["side"] if info["gap"] is not None else None,
+                    self.ring_implant_margin_um,
                 )
 
     return {"guard_ring": _GuardRingPCell}

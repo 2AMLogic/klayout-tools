@@ -35,6 +35,7 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         GUARD_RING_DEFAULT_PADDING_UM,
         WELL_ENCLOSURE_MARGIN_UM,
         _insert_boxes,
+        _insert_implant_ring,
         _insert_ring,
         _mos_array_layout,
         _shift_box,
@@ -328,8 +329,9 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
-                "Guard-ring implant drawing layer, exactly coincident with "
-                "the tap ring (only used when add_guard_ring and "
+                "Guard-ring implant drawing layer, tracking the tap ring's "
+                "own band with ring_implant_margin_um of extension beyond "
+                "every edge of it (only used when add_guard_ring and "
                 "ring_implant_present)",
                 default=kdb.LayerInfo(0, 0),
             )
@@ -339,6 +341,14 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the guard ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
+            )
+            self.param(
+                "ring_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the ring implant extends beyond the "
+                "ring's own band on every edge (only used when "
+                "ring_implant_present)",
+                default=0.0,
             )
             self.param(
                 "interior_channel_um",
@@ -517,13 +527,15 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     # Exactly coincident with the tap ring (issue #1580,
                     # mirrors `well_island`'s own `well_tap_implant` ring
                     # precedent) -- never a blanket over the enclosed array.
-                    _insert_ring(
+                    _insert_implant_ring(
                         self.cell,
                         self.layout.layer(self.ring_implant_layer),
                         dbu,
                         _shift_box(ring["outer_box_um"], ox, oy),
                         _shift_box(ring["inner_box_um"], ox, oy),
                         gap_box,
+                        ring["gap"]["side"] if ring["gap"] is not None else None,
+                        self.ring_implant_margin_um,
                     )
 
             # Medium-voltage/thick-oxide device-class marker (issue #1054):

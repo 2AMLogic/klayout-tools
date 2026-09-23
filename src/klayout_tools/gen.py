@@ -262,6 +262,9 @@ from .gen_layer_params import (
     _resolve_expected_device_class as _resolve_expected_device_class,
 )
 from .gen_layer_params import (
+    _ring_implant_margin_um as _ring_implant_margin_um,
+)
+from .gen_layer_params import (
     _ring_tap_implant_layer as _ring_tap_implant_layer,
 )
 from .gen_layer_params import (
@@ -380,6 +383,12 @@ _HIDDEN_PARAMS = {
     # request schema. See :func:`_ring_tap_implant_layer`.
     "ring_implant_layer",
     "ring_implant_present",
+    # How far that ring implant extends past the ring's own `Comp` band
+    # (issue #2369) -- the ring-shaped counterpart of `sd_implant_margin_um`
+    # above, harness-computed from the resolved PDK family the same way.
+    # Shared verbatim by `well_island`'s own `well_tap_implant_*` ring
+    # (issue #1421), which draws the same implant over the same `Comp` mask.
+    "ring_implant_margin_um",
     # `res_array`'s own metal-layer-resistor geometry floors (issue #1639),
     # harness-computed from the resolved PDK family/`params.metal_level`
     # exactly like `cap_bottom_plate_margin_min_um`/friends above -- see
@@ -2474,6 +2483,110 @@ def _insert_ring(
     if gap_box_um is not None:
         ring = ring - kdb.Region(_to_box(gap_box_um))
     cell.shapes(layer_index).insert(ring)
+
+
+def _grow_box_um(
+    box_um: tuple[float, float, float, float], margin_um: float
+) -> tuple[float, float, float, float]:
+    """``box_um`` grown by ``margin_um`` on all four sides (negative shrinks)."""
+    x0, y0, x1, y1 = box_um
+    return (x0 - margin_um, y0 - margin_um, x1 + margin_um, y1 + margin_um)
+
+
+def _implant_gap_box_um(
+    gap_box_um: tuple[float, float, float, float],
+    gap_side: str,
+    margin_um: float,
+) -> tuple[float, float, float, float] | None:
+    """The opening cut through an *implant* ring (:func:`_insert_implant_ring`)
+    that corresponds to ``gap_box_um``, the opening cut through the tap ring it
+    covers (issue #2369).
+
+    The tap ring's own cut faces are ordinary ``Comp`` edges, so the implant
+    has to extend ``margin_um`` past them exactly like it does past every other
+    edge of the band -- i.e. the implant's own opening is the tap ring's,
+    *inset* by ``margin_um`` at each end along the side's axis (and widened by
+    ``margin_um`` across the band, so it still cuts cleanly through the wider
+    implant band rather than leaving a hairline bridge at the band's own grown
+    edges).
+
+    Returns ``None`` when the inset closes the opening entirely (a tap-ring gap
+    of ``2 * margin_um`` or less): there is no ``Comp`` under the opening, so an
+    implant that simply runs across it is doping field oxide -- harmless, and
+    the only shape that can satisfy the extension rule on both cut faces at
+    once.
+    """
+    x0, y0, x1, y1 = gap_box_um
+    if gap_side in ("N", "S"):
+        # The opening runs along x; the band it cuts runs along y.
+        nx0, nx1 = x0 + margin_um, x1 - margin_um
+        if nx1 - nx0 <= 0:
+            return None
+        return (nx0, y0 - margin_um, nx1, y1 + margin_um)
+    ny0, ny1 = y0 + margin_um, y1 - margin_um
+    if ny1 - ny0 <= 0:
+        return None
+    return (x0 - margin_um, ny0, x1 + margin_um, ny1)
+
+
+def _insert_implant_ring(
+    cell: Any,
+    layer_index: int,
+    dbu: float,
+    outer_box_um: tuple[float, float, float, float],
+    inner_box_um: tuple[float, float, float, float],
+    gap_box_um: tuple[float, float, float, float] | None = None,
+    gap_side: str | None = None,
+    margin_um: float = 0.0,
+) -> None:
+    """Insert the implant ring covering a tap/collector ring's own ``Comp``
+    band (issue #1580), extended ``margin_um`` beyond every one of that band's
+    edges (issue #2369).
+
+    Before #2369 this was a plain :func:`_insert_ring` call on the *same*
+    ``outer``/``inner``/``gap`` triple as the tap ring, i.e. an implant exactly
+    coincident with the diffusion it dopes and therefore extending zero past
+    it. That satisfies gf180mcu's ``DF.12`` coverage rule (#1580's own target)
+    but violates ``NP.5b``/``PP.5b`` ("Extension beyond COMP", 0.16um) on every
+    edge of the ring -- a real DRC violation, not a deck artefact, which is why
+    the fix is here rather than in the deck. ``margin_um`` is the harness-
+    resolved per-family value (``ring_implant_margin_um``, see
+    :func:`~klayout_tools.gen_layer_params._ring_implant_margin_um`).
+
+    The ring stays a ring: the implant grows *outward* past the outer edge and
+    *inward* past the inner edge by the same ``margin_um``, never becoming a
+    blanket over the enclosed area (which would re-dope whatever a caller later
+    places inside the ring -- the invariant #1580's own comments call out).
+
+    ``margin_um <= 0`` falls through to :func:`_insert_ring` unchanged, so a
+    family that resolves no margin keeps byte-for-byte identical geometry.
+    """
+    if margin_um <= 0:
+        _insert_ring(cell, layer_index, dbu, outer_box_um, inner_box_um, gap_box_um)
+        return
+    implant_gap_um = (
+        _implant_gap_box_um(gap_box_um, gap_side or "E", margin_um)
+        if gap_box_um is not None
+        else None
+    )
+    inner_um = _grow_box_um(inner_box_um, -margin_um)
+    if inner_um[2] <= inner_um[0] or inner_um[3] <= inner_um[1]:
+        # A protected area narrower than `2 * margin_um` leaves no hole to
+        # keep: collapse it to nothing rather than emit a degenerate/negative
+        # box. Nothing can be placed inside an opening that small, so the
+        # "never a blanket over the enclosed area" invariant has nothing left
+        # to protect here.
+        cx = (inner_box_um[0] + inner_box_um[2]) / 2.0
+        cy = (inner_box_um[1] + inner_box_um[3]) / 2.0
+        inner_um = (cx, cy, cx, cy)
+    _insert_ring(
+        cell,
+        layer_index,
+        dbu,
+        _grow_box_um(outer_box_um, margin_um),
+        inner_um,
+        implant_gap_um,
+    )
 
 
 class GenError(Exception):

@@ -32,6 +32,7 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         _bjt_array_layout,
         _insert_boxes,
+        _insert_implant_ring,
         _insert_ring,
         _shift_box,
     )
@@ -152,9 +153,10 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
-                "Collector-ring implant drawing layer, exactly coincident "
-                "with the collector ring (only used when add_collector_ring "
-                "and ring_implant_present)",
+                "Collector-ring implant drawing layer, tracking the "
+                "collector ring's own band with ring_implant_margin_um of "
+                "extension beyond every edge of it (only used when "
+                "add_collector_ring and ring_implant_present)",
                 default=kdb.LayerInfo(0, 0),
             )
             self.param(
@@ -163,6 +165,14 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the collector ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
+            )
+            self.param(
+                "ring_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the ring implant extends beyond the "
+                "ring's own band on every edge (only used when "
+                "ring_implant_present)",
+                default=0.0,
             )
             self.param(
                 "bjt_mark_layer",
@@ -283,13 +293,15 @@ def _build_bjt_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                     # tap-layer shape (issue #1580, mirrors
                     # `well_island`'s own `well_tap_implant` ring precedent)
                     # -- never a blanket over the enclosed base well/array.
-                    _insert_ring(
+                    _insert_implant_ring(
                         self.cell,
                         self.layout.layer(self.ring_implant_layer),
                         dbu,
                         _shift_box(ring["outer_box_um"], ox, oy),
                         _shift_box(ring["inner_box_um"], ox, oy),
                         gap_box,
+                        ring["gap"]["side"] if ring["gap"] is not None else None,
+                        self.ring_implant_margin_um,
                     )
 
             # Per-unit bipolar device-mark, drawn on every unit (dummies

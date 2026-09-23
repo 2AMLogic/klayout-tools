@@ -660,6 +660,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged, and a deck that attaches it to another check kind, or sets a
   maximum below its own minimum, now fails loudly with a `DrcError` naming
   the rule rather than having the field silently ignored.
+- **Fixed** (#2369, `klt gen` gf180mcu tap/collector-ring implant geometry —
+  **no** `schema_version` bump; no request or response field changes, the
+  drawn implant polygon moves): the first thing the ten new implant rules
+  above found was a real violation in klt's own generators. Every generator
+  that draws a tap/collector ring on gf180mcu — `guard_ring`, `well_island`,
+  `mos_array`/`diff_pair` with `add_guard_ring`, `esd_device`, `bjt_array` —
+  drew that ring's implant (issues #1421/#1580) **exactly coincident** with
+  the ring's own `Comp` band. That satisfies `DF.12` ("COMP not covered by
+  Nplus or Pplus is forbidden"), which is what those issues targeted and is a
+  coverage rule with no distance in it, but it extends *zero* past the
+  diffusion and so violates `NP.5b`/`PP.5b` ("Extension beyond COMP", 0.16 µm)
+  on every edge of the band — a genuine DRC violation in the emitted layout,
+  not a deck artefact. The implant now tracks the ring with the new
+  harness-resolved `ring_implant_margin_um` (0.16 µm on gf180mcu, `0.0` —
+  i.e. byte-for-byte unchanged geometry — on every family that draws no ring
+  implant at all) of extension beyond every edge, inner and outer alike. It
+  stays a *ring*: it never blankets the area the ring encloses, so it cannot
+  re-dope what a caller places inside. A ring cut by `ring_gap_side` keeps its
+  opening, inset by the same margin at each end so the two cut faces get their
+  extension too (an opening of `2 × margin` or less closes over, doping only
+  field oxide). `examples/dogbone-terminal`'s committed streams are
+  regenerated: both families' GDS carry `mos_array`'s PCell parameter list, so
+  the new param drifts the sky130 fixture without moving a polygon.
 - **Added** (#2339, `klt erc`, additive — **no** `schema_version` bump: two
   new optional spec keys and one new coverage skip reason, no new output
   field and no new coverage list; a spec that uses neither key produces
