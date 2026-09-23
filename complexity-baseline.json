@@ -295,23 +295,8 @@
     },
     {
       "file": "src/klayout_tools/gen.py",
-      "function": "_mos_array_describe",
-      "complexity": 13
-    },
-    {
-      "file": "src/klayout_tools/gen.py",
       "function": "_mos_array_layout",
       "complexity": 11
-    },
-    {
-      "file": "src/klayout_tools/gen.py",
-      "function": "_mos_array_validate",
-      "complexity": 12
-    },
-    {
-      "file": "src/klayout_tools/gen.py",
-      "function": "_well_island_isolation",
-      "complexity": 12
     },
     {
       "file": "src/klayout_tools/gen_compose.py",
@@ -392,6 +377,21 @@
       "file": "src/klayout_tools/gen_compose_routing.py",
       "function": "route_two_pin",
       "complexity": 90
+    },
+    {
+      "file": "src/klayout_tools/gen_describe.py",
+      "function": "_mos_array_describe",
+      "complexity": 13
+    },
+    {
+      "file": "src/klayout_tools/gen_describe.py",
+      "function": "_mos_array_validate",
+      "complexity": 12
+    },
+    {
+      "file": "src/klayout_tools/gen_describe.py",
+      "function": "_well_island_isolation",
+      "complexity": 12
     },
     {
       "file": "src/klayout_tools/gen_pcells/bjt_array.py",

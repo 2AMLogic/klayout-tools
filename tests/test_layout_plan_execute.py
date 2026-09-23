@@ -815,7 +815,7 @@ def _strip_group(
     group_id: str, length_um: float, width_um: float, *, spacing_um: float = 0.0
 ) -> dict:
     # ``spacing_um`` also feeds ``resistor_strip``'s own declared
-    # ``drc_hints.min_spacing_um`` (gen.py's ``_resistor_strip_describe``) --
+    # ``drc_hints.min_spacing_um`` (gen_describe.py's ``_resistor_strip_describe``) --
     # explicitly zeroed by default so the row-offset/align/abutment tests
     # below stay decoupled from the inter-row-margin behavior covered by the
     # dedicated tests in "Inter-row margin" below (issue #1170). With

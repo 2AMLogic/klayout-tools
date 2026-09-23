@@ -508,7 +508,7 @@ def _resolve_group_params(
                     f"{unit_w} so the drawn device reproduces the netlist W"
                 )
         # An invalid `splits` override (non-numeric, non-positive) is left
-        # for `gen.py`'s own `_diff_pair_validate` to reject
+        # for `gen_describe.py`'s own `_diff_pair_validate` to reject
         # (`params.splits must be >= 1`) rather than this module dividing by
         # a value it cannot itself validate.
 

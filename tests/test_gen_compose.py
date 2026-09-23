@@ -11387,7 +11387,7 @@ def test_endpoint_stub_widen_um_requires_a_route_layer():
 # two blocks that need to face each other to route their shared net ... cannot
 # be made to face each other." `mos_array` (rows=1, cols=1) reports `U0_S` on
 # its own left edge (180deg) and `U0_D` on its own right edge (0deg) -- see
-# gen.py's `_mos_array_describe` -- so two such blocks placed side by side in
+# gen_describe.py's `_mos_array_describe` -- so two such blocks placed side by side in
 # a row have their drains on the *same* absolute side (both facing +x, away
 # from each other on the far block), reproducing the report's root cause.
 # --------------------------------------------------------------------------- #

@@ -59,6 +59,7 @@ The `gen` verb generates circuit layouts from PDK generators and composition rul
 - **gen_cmd** (`cli/gen_cmd.py`): CLI interface for generator and slicer invocation, parameter loading
 - **gen** (`gen.py`): Core generator dispatch, instance creation, hierarchy building, layout output
 - **gen_layer_params** (`gen_layer_params.py`): PDK-specific parameter resolution and lookup tables (layer geometries, spacing rules, device parameters per family)
+- **gen_describe** (`gen_describe.py`): Per-family request validation and response description — the `_<family>_validate()` bounds checks and the `_<family>_describe()` functions that turn a built layout into the response envelope's `device_count`/`ports`/`drc_hints` fields; split out of `gen.py` per issue #2347
 
 ### gen_compose
 
