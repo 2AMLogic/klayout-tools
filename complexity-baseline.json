@@ -581,12 +581,12 @@
     {
       "file": "src/klayout_tools/pdk_models.py",
       "function": "create_model_binding_delegate",
-      "complexity": 28
+      "complexity": 35
     },
     {
       "file": "src/klayout_tools/pdk_models.py",
       "function": "write_device",
-      "complexity": 11
+      "complexity": 12
     },
     {
       "file": "src/klayout_tools/pex.py",

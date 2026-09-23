@@ -47,15 +47,17 @@ how ``klt`` itself re-reads a netlist for ``klt lvs``'s pre-extracted
 ``cap_cmomf`` MoM capacitors, issue #1466) -- has no native SPICE element
 letter (it is not MOS/resistor/capacitor/bipolar/diode-shaped), so
 ``kdb.NetlistSpiceWriter`` writes it as an ``X`` subcircuit-call card (e.g.
-``XD_$1 A B cap_cmomi PARAMS: W=1 L=2``). Read back through a plain
-``kdb.NetlistSpiceReader()`` (no delegate, or this module's own capacitor-
-only delegate before this extension), an ``X`` card naming an undefined
-subcircuit synthesises an *abstract circuit* whose parameters are baked into
-its own mangled name (``CAP_CMOMI(L=2,W=1)``) -- the device is then compared
-by that circuit-name string, never as a device: it is invisible in the
-device census, ``options.parameter_tolerance`` never reaches it, and any
-mismatch degrades to a generic ``circuit could not be matched to a
-counterpart`` triple with no device/parameter/net name.
+``XD_$1 A B cap_cmomi W=1U L=2U`` -- unit-suffixed and ``PARAMS:``-free as of
+issue #2355; the ``PARAMS:`` separator is still accepted on read, since
+KLayout's own reader treats it as an optional no-op token). Read back through
+a plain ``kdb.NetlistSpiceReader()`` (no delegate, or this module's own
+capacitor-only delegate before this extension), an ``X`` card naming an
+undefined subcircuit synthesises an *abstract circuit* whose parameters are
+baked into its own mangled name (``CAP_CMOMI(L=2U,W=1U)``) -- the device is
+then compared by that circuit-name string, never as a device: it is
+invisible in the device census, ``options.parameter_tolerance`` never
+reaches it, and any mismatch degrades to a generic ``circuit could not be
+matched to a counterpart`` triple with no device/parameter/net name.
 
 :func:`custom_device_classes_for_deck` reads the same
 ``ExtractionDeck.mom_capacitors`` table :func:`klayout_tools.extract
@@ -425,7 +427,17 @@ def _recover_mom_x_card(
     to the default handler rather than silently misconnecting a terminal.
     All cards naming the same class share one ``DeviceClass`` object
     (:func:`_shared_device_class`, the same #1157 discipline the resistor
-    path follows)."""
+    path follows).
+
+    The writer's own card contract is ``X<name> a b cap_cmomi W=<um>U
+    L=<um>U`` (issue #2355 -- unit-suffixed, no ``PARAMS:`` keyword). The
+    reader's parameter parsing delivers ``W``/``L`` SI-scaled (``10U`` ->
+    ``1e-5``), so -- exactly like :func:`_recover_bulk_resistor_x_card`'s own
+    ``L``/``W`` handling -- they are converted to the micrometre domain
+    ``devices[].params``'s ``w_um``/``l_um`` and this
+    ``mom_capacitor_device_class`` both use. Any other declared parameter
+    (there are none today) rides through unconverted.
+    """
 
     from .extract import mom_capacitor_device_class
 
@@ -446,7 +458,9 @@ def _recover_mom_x_card(
     for net, terminal in zip(nets, terminals, strict=True):
         device.connect_terminal(terminal.name, net)
     for param_def in device_class.parameter_definitions():
-        if param_def.name in params:
+        if param_def.name in ("W", "L") and param_def.name in params:
+            device.set_parameter(param_def.id(), params[param_def.name] * 1e6)
+        elif param_def.name in params:
             device.set_parameter(param_def.id(), params[param_def.name])
     return True
 

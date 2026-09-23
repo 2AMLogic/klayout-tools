@@ -1158,6 +1158,40 @@ def test_golden_pair_sg13cmos5l_mom_capacitor_w_l_matches_marker_geometry(
     assert {device["nets"]["a"], device["nets"]["b"]} == {"PLUS_NET", "MINUS_NET"}
 
 
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+def test_sg13cmos5l_mom_capacitor_card_drops_params_keyword_and_suffixes_geometry(
+    tmp_path: Path, name: str, marker: tuple[int, int]
+):
+    """Issue #2355: `cap_cmomi`/`cap_cmomf` have no curated
+    `_CAPACITOR_MODEL_TABLE` entry (see `mom_capacitors`'s own docstring),
+    so `write_device`'s unbound-device path owns their card -- and used to
+    fall through to KLayout's own default primitive writer, which emits a
+    `PARAMS:`-keyword card with bare-micron numbers (e.g. `XD_$1 a b
+    cap_cmomi PARAMS: W=40 L=40`) that a SPICE parser under `.option
+    scale=1` reads as 40 *metres*, a ~1e6x oversize that silently models a
+    near-short capacitor in AC analysis. The fixed card drops `PARAMS:`,
+    keeps `cap_cmomi`/`cap_cmomf` as the trailing subcircuit-name token
+    (this device's own real upstream `.subckt` name), and formats `W=`/`L=`
+    with the same `U`-suffix style this family's unbound resistor cards
+    already use (`_format_um`'s default `GEOMETRY_STYLE_UNIT_SUFFIX`) --
+    `w_um=3.0`/`l_um=8.0` (the golden pair test above) becomes `W=3U
+    L=8U`. `devices[].params` itself is untouched -- this is a
+    netlist-text-only formatting fix."""
+    path = _write_gds(_make_sg13cmos5l_mom_layout(marker=marker), tmp_path / "mom.gds")
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "mom.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["params"] == {"w_um": pytest.approx(3.0), "l_um": pytest.approx(8.0)}
+
+    (card,) = [line for line in _device_cards(report) if f" {name} " in line]
+    assert "PARAMS:" not in card
+    assert card.startswith("X")
+    assert card.endswith(f" {name} W=3U L=8U")
+
+
 def test_sg13cmos5l_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
     tmp_path: Path,
 ):
