@@ -63,7 +63,9 @@ all `klt` commands (`schema_version`, error shape, exit codes).
     "area_um2": 2.125,
     "density": 0.2361111111111111,
     "polygon_count": 3,
-    "vertex_count": 11
+    "vertex_count": 11,
+    "flattened_polygon_count": 3,
+    "flattened_vertex_count": 11
   },
   "layers": null
 }
@@ -81,6 +83,8 @@ With `--per-layer`, `layers` is a list instead of `null`:
     "density": 0.2222222222222222,
     "polygon_count": 2,
     "vertex_count": 8,
+    "flattened_polygon_count": 2,
+    "flattened_vertex_count": 8,
     "annotation": false
   },
   {
@@ -91,6 +95,8 @@ With `--per-layer`, `layers` is a list instead of `null`:
     "density": 0.013888888888888888,
     "polygon_count": 1,
     "vertex_count": 3,
+    "flattened_polygon_count": 1,
+    "flattened_vertex_count": 3,
     "annotation": false
   }
 ]
@@ -130,8 +136,10 @@ All zero if the layout has no cells.
 | `name`          | string \| null   | *(`layers[]` only)* Layer name, or `null` for unnamed layers.        |
 | `area_um2`      | number (float)   | Drawn area in square micrometres (see semantics below).              |
 | `density`       | number (float)   | `area_um2 / bbox_um area`; `0.0` if the bounding box has zero area.  |
-| `polygon_count` | integer          | Number of area-bearing shapes (boxes, polygons, paths).              |
-| `vertex_count`  | integer          | Total vertex count across those shapes.                              |
+| `polygon_count` | integer          | Number of area-bearing shapes (boxes, polygons, paths), per cell definition. |
+| `vertex_count`  | integer          | Total vertex count across those shapes, per cell definition.         |
+| `flattened_polygon_count` | integer | Instance-resolved polygon count — like `polygon_count`, but weighted by instance multiplicity (see below). |
+| `flattened_vertex_count`  | integer | Instance-resolved vertex count — like `vertex_count`, but weighted by instance multiplicity (see below). |
 | `annotation`    | boolean          | *(`layers[]` only)* `true` when `(layer, datatype)` falls in the reserved annotation range (see below). |
 
 ### Semantics and guarantees
@@ -163,6 +171,20 @@ All zero if the layout has no cells.
   This is deliberately different from `area_um2` above: instance-weighting
   shape *counts* is out of scope for #1105, which targets the
   area/density numerator specifically.
+- **`flattened_polygon_count`/`flattened_vertex_count` are instance-resolved
+  (issue #2366).** They report the same underlying shapes as
+  `polygon_count`/`vertex_count`, but weighted by instance multiplicity
+  exactly like `area_um2` above — once for a plain placement, N times for an
+  N-copy `CellInstArray`, compounding through nested arrays. Use these
+  fields when you need a tool-measured shape/vertex count that reflects the
+  layout's actual drawn geometry on hierarchical designs (e.g. asserting a
+  multi-finger device array draws exactly `m` gate polygons across repeated
+  child-cell instances) without pre-flattening the layout yourself. This is
+  the same convention `klt layers --flattened`'s `flattened_shapes` field
+  uses for shape counts — see [`docs/cli/layers.md`](layers.md) — extended
+  here to also cover vertex counts. These are additive fields; the existing
+  `polygon_count`/`vertex_count` fields and their per-cell-definition
+  convention above are unchanged.
 - **Overlapping shapes are not merged.** `area_um2` is the sum of individual
   shape areas; overlapping geometry is double-counted. This keeps the
   computation cheap and exactly reproducible (no polygon-merge dependency on

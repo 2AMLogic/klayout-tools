@@ -145,6 +145,8 @@ def test_stats_report_empty_layout(tmp_path):
         "density": 0.0,
         "polygon_count": 0,
         "vertex_count": 0,
+        "flattened_polygon_count": 0,
+        "flattened_vertex_count": 0,
     }
 
 
@@ -295,6 +297,40 @@ def test_array_instanced_leaf_area_multiplies_by_instance_count(tmp_path):
     assert report["total"]["vertex_count"] == 8
 
 
+def test_array_instanced_flattened_counts_multiply_by_instance_count(tmp_path):
+    """`flattened_polygon_count`/`flattened_vertex_count` (issue #2366) are
+    the instance-resolved counterparts of `polygon_count`/`vertex_count`:
+    weighted by `CellInstArray` multiplicity exactly like `area_um2`, so the
+    120-copy `LEAF` array contributes 120 (not 1) to the flattened totals,
+    while the unchanged per-cell-definition fields stay at 2/8 (asserted
+    above in the sibling test)."""
+    path = tmp_path / "array_instanced.gds"
+    _make_array_instanced_layout().write(str(path))
+
+    report = stats_report(str(path), per_layer=True)
+
+    na, nb = 10, 12
+    # LEAF: 1 box, 4 vertices, placed 120 times via the array.
+    # Strap: 1 box, 4 vertices, placed once (drawn directly in TOP).
+    expected_flattened_polygon_count = na * nb * 1 + 1
+    expected_flattened_vertex_count = na * nb * 4 + 4
+
+    assert report["total"]["polygon_count"] == 2
+    assert report["total"]["vertex_count"] == 8
+    assert (
+        report["total"]["flattened_polygon_count"] == expected_flattened_polygon_count
+    )
+    assert report["total"]["flattened_vertex_count"] == expected_flattened_vertex_count
+
+    # Single-layer layout, so the one layers[] entry matches the total.
+    assert len(report["layers"]) == 1
+    layer_entry = report["layers"][0]
+    assert layer_entry["polygon_count"] == 2
+    assert layer_entry["vertex_count"] == 8
+    assert layer_entry["flattened_polygon_count"] == expected_flattened_polygon_count
+    assert layer_entry["flattened_vertex_count"] == expected_flattened_vertex_count
+
+
 def test_top_unknown_cell_raises(tmp_path):
     path = tmp_path / "multi_top.gds"
     _make_multi_top_layout().write(str(path))
@@ -369,7 +405,11 @@ def test_json_contract(tmp_path, capsys):
         "density",
         "polygon_count",
         "vertex_count",
+        "flattened_polygon_count",
+        "flattened_vertex_count",
     }
+    assert isinstance(data["total"]["flattened_polygon_count"], int)
+    assert isinstance(data["total"]["flattened_vertex_count"], int)
     assert isinstance(data["layers"], list)
     for entry in data["layers"]:
         assert set(entry.keys()) == {
@@ -380,9 +420,13 @@ def test_json_contract(tmp_path, capsys):
             "density",
             "polygon_count",
             "vertex_count",
+            "flattened_polygon_count",
+            "flattened_vertex_count",
             "annotation",
         }
         assert isinstance(entry["annotation"], bool)
+        assert isinstance(entry["flattened_polygon_count"], int)
+        assert isinstance(entry["flattened_vertex_count"], int)
 
     # Sorted ascending by (layer, datatype).
     pairs = [(e["layer"], e["datatype"]) for e in data["layers"]]
