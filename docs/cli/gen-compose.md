@@ -2421,6 +2421,18 @@ library cell, by re-keying `klt cells`' `{left, bottom, right, top}` bbox into
 this command's `{x0, y0, x1, y1}` — with nowhere to put ports, so nothing about
 such a block could participate in `connectivity[]`/`pins[]`.
 
+**Which provenance each block form requires.** A `blocks[]` entry declares
+exactly one source of geometry, and the two forms differ precisely in what the
+block must have come from:
+
+| Block form | Provenance required |
+|---|---|
+| `blocks[].generator_report` | A report a `klt` verb produced (`klt gen`, `klt draw`, or a previous `klt gen-compose` run) — its `generator` field is required, and its `bbox_um`/`ports[]` are taken verbatim. |
+| `blocks[].cell` | **None. No `klt gen` `generator_report` is required, or accepted, for this form** — `{gds_path, cell_name}` is the block's whole identity. Any cell in any readable stream qualifies: a PDK-shipped library cell, a cross-repo block, a hand-authored `klayout.db` output. `bbox_um` is read from the cell itself unless declared; `ports[]` are declared by the caller (or omitted, for a block that is placed but not wired). |
+
+Declaring both forms on one block is an application error (exit 1), as is
+declaring neither.
+
 ### Nesting a composition into a further composition
 
 A `klt gen-compose` response now reports `generator: "gen-compose"` and a
@@ -2526,6 +2538,22 @@ A `cell` block is otherwise an ordinary block: it takes `blocks[].orientation`
 routes through `connectivity[]`, labels through `pins[]`, and can be mixed
 freely with `generator_report` blocks in one request. Its response entry
 reports `source: "cell"`, `generator: null`, and the `cell_name` placed.
+
+**A library cell's own origin need not sit on its bbox corner (#2367).** A
+`kdb.Cell`'s local `(0, 0)` is wherever its author put it — a PDK IO cell can
+measure `bbox().left = -0.16 µm`. `"row"` and `"array"` placement anchor on the
+block's **bbox**, not on that origin: the offset applied to a block is computed
+relative to its own reported `bbox_um` (`offset_x = target_x - bbox.x0`), so the
+drawn geometry lands where the reported `bbox_um` says it does, whatever the
+cell's origin is, and under any `blocks[].orientation` (which flips the sign of
+that correction). `placement.strategy: "explicit"` is translation-only by
+design — `origins_um[id]` *is* the block's `offset_um`, exactly as the first
+block of a `"row"` is never translated — so an explicit origin moves a block's
+bbox by that amount rather than forcing the bbox's `(x0, y0)` corner onto it;
+the reported `bbox_um` reflects the same translation the geometry gets, so the
+two never disagree. Regression-tested against a non-zero-origin fixture,
+unrotated and under every orientation, in `tests/test_gen_compose.py`
+(`test_compose_cell_block_non_zero_origin_*`).
 
 **Related limitation, not fixed here.** `placement.strategy: "explicit"` still
 supports no per-block rotation beyond `blocks[].orientation`'s four
