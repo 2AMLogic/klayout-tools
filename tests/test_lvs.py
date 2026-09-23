@@ -9692,18 +9692,41 @@ def test_normalize_capacitor_multiplicity_gt_one_rejected():
 
 def test_normalize_sky130_bipolar_resolves_by_name_no_lw_needed():
     # sky130's pnp_05v5 cells carry no length/width-style call-site
-    # parameter at all -- resolved by subcircuit name alone.
+    # parameter at all -- resolved by subcircuit name alone. The emitter
+    # geometry that name encodes is still stated on the card (issue #2335):
+    # 0.68um x 0.68um -> AE = 0.4624um^2, PE = 4 * 0.68um.
     out = normalize_reference_netlist(
         "XQ1 c b e sky130_fd_pr__pnp_05v5_W0p68L0p68\n", deck="sky130"
     )
-    assert out.strip() == "Q1 c b e pnp"
+    assert out.strip() == "Q1 c b e pnp AE=0.4624P PE=2.72U"
+
+
+def test_normalize_sky130_bipolar_large_variant_carries_nominal_ae():
+    # The other curated variant: 3.40um x 3.40um -> AE = 11.56um^2,
+    # PE = 13.6um -- byte-for-byte the `AE=`/`PE=` the sky130 extraction
+    # deck itself writes for the same cell (issue #2335's reproduction).
+    out = normalize_reference_netlist(
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40\n", deck="sky130"
+    )
+    assert out.strip() == "Q1 c b e pnp AE=11.56P PE=13.6U"
+
+
+def test_normalize_bipolar_never_emits_base_collector_geometry():
+    # AB/PB/AC/PC measure drawn base/collector geometry the fixed-geometry
+    # cell name does not encode -- deliberately never stated, so a
+    # parameter neither side declares stays out of the compare entirely.
+    out = normalize_reference_netlist(
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=2\n", deck="sky130"
+    )
+    for absent in ("AB=", "PB=", "AC=", "PC="):
+        assert absent not in out
 
 
 def test_normalize_bipolar_mult_carried_onto_ne():
     out = normalize_reference_netlist(
         "XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=4\n", deck="sky130"
     )
-    assert out.strip() == "Q1 c b e pnp NE=4"
+    assert out.strip() == "Q1 c b e pnp AE=11.56P PE=13.6U NE=4"
 
 
 def test_normalize_bipolar_wrong_terminal_count_fails():
@@ -9721,7 +9744,7 @@ def test_normalize_device_families_auto_resolve_without_deck():
         "XQ1 c b e sky130_fd_pr__pnp_05v5_W0p68L0p68\n"
     )
     assert "R1 r0 r1 0 res_generic_po L=1U W=1U" in out
-    assert "Q1 c b e pnp" in out
+    assert "Q1 c b e pnp AE=0.4624P PE=2.72U" in out
 
 
 def test_normalize_unresolvable_resistor_shaped_name_still_raises():
@@ -10182,6 +10205,101 @@ def test_run_lvs_subckt_call_reference_resistor_family_converts_and_reads(tmp_pa
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2335: a sky130 fixed-geometry PNP converted from its `X` call must
+# reach `status: "match"` under the *default* full-parameter compare --
+# `DeviceClassBJT3Transistor` compares `AE`, so a geometry-free reference card
+# was a zero-vs-nonzero structural difference against the extracted side and
+# forced every caller through an `options.compare_parameters` override.
+# --------------------------------------------------------------------------- #
+
+#: Exactly what `klt extract --deck sky130` writes for one `klt gen bjt_array`
+#: unit of the 3.40um variant (issue #2335's reproduction).
+_BIPOLAR_LAYOUT_DEVICE = (
+    "pnp AE=11.56P PE=13.6U AB=12.96P PB=14.4U AC=12.96P PC=14.4U NE=1"
+)
+
+
+def _bipolar_request(tmp_path, layout_text, reference_text, top, options=None):
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_text),
+            "top": top,
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference_text),
+            "top": top,
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return request
+
+
+def test_run_lvs_subckt_call_sky130_pnp_matches_without_compare_parameters(tmp_path):
+    # Issue #2335's minimal repro shape: one extracted PNP carrying the
+    # deck's own `AE=`, against the documented `subckt-call` reference form.
+    # No `options.compare_parameters` override -- the default compare must
+    # pass on its own now that the conversion states the curated geometry.
+    request = _bipolar_request(
+        tmp_path,
+        f".SUBCKT cell ec vss\nQ$1 vss vss ec {_BIPOLAR_LAYOUT_DEVICE}\n.ENDS cell\n",
+        ".subckt cell EC VSS\n"
+        "XQ1 VSS VSS EC sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=1\n"
+        ".ends\n",
+        "cell",
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert not [
+        finding
+        for finding in report.get("findings", [])
+        if finding.get("kind") == "device.parameter_excluded"
+    ]
+
+
+def test_run_lvs_subckt_call_sky130_pnp_array_matches_without_overrides(tmp_path):
+    # The issue's own 8-unit `bjt_array` reproduction: every unit converts
+    # with its nominal `AE`, so the whole array pairs under the default
+    # compare instead of cascading into `device.unmatched` on both sides.
+    units = 8
+    layout = [".SUBCKT bjt_array vss " + " ".join(f"ec{i}" for i in range(units))]
+    reference = [".subckt bjt_array VSS " + " ".join(f"EC{i}" for i in range(units))]
+    for i in range(units):
+        layout.append(f"Q${i} vss vss ec{i} {_BIPOLAR_LAYOUT_DEVICE}")
+        reference.append(
+            f"XQ{i} VSS VSS EC{i} sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=1"
+        )
+    layout.append(".ENDS bjt_array")
+    reference.append(".ends")
+    request = _bipolar_request(
+        tmp_path,
+        "\n".join(layout) + "\n",
+        "\n".join(reference) + "\n",
+        "bjt_array",
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_run_lvs_subckt_call_sky130_pnp_wrong_variant_still_mismatches(tmp_path):
+    # The carried geometry is a real compared fact, not decoration: calling
+    # the small variant against a layout side extracted as the large one is
+    # now a detected difference rather than a silently-tolerated one.
+    request = _bipolar_request(
+        tmp_path,
+        f".SUBCKT cell ec vss\nQ$1 vss vss ec {_BIPOLAR_LAYOUT_DEVICE}\n.ENDS cell\n",
+        ".subckt cell EC VSS\n"
+        "XQ1 VSS VSS EC sky130_fd_pr__pnp_05v5_W0p68L0p68 mult=1\n"
+        ".ends\n",
+        "cell",
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] != "match"
 
 
 # --------------------------------------------------------------------------- #

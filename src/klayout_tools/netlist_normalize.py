@@ -113,6 +113,7 @@ source and hands a plain-element source back to the reader.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from typing import NamedTuple
@@ -764,6 +765,31 @@ def _convert_bipolar_card(
     parallel emitters), which ``DeviceClassBJT3Transistor`` natively
     supports -- so, unlike MOS/resistor/capacitor, ``mult`` here is carried,
     not rejected.
+
+    The *emitter geometry* those cells omit at the call site is not unknown
+    (issue #2335): the curated cell name encodes it, and
+    :attr:`~klayout_tools.pdk_models.DeviceLookup.emitter_area_um2` carries
+    the nominal emitter area ``pdk_models``' own bipolar table already
+    records for it. When present it is stated on the card as
+    ``AE=``/``PE=``, because ``AE`` is one of
+    ``DeviceClassBJT3Transistor``'s two *primary* (compared) parameters
+    (``AE``, ``NE``; confirmed against the installed ``klayout.db`` module):
+    a geometry-free reference card is a zero-vs-nonzero difference against
+    the layout side's extracted ``AE``, so *every* bipolar reports as
+    unmatched under the default full-parameter compare unless the caller
+    scopes it down with ``options.compare_parameters`` (issue #1928's
+    generic escape hatch). ``PE`` is derived rather than stored -- both
+    curated sky130 variants are square emitters (``W<n>L<n>`` with equal
+    ``W``/``L``), so ``side = sqrt(AE)`` and ``PE = 4 * side``, which keeps
+    the table's nominal area the single source of truth.
+
+    ``AB``/``PB``/``AC``/``PC`` are deliberately *not* emitted: they measure
+    drawn base/collector geometry that the fixed-geometry cell name does not
+    encode, so there is nothing to state honestly (see
+    :data:`~klayout_tools.pdk_models._BIPOLAR_DROPPED_PARAMS`). Leaving them
+    at the class default costs nothing: they are *secondary* parameters, so
+    once the primary ``AE``/``NE`` agree the comparer pairs the devices and
+    never reports them (asserted end to end in ``tests/test_lvs.py``).
     """
     if len(nodes) != _BIPOLAR_TERMINALS:
         raise NormalizeError(
@@ -773,6 +799,10 @@ def _convert_bipolar_card(
         )
 
     extra = ""
+    area_um2 = lookup.emitter_area_um2
+    if area_um2 is not None and area_um2 > 0:
+        side_um = math.sqrt(area_um2)
+        extra += f" AE={_format_um2(area_um2)} PE={_format_um(4.0 * side_um)}"
     if "mult" in params:
         try:
             mult = float(params["mult"])
@@ -781,7 +811,7 @@ def _convert_bipolar_card(
                 f"device '{instance}' (subcircuit '{subckt_name}'): "
                 f"parameter 'mult' value '{params['mult']}' is not numeric"
             ) from exc
-        extra = f" NE={mult:g}"
+        extra += f" NE={mult:g}"
 
     return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
 

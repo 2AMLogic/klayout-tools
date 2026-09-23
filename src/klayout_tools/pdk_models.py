@@ -668,12 +668,26 @@ class DeviceLookup:
     ``None`` for a kind with no geometry call-site parameter (bipolar's
     fixed-geometry cells, see :func:`known_device_subckt_names`'s
     docstring).
+
+    ``emitter_area_um2`` (issue #2335) is the *bipolar* counterpart of those
+    call-site parameters: a fixed-geometry cell states no geometry at its
+    call site, but its curated name encodes one, and
+    :data:`_BIPOLAR_MODEL_TABLE` already records the nominal emitter area
+    (in um^2) that name denotes -- the same number
+    :func:`_select_bipolar_variant` uses in the *forward* direction to pick
+    which variant to call. Carrying it here lets the ingestion direction
+    state ``AE``/``PE`` on the converted ``Q`` card instead of emitting a
+    geometry-free card that can never match a layout-extracted one under
+    ``DeviceClassBJT3Transistor``'s default full-parameter compare.
+    ``None`` for every non-bipolar kind, and for a bipolar binding whose
+    geometry is not curated (a caller-supplied ``device_map`` override).
     """
 
     kind: str
     device_class: str
     length_param: str | None = None
     width_param: str | None = None
+    emitter_area_um2: float | None = None
 
 
 def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
@@ -716,9 +730,15 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
             )
     for (deck_name, _family), table in _BIPOLAR_MODEL_TABLE.items():
         for device_class, variants in table.items():
-            for _nominal_ae, subckt in variants:
+            for nominal_ae, subckt in variants:
                 result.setdefault(
-                    subckt, (deck_name, DeviceLookup("bipolar", device_class))
+                    subckt,
+                    (
+                        deck_name,
+                        DeviceLookup(
+                            "bipolar", device_class, emitter_area_um2=nominal_ae
+                        ),
+                    ),
                 )
     return result
 
@@ -852,8 +872,11 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     for device_class, variants in _BIPOLAR_MODEL_TABLE.get(
         (deck_name, family), {}
     ).items():
-        for _nominal_ae, subckt in variants:
-            result.setdefault(subckt, DeviceLookup("bipolar", device_class))
+        for nominal_ae, subckt in variants:
+            result.setdefault(
+                subckt,
+                DeviceLookup("bipolar", device_class, emitter_area_um2=nominal_ae),
+            )
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:
@@ -1147,6 +1170,13 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
 #: ((nominal AE in um^2, subckt name), ...)}. gf180mcu is intentionally absent
 #: -- its recognised ``bjt`` stays a bare ``Q`` card (documented carve-out,
 #: see ``decks/gf180mcu.py:557-559`` and ``docs/cli/extract.md``).
+#:
+#: The nominal-AE half of each entry is used in *both* directions: forward
+#: (``klt extract --pdk``) to pick which fixed-geometry variant a measured
+#: emitter area should call (:func:`_select_bipolar_variant`), and ingestion
+#: (``klt lvs``'s ``form: "subckt-call"``) as
+#: :attr:`DeviceLookup.emitter_area_um2`, so the converted ``Q`` card can
+#: state the geometry the call site itself omits (issue #2335).
 _BIPOLAR_MODEL_TABLE: dict[
     tuple[str, str], dict[str, tuple[tuple[float, str], ...]]
 ] = {
@@ -1168,6 +1198,15 @@ _BIPOLAR_MODEL_TABLE: dict[
 #: written as an `X` card. `AE` itself is excluded: it *is* used, to select
 #: which fixed-geometry variant to call (see `_select_bipolar_variant`), so
 #: it is consumed rather than silently dropped.
+#:
+#: This lists what the *forward* (`X`-card-writing) direction cannot express
+#: and is unchanged by issue #2335 -- but note the ingestion direction is no
+#: longer symmetric with it: converting such an `X` card back to a `Q` card
+#: reconstructs `AE` (and, for these square-emitter cells, `PE`) from the
+#: curated nominal area in :data:`_BIPOLAR_MODEL_TABLE`, on top of the `NE`
+#: the call's own optional `mult` supplies. `AB`/`PB`/`AC`/`PC` stay
+#: genuinely lost in both directions: they measure drawn base/collector
+#: geometry that the fixed-geometry cell name does not encode.
 _BIPOLAR_DROPPED_PARAMS: tuple[str, ...] = ("PE", "AB", "PB", "AC", "PC", "NE")
 
 #: Per-PDK-family subcircuit length/width parameter spellings (see the module
