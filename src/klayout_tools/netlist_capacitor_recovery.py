@@ -103,7 +103,7 @@ need not guess it from geometry.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -288,14 +288,69 @@ def bulk_resistor_device_class(name: str) -> kdb.DeviceClass:
     series-fold behaviour, which a plain ``DeviceClassResistor`` with a
     hand-added third terminal does *not* support (the ``WithBulk`` class is
     what teaches the fold to leave the shared bulk connection alone).
-    Shared by every recovery of the same class name in one netlist via the
-    caller's ``device_class_by_name`` registry lookup, the same
-    one-class-object-per-name discipline the capacitor recovery follows.
+    Shared by every recovery of the same class name in one netlist via
+    :func:`_shared_device_class`, the same one-class-object-per-name
+    discipline KLayout's own default reading follows.
     """
     import klayout.db as kdb
 
     device_class = kdb.DeviceClassResistorWithBulk()
     device_class.name = name
+    return device_class
+
+
+def _shared_device_class(
+    netlist: kdb.Netlist,
+    class_name: str,
+    make_class: Callable[[], kdb.DeviceClass],
+    registry: dict[str, kdb.DeviceClass],
+) -> kdb.DeviceClass:
+    """The one ``kdb.DeviceClass`` object every recovery of ``class_name``
+    in one read must share -- looked up in ``registry`` first, then in
+    ``netlist``'s registered classes by exact name, and only then built via
+    ``make_class`` and registered (issue #1157, PR #2336 CI regression).
+
+    Why not ``Netlist.device_class_by_name``: that lookup misses a class
+    this recovery registered earlier in the same read twice over (both
+    verified against ``klayout==0.30.10``). First, it does not see a class
+    ``netlist.add()``-ed from inside a ``NetlistSpiceReaderDelegate
+    .element()`` callback for the rest of that read, even though
+    ``each_device_class()`` lists it immediately. Second, even after the
+    read completes it normalizes its argument through the netlist's own
+    case convention (SPICE netlists read case-insensitively, so it
+    *uppercases*) but compares against each registered class's stored name
+    verbatim -- a deck's canonical lowercase ``res_high_po`` never matches.
+    Either miss alone sends a naive create-and-``add`` fallback down the
+    per-card path: one fresh class object *per recovered card*.
+    ``Netlist.combine_devices()`` groups devices by ``DeviceClass`` object
+    identity (``tl::id_of`` of the device's class against the class being
+    combined for), so a per-card class object means no two devices ever
+    group and the series fold silently never happens (PR #2336: three
+    sky130 ``res_high_po`` segments survived as three devices on Linux CI).
+    One class object per name -- what this helper guarantees -- is also
+    what makes the fold robust against the klayout-side detail that
+    ``DeviceClass``'s copy constructor copies an indeterminate
+    ``tl::UniqueId`` (verified against ``klayout==0.30.10``: a
+    ``Netlist.dup()`` clone's ``id()`` is 0 on macOS but distinct garbage
+    on Linux), so the fold no longer depends on which platform's heap
+    happens to make the clone ids coincide.
+
+    ``registry`` is the per-reader cache the caller owns (one
+    ``make_capacitor_class_recovery_reader`` build serves exactly one
+    ``Netlist.read`` call -- every caller in this repo does); the exact-name
+    scan covers a class the *default* reader handler already registered
+    under the same verbatim name earlier in the same read.
+    """
+    device_class = registry.get(class_name)
+    if device_class is not None:
+        return device_class
+    for registered in netlist.each_device_class():
+        if registered.name == class_name:
+            registry[class_name] = registered
+            return registered
+    device_class = make_class()
+    netlist.add(device_class)
+    registry[class_name] = device_class
     return device_class
 
 
@@ -305,7 +360,7 @@ def _recover_bulk_resistor_x_card(
     nets: list,
     params: dict,
     resistor_name: str,
-    device_classes: dict[str, kdb.DeviceClass],
+    registry: dict[str, kdb.DeviceClass],
 ) -> bool:
     """Recover one ``X`` card naming a deck drawn-resistor class as a real
     3-terminal resistor device (issue #1157) -- see this module's docstring
@@ -320,35 +375,20 @@ def _recover_bulk_resistor_x_card(
     ``r=`` itself is required, and a card without it -- or without the
     writer's 3-net shape -- reports ``False`` and falls through to the
     default handler rather than being silently recovered as a zero-ohm
-    device or one with a misconnected terminal.
-
-    ``device_classes`` is the caller's per-read ``{name: DeviceClass}`` cache
-    (one dict per :func:`make_capacitor_class_recovery_reader` call, shared
-    across every card recovered in that read). It exists because
-    ``kdb.Netlist.device_class_by_name`` does not see a class added earlier
-    in the *same* ``Netlist.read()`` call -- verified against
-    ``klayout==0.30.10``: a device class ``netlist.add()``-ed from inside a
-    ``NetlistSpiceReaderDelegate.element()`` callback is invisible to
-    ``device_class_by_name`` for the rest of that read, even though
-    ``each_device_class()`` lists it immediately. Relying on
-    ``device_class_by_name`` alone (the pre-fix code) silently created one
-    *distinct* device-class object per recovered device instead of sharing
-    one per name -- ``Netlist.combine_devices()`` only folds devices of the
-    identical class object, so a series chain of N drawn primitives never
-    combined into one logical device (issue #2336's CI failure). The netlist
-    lookup is kept as a fallback for a class that predates this read (e.g.
-    already present on the netlist before ``.read()`` was called).
+    device or one with a misconnected terminal. All cards naming the same
+    class share one ``DeviceClass`` object (:func:`_shared_device_class`)
+    -- the one-class-object-per-name discipline the class-identity grouping
+    inside ``Netlist.combine_devices()`` requires.
     """
     if len(nets) != 3 or "R" not in params:
         return False
     netlist = circuit.netlist()
-    device_class = device_classes.get(resistor_name)
-    if device_class is None:
-        device_class = netlist.device_class_by_name(resistor_name)
-    if device_class is None:
-        device_class = bulk_resistor_device_class(resistor_name)
-        netlist.add(device_class)
-    device_classes[resistor_name] = device_class
+    device_class = _shared_device_class(
+        netlist,
+        resistor_name,
+        lambda: bulk_resistor_device_class(resistor_name),
+        registry,
+    )
     terminals = device_class.terminal_definitions()
     if len(nets) != len(terminals):
         return False
@@ -375,6 +415,7 @@ def _recover_mom_x_card(
     nets: list,
     params: dict,
     custom_lookup: Mapping[str, str],
+    registry: dict[str, kdb.DeviceClass],
 ) -> bool:
     """Recover one ``X`` card naming a deck custom (MoM-capacitor) device
     class as a real device of that class (issue #1942) -- see this module's
@@ -382,7 +423,9 @@ def _recover_mom_x_card(
     net count does not fit the class's own terminal shape reports ``False``
     (defensive only, never seen in practice) and the caller falls through
     to the default handler rather than silently misconnecting a terminal.
-    """
+    All cards naming the same class share one ``DeviceClass`` object
+    (:func:`_shared_device_class`, the same #1157 discipline the resistor
+    path follows)."""
 
     from .extract import mom_capacitor_device_class
 
@@ -390,10 +433,12 @@ def _recover_mom_x_card(
     if class_name is None:
         return False
     netlist = circuit.netlist()
-    device_class = netlist.device_class_by_name(class_name)
-    if device_class is None:
-        device_class = mom_capacitor_device_class(class_name)
-        netlist.add(device_class)
+    device_class = _shared_device_class(
+        netlist,
+        class_name,
+        lambda: mom_capacitor_device_class(class_name),
+        registry,
+    )
     terminals = device_class.terminal_definitions()
     if len(nets) != len(terminals):
         return False
@@ -413,7 +458,7 @@ def _recover_resistor_x_card(
     nets: list,
     params: dict,
     resistor_lookup: Mapping[str, str],
-    device_classes: dict[str, kdb.DeviceClass],
+    registry: dict[str, kdb.DeviceClass],
 ) -> bool:
     """Recover one ``X`` card naming a deck drawn-resistor class as a real
     3-terminal resistor device (issue #1157). Reports whether the card was
@@ -421,9 +466,7 @@ def _recover_resistor_x_card(
     ``resistor_lookup``, and for a matching name without the writer's
     3-net shape or declared ``r=`` parameter (the caller falls through to
     the default handler rather than recovering a zero-ohm or misconnected
-    device).
-
-    ``device_classes`` is threaded straight through to
+    device). ``registry`` is threaded straight through to
     :func:`_recover_bulk_resistor_x_card` -- see its docstring for why a
     per-read cache (rather than ``Netlist.device_class_by_name`` alone) is
     required for every recovered device of one class to share the same
@@ -432,7 +475,7 @@ def _recover_resistor_x_card(
     if resistor_name is None:
         return False
     return _recover_bulk_resistor_x_card(
-        circuit, name, nets, params, resistor_name, device_classes
+        circuit, name, nets, params, resistor_name, registry
     )
 
 
@@ -451,13 +494,20 @@ def make_capacitor_class_recovery_reader(
     ``recovered`` -- a missing or malformed comment) defers to KLayout's
     default reading behaviour, unchanged.
 
-    The recovered device class is looked up by name in the netlist's own
-    device-class registry first (``Circuit.netlist().device_class_by_name``)
-    and only created when absent, so multiple devices/circuits sharing the
+    The recovered device class is looked up in the reader's own
+    one-class-object-per-name registry (:func:`_shared_device_class`) --
+    which also catches a class the default reader handler already
+    registered under the same verbatim name earlier in the same read -- and
+    only created when absent, so multiple devices/circuits sharing the
     same recovered class name -- and, moreover, a class name genuinely bound
     elsewhere in the same file via a real ``X``-card model binding --
     correctly share one class object, exactly the way KLayout's own default
-    reading already shares one class object per class name.
+    reading already shares one class object per class name. Sharing the
+    object (not merely the name) is load-bearing: ``Netlist.combine_devices``
+    groups devices by class *object identity*, so KLayout's
+    ``device_class_by_name`` -- whose case-insensitive lookup silently
+    misses a lowercase stored name -- cannot be used as the shared registry
+    (PR #2336, see :func:`_shared_device_class`).
 
     ``custom_device_classes`` (issue #1942, see :func:`custom_device_classes_for_deck`
     and this module's own docstring) additionally recognises an ``X``
@@ -484,11 +534,11 @@ def make_capacitor_class_recovery_reader(
 
     custom_lookup: dict[str, str] = dict(custom_device_classes or {})
     resistor_lookup: dict[str, str] = dict(resistor_classes or {})
-    # Per-read cache keyed by resistor class name -- see
-    # `_recover_bulk_resistor_x_card`'s docstring for why this, rather than
-    # `Netlist.device_class_by_name` alone, is required to share one device
-    # class object across every recovered device of that class in this read.
-    resistor_device_classes: dict[str, kdb.DeviceClass] = {}
+    # One reader instance serves exactly one `Netlist.read` call (every
+    # caller in this repo builds it per call), so a plain per-class-name
+    # cache is a complete registry of the classes this delegate created or
+    # found during that read (PR #2336 -- see `_shared_device_class`).
+    class_registry: dict[str, kdb.DeviceClass] = {}
 
     class _CapacitorClassRecoveringDelegate(kdb.NetlistSpiceReaderDelegate):
         def wants_subcircuit(self, name: str) -> bool:
@@ -509,13 +559,25 @@ def make_capacitor_class_recovery_reader(
             if element_type == "C" and not model:
                 class_name = recovered.get((circuit.name, name))
                 if class_name:
-                    netlist = circuit.netlist()
-                    device_class = netlist.device_class_by_name(class_name)
-                    if device_class is None or not isinstance(
-                        device_class, kdb.DeviceClassCapacitor
-                    ):
+
+                    def _make_capacitor_class() -> kdb.DeviceClass:
                         device_class = kdb.DeviceClassCapacitor()
                         device_class.name = class_name
+                        return device_class
+
+                    netlist = circuit.netlist()
+                    device_class = _shared_device_class(
+                        netlist, class_name, _make_capacitor_class, class_registry
+                    )
+                    if not isinstance(device_class, kdb.DeviceClassCapacitor):
+                        # A same-named but different-typed class is already
+                        # registered in this read (never seen in practice:
+                        # recovered capacitor class names come from the
+                        # extract-written comments and name no resistor or
+                        # custom class). Keep the historical behaviour --
+                        # a fresh capacitor class -- rather than connecting
+                        # a capacitor onto a foreign class's terminal set.
+                        device_class = _make_capacitor_class()
                         netlist.add(device_class)
                     terminals = device_class.terminal_definitions()
                     if len(nets) == len(terminals):
@@ -531,17 +593,11 @@ def make_capacitor_class_recovery_reader(
                     # silently misconnecting a terminal.
             elif element_type == "X":
                 if _recover_mom_x_card(
-                    circuit, name, model, nets, params, custom_lookup
+                    circuit, name, model, nets, params, custom_lookup, class_registry
                 ):
                     return True
                 if _recover_resistor_x_card(
-                    circuit,
-                    name,
-                    model,
-                    nets,
-                    params,
-                    resistor_lookup,
-                    resistor_device_classes,
+                    circuit, name, model, nets, params, resistor_lookup, class_registry
                 ):
                     return True
             return super().element(

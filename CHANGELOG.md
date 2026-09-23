@@ -88,6 +88,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   `fixed_offset_ohm` correction (issue #585) behave exactly as before; see
   `docs/cli/extract.md`'s "Verified compatible with `klt sim`" and
   `docs/cli/lvs.md`'s new round-trip section.
+- **Fixed** (PR #2336 follow-up, the #1157 round-trip reader — no
+  `schema_version` bump): recovered `X` cards naming the same class now all
+  share one `DeviceClass` object per read, restoring the series
+  `combine_devices` fold the round-trip promised above on every platform.
+  The first cut looked the class up via `Netlist.device_class_by_name`,
+  which normalizes its argument through the netlist's case convention
+  (uppercases it for a SPICE netlist) but compares against each registered
+  class's stored name verbatim — the deck's canonical lowercase
+  `res_high_po` never matched, so every recovered card silently registered
+  another class object, and `Netlist.combine_devices()` — which groups
+  devices by class *object identity* — could no longer fold the chain
+  (Linux CI: the 3-segment `res_high_po` chain survived as 3 devices and
+  `test_pre_extracted_netlist_with_deck_applies_fixed_offset_once` failed
+  deterministically; macOS only passed because `Netlist.dup()`'s clones
+  happened to read back a shared id there — `DeviceClass`'s copy
+  constructor copies an indeterminate `tl::UniqueId` in klayout 0.30.10,
+  so that path's fold was never portable). The same latent per-card
+  registration is fixed for the #1942 MoM-capacitor and recovered-`C`-card
+  paths. Regression-locked at the reader/combine boundary by
+  `tests/test_lvs.py`'s
+  `test_recovered_resistor_x_cards_share_one_device_class_and_fold` (a
+  no-dup, no-retry `combine_devices()` call) and
+  `test_custom_class_recovery_x_cards_share_one_device_class`.
 - **Documented** (#1159, `klt extract --pdk` sky130 resistor geometry — the
   code fix already shipped with issue #1396's bare-micrometre convention,
   one week after #1159 was filed; this closes the loop with a regression
