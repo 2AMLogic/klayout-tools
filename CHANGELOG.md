@@ -14,6 +14,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2355, `klt extract --parasitics` MoM-capacitor cards — **no**
+  `schema_version` bump; `devices[].params` is unchanged, only the written
+  SPICE text): an extracted `cap_cmomi`/`cap_cmomf` (MoM capacitor, issue
+  #1466) device is registered as a plain, generic `kdb.DeviceClass()` — not
+  a `DeviceClassCapacitor`/`DeviceClassResistor` subclass — so it had no
+  curated `_CAPACITOR_MODEL_TABLE` entry and fell through
+  `write_device()`'s unbound path all the way to KLayout's own default
+  primitive-card writer, which emits a non-standard `PARAMS:`-keyword card
+  with bare-micron geometry (`XD_$1 A B cap_cmomi PARAMS: W=40 L=40`). A
+  SPICE parser under `.option scale=1` reads that as 40 *metres* — a
+  ~1e6x oversize that silently models the capacitor as a near-short in AC
+  analysis, with no diagnostic. The unbound path now recognises this
+  device shape structurally (non-empty class name, terminals exactly
+  `{A, B}`, parameters exactly `{W, L}` — mirroring
+  `mom_capacitor_device_class`'s own registration, issue #1927's resistor
+  fix for the analogous gap) and writes `XD_$1 A B cap_cmomi W=40U L=40U`
+  instead: no `PARAMS:` keyword, and `W`/`L` unit-suffixed the same way
+  this family's drawn-resistor cards already are. The SPICE writer/reader
+  round trip `klt lvs` relies on (issue #1942) is updated to match:
+  `netlist_capacitor_recovery._recover_mom_x_card` now scales a recovered
+  card's `W`/`L` back to micrometres the same way the resistor recovery
+  path already does, so a pre-extracted `layout.netlist`/`reference.netlist`
+  giving `layout.deck`/`reference.deck` still recovers the correct
+  `w_um`/`l_um` off the new card shape. See `docs/cli/extract.md`'s "MoM
+  capacitor devices" and `docs/cli/lvs.md`'s "Custom device classes
+  round-tripped through an `X` card" sections.
 - **Added** (#2339, `klt erc`, additive — **no** `schema_version` bump: two
   new optional spec keys and one new coverage skip reason, no new output
   field and no new coverage list; a spec that uses neither key produces

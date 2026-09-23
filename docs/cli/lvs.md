@@ -461,7 +461,7 @@ always assuming SI metres:
   suffix or exponent literal (`L=0.5u` / `L=0.15e-6`), either of which is
   unambiguous and unaffected by `reference.deck` either way.
 
-## Custom device classes round-tripped through an `X ... PARAMS:` card (issue #1942)
+## Custom device classes round-tripped through an `X` card (issue #1942)
 
 Every device class `klt extract` recognises through a native
 `kdb.DeviceExtractor*` (MOS, drawn resistor, MIM capacitor, bipolar, diode)
@@ -469,16 +469,20 @@ writes with its own SPICE element letter (`M`/`R`/`C`/`Q`/`D`). One device
 family — `sg13g2`'s `cap_cmomi`/`cap_cmomf` MoM (Metal-oxide-Metal)
 capacitors, recognised through a custom `kdb.GenericDeviceExtractor` (issue
 #1466) — has no native element letter, so `kdb.NetlistSpiceWriter` writes it
-as an ordinary subcircuit-call `X` card instead:
+as an ordinary subcircuit-call `X` card instead. Since issue #2355 the card
+drops the non-standard `PARAMS:` keyword and carries its `W`/`L` geometry
+with the same unit-suffix style the drawn-resistor `X` cards below already
+use (a bare-micron `PARAMS: W=4 L=10` reads as 4/10 *metres* under
+`.option scale=1`, silently oversizing the device by `1e6`x):
 
 ```
-XD_$1 A B cap_cmomi PARAMS: W=4 L=10
+XD_$1 A B cap_cmomi W=4U L=10U
 ```
 
 Reading that card back through a plain `kdb.NetlistSpiceReader()` (no
 delegate) does not error: an `X` card naming an undefined subcircuit
 synthesises an *abstract circuit* whose parameters are baked into its own
-mangled name (`CAP_CMOMI(L=10,W=4)`), and the device is then compared by
+mangled name (`CAP_CMOMI(L=10U,W=4U)`), and the device is then compared by
 that circuit-name string, never as a device — invisible in `counts.devices`,
 unreachable by `options.parameter_tolerance`, and any real mismatch degrades
 to a generic `topology`/`circuit could not be matched to a counterpart`
@@ -506,10 +510,20 @@ an `M`/`R`/`C`/`D` card already does:
   the device instance and its class (`cap_cmomi`), instead of a generic,
   un-named `topology` finding.
 
-A hand- or tool-generated reference netlist for this family must emit the
-identical `X <name> <net> <net> cap_cmomi PARAMS: W=<value> L=<value>` card
-shape `klt extract`'s own writer produces (see the example above) — there is
-no plain-element card form for this device family to convert to instead.
+A hand- or tool-generated reference netlist for this family must emit an
+`X <name> <net> <net> cap_cmomi W=<value>U L=<value>U` card naming the same
+class and unit-suffixed `W`/`L` values `klt extract`'s own writer produces
+(see the example above) — there is no plain-element card form for this
+device family to convert to instead. The recovery reader converts a
+suffixed value back to micrometres the same way the drawn-resistor `X`
+cards below already are (issue #2355); a *bare* (unsuffixed) `W`/`L` value
+is read as SI metres per this family's own convention (`sg13g2`/
+`sg13cmos5l` default to `GEOMETRY_STYLE_UNIT_SUFFIX`, "`form: "subckt-call"`
+resolves a bare literal per `reference.deck`" above) and recovers to a
+wildly wrong micrometre value — always suffix `W`/`L` on a hand-authored
+card for this family. The optional `PARAMS:` separator itself is still
+accepted either way (KLayout's reader treats it as a no-op token), even
+though `klt extract` itself no longer writes it.
 
 **Works under `reference.form: "subckt-call"` too** (issue #2327). A
 reference that needs the conversion for its *other* cards (a curated MOS or

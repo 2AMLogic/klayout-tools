@@ -15383,7 +15383,7 @@ def test_reference_netlist_bare_capacitor_card_also_recovers_class(tmp_path):
 
 # --------------------------------------------------------------------------- #
 # A custom (`kdb.GenericDeviceExtractor`-shaped) device class round-tripped
-# through an `X ... PARAMS:` card -- sg13g2's `cap_cmomi` MoM capacitor is
+# through an `X` card -- sg13g2's `cap_cmomi` MoM capacitor is
 # `klt extract`'s only device class with no native SPICE element letter, so
 # `kdb.NetlistSpiceWriter` writes it as a subcircuit call. Issue #1942
 # extends #1466's recognition to `klt lvs`'s own round-trip reads (a
@@ -15444,7 +15444,7 @@ def test_custom_device_classes_for_deck_reports_mom_capacitors():
 
 def test_custom_device_class_recovery_reader_recognises_x_card_as_a_device(tmp_path):
     """`make_capacitor_class_recovery_reader(..., custom_device_classes=...)`
-    reattaches a round-tripped `X ... PARAMS:` card naming a custom device
+    reattaches a round-tripped `X` card naming a custom device
     class to a real `Device` of that class -- not the mangled-name abstract
     circuit KLayout's own default reading would otherwise synthesise -- and
     leaves an `X` card naming anything else untouched."""
@@ -15456,7 +15456,7 @@ def test_custom_device_class_recovery_reader_recognises_x_card_as_a_device(tmp_p
 
     text = """
 .SUBCKT TOP A B
-XD1 A B cap_cmomi PARAMS: W=1.5 L=3.0
+XD1 A B cap_cmomi W=1.5U L=3.0U
 XD2 A B unknown_subckt
 .ENDS TOP
 """
@@ -15496,8 +15496,8 @@ def test_custom_class_recovery_x_cards_share_one_device_class(tmp_path):
 
     text = """
 .SUBCKT TOP A B
-XD1 A B cap_cmomi PARAMS: W=1.5 L=3.0
-XD2 B A cap_cmomi PARAMS: W=1.5 L=3.0
+XD1 A B cap_cmomi W=1.5U L=3.0U
+XD2 B A cap_cmomi W=1.5U L=3.0U
 .ENDS TOP
 """
     path = _write(tmp_path / "custom_class_shared.spice", text)
@@ -15522,9 +15522,9 @@ XD2 B A cap_cmomi PARAMS: W=1.5 L=3.0
 
 def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
     """The issue's own motivating scenario end to end: `klt extract`'s own
-    SPICE writer round-trips `cap_cmomi` as an `X ... PARAMS:` card, and a
-    hand-authored reference netlist -- the "reference must emit the
-    identical X ... PARAMS: card" shape the issue calls out -- gives
+    SPICE writer round-trips `cap_cmomi` as an `X` card, and a
+    hand-authored reference netlist -- the "reference must emit an
+    identical X card" shape the issue calls out -- gives
     `layout.deck`/`reference.deck` so both sides recognise the class. The
     device now reaches the ordinary device census (`counts.devices`) instead
     of vanishing into a subcircuit call."""
@@ -15539,7 +15539,7 @@ def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
     reference_path = _write(
         tmp_path / "ref.spice",
         ".subckt capblock PLUS_NET MINUS_NET\n"
-        "XD1 PLUS_NET MINUS_NET cap_cmomi PARAMS: W=4.0 L=10.0\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi W=4U L=10U\n"
         ".ends capblock\n",
     )
 
@@ -15567,13 +15567,13 @@ def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
 
 _MIXED_FAMILY_LAYOUT = """.subckt mixed IN MID OUT
 R1 IN MID 1200 rppd L=10U W=1U
-XD1 MID OUT cap_cmomi PARAMS: W=4.0 L=10.0
+XD1 MID OUT cap_cmomi W=4U L=10U
 .ends mixed
 """
 
 _MIXED_FAMILY_REFERENCE = """.subckt mixed IN MID OUT
 XR1 IN MID rppd w=1u l=10u
-XD1 MID OUT cap_cmomi PARAMS: W=4.0 L=10.0
+XD1 MID OUT cap_cmomi W=4U L=10U
 .ends mixed
 """
 
@@ -15581,13 +15581,15 @@ XD1 MID OUT cap_cmomi PARAMS: W=4.0 L=10.0
 def test_subckt_call_reference_carries_a_custom_device_class_card(tmp_path):
     """Issue #2327 end to end: one `reference.form: "subckt-call"` request
     now compares a reference that mixes a curated drawn resistor (`rppd`,
-    converted to a plain `R` card) with a round-tripped MoM-capacitor `X ...
-    PARAMS:` card (a custom device class, passed through for the #1942
-    recovery reader). Before, the conversion raised `subcircuit 'PARAMS:' is
-    not a known device` and the only way through was to splice the custom
-    cards out, convert the remainder, and resubmit as `plain-element` --
-    which also meant re-deriving the `device.placeholder_value` disclosure
-    the `subckt-call` path emits for free (asserted below)."""
+    converted to a plain `R` card) with a round-tripped MoM-capacitor `X`
+    card (a custom device class, passed through for the #1942
+    recovery reader). Before #2327, a `PARAMS:`-bearing card (the writer's
+    convention prior to issue #2355) made the conversion raise
+    `subcircuit 'PARAMS:' is not a known device`, and the only way through
+    was to splice the custom cards out, convert the remainder, and resubmit
+    as `plain-element` -- which also meant re-deriving the
+    `device.placeholder_value` disclosure the `subckt-call` path emits for
+    free (asserted below)."""
     request = {
         "layout": {
             "netlist": _write(tmp_path / "layout.spice", _MIXED_FAMILY_LAYOUT),
@@ -15637,7 +15639,7 @@ def test_mom_capacitor_parameter_tolerance_now_reaches_the_device(tmp_path):
     reference_path = _write(
         tmp_path / "ref.spice",
         ".subckt capblock PLUS_NET MINUS_NET\n"
-        "XD1 PLUS_NET MINUS_NET cap_cmomi PARAMS: W=4.0036 L=10.0\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi W=4.0036U L=10U\n"
         ".ends capblock\n",
     )
 
@@ -15698,7 +15700,7 @@ def test_mom_capacitor_without_deck_still_degrades_to_the_pre_1942_fallback(
     reference_path = _write(
         tmp_path / "ref.spice",
         ".subckt capblock PLUS_NET MINUS_NET\n"
-        "XD1 PLUS_NET MINUS_NET cap_cmomi PARAMS: W=4.0036 L=10.0\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi W=4.0036U L=10U\n"
         ".ends capblock\n",
     )
 
