@@ -372,8 +372,9 @@ written to every block.
       `erc.supply_short` naming it — and the run must report zero
       `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
-      reason `degenerate_tap_declaration`, issue #2199, or
-      `degenerate_well_assertion`, issue #2255) returns zero for a
+      reason `degenerate_tap_declaration`, issue #2199,
+      `degenerate_well_assertion`, issue #2255, or
+      `degenerate_well_selection`, issue #2339) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
       already rejects a spec declaring no `ties[]` at all. **A stream with
@@ -406,6 +407,25 @@ written to every block.
       `ties_checked_by_assertion` for the tap side — two distinct claims,
       reported distinctly, so "the well itself was the caller's word" never
       hides inside "a tap box was asserted".
+      **A block whose one drawn tub layer carries two differently-biased
+      well classes** — device-body wells on one rail beside a vertical
+      bipolar's base tub on the other, ordinary for a bandgap/bias block on
+      any PDK with a single n-tub layer — reaches **met** by declaring each
+      class as its own `ties[]` entry, scoped by
+      `ties[].well_requires`/`well_excludes` (issue #2339). Before that,
+      this item was unreachable by construction for such a block in the
+      opposite way to the native-substrate case: each entry graded *every*
+      shape of the shared `well_layer` against its own single `net`, so
+      whichever class was not declared reported a false `erc.missing_tie`
+      — the layout demonstrably correct, no single report able to say so,
+      and `supply_spec_disclosed_tool_limitation` (unmet) the best a
+      careful spec could reach. A selection narrows *drawn* geometry, so it
+      earns no assertion list and no weaker bar: it is graded as an
+      ordinary geometrically-derived pass, and a declared selection that
+      kept every shape of the layer or none of them is skipped as
+      `degenerate_well_selection` — caught by the same gate, which matches
+      on the `erc.missing_tie:` work-identity prefix rather than on the
+      reason token.
       When a stream genuinely cannot express a tap at all, a top-level
       `ties_disclosure` declares that explicitly; the item still renders
       `supply_spec_disclosed_unexpressible` rather than a met item — a

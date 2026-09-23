@@ -2616,6 +2616,379 @@ def test_well_boxes_rejects_an_inverted_box(tmp_path):
         run_erc(str(gds), str(spec))
 
 
+# --- ties: well-side class selection (issue #2339) -----------------------
+#
+# Everything above narrows or asserts on the *tap* side, or replaces the
+# well with an assertion. None of it reaches the case this section is
+# about: one drawn tub layer carrying two differently-biased well
+# *classes* -- device-body wells strapped to one supply beside a vertical
+# bipolar's base tub strapped to the other, the ordinary shape of a
+# bandgap/bias block on any PDK with a single n-tub layer. Each `ties[]`
+# entry graded *every* merged shape of `well_layer` against its own single
+# `net`, so whichever class was not declared reported a false
+# `erc.missing_tie` -- one per correctly-tapped well of the other class,
+# with the two declarations' finding sets disjoint and together covering
+# every well. `well_requires`/`well_excludes` select which shapes an entry
+# is about.
+
+
+def _two_class_well_layout(*, base_tub_tap: bool = True):
+    """`_routed_tie_layout`'s routed two-gate block plus a second n-tub on
+    the **same** `nwell` layer (10/0), biased to the *other* rail: the
+    base tub of a diode-connected vertical bipolar, sitting in the p-well
+    band and strapped to VSS, beside the device-body n-well band strapped
+    to VDD.
+
+    Both tubs are real, correct, fully tapped wells on one drawn layer.
+    The class marker (14/0, a PDK device marker over the bipolar) covers
+    only *part* of the base tub, and deliberately does not cover its tap
+    -- the marker sits at x in [5.2, 6.2] while the tap contact is at
+    x in [4.0, 4.6] -- so a narrowing that intersected the marker into the
+    well layer (rather than selecting whole shapes of it) would push that
+    tub's real tap outside the graded region and report the very finding
+    this feature removes.
+
+    The base tub also carries one *unmarked* contact (the bipolar's own
+    emitter contact, no tap implant on it), so the `tap_requires`
+    narrowing removes something inside this well too and the tie is not
+    itself tap-degenerate.
+
+    `base_tub_tap=False` omits the tub's implant-marked tap, leaving the
+    untied-well case for the falsifiability tests.
+    """
+    layout, top = _routed_tie_layout()
+    nwell = layout.layer(10, 0)
+    contact = layout.layer(11, 0)
+    tap_implant = layout.layer(12, 0)
+    bjt_marker = layout.layer(14, 0)
+
+    top.shapes(nwell).insert(kdb.Box.new(_um(3), _um(0.4), _um(6.5), _um(2.8)))
+    top.shapes(bjt_marker).insert(kdb.Box.new(_um(5.2), _um(0.8), _um(6.2), _um(2.4)))
+    if base_tub_tap:
+        top.shapes(contact).insert(kdb.Box.new(_um(4), _um(1.2), _um(4.6), _um(1.8)))
+        top.shapes(tap_implant).insert(kdb.Box.new(_um(3.8), _um(1), _um(4.8), _um(2)))
+    top.shapes(contact).insert(kdb.Box.new(_um(5.4), _um(1.2), _um(5.8), _um(1.8)))
+    return layout, top
+
+
+def _run_two_class_well(tmp_path, stem, ties, *, base_tub_tap=True):
+    layout, _top = _two_class_well_layout(base_tub_tap=base_tub_tap)
+    gds = tmp_path / f"{stem}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{stem}.erc.json"
+    _write_spec(spec, _routed_tie_spec(ties=ties))
+    return run_erc(str(gds), str(spec), pdk="sky130")
+
+
+def _two_class_ties(*, body_overrides=None, base_overrides=None):
+    """The two bias classes of the single 10/0 tub layer, declared as two
+    `ties[]` entries -- identical but for their `net` and their well-side
+    selection, which is what makes them two classes rather than two
+    contradictory readings of the same one."""
+    body = {
+        "name": "device_body_wells",
+        "well_layer": "10/0",
+        "tap_layer": "11/0",
+        "tap_requires": ["12/0"],
+        "connect_to": "li1",
+        "net": "VDD",
+    }
+    base = {
+        "name": "bipolar_base_tub",
+        "well_layer": "10/0",
+        "tap_layer": "11/0",
+        "tap_requires": ["12/0"],
+        "connect_to": "li1",
+        "net": "VSS",
+    }
+    body.update(body_overrides or {})
+    base.update(base_overrides or {})
+    return [body, base]
+
+
+_BODY_ID = 'erc.missing_tie:["device_body_wells"]'
+_BASE_ID = 'erc.missing_tie:["bipolar_base_tub"]'
+
+
+def test_one_tub_layer_two_bias_classes_is_unsatisfiable_without_selection(tmp_path):
+    """The reproduction, on today's vocabulary: both declarations are
+    honest and the layout is correct, but each entry grades *every* shape
+    of the shared `well_layer` against its own net, so each reports the
+    other class's well. The two finding sets are disjoint and together
+    account for every well -- which is exactly why no single report can
+    say the layout is right."""
+    report = _run_two_class_well(tmp_path, "two_class_before", _two_class_ties())
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 2
+    assert {f["layer"] for f in missing} == {"device_body_wells", "bipolar_base_tub"}
+    assert all("not connected to declared net" in f["description"] for f in missing)
+    # Disjoint: the well each entry reports is the one the *other* entry
+    # ties correctly.
+    reported = {(f["layer"], f["bbox"]["bottom"]) for f in missing}
+    assert len(reported) == 2
+    assert report["erc_status"] == "violations"
+
+
+def test_well_requires_and_well_excludes_partition_one_tub_layer(tmp_path):
+    """Issue #2339's acceptance criterion: the same layout and the same two
+    declarations, each scoped to its own bias class by the device marker --
+    one naming it, the complementary one excluding it -- report **zero**
+    `erc.missing_tie` findings, with both ties graded as real, checked
+    work."""
+    report = _run_two_class_well(
+        tmp_path,
+        "two_class_after",
+        _two_class_ties(
+            body_overrides={"well_excludes": ["14/0"]},
+            base_overrides={"well_requires": ["14/0"]},
+        ),
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert {_BODY_ID, _BASE_ID} <= set(report["erc_coverage"]["checked"])
+    assert report["erc_coverage"]["skipped"] == []
+    # Drawn-geometry narrowing, not caller assertion: neither assertion
+    # bucket is touched by a well-side selection.
+    assert report["erc_coverage"]["checked_by_assertion"] == []
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+    assert report["erc_status"] == "clean"
+    assert report["gate_count"] == 2
+
+
+def test_well_requires_selects_whole_shapes_not_the_marker_footprint(tmp_path):
+    """The reason this narrows by *selection* rather than by intersection:
+    the marker covers only part of the base tub and does not reach its tap
+    at all. Intersecting it into `well_layer` would shrink the graded
+    region to the marker's own footprint -- with the tub's real,
+    correctly-wired tap outside it -- and report "no tap contact drawn
+    inside it", re-introducing the false finding from the other
+    direction."""
+    report = _run_two_class_well(
+        tmp_path,
+        "two_class_whole_shape",
+        [_two_class_ties(base_overrides={"well_requires": ["14/0"]})[1]],
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _BASE_ID in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["skipped"] == []
+
+
+def test_a_selected_well_class_still_reports_its_own_untied_well(tmp_path):
+    """The falsifiability that earns the selection its `checked` grade: it
+    narrows *what is graded*, never what a finding is allowed to say. Drop
+    the base tub's tap and the scoped entry reports that tub -- and only
+    that tub, not the device-body wells it deliberately excluded."""
+    report = _run_two_class_well(
+        tmp_path,
+        "two_class_untied",
+        _two_class_ties(
+            body_overrides={"well_excludes": ["14/0"]},
+            base_overrides={"well_requires": ["14/0"]},
+        ),
+        base_tub_tap=False,
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["layer"] == "bipolar_base_tub"
+    assert missing[0]["net"] == "VSS"
+    assert "no 'bipolar_base_tub' tap contact drawn" in missing[0]["description"]
+    # The reported shape is the tub itself, not the marker's footprint.
+    assert missing[0]["bbox"]["left"] == _um(3.0)
+    assert missing[0]["bbox"]["right"] == _um(6.5)
+    assert report["erc_status"] == "violations"
+
+
+def test_a_selection_that_keeps_every_well_is_degenerate(tmp_path):
+    """The #2199 bar applied to the well-side selector: a "narrowing" that
+    keeps every merged shape of the drawn layer partitions nothing, so the
+    entry silently grades the other bias class against its own net exactly
+    as an unselected tie would. Recorded as skipped work under its own
+    reason, never as a pass. (Every well here contains a tap implant, so
+    naming 12/0 selects all of them.)"""
+    report = _run_two_class_well(
+        tmp_path,
+        "two_class_keeps_all",
+        [_two_class_ties(base_overrides={"well_requires": ["12/0"]})[1]],
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+    assert _BASE_ID not in report["erc_coverage"]["checked"]
+    # And the false finding is still reported, exactly as it would be
+    # without the key: the device-body band is graded against VSS. The
+    # skip is what tells a reader the declaration did not do what it
+    # looks like it did.
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["bbox"]["bottom"] == _um(8.0)
+    assert report["erc_status"] == "violations"
+
+
+def test_a_selection_that_keeps_no_well_is_degenerate(tmp_path):
+    """The other endpoint, and the more dangerous one: a selector matching
+    no well at all leaves the per-well loop with nothing to iterate, so the
+    run emits zero `erc.missing_tie` findings because nothing was examined.
+    That is the absence-of-evidence pass this whole family of tests exists
+    to refuse."""
+    report = _run_two_class_well(
+        tmp_path,
+        "two_class_keeps_none",
+        [_two_class_ties(base_overrides={"well_requires": ["98/0"]})[1]],
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_an_excludes_that_removes_every_well_is_degenerate(tmp_path):
+    """`well_excludes` is held to the same bar from the other side: an
+    exclusion that removes every shape selects nothing."""
+    report = _run_two_class_well(
+        tmp_path,
+        "two_class_excludes_all",
+        [_two_class_ties(base_overrides={"well_excludes": ["12/0"]})[1]],
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_the_selection_degeneracy_reason_is_distinct_from_the_tap_one(tmp_path):
+    """Two different defects, two different remedies: "your marker does not
+    partition this well layer" must not render as "narrow your tap". The
+    well test is applied first, for the same reason #2255's is -- the tap
+    narrowing is measured *inside* the well region, so on a well nobody
+    selected the tap answer is about the wrong set of shapes."""
+    tie = _two_class_ties(base_overrides={"well_requires": ["12/0"]})[1]
+    del tie["tap_requires"]  # tap-degenerate as well
+    report = _run_two_class_well(tmp_path, "two_class_both", [tie])
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_two_ties_on_one_well_layer_are_graded_independently(tmp_path):
+    """Coverage is keyed on the tie `name`, not on the `well_layer` the two
+    entries share: one well-formed selection and one degenerate selection in
+    the same run land in different buckets."""
+    report = _run_two_class_well(
+        tmp_path,
+        "two_class_mixed",
+        _two_class_ties(
+            body_overrides={"well_excludes": ["14/0"]},
+            base_overrides={"well_requires": ["12/0"]},
+        ),
+    )
+
+    assert _BODY_ID in report["erc_coverage"]["checked"]
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_a_tie_with_no_well_selection_is_never_selection_degenerate(tmp_path):
+    """The additive-when-unused guarantee, and the reason this test is
+    presence-gated rather than purely geometric: a tie with no well-side
+    selector claims *every* shape on its layer, which is the strongest
+    claim available -- not an unfalsifiable one. Every spec written before
+    this key existed grades exactly as it did."""
+    report = _run_routed_tie(
+        tmp_path, "no_well_selection", _routed_tie_entries(tap_requires=["12/0"])
+    )
+
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_status"] == "clean"
+
+
+def test_well_requires_on_an_asserted_substrate_region_is_rejected(tmp_path):
+    """A selection picks among *drawn* shapes. An asserted substrate region
+    (`well_layer: null` + `well_boxes`) already names exactly the region it
+    claims, box by box, so a layer-driven narrowing on top of it would be a
+    second, unstated claim -- rejected rather than silently ignored."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "requires_on_assertion",
+        {
+            "well_layer": None,
+            "well_boxes": [[0.0, 0.0, 4.0, 4.0]],
+            "well_requires": ["14/0"],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="well_requires selects among the drawn"):
+        run_erc(str(gds), str(spec))
+
+
+def test_well_excludes_on_an_asserted_substrate_region_is_rejected(tmp_path):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        "excludes_on_assertion",
+        {
+            "well_layer": None,
+            "well_boxes": [[0.0, 0.0, 4.0, 4.0]],
+            "well_excludes": ["14/0"],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="well_excludes selects among the drawn"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires", "well_excludes"])
+def test_a_non_array_well_selection_is_rejected(tmp_path, key):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"non_array_{key}",
+        {
+            "well_layer": "10/0",
+            key: "14/0",
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=f"{key} must be an array"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires", "well_excludes"])
+def test_a_malformed_well_selection_layer_is_rejected(tmp_path, key):
+    """The same per-entry validation `tap_requires` applies: a
+    silently-dropped layer would weaken a narrowing the caller believes
+    they declared."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"malformed_{key}",
+        {
+            "well_layer": "10/0",
+            key: ["not-a-layer"],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=rf"{key}\[0\]"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires", "well_excludes"])
+def test_a_null_well_selection_is_the_same_as_omitting_it(tmp_path, key):
+    """`null` is the documented "omitted" spelling for every optional list
+    on this entry -- it must not become an empty selection that matches
+    nothing."""
+    report = _run_two_class_well(
+        tmp_path,
+        f"null_{key}",
+        [_two_class_ties(base_overrides={key: None})[1]],
+    )
+
+    assert report["erc_coverage"]["skipped"] == []
+    assert _BASE_ID in report["erc_coverage"]["checked"]
+
+
 # --- ties: disclosed-unexpressible taps (issue #2234) --------------------
 
 
