@@ -576,8 +576,22 @@ faster than its own annotated critical path never advances out of reset, so
 every output register holds its reset value and every case reads the same
 thing, whereas a zero-delay run cannot fail for timing at *any* clock period
 (so its passing says nothing about whether the design meets that clock).
-Before suspecting the engine, check three things, in this order:
+**But on a design whose post-route STA closes, this reading is wrong — see
+step 0 below (issue #2364).** Before suspecting the engine, check these
+things, in order:
 
+0. **Is the design timing-clean, and does the SDF carry `IOPATH` entries?**
+   On a design whose SPEF-annotated STA closes both setup and hold with
+   positive slack, a constant-zero every-case failure under a full SDF is the
+   *expected* outcome of annotating `IOPATH` module-path delays onto the
+   sky130 specify-branch models in Icarus — **at any clock period**
+   (reproduced live at 10× relaxation on a +5.48 ns-slack design, issue
+   #2364; see
+   [`docs/design/sdf-annotate-feasibility-spike.md`](../design/sdf-annotate-feasibility-spike.md)
+   §3.8's addendum). A genuine timing failure cannot survive a relaxed
+   clock on a positive-slack design; an annotation-mechanism kill survives
+   it unchanged. The supported configuration for net-delay back-annotation
+   on this design class is `options.sdf.entries: "interconnect"` (below).
 1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck`,
    `zero_delay_alias_port_interconnect` and
    `zero_delay_physical_only_interconnect`, none of which can change a
@@ -590,13 +604,56 @@ Before suspecting the engine, check three things, in this order:
    near a period the design misses will fail everywhere once real delay is
    modelled, by design.
 3. **Re-run at a slower testbench clock.** If it passes there on the same SDF,
-   the annotation was never the problem.
+   the annotation was never the problem. If it is *still dead* at a 10×
+   relaxed clock on a design whose STA closes, that is step 0's
+   annotation-class dependence, not a timing outcome.
 
 This was reproduced end to end on a real sky130 post-route design (issue
 #1854) — see
 [`docs/design/sdf-annotate-feasibility-spike.md`](../design/sdf-annotate-feasibility-spike.md)
 §3.8 for the isolation table, the clock-period sweep, and why the "any
-`$sdf_annotate` call breaks Icarus's fallback" reading of it is wrong.
+`$sdf_annotate` call breaks Icarus's fallback" reading of it is wrong. Issue
+#2364 later bounded that reproduction's scope — it was a *timing-violating*
+design (−2.05 ns worst slack), and on a *timing-clean* one (+5.48 ns slack,
+setup and hold both closed) the same constant-zero shape is
+annotation-class-dependent: correct under `INTERCONNECT`-only annotation,
+dead under any `IOPATH`-bearing SDF, still dead at a 10× relaxed clock. See
+§3.8's 2026-09-23 addendum for that isolation table.
+
+**Net-delay back-annotation only: `options.sdf.entries: "interconnect"`
+(issue #2364).** For a design whose post-route STA closes, the supported way
+to back-annotate the post-layout-specific net delays without the
+`IOPATH`-on-sky130-specify-branches mechanism above is to select the
+`interconnect` entry population:
+
+```json
+"options": { "sdf": { "file": "gcd_route.sdf", "corner": "min",
+                      "entries": "interconnect" } }
+```
+
+Omitted (or `"all"`) annotates every delay entry the SDF carries,
+byte-identical to before this field existed. `"interconnect"` removes every
+non-`INTERCONNECT` delay entry from the SDF text before annotation — on a
+real `write_sdf` output, the `IOPATH` population — and reports the count as
+its own `dropped` class:
+
+```json
+"dropped": {
+  "iopath_interconnect_only": { "count": 1043, "reason": "..." }
+}
+```
+
+Unlike the two zero-delay `INTERCONNECT` exemptions above, this drop is
+*requested* rather than derived from an Icarus limitation, so it is not
+bounded by a delay value: it sets aside real module-path delay because the
+caller asked for net delays only. `environment.sdf.entries` echoes the
+selected population (`"all"`/`"interconnect"`), so a stored report is
+self-describing about which delay population its verdict was measured
+against. The mode still requires non-`FUNCTIONAL` cell models (the
+`FUNCTIONAL`-define rejection is unchanged) and still fails loudly on any
+diagnostic the drop did not cause; the filtered copy is written as a build
+artifact, `.klt/functional-verification/klt_sdf_interconnect_only.sdf`,
+while `environment.sdf.file` keeps naming the caller's own SDF.
 
 An annotated run is identifiable from the JSON alone: `environment.sdf` is
 `null` on an ordinary run and an object on an annotated one.
@@ -614,6 +671,7 @@ machine-readable instead of requiring a transcript hand-count:
 "sdf": {
   "file": "gcd_route.sdf",
   "corner": "typ",
+  "entries": "all",
   "annotated": true,
   "partial": true,
   "dropped": {
@@ -630,16 +688,22 @@ dropped: no benign diagnostic class was filtered out of the completed
 transcript scan, and no `INTERCONNECT` entry was normalized away before
 annotation. These values describe observed diagnostics and deliberate
 pre-annotation drops, not proof that every delay and timing check applied.
-Both keys are additive, alongside the existing `file`/`corner`/`annotated`.
+Both keys are additive, alongside the existing `file`/`corner`/`annotated`;
+`entries` (issue #2364) is additive the same way, echoing the request's
+entry population — `"all"` or `"interconnect"` — so a stored report is
+self-describing about which delay population its verdict was measured
+against.
 
-Three `dropped` classes exist today, and none of them can change a
-simulated delay:
+Four `dropped` classes exist today. The first three cannot change a
+simulated delay; the fourth deliberately does — it is the requested
+net-delay-only mode, and the count is what makes that choice honest:
 
 | Class | Source | Meaning |
 |---|---|---|
 | `timingcheck` | Transcript scan (issue #1102) | Icarus implements SDF delays but not SDF `TIMINGCHECK`; every `TIMINGCHECK` section in the SDF was dropped by the simulator. |
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
 | `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
+| `iopath_interconnect_only` | Requested mode (issue #2364) | The request selected `options.sdf.entries: "interconnect"`, so every non-`INTERCONNECT` delay entry — on a real `write_sdf` output, the `IOPATH` module-path delays — was removed before annotation and counted here. Only ever present on a run that selected the mode. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
@@ -965,6 +1029,7 @@ exactly.
 | `options.includes` | array\<string\> | Optional. `-I` include directories, resolved relative to the request (same convention as `sources`). Forwarded to `Runner.build(includes=...)`. Defaults to `[]`. |
 | `options.sdf.file` | string | Optional. Path to an IEEE-1497 SDF file, resolved relative to the request like every other path field, and back-annotated onto the design through Icarus's `$sdf_annotate` (see "SDF back-annotation"). Requires `engine: "icarus"` at version 13.0 or newer — `options.sdf` with `engine: "verilator"`, against a pre-13.0 `iverilog` (no `-ginterconnect`), or alongside a `FUNCTIONAL` entry in `options.defines`, is exit 1, never a silent no-op. A missing/unreadable file is exit 1 (issue #1002). |
 | `options.sdf.corner` | string | Optional, one of `"min"`/`"typ"`/`"max"`, default `"typ"`. Selects one member of each SDF `min:typ:max` triplet, via the compile-time `iverilog -T` flag. Only valid inside an `options.sdf` block; an unknown key inside that block is exit 1 rather than silently ignored. |
+| `options.sdf.entries` | string | Optional, one of `"all"`/`"interconnect"`, default `"all"` (issue #2364). `"all"` annotates every delay entry the SDF carries. `"interconnect"` drops every non-`INTERCONNECT` delay entry (on a real `write_sdf` output, the `IOPATH` population) before annotation and reports the count as the `iopath_interconnect_only` `environment.sdf.dropped` class — the supported net-delay back-annotation configuration for a design whose post-route STA closes (see "SDF back-annotation"). Echoed as `environment.sdf.entries`. An unknown value is exit 1 rather than silently ignored. |
 | `options.trace` | boolean | Defaults to `false`. `true` turns on cocotb's own `Runner(waves=True)` on both the build and test steps for whichever engine ran — Icarus dumps `<hdl_toplevel>.fst`, Verilator dumps `dump.vcd` — and the resulting file is contracted in the response's `trace` field, ready to hand to [`klt wave build`](wave.md). Not engine-restricted, unlike `options.coverage`/`options.sdf`: both engines have a waveform-dump path through cocotb. Not currently combinable with `--mutations` (exit 1) — see "Mutation testing: `--mutations`" → "Out of scope". |
 | `parameters` | object | Optional. String key -> scalar value (integer, float, string, or boolean), forwarded unchanged to both `Runner.build(parameters=...)` and `Runner.test(parameters=...)`. Overrides Verilog `parameter` (or VHDL `generic`) values at elaboration time -- e.g. `{"WIDTH": 8}` to elaborate a design's `#(parameter WIDTH = 16)` at 8 bits instead of its default. cocotb's own per-engine backend translates each entry into the right flag (Icarus: `-P<toplevel>.<name>=<value>`; Verilator: `-G<name>=<value>`) -- this verb never needs to know that syntax itself. Omitted/empty is a no-op, identical to today's behavior. Non-empty together with `options.sdf` on Icarus is exit 1 (see "How the annotation is wired") -- the SDF top-level-port workaround elaborates a generated wrapper as the new `-s` root, and cocotb's parameter-override syntax would then silently target that wrapper instead of the real DUT. |
 

@@ -467,6 +467,14 @@ is *not* the same mechanism — not an annotation failure at all.
 
 ### 3.8 The "constant-zero on every test case" shape is a timing outcome, not a broken annotation
 
+> **Scope (2026-09-23, issue #2364):** this attribution was measured on — and
+> holds for — the **timing-violating** design class the section's own run was
+> built from. On **timing-clean** designs (positive setup/hold slack at the
+> SDF's own corner) the same shape is **annotation-class-dependent**: dead
+> under any `IOPATH`-bearing SDF at any clock period, correct under
+> `INTERCONNECT`-only annotation. See the dated addendum at this section's
+> end before applying this section's conclusion to a design whose STA closes.
+
 Found live during issue #1854, closing out the question §3.7 deferred. The
 claim under test, from #1619's own report:
 
@@ -598,6 +606,79 @@ annotation failure into "oh, that's just the timing shape". The reading
 guidance is mirrored for callers in
 [`docs/cli/functional-verification.md`](../cli/functional-verification.md)
 §"SDF back-annotation".
+
+#### §3.8 addendum (2026-09-23, issue #2364): the attribution above does not generalize to timing-clean designs — the shape is annotation-class-dependent there
+
+The run above was built on a **timing-violating** design (−2.05 ns worst
+setup slack at the 1.1 ns target), and on that design class the §3.8
+attribution stands: dead at the violating period, alive again at a relaxed
+one, which is the signature of a genuine annotated-delay failure. It does
+**not** generalize. Issue #2364 isolated the same constant-zero shape on a
+design whose SPEF-annotated STA **closes** — and the discriminator is the
+SDF's entry class, not the clock period **[RUN]**:
+
+| | |
+|---|---|
+| Design | `examples/functional-verification/gcd.v` → `klt synthesize` (native Yosys) → `klt place-and-route` (native OpenROAD, `target_stage: "route"`, `post_route_spef: true`, `post_route_sdf: true`, **10 ns** target clock, seed 7) |
+| Netlist | OpenROAD `write_verilog`, 402 `sky130_fd_sc_hd__*` instances |
+| SDF | OpenSTA `write_sdf` from the same post-`read_spef` session: **1064** `INTERCONNECT`, **1043** `IOPATH`, **50** `TIMINGCHECK` entries |
+| STA | `spef_sta.worst_slack_ns` **+5.48 ns**, 0 setup violations, 0 hold violations, TNS 0 — timing **closed** at the testbench's own 10 ns period |
+| Models / tools | `sky130_fd_sc_hd.v` + `primitives.v`, `FUNCTIONAL` undefined; Icarus Verilog 13.0, cocotb 2.0.1 |
+
+The isolation table — every row is the same design, netlist, models, and
+testbench (the stock `test_gcd.py`, whose one deliberately-failing case makes
+"2 pass / 1 deliberate fail, `result` correct" the healthy baseline) **[RUN]**:
+
+| # | SDF handed to `$sdf_annotate` | testbench clock | outcome |
+|---|---|---|---|
+| a | none (zero-delay models) | 10 ns | 2 pass / 1 deliberate fail; `result` correct on every case |
+| b | `INTERCONNECT` entries only (1043 `IOPATH` entries removed from the SDF text) | 10 ns | **identical to (a)** — correct results |
+| c | full SDF (all `IOPATH` + `INTERCONNECT` applied, zero actionable diagnostics, `annotated: true`) | 10 ns | **dead** — `result` = 0 on every case, uniform constant-zero failure |
+| d | the same full SDF | **100 ns** (10× relaxed) | **still dead** — identical constant-zero failure |
+
+Row (d) is the one a genuine timing failure cannot produce: a design with
++5.48 ns of setup slack at 10 ns has ~15.5 ns of margin at a 100 ns period,
+yet the annotated run is exactly as dead as at 10 ns. Compare §3.8's own
+clock-period sweep on the violating design, where relaxation revived it at
+3.0 ns. Dead at both 1× and 10× with net-delay-only annotation passing is an
+**annotation-mechanism kill**, not a timing outcome — the #1888/§3.8
+clock-period-sweep evidence is real but only discriminates on the
+timing-violating class it was measured on.
+
+**Suspected mechanism** (consistent with #1854's original hypothesis, not
+proven here): the sky130 specify-branch models wire each cell's functional
+UDP through `*_delayed` nets driven only by `$setuphold`/`$recrem`
+delayed-signal outputs, which Icarus replaces with "copies of the original
+signals" (a warning per cell at build). With `IOPATH` module-path delays
+annotated on top, the copies and the path-delay scheduling interact so some
+cells' outputs settle to stale values — run-to-run nondeterministically in a
+driven testbench, matching the §3.7 shape-(b) testbench-sensitivity recorded
+by #1619. `INTERCONNECT`-only annotation never touches a module path and is
+stable.
+
+**Consequences.**
+
+- The §3.8 reading guidance ("a uniform every-case failure is usually not a
+  broken annotation — check `dropped`, the testbench clock, and re-run
+  slower") keeps its step 1 and gains a step 0 on timing-clean designs:
+  **which entry classes does the SDF carry?** On a design whose STA closes,
+  the constant-zero shape is the *expected* outcome of annotating `IOPATH`
+  onto the sky130 specify-branch models in Icarus, at any clock period.
+- The supported, honestly-reported configuration for net-delay
+  back-annotation on this design class is `options.sdf.entries:
+  "interconnect"` (issue #2364): every non-`INTERCONNECT` delay entry is
+  dropped before annotation and counted as the
+  `iopath_interconnect_only` `environment.sdf.dropped` class — a
+  first-class mode replacing the hand-filtered SDF row (b) above. See
+  [`docs/cli/functional-verification.md`](../cli/functional-verification.md)
+  §"SDF back-annotation".
+- The PDK-free regression test above keeps holding **and keeps its §3.8
+  attribution** — its docstring now states it covers only the
+  timing-violating design it was built from (#1854's repro), so it and this
+  addendum are not read as contradicting each other. The timing-clean
+  isolation table above is reproduced by the `entries` mode's own
+  integration coverage, not by a sky130 CI fixture (PDK-scale gate-level
+  runs stay out of CI for the same cost reasons §1 recorded).
 
 ---
 

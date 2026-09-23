@@ -14,6 +14,7 @@ deferral (:func:`_sdf_matching_paren`, :func:`_sdf_top_level_clauses`,
 :func:`_sdf_interconnect_is_droppable`, :func:`_sdf_cell_delay_spans`,
 :func:`_sdf_cell_entry_removals`, :func:`_cut_sdf_spans`,
 :func:`_read_sdf_text`, :func:`_drop_sdf_interconnect_entries`,
+:func:`_drop_sdf_non_interconnect_entries`,
 :func:`_drop_sdf_zero_delay_alias_port_interconnects`), physical-only-
 destination ``INTERCONNECT`` normalization
 (:func:`_sdf_cell_model_is_physical_only`,
@@ -97,18 +98,22 @@ def _resolve_sdf_option(
     sdf: Any, engine: str, request_dir: str
 ) -> dict[str, str] | None:
     """Validate the optional ``request.options.sdf`` block (issue #1002) and
-    return ``{"file": <abs path>, "corner": ...}``, or ``None`` when absent.
+    return ``{"file": <abs path>, "corner": ..., "entries": ...}``, or
+    ``None`` when absent.
 
     Unknown keys are rejected rather than ignored. The block's whole surface
-    is two fields, and both of the plausible typos (``"corners"``,
-    ``"path"``) would otherwise degrade to a *silently different run* -- the
-    wrong timing corner, or no annotation at all -- which is precisely the
-    class of failure this feature's own transcript gate exists to prevent.
+    is three fields, and each of the plausible typos (``"corners"``,
+    ``"path"``, ``"entry"``) would otherwise degrade to a *silently different
+    run* -- the wrong timing corner, no annotation at all, or every delay
+    annotated when only net delays were meant -- which is precisely the class
+    of failure this feature's own transcript gate exists to prevent.
     """
     from .functional_verification import (
         DEFAULT_SDF_CORNER,
+        DEFAULT_SDF_ENTRIES,
         SDF_CORNERS,
         SDF_ENGINES,
+        SDF_ENTRIES_MODES,
         FunctionalVerificationError,
     )
 
@@ -123,12 +128,12 @@ def _resolve_sdf_option(
             "point through this flow)"
         )
 
-    unknown = sorted(set(sdf) - {"file", "corner"})
+    unknown = sorted(set(sdf) - {"file", "corner", "entries"})
     if unknown:
         raise FunctionalVerificationError(
             "request.options.sdf has unknown field(s): "
             + ", ".join(unknown)
-            + " (supported: file, corner)"
+            + " (supported: file, corner, entries)"
         )
 
     file_value = sdf.get("file")
@@ -157,7 +162,14 @@ def _resolve_sdf_option(
             "request.options.sdf.corner must be one of: " + ", ".join(SDF_CORNERS)
         )
 
-    return {"file": os.path.abspath(path), "corner": corner}
+    entries = sdf.get("entries", DEFAULT_SDF_ENTRIES)
+    if entries not in SDF_ENTRIES_MODES:
+        raise FunctionalVerificationError(
+            "request.options.sdf.entries must be one of: "
+            + ", ".join(SDF_ENTRIES_MODES)
+        )
+
+    return {"file": os.path.abspath(path), "corner": corner, "entries": entries}
 
 
 def _write_sdf_annotate_shim(path: str, *, sdf_paths: list[str], scope: str) -> None:
@@ -912,6 +924,47 @@ def _drop_sdf_interconnect_entries(
     if not dropped:
         return None
     return _cut_sdf_spans(text, removed_spans), dropped
+
+
+def _drop_sdf_non_interconnect_entries(sdf_path: str) -> tuple[str, int] | None:
+    """``(``sdf_path``'s text with every non-``INTERCONNECT`` delay entry
+    removed, how many were removed)`` -- or ``None`` when there is nothing
+    to remove (or the file cannot be read), in which case the caller keeps
+    handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    The ``options.sdf.entries: "interconnect"`` mode's whole implementation
+    (issue #2364): the net-delay back-annotation configuration that issue's
+    isolation table validated on a timing-clean sky130A design -- a design
+    whose SPEF-annotated STA closes both setup and hold with positive slack
+    still simulates correctly with ``INTERCONNECT``-only annotation, while
+    any SDF carrying ``IOPATH`` module-path delays kills the same design
+    even at a 10x-relaxed clock period, which a genuine timing failure on a
+    positive-slack design cannot produce. The suspected mechanism is the
+    sky130 specify-branch models' ``*_delayed`` nets interacting with
+    Icarus's module-path-delay scheduling; whatever its exact shape, the
+    entry class is the discriminator, so the supported configuration is the
+    one that annotates the surviving class honestly rather than leaving
+    callers to hand-filter SDF text off-tool.
+
+    Every delay entry whose text does not start with ``(INTERCONNECT`` is
+    dropped -- on a real ``write_sdf`` output that is the ``IOPATH``
+    population and nothing else. The count is the number of *entries*
+    removed, and an emptied ``(DELAY ...)`` clause or delay-type clause is
+    removed along with its entries by the shared
+    :func:`_sdf_cell_entry_removals` cleanup (a ``(DELAY (ABSOLUTE))`` with
+    no entries is itself an Icarus parse error), so the filtered text this
+    returns is one Icarus accepts unchanged. ``(TIMINGCHECK ...)`` sections
+    are *not* touched here: Icarus drops every one of them itself (the
+    ``timingcheck`` ``environment.sdf.dropped`` class, issue #1102), which
+    is already counted and reported honestly without this pass needing to
+    re-implement it.
+    """
+    text = _read_sdf_text(sdf_path)
+    if text is None:
+        return None
+    return _drop_sdf_interconnect_entries(
+        text, lambda entry: not entry.lstrip().startswith("(INTERCONNECT")
+    )
 
 
 def _drop_sdf_zero_delay_alias_port_interconnects(
