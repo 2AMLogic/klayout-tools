@@ -151,6 +151,7 @@ from ._layout import load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
+from ._provenance import INPUT_ROLE_LAYOUT, _content_hash, build_provenance
 from .coverage import build_check_coverage, coverage_rollup, rollup_status, work_id
 from .ir_solver import solve_ir_drop, worst_deviation
 
@@ -168,6 +169,11 @@ if TYPE_CHECKING:
 #: `devices` echo of what it subtracted -- additive on both sides: a spec
 #: that declares no `devices[]` produces a byte-identical report except for
 #: the new (empty) `devices` list, so no bump here either.
+#:
+#: Issues #2349 (the shared `provenance` block) and #2345 (per-edge
+#: `length_um`/`cross_um`/`area_um2`, plus `ir_drop_map`'s derived
+#: `current_density_a_per_um`) are likewise purely additive new keys on an
+#: unchanged shape -- no bump.
 SCHEMA_VERSION = 1
 
 #: The most mesh cells one non-rectangular merged polygon may be decomposed
@@ -974,6 +980,8 @@ def _model_box_polygon(
         entry["sheet_resistance_ohm_per_sq"] * length_um / cross_um,
         current_limit_a,
         entry["current_limit_source"],
+        length_um=length_um,
+        cross_um=cross_um,
     )
     return [(n_a, a_x, a_y), (n_b, b_x, b_y)]
 
@@ -1064,6 +1072,8 @@ def _model_mesh_polygon(
                 sheet_r * half_um / cross_um,
                 None if limit_per_um is None else limit_per_um * cross_um,
                 entry["current_limit_source"],
+                length_um=half_um,
+                cross_um=cross_um,
             )
     return endpoints
 
@@ -1119,6 +1129,9 @@ def _build_island_network(
         resistance_ohm: float,
         current_limit_a: float | None = None,
         current_limit_source: str | None = None,
+        length_um: float | None = None,
+        cross_um: float | None = None,
+        area_um2: float | None = None,
     ) -> None:
         edge_id = f"e{counters['edge']}"
         counters["edge"] += 1
@@ -1130,6 +1143,21 @@ def _build_island_network(
                 "from": frm,
                 "to": to,
                 "resistance_ohm": round(resistance_ohm, 9),
+                # Issue #2345: the geometry this edge's resistance (and, for
+                # a metal edge, its per-width EM limit) was computed from --
+                # `length_um`/`cross_um` on a metal edge
+                # (`resistance_ohm = sheet_resistance_ohm_per_sq *
+                # length_um / cross_um`, `current_limit_a =
+                # current_limit_a_per_um * cross_um`), `area_um2` on a via
+                # edge (one merged via polygon -- the flat per-shape
+                # `resistance_ohm`/`current_limit_a` applies to the merged
+                # shape as a whole, per docs/cli/power.md's "one via shape
+                # = one resistor" caveat). `null` for the geometry an
+                # edge's kind does not have, matching `current_limit_a`'s
+                # own null convention.
+                "length_um": round(length_um, 6) if length_um is not None else None,
+                "cross_um": round(cross_um, 6) if cross_um is not None else None,
+                "area_um2": round(area_um2, 12) if area_um2 is not None else None,
                 # Issue #846, Phase 1c: this edge's own EM current-density
                 # limit, `null` when its `stackup`/`vias` role declared none
                 # -- see `_validate_stackup`/`_validate_vias` above and
@@ -1214,6 +1242,12 @@ def _build_island_network(
                 via["resistance_ohm"],
                 via["current_limit_a"],
                 via["current_limit_source"],
+                # Issue #2345: a via edge's geometry is its merged polygon's
+                # area, not a length/width -- the flat per-shape model
+                # applies to the merged shape as a whole (issue #2345's
+                # "per-cut vs per-merged-polygon" caveat, now visible in
+                # data).
+                area_um2=polygon.area() * dbu * dbu,
             )
 
     # The connectivity model already declared these nodes one island, so the
@@ -1562,6 +1596,14 @@ def _solve_ir_drop(
                         "current_a": _round_or_none(
                             solution["edge_currents"][edge["id"]], 12
                         ),
+                        # Issue #2345: the derived current density on the
+                        # same edge that carries the solved current --
+                        # reported with no pass/fail attached (see
+                        # `_edge_current_density`), so a role whose PDK
+                        # publishes no limit is still gradeable by a human.
+                        "current_density_a_per_um": _edge_current_density(
+                            edge, solution["edge_currents"][edge["id"]]
+                        ),
                     }
                     for edge in island["edges"]
                 ],
@@ -1643,6 +1685,27 @@ def _round_or_none(
     value: float | None, digits: int, scale: float = 1.0
 ) -> float | None:
     return None if value is None else round(value * scale, digits)
+
+
+def _edge_current_density(
+    edge: dict[str, Any], current_a: float | None
+) -> float | None:
+    """``abs(current_a) / cross_um`` for a solved metal edge, else ``None``
+    (issue #2345's derived per-edge current density).
+
+    This is the honest shape of the "role the PDK publishes no EM limit
+    for" answer: a number with no verdict attached -- a human prices it
+    against a datasheet or a foundry memo -- rather than silence, and
+    rather than a caller having to re-derive a width by inverting
+    ``resistance_ohm`` against endpoint-node distances (undefined for an
+    ideal short, and wrong for a decomposed polygon's sub-segments).
+    ``None`` for a via edge (no width exists -- the limit model is flat
+    per merged shape) and for an edge with no solved current (an unsolved
+    island, or a ``resistance_ohm: 0`` short), never a fabricated number.
+    """
+    if edge["kind"] != "metal" or current_a is None or edge["cross_um"] is None:
+        return None
+    return round(abs(current_a) / edge["cross_um"], 12)
 
 
 def _em_coverage(
@@ -2102,11 +2165,19 @@ def run_power(
     subtracted -- ``{"name", "body_layer", "on", "body_area_um2"}`` per
     declaration, in declaration order, ``[]`` when the spec declares none.
     It is a **top-level** key rather than ``klt erc``'s
-    ``provenance.devices`` for the plain reason that ``klt power`` has no
-    ``provenance`` block to nest it under; inventing a half-populated one
-    (no ``input``, no ``tool``) would be a worse divergence than a
-    differently-placed key carrying the identical four fields. See
-    ``docs/cli/power.md``'s "Device bodies are not wires".
+    ``provenance.devices`` because the echo predates this verb's own
+    ``provenance`` block (added later by issue #2349): moving it under
+    ``provenance`` now would remove the field existing callers read, which
+    the additive-envelope rule (``docs/json-contract.md``) forbids -- so
+    the differently-placed key carrying the identical four fields stays.
+    See ``docs/cli/power.md``'s "Device bodies are not wires".
+
+    ``provenance`` (issue #2349) is the shared reproducibility block every
+    verdict-bearing verb emits -- see ``docs/json-contract.md``'s "Shared
+    `provenance` block" -- pinning the layout (``input.content_hash``) and
+    the spec (``spec.content_hash``, ``klt erc``'s #2036 verb-local shape)
+    contents, the ``klt``/KLayout builds, and the top cell the connectivity
+    model ran on.
 
     ``ir_drop_map`` and
     ``worst_case_droop_mv`` are ``None`` when the spec declares neither
@@ -2291,6 +2362,27 @@ def run_power(
 
     status = _em_overall_status(em_verdict, coverage)
 
+    # Issue #2349: the same shared `provenance` block `klt erc` emits
+    # (#1968/#2036), same field names, so a caller reads both verbs
+    # identically and a committed IR/EM report can be re-verified against
+    # the exact layout and spec bytes it was solved from. A power report's
+    # numbers are a joint function of the layout, the spec's
+    # sheet-resistance/EM declarations, its `pads`, and its
+    # `current_model` -- pin all of the file-backed ones or the report is
+    # an unfalsifiable claim. `klt power` resolves no PDK (the spec
+    # declares sheet resistances and EM limits directly) and applies no
+    # deck, so `pdk`/`deck` are always `null` -- never fabricated.
+    # `provenance.spec` is #2036's verb-local second-input shape, attached
+    # here rather than via a `build_provenance` parameter exactly the way
+    # `klt erc` attaches it. `top_cell` is this verb's own addition: the
+    # solved network *is* `LayoutToNetlist`'s output for that one cell, so
+    # the KLayout build and the cell it ran on are both part of what the
+    # numbers depend on (`klayout_version` itself comes from the shared
+    # block, for the same reason `klt erc` records it).
+    provenance = build_provenance(input_path=file, input_role=INPUT_ROLE_LAYOUT)
+    provenance["spec"] = {"content_hash": _content_hash(spec_path)}
+    provenance["top_cell"] = top_cell.name
+
     return {
         "schema_version": SCHEMA_VERSION,
         "file": file,
@@ -2307,4 +2399,5 @@ def run_power(
         "coverage": coverage,
         "devices": devices_applied,
         "warnings": warnings,
+        "provenance": provenance,
     }

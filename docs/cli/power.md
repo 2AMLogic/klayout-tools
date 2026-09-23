@@ -332,7 +332,10 @@ connectivity graph uses, scoped down to only the layers this spec declares.
   `resistance_ohm = sheet_resistance_ohm_per_sq * length_um / width_um`.
   Every merged polygon in this command's own real-fixture validation (the
   `gcd` corpus fixture below, a genuine `klt place-and-route` output) is an
-  axis-aligned box, matching this model exactly.
+  axis-aligned box, matching this model exactly. The two numbers the model
+  consumed are reported on every metal edge — `length_um` and `cross_um`
+  (that formula's `width_um`) — so a suspicious resistance can be audited
+  against the geometry it was computed from (issue #2345).
 - A **non-rectangular** merged polygon — the normal shape of a real PDN
   ring, or of any L/T/comb-shaped bus — is **decomposed, not
   approximated**. See "Non-rectangular segments" below.
@@ -341,8 +344,12 @@ connectivity graph uses, scoped down to only the layers this spec declares.
   *nearest* (straight-line distance) the via's center **among the nodes of
   the merged polygon that via actually lands on** — not a true T-junction
   split of the rail it taps partway along, and never a node on some other
-  polygon of the same net that happens to be closer. See "Scope and
-  limitations" below for what this approximates away.
+  polygon of the same net that happens to be closer. A via edge reports the
+  merged polygon's area as its `area_um2` (issue #2345) — no length/width,
+  since the flat per-shape model applies to the merged shape as a whole —
+  making the per-cut-vs-per-merged-polygon caveat below visible in data
+  rather than only in prose. See "Scope and limitations" for what this
+  approximates away.
 - Every island's emitted network is **one connected component**, matching
   the one island the connectivity model found. When it is not — a via layer
   the spec never declared, or one whose `between` roles do not name the
@@ -446,10 +453,11 @@ semantics, same validation — the two verbs share one implementation
 (`src/klayout_tools/_devices.py`), so the identical `devices[]` block can be
 lifted straight from an `.erc.json` spec into a `.power.json` one. The only
 difference is where the echo lands: `klt erc` nests it under
-`provenance.devices`, and `klt power` — which has no `provenance` block at
-all — carries the same four fields in a **top-level `devices[]`**.
-Inventing a half-populated `provenance` (no `input`, no `tool`) would have
-been a worse divergence than a differently-placed key.
+`provenance.devices`, and `klt power` carries the same four fields in a
+**top-level `devices[]`**. (The echo predates `klt power`'s own
+`provenance` block, added later by issue #2349 — moving it under
+`provenance` now would remove a field existing callers read, which the
+additive envelope forbids, so the top-level key stays.)
 
 Three properties, all deliberate:
 
@@ -616,10 +624,10 @@ IR-drop solve already produced are checked against those limits, per net.
   micron — see "Worked example" below), because the layer's thickness is
   fixed. So a merged rail's own `current_limit_a` is
   `current_limit_a_per_um * cross_um`, using the exact same `cross_um`
-  (the merged polygon's shorter bounding-box dimension) the resistance
-  calculation above already computed — a wide rail tolerates more absolute
-  current than a narrow one on the same layer, which is exactly the
-  physical intent of a per-width limit.
+  (the merged polygon's shorter bounding-box dimension, reported per edge
+  — issue #2345) the resistance calculation above already computed — a
+  wide rail tolerates more absolute current than a narrow one on the same
+  layer, which is exactly the physical intent of a per-width limit.
 - **A via edge's limit is flat, not scaled.** A real PDK's `DCCURRENTDENSITY`
   for a via/cut layer is already a flat per-shape current (sky130's is "mA
   per via"), matching this spec's existing "one merged via polygon = one
@@ -666,6 +674,51 @@ IR-drop solve already produced are checked against those limits, per net.
   currents to compare, the same condition under which `ir_drop_map` itself
   is `null`.
 
+## Provenance (issue #2349)
+
+Every report carries the same shared `provenance` block `klt erc` emits
+([`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance`
+block"), with the same field names, so a caller reads both verbs
+identically and a committed IR/EM report can be re-verified against the
+exact artifacts it was solved from:
+
+```json
+"provenance": {
+  "klt_version": "0.6.0",
+  "klayout_version": "0.30.10",
+  "pdk": null,
+  "deck": null,
+  "input": {"content_hash": "sha256:…", "role": "layout"},
+  "spec": {"content_hash": "sha256:…"},
+  "top_cell": "ADC_BLOCK"
+}
+```
+
+- **`input.content_hash` pins the layout, `spec.content_hash` the spec's
+  *contents*.** The top-level `file`/`spec` fields are only their paths —
+  in a CI or agent context frequently temporary ones that no longer
+  exist. A `klt power` verdict is a joint function of **four** inputs —
+  the layout, the `stackup`/`vias` sheet resistances and EM limits (a
+  PDK-corner choice), the `pads`, and the `current_model` — so pinning
+  the layout alone leaves a committed report re-verifiable only halfway.
+  This is the identical reasoning that put `provenance.spec` on `klt erc`
+  (issue #2036), in the same `{content_hash}` shape.
+- **`pdk`/`deck` are always `null`.** `klt power` resolves no installed
+  PDK and applies no rule deck — the spec declares its sheet resistances
+  and EM limits directly. `null`, never fabricated, matching the shared
+  block's own convention.
+- **`klayout_version` and `top_cell`.** The solved network *is*
+  `LayoutToNetlist`'s output — which polygons merge, where a segment's
+  endpoint nodes land — so the droop depends on the KLayout build and the
+  cell it ran on, not only on the stream. `klt erc` records
+  `klayout_version` for the same reason; `top_cell` is this verb's own
+  addition, since a stream can hold several cells and `--top` selects
+  one.
+
+The block is purely additive (`schema_version` stays `1`), and the hashes
+are stable across runs on the same inputs, so committed reports can be
+re-verified in CI.
+
 ## JSON schema (the contract)
 
 **JSON is the API.** See [`docs/json-contract.md`](../json-contract.md) for
@@ -701,6 +754,9 @@ the shared envelope (`schema_version`, error shape, exit codes).
               "from": "n0",
               "to": "n1",
               "resistance_ohm": 1.0,
+              "length_um": 10.0,
+              "cross_um": 1.0,
+              "area_um2": null,
               "current_limit_a": 0.0028,
               "current_limit_source": "sky130_fd_sc_hd__nom.tlef met1 DCCURRENTDENSITY AVERAGE 2.8 mA/um"
             }
@@ -770,7 +826,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
               {"id": "n0", "voltage_v": 1.8, "droop_mv": 0.0, "injected_current_a": 0.0, "pad_voltage_v": 1.8},
               {"id": "n1", "voltage_v": 1.799, "droop_mv": 1.0, "injected_current_a": -0.001, "pad_voltage_v": null}
             ],
-            "edges": [{"id": "e0", "current_a": 0.001}]
+            "edges": [{"id": "e0", "current_a": 0.001, "current_density_a_per_um": 0.001}]
           }
         ]
       }
@@ -810,7 +866,16 @@ the shared envelope (`schema_version`, error shape, exit codes).
   "devices": [],
   "warnings": [
     "power net 'VGND' matches no labelled net in this layout -- nets actually present: 'VPWR'; check 'power_nets' against the layout's own pin/label text (a 'power_nets' entry matches a net that *carries* that label, so 'VDD_CORE' matches a net named 'DVDD,VDD_CORE'), and that at least one 'stackup' entry's 'label_layer' actually carries it"
-  ]
+  ],
+  "provenance": {
+    "klt_version": "0.6.0",
+    "klayout_version": "0.30.10",
+    "pdk": null,
+    "deck": null,
+    "input": {"content_hash": "sha256:…", "role": "layout"},
+    "spec": {"content_hash": "sha256:…"},
+    "top_cell": "TOP"
+  }
 }
 ```
 
@@ -829,13 +894,14 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].node_count`/`edge_count` | integer | This island's own totals (both `0` when `unsolved_reason` is set).                                 |
 | `islands[].unsolved_reason` | string \| null | `null` on a modelled island. A non-null string means this island's geometry could not be modelled exactly (not axis-aligned, or over the decomposition cap) and **no** resistor network was emitted for it — see "Non-rectangular segments" above. Never accompanied by an approximate network. |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "layer", "x_um", "y_um"}` — `id` is scoped to this island (see "Resistor-network model" above). |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "current_limit_a", "current_limit_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "kind", "layer", "from", "to", "resistance_ohm", "length_um", "cross_um", "area_um2", "current_limit_a", "current_limit_source"}` — `kind` is `"metal"` or `"via"`; `from`/`to` reference sibling `nodes[].id` values; `layer` names the contributing `stackup`/`vias` entry. `length_um`/`cross_um` (issue #2345) are the geometry a **metal** edge's resistance — and per-width EM limit — were computed from (`resistance_ohm = sheet_resistance_ohm_per_sq * length_um / cross_um`; for a decomposed polygon's sub-segment, the half-cell extent and its conducting width). `area_um2` (issue #2345) is a **via** edge's merged polygon area — the flat per-shape resistance/limit model applies to the merged shape as a whole, so that is what is reported. The geometry an edge's kind does not have is `null`. `current_limit_a`/`current_limit_source` (issue #846, Phase 1c) are this edge's own EM current-density limit and its citation, `null` when that role declared none. |
 | `node_count`/`edge_count`/`island_count` | integer | Totals across every requested net.                                                    |
 | `ir_drop_map`        | object \| null     | The static IR-drop solve, or `null` when the spec declared neither `pads` nor `current_model` — see below. |
 | `worst_case_droop_mv` | number \| null    | The largest \|voltage − island reference voltage\| anywhere solved, in millivolts (`null` when there was no solve; `0.0` when there was a solve but nothing drooped). Equal to `ir_drop_map.worst_case.droop_mv`. |
 | `em_verdict`         | object \| null     | The per-net EM current-density verdict, or `null` when the spec declared neither `pads` nor `current_model` (the same condition under which `ir_drop_map` is `null`) — see below. |
 | `devices`            | array\<object\>    | One entry per `devices[]` spec declaration, in declaration order: `{"name", "body_layer", "on", "body_area_um2"}`. `body_area_um2` is the area this declaration **actually** subtracted — the marker intersected with the `on` role's own drawn region, not the marker layer's own area — so `0.0` means the declaration changed nothing. `[]` when the spec declares no `devices`. See "Device bodies are not wires" below. |
 | `warnings`           | array\<string\>    | Non-fatal diagnostics — an unmatched `power_nets` entry (listing the net names actually present), a count of non-rectangular segments decomposed into sub-segments, an island declared unsolved, a via that lands on no modelled segment of one of the roles it declares, an island whose emitted network is more than one connected component (some real connection is not modelled), a pad/instance on a net with no geometry, current stranded on a padless island, an aggregate count of quiet unloaded padless islands, or a count of edges over their declared EM limit. Empty on a clean run.            |
+| `provenance`         | object             | The shared reproducibility block (issue #2349) — see "Provenance" above and [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block": `klt_version`, `klayout_version`, `pdk`/`deck` (always `null` for this verb), `input.content_hash` (the layout) and the verb-local `spec.content_hash` (the spec's contents), plus `top_cell`. |
 
 ### `ir_drop_map` (Phase 1b)
 
@@ -863,7 +929,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
 | `islands[].worst_case_droop_mv`/`worst_case_node_id` | number \| null / string \| null | This island's worst droop magnitude and where.                       |
 | `islands[].iterations`/`residual` | integer / number | Conjugate-gradient iterations and the achieved relative residual (worst over the island's components). |
 | `islands[].nodes[]`  | array\<object\>    | `{"id", "voltage_v", "droop_mv", "injected_current_a", "pad_voltage_v"}` — `id` matches the sibling `networks[]` node; `voltage_v`/`droop_mv` are `null` on an unsolved island; `injected_current_a` is signed (negative = drawn off this net) and `pad_voltage_v` is `null` unless a pad landed here. |
-| `islands[].edges[]`  | array\<object\>    | `{"id", "current_a"}` — the signed `from -> to` branch current, `null` on an unsolved island or a `resistance_ohm: 0` (shorted) edge. This is what the Phase 1c EM verdict consumes. |
+| `islands[].edges[]`  | array\<object\>    | `{"id", "current_a", "current_density_a_per_um"}` — the signed `from -> to` branch current, `null` on an unsolved island or a `resistance_ohm: 0` (shorted) edge. This is what the Phase 1c EM verdict consumes. `current_density_a_per_um` (issue #2345) is `abs(current_a)` divided by the same-named `networks[]` edge's own `cross_um`, `null` for a via edge or an edge with no solved current — a derived number with **no** verdict attached, so a role the PDK publishes no limit for is still reported as a density a human can price against a datasheet. |
 
 ### `em_verdict` (Phase 1c)
 
@@ -1113,7 +1179,10 @@ criterion 4):**
   as an array of several via cuts is not split into a parallel-resistor
   combination — the spec's `resistance_ohm` is used verbatim per merged
   via polygon. Model a via array's true (lower) parallel resistance by
-  passing that already-combined value in the spec.
+  passing that already-combined value in the spec. Each via edge reports
+  its merged polygon's `area_um2` (issue #2345), so a run whose via edges
+  all carry many-array-sized areas is distinguishable in data from one
+  solved per individual cut.
 - **Pads and instances snap to existing nodes.** A pad or an instance is
   wired to the nearest *extracted* node on its net, not spliced into a rail
   at its exact position — same trade, and same "immaterial for a short

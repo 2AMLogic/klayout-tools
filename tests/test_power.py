@@ -14,6 +14,7 @@ via klt par" acceptance criterion.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -50,6 +51,18 @@ MODEXP_CANARY_GDS = CORPUS_DIR / "place_and_route" / "modexp_canary.gds.gz"
 
 def _um(v: float) -> int:
     return int(round(v / 0.001))
+
+
+def _sha256_file(path) -> str:
+    """Freshly computed sha256 hex digest of `path`, for cross-checking
+    `provenance.input`/`provenance.spec` content hashes (issue #2349)
+    against an independent computation rather than
+    `klayout_tools._provenance.sha256_file` itself."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _basic_fixture(path) -> None:
@@ -202,6 +215,202 @@ def test_run_power_via_bridged_island_has_metal_and_via_edges(tmp_path):
     # through via connectivity alone.
     layers = {node["layer"] for node in island_b["nodes"]}
     assert layers == {"met1", "met2"}
+
+
+# --- run_power: per-edge geometry in the report (issue #2345) ---------------
+
+
+def test_metal_edges_carry_their_computed_length_and_cross_um(tmp_path):
+    """The two numbers the resistance (and per-width EM limit) were computed
+    from are reported on each metal edge, so `resistance_ohm` can be audited
+    against its drawn geometry: `sheet_r * length_um / cross_um`."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    vpwr = next(entry for entry in report["networks"] if entry["net"] == "VPWR")
+    islands = {island["node_count"]: island for island in vpwr["islands"]}
+
+    rail_edge = islands[2]["edges"][0]
+    assert rail_edge["length_um"] == pytest.approx(10.0)
+    assert rail_edge["cross_um"] == pytest.approx(1.0)
+    assert rail_edge["area_um2"] is None
+    assert rail_edge["resistance_ohm"] == pytest.approx(0.1 * 10.0 / 1.0)
+
+    stub_edge = next(
+        edge
+        for edge in islands[4]["edges"]
+        if edge["kind"] == "metal" and edge["layer"] == "met2"
+    )
+    assert stub_edge["length_um"] == pytest.approx(5.0)
+    assert stub_edge["cross_um"] == pytest.approx(2.0)
+    assert stub_edge["resistance_ohm"] == pytest.approx(0.05 * 5.0 / 2.0)
+
+
+def test_via_edges_carry_their_merged_polygon_area(tmp_path):
+    """A via edge's geometry is its merged polygon's area, not a
+    length/width: the flat per-shape resistance/limit model applies to the
+    merged shape as a whole, so that is what the report shows (issue
+    #2345)."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    vpwr = next(entry for entry in report["networks"] if entry["net"] == "VPWR")
+    island_b = next(island for island in vpwr["islands"] if island["node_count"] == 4)
+    via_edge = next(edge for edge in island_b["edges"] if edge["kind"] == "via")
+
+    # The via is drawn x:[4,6] y:[5,6] um -- 2.0 um^2 of merged cut geometry.
+    assert via_edge["area_um2"] == pytest.approx(2.0)
+    assert via_edge["length_um"] is None
+    assert via_edge["cross_um"] is None
+
+
+def test_mesh_subsegment_edges_carry_their_own_length_and_cross_um(tmp_path):
+    """Decomposed polygon sub-segments each report the half-cell extent and
+    conducting width their own resistance was computed from -- the model
+    stays auditable per sub-segment, not just per whole rail."""
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(spec)
+
+    report = run_power(str(gds), str(spec))
+    island = report["networks"][0]["islands"][0]
+    assert island["unsolved_reason"] is None
+
+    assert len(island["edges"]) > 1
+    for edge in island["edges"]:
+        assert edge["length_um"] > 0.0
+        assert edge["cross_um"] > 0.0
+        assert edge["area_um2"] is None
+        assert edge["resistance_ohm"] == pytest.approx(
+            0.1 * edge["length_um"] / edge["cross_um"]
+        )
+
+
+def test_ir_edges_report_their_current_density(tmp_path):
+    """`ir_drop_map`'s per-edge `current_density_a_per_um` equals the solved
+    branch current divided by the extraction edge's own `cross_um` --
+    reported with no verdict attached, so a role the PDK publishes no limit
+    for is still gradeable by a human (issue #2345)."""
+    report = _pad_and_load_report(tmp_path)
+
+    net = next(n for n in report["ir_drop_map"]["nets"] if n["net"] == "VPWR")
+    solved_island = next(island for island in net["islands"] if island["solved"])
+    solved_edge = next(
+        edge for edge in solved_island["edges"] if edge["current_a"] is not None
+    )
+    assert solved_edge["current_a"] == pytest.approx(1e-3)
+    # The loaded rail is the x:[0,10] y:[0,1] um met1 rail: 1 um wide, so
+    # 1 mA / 1 um = 1 mA/um.
+    assert solved_edge["current_density_a_per_um"] == pytest.approx(1e-3)
+
+    for unsolved in (island for island in net["islands"] if not island["solved"]):
+        for edge in unsolved["edges"]:
+            assert edge["current_a"] is None
+            assert edge["current_density_a_per_um"] is None
+
+
+def test_ir_current_density_matches_the_extraction_edges_cross_um(tmp_path):
+    """The density joins one-to-one with the extraction's own per-edge
+    geometry (same island, same edge id): `abs(current_a) / cross_um` on
+    every solved edge of a decomposed-mesh network, where inverting
+    `resistance_ohm` against endpoint-node distances would not even be
+    defined."""
+    gds = tmp_path / "lshape.gds"
+    spec = tmp_path / "lshape.power.json"
+    _l_bus_fixture(gds)
+    _l_bus_spec(
+        spec,
+        pads=[
+            {"name": "P0", "net": "VPWR", "x_um": 100.0, "y_um": 10.0, "voltage_v": 1.8}
+        ],
+        current_model={
+            "supply_net": "VPWR",
+            "instances": [
+                {"name": "u0", "x_um": 10.0, "y_um": 100.0, "current_a": 0.1}
+            ],
+        },
+    )
+
+    report = run_power(str(gds), str(spec))
+    extraction = report["networks"][0]["islands"][0]
+    solved = report["ir_drop_map"]["nets"][0]["islands"][0]
+    assert solved["solved"] is True
+
+    cross_by_id = {edge["id"]: edge["cross_um"] for edge in extraction["edges"]}
+    for edge in solved["edges"]:
+        assert edge["current_density_a_per_um"] == pytest.approx(
+            abs(edge["current_a"]) / cross_by_id[edge["id"]]
+        )
+
+
+# --- Shared `provenance` block (issue #2349) ---------------------------------
+
+
+def test_run_power_provenance_pins_layout_and_spec_hashes(tmp_path):
+    """The same `provenance` block `klt erc` emits (#1968/#2036), same field
+    names: the layout under `input`, the spec under the verb-local `spec`
+    key, both `sha256:`-prefixed; `pdk`/`deck` `null` (power resolves no PDK
+    and applies no deck -- never fabricated); plus the top cell the
+    connectivity model ran on."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    provenance = run_power(str(gds), str(spec))["provenance"]
+
+    assert provenance["input"] == {
+        "content_hash": f"sha256:{_sha256_file(gds)}",
+        "role": "layout",
+    }
+    assert provenance["spec"] == {"content_hash": f"sha256:{_sha256_file(spec)}"}
+    assert provenance["pdk"] is None
+    assert provenance["deck"] is None
+    assert provenance["top_cell"] == "TOP"
+    assert isinstance(provenance["klt_version"], str) and provenance["klt_version"]
+    assert isinstance(provenance["klayout_version"], str)
+    assert provenance["klayout_version"]
+
+
+def test_run_power_provenance_hashes_are_stable_across_runs(tmp_path):
+    """Same layout + spec bytes -> byte-identical provenance, so a committed
+    report can be re-verified in CI against the artifacts it claims to
+    describe."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    first = run_power(str(gds), str(spec))["provenance"]
+    second = run_power(str(gds), str(spec))["provenance"]
+    assert first == second
+
+
+def test_run_power_provenance_spec_hash_tracks_spec_contents(tmp_path):
+    """Editing the spec (a re-tuned sheet resistance) moves
+    `provenance.spec.content_hash` while `input`'s stays put -- the
+    committed-report falsifiability the echoed paths alone never gave: the
+    droop is a joint function of the layout *and* the declarations."""
+    gds = tmp_path / "basic.gds"
+    spec = tmp_path / "basic.power.json"
+    _basic_fixture(gds)
+    _basic_spec(spec)
+
+    before = run_power(str(gds), str(spec))["provenance"]
+    document = json.loads(spec.read_text())
+    document["stackup"][0]["sheet_resistance_ohm_per_sq"] = 0.2
+    spec.write_text(json.dumps(document))
+    after = run_power(str(gds), str(spec))["provenance"]
+
+    assert after["input"]["content_hash"] == before["input"]["content_hash"]
+    assert after["spec"]["content_hash"] != before["spec"]["content_hash"]
 
 
 # --- run_power: a via taps the polygon it lands on (issue #2259) -----------
@@ -1270,6 +1479,10 @@ def test_cli_json_contract(tmp_path, capsys):
         # again no `schema_version` bump.
         "devices",
         "warnings",
+        # Added additively by #2349 -- the shared `provenance` block `klt
+        # erc` already emits, same field names, so no `schema_version`
+        # bump either.
+        "provenance",
     }
     assert data["ir_drop_map"] is None
     assert data["worst_case_droop_mv"] is None
@@ -2200,6 +2413,10 @@ def test_cli_json_ir_drop_map_shape(tmp_path, capsys):
     assert set(ir_drop["nets"][0]["islands"][0]["edges"][0].keys()) == {
         "id",
         "current_a",
+        # Added additively by #2345: the derived current density on the
+        # same edge that carries the solved current (null when it does
+        # not apply -- a via edge, or no solved current).
+        "current_density_a_per_um",
     }
     assert data["worst_case_droop_mv"] == pytest.approx(1.0)
 
