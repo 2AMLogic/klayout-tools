@@ -12,8 +12,14 @@ deferral (:func:`_sdf_matching_paren`, :func:`_sdf_top_level_clauses`,
 ``INTERCONNECT`` normalization (:func:`_collect_sdf_alias_port_bits`,
 :func:`_sdf_interconnect_is_zero_delay`,
 :func:`_sdf_interconnect_is_droppable`, :func:`_sdf_cell_delay_spans`,
-:func:`_sdf_cell_alias_port_removals`, :func:`_cut_sdf_spans`,
-:func:`_drop_sdf_zero_delay_alias_port_interconnects`), and post-run diagnostics
+:func:`_sdf_cell_entry_removals`, :func:`_cut_sdf_spans`,
+:func:`_read_sdf_text`, :func:`_drop_sdf_interconnect_entries`,
+:func:`_drop_sdf_zero_delay_alias_port_interconnects`), physical-only-
+destination ``INTERCONNECT`` normalization
+(:func:`_sdf_cell_model_is_physical_only`,
+:func:`_collect_sdf_physical_only_instances`,
+:func:`_sdf_interconnect_is_physical_only_droppable`,
+:func:`_drop_sdf_zero_delay_physical_only_interconnects`), and post-run diagnostics
 (:func:`_check_sdf_engine_capability`, :func:`_scan_sdf_diagnostics`). This
 mirrors the shape of the earlier ``lvs.py``/``lvs_mismatch.py`` (#1721),
 ``extract.py``/``extract_parasitics.py`` (#1572), and
@@ -48,6 +54,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 
@@ -804,12 +811,20 @@ def _sdf_cell_delay_spans(
         return None
 
 
-def _sdf_cell_alias_port_removals(
-    text: str, cell_start: int, alias_port_bits: set[str]
+def _sdf_cell_entry_removals(
+    text: str, cell_start: int, droppable: Callable[[str], bool]
 ) -> tuple[list[tuple[int, int]], int]:
     """``([spans to cut], how many entries that accounts for)`` for one
-    ``(CELL ...)`` block -- :func:`_drop_sdf_zero_delay_alias_port_
-    interconnects`'s per-cell half, including the structural cleanup.
+    ``(CELL ...)`` block -- the per-cell half of every counted-exemption drop
+    pass in this module (issue #2285's alias-port drop and issue #2363's
+    physical-only-destination drop both route through here), including the
+    structural cleanup.
+
+    ``droppable`` is the only thing that differs between the passes: it is
+    handed one delay entry's full text and returns whether that entry is to
+    be removed. Everything else -- clause walking, counting, and the emptied-
+    clause cleanup Icarus's own parser forces -- is identical for both, so it
+    lives here once rather than being copied per pass.
 
     The returned spans are not always the entry spans themselves: emptying a
     delay-type clause returns *that clause's* span instead (Icarus rejects a
@@ -832,9 +847,7 @@ def _sdf_cell_alias_port_removals(
     for type_start, type_end in type_spans:
         entry_spans = _sdf_top_level_clauses(text, type_start + 1, type_end - 1)
         doomed = [
-            (start, end)
-            for start, end in entry_spans
-            if _sdf_interconnect_is_droppable(text[start:end], alias_port_bits)
+            (start, end) for start, end in entry_spans if droppable(text[start:end])
         ]
         if not doomed:
             continue
@@ -865,6 +878,42 @@ def _cut_sdf_spans(text: str, spans: list[tuple[int, int]]) -> str:
     return "".join(parts)
 
 
+def _read_sdf_text(sdf_path: str) -> str | None:
+    """``sdf_path``'s content, or ``None`` when it cannot be read. An
+    unreadable file is *not* an error on this path: every caller is a
+    normalization pass, and failing to normalize must never be worse than
+    never having tried."""
+    try:
+        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _drop_sdf_interconnect_entries(
+    text: str, droppable: Callable[[str], bool]
+) -> tuple[str, int] | None:
+    """``(``text`` with every ``droppable`` delay entry removed, how many
+    were removed)`` -- or ``None`` when nothing matched, in which case the
+    caller keeps handing its own input to ``$sdf_annotate`` unchanged.
+
+    The shared core of this module's counted-exemption drop passes (issues
+    #2285 and #2363): each supplies its own per-entry ``droppable``
+    predicate and gets the same clause walking, counting, and emptied-clause
+    cleanup.
+    """
+    removed_spans: list[tuple[int, int]] = []
+    dropped = 0
+    for cell_match in re.finditer(r"\(CELL\b", text):
+        spans, count = _sdf_cell_entry_removals(text, cell_match.start(), droppable)
+        removed_spans.extend(spans)
+        dropped += count
+
+    if not dropped:
+        return None
+    return _cut_sdf_spans(text, removed_spans), dropped
+
+
 def _drop_sdf_zero_delay_alias_port_interconnects(
     sdf_path: str, alias_port_bits: set[str]
 ) -> tuple[str, int] | None:
@@ -893,28 +942,285 @@ def _drop_sdf_zero_delay_alias_port_interconnects(
     ``test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
     unresolvable`` (issue #1619 shape (b)) -- widening this pass to sources
     would silently take over that documented case without evidence that
-    dropping is the right answer there.
+    dropping is the right answer there. (Issue #2363 supplies that evidence
+    for one strictly narrower subset of shape (b) -- a bit-selected-port
+    source feeding a *physical-only*, modpath-free destination instance --
+    and handles it in its own separate pass,
+    :func:`_drop_sdf_zero_delay_physical_only_interconnects`, precisely so
+    the general shape (b) case here stays untouched and still fails loudly.)
     """
     if not alias_port_bits:
         return None
-    try:
-        with open(sdf_path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
-    except OSError:
+    text = _read_sdf_text(sdf_path)
+    if text is None:
         return None
+    return _drop_sdf_interconnect_entries(
+        text,
+        lambda entry_text: _sdf_interconnect_is_droppable(entry_text, alias_port_bits),
+    )
 
-    removed_spans: list[tuple[int, int]] = []
-    dropped = 0
-    for cell_match in re.finditer(r"\(CELL\b", text):
-        spans, count = _sdf_cell_alias_port_removals(
-            text, cell_match.start(), alias_port_bits
-        )
-        removed_spans.extend(spans)
-        dropped += count
 
-    if not dropped:
+# --------------------------------------------------------------------------- #
+# Issue #2363: a zero-delay `INTERCONNECT` entry whose *destination* is a pin
+# of a **physical-only** instance -- a cell the router placed for a physical
+# reason with no timing content of its own, the antenna-effect diode being
+# the canonical case:
+#
+#     sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[3]));
+#     (INTERCONNECT ui_in[3] ANTENNA_diode_0.DIODE (0.000:0.000:0.000))
+#
+# This is shape (b) of the #1619/#1857 spike (`docs/design/sdf-annotate-
+# feasibility-spike.md` §3.7) -- a bit-selected top-level input port as the
+# entry's *source* -- so neither #1619's deferral nor #2285's alias-map
+# rewrite resolves it. It costs an `SDF ERROR: <file>:<line>: Could not find
+# intermodpath!`, and the diagnostic gate (correctly) treats an unapplied
+# annotation as a hard failure, so a real post-route SDF whose router
+# inserted antenna diodes on top-level input bits could not pass the gate at
+# all.
+#
+# Reproduced live against Icarus 13.0 through this module, which pinned down
+# a condition the issue's own write-up does not state: the failure needs the
+# port bit's net to carry **more than one** `INTERCONNECT` entry. A bus-port
+# net whose only entry is the diode's own annotates cleanly even without this
+# pass (#1619's deferral is enough, since each port bit is its own net), but
+# the moment that net carries a second entry one of them fails -- exactly the
+# same-net poisoning #1619 shape (a) describes, which the deferral cannot
+# undo because both entries are on the one net it deferred. A real router
+# inserts one diode per violating pin, so a multi-load input bit collects
+# several of these.
+#
+# What makes *this* subset of shape (b) different -- and what #2285's
+# docstring said was missing before the drop could be widened to a source-
+# side match at all -- is that the destination here is structurally
+# incapable of carrying a modpath: the diode model has no `specify` block
+# and no output port whatsoever (the no-`USE_POWER_PINS` variant is a module
+# with a single `input` and an empty body). There is no modpath the entry
+# could ever annotate, and no logic anywhere that observes the annotated
+# pin. The general shape (b) case -- a bit-selected-port source feeding an
+# ordinary `specify`-bearing standard cell -- is emphatically *not* covered
+# here: that destination has real modpaths, dropping its entry would change
+# simulated timing, and it must keep failing loudly exactly as
+# `test_integration_real_icarus_sdf_bus_port_input_fanout_stays_
+# unresolvable` documents. Verified live, not merely asserted: on a net
+# carrying both a diode entry and a `specify`-bearing entry, dropping the
+# diode entry leaves the ordinary entry behind and the run still raises.
+#
+# The exemption carries #2285's own bound verbatim, and for the same reason:
+# an entry is dropped only when *every* delay member it carries (all three
+# `min:typ:max` members of every rvalue, not just the `-T`-selected one) is
+# zero, so dropping it cannot change any simulated timing at any corner. A
+# non-zero-delay entry onto the identical physical-only pin is left in
+# place, fails to annotate, and still raises -- loud, not silently retimed.
+#
+# "Physical-only" is decided *structurally*, from the elaborated Verilog the
+# run is already compiling (:func:`_collect_sdf_physical_only_instances`),
+# never from a cell-name pattern like `*_diode_*`: a name pattern is a
+# per-PDK naming-convention coupling this repo avoids elsewhere, and it
+# cannot tell a timing-empty diode from a `specify`-bearing cell that merely
+# has "diode" in its name. Every ambiguity resolves toward *not* dropping --
+# a model that cannot be found, a top module outside `verilog_netlist`'s
+# gate-level grammar, or any `output`/`inout` declaration or `specify` block
+# anywhere in the model -- so a mis-parse can only ever leave an entry in
+# place to fail loudly, never silently remove a real delay.
+# --------------------------------------------------------------------------- #
+
+#: A ``module <name> ... endmodule`` block for a *named* cell, matched
+#: non-greedily so the first ``endmodule`` closes it. Used by
+#: :func:`_sdf_cell_model_is_physical_only` to find a destination instance's
+#: model text among the run's own sources.
+_VERILOG_MODULE_CHUNK_TEMPLATE = r"\bmodule\s+{name}\b.*?\bendmodule\b"
+
+#: Any declaration that disqualifies a model from being "physical-only".
+#: ``specify`` is the direct test (no ``specify`` block, no modpath -- which
+#: is the whole justification for the drop); ``output``/``inout`` are the
+#: conservative belt-and-braces half, since a cell with a driven pin is one
+#: whose annotation could conceivably be observed even without a modpath.
+_VERILOG_TIMING_CAPABLE_RE = re.compile(r"\b(?:specify|output|inout)\b")
+
+#: Verilog comments, stripped before :data:`_VERILOG_TIMING_CAPABLE_RE` is
+#: applied so a model whose header comment merely mentions "output" is not
+#: mis-classified as timing-capable.
+_VERILOG_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
+
+
+def _sdf_cell_model_is_physical_only(cell: str, source_texts: list[str]) -> bool:
+    """``True`` when every definition of Verilog module ``cell`` found in
+    ``source_texts`` declares no ``specify`` block, no ``output`` port, and
+    no ``inout`` port -- a cell that is structurally incapable of carrying a
+    modpath (issue #2363).
+
+    ``False`` when no definition is found at all, and ``False`` the moment
+    any definition is timing-capable. Both defaults are deliberate: this
+    predicate only ever authorises *removing* an SDF entry, so every
+    uncertainty has to resolve toward leaving the entry in place, where it
+    fails loudly rather than silently disappearing.
+    """
+    pattern = re.compile(
+        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(cell)), re.DOTALL
+    )
+    found = False
+    for text in source_texts:
+        for chunk_match in pattern.finditer(text):
+            found = True
+            chunk = _VERILOG_COMMENT_RE.sub(" ", chunk_match.group(0))
+            if _VERILOG_TIMING_CAPABLE_RE.search(chunk):
+                return False
+    return found
+
+
+def _collect_sdf_physical_only_instances(
+    source_paths: list[str], hdl_toplevel: str
+) -> set[str]:
+    """Every instance name in ``hdl_toplevel`` whose cell model is
+    physical-only -- no ``specify`` block, no ``output``/``inout`` pin, so no
+    modpath an ``INTERCONNECT`` entry onto one of its pins could ever
+    annotate (issue #2363). Antenna-effect diodes are the case this exists
+    for; a filler/tapcell with a timing-empty model qualifies by the same
+    construction.
+
+    Reuses :func:`klayout_tools.verilog_netlist.parse_gate_level_verilog`'s
+    instance list -- the same parser
+    :func:`_collect_sdf_alias_port_bits` already reuses for #2285's alias
+    map -- applied to *only* ``hdl_toplevel``'s own ``module``/``endmodule``
+    chunk, never to the whole of ``request.sources``: a real request's
+    sources also carry the PDK's behavioural cell models (``specify``
+    blocks, ``always`` blocks, non-alias continuous assignments), none of
+    which that deliberately narrow gate-level grammar models. The *cell
+    models* are then classified by plain text scan
+    (:func:`_sdf_cell_model_is_physical_only`), which is exactly what that
+    grammar cannot parse.
+
+    Returns an empty set -- never raises -- whenever the instance list
+    cannot be derived: no such module in any source, an unreadable file, or
+    a top module outside that gate-level subset (notably an **ANSI-style**
+    module header, which ``verilog_netlist`` does not model; every real
+    ``write_verilog`` post-route netlist -- the only kind that carries a
+    router-inserted antenna diode at all -- emits the non-ANSI form). An
+    empty set makes
+    :func:`_drop_sdf_zero_delay_physical_only_interconnects` a no-op, i.e.
+    the exact behaviour this path had before #2363: this is a
+    *normalization* pass, and failing to normalize must never be worse than
+    not having tried.
+    """
+    from .verilog_netlist import parse_gate_level_verilog
+
+    source_texts: list[str] = []
+    for path in source_paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                source_texts.append(handle.read())
+        except OSError:
+            continue
+
+    chunk_re = re.compile(
+        _VERILOG_MODULE_CHUNK_TEMPLATE.format(name=re.escape(hdl_toplevel)), re.DOTALL
+    )
+    instances: list[dict[str, Any]] = []
+    for text in source_texts:
+        chunk_match = chunk_re.search(text)
+        if chunk_match is None:
+            continue
+        try:
+            modules = parse_gate_level_verilog(chunk_match.group(0))
+        except Exception:
+            # Not parseable as gate-level Verilog (a hand-written RTL top, a
+            # construct outside verilog_netlist's narrow grammar) -- no
+            # instance list, so no normalization. Never fatal.
+            return set()
+        for module in modules:
+            if module["name"] == hdl_toplevel:
+                instances = list(module["instances"])  # type: ignore[arg-type]
+        break
+
+    physical_only: dict[str, bool] = {}
+    names: set[str] = set()
+    for instance in instances:
+        cell = str(instance["cell"])
+        if cell not in physical_only:
+            physical_only[cell] = _sdf_cell_model_is_physical_only(cell, source_texts)
+        if physical_only[cell]:
+            names.add(str(instance["name"]))
+    return names
+
+
+def _sdf_interconnect_is_physical_only_droppable(
+    entry_text: str,
+    bus_input_ports: set[str],
+    physical_only_instances: set[str],
+    divider: str,
+) -> bool:
+    """``True`` when ``entry_text`` is an ``INTERCONNECT`` entry whose
+    *source* is a bit-selected top-level input port in ``bus_input_ports``,
+    whose *destination* is a pin of an instance in
+    ``physical_only_instances``, and whose every delay member is zero -- the
+    sole condition :func:`_drop_sdf_zero_delay_physical_only_interconnects`
+    removes an entry on (issue #2363).
+
+    All three halves are load-bearing. The destination match is the
+    justification (no ``specify`` block and no output pin means no modpath
+    the entry could annotate and no logic that observes the pin); the
+    zero-delay test is what makes removing it provably unable to change
+    simulated timing at any corner; and the bit-selected-input-port source
+    match is what keeps the exemption pinned to the one shape #2363 actually
+    observed failing, rather than quietly generalising to every entry that
+    happens to land on a physical-only pin.
+
+    ``divider`` is the SDF file's own ``(DIVIDER ...)`` character, so the
+    destination is split on the separator *that file* declares rather than a
+    hardcoded ``.``. Only a single-level ``<instance><divider><pin>``
+    destination matches: a deeper hierarchical path names an instance that
+    is not in ``hdl_toplevel``'s own instance list, so it is left alone.
+    """
+    head = _SDF_INTERCONNECT_HEAD_RE.match(entry_text)
+    if head is None:
+        return False
+    source_match = _SDF_BUS_PORT_TOKEN_RE.match(head.group(1))
+    if source_match is None or source_match.group(1) not in bus_input_ports:
+        return False
+    instance, separator, _pin = head.group(2).rpartition(divider)
+    if not separator or instance not in physical_only_instances:
+        return False
+    return _sdf_interconnect_is_zero_delay(entry_text)
+
+
+def _drop_sdf_zero_delay_physical_only_interconnects(
+    sdf_path: str,
+    bus_input_ports: set[str],
+    physical_only_instances: set[str],
+) -> tuple[str, int] | None:
+    """Remove every zero-delay ``INTERCONNECT`` entry in ``sdf_path`` that
+    runs from a bit-selected top-level input port in ``bus_input_ports``
+    onto a pin of a physical-only instance in ``physical_only_instances``,
+    returning ``(text with those entries removed, how many were removed)``
+    -- or ``None`` when there is nothing to remove, in which case the caller
+    keeps handing ``sdf_path`` itself to ``$sdf_annotate`` unchanged.
+
+    See the module-level comment above for issue #2363's findings: why this
+    subset of the spike's shape (b) is structurally un-annotatable rather
+    than merely order-dependent, why the general shape (b) case is
+    deliberately left failing, and why "physical-only" is decided from the
+    elaborated model rather than from a cell-name pattern.
+
+    Either empty set makes this a no-op that returns ``None`` immediately
+    without reading the file -- the overwhelmingly common case (no bus
+    top-level port, or no timing-empty cell in the netlist), and a real
+    post-route SDF can be large enough that this pass's whole cost should be
+    paid only when it can possibly matter.
+    """
+    if not bus_input_ports or not physical_only_instances:
         return None
-    return _cut_sdf_spans(text, removed_spans), dropped
+    text = _read_sdf_text(sdf_path)
+    if text is None:
+        return None
+    divider_match = re.search(r"\(DIVIDER\s+(\S+?)\)", text)
+    divider = divider_match.group(1) if divider_match else "."
+
+    return _drop_sdf_interconnect_entries(
+        text,
+        lambda entry_text: _sdf_interconnect_is_physical_only_droppable(
+            entry_text, bus_input_ports, physical_only_instances, divider
+        ),
+    )
 
 
 # --------------------------------------------------------------------------- #

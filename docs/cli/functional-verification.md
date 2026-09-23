@@ -499,6 +499,74 @@ The normalized copy is written as a build artifact,
 generated `$sdf_annotate` shim names; `environment.sdf.file` still reports
 the caller's own SDF path, unchanged.
 
+**A zero-delay `INTERCONNECT` onto a physical-only instance is dropped before
+annotation, and counted** (issue #2363). A router inserts an antenna-effect
+diode on a pin whose net violates the antenna rules; the diode is a
+*physical-only* cell — its Verilog model has no `specify` block and no output
+pin at all — so it appears in the post-route netlist and SDF but can carry no
+timing:
+
+```verilog
+sky130_fd_sc_hd__diode_2 ANTENNA_diode_0 (.DIODE(ui_in[0]));
+```
+
+```
+(INTERCONNECT ui_in[0] ANTENNA_diode_0.DIODE (0.000:0.000:0.000))
+```
+
+That entry is shape (b) of the bit-selected-port `INTERCONNECT` failure
+(issue #1619 — a bit-selected top-level port as the entry's *source*), so
+neither the `klt_sdf_safe.sdf`/`klt_sdf_deferred_bus_ports.sdf` split nor the
+alias-map normalization above resolves it, and it costs one `SDF ERROR:
+<file>:<line>: Could not find intermodpath!`. Verified live against Icarus
+13.0: the failure needs the port bit's net to carry **more than one**
+`INTERCONNECT` entry — a bus-port net whose only entry is the diode's own
+annotates cleanly, but a real router inserts one diode per violating pin, so
+a multi-load input bit collects several and one of them fails. `klt`
+**removes** those entries from the SDF text it hands `$sdf_annotate` and
+reports the count as its own `dropped` class, distinct from the alias-port
+one:
+
+```json
+"dropped": {
+  "zero_delay_physical_only_interconnect": { "count": 4, "reason": "..." }
+}
+```
+
+The justification is that the destination is structurally incapable of
+carrying a modpath — no `specify` block, no output pin, so nothing the entry
+could annotate and no logic that observes the pin — and the exemption carries
+the same **delay-value** bound as the alias-port class above:
+
+- An entry is dropped only when *every* `min:typ:max` member of *every*
+  rvalue it carries is zero. A **non**-zero-delay entry onto the identical
+  physical-only pin (including one that is zero at `min`/`typ` but not at
+  `max`) is left in place, fails to annotate, and still fails the run with
+  exit 1.
+- The destination must be a *physical-only* instance. An entry onto an
+  ordinary `specify`-bearing standard cell — the general shape (b) case — is
+  **not** covered by this exemption and still fails the run loudly; that
+  remains an open Icarus limitation, not something this drop papers over.
+- Only `INTERCONNECT` entries are eligible, and only entries whose *source*
+  is a bit-selected top-level input port (the one shape this failure was
+  observed on).
+
+"Physical-only" is decided **structurally**, from the elaborated Verilog the
+run already compiles — the instance's cell type is read out of
+`hdl_toplevel`'s own module (the same non-ANSI gate-level parse the alias map
+uses) and its model is classified by whether it declares a `specify` block or
+any `output`/`inout` pin. It is never a cell-name pattern such as
+`*_diode_*`: that would couple to one PDK's naming convention and would
+mis-classify a `specify`-bearing cell that merely has "diode" in its name.
+Every ambiguity resolves toward *not* dropping — a model that is not among
+`request.sources`, a top module the gate-level parser cannot read, or any
+timing-capable declaration in the model — so a design where this cannot be
+decided behaves exactly as it did before this normalization existed.
+
+The normalized copy is written as a build artifact,
+`.klt/functional-verification/klt_sdf_physical_only_dropped.sdf`;
+`environment.sdf.file` still reports the caller's own SDF path, unchanged.
+
 **Reading a run that fails on *every* test case.** The most common shape of a
 real annotated failure is not a subtly different result on one test — it is
 every test failing identically, often with the design's outputs reading a
@@ -510,9 +578,10 @@ thing, whereas a zero-delay run cannot fail for timing at *any* clock period
 (so its passing says nothing about whether the design meets that clock).
 Before suspecting the engine, check three things, in this order:
 
-1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck` and
-   `zero_delay_alias_port_interconnect`, neither of which can change a delay),
-   every delay applied and no annotation failed. A genuinely failed annotation
+1. **`environment.sdf.dropped`** — if it is `{}` (or only `timingcheck`,
+   `zero_delay_alias_port_interconnect` and
+   `zero_delay_physical_only_interconnect`, none of which can change a
+   delay), every delay applied and no annotation failed. A genuinely failed annotation
    exits 1 with the offending transcript line, so a *returned report* already
    rules that out.
 2. **The testbench's own clock period against the design's post-route timing**
@@ -563,13 +632,14 @@ annotation. These values describe observed diagnostics and deliberate
 pre-annotation drops, not proof that every delay and timing check applied.
 Both keys are additive, alongside the existing `file`/`corner`/`annotated`.
 
-Two `dropped` classes exist today, and neither one can change a simulated
-delay:
+Three `dropped` classes exist today, and none of them can change a
+simulated delay:
 
 | Class | Source | Meaning |
 |---|---|---|
 | `timingcheck` | Transcript scan (issue #1102) | Icarus implements SDF delays but not SDF `TIMINGCHECK`; every `TIMINGCHECK` section in the SDF was dropped by the simulator. |
 | `zero_delay_alias_port_interconnect` | SDF-text normalization (issue #2285) | An `INTERCONNECT` entry whose destination is a top-level port bit the netlist drives through an `assign` alias, carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath across that join. |
+| `zero_delay_physical_only_interconnect` | SDF-text normalization (issue #2363) | An `INTERCONNECT` entry from a bit-selected top-level input port onto a pin of a physical-only instance (a router-inserted antenna diode, or any filler/tapcell whose model has no `specify` block and no output pin), carrying zero delay at every corner, was removed before annotation because Icarus cannot insert an intermodpath onto a modpath-free destination. |
 
 New classes may be added; a consumer should treat `dropped` as an open map
 keyed by class name, not as a fixed set of keys.
@@ -960,7 +1030,7 @@ set `options.trace: true`; on such a run it looks like this — the identical
 | `tests` | array\<object\> | One entry per `@cocotb.test()`, in the order cocotb ran them. `status` is `"passed"`/`"failed"`/`"skipped"`; `sim_time_ns`/`real_time_s` are `null` when the simulator did not report them. `error_type`/`error_message` are present **only** on `"failed"` entries, taken verbatim from the `<failure>` element's attributes. |
 | `coverage` | object \| null | `null` unless `options.coverage: true`; otherwise `line_pct`/`toggle_pct`/`branch_pct`/`expr_pct` (numbers, or `null` for a category `verilator_coverage` did not report) plus `info_path`, an absolute path to the lcov `.info` artifact. |
 | `trace` | object \| null | `null` unless `options.trace: true` (Epic #1585 Phase 3, issue #1845); otherwise `path` (absolute), `format` (`"vcd"` or `"fst"` — resolved from which engine ran, never a request choice), and `size_bytes` — the same shape [`klt wave build`](wave.md)'s own `trace` field uses. `options.trace: true` with no waveform file produced by the run is exit 1, not a silent `null` (indistinguishable from "not requested" otherwise). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285), and `dropped` names each such class with `{count, reason}`; neither class can change a simulated delay. See "SDF back-annotation" for the full shape. |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the simulator's own version token, `null` if unresolvable), `cocotb_version`, `results_xml` — the absolute path to the raw evidence this report was derived from, so a stored verdict can be re-checked against it — and `random_seed` (the effective seed cocotb used, `null` only if `results.xml` lacked the property; see "Reproducibility: `random_seed`"), plus `sdf` (issue #1002) — `null` on an ordinary run, an object on an SDF-annotated one, so an annotated verdict is never mistakable for a zero-delay one from the JSON alone: `file`, `corner`, `annotated: true`, plus `partial` and `dropped` (issue #1102) — `partial` is `true` when anything was dropped, either a benign diagnostic class filtered out of the transcript scan (`timingcheck`) or an `INTERCONNECT` entry normalized away before annotation (`zero_delay_alias_port_interconnect`, issue #2285; `zero_delay_physical_only_interconnect`, issue #2363), and `dropped` names each such class with `{count, reason}`; no class can change a simulated delay. See "SDF back-annotation" for the full shape. |
 
 There is no shared `provenance` block: this verb's verdict depends on no PDK
 and no rule deck (see `docs/json-contract.md` → "Shared `provenance`
