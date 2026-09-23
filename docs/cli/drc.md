@@ -897,14 +897,17 @@ the per-net connectivity a real process-antenna-area-ratio check needs and
 not have. See [`docs/cli/erc.md`](erc.md); this deck's *not* authoring an
 `"antenna"`-kind `DrcRule` is a scoping choice, not missing capability.
 
-The `gf180mcu` deck is likewise a **curated starter subset**: 46 rules —
+The `gf180mcu` deck is likewise a **curated starter subset**: 56 rules —
 width, spacing, and enclosure checks across the `Poly2`, `Comp`
-(diffusion/active), `Contact`, `Via1`-`Via4`, `Metal1`-`Metal5`, and
-`MetalTop`
+(diffusion/active), `Nplus`/`Pplus` (implant), `Contact`, `Via1`-`Via4`,
+`Metal1`-`Metal5`, and `MetalTop`
 layers (two of them, `Comp` width and spacing, as `_LV`/`_MV` pairs scoped
 to the `Dualgate` voltage-domain marker — see "Voltage-domain rule pairs"
 above), plus a first increment of well/substrate-tap coverage (`Nwell`
-spacing and Nwell-tap enclosure), one bipolar (BJT)-specific device rule
+spacing and Nwell-tap enclosure), the two implant layers' context-free
+rules (width, spacing, space to the opposite-type diffusion, gate overlap,
+and extension beyond their own diffusion — issue #2369), one bipolar
+(BJT)-specific device rule
 (`DRC_BJT` mark-layer separation), the MiM capacitor stack
 (`Metal4`/`FuseTop` bottom-/top-plate spacing and overlap, plus the virtual
 bottom plate's `Via4` overlap, see "Sized/derived-layer rules" above), and
@@ -914,7 +917,8 @@ published GlobalFoundries 180nm MCU **Design Rule Manual**
 ([`google/gf180mcu-pdk`](https://github.com/google/gf180mcu-pdk),
 `docs/physical_verification/design_manual/`; Apache License 2.0),
 specifically the "7.4 Nwell" (`NW.*`), "7.5 Comp" (`DF.*`), "7.7 Poly2"
-(`PL.*`), "7.12 Contact" (`CO.*`), "7.13 Metaln" (`Mn.*`, extended to
+(`PL.*`), "7.8 Nplus" (`NP.*`), "7.9 Pplus" (`PP.*`), "7.12 Contact"
+(`CO.*`), "7.13 Metaln" (`Mn.*`, extended to
 `n = 2..5`), "7.15 MetalTop" (`MT.*`), "9.1 Bond Pad" (`PAD.*`), "10.4.2
 MIM Capacitor, Option B" (`MIMTM.*`), and "10.7 DRC_BJT Mark Layer"
 (`BJT.*`) sections. Unlike
@@ -933,7 +937,10 @@ re-derived from a real fetched install's own
 (`volare enable gf180mcu c6d73a35f524070e85faff4a6a9eef49553ebc2b`, the same
 open_pdks build this repo already cites for gf180mcu's LVS-derived
 extraction deck), and each cites both its DRM rule id and the executable
-statement it was re-derived from.
+statement it was re-derived from. The same install's `comp.drc` (issue
+#1110's `_LV`/`_MV` voltage-split rules) and `{nplus,pplus}.drc` (issue
+#2369's `NP.3a`/`NP.5a`/`NP.5b` and `PP.*` mirrors, whose `PCOMP`/`NCOMP`/
+gate derivations only the executable deck states) are cited the same way.
 
 **"7.5 Comp"/"7.7 Poly2"/"7.12 Contact" are only partially transcribed, and
 the gap has a documented real-world cost (issue #1575).** This deck models
@@ -977,7 +984,7 @@ transcribed: each conditions a 0.06 um margin on a narrow-metal
 end-of-line predicate that `DrcRule`'s vocabulary cannot express, the same
 class of gap as sky130's `m2.6` above.
 
-Nineteen of the forty-four gf180mcu rules approximate an official DRM rule in
+Twenty-five of the fifty-six gf180mcu rules approximate an official DRM rule in
 some way — either a compound-layer context our single/two-layer check
 primitives can't isolate (`comp.space.1`/`comp.space.mv.1`, `poly2.space.1`,
 `poly2.width.1`, `nwell.enclosing.comp.1`), a marker layer this deck's
@@ -997,9 +1004,19 @@ half of one rule (`mim.space.1`'s "adjacent MiM" half, see below), or
 context our engine has no data for at all — net-potential
 (`nwell.space.1`) or device connectivity (`bjt.separation.comp.1`), both of
 which require netlist/connectivity information the geometry-only check
-primitives don't have. Each is called out explicitly in its rule's
-docstring in `gf180mcu.py`; the threshold values used are always the real,
-unmodified DRM values.
+primitives don't have, or a well/butting context selected by a boolean our
+engine cannot evaluate (issue #2369's six implant rules:
+`nplus.space.pcomp.1`/`pplus.space.ncomp.1` collapse the `DNWELL`/`LVPWELL`
+splits `NP.3b`-`NP.3e`/`PP.3b`-`PP.3e` onto the stricter 0.16 µm everywhere;
+`nplus.enclosing.poly2.1`/`pplus.enclosing.poly2.1` measure every transistor
+gate rather than only the matching channel type, because the official
+`ngate`/`pgate` is a four-layer boolean; `nplus.enclosing.comp.1`/
+`pplus.enclosing.comp.1` apply the strict 0.16 µm to butted edges the
+official rules exclude, and use KLayout's default `euclidian` metric where
+`NP.5b`/`PP.5b` use `projection`). Each is called out explicitly in its
+rule's docstring in `gf180mcu.py`; the threshold values used are always the
+real, unmodified DRM values, and every implant approximation errs strict
+(over-flagging), never permissive.
 
 The DRM's two MiM capacitor rules scoped to the "virtual bottom plate" —
 `MIMTM.1` (minimum bottom-plate spacing to other bottom-plate-or-routing
@@ -1629,7 +1646,15 @@ classes of rule are excluded from the gate:
   pairs — see "Voltage-domain rule pairs" above): it applied the *right*
   column, so the geometry it checked is not evidence of a gap;
 - a rule skipped on this run (`coverage.rules_skipped`): it applied no
-  threshold at all, right or wrong.
+  threshold at all, right or wrong;
+- a rule whose source DRM section publishes a **single** value column, so no
+  second column exists for it to have misread (issue #2369 — gf180mcu's ten
+  `nplus.*`/`pplus.*` implant rules, whose "7.8 Nplus"/"7.9 Pplus" tables
+  carry one `LAYOUT RULE` value per row and whose upstream executable
+  `rule_decks/{nplus,pplus}.drc` condition on neither `dualgate` nor
+  `v5_xtor`). This is opt-in per rule (`DrcRule.voltage_independent`), not a
+  default: every rule transcribed from a multi-column section still counts
+  as unscoped.
 
 So the `Dualgate`-inside `Comp` stripe from issue #552 now produces a
 `comp.width.mv.1` violation and **no** warning, while the same stripe with a
@@ -1738,7 +1763,7 @@ same way `scope` was before `coverage.deck_scope` aggregated it.
 As of issue #747, `provenance` was populated only for the 37 piloted
 width/space rules. As of issue #904, it is populated for **all** of
 gf180mcu's `DrcRule` entries (42 then, 44 as of issue #1110, 46 as of issue
-#1688) — sky130's own remaining `enclosing`/`separation`
+#1688, 56 as of issue #2369) — sky130's own remaining `enclosing`/`separation`
 rules still leave it `None` (the default), an unpopulated field, not a
 claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this

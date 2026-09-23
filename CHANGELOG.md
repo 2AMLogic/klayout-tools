@@ -577,6 +577,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   `w_um`/`l_um` off the new card shape. See `docs/cli/extract.md`'s "MoM
   capacitor devices" and `docs/cli/lvs.md`'s "Custom device classes
   round-tripped through an `X` card" sections.
+- **Fixed** (#2369, `klt drc --deck gf180mcu`, additive — **no**
+  `schema_version` bump): the curated `gf180mcu` deck had **no rule at all**
+  over the `Nplus` (32/0) / `Pplus` (31/0) implant layers, so a layout that
+  drew implant too narrow, too close together, or with too little gate
+  overlap came back `clean`. Ten rules are added — `nplus.width.1`/
+  `nplus.space.1`/`nplus.space.pcomp.1`/`nplus.enclosing.poly2.1`/
+  `nplus.enclosing.comp.1` and their `pplus.*` mirrors — transcribed from
+  DRM sections "7.8 Nplus" (`NP.1`/`NP.2`/`NP.3a`/`NP.5a`/`NP.5b`) and
+  "7.9 Pplus" (`PP.*`), each side read from its own published table rather
+  than assumed to mirror the other: width/space 0.4 µm, space to the
+  opposite-type diffusion 0.16 µm, gate overlap 0.23 µm, extension beyond
+  COMP 0.16 µm. The three non-trivial shapes scope their checked region
+  with a `DerivedLayer` boolean (`PCOMP`/`NCOMP`/gate) so they measure real
+  diffusion rather than the raw `Comp` drawn layer. The gf180mcu deck is now
+  56 rules (was 46), `coverage.rules_skipped` gains the ten new ids on a
+  stream that draws no implant, and `provenance.deck.content_hash` changes
+  accordingly. The per-context splits (`NP.3b`-`NP.3e`, `NP.4a`/`NP.4b`,
+  `NP.5c`/`NP.5d`, `NP.6`-`NP.12` and the `PP.*` equivalents) stay
+  uncovered — each keys off a `DNWELL`/`LVPWELL`/`SAB`/butting-edge context
+  this deck's curated layer set does not draw. See `docs/cli/drc.md`'s
+  "Coverage" section and the deck module's own "known approximations" list.
+  One knock-on: `coverage.voltage_domain_warnings` (issue #552/#1110) warns
+  that geometry inside `Dualgate` was checked by a rule which may have
+  applied the wrong *column* of a multi-column DRM table — a premise that
+  does not hold for the implant tables, which publish one value column. A
+  new opt-in `DrcRule.voltage_independent` flag (default `False`, so every
+  pre-existing rule is unaffected) keeps the ten implant rules out of that
+  gate, so issue #552's own `Dualgate`-over-`Comp`-and-`Nplus` reproducer
+  still reports **no** warning, exactly as #1110 established.
 - **Fixed** (#2377, `klt erc`, additive — **no** `schema_version` bump: one
   new coverage skip reason, no new output field, no new coverage list; a
   spec whose `ties[]` well layer already draws geometry produces

@@ -280,6 +280,38 @@ def _vacuity_layers(rule: DrcRule) -> set[tuple[int, int]]:
     return layers
 
 
+def _rule_outside_voltage_gate(
+    rule: DrcRule, marker: tuple[int, int], skipped_rule_ids: set[str]
+) -> bool:
+    """Whether ``rule`` is excluded from ``coverage.voltage_domain_warnings``'
+    unscoped-rule set for ``marker`` (issue #552, refined by #1110 and #2369).
+
+    The warning's premise is "this rule may have applied the *wrong column*
+    of a multi-column DRM table to geometry inside the marker". Three kinds
+    of rule cannot have done that, and each is excluded here rather than
+    inline in :func:`run_drc`'s marker loop:
+
+    - it was **skipped** this run (``coverage.rules_skipped``) -- it applied
+      no threshold at all, right or wrong;
+    - its ``derived_layer`` **reads the marker itself** (gf180mcu's
+      ``DF.1a``/``DF.3a`` ``_LV``/``_MV`` pairs, issue #1110) -- its checked
+      region is already scoped by the marker, so it applied the right column;
+    - it is flagged :attr:`~klayout_tools.decks.DrcRule.voltage_independent`
+      (issue #2369) -- its source DRM section publishes a single value
+      column, so no second column exists for it to have misread. Opt-in per
+      rule, never inferred: see that field's own docstring for the evidence
+      a rule must carry before setting it.
+    """
+    if rule.id in skipped_rule_ids:
+        return True
+    if rule.voltage_independent:
+        return True
+    return rule.derived_layer is not None and marker in (
+        rule.derived_layer.base,
+        rule.derived_layer.intersect_with,
+    )
+
+
 def _classify_skipped_rules(
     deck: list[DrcRule], rules_skipped: list[str], layout: Any
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -543,7 +575,11 @@ def run_drc(
     split ``Comp`` on ``Dualgate`` via
     :attr:`~klayout_tools.decks.DerivedLayer.mode` -- applied the *right*
     column and is excluded from the gate, as is any rule skipped this run
-    (it applied no threshold at all). The warning therefore keeps firing for
+    (it applied no threshold at all) and any rule flagged
+    :attr:`~klayout_tools.decks.DrcRule.voltage_independent` (issue #2369 --
+    a rule whose source DRM table publishes a single column, so no second
+    column exists for it to have read by mistake; gf180mcu's Nplus/Pplus
+    implant rules are the first). The warning therefore keeps firing for
     the parts of a deck that still ignore the marker, and stops firing once
     every rule that touched the marked geometry reads it. Always a list,
     empty for a deck that registers no such marker or a layout that draws
@@ -1111,15 +1147,7 @@ def run_drc(
             continue
         unscoped_layers: set[tuple[int, int]] = set()
         for rule in deck:
-            if rule.id in skipped_rule_ids:
-                continue
-            if rule.derived_layer is not None and marker in (
-                rule.derived_layer.base,
-                rule.derived_layer.intersect_with,
-            ):
-                # This rule reads the marker itself -- its checked region is
-                # already scoped by the marker, so it is not part of the gap
-                # this warning is about.
+            if _rule_outside_voltage_gate(rule, marker, skipped_rule_ids):
                 continue
             unscoped_layers |= _rule_input_layers(rule)
         unscoped_layers &= stream_layer_tuples
