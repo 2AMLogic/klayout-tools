@@ -1053,7 +1053,7 @@
         }
       ]
     },
-    "expected_disagreement": null,
+    "expected_disagreement": "sky130A.lydrc hard-codes `FEOL = false` (its own \"do not change\" comment, verified against a real volare-fetched install) with no `-rd`-settable override this engine's invocation can flip -- `difftap.1` (`difftap.width(0.15, euclidian)` over `difftap = diff.or(tap)`), the single native rule this curated tap-side half transcribes, lives inside the script's `if FEOL ... end` block, so `run_drc_klayout_engine` never evaluates it at all, regardless of the input layout. This is the identical root cause already documented for diff.width.1 -- the diff-side half of the same compound difftap.1 rule -- and for poly.width.1/nwell.width.1. A violate fixture correctly trips the curated engine but is always reported \"clean\" by the real deck. See docs/cli/drc.md's \"klayout\" engine limitations.",
     "layer": [
       65,
       44
