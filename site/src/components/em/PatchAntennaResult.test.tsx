@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { PatchAntennaResult } from "./PatchAntennaResult";
 import type { EmSiteExport } from "./types";
-import { makeFakeGL, mockFetchOk } from "@/test-utils/mocks";
+import { installFakeGLContext, mockFetchOk } from "@/test-utils/mocks";
 
 const fixture: EmSiteExport = {
   schema_version: 1,
@@ -57,10 +57,7 @@ const fixture: EmSiteExport = {
 };
 
 beforeEach(() => {
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ((..._args: unknown[]) => makeFakeGL()) as any,
-  );
+  installFakeGLContext();
   vi.spyOn(SVGElement.prototype, "getBoundingClientRect").mockReturnValue({
     x: 0,
     y: 0,

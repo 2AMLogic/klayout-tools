@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { InterconnectCouplingResult } from "./InterconnectCouplingResult";
 import type { EmSiteExport } from "./types";
-import { makeFakeGL, mockFetchOk } from "@/test-utils/mocks";
+import { installFakeGLContext, mockFetchOk } from "@/test-utils/mocks";
 
 const fixture: EmSiteExport = {
   schema_version: 1,
@@ -71,10 +71,7 @@ const fixture: EmSiteExport = {
 };
 
 beforeEach(() => {
-  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    ((..._args: unknown[]) => makeFakeGL()) as any,
-  );
+  installFakeGLContext();
 });
 
 afterEach(() => {
