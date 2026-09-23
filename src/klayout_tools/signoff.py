@@ -5475,7 +5475,10 @@ def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
     ``degenerate_well_selection`` -- a declared well-side class selection
     (``ties[].well_requires``/``well_excludes``) that kept every merged
     shape of the drawn well layer, or none of them -- is the second, and
-    needed no change here either.
+    needed no change here either. Issue #2377's ``empty_well_region`` -- a
+    ``ties[]`` entry naming a *drawn* ``well_layer`` with no geometry at all
+    in the stream, the unselected form of the same absence-of-evidence state
+    -- is the third, and needed no change here either.
     An envelope with no ``erc_coverage`` block
     (every report before #2179) skips nothing and is graded exactly as it
     was.

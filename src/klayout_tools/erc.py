@@ -472,6 +472,34 @@ REASON_DEGENERATE_WELL_ASSERTION = "degenerate_well_assertion"
 #: key existed means. See :func:`_select_well_class`.
 REASON_DEGENERATE_WELL_SELECTION = "degenerate_well_selection"
 
+#: The stable ``erc_coverage`` skip reason for a ``ties[]`` entry that names a
+#: drawn ``well_layer`` (never ``well_boxes`` -- see below) with **no
+#: geometry at all** in the stream: a typo'd layer/datatype, a PDK whose tub
+#: layer number changed, or a GDS written without the tub layer, issue #2377.
+#:
+#: An empty well region collapses :func:`_tie_findings`'s per-well loop to
+#: zero iterations -- the same "nothing was examined" state
+#: :data:`REASON_DEGENERATE_WELL_SELECTION` already rejects for a *declared*
+#: selection that keeps none of the drawn layer's shapes, one step earlier:
+#: here the layer itself contributes nothing, before any selection is even
+#: applied. Without this reason, zero ``erc.missing_tie`` findings from a
+#: well nobody drew read exactly like zero findings from a well that was
+#: examined and found clean -- the absence-of-evidence pass every other
+#: member of this family exists to reject.
+#:
+#: Drawn-layer only: a caller-asserted region (``well_layer: null`` +
+#: ``well_boxes``) cannot be empty after spec parsing (boxes are validated
+#: non-degenerate before this module ever sees them), so this reason never
+#: applies to an asserted tie -- see :func:`_tie_well_region`. Kept distinct
+#: from :data:`REASON_DEGENERATE_WELL_SELECTION` because the two say
+#: different things to go fix -- that one says "the marker layer you named
+#: does not partition this well layer"; this one says "the well layer itself
+#: draws nothing here" -- and it is not distinguished from "the layer is
+#: present but every shape on it happens to be empty", since
+#: :func:`_region` collapses both to the same empty ``Region``. See
+#: :func:`_degenerate_tie_reasons`.
+REASON_EMPTY_WELL_REGION = "empty_well_region"
+
 #: How much of the top cell's own extent a caller-asserted substrate region
 #: (``ties[].well_boxes``, issue #2255) must leave **uncovered** to count as
 #: a real claim rather than "the whole die is the substrate" -- as a
@@ -2370,7 +2398,7 @@ def _tie_findings(
 
 def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     """The declared ties whose ``erc.missing_tie`` verdict is unfalsifiable
-    (issues #2199, #2255 and #2339), each mapped to the stable
+    (issues #2199, #2255, #2339 and #2377), each mapped to the stable
     ``erc_coverage.skipped[].reason`` naming *why* -- reported as skipped
     work by :func:`_connectivity_coverage` rather than as a check that
     passed.
@@ -2438,12 +2466,27 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     everything in *this* stream is as degenerate as one that names the well
     layer itself.
 
-    **The well tests are applied first**, and win when both hold, because the
-    tap measurement is taken *inside* the well region: ``tap_narrowed`` is
-    ``(drawn_tap ∩ well) - tap_sites``, so an unfalsifiable well makes the
-    tap-side answer a statement about the die rather than about a tap.
-    Reporting "narrow your tap" for a declaration whose actual defect is
-    "you claimed the whole die" would send a reader to fix the wrong half.
+    A tie's well region is **empty** (:data:`REASON_EMPTY_WELL_REGION`,
+    issue #2377) when it names a *drawn* ``well_layer`` (never ``well_boxes``
+    -- an asserted region cannot be empty, see :func:`_tie_well_region`) and
+    that layer draws **no geometry at all** in the stream: a typo'd
+    layer/datatype, a PDK whose tub layer number changed, or a GDS written
+    without the tub layer. Measured before :func:`_select_well_class` even
+    runs, so it is distinct from -- and takes priority over --
+    :data:`REASON_DEGENERATE_WELL_SELECTION`: that reason means "the layer
+    is there but the declared class selector kept none of it"; this one
+    means "the layer itself contributed nothing, before any selection was
+    applied". Both collapse :func:`_tie_findings`'s per-well loop to zero
+    iterations, which is exactly the absence-of-evidence pass every test in
+    this function exists to reject.
+
+    **The well tests are applied first**, and win when more than one holds,
+    because the tap measurement is taken *inside* the well region:
+    ``tap_narrowed`` is ``(drawn_tap ∩ well) - tap_sites``, so an
+    unfalsifiable well makes the tap-side answer a statement about the die
+    rather than about a tap. Reporting "narrow your tap" for a declaration
+    whose actual defect is "you claimed the whole die" (or "your well layer
+    draws nothing") would send a reader to fix the wrong half.
 
     Deliberately *not* a change to ``erc_findings``: the same findings are
     emitted for the same geometry as before. What changes is that the
@@ -2454,6 +2497,8 @@ def _degenerate_tie_reasons(tie_layers: list[dict[str, Any]]) -> dict[str, str]:
     for tie in tie_layers:
         if tie["well_degenerate"]:
             reasons[tie["name"]] = REASON_DEGENERATE_WELL_ASSERTION
+        elif tie["well_region_empty"]:
+            reasons[tie["name"]] = REASON_EMPTY_WELL_REGION
         elif tie["well_selection_degenerate"]:
             reasons[tie["name"]] = REASON_DEGENERATE_WELL_SELECTION
         elif (
@@ -2737,6 +2782,13 @@ def _extract_connectivity(
         # that assertion is degenerate (issue #2255). Everything below is
         # identical either way: the well is the well, however it was named.
         well_region, well_degenerate = _tie_well_region(kdb, layout, top_cell, tie)
+        # Issue #2377: a *drawn* `well_layer` (never `well_boxes` -- an
+        # asserted region cannot be empty, see `_tie_well_region`) that
+        # draws no geometry at all in this stream. Measured here, before
+        # `_select_well_class` narrows the region further, so it is
+        # distinct from `well_selection_degenerate` below -- see
+        # `_degenerate_tie_reasons`.
+        well_region_empty = not tie["well_boxes"] and well_region.is_empty()
         # `well_requires`/`well_excludes` (issue #2339): keep only the merged
         # well shapes of the class this tie declares, so one tub layer
         # carrying two differently-biased classes can be declared as two
@@ -2790,6 +2842,13 @@ def _extract_connectivity(
                 # `checked_by_well_assertion`.
                 "well_asserted": bool(tie["well_boxes"]),
                 "well_degenerate": well_degenerate,
+                # Issue #2377: whether this tie names a *drawn* `well_layer`
+                # that draws no geometry at all in this stream -- always
+                # `False` for an asserted (`well_boxes`) tie, since an
+                # asserted region cannot be empty. Read by
+                # `_degenerate_tie_reasons`, before `well_selection_degenerate`
+                # below is even considered.
+                "well_region_empty": well_region_empty,
                 # Issue #2339: whether this tie's declared well-side class
                 # selection kept a proper, non-empty subset of the drawn
                 # `well_layer` -- `False` for every tie that declared none.

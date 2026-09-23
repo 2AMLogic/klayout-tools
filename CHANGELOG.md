@@ -266,6 +266,29 @@ not `klt --version`, if you need to detect this kind of drift. See
   `w_um`/`l_um` off the new card shape. See `docs/cli/extract.md`'s "MoM
   capacitor devices" and `docs/cli/lvs.md`'s "Custom device classes
   round-tripped through an `X` card" sections.
+- **Fixed** (#2377, `klt erc`, additive — **no** `schema_version` bump: one
+  new coverage skip reason, no new output field, no new coverage list; a
+  spec whose `ties[]` well layer already draws geometry produces
+  byte-identical output): a `ties[]` entry naming a *drawn* `well_layer`
+  with **no geometry at all** in the stream — a typo'd layer/datatype, a
+  PDK whose tub layer number changed, a GDS written without the tub layer —
+  used to be graded as fully checked work: the per-well loop then runs zero
+  times, so zero `erc.missing_tie` findings read as "every well is tied"
+  rather than "nothing was there to examine". That was the one remaining
+  unselected form of the absence-of-evidence pass the rest of this family
+  (`degenerate_tap_declaration` #2199, `degenerate_well_assertion` #2255,
+  `degenerate_well_selection` #2339) already rejects — the declared-selection
+  case `well_requires`/`well_excludes` keeping *no* shapes of the layer was
+  already caught; a bare `well_layer` naming an absent layer, with no
+  selection declared at all, was not. Such a tie's `erc.missing_tie` work
+  now lands in `erc_coverage.skipped` with reason `empty_well_region`, and
+  the connectivity roll-up reports `erc_status: "clean_partial"` rather than
+  `"clean"`. Never applies to an asserted substrate region (`well_layer:
+  null` + `well_boxes`, #2255): boxes are validated non-degenerate at
+  spec-parse time, so an asserted region can never be empty by the time this
+  test runs. `klt signoff`'s T1 item 11 needed no change: it already matches
+  on the `erc.missing_tie:` work-identity prefix rather than on the specific
+  skip reason.
 - **Added** (#2339, `klt erc`, additive — **no** `schema_version` bump: two
   new optional spec keys and one new coverage skip reason, no new output
   field and no new coverage list; a spec that uses neither key produces

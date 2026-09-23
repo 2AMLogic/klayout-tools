@@ -378,8 +378,10 @@ written to every block.
       `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
       reason `degenerate_tap_declaration`, issue #2199,
-      `degenerate_well_assertion`, issue #2255, or
-      `degenerate_well_selection`, issue #2339) returns zero for a
+      `degenerate_well_assertion`, issue #2255,
+      `degenerate_well_selection`, issue #2339, or `empty_well_region`,
+      issue #2377 — a drawn `well_layer` with no geometry at all in the
+      stream) returns zero for a
       reason that has nothing to do with taps, and renders
       `supply_spec_incomplete` rather than a met item — the same rule that
       already rejects a spec declaring no `ties[]` at all. **A stream with
