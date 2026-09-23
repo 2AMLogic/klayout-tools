@@ -1445,6 +1445,31 @@ _MAX_TRANSITION_VIOLATIONS_END = "===KLT_MAX_TRANSITION_VIOLATIONS_END==="
 _MAX_CAPACITANCE_VIOLATIONS_BEGIN = "===KLT_MAX_CAPACITANCE_VIOLATIONS_BEGIN==="
 _MAX_CAPACITANCE_VIOLATIONS_END = "===KLT_MAX_CAPACITANCE_VIOLATIONS_END==="
 
+#: Issue #2357: a **second**, library-only pass of the same two
+#: ``report_check_types`` blocks above, run *before*
+#: :func:`_design_rule_constraint_lines` applies any caller-stated
+#: ``constraints.max_transition_ns``/``.max_capacitance_pf`` override to
+#: ``[current_design]`` -- see :func:`_design_rule_check_lines`'s
+#: ``transition_begin``/``transition_end``/``capacitance_begin``/
+#: ``capacitance_end`` parameters and
+#: :func:`~klayout_tools.place_and_route_sta._corner_sweep_script_lines`
+#: for where the two passes are ordered. Distinct markers so
+#: :func:`_count_violations` can isolate this pass's own stdout block from
+#: the effective (library-*and*-constraint) one the original markers above
+#: still isolate.
+_MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN = (
+    "===KLT_MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN==="
+)
+_MAX_TRANSITION_LIBRARY_VIOLATIONS_END = (
+    "===KLT_MAX_TRANSITION_LIBRARY_VIOLATIONS_END==="
+)
+_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN = (
+    "===KLT_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN==="
+)
+_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END = (
+    "===KLT_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END==="
+)
+
 #: Same marker convention as the setup/hold pair above, isolating
 #: `check_antennas`'s own stdout (run post-`repair_antennas`, `"route"`
 #: stage only) so :func:`_count_antenna_violations` can parse its summary
@@ -1514,6 +1539,16 @@ _TOP_LEVEL_METRIC_KEYS = (
     # deck's own max-transition/max-capacitance limits.
     "max_transition_violation_count",
     "max_capacitance_violation_count",
+    # Additive (issue #2357): the library-only counterpart of the two
+    # fields above -- checked against whatever the loaded liberty decks
+    # declare on their own, before any caller-stated
+    # `constraints.max_transition_ns`/`.max_capacitance_pf` override is
+    # applied. Distinguishes a guard-band overrun (this pair `0`, the
+    # effective pair above nonzero) from a genuine library violation (both
+    # pairs nonzero) directly from the report. Same `null`-before-`"route"`
+    # gating as the pair above.
+    "max_transition_violation_count_vs_library",
+    "max_capacitance_violation_count_vs_library",
     # Additive (issue #1865): `"constrained"` / `"unconstrained"` / `null` --
     # whether the slack fields above are measurements at all, or OpenSTA's
     # own unconstrained-design sentinel (`1e+39`) restated. See
@@ -1933,6 +1968,9 @@ def run_place_and_route(
         corner_breakdown: list[dict[str, Any]] | None = None
         max_transition_violation_count: int | None = None
         max_capacitance_violation_count: int | None = None
+        # Issue #2357
+        max_transition_violation_count_vs_library: int | None = None
+        max_capacitance_violation_count_vs_library: int | None = None
         if stage == "route":
             antenna_count = _count_antenna_violations(completed.stdout)
             # Same deterministic path `_stage_script_lines`'s own `route`
@@ -1984,6 +2022,11 @@ def run_place_and_route(
                 # same sweep invocation -- no extra OpenROAD launch of its own.
                 max_transition_violation_count,
                 max_capacitance_violation_count,
+                # Issue #2357: the same verdict's library-only counterpart --
+                # against whatever the loaded liberty decks declare, before
+                # any caller-stated constraint is applied.
+                max_transition_violation_count_vs_library,
+                max_capacitance_violation_count_vs_library,
             ) = _run_corner_sweep(
                 engine_logs=engine_logs,
                 checkpoint_in=next_checkpoint,
@@ -2013,6 +2056,12 @@ def run_place_and_route(
                 corners=corner_breakdown,
                 max_transition_violation_count=max_transition_violation_count,
                 max_capacitance_violation_count=max_capacitance_violation_count,
+                max_transition_violation_count_vs_library=(
+                    max_transition_violation_count_vs_library
+                ),
+                max_capacitance_violation_count_vs_library=(
+                    max_capacitance_violation_count_vs_library
+                ),
             )
         )
         checkpoint_path = next_checkpoint
@@ -3754,7 +3803,13 @@ def _violation_count_lines() -> list[str]:
     ]
 
 
-def _design_rule_check_lines() -> list[str]:
+def _design_rule_check_lines(
+    *,
+    transition_begin: str = _MAX_TRANSITION_VIOLATIONS_BEGIN,
+    transition_end: str = _MAX_TRANSITION_VIOLATIONS_END,
+    capacitance_begin: str = _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
+    capacitance_end: str = _MAX_CAPACITANCE_VIOLATIONS_END,
+) -> list[str]:
     """Post-route **design-rule check** reports run inside the multi-corner
     sweep session
     (:func:`~klayout_tools.place_and_route_sta._corner_sweep_script_lines`)
@@ -3788,14 +3843,34 @@ def _design_rule_check_lines() -> list[str]:
     reporting, if it is ever wanted here, has to come from the topology walk
     (``get_pins -of_objects`` per net, counting inputs) that issue names as
     the safe-but-slower alternative, not from this call.
+
+    ``transition_begin``/``transition_end``/``capacitance_begin``/
+    ``capacitance_end`` (issue #2357) default to the module's original,
+    single "effective" marker pair each -- byte-identical Tcl to before this
+    parameter existed when the function is called with no arguments. The
+    caller (:func:`~klayout_tools.place_and_route_sta._corner_sweep_script_lines`)
+    passes this function's own distinct
+    ``_MAX_TRANSITION_LIBRARY_VIOLATIONS_*``/``_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_*``
+    constants for a **second** invocation, run *before*
+    :func:`_design_rule_constraint_lines` applies any caller-stated
+    ``constraints.max_transition_ns``/``.max_capacitance_pf`` override --
+    the exact same ``-max_slew``/``-max_capacitance`` Tcl, against whatever
+    the loaded liberty decks declare on their own. That closes the gap issue
+    #2357 reports: the original, still-unchanged marker pair's own count
+    (``max_transition_violation_count``/``max_capacitance_violation_count``)
+    is a verdict against whichever limit ended up tighter -- the caller's
+    own stated constraint when one was given, or the library's own per-pin
+    limit otherwise -- and never said which one that was. The library-only
+    pass gives a reader the other half of that comparison directly, instead
+    of requiring a raw ``stdout.log`` read to recover it.
     """
     return [
-        f'puts "{_MAX_TRANSITION_VIOLATIONS_BEGIN}"',
+        f'puts "{transition_begin}"',
         "report_check_types -max_slew -violators",
-        f'puts "{_MAX_TRANSITION_VIOLATIONS_END}"',
-        f'puts "{_MAX_CAPACITANCE_VIOLATIONS_BEGIN}"',
+        f'puts "{transition_end}"',
+        f'puts "{capacitance_begin}"',
         "report_check_types -max_capacitance -violators",
-        f'puts "{_MAX_CAPACITANCE_VIOLATIONS_END}"',
+        f'puts "{capacitance_end}"',
     ]
 
 
@@ -4719,6 +4794,8 @@ def _extract_stage_metrics(
     corners: list[dict[str, Any]] | None = None,
     max_transition_violation_count: int | None = None,
     max_capacitance_violation_count: int | None = None,
+    max_transition_violation_count_vs_library: int | None = None,
+    max_capacitance_violation_count_vs_library: int | None = None,
 ) -> dict[str, Any]:
     """Map one stage's raw OpenROAD ``-metrics`` JSON dump onto this
     contract's field names -- see this module's docstring
@@ -4812,6 +4889,23 @@ def _extract_stage_metrics(
             entry["max_transition_violation_count"] = max_transition_violation_count
         if max_capacitance_violation_count is not None:
             entry["max_capacitance_violation_count"] = max_capacitance_violation_count
+        # Issue #2357: the library-only counterpart of the two fields above
+        # -- checked against whatever the loaded liberty decks declare on
+        # their own, *before* any `request.constraints.max_transition_ns`/
+        # `.max_capacitance_pf` override is applied to the same session.
+        # Same absent-before-`"route"`/present-but-zero-when-clean gating.
+        # Reading this pair alongside the two above lets a caller tell a
+        # guard-band overrun (this pair `0`, the effective pair nonzero)
+        # apart from a genuine library violation (both pairs nonzero)
+        # without opening the retained OpenROAD `stdout.log`.
+        if max_transition_violation_count_vs_library is not None:
+            entry["max_transition_violation_count_vs_library"] = (
+                max_transition_violation_count_vs_library
+            )
+        if max_capacitance_violation_count_vs_library is not None:
+            entry["max_capacitance_violation_count_vs_library"] = (
+                max_capacitance_violation_count_vs_library
+            )
 
     # Issue #1865: whether the slack fields above are measurements at all.
     # OpenSTA reports the worst slack of a design with no constrained

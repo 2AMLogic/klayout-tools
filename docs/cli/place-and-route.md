@@ -888,7 +888,7 @@ many-corner library should use `sweep_corners` to scope the sweep down to
 the corners the design actually operates at, which also caps this added
 cost at the scoped subset's own size.
 
-### Design-rule-check verdict (`max_transition_violation_count`, `max_capacitance_violation_count`, issue #1709)
+### Design-rule-check verdict (`max_transition_violation_count`, `max_capacitance_violation_count`, issue #1709; library-only counterpart issue #2357)
 
 The sweep re-times the routed design at the `sweep_corners` decks, but until
 issue #1709 the response said nothing about **design-rule** checks at those
@@ -917,14 +917,53 @@ against an un-estimated network is not a meaningful number) and after the two
 `report_worst_slack_metric` calls. **No additional OpenROAD process launch**,
 so the wall-clock cost measured above is unchanged.
 
-The verdict is against whatever limits the loaded decks declare, so it is
-reported whether or not the caller set `constraints.max_transition_ns` /
-`.max_capacitance_pf`. With those set, it additionally answers whether the
-`repair_design` pass that was aimed at the caller's own tighter target
-actually hit it.
+The verdict is against whatever limit ends up *tighter* at each pin — the
+caller's own stated `constraints.max_transition_ns`/`.max_capacitance_pf`
+when given, or the loaded liberty deck's own per-pin limit otherwise — so it
+is reported whether or not the caller set either constraint field. With
+those set, it additionally answers whether the `repair_design` pass that was
+aimed at the caller's own tighter target actually hit it. That dual meaning
+is exactly what issue #2357 closes below: the two fields above alone cannot
+say *which* limit a given count reflects.
 
-**There is deliberately no `max_fanout_violation_count`.** `constraints.
-max_fanout` is still emitted as a *constraint*, but OpenSTA's
+#### Library-only counterpart (`max_transition_violation_count_vs_library`, `max_capacitance_violation_count_vs_library`, issue #2357)
+
+A caller-stated `constraints.max_transition_ns`/`.max_capacitance_pf` is
+usually a **guard-band** handed to `repair_design` — tighter than the
+liberty deck's own limit — so a nonzero
+`max_transition_violation_count`/`max_capacitance_violation_count` above
+does not by itself say whether the design breaks the *library's* own
+design rule (a real signoff violation) or only overran the caller's own,
+stricter target while staying comfortably inside the library's limit.
+Before this field, the only way to tell the two apart was to read the
+retained OpenROAD `stdout.log` for the `Limit` column `report_check_types`
+printed for each violating pin.
+
+Two more additive fields, at the same top level / `corners[]` locations as
+the pair above, close that: **`max_transition_violation_count_vs_library`**
+and **`max_capacitance_violation_count_vs_library`** are the same
+`report_check_types -max_slew`/`-max_capacitance -violators` check, run a
+**second time** in the same already-paid-for sweep invocation —
+immediately after `estimate_parasitics -global_routing` but **before**
+`_design_rule_constraint_lines` applies any caller-stated
+`set_max_transition`/`set_max_capacitance` override to the session. That
+ordering is what makes this pass a pure liberty-limit verdict: nothing but
+the loaded `.lib` decks' own declared limits is in force yet. Still **no
+additional OpenROAD process launch** — the wall-clock cost above is
+unchanged.
+
+Reading the two pairs together: `max_transition_violation_count_vs_library
+== 0` while `max_transition_violation_count > 0` means the design is clean
+against the library and the nonzero count above is only a guard-band
+overrun; both nonzero means the design genuinely breaks the library's own
+limit. When the caller sets neither `constraints.max_transition_ns` nor
+`.max_capacitance_pf`, the two passes never diverge — every field in this
+pair is numerically identical to its non-`_vs_library` counterpart, since
+nothing overrides the library check in between.
+
+**There is deliberately no `max_fanout_violation_count`** (library-only or
+otherwise). `constraints.max_fanout` is still emitted as a *constraint*, but
+OpenSTA's
 `sta::max_fanout_violation_count` takes OpenROAD down with a SIGSEGV inside
 `sta::CheckFanouts::check` on a library that declares no fanout limit at all
 (no `default_max_fanout`, no per-pin `max_fanout`) — reproduced at every
@@ -1757,10 +1796,12 @@ unsure).
   "worst_hold_slack_ns": 0.08421,
   "max_transition_violation_count": 2,
   "max_capacitance_violation_count": 0,
+  "max_transition_violation_count_vs_library": 2,
+  "max_capacitance_violation_count_vs_library": 0,
   "corners": [
-    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011, "total_negative_setup_slack_ns": -12.4103, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 },
-    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882, "total_negative_setup_slack_ns": -82.8171, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 2, "max_capacitance_violation_count": 0 },
-    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421, "total_negative_setup_slack_ns": -35.2841, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 0, "max_capacitance_violation_count": 0 }
+    { "name": "tt_025C_1v80", "setup_slack_ns": -2.18828, "hold_slack_ns": 0.42011, "total_negative_setup_slack_ns": -12.4103, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 0, "max_capacitance_violation_count": 0, "max_transition_violation_count_vs_library": 0, "max_capacitance_violation_count_vs_library": 0 },
+    { "name": "ss_100C_1v60", "setup_slack_ns": -4.02163, "hold_slack_ns": 0.51882, "total_negative_setup_slack_ns": -82.8171, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 2, "max_capacitance_violation_count": 0, "max_transition_violation_count_vs_library": 2, "max_capacitance_violation_count_vs_library": 0 },
+    { "name": "ff_n40C_1v95", "setup_slack_ns": -3.10442, "hold_slack_ns": 0.08421, "total_negative_setup_slack_ns": -35.2841, "total_negative_hold_slack_ns": 0.0, "timing_status": "constrained", "max_transition_violation_count": 0, "max_capacitance_violation_count": 0, "max_transition_violation_count_vs_library": 0, "max_capacitance_violation_count_vs_library": 0 }
   ],
   "estimated_power_mw": 11.6,
   "clock_skew_ns": 0.0421,
@@ -1915,8 +1956,9 @@ plain string" for the full enumeration and rationale.
 | `antenna_violation_count` | integer \| null | The post-repair antenna-*violating-net* count from `check_antennas`, run right after `repair_antennas`'s own reroute pass. `null` before the `"route"` stage — this is a DRC-signoff concern (`klt drc` on the merged GDS is the gate this metric tracks), not a connectivity one; `klt lvs` is unaffected by antenna repair. |
 | `route_drc_violation_count` | integer \| null | The violation count from `detailed_route -output_drc <rpt>`'s own report (TritonRoute's routing-legality check — short/spacing/via/etc. violations, distinct from the antenna check above), counting distinct complete `(type, sources, bbox, layer)` records from the **final** routing pass. Identical repeated records count once; incomplete records count individually. `0` for a DRC-clean route (a real `-output_drc` report is a 0-byte file in that case, not absent). `null` before the `"route"` stage — no `detailed_route` call has run yet (issue #938). |
 | `worst_setup_slack_ns` / `worst_hold_slack_ns` | number \| null | The corner-swept worst-case setup/hold slack — see "Multi-corner setup/hold sweep" below. `null` before the `"route"` stage; distinct from (and does not replace) `worst_slack_ns`, which stays the single nominal-corner value it has always been (issue #949). |
-| `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate the max-transition (OpenSTA `-max_slew`) and max-capacitance limits in force at those decks, from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given — without them the verdict is against the loaded decks' own declared limits; with them, it additionally says whether the `repair_design` pass aimed at the caller's tighter target actually hit it. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
-| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "timing_status": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ...}` (the two `max_*_violation_count` fields added by issue #1709; the two `total_negative_*_slack_ns` fields added by issue #1866; `timing_status` added by issue #1865 — computed from that corner's own two slack values, so a corner OpenSTA could not time is never mistaken for a clean one). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
+| `max_transition_violation_count` / `max_capacitance_violation_count` | integer \| null | Additive fields (issue #1709). The **effective design-rule-check verdict** at the same swept corners as `worst_setup_slack_ns`/`worst_hold_slack_ns` above — how many pins violate whichever of the max-transition (OpenSTA `-max_slew`)/max-capacitance limit ends up tighter at those decks: the caller's own `constraints.max_transition_ns`/`.max_capacitance_pf` when given, or the loaded liberty deck's own per-pin limit otherwise — from `report_check_types ... -violators` run inside the sweep's own already-paid-for invocation. `0` on a design-rule-clean run (present-but-zero, like `route_drc_violation_count`); `null` before the `"route"` stage, and `null` when `pdk.sweep_corners` explicitly sweeps zero corners. Reported whether or not `constraints.max_transition_ns`/`.max_capacitance_pf` were given. There is deliberately **no** `max_fanout_violation_count` — see "Design-rule-check verdict" below. |
+| `max_transition_violation_count_vs_library` / `max_capacitance_violation_count_vs_library` | integer \| null | Additive fields (issue #2357). The **library-only** counterpart of the pair above — the same check, run a second time in the same invocation *before* any caller-stated `constraints.max_transition_ns`/`.max_capacitance_pf` override is applied, so it reflects only what the loaded liberty decks themselves declare. Same `null`-before-`"route"`/present-but-zero-when-clean gating as the pair above. Lets a caller tell a guard-band overrun (this pair `0`, the effective pair above nonzero) apart from a genuine library violation (both pairs nonzero) directly from the report — see "Library-only counterpart" below. Identical to the pair above whenever the caller sets neither constraint field. |
+| `corners` | array\<object\> \| null | Additive field (issue #1092). Per-corner breakdown of the sweep behind `worst_setup_slack_ns`/`worst_hold_slack_ns` — one entry per corner actually swept (every shipped corner, or the `request.pdk.sweep_corners`-named subset when given), each `{"name": ..., "setup_slack_ns": ..., "hold_slack_ns": ..., "total_negative_setup_slack_ns": ..., "total_negative_hold_slack_ns": ..., "timing_status": ..., "max_transition_violation_count": ..., "max_capacitance_violation_count": ..., "max_transition_violation_count_vs_library": ..., "max_capacitance_violation_count_vs_library": ...}` (the two effective `max_*_violation_count` fields added by issue #1709 and their two library-only `..._vs_library` counterparts added by issue #2357; the two `total_negative_*_slack_ns` fields added by issue #1866; `timing_status` added by issue #1865 — computed from that corner's own two slack values, so a corner OpenSTA could not time is never mistaken for a clean one). Names which corner decided each aggregate: the entry with the lowest `setup_slack_ns` is the one `worst_setup_slack_ns` came from, and likewise the lowest `hold_slack_ns` for `worst_hold_slack_ns`, and the per-corner violation counts name which deck's limits a pin actually breaks. The two `total_negative_*_slack_ns` fields report that corner's own total negative slack (TNS) — how much of the design fails at that corner, distinct from the worst-single-path `setup_slack_ns`/`hold_slack_ns` — see "Per-corner total negative slack" below. `null` before the `"route"` stage (mirroring the two aggregates above); `[]` when `sweep_corners` explicitly names zero corners. See "Multi-corner setup/hold sweep" below. |
 | `estimated_power_mw` | number \| null | `null` before placement. |
 | `clock_skew_ns` | number \| null | Worst setup-side clock skew (`report_clock_skew_metric -setup`) across the clock tree TritonCTS built. `null` before the `"cts"` stage — no clock tree exists yet, so there is nothing to measure skew across (issue #783). |
 | `stages` | array\<object\> | One entry per completed stage through `stage_reached`, each with whatever subset of the top-level metric fields that stage's own OpenROAD reports populate. The top-level fields above are always the **last** entry in `stages`, restated at top level. |

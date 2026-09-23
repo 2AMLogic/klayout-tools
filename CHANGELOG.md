@@ -110,6 +110,27 @@ not `klt --version`, if you need to detect this kind of drift. See
   kind's evidence; the qualified-key-first, bare-key-fallback priority order
   mixed-signal manifests already had is unchanged, as is every rendered
   `"partition"` field. See `docs/cli/signoff.md`'s evidence-key section.
+- **Added** (#2357, `klt place-and-route`, additive — **no** `schema_version`
+  bump): two new fields alongside the existing
+  `max_transition_violation_count`/`max_capacitance_violation_count` (top
+  level, each `stages[]` `"route"` entry, and each `corners[]` entry) —
+  `max_transition_violation_count_vs_library` /
+  `max_capacitance_violation_count_vs_library`. The existing pair is a
+  verdict against whichever of the caller's own
+  `constraints.max_transition_ns`/`.max_capacitance_pf` guard-band (when
+  given) or the liberty deck's own per-pin limit ends up tighter, and never
+  said which one bound — a clean library result and a guard-band overrun
+  read identically. The new pair re-runs the same
+  `report_check_types -max_slew`/`-max_capacitance -violators` check a
+  second time in the same already-paid-for sweep invocation, before any
+  caller-stated constraint is applied, so it reflects only what the loaded
+  liberty decks themselves declare. Reading both together — `_vs_library ==
+  0` while the effective count is nonzero — distinguishes a guard-band
+  overrun from a genuine library violation directly from the report,
+  without reading the retained OpenROAD `stdout.log`. Identical to the
+  existing pair whenever the caller sets neither constraint field. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s "Library-only
+  counterpart" section.
 - **Fixed** (#2355, `klt extract --parasitics` MoM-capacitor cards — **no**
   `schema_version` bump; `devices[].params` is unchanged, only the written
   SPICE text): an extracted `cap_cmomi`/`cap_cmomf` (MoM capacitor, issue
