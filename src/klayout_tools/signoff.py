@@ -4266,7 +4266,7 @@ def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
 
 def _t1_item_text(t1_item: dict[str, Any], partition: str) -> str | None:
     """Select the body text a T1 checklist item shows for ``partition``:
-    the matching column for a per-kind item (1, 2, 5, 7), or the item's
+    the matching column for a per-kind item (1, 2, 5, 7, 11), or the item's
     single kind-independent body otherwise (3, 4, 6, 8, 9, 10)."""
     columns = t1_item["columns"]
     if columns:

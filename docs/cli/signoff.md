@@ -811,7 +811,7 @@ See "Citing an envelope nested inside a composite report (`pointer`)" below.
 - `block` — optional, echoed back verbatim in the report.
 - `kind` — required: `"analog"`, `"digital"`, or `"mixed-signal"` (see the
   doc's "Block kind" subsection). Selects which column of the doc's
-  per-kind T1 items (1, 2, 5, 7) applies; a `"mixed-signal"` manifest
+  per-kind T1 items (1, 2, 5, 7, 11) applies; a `"mixed-signal"` manifest
   renders **both** columns, once per partition.
 - `partition_boundary` — optional, `"mixed-signal"` only (issue #2278):
   what this block's two partitions *denote*. See "The declared partition
