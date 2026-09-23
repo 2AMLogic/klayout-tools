@@ -303,6 +303,27 @@ use) — matching `klt power`'s own convention.
     (see "A block with no drawn well at all" below). Each box's
     `left`/`bottom`/`right`/`top` must satisfy `left < right` and
     `bottom < top`.
+  - `well_requires` / `well_excludes` (optional arrays of
+    `"<layer>/<datatype>"`, default `[]`, issue #2339) — the **well-side
+    class selectors**, for a drawn `well_layer` that carries two
+    differently-biased well classes (device-body wells on one rail, a
+    vertical bipolar's base tub on the other). Each merged shape of
+    `well_layer` is kept only when it interacts with geometry on every
+    `well_requires` layer and with none of the `well_excludes` layers, so a
+    PDK device marker over one class selects it and a second, complementary
+    entry (the same marker under `well_excludes`) selects the rest — each
+    with its own `net`. Unlike `tap_requires`, which intersects layers into
+    the tap, this **selects whole drawn shapes** rather than intersecting
+    the layer: the unit `erc.missing_tie` checks is the well the layout
+    actually draws, so a marker covering only part of a tub cannot push
+    that tub's real tap outside the graded region (see "One well layer, two
+    bias classes" below). Valid only with a drawn `well_layer` — an
+    asserted substrate region (`well_layer: null` + `well_boxes`) already
+    names exactly the region it claims, box by box. Drawn-geometry
+    narrowing, not caller assertion, so there is no new coverage list; held
+    to the same falsifiability test every narrowing form here is: a
+    declared selection that keeps *every* drawn shape, or none of them, is
+    recorded as skipped work (`degenerate_well_selection`).
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
   - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
@@ -544,6 +565,13 @@ implicit "the whole top cell is the substrate" region and no derived
 rejected as unfalsifiable — they make `erc.missing_tie` satisfiable by any
 contact anywhere that reaches the declared net, which is exactly the silent
 pass the sections above exist to close.
+
+One drawn well layer holding two differently-biased well **classes** — a
+device-body well beside a vertical bipolar's base tub, ordinary on any PDK
+with a single n-tub layer — is likewise **no longer undeclarable** (issue
+#2339): `well_requires`/`well_excludes` select which merged shapes of that
+layer each `ties[]` entry is about, so each class is declared against its own
+`net`. See "One well layer, two bias classes" below.
 
 #### A degenerate tie is reported as skipped, not as a pass (issue #2199)
 
@@ -821,6 +849,114 @@ asserted well, so the weaker provenance is stated in the verdict of record
 rather than reachable only by re-opening the ERC envelope — see
 [`docs/design-evidence-tiers.md`](../design-evidence-tiers.md) item 11.
 
+#### One well layer, two bias classes (`well_requires`/`well_excludes`, issue #2339)
+
+Everything above assumes one `well_layer` means one bias. A PDK that draws a
+single n-type tub layer routinely puts two differently-biased well **classes**
+on it:
+
+- device-body wells, strapped to the positive supply, and
+- the base tub of a vertical/substrate bipolar, strapped to the *other*
+  supply (the device is diode-connected, so its base sits at the negative
+  rail).
+
+Both are real, correct, fully tapped wells. A `ties[]` entry grades *every*
+merged shape of its `well_layer` against that entry's single `net`, so
+before this key neither class could be declared without the other reporting
+a false `erc.missing_tie` — one per correctly-tapped well of the other
+class. The two declarations' finding sets are disjoint and together account
+for every well, which demonstrates the layout is right and yet leaves no
+single report able to say so. Every narrowing key above acts on the **tap**
+(`tap_requires`, `tap_is_dedicated`, `tap_boxes`) and so cannot reach it:
+excluding the other class's taps leaves its wells untapped, which is the
+same finding with a different cause.
+
+The two well-side selectors say which shapes an entry is about:
+
+```json
+{
+  "ties": [
+    {
+      "name": "device_body_wells",
+      "well_layer": "64/20",
+      "well_excludes": ["82/44"],
+      "tap_layer": "65/44",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VPWR"
+    },
+    {
+      "name": "bipolar_base_tub",
+      "well_layer": "64/20",
+      "well_requires": ["82/44"],
+      "tap_layer": "65/44",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VGND"
+    }
+  ]
+}
+```
+
+A shape of `well_layer` is kept when it interacts with geometry on **every**
+`well_requires` layer and with **none** of the `well_excludes` layers. The
+two entries above are therefore complementary by construction: whatever the
+device marker touches belongs to one, everything else to the other, and
+every well on the layer is graded exactly once. That complementarity is why
+both keys exist rather than only the positive one — a PDK generally marks
+the special device, not the ordinary wells, so "the rest" has no marker of
+its own to name.
+
+**This selects whole drawn shapes; it does not intersect the layer.** That
+is the one place it deliberately diverges from `tap_requires`, and the
+divergence is the point. A tap *is* the boolean its PDK draws it as, so
+intersecting is right there. A well is not: the unit `erc.missing_tie` loops
+over is one merged shape of the drawn layer, and a device marker generally
+covers only part of the tub it identifies — often not the tap ring at all.
+Intersecting would replace the tub with the marker's own footprint,
+shrinking the region the tap must fall inside (`tap_sites = tap_region ∩
+well`) and reporting the tub's real, correctly-wired tap as "no tap contact
+drawn inside it" — the same false finding, re-introduced from the other
+direction. Selecting whole shapes also keeps each finding's `bbox` the well
+the layout actually draws.
+
+**It narrows what is graded, never what a finding may say.** A selected
+class whose wells are genuinely untied reports them exactly as an
+unselected tie would; `tests/test_erc.py` asserts that directly
+(`test_a_selected_well_class_still_reports_its_own_untied_well`).
+
+**The falsifiability test**, matching every other narrowing form here: a
+**declared** selection that keeps *every* merged shape of the drawn layer,
+or *none* of them, is recorded as skipped work (`erc_coverage.skipped`,
+reason `degenerate_well_selection`) and the roll-up reports
+`erc_status: "clean_partial"`. The two endpoints fail differently and both
+matter:
+
+- *keeps everything* — the selection partitions nothing, so the entry still
+  grades the other bias class against its own net and still reports the
+  false finding, now with a declaration that looks like it fixed it;
+- *keeps nothing* — the per-well loop runs zero times, so zero
+  `erc.missing_tie` findings mean "nothing was examined", not "every well is
+  tied". This is the absence-of-evidence pass the whole degeneracy family
+  exists to refuse.
+
+Unlike the tap test, this one fires only when a selection was **declared**.
+A tie with no well-side selector claims every shape on its layer — the
+strongest claim available, not an unfalsifiable one — so every spec written
+before this key existed grades exactly as it did. Within a declared
+selection the measurement is geometric, not "which key was given": a
+selector that happens to keep everything in *this* stream (a marker drawn
+over every well) is as degenerate as naming the well layer itself.
+
+**Two ties may share one `well_layer`.** Coverage, degeneracy, and findings
+are all keyed on the tie `name`, so the entries above are graded
+independently: one can be `checked` while the other is skipped.
+
+`klt signoff`'s T1 item 11 needs no change for this: it already refuses to
+read anything in `erc_coverage.skipped` as a clean missing-tie verdict, and
+it matches on the `erc.missing_tie:` work-identity prefix rather than on the
+skip reason, so the new token is covered by construction.
+
 ### Device bodies are not wires (`devices[]`, issue #2183)
 
 A conductor role carries *geometry*, and the model above has no way to tell
@@ -1017,7 +1153,9 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   — declare it in `devices[]` (see "Device bodies are not wires" above), or
   read the finding as unreliable for that block.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
-  (one per merged polygon of a `ties[]` entry's `well_layer` — or of its
+  (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
+  the shapes its `well_requires`/`well_excludes` class selection keeps,
+  issue #2339 — or of its
   asserted `well_boxes`, issue #2255, for a block that draws none), a tap must
   be drawn inside it (`tap_layer`, narrowed by `tap_requires`) *and* at
   least one such tap must be electrically connected — via the tie
@@ -1243,15 +1381,17 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
 - **`erc_status: "clean_partial"`** — no finding, but some requested
   connectivity work was skipped: today that means a **degenerate `ties[]`
   declaration**, whose `erc.missing_tie` verdict could not be told apart
-  from one that never looked at a tap. Two forms, both under "Well/tap
+  from one that never looked at a tap. Three forms, all under "Well/tap
   connectivity" above: a degenerate *tap* (issue #2199,
   `degenerate_tap_declaration` — the declared tap region is
   indistinguishable from an ordinary source/drain contact reaching the
-  declared net) and a degenerate *well assertion* (issue #2255,
+  declared net), a degenerate *well assertion* (issue #2255,
   `degenerate_well_assertion` — a caller-asserted substrate region
-  indistinguishable from the whole top-cell extent). A successful, but not
-  unconditional, result: read `erc_coverage.skipped` for which tie, and
-  which of the two.
+  indistinguishable from the whole top-cell extent), and a degenerate *well
+  selection* (issue #2339, `degenerate_well_selection` — a declared
+  `well_requires`/`well_excludes` that kept every merged shape of the drawn
+  `well_layer`, or none of them). A successful, but not unconditional,
+  result: read `erc_coverage.skipped` for which tie, and which of the three.
 - `"not_checked"` is a reachable token of the shared rollup vocabulary,
   listed for completeness: `erc_coverage` always grades at least one gate
   (a run with no gate net at all is exit 1), so a successful run reports
@@ -1600,15 +1740,24 @@ envelope alone. The gate scope is never empty: a run in which no net
 carries gate-role geometry is exit 1, not a zero-coverage report.
 
 A declared `ties[]` entry is the one case this scope records as **skipped**:
-work that was requested and could not be performed. Two reasons today —
+work that was requested and could not be performed. Three reasons today —
 `degenerate_tap_declaration` (issue #2199: the declared tap region is
-indistinguishable from an ordinary source/drain contact) and
+indistinguishable from an ordinary source/drain contact),
 `degenerate_well_assertion` (issue #2255: a caller-asserted substrate region
-is indistinguishable from the whole top-cell extent). The well test is
-applied first when both would hold, since the tap narrowing is measured
-inside the well region. Either is a requested skip, so it does make the
-scope partial — see "A degenerate tie is reported as skipped, not as a
-pass" and "A block with no drawn well at all" above.
+is indistinguishable from the whole top-cell extent), and
+`degenerate_well_selection` (issue #2339: a declared well-side class
+selection kept every merged shape of the drawn `well_layer`, or none of
+them). The well tests are applied first when more than one would hold, since
+the tap narrowing is measured inside the well region. Any of them is a
+requested skip, so it does make the scope partial — see "A degenerate tie is
+reported as skipped, not as a pass", "A block with no drawn well at all",
+and "One well layer, two bias classes" above.
+
+**No new coverage list for a well-side selection.** `well_requires`/
+`well_excludes` narrow *drawn* geometry, exactly as `tap_requires` does, so
+a tie graded through one is an ordinary geometrically-derived pass and
+appears only in `checked`. The two lists below exist because a caller
+*assertion* is not corroborated by the stream; a selection is.
 
 `erc_coverage` additionally carries two assertion lists, both subsets of
 `checked`, both `[]` when unused, and both purely informational — additive

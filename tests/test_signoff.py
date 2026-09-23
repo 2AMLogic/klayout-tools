@@ -8748,6 +8748,120 @@ def test_item_11_well_assertion_list_is_empty_for_a_pre_2255_envelope(tmp_path):
     assert item["citation"]["power_delivery"]["ties_checked_by_well_assertion"] == []
 
 
+# --------------------------------------------------------------------------- #
+# T1 item 11 on one tub layer holding two bias classes -- issue #2339
+#
+# The mirror image of the #2255 case above: the well *is* drawn, but one
+# layer carries two differently-biased classes (device-body wells on one
+# rail, a vertical bipolar's base tub on the other), so each `ties[]` entry
+# graded every shape of that layer against its own single net and reported
+# the other class as untied. Item 11 was unreachable for such a block with
+# every well correctly tapped. `well_requires`/`well_excludes` scope each
+# entry to its class -- drawn-geometry narrowing, so no new citation field
+# and no weaker bar.
+# --------------------------------------------------------------------------- #
+
+#: An ERC spec whose one drawn tub layer is declared twice, once per bias
+#: class, scoped by the PDK device marker over the bipolar.
+ERC_TWO_CLASS_WELL_SPEC = {
+    **ERC_SUPPLY_SPEC,
+    "ties": [
+        {
+            "name": "device_body_wells",
+            "well_layer": "64/20",
+            "well_excludes": ["82/44"],
+            "tap_layer": "65/44",
+            "tap_is_dedicated": True,
+            "connect_to": "li1",
+            "net": "VPWR",
+        },
+        {
+            "name": "bipolar_base_tub",
+            "well_layer": "64/20",
+            "well_requires": ["82/44"],
+            "tap_layer": "65/44",
+            "tap_is_dedicated": True,
+            "connect_to": "li1",
+            "net": "VGND",
+        },
+    ],
+}
+
+
+def test_item_11_met_for_two_class_scoped_ties_on_one_well_layer(tmp_path):
+    """Issue #2339: both classes are ordinary checked work. A well-side
+    selection narrows *drawn* geometry, exactly as `tap_requires` does, so
+    neither assertion list is touched -- nothing here rested on the
+    caller's word."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(
+            checked=[
+                'erc.missing_tie:["device_body_wells"]',
+                'erc.missing_tie:["bipolar_base_tub"]',
+            ],
+        ),
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=envelope,
+                    erc_spec=ERC_TWO_CLASS_WELL_SPEC,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    assert item["citation"]["power_delivery"]["ties_checked_by_assertion"] == []
+    assert item["citation"]["power_delivery"]["ties_checked_by_well_assertion"] == []
+
+
+def test_item_11_unmet_when_a_well_selection_was_skipped_as_degenerate(tmp_path):
+    """And the falsifiability bar from the consumer side, for the third
+    skip reason: a declared selection that kept every shape of the layer
+    (or none of them) is skipped work, which has never been allowed to
+    stand for a clean missing-tie verdict. The gate matches the work
+    identity, not the reason string, so it caught this token with no
+    change."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(
+            checked=['erc.missing_tie:["device_body_wells"]'],
+            skipped=[
+                {
+                    "id": 'erc.missing_tie:["bipolar_base_tub"]',
+                    "reason": "degenerate_well_selection",
+                }
+            ],
+        ),
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=envelope,
+                    erc_spec=ERC_TWO_CLASS_WELL_SPEC,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+    assert item["citation"] is None
+
+
 def test_item_11_digital_unmet_when_no_pdn_was_built(tmp_path):
     """The headline case from the fleet survey: a routed digital block whose
     P&R request carried no `power` block at all. Every other T1 item can be

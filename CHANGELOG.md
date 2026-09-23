@@ -14,6 +14,55 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2339, `klt erc`, additive — **no** `schema_version` bump: two
+  new optional spec keys and one new coverage skip reason, no new output
+  field and no new coverage list; a spec that uses neither key produces
+  byte-identical output): a drawn well/tub layer carrying **two
+  differently-biased well classes** — device-body wells strapped to one
+  supply beside a vertical bipolar's base tub strapped to the other,
+  ordinary for a bandgap/bias block on any PDK with a single n-tub layer —
+  can now declare both, via the new `ties[].well_requires` /
+  `ties[].well_excludes`. A `ties[]` entry graded *every* merged shape of
+  its `well_layer` against that entry's single `net`, so whichever class
+  was not declared reported a false `erc.missing_tie`, one per
+  correctly-tapped well of the other class; the two declarations' finding
+  sets were disjoint and together covered every well, which demonstrated
+  the layout was right while leaving no single report able to say so. Every
+  narrowing key before this acted on the **tap** (`tap_requires`,
+  `tap_is_dedicated`, `tap_boxes`) and could not reach it — excluding the
+  other class's taps leaves its wells untapped, the same finding with a
+  different cause — and `well_boxes` (#2255) is rejected alongside a drawn
+  `well_layer` by construction. A well shape is now kept only when it
+  interacts with geometry on every `well_requires` layer and with none of
+  the `well_excludes` layers, so a PDK device marker over one class selects
+  it and a complementary entry naming the same marker under
+  `well_excludes` selects the rest, each with its own `net`. Both keys
+  ship together because the complementarity is the feature: a PDK
+  generally marks the special device, not the ordinary wells. Unlike
+  `tap_requires`, this **selects whole drawn shapes rather than
+  intersecting the layer** — the unit `erc.missing_tie` loops over is one
+  merged well shape, and a device marker generally covers only part of the
+  tub it identifies (often not the tap ring), so intersecting would shrink
+  the graded region below the tub's real tap and re-report the same false
+  finding from the other direction. Valid only with a drawn `well_layer`
+  (an asserted substrate region already names exactly what it claims, box
+  by box). Falsifiability is enforced on #2199's principle: a *declared*
+  selection that kept every merged shape of the layer (it partitions
+  nothing) or none of them (the per-well loop examines nothing, so zero
+  findings mean zero evidence) is recorded in `erc_coverage.skipped` with
+  the new reason `degenerate_well_selection` (`erc_status:
+  "clean_partial"`), applied ahead of the tap test. A tie with no well-side
+  selector is never selection-degenerate — it claims every shape on its
+  layer, which is the strongest claim available and what every spec written
+  before this meant. No new coverage list: a selection narrows *drawn*
+  geometry, exactly as `tap_requires` does, so it is graded as an ordinary
+  geometrically-derived pass rather than under an assertion
+  classification. `klt signoff`'s T1 item 11 needed no change — it matches
+  skipped `erc.missing_tie` work on the work-identity prefix, not on the
+  reason token — and such a block, previously able to reach only
+  `supply_spec_disclosed_tool_limitation` (unmet) with every well correctly
+  tapped, now reaches `met`.
+
 - **Fixed** (#2333, `klt drc --engine klayout`, additive — **no**
   `schema_version` bump and no change to any response field; one new opt-out
   flag, `--allow-missing-host-tools`, plus its request-document field

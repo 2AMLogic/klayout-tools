@@ -5218,7 +5218,12 @@ def _erc_missing_tie_skipped(envelope: dict[str, Any]) -> bool:
     reason to actually arrive -- ``degenerate_well_assertion``, a
     caller-asserted substrate region indistinguishable from the whole
     top-cell extent -- and needed no change here, which is the property this
-    prefix match was chosen for. An envelope with no ``erc_coverage`` block
+    prefix match was chosen for. Issue #2339's
+    ``degenerate_well_selection`` -- a declared well-side class selection
+    (``ties[].well_requires``/``well_excludes``) that kept every merged
+    shape of the drawn well layer, or none of them -- is the second, and
+    needed no change here either.
+    An envelope with no ``erc_coverage`` block
     (every report before #2179) skips nothing and is graded exactly as it
     was.
     """
