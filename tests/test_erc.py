@@ -4429,6 +4429,41 @@ def test_empty_label_layer_warns_on_stderr(tmp_path, capsys):
     assert "'li1'" in err
     assert "3/5" in err
     assert "no text" in err
+    # Once per affected entry, not once per extraction.
+    assert err.count("klt erc: warning:") == 1
+
+
+def test_empty_label_layer_warns_once_even_with_ties(tmp_path, capsys):
+    """The tie graph re-extracts the same `stackup` (issue #2169's second
+    `_extract_connectivity` pass); the warning is per affected *entry*, not
+    per extraction, so a ties-declaring spec still sees it exactly once
+    (issue #2401)."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    top.shapes(li1).insert(kdb.Box.new(_um(5), _um(0), _um(6), _um(1)))
+
+    gds = tmp_path / "ties-empty-label.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "ties-empty-label.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[{"name": "VDD", "kind": "supply"}],
+            ties=[
+                {
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_boxes": [[1.0, 2.0, 3.0, 4.0]],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        ),
+    )
+
+    run_erc(str(gds), str(spec))
+    err = capsys.readouterr().err
+
+    assert err.count("klt erc: warning:") == 1
 
 
 def test_populated_label_layer_does_not_warn_on_stderr(tmp_path, capsys):

@@ -2409,7 +2409,7 @@ def _register_label_layer(
     top_cell: Any,
     entry: dict[str, Any],
     conductor_region: Any,
-    verb: str,
+    verb: str | None,
 ) -> None:
     """Register a ``stackup`` entry's declared ``label_layer`` text onto its
     conductor region in the ``LayoutToNetlist`` graph -- and warn when that
@@ -2417,11 +2417,15 @@ def _register_label_layer(
     (:func:`_warn_label_layer_empty`, issue #2401).
 
     A ``label_layer`` of ``None`` (the spec default) registers nothing and
-    warns nothing, matching the pre-#2401 behaviour byte for byte."""
+    warns nothing, matching the pre-#2401 behaviour byte for byte. ``verb``
+    of ``None`` registers the text but skips the warning: the tie-graph
+    re-extraction (:func:`_extract_connectivity`'s second caller) walks the
+    same ``stackup`` again, and the warning is printed once per affected
+    entry, not once per extraction."""
     if entry["label_layer"] is None:
         return
     label_texts = _texts(layout, top_cell, entry["label_layer"])
-    if label_texts.is_empty():
+    if verb is not None and label_texts.is_empty():
         layer, datatype = entry["label_layer"]
         _warn_label_layer_empty(verb, entry["name"], f"{layer}/{datatype}")
     l2n.register(label_texts, f"{entry['name']}_label")
@@ -2435,7 +2439,7 @@ def _extract_connectivity(
     vias: list[dict[str, Any]],
     ties: list[dict[str, Any]],
     device_cuts: dict[str, Any],
-    verb: str,
+    verb: str | None,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
@@ -2994,7 +2998,7 @@ def run_erc(
     well_asserted_ties: set[str] = set()
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
-            layout, top_cell, stackup, vias, ties, device_cuts, verb="klt erc"
+            layout, top_cell, stackup, vias, ties, device_cuts, verb=None
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
