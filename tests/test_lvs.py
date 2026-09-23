@@ -12963,6 +12963,103 @@ def test_parse_gate_level_verilog_concatenation_rejected():
         parse_gate_level_verilog(text)
 
 
+#: Issue #2372: a Yosys-shaped module whose output bus is a concatenation
+#: of a narrower bus and a tie-off net -- `assign b = { a, zero };`.
+_CONCAT_ASSIGN_VERILOG = """
+module m(a, zero_in, b);
+  input [1:0] a;
+  input zero_in;
+  output [2:0] b;
+  wire zero;
+  assign b = { a, zero };
+  cellx u0 (.A(zero_in), .Y(zero));
+  cellx u1 (.A(b[2]), .Y(b[0]));
+endmodule
+"""
+
+
+def test_parse_gate_level_verilog_concatenation_assign_expanded_per_bit():
+    """Issue #2372: a concatenation right-hand side expands MSB-first into
+    one per-bit alias, using the module's own declared widths."""
+    module = parse_gate_level_verilog(_CONCAT_ASSIGN_VERILOG)[0]
+    assert module["port_aliases"] == {"b[2]": "a[1]", "b[1]": "a[0]", "b[0]": "zero"}
+    # Instance connections through the expanded aliases resolve too.
+    assert module["instances"][1]["connections"] == {"A": "a[1]", "Y": "zero"}
+
+
+def test_parse_gate_level_verilog_concatenation_assign_issue_repro_internal_wires():
+    """Issue #2372's exact repro: every operand is an internal (non-port)
+    `wire`, so the widths come from the new wire-declaration tracking."""
+    text = (
+        "module m(y0, y16);\n  output y0;\n  output y16;\n"
+        "  wire [15:0] a;\n  wire [16:0] b;\n  wire        zero;\n"
+        "  assign b = { a, zero };\n"
+        "  cellx u0 (.A(b[16]), .Y(y16));\n"
+        "  cellx u1 (.A(b[0]), .Y(y0));\n"
+        "  cellx u2 (.A(b[1]), .Y(zero));\n"
+        "endmodule\n"
+    )
+    instances = parse_gate_level_verilog(text)[0]["instances"]
+    assert instances[0]["connections"] == {"A": "a[15]", "Y": "y16"}
+    assert instances[1]["connections"] == {"A": "zero", "Y": "y0"}
+    assert instances[2]["connections"] == {"A": "a[0]", "Y": "zero"}
+
+
+def test_parse_gate_level_verilog_concatenation_assign_whitespace_and_bitselects():
+    """No-whitespace braces, escaped names, and single-index bit-selects are
+    all plain concatenation operands; declarations may follow the assign."""
+    text = "\n".join(
+        [
+            r"module m(y);",
+            r"  output y;",
+            r"  assign w = {v[3],\esc ,s};",
+            r"  wire [2:0] w;",
+            r"  wire [3:0] v;",
+            r"  wire \esc ;",
+            r"  wire s;",
+            r"  cellx u0 (.A(w[1]), .B(w[0]), .C(w[2]), .Y(y));",
+            r"endmodule",
+        ]
+    )
+    connections = parse_gate_level_verilog(text)[0]["instances"][0]["connections"]
+    assert connections == {"A": "esc", "B": "s", "C": "v[3]", "Y": "y"}
+
+
+def test_convert_gate_level_verilog_concatenation_assign_end_to_end():
+    """Issue #2372's reproduction no longer aborts the conversion."""
+    orders = {"cellx": ["A", "Y"]}
+    out = convert_gate_level_verilog(
+        _CONCAT_ASSIGN_VERILOG, pin_order_lookup=orders.get
+    )
+    assert "Xu1 a[1] zero cellx" in out
+
+
+@pytest.mark.parametrize(
+    ("assign", "reason"),
+    [
+        ("assign b = {2{a}};", "replication"),
+        ("assign b = { a, 1'b0 };", "literal"),
+        ("assign b = { a[1:0], c };", "part-select"),
+        ("assign b = { a, undeclared };", "no 'wire'"),
+        ("assign b = { a, c, c };", "bit\\(s\\) wide"),
+        ("assign {b, c} = { a, c };", "left-hand side"),
+        ("assign b = {};", "empty"),
+        ("assign b = a & c;", "found"),
+    ],
+)
+def test_parse_gate_level_verilog_unsupported_assign_still_rejected(assign, reason):
+    """Issue #2372 handles only the plain concatenation case; replication,
+    literals, part-selects, width mismatches and general expressions keep
+    failing loudly with the "only a plain ... is supported" error."""
+    text = (
+        "module m(a, b);\n  input [1:0] a;\n  output [2:0] b;\n  wire c;\n"
+        f"  {assign}\n  cellx u0 (.A(c), .Y(b[0]));\nendmodule\n"
+    )
+    with pytest.raises(VerilogNetlistError, match="only a plain 'assign") as exc:
+        parse_gate_level_verilog(text)
+    assert re.search(reason, str(exc.value))
+
+
 def test_parse_gate_level_verilog_unconnected_pin_is_dropped():
     text = (
         "module m(a, y);\n  input a;\n  output y;\n"

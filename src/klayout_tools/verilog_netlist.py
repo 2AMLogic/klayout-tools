@@ -92,14 +92,22 @@ gate-level, already-flattened netlist actually needs are supported --
 `module`/`endmodule`, `input`/`output`/`inout` port declarations (with an
 optional `[msb:lsb]` bus range), plain instance calls with **named**
 (`.PORT(NET)`) connections, a bare identifier or single-index bit-select
-(`net`/`bus[3]`) or `1'b0`/`1'b1` constant as a connection expression, and a
-simple `assign <net> = <net>;` alias. A Verilog escaped identifier
+(`net`/`bus[3]`) or `1'b0`/`1'b1` constant as a connection expression, a
+simple `assign <net> = <net>;` alias, and a plain concatenation `assign
+<net> = { <net>, <net>, ... };` (issue #2372 -- Yosys's routine rendering of
+a vector alias or tie-off padding), expanded MSB-first into one per-bit
+alias using the module's own `wire`/`input`/`output`/`inout` declared
+widths; the two sides' total widths must agree exactly. A concatenation
+operand must be a plain net or single-index bit-select -- replication
+(`{N{x}}`), literals (`1'b0`) and part-selects (`a[7:4]`) inside a
+concatenation stay rejected. A Verilog escaped identifier
 (`\\name`) is accepted wherever a name is, as the single atomic token
 Verilog's own whitespace-terminated escape rule defines -- so a
 place-and-route-flattened hierarchy path like `\\my_array[0].u_inst/_01_` is
 the literal net name `my_array[0].u_inst/_01_`, never re-read as a
 bit-select of a bus `my_array` (issue #1371). Anything else -- positional
-instance connections, concatenation, a multi-bit range slice, a non-constant
+instance connections, a concatenation anywhere but an `assign` right-hand
+side, a multi-bit range slice, a non-constant
 expression, `always`/`case`/other behavioral statements -- raises
 :class:`VerilogNetlistError` naming the offending construct, never a silent
 best-effort guess (the same "a wrong conversion in a sign-off tool must
@@ -516,8 +524,10 @@ def _parse_module_chunk(chunk: str) -> _Module:
     name, header_ports = _parse_header(statements[0])
 
     port_widths: dict[str, list[str]] = {}
+    wire_widths: dict[str, list[str]] = {}
     instances: list[_Instance] = []
     aliases: dict[str, str] = {}
+    assign_statements: list[str] = []
 
     for statement in statements[1:]:
         stripped = statement.strip()
@@ -528,11 +538,19 @@ def _parse_module_chunk(chunk: str) -> _Module:
         if keyword in _DIRECTION_KEYWORDS:
             _parse_direction_statement(stripped, port_widths)
         elif keyword in _IGNORED_DECL_KEYWORDS:
-            continue
+            _record_net_declaration_widths(stripped, wire_widths)
         elif keyword == "assign":
-            _parse_assign_statement(stripped, aliases)
+            # Deferred until every declaration in the module is seen, so a
+            # concatenation right-hand side (issue #2372) can be expanded
+            # bit-by-bit against the operands' declared widths regardless
+            # of statement order.
+            assign_statements.append(stripped)
         else:
             instances.append(_parse_instance_statement(stripped))
+
+    net_widths = {**wire_widths, **port_widths}
+    for stripped in assign_statements:
+        _parse_assign_statement(stripped, aliases, net_widths)
 
     ports: list[str] = []
     for port in header_ports:
@@ -543,14 +561,162 @@ def _parse_module_chunk(chunk: str) -> _Module:
 
 _ASSIGN_RE = re.compile(r"^assign\s+(?P<lhs>\S+)\s*=\s*(?P<rhs>\S+)$")
 
+#: An ``assign`` whose right-hand side is a brace-delimited expression --
+#: routed to :func:`_expand_concat_assign` (issue #2372) instead of the
+#: plain-alias path. The left-hand side is re-validated there.
+_CONCAT_ASSIGN_RE = re.compile(
+    r"^assign\s+(?P<lhs>[^=]+?)\s*=\s*(?P<rhs>\{.*\})$", re.S
+)
 
-def _parse_assign_statement(statement: str, aliases: dict[str, str]) -> None:
+#: A Verilog declaration of internal nets (``wire``/``reg``/...), with an
+#: optional ``signed`` qualifier and ``[msb:lsb]`` range -- read only to
+#: learn each net's bit list for concatenation expansion (issue #2372).
+_NET_DECL_RE = re.compile(
+    r"^(?:" + "|".join(_IGNORED_DECL_KEYWORDS) + r")\b\s*"
+    r"(?:signed\b\s*)?"
+    r"(?:\[\s*(?P<msb>-?\d+)\s*:\s*(?P<lsb>-?\d+)\s*\]\s*)?"
+    r"(?P<names>.*)$",
+    re.S,
+)
+
+
+def _record_net_declaration_widths(
+    statement: str, net_widths: dict[str, list[str]]
+) -> None:
+    """Record the bit list of every net a ``wire``/``reg``/... declaration
+    names (issue #2372). Deliberately permissive -- these declarations were
+    ignored outright before, and still carry no SPICE-level meaning -- so an
+    entry this does not understand is simply skipped rather than raised on;
+    a concatenation that later needs an unrecorded net's width fails loudly
+    in :func:`_expand_concat_assign` instead."""
+    match = _NET_DECL_RE.match(statement.strip())
+    if match is None:
+        return
+    for raw in _split_top_level(match.group("names")):
+        if not _IDENT_RE.fullmatch(raw) and not _ESCAPED_IDENT_RE.fullmatch(raw):
+            continue
+        name = _unescape(raw)
+        if match.group("msb") is not None:
+            net_widths[name] = _expand_range(
+                name, int(match.group("msb")), int(match.group("lsb"))
+            )
+        else:
+            net_widths.setdefault(name, [name])
+
+
+def _unsupported_assign(statement: str, reason: str = "") -> VerilogNetlistError:
+    message = (
+        "only a plain 'assign <net> = <net>;' alias or a plain concatenation "
+        "'assign <net> = { <net>, ... };' is supported, found: "
+        f"{statement.strip()[:80]!r}"
+    )
+    if reason:
+        message += f" -- {reason}"
+    return VerilogNetlistError(message)
+
+
+def _concat_operand_bits(
+    statement: str, operand: str, net_widths: dict[str, list[str]]
+) -> list[str]:
+    """Resolve one side of a concatenation assign (the LHS, or one RHS
+    operand) to its MSB-first list of single-bit net names."""
+    operand = operand.strip()
+    if "{" in operand or "}" in operand:
+        raise _unsupported_assign(
+            statement,
+            f"operand {operand!r} is a replication or nested concatenation, "
+            "which is not supported",
+        )
+    if "'" in operand or re.fullmatch(r"\d+", operand):
+        raise _unsupported_assign(
+            statement,
+            f"operand {operand!r} is a literal constant, which is not "
+            "supported inside a concatenation",
+        )
+    if _RANGE_SELECT_RE.match(operand):
+        raise _unsupported_assign(
+            statement,
+            f"operand {operand!r} is a multi-bit part-select, which is not "
+            "supported inside a concatenation",
+        )
+    try:
+        net = _parse_connection_expr(operand)
+    except VerilogNetlistError as exc:
+        raise _unsupported_assign(statement, str(exc)) from exc
+    if net in net_widths:
+        return list(net_widths[net])
+    if net.endswith("]"):
+        # A single-index bit-select (`bus[3]`, `\bus [3]`): one bit by
+        # construction, whatever the base's declared width.
+        return [net]
+    raise _unsupported_assign(
+        statement,
+        f"operand {operand!r} has no 'wire'/'input'/'output'/'inout' "
+        "declaration in this module, so its bit width is unknown",
+    )
+
+
+def _expand_concat_assign(
+    statement: str,
+    lhs: str,
+    rhs: str,
+    aliases: dict[str, str],
+    net_widths: dict[str, list[str]],
+) -> None:
+    """Expand ``assign <lhs> = { <op>, <op>, ... };`` into one per-bit
+    alias ``<lhs bit> -> <operand bit>`` (issue #2372) -- Yosys's routine
+    rendering of a bit-for-bit vector alias or tie-off padding.
+
+    Verilog concatenation is MSB-first: the first operand supplies the
+    most-significant bits. Both sides are expanded to MSB-first bit lists
+    from the module's own declarations and zipped. Operands are restricted
+    to plain nets and single-index bit-selects; replication (``{N{x}}``),
+    literals (``1'b0``) and part-selects (``a[7:4]``) are rejected with the
+    same "only a plain ... is supported" error as any other unsupported
+    ``assign``, as is a width mismatch between the two sides (Verilog would
+    silently zero-extend or truncate; a sign-off converter must not).
+    """
+    if "{" in lhs or "}" in lhs:
+        raise _unsupported_assign(
+            statement,
+            "a concatenation on the left-hand side is not supported",
+        )
+    inner = rhs.strip()[1:-1]
+    operands = _split_top_level(inner)
+    if not operands:
+        raise _unsupported_assign(statement, "the concatenation is empty")
+    lhs_bits = _concat_operand_bits(statement, lhs, net_widths)
+    rhs_bits: list[str] = []
+    for operand in operands:
+        rhs_bits.extend(_concat_operand_bits(statement, operand, net_widths))
+    if len(lhs_bits) != len(rhs_bits):
+        raise _unsupported_assign(
+            statement,
+            f"left-hand side is {len(lhs_bits)} bit(s) wide but the "
+            f"concatenation is {len(rhs_bits)} bit(s) wide",
+        )
+    for lhs_bit, rhs_bit in zip(lhs_bits, rhs_bits, strict=True):
+        aliases[lhs_bit] = rhs_bit
+
+
+def _parse_assign_statement(
+    statement: str,
+    aliases: dict[str, str],
+    net_widths: dict[str, list[str]] | None = None,
+) -> None:
+    concat = _CONCAT_ASSIGN_RE.match(statement.strip())
+    if concat is not None:
+        _expand_concat_assign(
+            statement,
+            concat.group("lhs"),
+            concat.group("rhs"),
+            aliases,
+            net_widths or {},
+        )
+        return
     match = _ASSIGN_RE.match(statement.strip())
     if match is None:
-        raise VerilogNetlistError(
-            f"only a plain 'assign <net> = <net>;' alias is supported, found: "
-            f"{statement.strip()[:80]!r}"
-        )
+        raise _unsupported_assign(statement)
     lhs = _parse_connection_expr(match.group("lhs"))
     rhs = _parse_connection_expr(match.group("rhs"))
     aliases[lhs] = rhs
