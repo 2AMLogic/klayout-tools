@@ -39,6 +39,7 @@ from klayout_tools.gen_compose import (
     compute_row_offsets,
     load_generator_report_arg,
     manhattan_backbone,
+    resolve_bbox_target_offsets,
     resolve_explicit_offsets,
 )
 
@@ -208,6 +209,55 @@ def test_resolve_explicit_offsets_reorders_by_order_not_dict_iteration():
     offsets_ba = resolve_explicit_offsets(["b", "a"], origins)
     assert offsets_ba["b"] == {"x": 3.0, "y": 4.0}
     assert offsets_ba["a"] == {"x": 1.0, "y": 2.0}
+
+
+# --------------------------------------------------------------------------- #
+# resolve_bbox_target_offsets() -- pure placement math, no PDK/pya involvement
+# (#2410, mirrors the resolve_explicit_offsets() suite above)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_bbox_target_offsets_anchors_on_block_bbox_corner():
+    # Unlike resolve_explicit_offsets, a block's own bbox_um is the whole
+    # point here -- the target names where the (oriented) bbox's (x0, y0)
+    # corner should land, so the offset is target - bbox.(x0, y0), exactly
+    # the anchoring compute_row_offsets applies between row neighbours.
+    bboxes = {
+        "io": {"x0": -0.16, "y0": 0.5, "x1": 1.84, "y1": 1.7},
+        "core": {"x0": 0.0, "y0": 0.0, "x1": 10.0, "y1": 4.0},
+    }
+    targets = {
+        "io": {"x": 5.0, "y": 2.0},
+        "core": {"x": -3.5, "y": 10.0},
+    }
+    offsets = resolve_bbox_target_offsets(["io", "core"], bboxes, targets)
+    assert offsets["io"] == {"x": 5.16, "y": 1.5}
+    assert offsets["core"] == {"x": -3.5, "y": 10.0}
+
+
+def test_resolve_bbox_target_offsets_zero_origin_block_matches_explicit():
+    # For a block whose own bbox_um.x0/y0 are both 0, the bbox-anchored
+    # offset degenerates to the target itself -- identical to what
+    # resolve_explicit_offsets would apply for the same {x, y} value.
+    bboxes = {"a": {"x0": 0.0, "y0": 0.0, "x1": 2.0, "y1": 1.0}}
+    targets = {"a": {"x": 3.5, "y": -2.0}}
+    assert resolve_bbox_target_offsets(["a"], bboxes, targets) == (
+        resolve_explicit_offsets(["a"], targets)
+    )
+
+
+def test_resolve_bbox_target_offsets_reorders_by_order_not_dict_iteration():
+    bboxes = {
+        "a": {"x0": 1.0, "y0": 0.0, "x1": 2.0, "y1": 1.0},
+        "b": {"x0": -1.0, "y0": 0.0, "x1": 3.0, "y1": 1.0},
+    }
+    targets = {
+        "a": {"x": 10.0, "y": 0.0},
+        "b": {"x": 20.0, "y": 0.0},
+    }
+    offsets_ba = resolve_bbox_target_offsets(["b", "a"], bboxes, targets)
+    assert offsets_ba["b"] == {"x": 21.0, "y": 0.0}
+    assert offsets_ba["a"] == {"x": 9.0, "y": 0.0}
 
 
 # --------------------------------------------------------------------------- #
@@ -1056,6 +1106,89 @@ def test_compose_explicit_rejects_missing_origins_um_entirely(tmp_path, pdk_root
                 "options": {"output": str(tmp_path / "out.gds")},
             }
         )
+
+
+def test_compose_explicit_rejects_origins_um_and_target_bbox_um_together(
+    tmp_path,
+    pdk_root,
+):
+    # The bbox-target form is an alternative to origins_um, not an addition --
+    # declaring both is an application error, mirroring the exactly-one-source
+    # rule blocks[].generator_report/cell already apply (#2410).
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="exactly one"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1"],
+                    "origins_um": {"b1": {"x": 0.0, "y": 0.0}},
+                    "target_bbox_um": {"b1": {"x": 0.0, "y": 0.0}},
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_explicit_rejects_missing_target_for_order_id(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="target_bbox_um"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1"],
+                    "target_bbox_um": {},
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_explicit_rejects_non_numeric_target_fields(tmp_path, pdk_root):
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    with pytest.raises(GenComposeError, match="target_bbox_um"):
+        compose(
+            {
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "blocks": [{"id": "b1", "generator_report": r1}],
+                "placement": {
+                    "strategy": "explicit",
+                    "order": ["b1"],
+                    "target_bbox_um": {"b1": {"x": 1.0, "y": None}},
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_compose_explicit_target_bbox_um_places_reported_bbox_corner(
+    tmp_path, pdk_root
+):
+    # A generator_report block whose bbox_um.x0/y0 are 0: the bbox target
+    # degenerates to the same offset an identical origins_um entry would
+    # apply, and the response's offset_um/bbox_um reflect it.
+    r1 = _gen_block(tmp_path, pdk_root, "resistor_strip", "r1")
+    output = tmp_path / "target_bbox.gds"
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "b1", "generator_report": r1}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["b1"],
+                "target_bbox_um": {"b1": {"x": 5.0, "y": -3.0}},
+            },
+            "options": {"cell_name": "target_bbox_0", "output": str(output)},
+        }
+    )
+    assert report["blocks"][0]["offset_um"] == {"x": 5.0, "y": -3.0}
+    assert report["blocks"][0]["bbox_um"]["x0"] == pytest.approx(5.0)
+    assert report["blocks"][0]["bbox_um"]["y0"] == pytest.approx(-3.0)
 
 
 def test_compose_explicit_ignores_spacing_um_when_present(tmp_path, pdk_root):
@@ -11964,6 +12097,97 @@ def test_compose_cell_block_non_zero_origin_explicit_origin_translates_verbatim(
     )
     assert _composed_li1_boxes_um(output, "offset_origin_explicit_0") == pytest.approx(
         [(4.84, 2.0, 6.84, 3.2)]
+    )
+
+
+def test_compose_cell_block_non_zero_origin_explicit_bbox_target_lands_geometry_at_target(  # noqa: E501
+    tmp_path, pdk_root
+):
+    # #2410: the same non-zero-origin library cell as the verbatim-translation
+    # test above, placed via the bbox-target alternative instead. The caller
+    # names where the block's *footprint* should land, so the drawn geometry
+    # (not merely the reported bbox_um) must sit exactly at the requested
+    # corner -- the ergonomic the translation-only origins_um form makes the
+    # caller compute by hand.
+    gds = _write_offset_origin_library_gds(
+        tmp_path / "lib.gds", {"pdk_io": (-0.16, 0.0, 2.0, 1.2)}
+    )
+    output = tmp_path / "offset_origin_target_bbox.gds"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [{"id": "io", "cell": {"gds_path": gds, "cell_name": "pdk_io"}}],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["io"],
+                "target_bbox_um": {"io": {"x": 5.0, "y": 2.0}},
+            },
+            "options": {
+                "cell_name": "offset_origin_target_bbox_0",
+                "output": str(output),
+            },
+        }
+    )
+
+    # The raw instance translation is the bbox-anchored 5.16um (= 5.0 target
+    # minus the cell's own -0.16 x0) -- the value a "row" placement computes
+    # between neighbours, applied here against the caller's declared corner.
+    assert report["blocks"][0]["offset_um"] == pytest.approx({"x": 5.16, "y": 2.0})
+    assert report["blocks"][0]["bbox_um"] == pytest.approx(
+        {"x0": 5.0, "y0": 2.0, "x1": 7.0, "y1": 3.2}
+    )
+    # The load-bearing assertion (AC2): the *drawn* geometry lands with its
+    # bbox corner exactly at the requested target, unrotated.
+    assert _composed_li1_boxes_um(
+        output, "offset_origin_target_bbox_0"
+    ) == pytest.approx([(5.0, 2.0, 7.0, 3.2)])
+
+
+@pytest.mark.parametrize(
+    "orientation",
+    ["mirror_x", "mirror_y", "rotate_180"],
+)
+def test_compose_cell_block_non_zero_origin_explicit_bbox_target_oriented_geometry_lands_at_target(  # noqa: E501
+    tmp_path, pdk_root, orientation
+):
+    # #2410, the orientation half (AC2): the same cell under each non-default
+    # blocks[].orientation. Anchoring on the *oriented* bbox (what _parse_blocks
+    # reports as bbox_um after _orient_bbox_um) makes the drawn footprint land
+    # on the identical target rectangle for every orientation -- only the raw
+    # instance translation differs, and it differs by exactly the
+    # orientation-dependent anchoring correction (the same sign flip the row
+    # strategy's own oriented test above exercises).
+    gds = _write_offset_origin_library_gds(
+        tmp_path / "lib.gds", {"pdk_io": (-0.16, 0.0, 2.0, 1.2)}
+    )
+    output = tmp_path / f"target_bbox_{orientation}.gds"
+    cell_name = f"target_bbox_{orientation}_0"
+
+    report = compose(
+        {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {
+                    "id": "io",
+                    "cell": {"gds_path": gds, "cell_name": "pdk_io"},
+                    "orientation": orientation,
+                }
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["io"],
+                "target_bbox_um": {"io": {"x": 5.0, "y": 2.0}},
+            },
+            "options": {"cell_name": cell_name, "output": str(output)},
+        }
+    )
+
+    io = next(block for block in report["blocks"] if block["id"] == "io")
+    assert io["orientation"] == orientation
+    assert io["bbox_um"] == pytest.approx({"x0": 5.0, "y0": 2.0, "x1": 7.0, "y1": 3.2})
+    assert _composed_li1_boxes_um(output, cell_name) == pytest.approx(
+        [(5.0, 2.0, 7.0, 3.2)]
     )
 
 

@@ -23,7 +23,10 @@ Scope (phase 2, this module's current state):
   each block's own reported ``bbox_um`` plus ``placement.spacing_um``
   (``"row"``, see :func:`compute_row_offsets`), a caller-declared
   ``placement.origins_um`` per block id (``"explicit"``, see
-  :func:`resolve_explicit_offsets`, #321), or a repeated single-block R rows x
+  :func:`resolve_explicit_offsets`, #321) or its bbox-target alternative
+  ``placement.target_bbox_um`` (``"explicit"``, see
+  :func:`resolve_bbox_target_offsets`, #2410 -- exactly one of the two per
+  request), or a repeated single-block R rows x
   C cols regular tiling (``"array"``, see :func:`_parse_array_placement`,
   #1053) -- and write a composed GDS with each block's own top cell
   instantiated as a translated sub-cell instance under one new top cell (an
@@ -478,6 +481,49 @@ def resolve_explicit_offsets(
     rule-compliance authority on the composed output.
     """
     return {block_id: dict(origins_um[block_id]) for block_id in order}
+
+
+def resolve_bbox_target_offsets(
+    order: list[str],
+    bboxes_um: dict[str, dict[str, float]],
+    target_bbox_um: dict[str, dict[str, float]],
+) -> dict[str, dict[str, float]]:
+    """Compute each block's ``offset_um`` for ``strategy: "explicit"`` with the
+    bbox-target form of the request (#2410) -- the alternative to
+    ``origins_um`` (:func:`resolve_explicit_offsets`).
+
+    ``target_bbox_um[block_id]`` names the position the block's own
+    **bounding box** ``(x0, y0)`` corner should land at, and the verb computes
+    the translation (``offset = target - bbox.(x0, y0)``) -- exactly the
+    anchoring :func:`compute_row_offsets` already applies between row
+    neighbours. For a block whose ``bbox_um.x0``/``y0`` are both ``0`` the
+    two forms are indistinguishable; for a library cell whose local
+    ``(0, 0)`` is *not* its bbox's lower-left corner (e.g. a PDK IO cell
+    measured ``bbox().left = -0.16 um``), this is the difference between
+    naming where the *footprint* lands and naming a raw translation the
+    caller must pre-correct by hand.
+
+    ``bboxes_um`` maps every block ``id`` in ``order`` to its own
+    (pre-translation) ``bbox_um`` dict -- the same oriented bbox
+    :func:`_parse_blocks` reports (orientation is applied *before* this
+    anchor, so the drawn geometry lands on the target under every
+    ``blocks[].orientation``). ``target_bbox_um`` maps every ``id`` in
+    ``order`` to its own ``{"x": float, "y": float}`` target (already
+    validated by :func:`_parse_explicit_targets`). Returns a dict mapping
+    each ``id`` in ``order`` to its ``offset_um``.
+
+    Like :func:`resolve_explicit_offsets`, overlapping or abutting targets
+    are not validated here -- a caller-declared overlap is legal input, and
+    ``klt drc`` remains the rule-compliance authority on the composed output
+    (the module docstring's "geometry is advisory" philosophy).
+    """
+    return {
+        block_id: {
+            "x": target_bbox_um[block_id]["x"] - bboxes_um[block_id]["x0"],
+            "y": target_bbox_um[block_id]["y"] - bboxes_um[block_id]["y0"],
+        }
+        for block_id in order
+    }
 
 
 def array_placement_bbox_um(
@@ -1316,30 +1362,62 @@ def _parse_explicit_origins(
     Returns a dict mapping each ``id`` in ``order`` to its parsed
     ``{"x": float, "y": float}`` origin.
     """
-    if not isinstance(raw_origins, dict):
+    return _parse_explicit_xy_map(raw_origins, order, "origins_um")
+
+
+def _parse_explicit_targets(
+    raw_targets: Any, order: list[str]
+) -> dict[str, dict[str, float]]:
+    """Parse and validate ``placement.target_bbox_um`` for ``strategy:
+    "explicit"`` (#2410) -- the bbox-target alternative to ``origins_um``.
+
+    Identical shape to :func:`_parse_explicit_origins` (a JSON object whose
+    key set equals ``order`` exactly, each value a ``{"x": number,
+    "y": number}`` pair naming where that block's own reported ``bbox_um``
+    ``(x0, y0)`` corner should land); only the field name in the error
+    messages differs.
+    """
+    return _parse_explicit_xy_map(raw_targets, order, "target_bbox_um")
+
+
+def _parse_explicit_xy_map(
+    raw_map: Any, order: list[str], field: str
+) -> dict[str, dict[str, float]]:
+    """Shared per-block ``{"x": number, "y": number}`` map validation for
+    ``strategy: "explicit"`` -- the common shape of ``origins_um`` (#321)
+    and ``target_bbox_um`` (#2410).
+
+    ``raw_map`` must be a JSON object whose key set equals ``order`` exactly
+    (same shape of check :func:`_parse_placement` already applies to
+    ``order`` vs. ``blocks[].id`` -- a missing, extra, or unknown id is an
+    application error), each value a ``{"x": number, "y": number}`` pair.
+    Returns a dict mapping each ``id`` in ``order`` to its parsed
+    ``{"x": float, "y": float}`` entry.
+    """
+    if not isinstance(raw_map, dict):
         raise GenComposeError(
-            "request.placement.origins_um must be a JSON object mapping "
-            "every placement.order id to a {x, y} origin when strategy is "
+            f"request.placement.{field} must be a JSON object mapping "
+            "every placement.order id to a {x, y} pair when strategy is "
             "'explicit'"
         )
 
     order_ids = set(order)
-    if set(raw_origins) != order_ids or len(raw_origins) != len(order_ids):
+    if set(raw_map) != order_ids or len(raw_map) != len(order_ids):
         raise GenComposeError(
-            "request.placement.origins_um must have exactly one entry for "
+            f"request.placement.{field} must have exactly one entry for "
             "every placement.order id (no missing or extra/unknown ids)"
         )
 
-    origins: dict[str, dict[str, float]] = {}
+    parsed: dict[str, dict[str, float]] = {}
     for block_id in order:
-        raw_origin = raw_origins[block_id]
-        if not isinstance(raw_origin, dict):
+        raw_pair = raw_map[block_id]
+        if not isinstance(raw_pair, dict):
             raise GenComposeError(
-                f"request.placement.origins_um['{block_id}'] must be a JSON "
+                f"request.placement.{field}['{block_id}'] must be a JSON "
                 "object with numeric x/y fields"
             )
-        x = raw_origin.get("x")
-        y = raw_origin.get("y")
+        x = raw_pair.get("x")
+        y = raw_pair.get("y")
         if (
             isinstance(x, bool)
             or isinstance(y, bool)
@@ -1347,12 +1425,11 @@ def _parse_explicit_origins(
             or not isinstance(y, (int, float))
         ):
             raise GenComposeError(
-                f"request.placement.origins_um['{block_id}'] must have "
-                "numeric x/y fields"
+                f"request.placement.{field}['{block_id}'] must have numeric x/y fields"
             )
-        origins[block_id] = {"x": float(x), "y": float(y)}
+        parsed[block_id] = {"x": float(x), "y": float(y)}
 
-    return origins
+    return parsed
 
 
 def _parse_array_placement(raw_placement: dict[str, Any]) -> dict[str, Any]:
@@ -1434,18 +1511,24 @@ def _parse_placement(
     list[str],
     float,
     dict[str, dict[str, float]] | None,
+    dict[str, dict[str, float]] | None,
     dict[str, Any] | None,
 ]:
     """Parse and validate ``request.placement``.
 
-    Returns ``(strategy, order, spacing_um, origins_um, array_params)``.
-    ``spacing_um`` is ``0.0`` (unused) and ``origins_um``/``array_params`` are
-    ``None`` for ``strategy: "row"``; ``origins_um`` is a parsed dict (and
-    ``spacing_um``/``array_params`` unused) for ``strategy: "explicit"``
-    (#321) -- ``placement.spacing_um`` alongside an ``"explicit"`` strategy is
-    simply ignored, not rejected; ``array_params`` is a parsed dict (and
-    ``spacing_um``/``origins_um`` unused) for ``strategy: "array"`` (#1053,
-    see :func:`_parse_array_placement`).
+    Returns ``(strategy, order, spacing_um, origins_um, target_bbox_um,
+    array_params)``. ``spacing_um`` is ``0.0`` (unused) and
+    ``origins_um``/``target_bbox_um``/``array_params`` are ``None`` for
+    ``strategy: "row"``; for ``strategy: "explicit"`` exactly one of
+    ``origins_um`` (a parsed dict, #321) or ``target_bbox_um`` (a parsed
+    dict, #2410) is set -- declaring both, or neither, is an application
+    error, mirroring the exactly-one-source rule ``blocks[]`` already
+    applies to ``generator_report``/``cell`` (the other is ``None``;
+    ``spacing_um``/``array_params`` unused, and ``placement.spacing_um``
+    alongside an ``"explicit"`` strategy is simply ignored, not rejected);
+    ``array_params`` is a parsed dict (and ``spacing_um``/``origins_um``/
+    ``target_bbox_um`` unused) for ``strategy: "array"`` (#1053, see
+    :func:`_parse_array_placement`).
     """
     if not isinstance(raw_placement, dict):
         raise GenComposeError("request.placement must be a JSON object")
@@ -1481,12 +1564,27 @@ def _parse_placement(
         )
 
     if strategy == "explicit":
+        has_origins = "origins_um" in raw_placement
+        has_targets = "target_bbox_um" in raw_placement
+        if has_origins and has_targets:
+            raise GenComposeError(
+                "request.placement.origins_um and "
+                "request.placement.target_bbox_um are mutually exclusive "
+                "under strategy 'explicit' -- declare exactly one (a raw "
+                "{x, y} translation per block, or a {x, y} bbox-corner "
+                "target per block, #2410)"
+            )
+        if has_targets:
+            target_bbox_um = _parse_explicit_targets(
+                raw_placement.get("target_bbox_um"), order
+            )
+            return strategy, order, 0.0, None, target_bbox_um, None
         origins_um = _parse_explicit_origins(raw_placement.get("origins_um"), order)
-        return strategy, order, 0.0, origins_um, None
+        return strategy, order, 0.0, origins_um, None, None
 
     if strategy == "array":
         array_params = _parse_array_placement(raw_placement)
-        return strategy, order, 0.0, None, array_params
+        return strategy, order, 0.0, None, None, array_params
 
     spacing_um = raw_placement.get("spacing_um", 0.0)
     if isinstance(spacing_um, bool) or not isinstance(spacing_um, (int, float)):
@@ -1495,7 +1593,7 @@ def _parse_placement(
     if spacing_um < 0:
         raise GenComposeError("request.placement.spacing_um must be >= 0")
 
-    return strategy, order, spacing_um, None, None
+    return strategy, order, spacing_um, None, None, None
 
 
 def _validate_block_port(
@@ -2297,8 +2395,8 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         raise GenComposeError(str(exc)) from exc
 
     blocks = _parse_blocks(request.get("blocks"), request_dir or os.getcwd())
-    strategy, order, spacing_um, origins_um, array_params = _parse_placement(
-        request.get("placement"), set(blocks)
+    strategy, order, spacing_um, origins_um, target_bbox_um, array_params = (
+        _parse_placement(request.get("placement"), set(blocks))
     )
     connectivity = _parse_connectivity(request.get("connectivity"), blocks)
     promoted_pins = _parse_pins(request.get("pins"), blocks, connectivity)
@@ -2328,8 +2426,13 @@ def compose(request: dict[str, Any], request_dir: str | None = None) -> dict[str
         # as a separate offsets_um entry (#1053; see the module docstring).
         offsets_um = {order[0]: dict(array_params["origin_um"])}
     else:
-        assert origins_um is not None  # guaranteed by _parse_placement for "explicit"
-        offsets_um = resolve_explicit_offsets(order, origins_um)
+        # Exactly one of origins_um / target_bbox_um is non-None here --
+        # _parse_placement's exactly-one-of check guarantees it (#2410).
+        if origins_um is not None:
+            offsets_um = resolve_explicit_offsets(order, origins_um)
+        else:
+            assert target_bbox_um is not None
+            offsets_um = resolve_bbox_target_offsets(order, bboxes_um, target_bbox_um)
 
     if strategy == "array":
         assert array_params is not None
