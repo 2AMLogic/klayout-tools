@@ -3958,7 +3958,11 @@ def _add_stats_parser(subparsers: argparse._SubParsersAction) -> None:
         description=(
             "Report bounding box, drawn area, density, and polygon/vertex "
             "counts of a GDSII or OASIS layout file, in total and optionally "
-            "per layer."
+            "per layer. polygon_count/vertex_count are per cell definition "
+            "(not instance-resolved); flattened_polygon_count/"
+            "flattened_vertex_count are the instance-resolved counterparts, "
+            "weighted by CellInstArray multiplicity like area_um2, matching "
+            "'klt layers --flattened'."
         ),
     )
     stats_parser.add_argument("file", help="path to a GDSII or OASIS layout file")

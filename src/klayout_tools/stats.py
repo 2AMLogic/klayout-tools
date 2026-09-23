@@ -132,8 +132,9 @@ def _instance_weights(cells: list[Any]) -> dict[int, int]:
 
 def _accumulate(
     cells: Any, layer_index: int, weights: dict[int, int]
-) -> tuple[int, int, int]:
-    """Sum (area_dbu2, polygon_count, vertex_count) for one layer.
+) -> tuple[int, int, int, int, int]:
+    """Sum (area_dbu2, polygon_count, vertex_count, flattened_polygon_count,
+    flattened_vertex_count) for one layer.
 
     ``cells`` is the set of cell *definitions* to sum over -- every cell in
     the stream by default, or (with ``--top`` given, issue #554) just the
@@ -144,7 +145,7 @@ def _accumulate(
 
     ``weights`` (issue #1105, see :func:`_instance_weights`) maps each
     cell's ``cell_index()`` to how many times it is instantiated within that
-    scope. Only ``area_dbu2`` is multiplied by it: the density denominator
+    scope. ``area_dbu2`` is multiplied by it: the density denominator
     (the scope's hierarchy-inclusive bounding box, see :func:`stats_report`)
     already spans every array position, so a leaf cell placed via an N-copy
     ``CellInstArray`` must contribute N times its own drawn area for
@@ -152,22 +153,41 @@ def _accumulate(
     per cell *definition* (each shape counted once where it is defined, not
     multiplied by instantiation) -- the shape-count convention ``klt
     layers`` also uses, deliberately left unchanged since #1105 is scoped to
-    the area/density numerator, not shape counts. Overlapping shapes are
-    **not** merged, so area may double-count overlapping geometry; this
-    keeps the computation cheap and exactly reproducible.
+    the area/density numerator, not shape counts.
+
+    ``flattened_polygon_count``/``flattened_vertex_count`` (issue #2366) are
+    the instance-resolved counterparts: the same per-shape polygon/vertex
+    counts as ``polygon_count``/``vertex_count``, but weighted by ``weights``
+    exactly like ``area_dbu2`` above, so a shape drawn once in a cell placed
+    N times via a ``CellInstArray`` contributes N to these totals -- matching
+    ``klt layers --flattened``'s ``flattened_shapes`` convention. Overlapping
+    shapes are **not** merged, so area and the flattened counts may
+    double-count overlapping geometry; this keeps the computation cheap and
+    exactly reproducible.
     """
     area_dbu2 = 0
     polygon_count = 0
     vertex_count = 0
+    flattened_polygon_count = 0
+    flattened_vertex_count = 0
     for cell in cells:
         weight = weights.get(cell.cell_index(), 0)
         for shape in cell.shapes(layer_index).each():
             if not _is_area_shape(shape):
                 continue
+            shape_vertex_count = _shape_vertex_count(shape)
             area_dbu2 += weight * shape.area()
             polygon_count += 1
-            vertex_count += _shape_vertex_count(shape)
-    return area_dbu2, polygon_count, vertex_count
+            vertex_count += shape_vertex_count
+            flattened_polygon_count += weight
+            flattened_vertex_count += weight * shape_vertex_count
+    return (
+        area_dbu2,
+        polygon_count,
+        vertex_count,
+        flattened_polygon_count,
+        flattened_vertex_count,
+    )
 
 
 def _density(area_dbu2: int, bbox_area_dbu2: int) -> float:
@@ -195,11 +215,14 @@ def stats_report(
             "bbox_um": {"left": .., "bottom": .., "right": .., "top": ..,
                         "width": .., "height": ..},
             "total": {"area_um2": .., "density": .., "polygon_count": ..,
-                       "vertex_count": ..},
+                       "vertex_count": .., "flattened_polygon_count": ..,
+                       "flattened_vertex_count": ..},
             "layers": None | [
                 {"layer": int, "datatype": int, "name": str | None,
                  "area_um2": float, "density": float,
                  "polygon_count": int, "vertex_count": int,
+                 "flattened_polygon_count": int,
+                 "flattened_vertex_count": int,
                  "annotation": bool},
                 ...
             ],
@@ -220,6 +243,16 @@ def stats_report(
     -- they stay per cell definition (each shape counted once where it is
     defined), matching ``klt layers``' shape-count convention. Overlapping
     shapes are not merged, so area may double-count overlapping geometry.
+
+    ``flattened_polygon_count``/``flattened_vertex_count`` (issue #2366) give
+    a consumer that same instance-resolved multiplicity for the polygon and
+    vertex counts, without having to flatten the layout itself: a shape
+    drawn once in a cell placed N times via a ``CellInstArray`` contributes
+    N to these totals, exactly like ``area_um2`` above. They are additive
+    fields alongside the existing per-cell-definition ``polygon_count``/
+    ``vertex_count`` (which are unchanged), and mirror ``klt layers
+    --flattened``'s ``flattened_shapes`` field/convention -- see
+    ``docs/cli/layers.md`` -- extended here to also cover vertex counts.
 
     ``layers`` is ``None`` unless ``per_layer=True``, in which case it is a
     list sorted by ``(layer, datatype)`` ascending for deterministic output.
@@ -280,15 +313,23 @@ def stats_report(
     total_area_dbu2 = 0
     total_polygon_count = 0
     total_vertex_count = 0
+    total_flattened_polygon_count = 0
+    total_flattened_vertex_count = 0
     per_layer_entries: list[dict[str, Any]] | None = [] if per_layer else None
 
     for layer_index in layout.layer_indexes():
-        area_dbu2, polygon_count, vertex_count = _accumulate(
-            scope_cells, layer_index, weights
-        )
+        (
+            area_dbu2,
+            polygon_count,
+            vertex_count,
+            flattened_polygon_count,
+            flattened_vertex_count,
+        ) = _accumulate(scope_cells, layer_index, weights)
         total_area_dbu2 += area_dbu2
         total_polygon_count += polygon_count
         total_vertex_count += vertex_count
+        total_flattened_polygon_count += flattened_polygon_count
+        total_flattened_vertex_count += flattened_vertex_count
 
         if per_layer_entries is not None:
             info = layout.get_info(layer_index)
@@ -301,6 +342,8 @@ def stats_report(
                     "density": _density(area_dbu2, bbox_area_dbu2),
                     "polygon_count": polygon_count,
                     "vertex_count": vertex_count,
+                    "flattened_polygon_count": flattened_polygon_count,
+                    "flattened_vertex_count": flattened_vertex_count,
                     "annotation": is_reserved_annotation_layer(
                         info.layer, info.datatype
                     ),
@@ -321,6 +364,8 @@ def stats_report(
             "density": _density(total_area_dbu2, bbox_area_dbu2),
             "polygon_count": total_polygon_count,
             "vertex_count": total_vertex_count,
+            "flattened_polygon_count": total_flattened_polygon_count,
+            "flattened_vertex_count": total_flattened_vertex_count,
         },
         "layers": per_layer_entries,
     }
