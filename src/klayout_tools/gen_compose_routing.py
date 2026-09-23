@@ -1204,7 +1204,7 @@ def _self_net_cross_layer_lane_waypoints_um(
 #: Port-name prefixes a ``klt gen`` generator uses for a guard/collector ring's
 #: own tap ports (``diff_pair``'s ``add_guard_ring``, ``bjt_array``'s
 #: ``add_collector_ring``, and the standalone ``guard_ring`` generator itself
-#: -- see ``gen.py``'s ``_diff_pair_describe``/``_bjt_array_describe``/
+#: -- see ``gen_describe.py``'s ``_diff_pair_describe``/``_bjt_array_describe``/
 #: ``_guard_ring_describe``). A block reporting any port with one of these
 #: prefixes has a ring drawn *around* its other ports -- any route touching a
 #: non-tap port on that block necessarily crosses the ring's own metal loop on
@@ -1214,7 +1214,7 @@ _RING_TAP_PORT_PREFIXES = ("TAP_", "COLL_")
 
 #: Port-name prefix a ``klt gen`` generator uses to report a *ring opening*
 #: -- the routing gap ``params.ring_gap_side`` cuts through one side of a
-#: guard/collector ring (#434, see ``gen.py``'s ``_ring_ports``). A
+#: guard/collector ring (#434, see ``gen_describe.py``'s ``_ring_ports``). A
 #: ``GAP_<side>`` entry is a marker, not a conductor: ``x_um``/``y_um`` is the
 #: opening's centre on the ring's own centre line, ``width_um`` is how long
 #: the opening is along that side, and ``direction_deg`` is the side's outward
@@ -1308,8 +1308,8 @@ def _ring_conductor_layers(
       ``bjt_array``'s ``COLL_*`` collector tap reports the ``"tap"`` role,
       which is what makes it a collector tie -- issue #2312; it reported the
       bare ``"active"`` role before), and a ``GAP_*`` opening marker
-      reports "the layer a route would cross the ring on" (see ``gen.py``'s
-      :func:`~klayout_tools.gen._ring_ports`).
+      reports "the layer a route would cross the ring on" (see
+      :func:`~klayout_tools.gen_describe._ring_ports`).
     * ``deck.metals[0]`` -- the local-interconnect level every ``klt gen``
       ring draws its *metal* loop on, whether or not a tap port happens to
       report it. ``bjt_array``'s collector ring is the case that matters:
