@@ -48,6 +48,26 @@ not `klt --version`, if you need to detect this kind of drift. See
   `.klt/functional-verification/klt_sdf_physical_only_dropped.sdf`;
   `environment.sdf.file` still reports the caller's own SDF path. See
   `docs/cli/functional-verification.md`'s "SDF back-annotation" section.
+- **Fixed** (#2362, `klt signoff --manifest` evidence keys — **no**
+  `schema_version` bump; purely additive, every manifest that graded before
+  grades identically): a partition-qualified evidence key
+  (`"7.digital"`) was silently ignored on a manifest whose `kind` is plainly
+  `"analog"` or `"digital"`. `docs/cli/signoff.md` documents
+  `"<item id>.<analog|digital>"` as *the* spelling for a per-kind T1 item
+  (1, 2, 5, 7, 11) without restricting it to mixed-signal blocks, but the
+  lookup was keyed off the report row's `partition` field — `None` outside a
+  mixed-signal manifest — so the qualified key was never consulted, the bare
+  `"<item id>"` key was missing, and the item rendered
+  `unmet`/`no_evidence` even though the author had cited exactly what the
+  docs asked for. Evidence lookup is now keyed off the partition **being
+  graded** (the block's own `kind` for a pure-kind manifest, each of
+  `analog`/`digital` in turn for a mixed-signal one), so both spellings
+  resolve everywhere. Only the graded partition's qualifier is ever tried,
+  so a mismatched one (`"7.analog"` on a `"digital"` manifest) still matches
+  nothing and falls through to the bare key rather than borrowing the other
+  kind's evidence; the qualified-key-first, bare-key-fallback priority order
+  mixed-signal manifests already had is unchanged, as is every rendered
+  `"partition"` field. See `docs/cli/signoff.md`'s evidence-key section.
 - **Fixed** (#2355, `klt extract --parasitics` MoM-capacitor cards — **no**
   `schema_version` bump; `devices[].params` is unchanged, only the written
   SPICE text): an extracted `cap_cmomi`/`cap_cmomf` (MoM capacitor, issue

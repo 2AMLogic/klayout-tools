@@ -3592,11 +3592,17 @@ def build_tier_report(
                 # either binding, and everything downstream grades the value
                 # it names exactly as if that value were the whole document.
                 "7": {"file": "composed.json", "pointer": "/pex"},
-                # for a mixed-signal block, per-kind items (1, 2, 5, 7) key
-                # on "<item id>.<analog|digital>"; kind-independent items
-                # (3, 4, 6, 8, 9, 10) may use the bare "<item id>" key and
-                # are looked up by both partitions -- see the doc's "Block
-                # kind" subsection for which items split which way.
+                # per-kind items (1, 2, 5, 7, 11) may key on
+                # "<item id>.<analog|digital>" -- for a mixed-signal block
+                # that selects one of its two partitions' rows, and for a
+                # pure "analog"/"digital" block the qualifier matching the
+                # block's own kind resolves too (issue #2362). A qualifier
+                # naming any other partition is simply not found.
+                # Kind-independent items (3, 4, 6, 8, 9, 10) use the bare
+                # "<item id>" key, which also remains the fallback for a
+                # per-kind item and is looked up by both partitions of a
+                # mixed-signal block -- see the doc's "Block kind"
+                # subsection for which items split which way.
             }
         }
 
@@ -4086,6 +4092,7 @@ def build_tier_report(
                     text=_t1_item_text(t1_item, partition),
                     notes=list(t1_item["notes"]),
                     partition=partition if kind == "mixed-signal" else None,
+                    partition_kind=partition,
                     partition_boundary=partition_boundary.get(partition),
                     evidence=evidence,
                     allowed_kinds=_allowed_kinds_for(t1_item["id"], partition),
@@ -4268,15 +4275,33 @@ def _t1_item_text(t1_item: dict[str, Any], partition: str) -> str | None:
 
 
 def _lookup_evidence(
-    evidence: dict[str, Any], item_id: int, partition: str | None
+    evidence: dict[str, Any], item_id: int, partition_kind: str | None
 ) -> Any:
-    """Look up a manifest ``evidence`` entry for ``item_id``, preferring a
-    partition-qualified key (``"<id>.<partition>"``) over the bare
+    """Look up a manifest ``evidence`` entry for ``item_id``, preferring the
+    partition-qualified key (``"<id>.<partition_kind>"``) over the bare
     ``"<id>"`` key -- so a mixed-signal manifest can give per-partition
     evidence for a per-kind item while still sharing one evidence entry
-    across both partitions for a kind-independent item."""
-    if partition:
-        keyed = evidence.get(f"{item_id}.{partition}")
+    across both partitions for a kind-independent item.
+
+    ``partition_kind`` is the partition **being graded** -- ``"analog"`` or
+    ``"digital"`` for a ``"mixed-signal"`` manifest (which grades one
+    partition at a time), and the block's own ``kind`` for a pure
+    ``"analog"``/``"digital"`` manifest. It is deliberately *not* the report
+    row's ``"partition"`` field, which stays ``None`` outside a mixed-signal
+    manifest: issue #2362 -- ``docs/cli/signoff.md`` documents
+    ``"<item id>.<analog|digital>"`` as *the* spelling for a per-kind item
+    without restricting it to mixed-signal blocks, so a ``"7.digital"`` key
+    on a ``kind: "digital"`` manifest has to resolve. Keying the lookup off
+    the row's ``partition`` instead silently ignored exactly the citation the
+    docs asked for and rendered the item ``unmet``/``no_evidence``.
+
+    Only the partition actually being graded is ever tried, so a mismatched
+    qualifier (``"7.analog"`` on a ``"digital"`` manifest) still finds
+    nothing and falls through to the bare key -- it is never graded against
+    the other kind's evidence.
+    """
+    if partition_kind:
+        keyed = evidence.get(f"{item_id}.{partition_kind}")
         if keyed is not None:
             return keyed
     return evidence.get(str(item_id))
@@ -5809,8 +5834,11 @@ def _build_power_delivery_item(
     silently dropped from the cited set), and that grading is delegated to
     :func:`_grade_power_delivery`.
 
-    ``partition_boundary`` (issue #2278) is echoed exactly as in
-    :func:`_build_tier_item`.
+    ``partition_kind`` -- the partition being graded -- both selects the
+    per-block-kind rule :func:`_grade_power_delivery` applies and (issue
+    #2362) qualifies the evidence-key lookup, exactly as in
+    :func:`_build_tier_item`; ``partition_boundary`` (issue #2278) is echoed
+    exactly as in :func:`_build_tier_item` too.
 
     ``graded_by_build`` (issue #2176) is reported and honoured exactly as in
     :func:`_build_tier_item`. In practice it is always ``True`` here --
@@ -5825,7 +5853,7 @@ def _build_power_delivery_item(
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
 
-    raw_entry = _lookup_evidence(evidence, item_id, partition)
+    raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif raw_entry is not None:
@@ -5865,6 +5893,7 @@ def _build_tier_item(
     text: str | None,
     notes: list[str],
     partition: str | None,
+    partition_kind: str,
     partition_boundary: str | None = None,
     evidence: dict[str, Any],
     allowed_kinds: set[str] | None = None,
@@ -5886,6 +5915,15 @@ def _build_tier_item(
     #2044 only T1 items 1, 2, 9 and 10 (the four naming no evidence at all)
     still pass ``None`` (see :data:`_ITEM_ALLOWED_KINDS` and
     :func:`_allowed_kinds_for`).
+
+    ``partition_kind`` (issue #2362) is the partition this row grades --
+    ``"analog"``/``"digital"`` for either half of a mixed-signal block, and
+    the block's own ``kind`` for a pure ``"analog"``/``"digital"`` block. It
+    is what :func:`_lookup_evidence` qualifies the evidence key with, and is
+    deliberately separate from ``partition`` (which is ``None`` outside a
+    mixed-signal manifest and is only ever *rendered*): the documented
+    ``"<id>.<analog|digital>"`` evidence key has to resolve on a pure-kind
+    manifest too, not just on a mixed-signal one.
 
     ``partition_boundary`` (issue #2278) is the manifest's own statement of
     what *this row's* partition denotes, resolved by
@@ -5940,7 +5978,7 @@ def _build_tier_item(
     status = "unmet"
     reason: str | None = _REASON_NO_EVIDENCE
 
-    raw_entry = _lookup_evidence(evidence, item_id, partition)
+    raw_entry = _lookup_evidence(evidence, item_id, partition_kind)
     if raw_entry is not None and not graded_by_build:
         reason = _REASON_UNGRADEABLE_BY_BUILD
     elif raw_entry is not None:
