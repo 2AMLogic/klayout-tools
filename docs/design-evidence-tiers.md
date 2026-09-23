@@ -368,7 +368,12 @@ written to every block.
       entry with `"kind": "supply"`, a stackup covering the layers the
       supply is routed on, and the `ties[]` declarations for the
       well/substrate taps. Every declared supply must resolve to exactly
-      **one** electrical island — no `erc.unconnected_net` and no
+      **one** electrical island — or, when the entry declares
+      `nets[].islands` (issue #2400), to exactly that declared count of
+      deliberately separate domains, so a legitimately multi-domain
+      supply (one library PG pin name on independent islands) can satisfy
+      this item instead of being unreachable by construction — with no
+      `erc.unconnected_net` and no
       `erc.supply_short` naming it — and the run must report zero
       `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
