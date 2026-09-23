@@ -249,7 +249,8 @@ response. Further verb adoption preserves each verb's existing envelope.
 
 Verbs whose verdict depends on the exact tool build, PDK release, and rule
 deck — currently `drc`, `lvs`, `extract`, `sim`, `size`, `precheck`, `erc`,
-`gen`, and `gen-compose` — emit a shared top-level `provenance` block so a
+`power`, `gen`, and `gen-compose` — emit a shared top-level `provenance`
+block so a
 "clean"/"pass"/"match" result is auditable and reproducible later. Two runs
 made against different deck revisions or PDK releases are otherwise
 indistinguishable in the output, so a signoff claim can't be checked or
@@ -350,6 +351,20 @@ that omits `--deck` produces `provenance.devices` entries with the pre-#2204
 bump, matching this block's own additive-envelope convention. See
 [`docs/cli/erc.md`](cli/erc.md)'s "Deck-driven device-marker
 auto-detection".
+
+`klt power` (issue #2349) emits the block for the same two-input reason
+`klt erc` does — its IR/EM verdict is a joint function of the layout
+*and* the spec's `stackup`/`vias` sheet-resistance and EM declarations,
+its `pads`, and its `current_model`, none of which a committed report
+could otherwise be re-verified against. `provenance.pdk`/`provenance.deck`
+are always `null` (the verb resolves no installed PDK and applies no deck
+— the spec declares its electrical numbers directly); the layout is
+pinned under `provenance.input` and the spec under the same verb-local
+`provenance.spec` `{content_hash}` shape `klt erc`'s issue #2036 added,
+so a caller reads both verbs identically. It adds one verb-local key of
+its own, `provenance.top_cell`: the solved network is `LayoutToNetlist`'s
+output *for one cell*, and a stream can hold several. See
+[`docs/cli/power.md`](cli/power.md)'s "Provenance".
 
 `klt wave build`/`klt wave query` (Epic #1585) also emit this block, but
 for a different reason: neither resolves a PDK nor applies a rule deck (a
