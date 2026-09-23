@@ -6,8 +6,9 @@ look up which release shipped a given revision (`resolve`, by content hash
 or by `(name, version)`, against klayout-tools' own generated release
 history, issue #623), report this install's own deck content hash,
 structural device-class coverage, and release status directly, with no
-input layout needed (`info`, issue #1209), or list the rule values a deck
-enforces (`rules`, issue #2308).
+input layout needed (`info`, issue #1209), list the rule values a deck
+enforces (`rules`, issue #2308), or list the drawn-layer predicate set each
+of a deck's device classes is recognised by (`devices`, issue #2365).
 
 ```
 klt deck hash    --deck <name>                              [--format text|json]
@@ -15,15 +16,17 @@ klt deck resolve --content-hash <sha256:hex> [--deck <name>] [--format text|json
 klt deck resolve --deck <name> --version <X.Y.Z>            [--format text|json]
 klt deck info    [--deck <name>]                             [--format text|json]
 klt deck rules   --deck <name> [--rule <id>]                 [--format text|json]
+klt deck devices --deck <name> [--class <name>]              [--format text|json]
 ```
 
-The four are complements: `hash` answers "which deck revision will this
+The five are complements: `hash` answers "which deck revision will this
 build use?" (issue #1202), `resolve` answers "which release shipped that
 revision?" (issue #623), `info` answers "what does this install
 actually recognise, right now, with no input layout at all?" (issue #1209),
-and `rules` answers "what numbers does this deck actually enforce?" (issue
+`rules` answers "what numbers does this deck actually enforce?" (issue
 #2308) — the pre-layout question `klt drc`, which needs a stream, cannot
-answer.
+answer — and `devices` answers "what must a layout **draw** for one of those
+device classes to be recognised?" (issue #2365).
 
 ## `klt deck hash`
 
@@ -239,7 +242,9 @@ klt deck info --deck gf180mcu # one deck only
   the field that would have caught issue #1209 directly: comparing this
   list's contents (not just its `content_hash`) is what distinguishes a deck
   that recognises `diode_nd2ps_06v0`/`diode_pd2nw_06v0` from one that
-  predates diode support entirely.
+  predates diode support entirely. It says what the deck **can find**; it
+  does not say what a layout must **draw** for one to be found — that is
+  [`klt deck devices`](#klt-deck-devices) below.
 - `released` / `release` — the same tri-state signal as
   `provenance.deck.released` (`true`/`false`/`null`; see above), plus, when
   `true`, the `{git_tag, git_commit, package_version}` of the release that
@@ -354,6 +359,130 @@ executable deck — coverage is the set of rules klt implements, not the full
 DRM. `provenance` is what ties each value back to the upstream source it came
 from; `klt drc`'s `coverage.deck_scope` answers the complementary "what
 sections does this deck claim" question.
+
+## `klt deck devices`
+
+Report **what a layout has to draw** for each of an extraction deck's device
+classes to be recognised — its device-recognition marker layer plus every
+per-terminal `requires`/`excludes` predicate, with layer/datatype numbers —
+with **no layout file and no extraction run** (issue #2365).
+
+```
+klt deck devices --deck gf180mcu                              # every class
+klt deck devices --deck gf180mcu --class diode_pd2nw_06v0     # one class
+klt deck devices --deck gf180mcu --format json
+```
+
+`klt deck info`'s `device_classes` says a deck *can* recognise a
+`diode_pd2nw_06v0`. It does not say that doing so requires a `diode_mk`
+(115/5) marker over the junction **and** `Pplus` (31/0) + `Dualgate` (55/0)
+over its anode — and a layout missing any single member of that set extracts
+as `device_count: 0`, which reads exactly like "this layout legitimately
+contains no diodes". Before this command the only way to find out which
+member was missing was to read `decks/gf180mcu.py`'s `DiodeDevice` entry
+field by field, which two separate passes on a real design had to do
+(2AMLogic/gf180-drone-fc, its issues #24 and #37).
+
+```json
+{
+  "schema_version": 1,
+  "deck": "gf180mcu",
+  "content_hash": "sha256:95c2eb91…",
+  "device_classes": [
+    {
+      "name": "diode_pd2nw_06v0",
+      "kind": "diode",
+      "marker": { "layer": 115, "datatype": 5, "name": "diode_mk" },
+      "marker_gated": true,
+      "predicate_gated": true,
+      "terminals": [
+        {
+          "name": "anode",
+          "layer": { "layer": 22, "datatype": 0, "name": "Comp" },
+          "requires": [
+            { "layer": 31, "datatype": 0, "name": "Pplus" },
+            { "layer": 55, "datatype": 0, "name": "Dualgate" }
+          ],
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+        },
+        {
+          "name": "cathode",
+          "layer": { "layer": 21, "datatype": 0, "name": "Nwell" },
+          "requires": [],
+          "excludes": [ { "layer": 12, "datatype": 0, "name": "DNWELL" } ]
+        }
+      ],
+      "required_layers": [ … ],
+      "excluded_layers": [ … ],
+      "provenance": {
+        "source_repo": "google/globalfoundries-pdk-libs-gf180mcu_fd_pv",
+        "source_path": "libs.tech/klayout/lvs/rule_decks/diode_extraction.lvs",
+        "rule_id": "gf180mcu_fd_pr__diode_pd2nw_06v0",
+        "commit": "c6d73a35f524070e85faff4a6a9eef49553ebc2b"
+      }
+    }
+  ]
+}
+```
+
+- `deck` / `content_hash` — the deck name as given, and this install's own
+  deck module hash (the same value `klt deck info`/`klt deck rules`/
+  `provenance.deck.content_hash` report). Cite it alongside a transcribed
+  layer number and the citation stays re-checkable on the next PDK bump.
+- `name` — the `devices[].class` label this class extracts as (the same
+  strings `klt deck info`'s `device_classes` lists).
+- `kind` — the recognition family: `mos`, `bipolar`, `capacitor`,
+  `mom_capacitor`, `resistor`, `diode`.
+- `marker` — the class's device-recognition marker layer, or `null` for a
+  markerless (drawn-geometry-only) class.
+- `marker_gated` / `predicate_gated` — booleans, so "which classes need
+  something beyond their own conductor/diffusion geometry" is answerable by
+  filtering rather than by reading prose. **Marker- and predicate-gated
+  classes are the minority**, which is exactly what makes them expensive:
+  every other family a deck recognises is driven off drawn geometry alone,
+  so nothing about a layout suggests one family has a prerequisite the
+  others do not. `predicate_gated` is `true` when any terminal declares a
+  non-empty `requires` — note this is honestly `true` for `pfet` (a PMOS is
+  not recognised outside `nwell`) and `false` for `nfet`.
+- `terminals` — one entry per recognised terminal:
+  `{name, layer, requires, excludes}`. `layer` is `null` for a terminal
+  formed by the substrate rather than by a drawn mask (gf180mcu's
+  `diode_nd2ps_06v0` anode). Every layer in `requires` must **also** cover
+  the region; every layer in `excludes` is subtracted from it.
+- `required_layers` / `excluded_layers` — the flattened union in
+  first-mention order (marker first, then each terminal's own layer and its
+  `requires`). `required_layers` is the "what am I missing?" list — every
+  one of these has to be drawn over the same geometry, and missing any one
+  of them fails identically and silently.
+- `provenance` — the entry's structured upstream PDK-LVS citation, or `null`
+  when it carries none yet (the same shape `klt deck rules` reports).
+- Every layer is `{"layer": <int>, "datatype": <int>, "name": <str|null>}` —
+  the raw GDS numbering a layout is drawn in, plus the deck's published name
+  for the pair when it publishes one (`null`, never a fabricated name, when
+  it does not).
+
+`klt extract` reports the same fact from the other end: a junction-diode
+region that matches every predicate of a class except one or more members of
+this set now produces a `warnings[]` entry naming what is missing, instead of
+a silent `device_count: 0` — see
+[`extract.md`](extract.md)'s "Marker-gated and predicate-gated device
+classes" section.
+
+An unknown `--deck` is a clean error (exit 1) through the standard envelope.
+So is an unknown `--class` — deliberately an error rather than an empty
+`device_classes` list, since a silent empty result reads as "that class has no
+drawn-layer requirements", a materially different claim from "you asked for a
+class this deck does not declare":
+
+```json
+{
+  "schema_version": 1,
+  "error": {
+    "command": "deck devices",
+    "message": "deck 'gf180mcu' declares no device class named 'diode_pw2nd' (declared: nfet, pfet, bjt, …; run `klt deck devices --deck gf180mcu` to list them)"
+  }
+}
+```
 
 ## The generated history table
 

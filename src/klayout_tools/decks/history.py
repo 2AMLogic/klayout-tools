@@ -388,6 +388,389 @@ def deck_rules(name: str, rule_id: str | None = None) -> dict[str, Any]:
     }
 
 
+def deck_devices(name: str, device_class: str | None = None) -> dict[str, Any]:
+    """The *drawn-layer predicate set* every device class an extraction deck
+    declares is recognised by -- its device-recognition marker layer plus the
+    per-terminal ``requires``/``excludes`` narrowing -- as structured data,
+    without reading the deck module's Python source (issue #2365).
+
+    ``klt deck info``'s ``device_classes`` answers "can this deck recognise a
+    ``diode_pd2nw_06v0`` at all"; it does **not** say what has to be *drawn*
+    for one to be recognised. That gap is expensive: most of a deck's device
+    families (MOS, and every markerless class) are driven off drawn geometry
+    alone, but a minority are gated on a dedicated device-recognition marker
+    layer *and* on per-terminal implant predicates -- e.g. gf180mcu's
+    ``diode_pd2nw_06v0`` needs ``diode_mk`` (115/5) over the junction **and**
+    ``Pplus`` (31/0) + ``Dualgate`` (55/0) over its anode. A layout missing
+    any single member of that set extracts as ``device_count: 0``, which
+    reads exactly like "this layout legitimately contains no diodes", so the
+    only way to find out which member was missing used to be reading
+    ``decks/gf180mcu.py`` field by field. This answers it in one query.
+
+    ``name`` selects the extraction deck
+    (:class:`~klayout_tools.decks.UnknownExtractionDeckError`, surfaced as
+    :class:`DeckHistoryError`, for an unregistered name). ``device_class``
+    narrows to a single entry by exact ``name`` -- a class the deck does not
+    declare is a :class:`DeckHistoryError`, never an empty list (a silent
+    empty result reads as "that class has no drawn-layer requirements",
+    which is a materially different claim from "you asked for a class that
+    does not exist"), mirroring :func:`deck_rules`' ``rule_id`` contract.
+
+    Returns a flat envelope:
+
+    - ``deck`` / ``content_hash`` -- the deck name as given, and this
+      install's ``sha256:``-prefixed deck module hash (the same value
+      :func:`deck_info`/``provenance.deck.content_hash`` report), so a
+      transcribed layer number stays re-checkable against the installed deck
+      on the next PDK bump.
+    - ``device_classes`` -- one entry per declared device class, in the
+      deck's own declaration order: the two MOS classes first (they are
+      declared by every deck), then bipolars, MiM capacitors, MoM
+      capacitors, drawn resistors and junction diodes -- the same order
+      :attr:`~klayout_tools.decks.ExtractionDeck.device_classes` lists.
+
+    Each entry carries:
+
+    - ``name`` -- the ``devices[].class`` label this class extracts as.
+    - ``kind`` -- the recognition family (``"mos"``, ``"bipolar"``,
+      ``"capacitor"``, ``"mom_capacitor"``, ``"resistor"``, ``"diode"``).
+    - ``marker`` -- the class's device-recognition marker layer, or ``None``
+      for a markerless (geometry-driven) class.
+    - ``marker_gated`` / ``predicate_gated`` -- booleans, so "which classes
+      need something beyond their own conductor/diffusion geometry" is
+      answerable by filtering rather than by prose. ``marker_gated`` is
+      ``marker is not None``; ``predicate_gated`` is ``True`` when any
+      terminal declares a non-empty ``requires``.
+    - ``terminals`` -- one entry per recognised terminal, each
+      ``{name, layer, requires, excludes}``. ``layer`` is ``None`` for a
+      terminal formed by the substrate rather than by a drawn mask (e.g.
+      ``diode_nd2ps_06v0``'s anode).
+    - ``required_layers`` / ``excluded_layers`` -- the flattened union, in
+      first-mention order: every layer that must be drawn over the geometry
+      for this class to be recognised, and every layer whose presence
+      disqualifies it. ``required_layers`` is the "what am I missing?" list
+      the near-miss diagnostic in ``klt extract``'s ``warnings[]`` names
+      entries from.
+    - ``provenance`` -- the entry's structured upstream PDK-LVS citation
+      (:class:`~klayout_tools.decks.rules.RuleProvenance` as a dict), or
+      ``None`` when it carries none yet.
+
+    Every layer is reported as ``{"layer": <int>, "datatype": <int>,
+    "name": <str|null>}`` -- the raw GDS numbering a layout is drawn in,
+    plus the deck's published name for the pair when it publishes one
+    (``null`` rather than a fabricated name when it does not).
+    """
+    # Imported lazily for the same circular-import reason `deck_info` is --
+    # see its own note.
+    from .._provenance import sha256_file
+    from . import (
+        UnknownExtractionDeckError,
+        deck_source_path,
+        get_extraction_deck,
+        get_layer_names,
+    )
+
+    try:
+        deck = get_extraction_deck(name)
+    except UnknownExtractionDeckError as exc:
+        raise DeckHistoryError(str(exc)) from exc
+
+    layer_names = get_layer_names(name)
+    entries = _project_device_classes(deck, layer_names)
+
+    if device_class is not None:
+        selected = [entry for entry in entries if entry["name"] == device_class]
+        if not selected:
+            declared = ", ".join(entry["name"] for entry in entries)
+            raise DeckHistoryError(
+                f"deck {name!r} declares no device class named "
+                f"{device_class!r} (declared: {declared}; run "
+                f"`klt deck devices --deck {name}` to list them)"
+            )
+        entries = selected
+
+    digest = sha256_file(deck_source_path(name))
+
+    return {
+        "schema_version": 1,
+        "deck": name,
+        "content_hash": f"sha256:{digest}" if digest is not None else None,
+        "device_classes": entries,
+    }
+
+
+def _layer_entry(
+    pair: tuple[int, int] | None, layer_names: dict[tuple[int, int], str]
+) -> dict[str, Any] | None:
+    """One ``(layer, datatype)`` pair as :func:`deck_devices`' layer object.
+
+    ``None`` in, ``None`` out -- a terminal a PDK draws no mask for (the
+    substrate side of a junction diode) reports a ``null`` layer rather than
+    a fabricated pair.
+    """
+    if pair is None:
+        return None
+    return {
+        "layer": pair[0],
+        "datatype": pair[1],
+        "name": layer_names.get(pair),
+    }
+
+
+def _terminal_entry(
+    name: str,
+    layer: tuple[int, int] | None,
+    requires: tuple[tuple[int, int], ...],
+    excludes: tuple[tuple[int, int], ...],
+    layer_names: dict[tuple[int, int], str],
+) -> dict[str, Any]:
+    """One terminal of a device class, in :func:`deck_devices`' shape."""
+    return {
+        "name": name,
+        "layer": _layer_entry(layer, layer_names),
+        "requires": [_layer_entry(pair, layer_names) for pair in requires],
+        "excludes": [_layer_entry(pair, layer_names) for pair in excludes],
+    }
+
+
+def _device_class_entry(
+    *,
+    name: str,
+    kind: str,
+    marker: tuple[int, int] | None,
+    terminals: list[dict[str, Any]],
+    layer_names: dict[tuple[int, int], str],
+    provenance: Any = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble one :func:`deck_devices` ``device_classes[]`` entry, deriving
+    the flattened ``required_layers``/``excluded_layers`` union (and the two
+    gating booleans) from ``marker`` + ``terminals`` so the summary can never
+    drift from the per-terminal detail it summarises."""
+    required: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+
+    def add(bucket: list[dict[str, Any]], entry: dict[str, Any] | None) -> None:
+        if entry is None:
+            return
+        pair = (entry["layer"], entry["datatype"])
+        if any((e["layer"], e["datatype"]) == pair for e in bucket):
+            return
+        bucket.append(entry)
+
+    marker_entry = _layer_entry(marker, layer_names)
+    add(required, marker_entry)
+    predicate_gated = False
+    for terminal in terminals:
+        add(required, terminal["layer"])
+        for entry in terminal["requires"]:
+            predicate_gated = True
+            add(required, entry)
+        for entry in terminal["excludes"]:
+            add(excluded, entry)
+
+    return {
+        "name": name,
+        "kind": kind,
+        "marker": marker_entry,
+        "marker_gated": marker_entry is not None,
+        "predicate_gated": predicate_gated,
+        "terminals": terminals,
+        "required_layers": required,
+        "excluded_layers": excluded,
+        **(extra or {}),
+        "provenance": _provenance_entry(provenance),
+    }
+
+
+def _provenance_entry(provenance: Any) -> dict[str, Any] | None:
+    """A :class:`RuleProvenance` as a plain dict, matching
+    :func:`_project_rule`'s own projection; ``None`` passes through."""
+    if provenance is None:
+        return None
+    return {
+        "source_repo": provenance.source_repo,
+        "source_path": provenance.source_path,
+        "rule_id": provenance.rule_id,
+        "commit": provenance.commit,
+    }
+
+
+def _project_device_classes(
+    deck: Any, layer_names: dict[tuple[int, int], str]
+) -> list[dict[str, Any]]:
+    """Every device class ``deck`` declares, projected into
+    :func:`deck_devices`' ``device_classes[]`` shape.
+
+    Ordered exactly as :attr:`ExtractionDeck.device_classes` orders its own
+    role tokens (MOS, bipolars, capacitors, MoM capacitors, resistors,
+    diodes) so the two lists read against each other without re-sorting.
+    """
+    entries: list[dict[str, Any]] = []
+
+    # MOS. Markerless by construction: recognition is the deck's own
+    # active/poly/nwell stack, split by which side of the well the active
+    # island sits on (see `ExtractionDeck`'s docstring). Reported anyway --
+    # "this class needs no marker" is exactly the fact a caller comparing
+    # against a marker-gated class needs to see, and the `nwell`
+    # require/exclude asymmetry is what tells NMOS from PMOS (so `pfet`
+    # reports `predicate_gated: true` on `nwell`, which is the literal
+    # truth: a PMOS is not recognised outside the well).
+    for class_name, in_well in ((deck.nfet_class, False), (deck.pfet_class, True)):
+        entries.append(
+            _device_class_entry(
+                name=class_name,
+                kind="mos",
+                marker=None,
+                terminals=[
+                    _terminal_entry(
+                        "source_drain",
+                        deck.active,
+                        (deck.nwell,) if in_well else (),
+                        () if in_well else (deck.nwell,),
+                        layer_names,
+                    ),
+                    _terminal_entry(
+                        "gate",
+                        deck.poly,
+                        (deck.nwell,) if in_well else (),
+                        () if in_well else (deck.nwell,),
+                        layer_names,
+                    ),
+                ],
+                layer_names=layer_names,
+                provenance=(deck.pfet_provenance if in_well else deck.nfet_provenance),
+                extra={
+                    "flavours": [
+                        {
+                            "flavour": flavour.flavour,
+                            "description": flavour.description or None,
+                            "marker": _layer_entry(flavour.marker, layer_names),
+                        }
+                        for flavour in deck.mos_flavours
+                    ]
+                },
+            )
+        )
+
+    for bipolar in deck.bipolars:
+        entries.append(
+            _device_class_entry(
+                name=bipolar.class_name,
+                kind="bipolar",
+                marker=bipolar.marker,
+                terminals=[
+                    _terminal_entry("base", bipolar.base, (), (), layer_names),
+                    _terminal_entry(
+                        "emitter",
+                        bipolar.emitter,
+                        bipolar.emitter_requires,
+                        bipolar.emitter_excludes,
+                        layer_names,
+                    ),
+                    _terminal_entry(
+                        "collector", bipolar.collector, (), (), layer_names
+                    ),
+                ],
+                layer_names=layer_names,
+                provenance=bipolar.provenance,
+            )
+        )
+
+    for capacitor in deck.capacitors:
+        entries.append(
+            _device_class_entry(
+                name=capacitor.name,
+                kind="capacitor",
+                marker=None,
+                terminals=[
+                    _terminal_entry(
+                        "top_plate",
+                        capacitor.top_plate,
+                        capacitor.top_plate_requires,
+                        capacitor.top_plate_excludes,
+                        layer_names,
+                    ),
+                    _terminal_entry(
+                        "bottom_plate",
+                        capacitor.bottom_plate,
+                        capacitor.bottom_plate_requires,
+                        capacitor.bottom_plate_excludes,
+                        layer_names,
+                    ),
+                ],
+                layer_names=layer_names,
+                provenance=capacitor.provenance,
+            )
+        )
+
+    for mom in deck.mom_capacitors:
+        entries.append(
+            _device_class_entry(
+                name=mom.name,
+                kind="mom_capacitor",
+                marker=mom.marker,
+                terminals=[
+                    _terminal_entry(f"pin{index}", pin, (), (), layer_names)
+                    for index, pin in enumerate(mom.metal_pins)
+                    if pin is not None
+                ],
+                layer_names=layer_names,
+                provenance=mom.provenance,
+            )
+        )
+
+    for resistor in deck.resistors:
+        entries.append(
+            _device_class_entry(
+                name=resistor.name,
+                kind="resistor",
+                marker=resistor.marker,
+                terminals=[
+                    _terminal_entry(
+                        "body",
+                        resistor.body,
+                        resistor.requires,
+                        resistor.excludes,
+                        layer_names,
+                    ),
+                    _terminal_entry("terminal", resistor.terminal, (), (), layer_names),
+                ],
+                layer_names=layer_names,
+                provenance=resistor.provenance,
+            )
+        )
+
+    for diode in deck.diodes:
+        entries.append(
+            _device_class_entry(
+                name=diode.name,
+                kind="diode",
+                marker=diode.marker,
+                terminals=[
+                    _terminal_entry(
+                        "anode",
+                        diode.anode,
+                        diode.anode_requires,
+                        diode.anode_excludes,
+                        layer_names,
+                    ),
+                    _terminal_entry(
+                        "cathode",
+                        diode.cathode,
+                        diode.cathode_requires,
+                        diode.cathode_excludes,
+                        layer_names,
+                    ),
+                ],
+                layer_names=layer_names,
+                provenance=diode.provenance,
+            )
+        )
+
+    return entries
+
+
 def _project_rule(
     rule: DrcRule,
     nominal_dbu: float,

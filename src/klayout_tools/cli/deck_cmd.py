@@ -19,8 +19,15 @@ to the release that shipped it.
   run. ``info`` says which deck you have; ``rules`` says what it requires,
   so pre-layout arithmetic can read a constant from the installed deck
   rather than transcribing it out of a deck comment.
+- ``devices`` (issue #2365) -- report the *drawn-layer predicate set* every
+  device class an extraction deck declares is recognised by: its
+  device-recognition marker layer plus each terminal's ``requires``/
+  ``excludes`` narrowing, with layer/datatype numbers. ``info`` says which
+  device classes a deck can recognise; this says what has to be **drawn**
+  for one to be recognised, so a near-miss layout does not have to be
+  diagnosed by reading the deck module's Python source.
 
-All four emit through the shared envelope helpers in :mod:`.output` -- see
+All five verbs emit through the shared envelope helpers in :mod:`.output` -- see
 ``docs/json-contract.md``.
 
 Exit codes:
@@ -37,7 +44,13 @@ from __future__ import annotations
 import argparse
 
 from .._provenance import UnknownProvenanceDeckError, deck_identity
-from ..decks.history import DeckHistoryError, deck_info, deck_rules, resolve_deck
+from ..decks.history import (
+    DeckHistoryError,
+    deck_devices,
+    deck_info,
+    deck_rules,
+    resolve_deck,
+)
 from .output import emit_error, emit_success
 
 
@@ -121,6 +134,57 @@ def run_rules(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_rules_text)
     return 0
+
+
+def run_devices(args: argparse.Namespace) -> int:
+    try:
+        report = deck_devices(name=args.deck, device_class=args.device_class)
+    except DeckHistoryError as exc:
+        return emit_error("deck devices", str(exc), args.format)
+
+    emit_success(report, args.format, _print_devices_text)
+    return 0
+
+
+def _layer_text(entry: dict | None) -> str:
+    """One layer as ``"Pplus (31/0)"`` -- the deck's published name plus the
+    raw GDS pair, or just the pair when the deck publishes no name for it.
+    Never drops the numbers: they are what a caller draws against."""
+    if entry is None:
+        return "none"
+    pair = f"{entry['layer']}/{entry['datatype']}"
+    name = entry.get("name")
+    return f"{name} ({pair})" if name else pair
+
+
+def _layers_text(entries: list) -> str:
+    return ", ".join(_layer_text(entry) for entry in entries) if entries else "none"
+
+
+def _print_devices_text(report: dict) -> None:
+    print(f"deck: {report['deck']}")
+    print(f"content_hash: {report['content_hash']}")
+    print(f"device_classes: {len(report['device_classes'])}")
+    for entry in report["device_classes"]:
+        gating = []
+        if entry["marker_gated"]:
+            gating.append("marker-gated")
+        if entry["predicate_gated"]:
+            gating.append("predicate-gated")
+        print()
+        print(f"{entry['name']} ({entry['kind']})")
+        print(f"  gating: {', '.join(gating) if gating else 'drawn geometry only'}")
+        print(f"  marker: {_layer_text(entry['marker'])}")
+        for terminal in entry["terminals"]:
+            print(f"  terminal {terminal['name']}:")
+            print(f"    layer: {_layer_text(terminal['layer'])}")
+            print(f"    requires: {_layers_text(terminal['requires'])}")
+            print(f"    excludes: {_layers_text(terminal['excludes'])}")
+        for flavour in entry.get("flavours", []):
+            print(f"  flavour {flavour['flavour']}: {_layer_text(flavour['marker'])}")
+        print(f"  required_layers: {_layers_text(entry['required_layers'])}")
+        print(f"  excluded_layers: {_layers_text(entry['excluded_layers'])}")
+        print(f"  provenance: {_provenance_text(entry['provenance'])}")
 
 
 def _print_rules_text(report: dict) -> None:

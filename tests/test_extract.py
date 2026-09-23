@@ -3646,6 +3646,206 @@ def test_dummy_marker_drops_a_whole_diode(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Junction-diode near misses (issue #2365)
+# --------------------------------------------------------------------------- #
+
+
+def _make_gf180mcu_pd2nw_junction(
+    *,
+    marker: bool = True,
+    pplus: bool = True,
+    dualgate: bool = True,
+    pmos: bool = False,
+) -> kdb.Layout:
+    """A single, geometrically-correct drawn p+/Nwell junction on gf180mcu's
+    `diode_pd2nw_06v0` layers -- the reproduction from issue #2365
+    (2AMLogic/gf180-drone-fc's `junction_diode.gds`), reduced to the one
+    device and parameterised on each member of the class's drawn-layer
+    predicate set.
+
+    Complete (every keyword left at its default) this extracts as exactly one
+    `diode_pd2nw_06v0`. Each keyword set to ``False`` removes exactly one
+    member of that set -- `diode_mk` 115/5 (the marker the issue's first pass
+    had to find by reading the deck source), `Pplus` 31/0 and `Dualgate` 55/0
+    (the `anode_requires` pair its *second* pass needed, after adding the
+    marker alone still gave `device_count: 0`).
+
+    ``pmos`` adds an ordinary 6V PMOS in the same well -- p+ `Comp` under a
+    `Poly2` gate, carrying `Dualgate` but no `diode_mk` -- whose own
+    source/drain satisfies every `diode_pd2nw_06v0` predicate *except* the
+    marker. It is the near-miss detector's main false-positive risk and must
+    never be reported as one.
+    """
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(21, 0, kdb.Box(4000, 0, 7000, 3000))  # Nwell (cathode)
+    if marker:
+        draw(115, 5, kdb.Box(4800, 800, 6200, 2200))  # diode_mk
+    if dualgate:
+        draw(55, 0, kdb.Box(4800, 800, 6200, 2200))  # Dualgate (6V flavour)
+    draw(22, 0, kdb.Box(5000, 1000, 6000, 2000))  # Comp (anode)
+    if pplus:
+        draw(31, 0, kdb.Box(5000, 1000, 6000, 2000))  # Pplus (p+ doped)
+    draw(33, 0, kdb.Box(5300, 1300, 5700, 1700))  # Contact over the anode
+    draw(34, 0, kdb.Box(5200, 1200, 5800, 1800))  # Metal1 over the anode
+    top.shapes(layout.layer(34, 10)).insert(kdb.Text("ANOD", kdb.Trans(5500, 1500)))
+
+    if pmos:
+        draw(22, 0, kdb.Box(4200, 2400, 5400, 2900))  # Comp (source/drain)
+        draw(31, 0, kdb.Box(4200, 2400, 5400, 2900))  # Pplus
+        draw(55, 0, kdb.Box(4100, 2300, 5500, 3000))  # Dualgate (6V PMOS)
+        draw(30, 0, kdb.Box(4700, 2200, 4900, 3100))  # Poly2 (gate)
+
+    return layout
+
+
+def _near_miss_warnings(report: dict) -> list[str]:
+    return [w for w in report["warnings"] if "drawn-layer predicate" in w]
+
+
+def test_gf180mcu_complete_diode_junction_extracts_one_device_and_no_near_miss(
+    tmp_path,
+):
+    """Golden case (a) of issue #2365: everything drawn, one diode, and the
+    near-miss diagnostic stays silent -- it only ever speaks for an entry
+    that recognised nothing."""
+    path = _write_gds(_make_gf180mcu_pd2nw_junction(), tmp_path / "complete.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "complete.spice"))
+
+    assert report["device_counts"] == {"diode_pd2nw_06v0": 1}
+    assert _near_miss_warnings(report) == []
+
+
+def test_gf180mcu_diode_junction_missing_only_the_marker_warns(tmp_path):
+    """Golden case (b): the same junction with only `diode_mk` (115/5)
+    removed extracted as `device_count: 0` with `warnings: []` -- a result
+    indistinguishable from "this layout legitimately contains no diodes",
+    which is what made the reported failure expensive. It now names the
+    missing marker."""
+    path = _write_gds(
+        _make_gf180mcu_pd2nw_junction(marker=False), tmp_path / "no_marker.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "no_marker.spice"))
+
+    assert report["device_counts"] == {}
+    (warning,) = _near_miss_warnings(report)
+    assert "diode_pd2nw_06v0" in warning
+    assert "diode_mk (115/5)" in warning
+    # Nothing else is reported as missing -- the diagnostic is specific.
+    assert "31/0" not in warning and "55/0" not in warning
+    # And it hands over a runnable way to see the whole predicate set.
+    assert "klt deck devices --deck gf180mcu --class diode_pd2nw_06v0" in warning
+
+
+def test_gf180mcu_diode_junction_missing_only_one_requires_layer_warns(tmp_path):
+    """Golden case (c): marker drawn, `Dualgate` drawn, but the anode's
+    `Pplus` (31/0) implant missing -- the second pass of the reported
+    failure, the one that proved fixing the marker alone was necessary but
+    not sufficient. Exactly the one missing `anode_requires` member is
+    named."""
+    path = _write_gds(
+        _make_gf180mcu_pd2nw_junction(pplus=False), tmp_path / "no_pplus.gds"
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "no_pplus.spice"))
+
+    assert report["device_counts"] == {}
+    (warning,) = _near_miss_warnings(report)
+    assert "anode_requires layer Pplus (31/0)" in warning
+    assert "115/5" not in warning and "55/0" not in warning
+
+
+def test_gf180mcu_diode_junction_missing_several_predicates_names_them_all(tmp_path):
+    """The reported failure took two rounds because fixing one missing layer
+    exposed the next. The search is leave-many-out, so a layout short of
+    both the marker and an implant is told about both at once."""
+    path = _write_gds(
+        _make_gf180mcu_pd2nw_junction(marker=False, dualgate=False),
+        tmp_path / "no_marker_no_dualgate.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "several.spice"))
+
+    (warning,) = _near_miss_warnings(report)
+    assert "diode_mk (115/5)" in warning
+    assert "Dualgate (55/0)" in warning
+
+
+def test_gf180mcu_ordinary_pmos_is_not_reported_as_a_diode_near_miss(tmp_path):
+    """The false-positive guard: a 6V PMOS's p+-in-Nwell source/drain
+    satisfies every `diode_pd2nw_06v0` predicate except the marker, so
+    without the "already explained by another recognised structure" filter
+    every such transistor would produce a near-miss line on every layout.
+
+    Drawn alongside a *complete* diode so the entry is exercised on a layout
+    where recognition succeeds, and alongside a marker-less one where it does
+    not -- neither may charge the PMOS."""
+    complete = _write_gds(
+        _make_gf180mcu_pd2nw_junction(pmos=True), tmp_path / "pmos_ok.gds"
+    )
+    report = run_extract(complete, "gf180mcu", output=str(tmp_path / "pmos_ok.spice"))
+    assert report["device_counts"] == {"diode_pd2nw_06v0": 1, "pfet": 1}
+    assert _near_miss_warnings(report) == []
+
+    marker_less = _write_gds(
+        _make_gf180mcu_pd2nw_junction(marker=False, pmos=True),
+        tmp_path / "pmos_nomark.gds",
+    )
+    report = run_extract(
+        marker_less, "gf180mcu", output=str(tmp_path / "pmos_nomark.spice")
+    )
+    # Exactly one candidate -- the diode's own junction, not the PMOS's two
+    # source/drain islands as well.
+    (warning,) = _near_miss_warnings(report)
+    assert warning.startswith("1 candidate 'diode_pd2nw_06v0' region matches")
+
+
+def test_gf180mcu_layout_with_no_diode_shaped_geometry_warns_nothing(tmp_path):
+    """No near-miss line for a layout that simply contains no diode: the
+    baseline BJT fixture draws none of the junction geometry, and a bare
+    implant or marker patch with no anode/cathode conductor under it is not
+    "one layer short of a diode", it is nothing."""
+    path = _write_gds(_make_gf180mcu_bjt_layout(), tmp_path / "bjt.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "bjt.spice"))
+
+    assert report["device_counts"] == {"bjt": 1}
+    assert _near_miss_warnings(report) == []
+
+
+def test_gf180mcu_dual_diode_clamp_reports_no_near_miss(tmp_path):
+    """Both entries of the baseline dual-diode ESD clamp recognise a device,
+    so neither runs the near-miss search -- the no-regression check for the
+    layouts this deck already handled correctly."""
+    path = _write_gds(_make_gf180mcu_diode_layout(), tmp_path / "diode.gds")
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "diode.spice"))
+
+    assert _near_miss_warnings(report) == []
+
+
+def test_diode_near_miss_names_layers_from_the_same_set_deck_devices_reports(tmp_path):
+    """The diagnostic and the discovery path must never drift: every layer
+    the near-miss search can report as missing is a member of the
+    `required_layers` list `klt deck devices` publishes for the same class
+    (issue #2365's two halves, checked against each other)."""
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.decks.history import deck_devices
+    from klayout_tools.extract import _diode_required_terms
+
+    for entry in deck_devices("gf180mcu")["device_classes"]:
+        if entry["kind"] != "diode":
+            continue
+        published = {
+            (layer["layer"], layer["datatype"]) for layer in entry["required_layers"]
+        }
+        diode = next(
+            d for d in get_extraction_deck("gf180mcu").diodes if d.name == entry["name"]
+        )
+        assert {pair for _, pair in _diode_required_terms(diode)} <= published
+
+
+# --------------------------------------------------------------------------- #
 # MiM capacitor device recognition (issue #225)
 # --------------------------------------------------------------------------- #
 
