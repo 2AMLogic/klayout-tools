@@ -378,6 +378,41 @@ class DrcRule:
     All three default to ``None``; ``other_layer``/``derived_layer`` are
     unused for this check kind.
 
+    ``threshold_max_dbu`` (issue #2370) is the *upper* bound half of a
+    fixed-size rule, in database units of the deck's own nominal dbu exactly
+    like ``threshold_dbu`` (and rescaled by the same ``dbu_scale``). It is
+    valid only alongside ``check="width"``, where it turns the rule from a
+    minimum-width lower bound into a full min **and** max size check: a
+    published rule such as gf180mcu's ``CO.1`` ("min/max contact size ->
+    0.22um", i.e. contacts are a *fixed* 0.22 x 0.22 um square) or ``Vn.1``
+    (a fixed 0.26 x 0.26 um via) bounds the feature from both sides, and
+    ``Region.width_check`` -- like every other ``Region`` check primitive --
+    only ever reports the lower-bound half. ``None`` (the default) leaves a
+    ``"width"`` rule exactly as it behaved before this field existed:
+    minimum-width only.
+
+    The max half is **not** an inverted ``width_check``. A "width" in the
+    ``width_check`` sense is the distance between two *facing* edges, so
+    an over-long contact bar (0.22 x 2 um) has a perfectly legal 0.22 um
+    facing-edge width and would never be reported by any width-based upper
+    bound -- yet it is exactly the geometry ``CO.1`` forbids. ``run_drc()``
+    therefore measures the max half as a **bounding-box size** bound:
+    ``klayout.db.Region.with_bbox_max(0, max + 1, inverse=True)``, which
+    returns the merged polygons whose *larger* bounding-box dimension
+    exceeds ``threshold_max_dbu`` -- flagging an oversized square, an
+    elongated bar, and an L-shaped cut alike, while leaving a
+    correctly-sized square (whose bbox is exactly the threshold) clean. Like
+    ``"area"``'s ``with_area``, this returns violating *polygons* (a
+    ``Region``), not an ``EdgePairs`` collection, so each is reported as its
+    own violation under the same rule ``id`` and the same ``check: "width"``
+    string -- additive to the minimum-width edge pairs, the same way the
+    ``"enclosing"``/``"enclosed"`` zero-overlap escape term already is (see
+    ``_run_width_max_check`` in ``drc.py``). Because the bound is measured
+    on the bounding box, a *non-axis-aligned* cut (e.g. a 45-degree-rotated
+    square) is measured by its axis-aligned envelope and so is flagged
+    somewhat conservatively -- acceptable for the fixed-size cut/via rules
+    this exists for, whose official geometry is an axis-aligned square.
+
     ``antenna_ratio_max`` (issue #812) is the field ``check="antenna"``
     uses: the maximum allowed ratio of ``layer``'s total merged area to
     ``other_layer``'s (required, like every other two-layer check kind).
@@ -415,6 +450,7 @@ class DrcRule:
     density_min: float | None = None
     density_max: float | None = None
     antenna_ratio_max: float | None = None
+    threshold_max_dbu: int | None = None
 
 
 class UnknownDeckError(Exception):

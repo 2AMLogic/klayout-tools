@@ -153,30 +153,68 @@ def _margin_dbu(threshold_dbu: int) -> int:
     return (raw // _GRID_DBU) * _GRID_DBU
 
 
+def max_size_by_layer(deck_rules: list[DrcRule]) -> dict[tuple[int, int], int]:
+    """Every layer this deck bounds from *above* via `DrcRule.
+    threshold_max_dbu` (issue #2370), mapped to the tightest such bound.
+
+    gf180mcu's `CO.1`/`Vn.1` make Contact/Via1-Via4 *fixed*-size layers
+    (0.22um / 0.26um squares): a cut drawn any larger is a violation, so the
+    generic bar geometry every builder below reaches for by default -- a
+    4000 dbu-long width bar, a 2000x4000 dbu space bar, a 2000 dbu enclosed
+    square -- is itself illegal on those layers and would make an otherwise
+    unrelated rule's `"clean"` fixture report violations. Each builder caps
+    its own geometry against this map; layers absent from it (every layer of
+    every other deck today) keep byte-identical fixtures.
+    """
+    caps: dict[tuple[int, int], int] = {}
+    for rule in deck_rules:
+        if rule.threshold_max_dbu is None:
+            continue
+        prior = caps.get(rule.layer)
+        caps[rule.layer] = (
+            rule.threshold_max_dbu
+            if prior is None
+            else min(prior, rule.threshold_max_dbu)
+        )
+    return caps
+
+
+def _capped(value: int, cap: int | None) -> int:
+    """`value`, clamped to `cap` when the layer it describes carries a
+    maximum-size bound (see :func:`max_size_by_layer`)."""
+    return value if cap is None else min(value, cap)
+
+
 def _width_pair(
-    layer: tuple[int, int], threshold_dbu: int
+    layer: tuple[int, int], threshold_dbu: int, max_dbu: int | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     margin = _margin_dbu(threshold_dbu)
     violate_w = max(threshold_dbu - margin, 1)
-    clean_w = threshold_dbu + margin
+    # On a fixed-size layer the "comfortably above the minimum" clean bar is
+    # itself over the maximum: clamp both the bar's width and its length, so
+    # a fixed-size rule's clean fixture is the one legal shape -- a square of
+    # exactly the published size (issue #2370). The violate bar stays too
+    # narrow in one direction (the minimum-width half) while its bounding box
+    # stays within the maximum, keeping that fixture a single-rule case.
+    clean_w = _capped(threshold_dbu + margin, max_dbu)
+    bar_length = _capped(_WIDTH_BAR_LENGTH_DBU, max_dbu)
     layer_list = list(layer)
-    violate = {
-        "shapes": [
-            {"layer": layer_list, "box": [0, 0, violate_w, _WIDTH_BAR_LENGTH_DBU]}
-        ]
-    }
-    clean = {
-        "shapes": [{"layer": layer_list, "box": [0, 0, clean_w, _WIDTH_BAR_LENGTH_DBU]}]
-    }
+    violate = {"shapes": [{"layer": layer_list, "box": [0, 0, violate_w, bar_length]}]}
+    clean = {"shapes": [{"layer": layer_list, "box": [0, 0, clean_w, bar_length]}]}
     return violate, clean
 
 
 def _space_pair(
-    layer: tuple[int, int], threshold_dbu: int
+    layer: tuple[int, int], threshold_dbu: int, max_dbu: int | None = None
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     margin = _margin_dbu(threshold_dbu)
     violate_gap = max(threshold_dbu - margin, 1)
     clean_gap = threshold_dbu + margin
+    # Same fixed-size clamp as `_width_pair`: on a cut layer the two bars
+    # become two legally-sized cut squares, so the spacing fixture doesn't
+    # also trip that layer's own size rule.
+    bar_width = _capped(_SPACE_BAR_WIDTH_DBU, max_dbu)
+    bar_length = _capped(_SPACE_BAR_LENGTH_DBU, max_dbu)
     layer_list = list(layer)
 
     def pair(gap: int) -> dict[str, Any]:
@@ -184,15 +222,15 @@ def _space_pair(
             "shapes": [
                 {
                     "layer": layer_list,
-                    "box": [0, 0, _SPACE_BAR_WIDTH_DBU, _SPACE_BAR_LENGTH_DBU],
+                    "box": [0, 0, bar_width, bar_length],
                 },
                 {
                     "layer": layer_list,
                     "box": [
-                        _SPACE_BAR_WIDTH_DBU + gap,
+                        bar_width + gap,
                         0,
-                        2 * _SPACE_BAR_WIDTH_DBU + gap,
-                        _SPACE_BAR_LENGTH_DBU,
+                        2 * bar_width + gap,
+                        bar_length,
                     ],
                 },
             ]
@@ -218,7 +256,10 @@ _ENCLOSING_ESCAPE_WIDTH_DBU = 500
 
 
 def _enclosing_pair(
-    layer: tuple[int, int], other_layer: tuple[int, int], threshold_dbu: int
+    layer: tuple[int, int],
+    other_layer: tuple[int, int],
+    threshold_dbu: int,
+    other_max_dbu: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Build a violate/clean pair for an `"enclosing"` `DrcRule` (`layer`
     encloses `other_layer`, e.g. metal encloses a contact/via).
@@ -238,20 +279,43 @@ def _enclosing_pair(
     mechanism that reliably trips regardless of whether `threshold_dbu` is
     zero or positive (a `0.0um` threshold's own `enclosing_check` never
     reports a marginal violation at all, see `metal1.enclosing.via1.1`'s own
-    docstring in `gf180mcu.py`)."""
+    docstring in `gf180mcu.py`).
+
+    `other_max_dbu` (issue #2370) clamps the enclosed square when
+    `other_layer` is a *fixed*-size cut layer (gf180mcu's Contact/Via1-Via4,
+    whose `CO.1`/`Vn.1` maxima make the default 2000 dbu square illegal on
+    its own). Shrinking the cut alone is not enough: the enclosing conductor
+    would shrink with it and drop below its own `metal*.width.1` minimum,
+    trading one incidental violation for another. So in the clamped case the
+    conductor keeps the same comfortable extent it always had -- the clean
+    box is grown outward (a margin *at least* the rule's, which is still a
+    clean verdict), and the violate box is extended away from the cut on the
+    three sides it is not escaping through, leaving the same
+    escape-strip mechanism intact."""
     margin = threshold_dbu + _margin_dbu(threshold_dbu)
-    other_box = [0, 0, _ENCLOSED_SHAPE_SIZE_DBU, _ENCLOSED_SHAPE_SIZE_DBU]
+    size = _capped(_ENCLOSED_SHAPE_SIZE_DBU, other_max_dbu)
+    # The escape strip must be narrower than the cut itself, so the
+    # conductor still covers (and therefore interacts with) part of it.
+    escape = min(_ENCLOSING_ESCAPE_WIDTH_DBU, size // 2)
+    # How much the conductor has to be grown back by, so its own smallest
+    # dimension stays at the uncapped enclosed size -- which every deck's
+    # `width` minimum already clears by construction (see
+    # `_ENCLOSED_SHAPE_SIZE_DBU`'s own comment). Zero whenever the cut was
+    # not clamped, which is what keeps every pre-#2370 fixture identical.
+    grow = _ENCLOSED_SHAPE_SIZE_DBU - size
+    conductor_margin = max(margin, grow // 2)
+    other_box = [0, 0, size, size]
     clean_layer_box = [
-        -margin,
-        -margin,
-        _ENCLOSED_SHAPE_SIZE_DBU + margin,
-        _ENCLOSED_SHAPE_SIZE_DBU + margin,
+        -conductor_margin,
+        -conductor_margin,
+        size + conductor_margin,
+        size + conductor_margin,
     ]
     violate_layer_box = [
-        0,
-        0,
-        _ENCLOSED_SHAPE_SIZE_DBU - _ENCLOSING_ESCAPE_WIDTH_DBU,
-        _ENCLOSED_SHAPE_SIZE_DBU,
+        -grow,
+        -(grow // 2),
+        size - escape,
+        size + grow // 2,
     ]
     other_list = list(other_layer)
     layer_list = list(layer)
@@ -314,10 +378,14 @@ def _separation_pair(
 #: comfortably-oversized `Metal4` box (`(46, 0)`) fully covering a `FuseTop`
 #: box (`(75, 0)`) makes the derived region exactly `FuseTop.sized(1.06um)`
 #: (`[-1060, -1060, 7060, 7060]` for a `[0, 0, 6000, 6000]` FuseTop box);
-#: `Via4` (`(41, 0)`) is then placed with a `threshold_dbu(400) +
-#: _margin_dbu(400)(100) = 500` dbu margin inside that derived region for
-#: `"clean"`, or straddling its right edge (an `outside_region` escape, the
-#: same mechanism `_enclosing_pair` uses) for `"violate"`. Verified (this
+#: `Via4` (`(41, 0)`) is then placed well inside that derived region (far
+#: above the `threshold_dbu(400) + _margin_dbu(400)(100) = 500` dbu margin
+#: the rule needs) for `"clean"`, or straddling its right edge (an
+#: `outside_region` escape, the same mechanism `_enclosing_pair` uses) for
+#: `"violate"`. Both Via4 boxes are exactly 260x260 dbu -- `Vn.1`'s fixed
+#: size, whose maximum half is enforced as of issue #2370, so the larger
+#: Via4 boxes this fixture used before that would now trip `via4.width.1`
+#: on their own. Verified (this
 #: issue) to not incidentally trip any other gf180mcu `DrcRule` -- neither
 #: fixture draws Via1/Via2/Via3/MetalTop/Pad/Nwell/Comp/Poly2/Contact, the
 #: only other layers any *other* rule in this deck reads, and every
@@ -343,14 +411,14 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
             "shapes": [
                 {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
                 {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
-                {"layer": [41, 0], "box": [6800, 0, 8000, 2000]},  # Via4 (escapes)
+                {"layer": [41, 0], "box": [6900, 0, 7160, 260]},  # Via4 (escapes)
             ]
         },
         {  # clean: Via4 sits >= 500 dbu inside the derived region on every side
             "shapes": [
                 {"layer": [75, 0], "box": [0, 0, 6000, 6000]},  # FuseTop
                 {"layer": [46, 0], "box": [-3000, -3000, 9000, 9000]},  # Metal4
-                {"layer": [41, 0], "box": [-560, -560, 6560, 6560]},  # Via4
+                {"layer": [41, 0], "box": [2870, 2870, 3130, 3130]},  # Via4
             ]
         },
     ),
@@ -424,6 +492,10 @@ def build_manifest(
     existing: dict[str, dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     allowed_checks = ALLOWED_CHECKS[deck_name]
+    # Layers this deck bounds from above (issue #2370) -- empty for every
+    # deck but gf180mcu today, so every other manifest regenerates
+    # byte-identically.
+    max_sizes = max_size_by_layer(deck_rules)
     manifest: dict[str, dict[str, Any]] = {}
     for rule in deck_rules:
         if rule.check not in allowed_checks:
@@ -431,13 +503,20 @@ def build_manifest(
         if rule.id in _DERIVED_LAYER_FIXTURES:
             violate, clean = _DERIVED_LAYER_FIXTURES[rule.id]
         elif rule.check == "width":
-            violate, clean = _width_pair(rule.layer, rule.threshold_dbu)
+            violate, clean = _width_pair(
+                rule.layer, rule.threshold_dbu, max_sizes.get(rule.layer)
+            )
         elif rule.check == "space":
-            violate, clean = _space_pair(rule.layer, rule.threshold_dbu)
+            violate, clean = _space_pair(
+                rule.layer, rule.threshold_dbu, max_sizes.get(rule.layer)
+            )
         elif rule.check == "enclosing":
             assert rule.other_layer is not None, rule.id
             violate, clean = _enclosing_pair(
-                rule.layer, rule.other_layer, rule.threshold_dbu
+                rule.layer,
+                rule.other_layer,
+                rule.threshold_dbu,
+                max_sizes.get(rule.other_layer),
             )
         else:  # "separation"
             assert rule.other_layer is not None, rule.id

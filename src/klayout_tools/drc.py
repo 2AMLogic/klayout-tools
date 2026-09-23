@@ -84,6 +84,15 @@ from .pdk import PdkNotFoundError, find_pdk
 # `mim.space.1` peer check (see `peer_edge_pairs` below) before this issue
 # exposed it as a `DrcRule.check` option.
 _SINGLE_LAYER_CHECKS = {"width", "space", "notch", "isolated"}
+# Check kinds `DrcRule.threshold_max_dbu` (issue #2370) is meaningful for --
+# i.e. the ones whose published rule can carry an *upper* size bound
+# alongside the lower one `threshold_dbu` already expresses (gf180mcu's
+# `CO.1` fixed 0.22x0.22um contact, `Vn.1` fixed 0.26x0.26um via). Only
+# "width" today; kept as a set (rather than an `== "width"` test) so the
+# validation error message can name the admissible kinds the same way every
+# other check-kind error in this module does. See
+# `_validate_threshold_max`/`_run_width_max_check` below.
+_MAX_BOUND_CHECKS = {"width"}
 # Check kinds that compare a region against another region (other_layer required).
 _TWO_LAYER_CHECKS = {"separation", "enclosing", "enclosed", "overlap"}
 # Two-layer check kinds where the "enclosed" layer can lie entirely outside
@@ -660,6 +669,13 @@ def run_drc(
     rules_checked: list[str] = []
 
     for rule in deck:
+        # A `threshold_max_dbu` (#2370) attached to a check kind with no
+        # upper-bound branch is a deck-authoring mistake that must fail
+        # loudly, including on a stream where this rule's layer is absent
+        # (below) and the check itself never runs -- see
+        # `_validate_threshold_max`.
+        _validate_threshold_max(rule)
+
         # For a `derived_layer` rule (#345), the region actually checked is
         # computed from two *different* drawn layers (`derived_layer.base`/
         # `intersect_with`) rather than `rule.layer`'s own raw shapes -- see
@@ -992,15 +1008,32 @@ def run_drc(
                 )
                 rule_counts[rule.id] = rule_counts.get(rule.id, 0) + 1
 
-            # `outside_region` (only set for "enclosing"/"enclosed", see
-            # _OUTSIDE_CHECKS) holds the part of the enclosed layer that
-            # `enclosing_check`/`enclosed_check` structurally cannot report:
-            # area with zero (or partial) spatial overlap with the enclosing
-            # layer, up to and including a shape that lies entirely outside
-            # it -- the worst-case enclosure violation (#318). Reported under
-            # the same rule id, additive to the edge-pair violations above.
-            if outside_region is not None:
-                for polygon in outside_region.each_merged():
+            # Polygon-shaped violation terms reported under the same rule id,
+            # additive to the edge-pair violations above (each `None` for
+            # every rule that doesn't opt into it):
+            #
+            # - `outside_region` (only set for "enclosing"/"enclosed", see
+            #   _OUTSIDE_CHECKS) holds the part of the enclosed layer that
+            #   `enclosing_check`/`enclosed_check` structurally cannot
+            #   report: area with zero (or partial) spatial overlap with the
+            #   enclosing layer, up to and including a shape that lies
+            #   entirely outside it -- the worst-case enclosure violation
+            #   (#318).
+            # - the max-size term (only set for a `"width"` rule that
+            #   declares `threshold_max_dbu`, see `_run_width_max_check`)
+            #   holds the merged cuts whose bounding box exceeds the *upper*
+            #   bound of a fixed-size rule like gf180mcu's `CO.1`/`Vn.1`
+            #   (#2370) -- the half no `Region` check primitive reports.
+            polygon_terms = [
+                term
+                for term in (
+                    outside_region,
+                    _run_width_max_check(region, rule, dbu_scale),
+                )
+                if term is not None
+            ]
+            for polygon_term in polygon_terms:
+                for polygon in polygon_term.each_merged():
                     bbox = polygon.bbox()
                     points = [[pt.x, pt.y] for pt in polygon.each_point_hull()]
 
@@ -1515,6 +1548,88 @@ def _validate_derived_layer(rule: DrcRule) -> None:
             f"rule '{rule.id}': unknown derived_layer mode "
             f"'{derived.mode}' (known: {', '.join(sorted(_DERIVED_LAYER_MODES))})"
         )
+
+
+def _validate_threshold_max(rule: DrcRule) -> None:
+    """Reject a :class:`~klayout_tools.decks.DrcRule` that sets
+    ``threshold_max_dbu`` on a check kind with no upper-bound branch, or
+    whose upper bound sits below its own lower bound (issue #2370).
+
+    Mirrors :func:`_validate_derived_layer`'s "a deck-authoring mistake
+    fails loudly with the rule id, never silently checks less than the
+    author asked for" contract: an upper bound attached to (say) a
+    ``"space"`` rule would otherwise be silently ignored, leaving the deck
+    author believing a half of their rule is enforced when nothing reads the
+    field at all. Validated per rule at the top of ``run_drc``'s rule loop
+    rather than inside :func:`_run_width_max_check`, so the mistake surfaces
+    even on a stream whose layer for that rule is absent (where the check
+    itself never runs).
+    """
+    if rule.threshold_max_dbu is None:
+        return
+    if rule.check not in _MAX_BOUND_CHECKS:
+        raise DrcError(
+            f"rule '{rule.id}': threshold_max_dbu is only supported for check "
+            f"kinds {', '.join(sorted(_MAX_BOUND_CHECKS))} (got '{rule.check}')"
+        )
+    if rule.threshold_max_dbu < rule.threshold_dbu:
+        raise DrcError(
+            f"rule '{rule.id}': threshold_max_dbu ({rule.threshold_max_dbu}) is "
+            f"below threshold_dbu ({rule.threshold_dbu}) -- no geometry can "
+            "satisfy both bounds"
+        )
+
+
+def _run_width_max_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any | None:
+    """The *upper*-bound half of a ``check="width"`` rule that sets
+    ``threshold_max_dbu`` (issue #2370): the merged polygons of ``region``
+    whose bounding box exceeds the maximum in either dimension.
+
+    Returns ``None`` for any rule that does not set ``threshold_max_dbu``
+    (every rule predating this field), so a caller can treat it as an
+    optional, purely additive term -- exactly like ``_run_check``'s
+    ``outside_region`` escape term (#318).
+
+    **Why a bounding-box bound and not an inverted** ``width_check``. A
+    published fixed-size rule -- gf180mcu's ``CO.1`` ("min/max contact size
+    -> 0.22um": every contact is a *fixed* 0.22 x 0.22 um square) and
+    ``Vn.1`` (a fixed 0.26 x 0.26 um via) -- bounds the cut from both sides,
+    but ``Region.width_check``, like every other ``Region`` check primitive,
+    only ever reports the lower-bound half. There is no native upper-bound
+    primitive to invert, and the obvious geometric substitute (shrink the
+    region by half the maximum and flag whatever survives) measures the
+    *facing-edge* width only: an over-long contact bar drawn 0.22 x 2 um has
+    a perfectly legal 0.22 um facing-edge width, collapses to nothing when
+    shrunk, and would go unreported -- yet it is precisely the geometry
+    ``CO.1`` forbids.
+
+    ``klayout.db.Region.with_bbox_max(0, max + 1, inverse=True)`` bounds the
+    *larger* bounding-box dimension of each polygon instead (KLayout's
+    ``with_*`` range selectors use a half-open ``[min, max)`` interval, hence
+    the ``+ 1``: a cut whose bbox is exactly the threshold is legal and must
+    stay clean). That flags an oversized square, an elongated bar, and an
+    L-shaped cut alike. The bound is measured on the axis-aligned envelope,
+    so a non-axis-aligned cut (e.g. a 45-degree-rotated square) is measured
+    conservatively by its envelope rather than its true size -- acceptable
+    for the fixed-size cut/via rules this exists for, whose official
+    geometry is an axis-aligned square.
+
+    ``region`` is merged first, for the same reason ``_run_check`` merges
+    (#995): a cut drawn as several abutting shapes is one physical cut, and
+    its size must be measured on the shape the fab sees. This cuts both ways
+    here and deliberately so -- two abutting oversized cuts merge into one
+    over-wide polygon that this term now reports, which is the geometry
+    issue #546's own reproducer draws.
+
+    Like ``_run_area_check``, this returns violating *polygons* (a
+    ``Region``), not an ``EdgePairs`` collection, so ``run_drc`` reports each
+    under the same rule ``id`` and the same ``check: "width"`` string as the
+    minimum-width edge pairs it is additive to.
+    """
+    if rule.threshold_max_dbu is None:
+        return None
+    max_d = round(rule.threshold_max_dbu * dbu_scale)
+    return region.merged().with_bbox_max(0, max_d + 1, True)
 
 
 def _run_area_check(region: Any, rule: DrcRule, dbu_scale: float) -> Any:

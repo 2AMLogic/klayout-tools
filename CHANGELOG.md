@@ -327,6 +327,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   test runs. `klt signoff`'s T1 item 11 needed no change: it already matches
   on the `erc.missing_tie:` work-identity prefix rather than on the specific
   skip reason.
+- **Fixed** (#2370, `klt drc --deck gf180mcu`, additive — **no**
+  `schema_version` bump and no new output field; violations from the new
+  bound are reported under the *same* rule id with the same
+  `check: "width"` string, so only the violation set changes): gf180mcu's
+  `CO.1` ("min/max contact size → 0.22um") and `Vn.1` ("min/max Vian size →
+  0.26um") are **fixed-size** rules — every contact is exactly a
+  0.22 × 0.22 um square, every via exactly 0.26 × 0.26 um — but the deck
+  encoded only the minimum half, because `klayout.db.Region.width_check`,
+  like every other `Region` check primitive, only ever reports a
+  lower-bound violation. An oversized 0.30 × 0.30 um contact, and an
+  elongated 0.22 × 2 um contact *bar*, both reported `status: "clean"`.
+  `DrcRule.threshold_max_dbu` adds the upper bound, and
+  `contact.width.1`/`via1.width.1`–`via4.width.1` now set it equal to their
+  own `threshold_dbu`. It is measured as a **bounding-box size** bound
+  (`Region.with_bbox_max(0, max + 1, inverse=True)`), not as an inverted
+  width check: the facing-edge distance of an over-long bar is a perfectly
+  legal 0.22 um, so no width-based upper bound — nor the obvious
+  shrink-by-half-the-maximum substitute, which collapses such a bar to
+  nothing — could ever catch the geometry the rule actually forbids. An
+  oversized square, an elongated bar, and an L-shaped cut are now all
+  flagged; a cut drawn at exactly the published size stays clean. Residual
+  conservatism, called out in `gf180mcu.py`'s own "Known approximations"
+  list: the bound is measured on the axis-aligned envelope, so a
+  non-axis-aligned cut (a 45°-rotated square) is measured by its envelope
+  rather than its true size — these rules' official geometry is an
+  axis-aligned square, so no realistic drawn cut hits it. The field is
+  opt-in per rule and valid only on `check: "width"`; every existing
+  minimum-only `"width"` rule (including every other deck's) is byte-for-byte
+  unchanged, and a deck that attaches it to another check kind, or sets a
+  maximum below its own minimum, now fails loudly with a `DrcError` naming
+  the rule rather than having the field silently ignored.
 - **Added** (#2339, `klt erc`, additive — **no** `schema_version` bump: two
   new optional spec keys and one new coverage skip reason, no new output
   field and no new coverage list; a spec that uses neither key produces

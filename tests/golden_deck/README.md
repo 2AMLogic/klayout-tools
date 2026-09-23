@@ -156,6 +156,20 @@ proportional but capped, so it's never zero/negative for this pilot's
 smallest threshold (140 dbu) and never so large it swamps the real geometry
 for its largest (1200 dbu).
 
+**Fixed-size layers clamp those constants** (issue #2370). A layer whose deck
+carries a `DrcRule.threshold_max_dbu` is bounded from *above* as well as
+below -- gf180mcu's Contact (`CO.1`, 0.22um) and Via1-Via4 (`Vn.1`, 0.26um)
+are fixed-size squares -- so the default bar geometry is itself illegal on
+those layers and would make an unrelated rule's `"clean"` fixture report
+violations. `generate_golden_deck.py` derives a per-layer cap
+(`max_size_by_layer`) and clamps each builder's own geometry against it: a
+width pair's clean bar becomes a square of exactly the published size, a
+space pair's two bars become two legally-sized cut squares, and an
+`"enclosing"` pair's enclosed square shrinks to the cut's legal size while
+its *conductor* is grown back so it still clears its own `width` minimum.
+Layers with no maximum (every layer of every deck but gf180mcu today) are
+untouched, so their manifests regenerate byte-identically.
+
 `"expected_disagreement"` is the one field the regenerator **preserves**
 across a re-run rather than deriving -- a deliberate, human-authored
 annotation, the same "refresh the derived value, keep the human-authored

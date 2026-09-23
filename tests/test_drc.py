@@ -1471,7 +1471,11 @@ def _make_gf180mcu_four_layer_clean_layout() -> kdb.Layout:
 
     contact = layout.layer(33, 0)
     layout.set_info(contact, kdb.LayerInfo(33, 0, "Contact"))
-    top.shapes(contact).insert(kdb.Box(2000, 0, 2300, 300))
+    # Exactly 220x220 dbu: `contact.width.1` is a *fixed*-size rule (CO.1),
+    # so 0.22um is both the minimum and the maximum (issue #2370) -- the
+    # 300x300 square this fixture used while only the minimum half was
+    # enforced is a genuine CO.1 violation.
+    top.shapes(contact).insert(kdb.Box(2000, 0, 2220, 220))
 
     metal1 = layout.layer(34, 0)
     layout.set_info(metal1, kdb.LayerInfo(34, 0, "Metal1"))
@@ -2289,10 +2293,12 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     """A Via4 shape centred well inside the virtual bottom plate (>= 400 dbu
     margin on every side) passes.
 
-    Sized 300x300 dbu (>= the 260 dbu `via4.width.1` minimum added by #546)
-    rather than the smaller placeholder size used before that rule existed,
-    so this fixture stays genuinely `"clean"` under the now-fuller via4 rule
-    coverage, not just under `mim.enclosing.via4.1` alone.
+    Sized exactly 260x260 dbu rather than the smaller placeholder size used
+    before `via4.width.1` existed (#546), so this fixture stays genuinely
+    `"clean"` under the now-fuller via4 rule coverage, not just under
+    `mim.enclosing.via4.1` alone. Exactly 260, not the 300 this used while
+    only the minimum half of `Vn.1` was enforced: that rule is a *fixed*
+    0.26 x 0.26um size, both bounds of which are checked since issue #2370.
     """
     layout = kdb.Layout()
     layout.dbu = 0.001
@@ -2305,7 +2311,7 @@ def test_run_drc_gf180mcu_mim_enclosing_via4_clean(tmp_path):
     layout.set_info(via4, kdb.LayerInfo(41, 0, "Via4"))
     top.shapes(metal4).insert(kdb.Box(0, 0, 20000, 20000))
     top.shapes(fusetop).insert(kdb.Box(2000, 2000, 18000, 18000))
-    top.shapes(via4).insert(kdb.Box(9850, 9850, 10150, 10150))  # centred, 300x300
+    top.shapes(via4).insert(kdb.Box(9870, 9870, 10130, 10130))  # centred, 260x260
     path = tmp_path / "mim_enclosing_via4_clean.gds"
     layout.write(str(path))
 
@@ -2385,16 +2391,22 @@ _GF180MCU_VIA_LAYERS = [
 def test_run_drc_gf180mcu_via_width_violation(
     rule_prefix, layer_tuple, layer_name, tmp_path
 ):
-    """A via square narrower than the 260 dbu (0.26 um) `<via>.width.1`
-    threshold trips exactly one violation (the minimum-width half of the
-    official "Vn.1" min/max size rule -- see `via1.width.1`'s docstring in
-    `gf180mcu.py` for why only the minimum half is enforced)."""
+    """A via narrower than the 260 dbu (0.26 um) `<via>.width.1` threshold
+    trips exactly one violation -- the minimum-width half of the official
+    "Vn.1" min/max size rule.
+
+    Kept under the *maximum* half's bound too (issue #2370: `Vn.1` is a
+    fixed 0.26 x 0.26um size, and both halves are enforced), so this case
+    still isolates the minimum: 100 x 260 dbu is too narrow in one direction
+    while its bounding box is exactly -- not over -- the 260 dbu maximum.
+    The max half has its own cases in
+    `test_run_drc_gf180mcu_via_width_max_*` below."""
     layout = kdb.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
     via = layout.layer(*layer_tuple)
     layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
-    top.shapes(via).insert(kdb.Box(0, 0, 100, 2000))  # 100 dbu < 260
+    top.shapes(via).insert(kdb.Box(0, 0, 100, 260))  # 100 dbu < 260
     path = tmp_path / f"{rule_prefix}_width_violation.gds"
     layout.write(str(path))
 
@@ -2421,8 +2433,11 @@ def test_run_drc_gf180mcu_via_space_violation(
     top = layout.create_cell("TOP")
     via = layout.layer(*layer_tuple)
     layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
-    top.shapes(via).insert(kdb.Box(0, 0, 300, 300))
-    top.shapes(via).insert(kdb.Box(400, 0, 700, 300))  # 100 dbu gap < 260
+    # Exactly 260x260 dbu each -- `Vn.1` is a fixed size (issue #2370), so a
+    # 300x300 via would trip `<via>.width.1`'s max half as well and stop this
+    # case from isolating the spacing rule.
+    top.shapes(via).insert(kdb.Box(0, 0, 260, 260))
+    top.shapes(via).insert(kdb.Box(360, 0, 620, 260))  # 100 dbu gap < 260
     path = tmp_path / f"{rule_prefix}_space_violation.gds"
     layout.write(str(path))
 
@@ -2438,14 +2453,19 @@ def test_run_drc_gf180mcu_via_space_violation(
 
 @pytest.mark.parametrize("rule_prefix,layer_tuple,layer_name", _GF180MCU_VIA_LAYERS)
 def test_run_drc_gf180mcu_via_clean(rule_prefix, layer_tuple, layer_name, tmp_path):
-    """A single, properly-sized (>= 260 dbu), properly-isolated via square
-    passes both `<via>.width.1` and `<via>.space.1`."""
+    """A single, properly-sized, properly-isolated via square passes both
+    `<via>.width.1` and `<via>.space.1`.
+
+    Exactly 260x260 dbu: `Vn.1` is a fixed 0.26 x 0.26um size whose *both*
+    bounds are checked (issue #2370), so "properly sized" is one value, not
+    a floor -- the false-positive guard for the max half added by that issue
+    (a correctly-sized cut must stay clean)."""
     layout = kdb.Layout()
     layout.dbu = 0.001
     top = layout.create_cell("TOP")
     via = layout.layer(*layer_tuple)
     layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
-    top.shapes(via).insert(kdb.Box(0, 0, 300, 300))  # 300 >= 260
+    top.shapes(via).insert(kdb.Box(0, 0, 260, 260))  # exactly 260: min == max
     path = tmp_path / f"{rule_prefix}_clean.gds"
     layout.write(str(path))
 
@@ -2483,7 +2503,7 @@ def test_run_drc_gf180mcu_via_layers_now_covered_by_their_own_rules(tmp_path):
     for _rule_prefix, layer_tuple, layer_name in _GF180MCU_VIA_LAYERS:
         li = layout.layer(*layer_tuple)
         layout.set_info(li, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
-        top.shapes(li).insert(kdb.Box(0, 0, 300, 300))  # legally sized, isolated
+        top.shapes(li).insert(kdb.Box(0, 0, 260, 260))  # legally sized, isolated
     path = tmp_path / "via_layers_covered.gds"
     layout.write(str(path))
 
@@ -2515,19 +2535,18 @@ def test_run_drc_gf180mcu_via4_reproducer_from_issue_546(tmp_path):
     by default (its `merged_semantics` default), so those two 780x780 dbu
     squares become a single 1560x780 dbu merged rectangle whose minimum width
     (780 dbu) is well above the 260 dbu minimum, and `space_check` sees one
-    polygon, not two, so it reports no space violation either -- the same
-    "our width_check enforces only a minimum, never the official rule's
-    fixed-size maximum" approximation `contact.width.1`/`via1.width.1` (etc.)
-    already document, just triggered by two abutting oversized cuts merging
-    into one shape rather than by a single one. Widening the gap to 100 dbu
-    (<< the 260 dbu `via4.space.1` minimum) keeps every dimension from the
-    issue's own reproducer (each cut still 780x780 dbu, ~3x the legal size)
-    while producing two genuinely separate polygons that `via4.space.1`
-    catches -- the same underlying "illegal via geometry reports clean" bug
-    the issue reports, demonstrated through the one approximation
-    (`space_check`) this deck's rules can enforce rather than the one
-    (a min/max `width_check`) the curator's own implementation guidance
-    said not to add as part of this issue.
+    polygon, not two, so it reported no space violation either. When this
+    test was written that made `via4.space.1` the only rule able to catch
+    the geometry, so it widens the gap to 100 dbu (<< the 260 dbu
+    `via4.space.1` minimum), keeping every dimension from the issue's own
+    reproducer (each cut still 780x780 dbu, ~3x the legal size) while
+    producing two genuinely separate polygons.
+
+    Since issue #2370 the *size* half is caught too: `Vn.1` is a fixed
+    0.26 x 0.26 um square and `via4.width.1` now carries the matching
+    `threshold_max_dbu`, so each 780x780 dbu cut is reported on its own
+    merits rather than only through its spacing to its neighbour -- asserted
+    below alongside the original spacing expectation.
     """
     layout = kdb.Layout()
     layout.dbu = 0.001
@@ -2554,6 +2573,174 @@ def test_run_drc_gf180mcu_via4_reproducer_from_issue_546(tmp_path):
     assert report["status"] == "violations"
     assert report["violation_count"] > 0
     assert report["rule_counts"].get("via4.space.1", 0) >= 1
+    # The size half, closed by #2370: each 780x780 dbu cut is ~3x `Vn.1`'s
+    # fixed 260 dbu size, so both are reported by `via4.width.1` itself.
+    assert report["rule_counts"].get("via4.width.1", 0) == 2
+
+
+# --- CO.1/Vn.1 fixed-size maximum (threshold_max_dbu, #2370) --------------
+#
+# `CO.1` ("min/max contact size -> 0.22um") and `Vn.1` ("min/max Vian size
+# -> 0.26um") are *fixed*-size rules: the published value is simultaneously
+# a floor and a ceiling. Until #2370 the deck encoded only the floor, because
+# `Region.width_check` -- like every other `Region` check primitive -- only
+# reports a lower-bound violation, so an oversized square or an elongated
+# contact/via bar reported `status: clean`. `DrcRule.threshold_max_dbu` adds
+# the ceiling (see `_run_width_max_check` in `drc.py`); the boundary ladder
+# below pins both halves and, most importantly, the *no-false-positive* case
+# in the middle: a cut drawn at exactly the fixed size stays clean.
+
+# (case id, cut box, expected violation count) for Contact (33/0), whose
+# CO.1 size is 220 dbu.
+_GF180MCU_CONTACT_SIZE_CASES = [
+    # An under-sized *square* is too narrow in both directions, so
+    # `width_check` reports one edge pair per direction -- 2, not 1.
+    ("below_min", kdb.Box(0, 0, 200, 200), 2),
+    ("at_min_and_max", kdb.Box(0, 0, 220, 220), 0),
+    ("above_max_square", kdb.Box(0, 0, 300, 300), 1),
+    ("above_max_bar", kdb.Box(0, 0, 220, 2000), 1),
+]
+
+
+@pytest.mark.parametrize(
+    "case_id,cut_box,expected_count",
+    _GF180MCU_CONTACT_SIZE_CASES,
+    ids=[entry[0] for entry in _GF180MCU_CONTACT_SIZE_CASES],
+)
+def test_run_drc_gf180mcu_contact_fixed_size_boundaries(
+    case_id, cut_box, expected_count, tmp_path
+):
+    """`contact.width.1` (CO.1) is checked as a fixed 0.22 x 0.22 um size.
+
+    Four rungs of the boundary ladder, all reported under the one rule id
+    with `check: "width"`:
+
+    - 200x200 dbu (below the minimum, one edge pair per direction) -- the
+      half that already worked;
+    - 220x220 dbu (exactly the fixed size) -- must stay clean, the
+      false-positive guard for the new maximum;
+    - 300x300 dbu (an oversized square) -- newly flagged;
+    - 220x2000 dbu (an elongated bar, issue #2351's own reproducer) -- newly
+      flagged, and the case no width-based upper bound could catch: its
+      facing-edge width is a perfectly legal 220 dbu.
+    """
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    contact = layout.layer(33, 0)
+    layout.set_info(contact, kdb.LayerInfo(33, 0, "Contact"))
+    top.shapes(contact).insert(cut_box)
+    path = tmp_path / f"contact_{case_id}.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["rule_counts"].get("contact.width.1", 0) == expected_count
+    if expected_count == 0:
+        assert report["status"] == "clean"
+        return
+    assert report["status"] == "violations"
+    reported = [v for v in report["violations"] if v["rule"] == "contact.width.1"]
+    for violation in reported:
+        assert violation["check"] == "width"
+        assert violation["layer"] == "Contact"
+        # Both halves report a real located shape, not a whole-cell aggregate.
+        assert violation["polygon"] is not None
+        assert violation["bbox"]["right"] > violation["bbox"]["left"]
+
+
+@pytest.mark.parametrize("rule_prefix,layer_tuple,layer_name", _GF180MCU_VIA_LAYERS)
+def test_run_drc_gf180mcu_via_width_max_violation(
+    rule_prefix, layer_tuple, layer_name, tmp_path
+):
+    """The `Vn.1` ceiling for each of Via1-Via4: a 300x300 dbu via (above the
+    fixed 260 dbu size, and previously `status: clean`) trips exactly one
+    `<via>.width.1` violation."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer_tuple)
+    layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 300, 300))  # 300 dbu > 260
+    path = tmp_path / f"{rule_prefix}_width_max_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
+    (violation,) = report["violations"]
+    assert violation["rule"] == f"{rule_prefix}.width.1"
+    assert violation["check"] == "width"
+    assert violation["layer"] == layer_name
+
+
+@pytest.mark.parametrize("rule_prefix,layer_tuple,layer_name", _GF180MCU_VIA_LAYERS)
+def test_run_drc_gf180mcu_via_width_max_elongated_bar_violation(
+    rule_prefix, layer_tuple, layer_name, tmp_path
+):
+    """A via drawn as a 260 x 2000 dbu bar -- legal facing-edge width, far
+    over `Vn.1`'s fixed size -- is flagged.
+
+    The case that rules out implementing the maximum as a shrink-by-half-max
+    geometric test (see `_run_width_max_check`'s docstring): such a bar
+    collapses to nothing when shrunk by half the maximum and would be missed
+    entirely."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    via = layout.layer(*layer_tuple)
+    layout.set_info(via, kdb.LayerInfo(layer_tuple[0], layer_tuple[1], layer_name))
+    top.shapes(via).insert(kdb.Box(0, 0, 260, 2000))
+    path = tmp_path / f"{rule_prefix}_width_max_bar.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"] == {f"{rule_prefix}.width.1": 1}
+
+
+def test_run_drc_gf180mcu_contact_fixed_size_rules_declare_both_bounds():
+    """Structural half of the above: the five rules #2370 covers each carry
+    a `threshold_max_dbu` equal to their own `threshold_dbu` -- a *fixed*
+    size, not a range."""
+    deck = get_deck("gf180mcu")
+    fixed_size_rule_ids = {
+        "contact.width.1",
+        "via1.width.1",
+        "via2.width.1",
+        "via3.width.1",
+        "via4.width.1",
+    }
+    seen = set()
+    for rule in deck:
+        if rule.id not in fixed_size_rule_ids:
+            continue
+        seen.add(rule.id)
+        assert rule.check == "width"
+        assert rule.threshold_max_dbu == rule.threshold_dbu, rule.id
+    assert seen == fixed_size_rule_ids
+
+
+def test_run_drc_gf180mcu_contact_max_bound_rescales_with_layout_dbu(tmp_path):
+    """The maximum is rescaled by `dbu_scale` exactly like `threshold_dbu`:
+    on a layout written at 0.002 um/dbu (half the deck's nominal resolution)
+    CO.1's 0.22 um ceiling is 110 layout dbu, so a 150 dbu (0.30 um) contact
+    violates while a 110 dbu (0.22 um) one does not."""
+    for name, size, expected in (("oversized", 150, 1), ("exact", 110, 0)):
+        layout = kdb.Layout()
+        layout.dbu = 0.002  # deck nominal is 0.001 -> dbu_scale 0.5
+        top = layout.create_cell("TOP")
+        contact = layout.layer(33, 0)
+        layout.set_info(contact, kdb.LayerInfo(33, 0, "Contact"))
+        top.shapes(contact).insert(kdb.Box(0, 0, size, size))
+        path = tmp_path / f"contact_dbu_{name}.gds"
+        layout.write(str(path))
+
+        report = run_drc(str(path), "gf180mcu")
+
+        assert report["rule_counts"].get("contact.width.1", 0) == expected, name
 
 
 # --- conductor-over-cut enclosure (CO.6, V1.3a, Vn.3b/Vn.4a, #551) --------
@@ -2589,6 +2776,21 @@ _GF180MCU_CUT_ENCLOSURE_RULES = [
 _GF180MCU_CUT_ENCLOSURE_RULES_WITH_MARGIN = [
     entry for entry in _GF180MCU_CUT_ENCLOSURE_RULES if entry[5] > 0
 ]
+
+
+def _gf180mcu_legal_cut_box(cut: tuple[int, int], left: int, bottom: int) -> kdb.Box:
+    """A cut square of exactly the size its own fixed-size rule requires --
+    0.22um for Contact (`CO.1`), 0.26um for Via1-Via4 (`Vn.1`).
+
+    Both rules bound the cut from *both* sides (issue #2370), so there is no
+    single "comfortably legal" size that works for every cut layer the
+    enclosure fixtures below parametrize over: the one 300x300 dbu square
+    they shared while only the minimum half was enforced is now over CO.1's
+    and Vn.1's maxima alike, and would add a `<cut>.width.1` violation to
+    every enclosure case.
+    """
+    size = 220 if cut == (33, 0) else 260
+    return kdb.Box(left, bottom, left + size, bottom + size)
 
 
 def _gf180mcu_cut_stack(tmp_path, name, conductor, cut, conductor_box, cut_box):
@@ -2628,7 +2830,7 @@ def test_run_drc_gf180mcu_cut_enclosure_escape_violation(
         conductor,
         cut,
         kdb.Box(1100, 800, 1600, 1600),  # misses the cut's left 100 dbu
-        kdb.Box(1000, 1000, 1300, 1300),  # 300 dbu, legal for Contact and Vian
+        _gf180mcu_legal_cut_box(cut, 1000, 1000),  # exactly CO.1/Vn.1 size
     )
 
     report = run_drc(str(path), "gf180mcu")
@@ -2661,7 +2863,7 @@ def test_run_drc_gf180mcu_cut_enclosure_marginal_violation(
         conductor,
         cut,
         kdb.Box(1000 - margin, 800, 1600, 1600),
-        kdb.Box(1000, 1000, 1300, 1300),
+        _gf180mcu_legal_cut_box(cut, 1000, 1000),
     )
 
     report = run_drc(str(path), "gf180mcu")
@@ -2690,7 +2892,7 @@ def test_run_drc_gf180mcu_cut_enclosure_clean(
         conductor,
         cut,
         kdb.Box(800, 800, 1600, 1600),
-        kdb.Box(1000, 1000, 1300, 1300),
+        _gf180mcu_legal_cut_box(cut, 1000, 1000),
     )
 
     report = run_drc(str(path), "gf180mcu")
@@ -6035,6 +6237,199 @@ def test_run_drc_antenna_check_requires_other_layer(tmp_path, monkeypatch):
     layout.write(str(path))
 
     with pytest.raises(DrcError, match="other_layer"):
+        run_drc(str(path), "synthetic")
+
+
+# --------------------------------------------------------------------------- #
+# `DrcRule.threshold_max_dbu` as a general capability (#2370)
+# --------------------------------------------------------------------------- #
+# gf180mcu's CO.1/Vn.1 rules above exercise the *fixed*-size case (maximum
+# == minimum). These synthetic one-rule decks cover what no real deck rule
+# does today: a genuine min..max *range*, and the deck-authoring mistakes the
+# engine must reject loudly rather than silently ignore.
+
+_SYNTHETIC_WIDTH_RANGE_CASES = [
+    # An under-sized square is too narrow in both directions -> one
+    # `width_check` edge pair per direction; the max half reports one
+    # violating *polygon*.
+    ("below_min", 50, 2),
+    ("at_min", 100, 0),
+    ("in_range", 200, 0),
+    ("at_max", 300, 0),
+    ("above_max", 301, 1),
+]
+
+
+@pytest.mark.parametrize(
+    "case_id,size,expected_count",
+    _SYNTHETIC_WIDTH_RANGE_CASES,
+    ids=[entry[0] for entry in _SYNTHETIC_WIDTH_RANGE_CASES],
+)
+def test_run_drc_synthetic_width_range_boundaries(
+    case_id, size, expected_count, tmp_path, monkeypatch
+):
+    """A `check="width"` rule with `threshold_dbu=100`/`threshold_max_dbu=300`
+    bounds the shape from both sides: below the minimum and above the maximum
+    are violations, and every size in between -- including both endpoints,
+    which are inclusive -- is clean."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="cut.width.1",
+                description="synthetic: cut width between 100 and 300 dbu",
+                layer=(70, 0),
+                check="width",
+                threshold_dbu=100,
+                threshold_max_dbu=300,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    cut = layout.layer(70, 0)
+    top.shapes(cut).insert(kdb.Box(0, 0, size, size))
+    path = tmp_path / f"width_range_{case_id}.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["rule_counts"].get("cut.width.1", 0) == expected_count
+    for violation in report["violations"]:
+        assert violation["check"] == "width"
+
+
+def test_run_drc_synthetic_width_max_only_applies_to_that_rule(tmp_path, monkeypatch):
+    """An oversized shape on a plain minimum-only `"width"` rule (no
+    `threshold_max_dbu`) is still clean -- the new upper bound is opt-in per
+    rule, not a behaviour change for every existing `"width"` rule."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.width.1",
+                description="synthetic: minimum-only metal width",
+                layer=(70, 0),
+                check="width",
+                threshold_dbu=100,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(70, 0)
+    top.shapes(metal).insert(kdb.Box(0, 0, 100_000, 100_000))
+    path = tmp_path / "width_no_max.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "synthetic")
+
+    assert report["status"] == "clean"
+
+
+def test_run_drc_threshold_max_dbu_rejected_for_unsupported_check_kind(
+    tmp_path, monkeypatch
+):
+    """`threshold_max_dbu` on a check kind with no upper-bound branch (here
+    `"space"`) raises `DrcError` naming the rule, rather than being silently
+    ignored -- the same fail-loudly contract `_validate_derived_layer` and
+    `_run_area_check` already have for their own deck-authoring mistakes."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.space.1",
+                description="synthetic: misconfigured space rule",
+                layer=(70, 0),
+                check="space",
+                threshold_dbu=100,
+                threshold_max_dbu=300,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    metal = layout.layer(70, 0)
+    top.shapes(metal).insert(kdb.Box(0, 0, 200, 200))
+    path = tmp_path / "space_with_max.gds"
+    layout.write(str(path))
+
+    with pytest.raises(DrcError, match="metal.space.1.*threshold_max_dbu"):
+        run_drc(str(path), "synthetic")
+
+
+def test_run_drc_threshold_max_dbu_rejected_when_below_threshold_dbu(
+    tmp_path, monkeypatch
+):
+    """A maximum below the rule's own minimum is unsatisfiable by any
+    geometry -- rejected at run time rather than quietly flagging every
+    shape twice."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="cut.width.1",
+                description="synthetic: inverted size bounds",
+                layer=(70, 0),
+                check="width",
+                threshold_dbu=300,
+                threshold_max_dbu=100,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    cut = layout.layer(70, 0)
+    top.shapes(cut).insert(kdb.Box(0, 0, 200, 200))
+    path = tmp_path / "inverted_bounds.gds"
+    layout.write(str(path))
+
+    with pytest.raises(DrcError, match="below threshold_dbu"):
+        run_drc(str(path), "synthetic")
+
+
+def test_run_drc_threshold_max_dbu_validated_even_when_layer_absent(
+    tmp_path, monkeypatch
+):
+    """The validation above is not gated on the rule's layer being present
+    in the stream: a misconfigured rule must fail on *any* input, not only on
+    the one layout that happens to draw its layer."""
+    from klayout_tools.decks import DrcRule
+
+    _patch_synthetic_deck(
+        monkeypatch,
+        [
+            DrcRule(
+                id="metal.space.1",
+                description="synthetic: misconfigured space rule",
+                layer=(71, 0),  # never drawn below
+                check="space",
+                threshold_dbu=100,
+                threshold_max_dbu=300,
+            )
+        ],
+    )
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    other = layout.layer(70, 0)
+    top.shapes(other).insert(kdb.Box(0, 0, 200, 200))
+    path = tmp_path / "absent_layer_with_max.gds"
+    layout.write(str(path))
+
+    with pytest.raises(DrcError, match="threshold_max_dbu"):
         run_drc(str(path), "synthetic")
 
 
