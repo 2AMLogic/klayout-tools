@@ -1927,6 +1927,332 @@ def _klayout_deck_error_lines(*streams: str | None) -> list[str]:
     return lines
 
 
+#: Cap on how many lines of klayout's own output a deck-abort error message
+#: carries (issue #2333). The whole captured stdout/stderr is surfaced below
+#: this size -- the point of the change is that a *non*-``ERROR``-prefixed
+#: line (``sh: pmap: command not found``) is usually the causal one -- but a
+#: deck that prints a per-rule progress line for thousands of rules should
+#: not turn a single error into a multi-megabyte message. When the cap trips,
+#: the **tail** is what survives (the abort is at the end of the run) and any
+#: ``ERROR`` line from the omitted head is repeated so the detection signal is
+#: never lost to truncation.
+_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES = 500
+
+
+def _klayout_deck_error_detail(
+    stdout: str | None, stderr: str | None, error_lines: list[str]
+) -> str:
+    """The klayout output to quote in a deck-abort :class:`DrcError` (issue
+    #2333), stdout before stderr.
+
+    Deliberately **not** ``error_lines`` alone. ``_klayout_deck_error_lines``
+    keeps only lines starting with ``ERROR`` -- correct for *detecting* a
+    failed deck (a rule named ``ERROR_CHECK.1`` must not be misread as one),
+    but wrong for *explaining* it: the line that says why is routinely not
+    ``ERROR``-prefixed. The motivating case is a PDK driver that shells out
+    to a host utility the machine does not have, where klayout's captured
+    output is::
+
+        sh: pmap: command not found
+        ERROR: In main.drc: undefined method 'strip' for nil
+        ERROR: NoMethodError: undefined method 'strip' for nil in ...
+
+    Quoting only the ``ERROR`` lines drops the one line that identifies the
+    real cause and leaves a nil-dereference that reads like a broken rule
+    deck. So the full captured output is surfaced (subject to
+    :data:`_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES`), and ``error_lines`` is
+    used only as the fallback for the impossible-in-practice case of an empty
+    capture.
+    """
+    chunks = [
+        stream.strip() for stream in (stdout, stderr) if stream and stream.strip()
+    ]
+    combined = "\n".join(chunks)
+    if not combined:
+        return "\n".join(error_lines)
+
+    lines = combined.splitlines()
+    if len(lines) <= _KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:
+        return combined
+
+    kept = lines[-_KLAYOUT_DECK_ERROR_DETAIL_MAX_LINES:]
+    kept_set = {line.rstrip() for line in kept}
+    dropped_errors = [line for line in error_lines if line.rstrip() not in kept_set]
+    head = [
+        f"... ({len(lines) - len(kept)} earlier lines omitted; "
+        "klt kept the tail, where the abort is)"
+    ]
+    if dropped_errors:
+        head.extend(dropped_errors)
+        head.append("... (end of ERROR lines recovered from the omitted section)")
+    return "\n".join(head + kept)
+
+
+#: Ruby's shell-out forms, as they appear in a KLayout DRC-DSL driver script
+#: (issue #2333). Each alternative captures the *command string* the host
+#: shell would run, which :func:`_shell_command_words` then reduces to the
+#: executables it names. Backticks and ``%x`` are the literal forms; the rest
+#: are the method calls whose first argument is a command line.
+_RUBY_SHELL_OUT_RES = (
+    # `pmap #{Process.pid} | tail -1`
+    re.compile(r"`(?P<cmd>[^`\n]*)`"),
+    # %x{...} / %x(...) / %x[...]
+    re.compile(r"%x[{(\[](?P<cmd>[^)}\]\n]*)[)}\]]"),
+    # system("..."), exec('...'), spawn("..."), IO.popen("..."),
+    # Open3.capture3("..."), Open3.popen3('...'), ...
+    re.compile(
+        r"\b(?:system|exec|spawn|IO\.popen|Open3\.\w+)\s*\(?\s*"
+        r"""(?:"(?P<cmd_dq>[^"\n]*)"|'(?P<cmd_sq>[^'\n]*)')"""
+    ),
+)
+
+#: Ruby's literal-path include forms, so a driver split across files is
+#: scanned as a whole (issue #2333). Only string *literals* are followed --
+#: a computed path is unknowable statically and is simply not scanned.
+_RUBY_INCLUDE_RE = re.compile(
+    r"""\b(?:require_relative|require|load)\s*\(?\s*"""
+    r"""(?:"(?P<path_dq>[^"\n]*)"|'(?P<path_sq>[^'\n]*)')"""
+)
+
+#: Words that name no external executable: shell builtins/keywords, plus the
+#: redirection/grouping artifacts a naive split can leave behind. Anything
+#: here is skipped rather than looked up on PATH.
+_SHELL_BUILTIN_WORDS = frozenset(
+    {
+        ".",
+        ":",
+        "[",
+        "alias",
+        "bg",
+        "break",
+        "case",
+        "cd",
+        "command",
+        "continue",
+        "do",
+        "done",
+        "echo",
+        "elif",
+        "else",
+        "esac",
+        "eval",
+        "exec",
+        "exit",
+        "export",
+        "false",
+        "fg",
+        "fi",
+        "for",
+        "function",
+        "if",
+        "jobs",
+        "local",
+        "printf",
+        "pwd",
+        "read",
+        "return",
+        "set",
+        "shift",
+        "source",
+        "test",
+        "then",
+        "time",
+        "trap",
+        "true",
+        "type",
+        "ulimit",
+        "umask",
+        "unalias",
+        "unset",
+        "until",
+        "wait",
+        "while",
+    }
+)
+
+#: A word that could plausibly name an executable: a bare command name or a
+#: path to one. Anything else (a redirection fragment, a glob, a quote-mangled
+#: token) is skipped -- the preflight only reports what it is sure about.
+_COMMAND_WORD_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.+-]*$|^[./~][\w./+-]*$")
+
+#: Upper bound on how many files one deck's include graph is scanned for
+#: (issue #2333) -- a static scan must never become the expensive part of a
+#: DRC run, and a driver that pulls in more than this is past the point where
+#: a heuristic preflight is useful.
+_DECK_SCAN_MAX_FILES = 64
+
+
+def _shell_command_words(command: str) -> list[str]:
+    """The executables a shell would run for ``command`` -- the first word of
+    each pipeline/list segment (issue #2333).
+
+    Conservative by design: a segment whose command word is Ruby-interpolated
+    (``#{...}``), a shell builtin, or anything that does not look like a
+    command name at all yields nothing rather than a guess, because every word
+    returned here becomes a hard failure when it is missing from PATH.
+    """
+    words: list[str] = []
+    for segment in re.split(r"\|\||&&|[|;\n]", command):
+        tokens = segment.strip().lstrip("(").strip().split()
+        # Leading `FOO=bar` environment assignments precede the command.
+        while tokens and re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0]):
+            tokens.pop(0)
+        if not tokens:
+            continue
+        word = tokens[0]
+        # Only a *matched* surrounding quote pair is stripped: a stray
+        # apostrophe (Ruby renders names as `foo', so a line quoting two of
+        # them pairs the backticks by accident) must keep it and be rejected
+        # by `_COMMAND_WORD_RE` below rather than become a bogus lookup.
+        if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
+            word = word[1:-1]
+        if "#{" in word or "$" in word:
+            continue
+        if word in _SHELL_BUILTIN_WORDS or not _COMMAND_WORD_RE.match(word):
+            continue
+        words.append(word)
+    return words
+
+
+def _deck_script_files(deck_file: str) -> list[str]:
+    """``deck_file`` plus every literal-path Ruby include reachable from it
+    (issue #2333), depth-first, de-duplicated, bounded by
+    :data:`_DECK_SCAN_MAX_FILES`.
+
+    A PDK's driver is often one file, but the shapes that carry host
+    assumptions (a shared logging/util prologue, a per-topic rule table) split
+    it across a handful. Unreadable or computed-path includes are skipped, not
+    an error: this is a diagnostic aid, and a file it cannot read is simply
+    one it cannot make claims about.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    pending = [os.path.abspath(deck_file)]
+    while pending and len(ordered) < _DECK_SCAN_MAX_FILES:
+        current = pending.pop(0)
+        if current in seen or not os.path.isfile(current):
+            continue
+        seen.add(current)
+        ordered.append(current)
+        try:
+            with open(current, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+        except OSError:
+            continue
+        base = os.path.dirname(current)
+        for match in _RUBY_INCLUDE_RE.finditer(text):
+            raw = match.group("path_dq") or match.group("path_sq") or ""
+            if not raw or "#{" in raw:
+                continue
+            candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
+            for resolved in (candidate, candidate + ".rb"):
+                if os.path.isfile(resolved):
+                    pending.append(os.path.abspath(resolved))
+                    break
+    return ordered
+
+
+def _scan_deck_host_commands(deck_file: str) -> dict[str, str]:
+    """Every host executable the deck script (and its literal includes) shells
+    out to, mapped to the ``<file>:<line>`` where it was first seen (issue
+    #2333).
+
+    A static, deliberately shallow scan -- see
+    :func:`_missing_deck_host_commands` for what that means for the caller.
+    """
+    found: dict[str, str] = {}
+    for source in _deck_script_files(deck_file):
+        try:
+            with open(source, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        for number, line in enumerate(lines, start=1):
+            if line.lstrip().startswith("#"):
+                continue
+            for pattern in _RUBY_SHELL_OUT_RES:
+                for match in pattern.finditer(line):
+                    groups = match.groupdict()
+                    command = (
+                        groups.get("cmd")
+                        or groups.get("cmd_dq")
+                        or groups.get("cmd_sq")
+                        or ""
+                    )
+                    for word in _shell_command_words(command):
+                        found.setdefault(word, f"{source}:{number}")
+    return found
+
+
+def _missing_deck_host_commands(deck_file: str) -> dict[str, str]:
+    """The subset of :func:`_scan_deck_host_commands` that is not on ``PATH``,
+    mapped to its first ``<file>:<line>`` citation (issue #2333).
+
+    Both directions of error are accepted on purpose, and both are safe:
+
+    - **False negative** (a shell-out through a computed command string, an
+      include this cannot resolve): the run proceeds exactly as it did before
+      this check existed, and the deck's own failure is still caught by the
+      deck-abort check -- now quoting the ``sh: ...: command not found`` line
+      that explains it (:func:`_klayout_deck_error_detail`).
+    - **False positive** (a shell-out on a branch this run would never take):
+      the caller is told which utility and which line, and
+      ``--allow-missing-host-tools`` runs the deck anyway.
+
+    What is *not* acceptable is guessing: a word that might not be a command
+    name is never reported, since every word here fails the run by default.
+    """
+    import shutil
+
+    return {
+        command: where
+        for command, where in _scan_deck_host_commands(deck_file).items()
+        if shutil.which(command) is None
+    }
+
+
+def _preflight_deck_host_tools(deck_file: str, allow_missing_host_tools: bool) -> None:
+    """Raise :class:`DrcError` if the deck script shells out to a command
+    this host does not have (issue #2333), naming the command and where it is
+    used. A no-op when ``allow_missing_host_tools`` is set.
+
+    Called *before* the ``klayout`` subprocess is launched: the failure it
+    prevents is not a rule-checking failure at all, and the error the deck
+    itself would produce names something else entirely.
+    """
+    if allow_missing_host_tools:
+        return
+    missing = _missing_deck_host_commands(deck_file)
+    if missing:
+        raise DrcError(_missing_host_commands_message(missing))
+
+
+def _missing_host_commands_message(missing: dict[str, str]) -> str:
+    """The actionable error text for a deck whose host utilities are absent
+    (issue #2333), one ``deck requires '<cmd>' (not found on PATH)`` line per
+    utility with the ``<file>:<line>`` that shells out to it.
+
+    Phrased so the *first* thing the caller reads is the missing utility --
+    the whole point of the preflight is that the failure the deck itself
+    produces names something else entirely.
+    """
+    bullets = "\n".join(
+        f"  - deck requires {command!r} (not found on PATH) -- shelled out to "
+        f"at {where}"
+        for command, where in sorted(missing.items())
+    )
+    return (
+        "the DRC-DSL deck script shells out to a host utility this machine "
+        "does not have, so it would abort before reporting rules (typically "
+        "with a downstream error naming something else entirely):\n"
+        f"{bullets}\n"
+        "Install the missing utility (e.g. `pmap` ships with procps on "
+        "Linux and has no macOS equivalent), point --deck-file at a driver "
+        "that does not need it, or pass --allow-missing-host-tools to run "
+        "the deck anyway. See docs/cli/drc.md, 'Engine' -> 'klayout'."
+    )
+
+
 def _cleanup_klayout_drc_work_dir(work_dir: str) -> None:
     import shutil
 
@@ -1942,6 +2268,7 @@ def run_drc_klayout_engine(
     pdk_variant: str | None = None,
     pdk_root: str | None = None,
     allow_deck_errors: bool = False,
+    allow_missing_host_tools: bool = False,
 ) -> dict[str, Any]:
     """Run a PDK-native KLayout DRC-DSL rule-deck script (``deck_file``,
     typically resolved via :func:`klayout_tools.pdk.drc_deck_file` or an
@@ -2004,10 +2331,38 @@ def run_drc_klayout_engine(
       has deliberately scoped around a known-unrunnable rule: the partial
       report is accepted, and the run records what it tolerated in the
       additive ``engine_deck_errors`` field (see below) so the verdict is
-      never *silently* clean. It never tolerates a missing report file.
+      never *silently* clean. It never tolerates a missing report file. The
+      raised error quotes klayout's **whole** captured output, not just its
+      ``ERROR``-prefixed lines (issue #2333): the line that explains an abort
+      is routinely not ``ERROR``-prefixed (``sh: pmap: command not found``),
+      and dropping it leaves a downstream traceback that misdiagnoses a host
+      problem as a broken rule deck. Only the *message* is widened -- what
+      counts as a deck error is still the ``ERROR``-prefix test, so a rule
+      named ``ERROR_CHECK.1`` is still not misread as a failure.
     - **Workdir**: ``tempfile.mkdtemp``, cleaned up via
       :func:`_cleanup_klayout_drc_work_dir` (``shutil.rmtree(...,
       ignore_errors=True)``) in a ``finally``.
+
+    **Host preflight (issue #2333).** Running a PDK's own driver script makes
+    that vendor's *host* assumptions part of this engine's contract, and
+    those assumptions routinely have nothing to do with rule checking: a real
+    open-PDK driver installs a Ruby ``Logger`` formatter that shells out to
+    procps ``pmap(1)`` on every log line, so on a host without ``pmap``
+    (macOS, minimal container images) the deck dies on its *first*
+    ``logger.info`` -- before a single rule runs -- with a nil dereference
+    that reads like a broken rule deck. Before launching klayout, the deck
+    script and its literal-path Ruby includes are scanned for shelled-out
+    command names (:func:`_scan_deck_host_commands`) and any that are not on
+    ``PATH`` fail the run with a :class:`DrcError` naming them and where they
+    are used (``deck requires 'pmap' (not found on PATH)``), instead of
+    letting the deck surface an unrelated downstream traceback.
+    ``allow_missing_host_tools=True`` (CLI: ``--allow-missing-host-tools``)
+    skips the check, for a driver whose shell-out is on a branch this run
+    never takes. The scan is static and deliberately conservative -- it
+    reports only words it is sure name a command -- so it is a diagnostic
+    aid, never a guarantee; a shell-out it cannot see still fails the way it
+    always did, now with the causal ``sh: ...: command not found`` line
+    quoted in the deck-abort error (see below).
 
     ``top`` is not yet supported for this engine (unlike :func:`run_drc`'s
     curated engine, issue #554): an arbitrary PDK-native DRC-DSL script has
@@ -2106,6 +2461,11 @@ def run_drc_klayout_engine(
     if not os.path.isfile(deck_file):
         raise DrcError(f"deck file not found: {deck_file}")
 
+    # Issue #2333: a vendor driver's host assumptions are not rule checking,
+    # but they abort the deck all the same -- and the abort they produce
+    # names the wrong thing. Fail before the subprocess, naming the utility.
+    _preflight_deck_host_tools(deck_file, allow_missing_host_tools)
+
     # Validates `path` (missing/directory/unreadable) before the subprocess
     # is launched, the same fail-fast order `run_drc` uses -- and gives this
     # engine the input layout's own `dbu`, needed to convert the RDB report's
@@ -2169,9 +2529,10 @@ def run_drc_klayout_engine(
         error_lines = _klayout_deck_error_lines(completed.stdout, completed.stderr)
         deck_errored = completed.returncode != 0 or bool(error_lines)
         if deck_errored and not allow_deck_errors:
-            detail = (
-                "\n".join(error_lines)
-                or (completed.stdout or completed.stderr or "").strip()
+            # Issue #2333: the *whole* captured output, not `error_lines`
+            # alone -- the causal line is routinely not ERROR-prefixed.
+            detail = _klayout_deck_error_detail(
+                completed.stdout, completed.stderr, error_lines
             )
             raise DrcError(
                 "klayout reported an error while running the deck script "

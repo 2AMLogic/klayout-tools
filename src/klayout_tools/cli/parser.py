@@ -4302,6 +4302,22 @@ def _add_drc_parser(subparsers: argparse._SubParsersAction) -> None:
             "field. See docs/cli/drc.md, 'Engine' -> 'klayout'."
         ),
     )
+    drc_parser.add_argument(
+        "--allow-missing-host-tools",
+        dest="allow_missing_host_tools",
+        action="store_true",
+        help=(
+            "skip the host preflight that refuses to run a deck script "
+            "shelling out to a command missing from PATH (--engine klayout "
+            "only; ignored for --engine curated). By default such a deck "
+            "fails up front naming the utility (issue #2333), because a "
+            "PDK driver's host assumptions -- e.g. a logger that shells out "
+            "to procps pmap(1) -- abort the deck before any rule runs, with "
+            "a downstream error that names something else entirely. Use "
+            "this when the shell-out is on a branch your run never takes. "
+            "See docs/cli/drc.md, 'Engine' -> 'klayout'."
+        ),
+    )
     drc_input_group.add_argument(
         "--check",
         default=None,
