@@ -636,9 +636,10 @@ testbench (the stock `test_gcd.py`, whose one deliberately-failing case makes
 | c | full SDF (all `IOPATH` + `INTERCONNECT` applied, zero actionable diagnostics, `annotated: true`) | 10 ns | **dead** — `result` = 0 on every case, uniform constant-zero failure |
 | d | the same full SDF | **100 ns** (10× relaxed) | **still dead** — identical constant-zero failure |
 
-Row (d) is the one a genuine timing failure cannot produce: a design with
-+5.48 ns of setup slack at 10 ns has ~15.5 ns of margin at a 100 ns period,
-yet the annotated run is exactly as dead as at 10 ns. Compare §3.8's own
+Row (d) is the one a genuine timing failure cannot produce: the design's
+annotated critical path is ~4.5 ns (10 ns period − 5.48 ns slack), so a
+100 ns period leaves ~95 ns of setup margin, yet the annotated run is
+exactly as dead as at 10 ns. Compare §3.8's own
 clock-period sweep on the violating design, where relaxation revived it at
 3.0 ns. Dead at both 1× and 10× with net-delay-only annotation passing is an
 **annotation-mechanism kill**, not a timing outcome — the #1888/§3.8
