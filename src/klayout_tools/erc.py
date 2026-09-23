@@ -243,6 +243,7 @@ See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from ._devices import (
@@ -2373,6 +2374,60 @@ def _select_well_class(
     return selected, degenerate
 
 
+def _warn_label_layer_empty(verb: str, name: str, label_layer: str) -> None:
+    """The stderr warning printed once per ``stackup`` entry whose declared
+    ``label_layer`` carries **zero** text objects in the analysed top cell
+    (issue #2401).
+
+    An empty label layer is silent everywhere else in the report: every
+    ``gates[].net`` on that role reads ``null`` (indistinguishable from a
+    spec with no ``label_layer`` at all) and every ``nets[]`` entry that
+    expects to match through it resolves zero islands and is reported as
+    ``erc.unconnected_net`` -- which reads as "this net is not in the
+    layout", i.e. a blocking supply-connectivity defect. In practice that
+    combination is almost always a mis-transcribed layer/datatype (a
+    ``.pin`` polygon layer named where the PDK's ``.label`` text layer was
+    meant) rather than a real connectivity failure. Printed to stderr,
+    following :func:`klayout_tools._devices._warn_device_body_missed_role`
+    's precedent (issue #2226), so a caller piping ``--format json`` to a
+    file still sees it (JSON goes to stdout only -- ``docs/json-contract.md``).
+    ``verb`` is the calling command (``"klt erc"``), so the line names the
+    tool the caller actually ran."""
+    print(
+        f"{verb}: warning: stackup entry {name!r} declares label_layer "
+        f"{label_layer}, but that layer carries no text anywhere in the "
+        "analysed top cell -- nets matched through it resolve zero islands "
+        "(erc.unconnected_net) and its gates[].net reads null. Check the "
+        "label layer/datatype.",
+        file=sys.stderr,
+    )
+
+
+def _register_label_layer(
+    l2n: Any,
+    layout: Any,
+    top_cell: Any,
+    entry: dict[str, Any],
+    conductor_region: Any,
+    verb: str,
+) -> None:
+    """Register a ``stackup`` entry's declared ``label_layer`` text onto its
+    conductor region in the ``LayoutToNetlist`` graph -- and warn when that
+    layer carries zero text objects in the analysed top cell
+    (:func:`_warn_label_layer_empty`, issue #2401).
+
+    A ``label_layer`` of ``None`` (the spec default) registers nothing and
+    warns nothing, matching the pre-#2401 behaviour byte for byte."""
+    if entry["label_layer"] is None:
+        return
+    label_texts = _texts(layout, top_cell, entry["label_layer"])
+    if label_texts.is_empty():
+        layer, datatype = entry["label_layer"]
+        _warn_label_layer_empty(verb, entry["name"], f"{layer}/{datatype}")
+    l2n.register(label_texts, f"{entry['name']}_label")
+    l2n.connect(conductor_region, label_texts)
+
+
 def _extract_connectivity(
     layout: Any,
     top_cell: Any,
@@ -2380,10 +2435,17 @@ def _extract_connectivity(
     vias: list[dict[str, Any]],
     ties: list[dict[str, Any]],
     device_cuts: dict[str, Any],
+    verb: str,
 ) -> tuple[Any, Any, dict[str, int], list[dict[str, Any]]]:
     """Build, extract, and return one ``LayoutToNetlist`` connectivity graph
     over the declared ``stackup``/``vias`` -- plus, when ``ties`` is
     non-empty, each tie's derived *tap* conductor.
+
+    A ``stackup`` entry whose declared ``label_layer`` carries zero text
+    objects in the analysed top cell additionally gets a one-line stderr
+    warning (:func:`_warn_label_layer_empty`, issue #2401) -- the
+    mis-transcribed-layer case the report alone renders as
+    ``erc.unconnected_net`` on every net matched through it.
 
     Returns ``(l2n, circuit, layer_index, tie_layers)``.
 
@@ -2457,10 +2519,7 @@ def _extract_connectivity(
         regions[entry["name"]] = conductor_region
         layer_index[entry["name"]] = l2n.register(conductor_region, entry["name"])
         l2n.connect(conductor_region)
-        if entry["label_layer"] is not None:
-            label_texts = _texts(layout, top_cell, entry["label_layer"])
-            l2n.register(label_texts, f"{entry['name']}_label")
-            l2n.connect(conductor_region, label_texts)
+        _register_label_layer(l2n, layout, top_cell, entry, conductor_region, verb)
 
     for via in vias:
         via_region = _cut_device_bodies(
@@ -2804,7 +2863,7 @@ def run_erc(
         ] + deck_devices_applied
 
     l2n, circuit, layer_index, _ = _extract_connectivity(
-        layout, top_cell, stackup, vias, [], device_cuts
+        layout, top_cell, stackup, vias, [], device_cuts, verb="klt erc"
     )
 
     gate_role = stackup[0]["name"]
@@ -2935,7 +2994,7 @@ def run_erc(
     well_asserted_ties: set[str] = set()
     if ties:
         tie_l2n, tie_circuit, _, tie_layers = _extract_connectivity(
-            layout, top_cell, stackup, vias, ties, device_cuts
+            layout, top_cell, stackup, vias, ties, device_cuts, verb="klt erc"
         )
         erc_findings.extend(_tie_findings(tie_l2n, tie_circuit, tie_layers))
         degenerate_ties = _degenerate_tie_reasons(tie_layers)
