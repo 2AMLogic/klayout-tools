@@ -1,8 +1,9 @@
 # Golden-pair manifest (`klt drc` rules)
 
 Declarative, rule-id-keyed golden violate/clean fixture manifest for
-`sky130.py`'s width/space `DrcRule` entries (28, +1 for issue #1420's
-`nwell.width.1`; `nwell.space.1` -- issue #1420's other addition -- uses the
+`sky130.py`'s width/space `DrcRule` entries (29, +1 for issue #1420's
+`nwell.width.1` and +1 for issue #2321's `tap.width.1`; `nwell.space.1`
+-- issue #1420's other addition -- uses the
 `"isolated"` check kind as of issue #1654, so it no longer falls within this
 manifest's width/space-only scope), `sg13g2.py`'s width/space
 `DrcRule` entries (14, issue #905/#911), and **all** of `gf180mcu.py`'s
@@ -52,7 +53,9 @@ tests/golden_deck/
   __init__.py            # package marker (tests/ import convention, see below)
   manifest.py            # load_manifest() / build_layout() / write_layout()
   generate_golden_deck.py  # regeneration script (see "Regenerating" below)
-  sky130/manifest.json     # 29 entries (11 at issue #747, width/space-only, grown since)
+  sky130/manifest.json     # 29 entries (11 at issue #747, width/space-only,
+                            # grown since -- latest +1 is issue #2321's
+                            # tap.width.1)
   gf180mcu/manifest.json   # 44 entries (full DRC deck, issue #904;
                             # +2 for issue #1110's DF.1a/DF.3a _LV/_MV split)
   sg13g2/manifest.json     # 14 entries (issue #905, Epic #711 Phase 3b --
@@ -231,6 +234,19 @@ which suppresses the native check entirely regardless of the input layout.
 part of this same `FEOL = false`-gated disagreement before issue #1654 --
 now that it uses `"isolated"` instead of `"space"`, it has left this
 width/space manifest entirely rather than resolving the disagreement.)
+
+Issue #2321's `tap.width.1` (the tap-side half of the same compound
+`difftap.1` rule `diff.width.1` halves) carries `"expected_disagreement":
+null` today on the same terms as gf180mcu's entries above: it has **not**
+been cross-checked against a real `sky130A.lydrc` yet (no `klayout` binary
+or resolvable sky130A install was available when it was added), so null
+records "not cross-checked", not a claim of agreement. Given `difftap.1`
+sits inside the same `if FEOL ... end` block that suppresses
+`diff.width.1`/`poly.width.1`/`nwell.width.1` natively, its `violate`
+fixture would be expected to disagree the identical way -- but per this
+manifest's own discipline that annotation is established empirically, not
+assumed, so it is left for the first environment that can run the tier-3
+cross-check.
 
 gf180mcu's 46 rules have no native-*DRC*-deck cross-check verdict either
 way (deferred per the scope above -- no single runnable native DRC deck

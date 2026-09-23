@@ -8549,3 +8549,54 @@ def test_sg13g2_guard_ring_draws_no_ring_implant_despite_tap_active_collision(
     # Exactly the pre-#1580 layer set: active/tap (1/0, shared), contact
     # (6/0), metal (8/0), well (31/0, add_well defaults True) -- no implant.
     assert present == {(1, 0), (6, 0), (8, 0), (31, 0)}
+
+
+# --- #2321: every tap-role ring generator stays DRC-clean on sky130 ---------
+
+
+@pytest.mark.parametrize(
+    "generator,params",
+    [
+        ("guard_ring", {}),
+        # mos_array's bare units draw no tap shapes on sky130; its substrate
+        # tie ring is the `add_guard_ring` composition (#2321's mos_array
+        # entry in the six-generator tap-role list).
+        ("mos_array", {"add_guard_ring": True}),
+        ("diff_pair", {}),
+        ("esd_device", {}),
+        ("well_island", {}),
+        ("bjt_array", {}),
+    ],
+)
+def test_sky130_tap_role_generators_stay_drc_clean_under_tap_rules(
+    generator, params, tmp_path, pdk_root
+):
+    """Issue #2321, no-false-positive half: every `klt gen` generator that
+    draws a substrate/well tie ring on the `tap` role (65/44) passes
+    `klt drc --deck sky130` clean under the `tap.width.1`/
+    `tap.enclosing.licon.1` rules that now check that layer.
+
+    Before those rules existed these same outputs were "clean" only because
+    nothing looked -- the deck's difftap-family rules (`diff.width.1`,
+    `diff.enclosing.licon.1`) read diff.drawing (65/20) shapes only, so
+    tap.drawing geometry was invisible to the deck. The malformed-ring
+    (negative-control) half of #2321's acceptance criteria lives in
+    `tests/test_drc.py`'s tap.* violate/clean pairs."""
+    output = tmp_path / f"{generator}_sky130_tap_rules.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+
+    drc_report = run_drc(str(output), "sky130")
+
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    # The new rules really ran against each generator's ring (not skipped
+    # for want of drawn layers -- a vacuous "clean" proves nothing, the
+    # same discipline the #995 enclosing pair applies).
+    for rule_id in ("tap.width.1", "tap.enclosing.licon.1"):
+        assert rule_id not in drc_report["coverage"]["rules_skipped"]

@@ -227,9 +227,12 @@ The spec file is a JSON object:
     electrical conductor. This is how a conductor spread across several GDS
     layers (e.g. a coax-style shield's four wall segments, each its own
     layer) is expressed as a single node; see "Worked example: coax" below.
-    (PEEC's bar-shaped-conductor restriction below means a
-    `compute_inductance: true` request cannot use this to merge several
-    boxes into one conductor — see "PEEC inductance/resistance".)
+    (`compute_inductance: true`/`frequencies_hz` can also merge several
+    boxes into one PEEC-eligible conductor this way, *provided* every box
+    shares one current-flow axis with every other box in the request — see
+    "PEEC inductance/resistance"'s "bar-shaped-conductor MVP restriction".
+    The coax shield's own four walls do not satisfy that — see "Worked
+    example: coax" below.)
   - `z0_um`/`z1_um` (numbers) — the conductor's z-extent at this layer.
     `z0_um == z1_um` models an idealised zero-thickness flat plate (the
     common case for a simple parallel-plate test); `z1_um > z0_um` models a
@@ -379,14 +382,17 @@ the knob to change. Exit code stays `0` — a warning is a diagnostic, not a
 failure.
 
 In practice a warning always means the same thing: **`panel_size_um` is too
-coarse relative to the smallest conductor-to-conductor separation.** Two
-panels on facing conductors are then much closer to each other than the
-panels are wide, and the centroid-to-centroid `1/r` kernel (see "Scope and
-limitations") wildly overestimates their coupling — badly enough to flip the
-mutual term's sign. As a rule of thumb, keep `panel_size_um` at or below the
-smallest gap you care about resolving, and re-run with a smaller value to
-confirm the answer has stopped moving. Convergence-under-refinement is
-validated systematically in
+coarse relative to the smallest conductor-to-conductor separation.** A
+constant-density panel cannot represent the charge that piles up on a surface
+facing a gap narrower than the panel itself, so the coupling between such a
+pair is structurally unreliable. The near-field quadrature kernel (#2061)
+keeps the matrix's *sign structure* physical even in that regime — the old
+failure mode, a sign-flipped mutual term, is gone — but no kernel can invent
+resolution the mesh does not have, so the coarseness diagnostic names the
+pair and the knob instead of staying silent. As a rule of thumb, keep
+`panel_size_um` at or below the smallest gap you care about resolving, and
+re-run with a smaller value to confirm the answer has stopped moving.
+Convergence-under-refinement is validated systematically in
 [`docs/design/mom-validation.md`](../design/mom-validation.md) (#719), which
 also measures what a given `panel_size_um`/gap ratio costs you in accuracy:
 `panel_size_um = gap` lands within ~1% of the converged answer on a
@@ -398,11 +404,11 @@ $ klt mom plates.gds coarse.mom.json
 (femtofarads)
 
 warnings:
-  mutual capacitance between conductors "top" and "bottom" is 0.118396 fF, but a
-  physical Maxwell capacitance matrix has non-positive off-diagonal entries -- the
-  point-collocation fill has broken down, most likely because panel_size_um is
-  coarse relative to the spacing between these conductors; reduce panel_size_um
-  and re-run
+  conductors "top" and "bottom" are separated by as little as 0.0100 um
+  (panel-centroid scale) while discretised with panels up to 2.0000 um wide --
+  a constant-density panel cannot resolve the charge facing a gap narrower
+  than the panel, so their coupling should not be trusted; reduce
+  panel_size_um and re-run
 ```
 
 ## PEEC inductance/resistance
@@ -419,18 +425,28 @@ the capacitance solve's — read this section before turning it on.
 
 ### The bar-shaped-conductor MVP restriction
 
-`compute_inductance: true` requires every conductor in the request to reduce
-to a single well-defined current-flow "bar":
+`compute_inductance: true` requires every *box*, of every conductor in the
+request, to individually reduce to a well-defined current-flow "bar"; a
+conductor built from several boxes may do so box by box, *provided* its own
+boxes share one current-flow axis and axial extent:
 
-- **Exactly one box per conductor.** A conductor merged from several
-  `stackup` entries (e.g. the coax shield's four wall segments in "Worked
-  example: coax" below) has no single well-defined bar cross-section under
-  this MVP's model, and is rejected with a clear error. Multi-box PEEC
-  (Ruehli's general mesh) is a follow-up.
+- **Multi-box conductors are supported, as long as every box shares one
+  axis.** A conductor merged from several `stackup` entries (e.g. a "go"
+  rail spread across two GDS layers) is fine, *provided* every one of its
+  boxes is individually bar-shaped (see below) and shares the same
+  current-flow axis and axial extent as the conductor's other boxes —
+  see "Worked example: multi-box conductor" below.
+  ([#1841](https://github.com/2AMLogic/klayout-tools/issues/1841), PEEC
+  increment (i).) **Mixed-axis geometry within one conductor stays out of
+  scope**: the coax shield's four wall segments in "Worked example: coax"
+  below sit on two *different* current-flow axes (north/south run along one
+  axis, east/west along the perpendicular one), so that shape is still
+  rejected — see the general Ruehli mesh note below. That remains a
+  follow-up beyond increments (i) and (ii).
 - **A true 3-D bar.** All three of a box's extents (x, y, z) must be
   non-zero — a flat, zero-thickness plate (fine for capacitance) has no
   cross-sectional area to carry current.
-- **Bar-shaped, not cubic.** The box's longest extent (the current-flow
+- **Bar-shaped, not cubic.** A box's longest extent (the current-flow
   axis — the MVP's simplest defensible choice: **current flows along the
   box's longest axis**, matching how bar/wire conductors are treated in
   introductory PEEC codes) must be at least 3x each of the other two
@@ -447,10 +463,12 @@ Conductors no longer need to share a current-flow axis or an axial extent
 mutual-inductance formula below now handles filament pairs of arbitrary
 relative orientation and offset, not just the parallel/aligned/equal-length
 special case. A rectangular loop, a single straight bar, an L-shaped trace
-(two bars meeting at a right angle), and an offset loop (two bars of
-different length or axial position) all satisfy this scope; a coax shield
-(several boxes per conductor) or a pad (not elongated enough to have a
-well-defined current-flow axis) do not (yet).
+(two bars meeting at a right angle), an offset loop (two bars of different
+length or axial position), and a multi-box conductor whose boxes share one
+axis (e.g. a dual-strip rail — "Worked example: multi-box conductor" below)
+all satisfy this scope; a coax shield (mixed-axis boxes within one
+conductor) or a pad (not elongated enough to have a well-defined
+current-flow axis) do not (yet).
 
 ### Method: filament bundle + Neumann's formula
 
@@ -533,11 +551,14 @@ single static R/L/C matrix to genuine frequency-swept network parameters.
 ### The bar-shaped-conductor MVP restriction (shared with PEEC)
 
 The full-wave solve requires the **exact same** bar-shaped-conductor
-restriction as `compute_inductance` above — every conductor reduces to a
-single well-defined bar (one box, a true 3-D elongated shape) — see "The
-bar-shaped-conductor MVP restriction" above for the full detail and why.
-This applies independent of whether `compute_inductance` is also set in the
-same request.
+restriction as `compute_inductance` above — every box, of every conductor,
+reduces to a well-defined bar (a true 3-D elongated shape), and a multi-box
+conductor's own boxes share a common current-flow axis and axial extent —
+see "The bar-shaped-conductor MVP restriction" above for the full detail
+and why. This applies independent of whether `compute_inductance` is also
+set in the same request. A multi-box conductor's several boxes are combined
+into one equivalent thin wire (summed cross-sectional area, area-weighted
+transverse centroid) before the retarded-kernel solve below.
 
 Since [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
 conductors no longer need to share a current-flow axis or axial extent for
@@ -900,7 +921,53 @@ shield:
 }
 ```
 
-See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry.
+See `tests/test_mom.py`'s `_coax_fixture` for the exact wall geometry. Note
+that this particular shield is a **mixed-axis** multi-box conductor (the
+north/south walls run along one current-flow axis, east/west along the
+perpendicular one), so it stays out of scope for `compute_inductance`/
+`frequencies_hz` even after the "Worked example: multi-box conductor"
+relaxation below — see "The bar-shaped-conductor MVP restriction".
+
+## Worked example: multi-box conductor
+
+`compute_inductance: true`/`frequencies_hz` accept a conductor built from
+more than one box, as long as the conductor's own boxes share one
+current-flow axis and axial extent
+([#1841](https://github.com/2AMLogic/klayout-tools/issues/1841)). Here
+`"go"` is a dual-strip rail spread across two GDS layers, both 500 µm long
+along the same axis as the single-box `"return"` conductor:
+
+```json
+{
+  "background_permittivity": 1.0,
+  "panel_size_um": 5.0,
+  "compute_inductance": true,
+  "filament_size_um": 0.5,
+  "stackup": [
+    {
+      "layer": "1/0", "conductor": "go",
+      "z0_um": 0.0, "z1_um": 2.0,
+      "conductivity_S_per_m": 5.96e7
+    },
+    {
+      "layer": "3/0", "conductor": "go",
+      "z0_um": 0.0, "z1_um": 2.0,
+      "conductivity_S_per_m": 5.96e7
+    },
+    {
+      "layer": "2/0", "conductor": "return",
+      "z0_um": 0.0, "z1_um": 2.0,
+      "conductivity_S_per_m": 5.96e7
+    }
+  ]
+}
+```
+
+`inductance_matrix_nh`/`resistance_ohm` still have one row/entry per
+*conductor* (two, here: `"go"` and `"return"`), not per box — every filament
+from `"go"`'s two boxes is attributed back to `"go"` for the PEEC solve. See
+`tests/test_mom.py`'s `test_run_mom_peec_accepts_multi_box_conductor` for
+the exact fixture.
 
 ## Worked example: straight wire and loop
 
@@ -963,15 +1030,20 @@ oracles), for the exact geometry and measured accuracy.
   for the whole solve; there is no per-layer dielectric stack (e.g. a real
   oxide/nitride stack with different permittivities per layer). Multi-layer
   dielectric support is a follow-up.
-- **Simplified point-collocation BEM fill.** Off-diagonal
-  potential-coefficient entries use the bare point-charge kernel between
-  panel centroids rather than a true panel-to-panel double integral; the
-  diagonal (self) term uses the standard closed-form equivalent-square-panel
-  approximation. This is adequate for "produces a numeric result" (this
-  command's bar); accuracy-vs-refinement is measured in
-  [`docs/design/mom-validation.md`](../design/mom-validation.md). The kernel's
-  known failure mode — panels wider than the gap they face — is detected and
-  surfaced in `warnings` rather than returned silently (see "Warnings").
+- **Constant-panel collocation BEM fill with a near-field/far-field split.**
+  Off-diagonal potential-coefficient entries integrate the source panel
+  properly (4-point-per-axis Gauss–Legendre quadrature of the potential at
+  the target centroid, symmetrised across the pair) when the two panels'
+  centroids are closer than a few panel widths; well-separated pairs keep
+  the cheap point-charge kernel between centroids; the diagonal (self) term
+  uses the standard closed-form equivalent-square-panel approximation.
+  Measured against FastCap on a common mesh (#2015), the capacitance matrix
+  agrees to ≤0.5% on every fixture including closely spaced parallel plates
+  — see [`docs/design/fastcap-oracle.md`](../design/fastcap-oracle.md) and
+  [`docs/design/mom-validation.md`](../design/mom-validation.md). One thing
+  no kernel fixes: panels wider than the gap they face cannot resolve the
+  gap-facing charge distribution, so such pairs are flagged by a coarseness
+  diagnostic in `warnings` (see "Warnings") rather than trusted silently.
 - **The capacitance and PEEC inductance/resistance solves are quasi-static**
   (DC/low-frequency) — no frequency dependence, no skin effect. The
   full-wave solve above adds a genuine frequency sweep for the *series*
@@ -990,15 +1062,18 @@ oracles), for the exact geometry and measured accuracy.
 - **PEEC inductance/resistance and the full-wave solve are both
   bar-shaped-conductors-only (MVP).** See "PEEC inductance/resistance"
   above's "bar-shaped-conductor MVP restriction" — a materially narrower
-  scope than the capacitance solve's (single box, true 3-D, elongated). A
-  request that does not fit is rejected with a clear error naming which
-  restriction it violates, not silently approximated. Since
+  scope than the capacitance solve's (every box true 3-D and elongated; a
+  conductor may contribute more than one box as long as its own boxes share
+  one axis/extent — a request mixing axes within one conductor, e.g. a coax
+  shield's wall segments, remains out of scope). A request that does not
+  fit is rejected with a clear error naming which restriction it violates,
+  not silently approximated. Since
   [issue #1842](https://github.com/2AMLogic/klayout-tools/issues/1842),
   conductors no longer need to share a current-flow axis or axial extent —
   a coiled/spiral winding or an L-shaped loop is in scope, provided every
-  conductor is still exactly one bar-shaped box (a multi-box conductor,
-  e.g. a coax shield's wall segments, is a separate, still-open follow-up).
-  The full-wave solve's derived characteristic-impedance/propagation-constant
+  box is still a bar-shaped box and each conductor's own boxes stay on one
+  axis. The full-wave solve's derived
+  characteristic-impedance/propagation-constant
   fields are further restricted to exactly two conductors that *do* share
   one axis and axial span (the canonical transmission-line case); a request
   outside that still gets the raw partial-impedance matrix, just not those
@@ -1090,6 +1165,19 @@ are exhaustive forever.
   Phase 2c): why NEC2++, the license-handling (subprocess-only, never
   embedded — GPL-3.0), the benchmark, the tolerance/metric definitions, and
   the measured agreement.
+- [`docs/design/fastcap-oracle.md`](../design/fastcap-oracle.md) —
+  cross-validation of the **capacitance matrix** above against FastCap 2.0
+  ([#2015](https://github.com/2AMLogic/klayout-tools/issues/2015), pairing #4
+  of oracle tracking issue
+  [#2007](https://github.com/2AMLogic/klayout-tools/issues/2007)): an
+  independently implemented MoM capacitance solver — the very program
+  `native/mom/src/solver.rs` cites as the method it implements — run over the
+  same geometry and the same panel set. Why FastCap rather than Palace, the
+  measured agreement (0.03% on a coupled-line pair, 0.32% on closely spaced
+  parallel plates, after #2061's near-field kernel), where the two solvers
+  disagree most and why, and the declared shared surface. The executable form
+  is `tests/test_mom_capacitance_oracle.py`, provisioned by
+  `scripts/install-fastcap.sh`.
 - [`docs/design/mom-iterative-solver.md`](../design/mom-iterative-solver.md) —
   the iterative (preconditioned Conjugate Gradient) solve step
   ([#799](https://github.com/2AMLogic/klayout-tools/issues/799)): why CG over
@@ -1109,3 +1197,13 @@ are exhaustive forever.
   Phase 2c), backed by `scripts/mom_nec_reference.py`'s subprocess-invoked
   reference solve — see `docs/design/mom-cross-validation.md` for the full
   methodology.
+- `tests/test_mom_pypeec_cross_validation.py` — the same pattern for the
+  PEEC inductance path: cross-validation of the spiral fixture's total
+  partial inductance against the external PyPEEC oracle
+  ([#1886](https://github.com/2AMLogic/klayout-tools/issues/1886), closing
+  out [#1842](https://github.com/2AMLogic/klayout-tools/issues/1842)'s
+  acceptance criterion 3), backed by `scripts/mom_pypeec_reference.py`'s
+  subprocess-invoked reference solve. The measured comparison lives in
+  [`docs/design/mom-validation.md`](../design/mom-validation.md); the oracle
+  choice (and why FastHenry is permanently out) in
+  [`docs/design/mom-cross-validation.md`](../design/mom-cross-validation.md).

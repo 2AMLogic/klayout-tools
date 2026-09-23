@@ -440,8 +440,9 @@ ESD_MAX_FINGERS_PER_RING = 32
 _PDK_ROLE_LAYERS: dict[str, dict[str, tuple[int, int] | None]] = {
     "sky130": {
         "active": (65, 20),  # diff.drawing
-        "tap": (65, 44),  # tap.drawing -- present in sky130.py's LAYER_NAMES
-        # but no curated rule checks it, so a tap ring is DRC-free there.
+        "tap": (65, 44),  # tap.drawing -- width- and licon-enclosure-checked
+        # by sky130.py's `tap.width.1`/`tap.enclosing.licon.1` since issue
+        # #2321; before that rule pair, a tap ring was DRC-free there.
         "poly": (66, 20),  # poly.drawing
         "contact": (66, 44),  # licon1.drawing
         "metal": (67, 20),  # li1.drawing
@@ -2700,9 +2701,11 @@ def _bjt_layer_params(
 
     Also resolves ``ring_implant_layer``/``ring_implant_present`` (issue
     #1580, :func:`_ring_tap_implant_layer`) for the collector ring's own
-    ``Comp`` shape (drawn on ``active_layer`` directly -- see
-    ``_BjtArrayPCell.produce_impl``, not a separate ``tap``-role ring the way
-    ``guard_ring``/``mos_array``/``diff_pair``/``esd_device`` draw theirs).
+    ``Comp`` shape -- drawn on ``tap_layer`` since issue #2312 (it used to be
+    drawn on ``active_layer`` directly), so the ring is the same ``tap``-role
+    ring ``guard_ring``/``mos_array``/``diff_pair``/``esd_device`` already
+    draw, and therefore a substrate tie an extraction deck actually
+    recognises; see ``_BjtArrayPCell.produce_impl``.
     Always resolved with ``well_tie=False``: the collector ring is composed
     *outside* the shared base well's own footprint (``well_box_um`` plus
     ``BJT_COLLECTOR_GAP_UM``, see :func:`_bjt_array_layout`'s docstring), so

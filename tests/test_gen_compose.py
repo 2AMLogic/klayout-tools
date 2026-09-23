@@ -7013,14 +7013,39 @@ def test_resolve_via_drop_layer_same_layer_needs_no_drop():
 
 
 def test_resolve_via_drop_layer_unrelated_role_needs_no_drop():
-    # A tap port (65/44) is not a member of the deck's metals stack at all,
-    # and is not the deck's poly layer either -- via-drop only ever applies
-    # between two declared routing-metal levels, so this keeps the pre-#454
-    # "draw directly on route_layer" behavior rather than being treated as
-    # "needs a drop but none found".
+    # A role that is neither a metals-stack level, nor the deck's poly
+    # layer, nor a diffusion-class (`active`/`tap`) layer -- via-drop only
+    # ever applies between two declared routing-metal levels, so this keeps
+    # the pre-#454 "draw directly on route_layer" behavior rather than being
+    # treated as "needs a drop but none found". sky130's `nwell` (64/20) is
+    # such a layer: no `klt gen` generator reports a port on it, but the
+    # deck models it.
     deck = get_extraction_deck("sky130")
-    ladder, error = _resolve_via_drop_layer(deck, (67, 20), (65, 44))
+    ladder, error = _resolve_via_drop_layer(deck, (67, 20), deck.nwell)
     assert ladder is None
+    assert error is None
+
+
+def test_resolve_via_drop_layer_tap_role_port_resolves_a_contact_hop():
+    # Issue #2312: a tie ring's own shape belongs on the deck's `tap` role
+    # (65/44 on sky130) -- that is the mask `klt extract` recognises a
+    # substrate/well tie from -- so a port reported there must resolve the
+    # same `deck.contact` ladder `deck.active` already does. Before #2312
+    # this fell into the generic "unrelated role, nothing to do" branch and
+    # the backbone was drawn as an uncontacted metal stub over the ring:
+    # `routed: true`, DRC-clean, electrically open.
+    deck = get_extraction_deck("sky130")
+    assert deck.tap is not None and deck.tap != deck.active
+    ladder, error = _resolve_via_drop_layer(deck, (67, 20), deck.tap)
+    assert ladder == ((deck.contact, deck.tap, (67, 20)),)
+    assert error is None
+
+    # And the multi-hop form, routing on met1 (metals[1], "metal2").
+    ladder, error = _resolve_via_drop_layer(deck, (68, 20), deck.tap)
+    assert ladder == (
+        (deck.contact, deck.tap, (67, 20)),
+        ((67, 44), (67, 20), (68, 20)),
+    )
     assert error is None
 
 
@@ -10362,12 +10387,19 @@ def _bjt_array_collector_net_id(gds_path, top_cell_name, deck, point_a_um, point
     dbu = layout.dbu
 
     l2n = kdb.LayoutToNetlist(kdb.RecursiveShapeIterator(layout, top, []))
-    probe_layers = [deck.active, *deck.metals]
+    # `deck.tap` is probed/connected alongside `deck.active` (issue #2312):
+    # a tie ring's own shape sits on the tap mask, not on bare diffusion, so
+    # a probe that only knew `active` would report "no shape here" at a
+    # `COLL_*` landing point and silently fall through to whatever metal
+    # happens to cover it.
+    assert deck.tap is not None and deck.tap != deck.active
+    probe_layers = [deck.active, deck.tap, *deck.metals]
 
     def make_layer(pair):
         return l2n.make_layer(layout.layer(pair[0], pair[1]), f"L{pair[0]}_{pair[1]}")
 
     active = make_layer(deck.active)
+    tap = make_layer(deck.tap)
     contact = make_layer(deck.contact)
     metals = [make_layer(pair) for pair in deck.metals]
     vias = [make_layer(pair) for pair in deck.vias]
@@ -10375,6 +10407,8 @@ def _bjt_array_collector_net_id(gds_path, top_cell_name, deck, point_a_um, point
     l2n.connect(active)
     l2n.connect(contact)
     l2n.connect(active, contact)
+    l2n.connect(tap)
+    l2n.connect(tap, contact)
     l2n.connect(contact, metals[0])
     l2n.connect(metals[0])
     for index in range(len(vias)):
@@ -10759,6 +10793,203 @@ def test_compose_bjt_array_collector_ring_strap_merges_alongside_channel_track_l
         "COLL_E's diffusion did not merge into the base bus's own node -- "
         "issue #2008's reported false positive"
     )
+
+
+def _issue_2312_stub_block(block_id, gds_path, conn_x_um, pad_x_um):
+    """One of issue #2312's own two `promo_stub` blocks: a 1.5um-wide
+    library cell exposing a `CONN` port (wired through `connectivity[]`) and
+    a `PAD` port (declare-only, named in `pins[]`), both on li1 at the cell's
+    vertical midline and facing opposite directions -- transcribed from the
+    request JSON in the issue body."""
+    return {
+        "id": block_id,
+        "cell": {
+            "gds_path": gds_path,
+            "cell_name": "promo_stub",
+            "bbox_um": {"x0": 0.0, "y0": 0.0, "x1": 1.5, "y1": 0.17},
+            "ports": [
+                {
+                    "name": "CONN",
+                    "x_um": conn_x_um,
+                    "y_um": 0.085,
+                    "layer": {"layer": 67, "datatype": 20},
+                    "width_um": 0.17,
+                    "direction_deg": 180 if conn_x_um == 0.0 else 0,
+                },
+                {
+                    "name": "PAD",
+                    "x_um": pad_x_um,
+                    "y_um": 0.085,
+                    "layer": {"layer": 67, "datatype": 20},
+                    "width_um": 0.17,
+                    "direction_deg": 180 if pad_x_um == 0.0 else 0,
+                },
+            ],
+        },
+    }
+
+
+def test_compose_bjt_array_collector_strap_merges_the_substrate_net_under_extract(
+    tmp_path, pdk_root
+):
+    """Issue #2312's own byte-exact reproduction, resolved.
+
+    The reported failure: with the array's `COLL_E` collector tap added to an
+    already-connected `vss` net (8 base pins plus a declare-only stub),
+    `gen-compose` reports the net `status: "routed"` and every leg
+    `routed: true`, `klt drc --deck sky130` is clean -- and `klt extract
+    --deck sky130` still recovers three nets (`ec`, `vss`, `vsubs`), with
+    every device's collector on `vsubs`, a node with no connection to `vss`.
+
+    Root cause (which is *not* the drawn strap, and not where the issue title
+    localizes it): #1894's contact ladder does draw a real, electrically
+    merged strap onto the ring -- a raw `LayoutToNetlist` probe confirmed
+    that already held on `main`. What did not hold is *recognition*: an
+    extraction deck derives its substrate-tie region from the `tap` mask
+    outside every `nwell` (`extract.py`'s `tap_substrate`, tied to the
+    deck's synthesized `substrate_net` via `connect_global`), and
+    `bjt_array` drew its collector ring on the bare `active`/diffusion role
+    instead. The ring was therefore an unrecognised diffusion island: no
+    matter how it was strapped, nothing ever unified the strapped net with
+    the substrate identity every collector-less bipolar's collector terminal
+    carries, so the extracted netlist was electrically wrong while both of
+    the pipeline's success signals stayed green. The ring now draws on the
+    `tap` role, exactly like `guard_ring`'s ring and each unit's own
+    base-tie pad already do.
+
+    The control leg below (the identical composition with `COLL_E` *not* in
+    `vss`'s `pins[]`) is what makes the assertion discriminating: without the
+    strap the substrate net must stay separate, so a test that merely
+    asserted "collector reads `vss`" could not pass by accident.
+    """
+    bjt = _gen_block(
+        tmp_path,
+        pdk_root,
+        "bjt_array",
+        "coll_2312",
+        # The issue's own `klt gen bjt_array` params, verbatim.
+        rows=2,
+        cols=4,
+        ratio=8,
+        topology="common_centroid",
+        add_collector_ring=True,
+        ring_gap_side="N",
+        ring_gap_um=4.0,
+        ring_gap_offset_um=-1.565,
+        emitter_um=3.4,
+    )
+    stub_gds = _write_empty_library_gds(tmp_path / "promo_stub.gds", "promo_stub")
+
+    def _build(include_coll, cell_name, output):
+        vss_pins = [{"block": "array", "port": f"Q{i}_B"} for i in range(8)]
+        vss_pins.append({"block": "stub_vss", "port": "CONN"})
+        if include_coll:
+            vss_pins.append({"block": "array", "port": "COLL_E"})
+        return {
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "blocks": [
+                {"id": "array", "generator_report": bjt},
+                _issue_2312_stub_block("stub_ec", stub_gds, 1.5, 0.0),
+                _issue_2312_stub_block("stub_vss", stub_gds, 0.0, 1.5),
+            ],
+            "placement": {
+                "strategy": "explicit",
+                "order": ["array", "stub_ec", "stub_vss"],
+                "origins_um": {
+                    "array": {"x": 0.0, "y": 0.0},
+                    "stub_ec": {"x": -5.0, "y": 9.915},
+                    "stub_vss": {"x": 22.0, "y": 8.915},
+                },
+            },
+            "routing": {
+                "layer_role": "metal",
+                "width_um": 0.17,
+                "cross_block_layer_role": "metal2",
+            },
+            "connectivity": [
+                {"net": "vss", "pins": vss_pins},
+                {
+                    "net": "ec",
+                    "pins": [
+                        *({"block": "array", "port": f"Q{i}_E"} for i in range(8)),
+                        {"block": "stub_ec", "port": "CONN"},
+                    ],
+                },
+            ],
+            "pins": [
+                {"net": "ec", "block": "stub_ec", "port": "PAD"},
+                {"net": "vss", "block": "stub_vss", "port": "PAD"},
+            ],
+            "options": {"cell_name": cell_name, "output": str(output)},
+        }
+
+    # Control: the identical composition with no `COLL_E` leg at all. The
+    # substrate net is genuinely separate here -- `vsubs` is its own node and
+    # every collector sits on it.
+    control_out = tmp_path / "coll_2312_control.gds"
+    control_report = compose(_build(False, "coll_2312_control", control_out))
+    assert control_report["unrouted_nets"] == []
+    control_extract = extract.run_extract(
+        str(control_out), "sky130", top="coll_2312_control"
+    )
+    control_nets = {net["name"] for net in control_extract["nets"]}
+    assert control_nets == {"ec", "vss", "vsubs"}
+    assert {
+        device["nets"]["c"]
+        for device in control_extract["devices"]
+        if device["class"] == "pnp"
+    } == {"vsubs"}
+
+    # The issue's own repro: `COLL_E` added to the already-connected `vss`
+    # net's `pins[]`.
+    output = tmp_path / "bias_core_pnp8_leg.gds"
+    request = _build(True, "bias_core_pnp8_leg", output)
+    report = compose(request)
+
+    # The two signals the issue reports as (correctly) green -- kept green.
+    assert report["unrouted_nets"] == []
+    vss_net = next(net for net in report["nets"] if net["net"] == "vss")
+    assert vss_net["status"] == "routed"
+    assert vss_net["routed"] is True
+    assert all(leg["routed"] for leg in vss_net["legs"])
+    coll_leg = next(
+        leg
+        for leg in vss_net["legs"]
+        if any(pin["port"] == "COLL_E" for pin in leg["pins"])
+    )
+    assert coll_leg["routed"] is True
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    # Physical connectivity: `COLL_E`'s own tie shape and the base bus are
+    # one electrical node (this already held before the fix -- the strap was
+    # drawn; it was never recognised).
+    deck = get_extraction_deck("sky130")
+    coll_e = next(p for p in bjt["ports"] if p["name"] == "COLL_E")
+    q5_b = next(p for p in bjt["ports"] if p["name"] == "Q5_B")
+    net_coll, net_base = _bjt_array_collector_net_id(
+        str(output),
+        "bias_core_pnp8_leg",
+        deck,
+        (coll_e["x_um"], coll_e["y_um"]),
+        (q5_b["x_um"], q5_b["y_um"]),
+    )
+    assert net_coll is not None and net_base is not None
+    assert net_coll[:2] == net_base[:2] and net_coll[2] == net_base[2]
+
+    # The issue's own acceptance condition: `klt extract` recovers the
+    # `COLL_E`-bearing net as ONE node, not `vss` plus a separate `vsubs`.
+    result = extract.run_extract(str(output), "sky130", top="bias_core_pnp8_leg")
+    net_names = {net["name"] for net in result["nets"]}
+    assert "vsubs" not in net_names, (
+        "the collector diffusion is still a separate node from vss -- issue "
+        f"#2312's reported failure (nets: {sorted(net_names)})"
+    )
+    assert net_names == {"ec", "vss"}
+    collector_nets = {
+        device["nets"]["c"] for device in result["devices"] if device["class"] == "pnp"
+    }
+    assert collector_nets == {"vss"}
 
 
 def test_compose_routes_mos_array_device_port_to_its_own_ring_tap_port(

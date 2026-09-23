@@ -1,0 +1,13 @@
+{
+  "task": "source-follower",
+  "targeted": [
+    {
+      "name": "input-device-undersized",
+      "netlist": "sf.spice",
+      "find": "XMn vdd gate out 0 sky130_fd_pr__nfet_01v8 L=1 W=40 nf=1 mult=1",
+      "replace": "XMn vdd gate out 0 sky130_fd_pr__nfet_01v8 L=1 W=4 nf=1 mult=1",
+      "why": "input device narrowed 10x -> gm falls roughly with the square root of W while gmb (body effect, the term that already caps this topology's real-device gain per this task's own reference notes) barely moves, so gm/(gm+gmb) drops well below the 0.80 V/V floor"
+    }
+  ],
+  "equivalent": []
+}

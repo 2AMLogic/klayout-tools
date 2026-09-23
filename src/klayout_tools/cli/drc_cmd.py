@@ -142,6 +142,7 @@ _REQUEST_FIELD_DESTS = {
     "deck_vars": "deck_var",
     "timeout_s": "timeout_s",
     "allow_deck_errors": "allow_deck_errors",
+    "allow_missing_host_tools": "allow_missing_host_tools",
     "pdk": "pdk",
     "pdk_root": "pdk_root",
 }
@@ -200,6 +201,9 @@ def _apply_request(args: argparse.Namespace) -> argparse.Namespace:
             "allow_deck_errors": reqdoc.get_bool(
                 request, "allow_deck_errors", verb="drc", error_cls=DrcError
             ),
+            "allow_missing_host_tools": reqdoc.get_bool(
+                request, "allow_missing_host_tools", verb="drc", error_cls=DrcError
+            ),
             "pdk": _str("pdk"),
             "pdk_root": _path("pdk_root"),
         }
@@ -226,6 +230,7 @@ def _run(args: argparse.Namespace) -> dict:
             pdk_variant=args.pdk,
             pdk_root=args.pdk_root,
             allow_deck_errors=args.allow_deck_errors,
+            allow_missing_host_tools=args.allow_missing_host_tools,
         )
 
     if not args.deck:

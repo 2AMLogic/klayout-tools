@@ -14,6 +14,310 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2333, `klt drc --engine klayout`, additive — **no**
+  `schema_version` bump and no change to any response field; one new opt-out
+  flag, `--allow-missing-host-tools`, plus its request-document field
+  `allow_missing_host_tools`): a PDK's own DRC-DSL driver script carries that
+  vendor's *host* assumptions, and they routinely have nothing to do with
+  rule checking — a real open-PDK driver installs a Ruby `Logger` formatter
+  that shells out to procps `pmap(1)` on every log line, so on a host without
+  `pmap` (macOS, minimal container images) the backtick yields `""`,
+  `""[10, 40]` is `nil`, and `nil.strip` raises: the deck dies on its
+  **first** `logger.info`, before executing a single rule. Two defects made
+  that a ~30-minute misdiagnosis rather than a one-line answer, both fixed
+  here. (1) The deck-abort error quoted only klayout's `ERROR`-prefixed
+  lines, so the surfaced message was a nil dereference that reads like a
+  broken rule deck, while the `sh: pmap: command not found` line that
+  explains it — captured, but not `ERROR`-prefixed — was dropped. The raised
+  error now carries the full captured stdout/stderr (stdout first, tail-
+  truncated with an explicit marker for an enormous capture, never losing an
+  `ERROR` line). What counts as a *deck error* is unchanged: still the
+  `ERROR`-prefix test, so a rule named `ERROR_CHECK.1` is still not misread
+  as a failure. (2) There was no way to learn this before paying for the
+  run. `klt drc` now scans the deck script and its literal-path Ruby includes
+  for shelled-out commands (backticks, `%x{...}`, `system`/`exec`/`spawn`,
+  `IO.popen`, `Open3.*`) *before* launching `klayout`, and refuses to start
+  when one is missing from `PATH`: `deck requires 'pmap' (not found on
+  PATH) -- shelled out to at <file>:<line>`. The scan is static and
+  deliberately conservative — an interpolated/computed command, a shell
+  builtin, or a commented-out one is never reported, so a shell-out it cannot
+  see still fails the way it always did (now with the causal line quoted),
+  and a shell-out on a branch the run never takes is skipped with
+  `--allow-missing-host-tools`. klt deliberately supplies no stand-ins for
+  what a driver shells out to: that does not generalise, and it would
+  silently change what the run measured. Still open, and deliberately not
+  addressed here: a PDK's rule tables are the portable part, and there is
+  still no way to run them without the vendor's driver.
+
+- **Fixed** (#2327, `klt lvs`'s `reference.form: "subckt-call"` conversion,
+  additive — **no** `schema_version` bump, and no change to any request
+  field or response shape): a reference netlist that mixes a curated
+  subckt-call device (a MOS or drawn-resistor `X` card) with a
+  round-tripped *custom* device class (`X D1 A B cap_cmomi PARAMS: W=4.0
+  L=10.0` — IHP's MoM capacitors, the family issue #1942 taught the reader
+  to recognise) now converts instead of failing, so one request compares
+  both device families against an extracted layout. Two defects, both in
+  `netlist_normalize.py`: SPICE's `PARAMS:` keyword carries no `=`, so it
+  was tokenized as a *positional* token — and, being the last one, read as
+  the subcircuit name itself, making every such card fail with `subcircuit
+  'PARAMS:' is not a known device`; and even spelled without `PARAMS:`, a
+  custom class is deliberately absent from the curated binding table, so
+  its carried `W=`/`L=` tripped the device-like heuristic into the same
+  error. `PARAMS:` is now read as the separator it is (matching
+  `kdb.NetlistSpiceReader`) for every family, and an `X` card naming one of
+  `reference.deck`'s own custom device classes passes through untouched —
+  that family has no plain-element card to convert *to*, and the
+  passed-through card is exactly what the #1942 recovery reader already
+  reads as a real device. Keyed off the requested deck's declared classes,
+  never a global name list, so a genuinely unknown subcircuit name is still
+  the same hard error (now naming the real subcircuit rather than
+  `PARAMS:`). This retires the caller-side workaround of splicing the
+  custom cards out, converting the remainder, and resubmitting as
+  `plain-element` — which also had to re-derive the
+  `device.placeholder_value` disclosure the `subckt-call` path emits on its
+  own.
+
+- **Added** (#2016, `klt sim`, no `schema_version` bump — the response shape
+  is unchanged, `environment.engine` simply may now read `"xyce"`): a Xyce
+  execution path and cross-validation oracle. `engine: "xyce"` (Sandia's
+  Xyce, a from-scratch SPICE implementation — a genuinely independent oracle
+  for the ngspice results, pairing #5 of oracle-tracking #2007) runs DC/OP/
+  TRAN analyses over process/temperature corners on the `local`/
+  `local-parallel` backends, with waveforms via Xyce's ASCII rawfile.
+  Everything else the engine does not implement — `corners.supply_v` (Xyce
+  has no `alter`; and Xyce's `.temp` card is a silent no-op, so temperature
+  rides `.options device temp=`), `monte_carlo`, `options.fail_fast_probe`,
+  `remote`/`batch` — is refused up front with an error naming what is
+  supported. The oracle itself (`tests/test_sim_xyce_oracle.py`, real-binary
+  gated on both `Xyce` and `ngspice`) asserts ngspice-vs-Xyce agreement
+  within 3e-3 relative on DC/transient/temperature fixtures, a 21-point
+  sweep evidence check, and a seeded-defect negative control both engines
+  must flag; measured agreement and the divergences that shaped the deck
+  generator are recorded in `docs/design/xyce-oracle.md`.
+  `scripts/install-xyce.sh` installs the pinned official macOS arm64 build
+  (checksum-verified, smoke-tested); `.github/workflows/xyce-oracle.yml`
+  runs the oracle on dispatch, off the per-PR budget. `klt size` remains
+  ngspice-only.
+- **Fixed** (#1157, `klt extract` bare-mode cards for bulk-bearing drawn
+  resistors — **no** `schema_version` bump; the written SPICE card shape for
+  3-terminal resistor classes changes, see below): a drawn-resistor class
+  whose recognised terminal set includes a bulk/tap node — sky130's
+  `res_high_po`/`res_xhigh_po`, gf180mcu's `ppolyf_u` family, sg13g2's
+  `rsil`/`rppd`/`rhigh` — is no longer written (without `--pdk`) as the
+  KLayout-shaped 3-net `R` card (`R$1 A B W 12000 res_xhigh_po`), which
+  ngspice cannot parse at all: its native `R` element accepts exactly two
+  nodes, so it consumed the third net and the value as the
+  `<value>`/`<model>` positions and aborted with
+  `unknown parameter (res_xhigh_po)` — the netlist was not a simulatable
+  deck for such a layout, not merely a fidelity tradeoff. Those classes now
+  write `X$1 A B W res_xhigh_po r=12000 L=6U W=1U`: the class name becomes a
+  **caller-suppliable subcircuit name** (the testbench supplies a matching
+  3-pin `.subckt <class> a b w r= l= w=` wrapper declaring every parameter
+  the card carries), and the extracted resistance moves onto a declared
+  `r=` parameter so it stays on the written card the way issues #521/#588
+  established. Two-terminal classes keep the `R` card + `.model <class> r`
+  convention byte-for-byte. `klt lvs` re-ingests the new card shape
+  transparently whenever `layout.deck`/`reference.deck` is given, restoring
+  the identical `DeviceClassResistorWithBulk` (A/B/W, R/L/W) the old card's
+  read-back produced — series `combine_devices` folding and the deferred
+  `fixed_offset_ohm` correction (issue #585) behave exactly as before; see
+  `docs/cli/extract.md`'s "Verified compatible with `klt sim`" and
+  `docs/cli/lvs.md`'s new round-trip section.
+- **Fixed** (PR #2336 follow-up, the #1157 round-trip reader — no
+  `schema_version` bump): recovered `X` cards naming the same class now all
+  share one `DeviceClass` object per read, restoring the series
+  `combine_devices` fold the round-trip promised above on every platform.
+  The first cut looked the class up via `Netlist.device_class_by_name`,
+  which normalizes its argument through the netlist's case convention
+  (uppercases it for a SPICE netlist) but compares against each registered
+  class's stored name verbatim — the deck's canonical lowercase
+  `res_high_po` never matched, so every recovered card silently registered
+  another class object, and `Netlist.combine_devices()` — which groups
+  devices by class *object identity* — could no longer fold the chain
+  (Linux CI: the 3-segment `res_high_po` chain survived as 3 devices and
+  `test_pre_extracted_netlist_with_deck_applies_fixed_offset_once` failed
+  deterministically; macOS only passed because `Netlist.dup()`'s clones
+  happened to read back a shared id there — `DeviceClass`'s copy
+  constructor copies an indeterminate `tl::UniqueId` in klayout 0.30.10,
+  so that path's fold was never portable). The same latent per-card
+  registration is fixed for the #1942 MoM-capacitor and recovered-`C`-card
+  paths. Regression-locked at the reader/combine boundary by
+  `tests/test_lvs.py`'s
+  `test_recovered_resistor_x_cards_share_one_device_class_and_fold` (a
+  no-dup, no-retry `combine_devices()` call) and
+  `test_custom_class_recovery_x_cards_share_one_device_class`.
+- **Documented** (#1159, `klt extract --pdk` sky130 resistor geometry — the
+  code fix already shipped with issue #1396's bare-micrometre convention,
+  one week after #1159 was filed; this closes the loop with a regression
+  lock + vendor-deck proof, and the docs it asked for): the sky130
+  geometry-convention table in `docs/cli/extract.md`'s "SPICE model
+  binding" section now names the affected classes explicitly — a
+  `--pdk`-bound `res_high_po`/`res_xhigh_po`/`res_generic_po` `X` card
+  carries its geometry suffix-free (`l=6 w=1`) because those vendor
+  subcircuits' own `.param` blocks compute `leff = {l-0.0592}` and
+  `Efac = {... log(leff/w)}` in bare micron-scale units, so the
+  unit-suffixed spelling the issue reported (`l=180U w=0.42U`) drove `leff`
+  negative at any drawn length and ngspice's `Efac` parse-tree check to a
+  `nan` / `parameter value out of range` abort. Verified against the real
+  unmodified `sky130_fd_pr__res_xhigh_po.model.spice`: the suffix-free card
+  solves a sane operating point, the suffixed one reproduces the exact
+  failure. Regression-locked for the with-bulk classes by
+  `tests/test_extract.py`'s
+  `test_pdk_resolved_binds_three_terminal_resistor_sky130_suffix_free`, and
+  end-to-end against the real vendor deck (where an install + ngspice
+  resolve) by `test_real_sky130_bound_resistor_card_simulates_against_the_vendor_deck`.
+
+## 0.6.0 (2026-09-22)
+
+270 commits on `main` since v0.5.0, cut under the 25-commit backstop in
+[`RELEASING.md`](RELEASING.md)'s "Release cadence" (the event-based condition
+is met too: #2173/#2238 document downstream consumers blocked on unreleased
+fixes). Minor bump: the range adds verbs and request fields (`klt deck rules`,
+`klt sim`'s 2am EDA batch-fleet backend, `klt signoff`'s grading expansion,
+`klt erc`'s connectivity rollup, `klt mom`'s PEEC increments) with no
+conventional-commit breaking marker (`!:` / `BREAKING CHANGE`) and no
+`schema_version` value under `src/` decreased (the only literal changes are
+1→2 bumps plus a new constant at 1; `FLEET_REPORT_SCHEMA_VERSION` rose 1→3);
+compatibility notes, where they matter, are in the entries below.
+
+- **Fixed** (#2312, `klt gen bjt_array` geometry + `klt gen-compose`
+  via-drop, **no** `schema_version` bump — but the `COLL_*` ports' reported
+  `layer` and the drawn collector-ring layer both change on sky130, see
+  below): a `bjt_array` collector ring strapped to an already-connected net
+  by `klt gen-compose` now actually shows up merged in `klt extract`'s
+  netlist. The reported failure was a silent one — `gen-compose` reported
+  the `COLL_*` leg `routed: true`, `klt drc --deck sky130` was clean, and
+  `klt extract --deck sky130` still recovered the collector diffusion as a
+  separate, floating `vsubs` node with no connection to the strapped net.
+  The strap itself was real (#1894's contact ladder draws it); what was
+  missing was *recognition*. An extraction deck derives its substrate-tie
+  region from the **`tap`** mask outside every `nwell` and unifies it with
+  the deck's synthesized substrate net via `connect_global`, and this
+  generator drew its collector ring on the bare `active`/diffusion role
+  instead — making the ring an unrecognised diffusion island no strap could
+  ever tie to the substrate identity every collector-less bipolar's
+  collector terminal carries. The ring (and therefore the `COLL_*` ports'
+  reported `layer`) now uses the `tap` role, the same role `guard_ring`'s
+  ring and each `bjt_array` unit's own base-tie pad already used: on sky130
+  that moves the ring from `diff.drawing` 65/20 to `tap.drawing` 65/44; on
+  gf180mcu, whose `tap` role *is* its `active` role (`22/0`), the geometry
+  is byte-identical. `gen_compose`'s via-drop resolution treats both
+  diffusion-*class* roles (`ExtractionDeck.active` **and**
+  `ExtractionDeck.tap`) as reachable through `ExtractionDeck.contact`, so a
+  port on either still gets a real licon/mcon ladder rather than the
+  uncontacted metal stub a `tap`-role port used to get.
+- **Fixed** (#2061, `klt mom` numerics — **no** `schema_version` bump, same
+  JSON shape): the capacitance solver's off-diagonal kernel no longer lumps
+  each panel's charge at its centroid for nearby panel pairs. The kernel fill
+  now splits near field from far field: when two panels' centroids are
+  closer than a few panel widths, the source panel's potential is integrated
+  properly (4-point-per-axis Gauss–Legendre quadrature at the target
+  centroid, symmetrised across the pair so the matrix — and the
+  Conjugate Gradient solve — stays symmetric); well-separated pairs keep
+  the cheap centroid point-charge kernel, and the diagonal (self) term keeps
+  its closed form. Motivated and measured by the FastCap 2.0 cross-validation
+  oracle: on the same mesh that used to disagree by 3.29% on closely spaced
+  parallel plates, `klt mom` now agrees with FastCap to 0.32% (coupled lines
+  0.17% → 0.03%, shielded triple 1.29% → 0.46%). The correction also
+  removed the old coarse-mesh failure mode where the mutual capacitance of a
+  pair whose gap was far narrower than its panels came back sign-flipped:
+  the sign is now physical, and the unresolvable-magnitude condition is
+  instead flagged by a new coarseness diagnostic in `warnings` (same
+  `panel_size_um` guidance, one entry per offending conductor pair), so the
+  under-resolved-solve warning contract is unchanged. Two closed-form
+  validation tolerances were recalibrated to the cross-validated
+  discretisation with FastCap co-witness runs (parallel-plate/Kirchhoff 5%
+  → 6%, square-coax 2% → 3%, refinement-order floor first-order → 0.4):
+  the pre-#2061 agreement there leaned on the kernel's over-coupling
+  cancelling the constant-density basis's under-resolution of gap-facing
+  charge — FastCap sits at the same values (0.1–0.3% from `klt mom` on
+  every co-witnessed fixture). Fill cost rises only for near-field pairs
+  (+45 ms of 1.5 s on the largest oracle fixture); no measurable end-to-end
+  solve-time change.
+- **Added** (#2308, `klt deck rules` + docs, additive — **no**
+  `schema_version` bump, a new verb with its own `schema_version: 1`): a
+  read-only query for the *numbers* a built-in deck enforces —
+  `klt deck rules --deck sky130 [--rule poly.width.1]` lists every
+  registered rule's `id`, `description`, `check`, `layers`, `scope`,
+  `value_um`/`value_dbu`, kind-specific `limits`, and structured
+  `provenance`, alongside the deck's own `content_hash`. No layout file and
+  no check run: `klt drc` reports violations and therefore needs a stream,
+  so pre-layout arithmetic (area budgeting, device pitch, whether a proposed
+  segmentation is drawable at all) previously had to transcribe constants
+  out of deck comments by hand — a copy that silently stops tracking the
+  deck when the deck moves, and a citation no reviewer could re-check
+  mechanically. Carrying `content_hash` with the values makes a cited
+  constant pinnable to the exact deck revision it was read from. `area`/
+  `density`/`antenna` rules, which do not use a distance threshold, report
+  `value_um: null` plus their own `limits` rather than the unused `0` they
+  author as a placeholder; an unknown `--rule` id is a clean error envelope
+  (exit 1), never an empty `rules` list.
+- **Fixed** (#2306, `scripts/install-fastcap.sh`, developer tooling only —
+  **no** `klt` behaviour or JSON shape change): the FastCap 2.0 capacitance
+  oracle now builds on macOS without hand-rolled local aids. Two 1992-C
+  problems made a clean macOS checkout fail where Linux/CI passed:
+  `src/mulGlobal.h` includes `<malloc.h>`, a glibc-only header macOS does
+  not ship (BSD declares `malloc`/`calloc` in `<stdlib.h>`), and
+  `src/mulSetup.c`'s unprototyped K&R `getnbrs` returns no value from an
+  `int`-returning function, which Apple Clang treats as a hard
+  `-Wreturn-mismatch` error that the build's existing `-w` does not demote.
+  The script now generates a two-line `<malloc.h>` shim into its own
+  scratch source tree and passes `-I<shim> -Wno-error=return-mismatch`,
+  both guarded on `uname -s == Darwin` so the Linux `make` invocation is
+  byte-identical to before. Both aids are build-only and live in the
+  script's shell logic rather than the committed
+  `scripts/patches/fastcap-2.0-modern-toolchain.patch`, because `patch`
+  hunks apply unconditionally and these are platform-conditional; the
+  pinned commit, asset URL, checksum gate and patch file are unchanged, so
+  the built solver is bit-for-bit the same FastCap CI already compares
+  against.
+- **Fixed** (#2285, `klt functional-verification`, additive — **no**
+  `schema_version` bump): `options.sdf` no longer hard-fails on a zero-delay
+  `INTERCONNECT` entry whose destination is a top-level output port bit the
+  gate-level netlist drives through a Verilog `assign` alias — the shape
+  every P&R backend produces for a constant/tie-cell-driven output
+  (`assign uio_oe[0] = net0;`). Icarus 13.0 cannot insert an intermodpath
+  across that `assign` join, so each such entry cost one `SDF ERROR: ...
+  Could not find intermodpath!` and a real post-route SDF could not pass the
+  diagnostic gate at all, even though every failing entry was
+  `(0.000:0.000:0.000)` and modelled no delay. Rewriting the endpoint
+  through the netlist's alias map was tried and refuted live (the rewritten
+  entry names the net its own source pin drives and fails with `Could not
+  find handles for both ports!`), so such entries are now removed from the
+  SDF text handed to `$sdf_annotate` and counted in `environment.sdf.dropped`
+  as a new class, `zero_delay_alias_port_interconnect` (beside #1102's
+  `timingcheck`), with `partial: true`. The exemption is bounded by the
+  entry's delay value, not by the diagnostic text: an entry is dropped only
+  when *every* `min:typ:max` member of every rvalue is zero, so a
+  non-zero-delay entry on the identical destination is left in place and
+  still fails loudly (exit 1) — real delay is never silently discarded. The
+  alias map is read from `hdl_toplevel`'s own module via the same gate-level
+  `assign` parser `klt lvs` already reuses (#2021); a top module it cannot
+  read yields no drops and unchanged behavior. See
+  [`docs/cli/functional-verification.md`](docs/cli/functional-verification.md)'s
+  "SDF back-annotation" section.
+- **Added** (#2278, `klt signoff --manifest` + docs, additive — **no**
+  `schema_version` bump): an optional `partition_boundary` field on a
+  `kind: "mixed-signal"` block manifest, stating what each partition denotes
+  (`{"analog": "...", "digital": "..."}` — which nets/pins/cells belong to
+  which side). `docs/design-evidence-tiers.md`'s "Block kind" subsection
+  requires a mixed-signal claim to state that boundary explicitly, and the
+  manifest previously had nowhere to put it: every report's
+  `"partition": "analog"`/`"digital"` rows named a side nothing defined,
+  though an evidence key could already select one (`"<id>.<analog|digital>"`).
+  The declaration is echoed verbatim onto the report (top-level
+  `partition_boundary`) and onto every row of the partition it names
+  (`items[].partition_boundary`), so a row and the definition of the silicon
+  it covers are readable together; `--format text` prints it once under the
+  `kind:` header. **Reported, never graded** — it moves no item's `status`
+  and no block's `tier`, exactly like `drc_coverage` (#2002) and `body_bias`
+  (#1983); a mixed-signal manifest that declares nothing grades identically
+  and renders a byte-identical report, so `--check` sees no drift on an
+  upgrade alone. Either partition may be declared alone; a declaration on an
+  `analog`/`digital` manifest, an unknown partition key, or a blank/non-string
+  value is refused by name (exit `1`) rather than silently dropped. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md) → "The declared partition
+  boundary".
 - **Added** (#2275, `scripts/check_artifact_determinism.py` + CI + docs,
   additive — **no** `schema_version` bump): flake-triage forensics and
   declared platform-variable regions for golden-artifact evidence. The
@@ -1348,6 +1652,37 @@ not `klt --version`, if you need to detect this kind of drift. See
   values (e.g. issue #1999's escaped-identifier mismatch), and is documented
   as such in [`docs/cli/signoff.md`](docs/cli/signoff.md)'s new "Envelope
   validation" section.
+- **Added**: a FastCap-backed **capacitance cross-validation oracle** for
+  `klt mom` (issue #2015, pairing #4 of tracking issue #2007). `klt mom`'s
+  Maxwell capacitance matrix came from one implementation
+  (`native/mom/src/solver.rs`) with only two checks on its numerics: analytic
+  closed forms, which exist for about four idealised shapes, and the NEC2++
+  cross-check, which covers the *full-wave* solver path and says nothing about
+  capacitance. `tests/test_mom_capacitance_oracle.py` now runs
+  [FastCap 2.0](https://github.com/ediloren/FastCap2) — the 1992 M.I.T. solver
+  `solver.rs` itself cites as the method it implements, with analytic
+  panel-to-panel integrals where this repo's core uses a point-charge kernel —
+  over the *same* conductor geometry, meshed to the same panel set, and
+  compares every Maxwell-matrix entry inside a stated band. Measured
+  agreement: **0.17%** on a coupled-line pair, **1.29%** on a three-conductor
+  shielded triple, **3.29%** on the flat-lamina parallel-plate fixture (whose
+  larger difference is a documented kernel accuracy gap, not a defect); two
+  seeded geometry defects — a 0.5 µm spacing error and a deleted ground plane
+  — move entries by 19% and 39%, an order of magnitude outside that band, and
+  both solvers size each defect to within 1.3% of each other. FastCap was chosen
+  over Palace (#2007's other candidate) because it is the same method class,
+  takes exactly the panel set `klt mom` already builds, and builds in ~7
+  seconds with no dependencies, so it gates every PR rather than needing its
+  own opt-in workflow. New provisioning: `scripts/install-fastcap.sh` (pinned,
+  checksummed `ediloren/FastCap2` `master` — M.I.T.'s permissive 2003
+  relicensing, not the `WRCad` branch's noncommercial one — plus
+  `scripts/patches/fastcap-2.0-modern-toolchain.patch`, two build-only hunks
+  for a 2020s C compiler), wired into `ci.yml`'s existing `Native engines
+  (Rust)` (`mom`) leg with a no-silent-skip gate. The module skips cleanly
+  when `fastcap` is absent. No `klt` runtime behaviour or JSON shape changes —
+  FastCap stays an oracle, never a runtime dependency. Methodology, the
+  FastCap-vs-Palace decision, measured results, the declared shared surface
+  and the unsupported cases: `docs/design/fastcap-oracle.md`.
 - **Added**: `klt erc --format json` now emits `provenance.spec` as
   `{"content_hash": "sha256:<hex>"}` (issue #2036), pinning the *contents* of
   the stackup/vias/nets/ties spec file the run was validated against.
@@ -2337,6 +2672,20 @@ not `klt --version`, if you need to detect this kind of drift. See
   for the full decision record and
   [`docs/json-contract.md`](docs/json-contract.md)'s "Pinning the KLayout
   engine version" section.
+- **Added**: `klt mom` PEEC inductance/resistance and full-wave S-parameter
+  requests accept a conductor built from more than one box, as long as the
+  conductor's own boxes share one current-flow axis and axial extent (issue
+  #1841). Previously a multi-box conductor was rejected outright by the
+  bar-shaped-conductor MVP restriction; now each box is validated
+  individually against that restriction, and (for PEEC) gets its own
+  filament grid attributed back to the owning conductor for the pairwise
+  solve, or (for full-wave) is combined with its sibling boxes into one
+  equivalent wire via summed cross-sectional area and an area-weighted
+  centroid. A conductor whose own boxes span more than one axis is still
+  rejected, unchanged; conductors still need not share an axis or axial
+  extent with each other (issue #1842). `inductance_matrix_nh`/
+  `resistance_ohm` still report one row/entry per conductor, not per box.
+  See `docs/cli/mom.md`'s "Worked example: multi-box conductor" section.
 - **Fixed**: `klt synthesize`'s `schema_version` bumps `1` -> `2` (issue
   #1844, mirroring `klt pex`/`klt sim`/`klt size`/`klt extract`'s own issue
   #1261/#1376 bumps): the top-level `netlist_path`/`script_path` fields --
@@ -2571,6 +2920,265 @@ not `klt --version`, if you need to detect this kind of drift. See
   — precisely the library class `constraints.max_fanout` exists to serve. No
   `schema_version` bump (additive on both request and response). See
   [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md).
+
+### Merged since 0.5.0, by commit type
+
+Every commit on `main` in `v0.5.0..v0.6.0` (270 commits), grouped by its
+conventional-commit prefix; the trailing `(#N)` is the squash-merged PR.
+The narrative entries above cite the originating issue where one exists.
+Repeated no-PR sync commits (`chore: resync installed Loom surfaces`,
+`bd sync`) are aggregated into single lines.
+
+#### Added
+
+- feat(deck): add `klt deck rules` to expose a deck's rule values (#2308) (#2315)
+- feat(sim): honor a host-level KLT_SIM_MAX_WORKERS cap for local-parallel (#2311)
+- feat(benchmarks): wire real per-round token usage into the round-mode ledger (#2294) (#2309)
+- feat(benchmarks): cache the deterministic reference provider across --rounds (#2305)
+- feat(signoff): carry a mixed-signal manifest's declared partition boundary (#2303)
+- feat(functional-verification): declared-input evidence manifest v1 (partial-closure pilot) (#2097) (#2301)
+- feat(place-and-route): row-rail fallback warning + PDN/stackup docs guidance (#1985) (#2300)
+- feat(mom): PEEC increment (i) — multi-box conductors sharing one axis (#1869)
+- feat(test): cross-validate klt mom's capacitance matrix against FastCap 2.0 (#2015) (#2064)
+- feat(benchmarks): --rounds refinement mode with a per-cell ledger.jsonl (#2253) (#2296)
+- feat(design-agent): per-task mutations.json schema + validate mutation-gate enforcement (#2297)
+- feat(equiv): stage-scoped --resume + --check/--rerun + remote evidence-runs guide (#2280) (#2289)
+- feat(evidence): float-provenance rules + pinned-artifact escape hatch for committed generators (#2279) (#2287)
+- feat(extract): add --subcircuit to slice one sub-cell into a standalone .SUBCKT deck (#2283)
+- feat(power): carve declared device bodies out of the conductor roles (#2271)
+- feat(erc): let a native-substrate block declare its tie via asserted well_boxes (#2273)
+- feat(erc): distinguish a tool-limitation tie disclosure from an unexpressible tap (#2264)
+- feat(signoff): add --check so a committed report verifies across provisioning routes (#2258)
+- feat(erc): declare a tap by assertion or disclose it as unexpressible (#2240)
+- feat(signoff): gate --format text colour on isatty, $NO_COLOR, and --no-color (#2235)
+- feat(verify): --check/--rerun for synthesize/place-and-route + envelope lint (#2233)
+- feat(equiv): optional Verilator fast-path replay backend (iverilog stays canonical) (#2232)
+- feat(erc): auto-apply a curated deck's own device-marker layers via --deck (#2217)
+- feat(gen-compose): flag legs whose landing pin never touches real block metal (#2221)
+- feat(signoff): expose a grading-ruleset identity distinct from git_commit/git_tag (#2222)
+- feat(signoff): report how many T1 items this build grades beside the doc's count (#2215)
+- feat(erc): locate each island of a multi-island erc.unconnected_net (#2207)
+- feat(signoff): verify a citation's input against the artifact, not just the envelope (#2212)
+- feat(signoff): report version-skewed envelopes distinguishably (#2198) (#2208)
+- feat(erc): subtract declared device bodies from connectivity (#2205)
+- feat(signoff): pin the tier report's governing checklist by content hash (#2191)
+- feat(erc): add erc_status, a connectivity rollup beside the antenna status (#2188)
+- feat(place-and-route): ship platform-default PDN presets for request.power (#2174)
+- feat(design-agent): zero-TC composite reference divider for the device oscillator (#2155)
+- feat(coverage): define the common partial-success rollup and signoff rule (#2151)
+- feat(signoff): kind-restrict T1 items 5, 6 and 8 (#2044) (#2129)
+- feat(provenance): discriminate input.content_hash by artifact role (#2058)
+- feat(place-and-route): measure and warn about placed power delivery (#2122)
+- feat(pdk): enforce explicit capability decisions against live owners (#2137)
+- feat(signoff): add T1 item 11, power delivery (structural) (#2057)
+- feat(signoff): validate ingested envelopes against a typed shape per kind (#2054)
+- feat(gen): add shared provenance block to klt gen/gen-compose reports (#2066)
+- feat(sim): add a `batch` backend that submits to 2am's EDA batch fleet (#2080) (#2087)
+- feat(coverage): declare the shared nothing_checked convention; klt signoff refuses vacuous evidence (#2067)
+- feat(gen-compose): record source_path and a geometry digest per input block (#2069)
+- feat(ci): add a cyclomatic-complexity ratchet (C901), not a ceiling (#2041)
+- feat(erc): pin the spec file's contents in klt erc's provenance block (#2049)
+- feat(lvs,pex,signoff): make device-body tie/bias a gradeable field (#1983) (#2047)
+- feat(lvs): disclose applied hints.equivalent_pins groupings in the envelope (#2031)
+- feat(signoff): report the cited DRC envelope's coverage block (#2002) (#2017)
+- feat(signoff): grade digital RTL-flow blocks (sta/functional-verification, per-kind item 7) (#1967)
+- feat(erc): add status and provenance to klt erc's envelope (#1984)
+- feat(lvs): add per-instance power/ground connectivity check to gate-level LVS (#1964)
+- feat(lvs): add options.compare_parameters to scope device-class parameter compares (#1928) (#1943)
+- feat(scripts): add checksum-pinned fetch script for ihp-sg13cmos5l (#1940)
+- feat(sta): add pdk.corners for N-corner characterization in one request (#1919)
+- feat(drc,extract): add optional request-document input form (issue #1867) (#1918)
+- feat(place-and-route,sta): add input/output delay constraints and timing_status (#1915)
+- feat(signoff): consume declared critical metrics from the metric-namespace registry (#1910)
+- feat(place-and-route): add per-corner TNS to the post-route corner sweep (#1905)
+- feat(extract): adopt the declared metric namespace registry (extract__* metrics) (#1899)
+- feat(functional-verification): options.trace contracts the waveform artifact (#1862)
+- feat(sim): adopt declared metric namespace registry (sim__corner__* metrics) (#1897)
+- feat(gen-compose): connectivity[].layer_role routes non-planar net graphs in one call (#1858)
+- feat: detect and warn on KLayout engine version drift (issue #1490) (#1872)
+- feat(drc): adopt declared metric namespace registry (drc__error__count) (#1877)
+- feat(spec-review): promote verdict to EE key of two-key ratification (#1893)
+- feat(mom): PEEC increment (ii) -- arbitrary orientation/offset filament pairs (#1879)
+- feat(place-and-route): add max_transition_ns/max_capacitance_pf/max_fanout constraints (#1860)
+- feat(gen-compose): channel track assignment for inter-block route-vs-route contention (#1467) (#1840)
+- feat(extract): implement --parasitics-top-cell-only R/C attribution (#1704) (#1856)
+- feat(sim): two-pass fail-fast probe for unmeetable timeout budgets (#1694) (#1859)
+- feat(gen-compose): subtract a block's navigable_regions from its obstacle bbox (#1835) (#1855)
+- feat(mom): resolve klt mom stackup from an installed PDK (#1617) (#1852)
+- feat(metrics): add declared metric namespace registry, pilot on layout-metrics (#1851)
+- feat(wave): wire klt wave build/query into the CLI, schemas, docs (#1833)
+- feat(gen): mos_array interior_channel_um reserves an interior routing channel (#1531) (#1836)
+
+#### Fixed
+
+- fix(lvs): recover the device.property finding on the inline-extraction path (#2317) (#2319)
+- fix(mom): Gauss quadrature over near-field source panels — closes the ~3% centroid-kernel gap (#2061) (#2322)
+- fix(gen): draw bjt_array's collector ring on the tap role so extract sees the tie (#2320)
+- fix(fastcap): build the capacitance oracle on macOS without manual aids (#2306) (#2314)
+- fix(functional-verification): drop zero-delay assign-alias port INTERCONNECTs (#2304)
+- fix(native): set debug = 1 on every release profile so macOS can dlopen the output (#2261) (#2290)
+- fix(power): attach a via to the polygon it lands on, not the nearest node on the net (#2269)
+- fix(build): stop counting untracked build-root files as dirty in git_identity() (#2257)
+- fix(lvs): prune power-only masters from the reference side too (#2244) (#2251)
+- fix(examples): clear host paths from committed envelopes and gate them in CI (#2241)
+- fix(loom): teach sweep-lease-fence.sh check its own sweep id (--sweep-id) (#2239)
+- fix(erc): report device-body carve-out area intersected with its role (#2236)
+- fix(signoff): rank an ungradeable-by-build item first in the fleet blocker (#2220)
+- fix(signoff): resolve klt yield samples path relative to the report (#2211)
+- fix(erc): report a degenerate tie as skipped, not a clean missing-tie pass (#2209)
+- fix(loom): never write loom:issue over a live loom:operator-only escalation (#2206)
+- fix(power): match power_nets by carried label, decompose non-rect rails (#2190)
+- fix(signoff): report per-item build-grading coverage and name the build (#2201)
+- fix(signoff): distinguish unverifiable provenance from genuine staleness (#2195)
+- fix(place-and-route): reject PDN straps that cannot fit the floorplan core (#2189)
+- fix(signoff): the fleet roll-up's blocking_item skips structurally-ungradeable items (#2187)
+- fix(erc): scope ties[] well conduction to its taps, isolate tie graph (#2186)
+- fix(extract): stop double-escaping a merged-label net's synthesized leg/hub name (#2185)
+- fix(sim): populate provenance.input with role: netlist (#2168)
+- fix(signoff): reject malformed critical metrics (#2094) (#2112)
+- fix(signoff): let a critical-metric blocker outrank a partial status token (#2167)
+- fix(drc): apply the common coverage rollup to curated results (#2166)
+- fix(pex): apply the common coverage rollup (#2165)
+- fix(examples): regenerate the signoff worked example and gate it in CI (#2163)
+- fix(sim): apply the common coverage rollup to skipped corners and limits (#2162)
+- fix(erc): apply the common coverage rollup rule to antenna status (#2109) (#2161)
+- fix(power): derive EM status from the common coverage rollup (#2116) (#2160)
+- fix(provenance): record the running tool build identity (#2102)
+- fix(openroad): retain per-invocation logs across P&R and STA failures (#2127)
+- fix(functional-verification): reject unexecuted or inconsistent evidence (#2107)
+- fix(extract): rename dot-joined net names so ngspice can address the node (#2153)
+- fix(lvs): require cross-master corroboration before calling a pin a supply (#2105)
+- fix(signoff): require literal true for SDF annotation credit (#2135)
+- fix(extract): preserve abstracted well continuity (#2082) (#2121)
+- fix(extract): stop --abstract-cells merging a macro's own declared pins (#2147)
+- fix(loom): verify bare file and line citations (#2128)
+- fix(place-and-route): floor routed metal against each layer's min-area rule (#2144)
+- fix(coverage): refuse zero-check results across audited producers (#2134)
+- fix(functional-verification): require readable SDF transcripts (#2138)
+- fix(lvs): flag a supply net matched to an unrelated signal net (#2140)
+- fix(synthesize): isolate artifacts and input attribution per invocation (#2119)
+- fix: isolate routing passes and publish distinct final DRC counts (#2098)
+- fix(extract): curate sg13cmos5l nominal metal parasitics (#2126)
+- fix(gen-compose): floor via landing pads by enclosure rules (#2103)
+- fix(lvs): report supply names spanning disconnected layout nets (#2120)
+- fix(extract): resolve a magic tech file for the ext2spice coupling oracle test (#2059)
+- fix(synthesize): enable gf180 7t constraints and constant mapping (#2099)
+- fix(lvs): make body_verification's PMOS arm per-device, not deck-structural (#2048) (#2068)
+- fix(ci): warn not error on queue-only wall-clock breaches (#2056) (#2063)
+- fix(decks): register sg13cmos5l in the parasitics registry (#2012)
+- fix(gen-compose): floor via-drop landing pads against each layer's own min-area rule (#2075)
+- fix: re-snapshot complexity-baseline.json to unblock the C901 ratchet (#2077)
+- fix(lvs): join assign-aliased reference ports onto their canonical net (#2038)
+- fix(gen): emit the JSON error envelope for self-detected usage errors (#2029) (#2050)
+- fix(erc,power): report pass_partial when coverage is incomplete (#1997) (#2022)
+- fix(loom): give every worktree its own uv-synced editable install (#2042)
+- fix(decks): transcribe sky130's met1-met5 holes-area rules (m1.7-m5.7) (#2023)
+- fix(equiv): keep escaped top-level ports out of cut-point blacklisting (#2019)
+- fix(extract): stop abstract-pin candidate discovery at a second declared pin (#2024)
+- fix(examples): make both worked-example regenerators reproducible (#2018)
+- fix(signoff): restrict T1 items 3 and 4 to drc and lvs citations (#2013)
+- fix(extract): warn when a declared pin name matches 2+ disconnected nets (#2010)
+- fix(lvs): act on power_connectivity first-tester feedback (#1978) (#2009)
+- fix(synth,pnr): strip signed declarations, resolve x constants, pre-flight netlists (#2006)
+- fix(lvs): populate provenance.input.content_hash, strip ANSI from netgen text (#2005)
+- fix(erc): compute gate area from poly ∩ diff via optional active_layer (#2001)
+- fix(decks): transcribe sky130's met1-met5 minimum-area rules (#1955) (#1989)
+- fix(gen-compose): make the closed-ring rejection plane-aware (#1970)
+- fix(signoff): hard-fail klt signoff's lvs check on a power_connectivity mismatch (#1974)
+- fix(drc): fail --engine klayout runs on a partially-executed deck (#1951)
+- fix(hermit): recognize annotated self-assignment as instance state (#1949)
+- fix(extract): carry resistor L/W geometry onto the written R card (#1947)
+- fix(gen-compose): accurate ring-gap clearance messages; fund ring-gap reach in own-block routing allowance (#1945)
+- fix(lvs): recognise round-tripped custom device classes as devices, not abstract circuits (#1942) (#1944)
+- fix(gen-compose): hold a leg's own-block approach to the deck's spacing rule (#1904) (#1936)
+- fix(drc,extract): stop bare filename starting with '{' misclassifying as inline JSON (#1939)
+- fix(gen-compose): compare a via-drop ladder's intermediate landing pads too (#1937)
+- fix(gen): resolve sky130 hvi marker for voltage_flavor (issue #1912) (#1935)
+- fix(extract): stop --abstract-cells from corrupting unrelated net names (#1911) (#1934)
+- fix(lvs): let a subckt-call reference's placeholder-0 value pair on topology (#1933)
+- fix(drc,lvs): populate provenance.pdk when --pdk/reference.pdk resolves (#1901) (#1932)
+- fix(gen-compose): reject a leg that reaches a pin from the side it doesn't face (#1931)
+- fix(gen-compose): draw a real contact for diffusion-role via-drops (COLL_*) (#1930)
+- fix(functional-verification): guard against Icarus's escaped-divider INTERCONNECT crash (issue #1890) (#1926)
+- fix(synthesize): write commit-safe $PDK_ROOT-relative liberty, rehydrate a runnable sibling (#1920)
+- fix(lvs): recover capacitor device-class name across bare-C-card round trip (#1921)
+- fix(place-and-route): surface container-mount hints on openroad file-read failures (#1914)
+- fix: restore SIGPIPE race fix and flake-detection test in verify-proposal-refs.sh (#1898) (#1903)
+- fix(loom): verify-proposal-refs.sh cache never persists, flaky false MISSING FILE reports (#1881)
+- fix(synthesize): report artifact paths as {path, scope}, drop absolute paths from .ys (#1873)
+- fix(functional-verification): defer bit-selected top-level-port INTERCONNECT entries to a later $sdf_annotate call (#1857)
+- fix(wave): harden gen_fixtures against the fst-writer size-tie defect, draft upstream report (#1606) (#1853)
+
+#### Changed
+
+- refactor(native): extract shared NLDM bilinear-interpolation crate (#2272) (#2282)
+- perf(erc): add --findings-only to skip the per-gate antenna accumulation (#2228)
+- refactor(size): extract shared method/env tail into _print_method_and_env (#2154)
+- refactor(extract): split the netlist-report subsystem into extract_report.py (#2071)
+- refactor(pdk): one authoritative variant->family classifier (#2026) (#2053)
+- refactor(power): use ir_solver.worst_deviation for island worst droop (#1950)
+- refactor(pdk): split standard-cell/liberty subsystem into pdk_cells.py (#1923)
+- refactor(functional-verification): split SDF timing-annotation subsystem into functional_verification_sdf.py (#1916)
+- refactor(gen): split PDK layer-parameter lookup into gen_layer_params.py (#1891)
+- refactor(extract): split RC-parasitics subsystem into extract_parasitics.py (#1882)
+- refactor(pdk): dedupe _resolve_liberty into shared resolve_liberty_for_cell_library (#1861)
+
+#### Docs
+
+- docs: tagged remote-compute guide + gitignore per-repo .env (#2277) (#2292)
+- docs: codify byte-exact-vs-tolerance convention for numeric fixtures (#2293)
+- docs(signoff): document the supply_spec_disclosed_tool_limitation reason (#2268)
+- docs(gen): state that generator geometry is not stable across releases (#2256)
+- docs(erc): document diffusion/well continuity false-positive risk (#2200)
+- docs: make the klt exit-code contract explicitly additive, gate on status (#2184)
+- docs: what makes a subagent run slow, and the dispatch skill for it (#2030)
+- docs(drc): correct stale coverage_unknown docs for the klayout engine (#2157)
+- docs(signoff): document coverage_unknown/malformed_coverage reason values (#2149)
+- docs(lvs): document net_correspondence reference/layout as nullable (#2143)
+- docs(json): define warnings for skipped requested analyses (#2125)
+- docs: document envelope-vs-plain-string split for artifact path fields (#2081)
+- doc: add module-ownership map for multi-file klt verbs (#2043)
+- docs(tiers): state the power_connectivity condition item 4 is graded on (#2003)
+- docs(drc): record the decision to leave metal density uncovered (#1975) (#1992)
+- docs(cocotb): require ReadOnly() before sampling a DUT output (#1990)
+- docs: add the digital path's staged pipeline contract (D1-D11) (#1963)
+- docs(signoff): add a runnable block-manifest worked example (#1961)
+- docs(cli): add yield-campaign reference page, link release-lag policy (#1958)
+- docs: bring README file trees and PyPI status back in line with the tree
+- docs(lvs): clarify counts.{nets,pins}.matched is hierarchy-wide, not top-circuit-scoped (#1887) (#1925)
+- docs(lvs): sharpen combine_devices_per_circuit no-op caveat for klt extract composed netlists (#1924)
+- docs(synthesize): fix netlist_path.path resolution base in place-and-route bullet (#1896)
+- docs(functional-verification): attribute the all-tests-fail SDF shape to timing, not annotation (#1888)
+- docs(wave): add waveform-first debugging guide for agents (#1864)
+- docs(design): record path-1 decision for klt mom non-bar conductor support (#1843)
+
+#### Chores
+
+- test(lvs): cross-validate the LVS verdict against a magic-extracted netlist (#2318)
+- build(deps): bump the github-actions group across 1 directory with 3 updates (#2164)
+- build(deps): bump the npm-minor-patch group across 1 directory with 9 updates (#2274)
+- test(mom): grep-based no-silent-skip gate + seeded-defect control for PyPEEC (#2310)
+- test(lvs): power-grid regression suite + real conb_1 gate-model corpus control (#1986) (#2302)
+- test(mom): cross-validate the PEEC spiral against PyPEEC in CI (closes out #1842 AC3) (#2106)
+- ci(evidence): flake triage forensics + declared platform-variable regions for golden artifacts (#2275) (#2298)
+- ci: dedicated test-numerical job + numpy cross-check suite for dependency-gated numerical surfaces (#2276) (#2291)
+- test(gen-compose): guard COLL_* + channel-track-leg net merge (#2008) (#2060)
+- ci: byte-compare golden artifacts regenerated under two hash seeds and paths (#2231)
+- test: add offset/mismatch start-up sweeps for device-oscillator (#2213)
+- test: isolate build identity git probes from OpenROAD stubs (#2159)
+- test(corpus): add a gcd P&R fixture with a real power grid (#2114)
+- test: isolate optional ngspice and fleet PDK requirements (#2101)
+- ci: add a wall-clock budget check to ci.yml (#1993)
+- test(oracle): cross-validate klt drc and klt extract against magic (#2014) (#2046)
+- test(signoff): bind an LVS check to the DRC'd layout, correct stale prose (#2040)
+- ci: move native-techmap off the contended self-hosted pool (#1981)
+- test(gen-compose): lock in clean bundle-net routing through a nested composition (#1917) (#1938)
+- test(loom): enlarge Fixture 5b's fixture repo to actually trigger the SIGPIPE race it guards (#1906)
+- ci: gate native legs on an extension freshness fingerprint (#1889) (#1900)
+- chore(examples): regenerate critical-net-mom-fidelity reports from current klt extract (#2270)
+- chore(decks): regenerate deck history table for v0.5.0
+- chore: resync installed Loom surfaces (35 commits, no PR)
+- bd sync: 2026-09-21 17:49:35 (no PR)
 
 ## 0.5.0 (2026-09-15)
 

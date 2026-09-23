@@ -657,6 +657,281 @@ def device_kind(model: str) -> str:
     return lowered
 
 
+# --------------------------------------------------------------------------- #
+# LVS adapter (issue #2316): magic's netlist as `klt lvs`'s *layout* side
+# --------------------------------------------------------------------------- #
+#
+# `klt lvs`'s `request.layout` accepts a pre-extracted SPICE netlist
+# (`{"netlist": ..., "top": ...}`) instead of a GDS to extract inline, which
+# is the seam this adapter plugs magic into: the verdict pipeline then runs
+# with an *independently extracted* layout netlist, closing the one gap
+# #2007's analysis flagged (netgen agreement validates comparison; #2014
+# validates extraction; neither ran an LVS **verdict** off a non-KLayout
+# extraction).
+#
+# The adapter is a **format** translation, not a filter. magic writes its
+# devices as subcircuit-instance cards naming the full PDK model
+# (`X0 Y A VGND VNB sky130_fd_pr__nfet_01v8 w=0.65 l=0.15 ...`), which
+# KLayout's SPICE reader reads as a call into an abstract circuit rather
+# than as a MOS device; `klt`'s own writer uses the `M` card with the deck's
+# device-class name (`M$1 Y A VGND vsubs nfet L=0.15U W=0.65U ...`). Every
+# extracted parameter magic reported is carried across -- nothing is dropped
+# to make a compare easier.
+
+
+#: Per-`klt`-deck translation of magic's own **bulk** net names onto the
+#: names `klt`'s extraction gives the very same nodes.
+#:
+#: This is the "bulk-net naming" difference `docs/design/magic-oracle.md`
+#: already declares (magic names a MOSFET's bulk from its own
+#: well/substrate node; `klt` synthesises `vsubs` for the substrate). It is
+#: a naming convention on both sides, not a verdict, so translating it here
+#: is what stops it producing a *false* mismatch -- the acceptance criterion
+#: this adapter exists to satisfy. Every entry is asserted to be live at
+#: translation time (see :func:`magic_net_translation`), so a deck whose
+#: magic names change fails loudly instead of quietly translating nothing.
+BULK_NET_ALIASES_BY_DECK: dict[str, dict[str, str]] = {
+    "sky130": {"VNB": "vsubs"},
+    "gf180mcu": {"SUB": "vsubs"},
+}
+
+#: Prefix for the stable names :func:`magic_net_translation` gives magic's
+#: *unlabelled* nets. magic names a net it had to invent from the position
+#: of the geometry it found (`a_74_47#`, `w_n86_453#`); `klt` numbers them
+#: (`$5`). Neither name means anything, both move when the layout moves, and
+#: an LVS comparer pairs such a net topologically -- so they are renamed to
+#: something stable and collision-free rather than compared. The second half
+#: of the same declared naming difference as :data:`BULK_NET_ALIASES_BY_DECK`.
+GENERATED_NET_PREFIX = "magic_unnamed_"
+
+#: Terminal order magic's `ext2spice` writes a MOSFET subcircuit call in,
+#: for both PDKs' open_pdks models. Mirrors
+#: `tests/test_extract_magic_oracle.py`'s `MAGIC_MOSFET_TERMINALS`, which is
+#: where #2014 verified it against real output; a model declaring a
+#: different port order fails loudly here (the terminals would be written
+#: onto the wrong `M`-card positions and the compare would report a
+#: mismatch), never silently.
+MAGIC_MOSFET_TERMINAL_ORDER = ("d", "g", "s", "b")
+
+#: `(<ext2spice parameter>, <SPICE card key>, <unit suffix>)` for every
+#: parameter `klt extract`'s own SPICE writer emits, in its order. µm for a
+#: length/perimeter (`U`), µm² for an area (`P`, i.e. pico-square-metres) --
+#: the units `parse_magic_spice` already normalises magic's values to, and
+#: the units `klt`'s own writer uses, so both sides state the same numbers.
+_SPICE_MOSFET_PARAMS: tuple[tuple[str, str, str], ...] = (
+    ("l", "L", "U"),
+    ("w", "W", "U"),
+    ("as", "AS", "P"),
+    ("ad", "AD", "P"),
+    ("ps", "PS", "U"),
+    ("pd", "PD", "U"),
+)
+
+#: Device classes this adapter can express as a SPICE `M` card. Anything
+#: else (a resistor, a capacitor, an unrecognised model :func:`device_kind`
+#: passed through under magic's own name) raises rather than being dropped:
+#: silently omitting a device is exactly how a broken layout reports a clean
+#: match.
+_MOSFET_KINDS = frozenset({"nfet", "pfet"})
+
+#: Characters that would change how a SPICE reader tokenises a name. A
+#: translated name containing any of them is refused rather than quoted --
+#: no fixture needs one, and a mangled net name is indistinguishable from a
+#: connectivity difference once the comparer has run.
+_UNSAFE_NAME_RE = re.compile(r"[\s()=,*;'\"{}]")
+
+
+def _is_magic_generated_net(name: str) -> bool:
+    """Whether ``name`` is one magic invented rather than read off a label.
+
+    magic terminates every such name with ``#`` (``a_74_47#``,
+    ``w_n86_453#``); a name taken from a drawn label never carries one.
+    """
+    return name.endswith("#")
+
+
+def magic_net_translation(
+    result: MagicExtractResult,
+    *,
+    deck: str,
+    aliases: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """The declared magic -> `klt` net-name translation for ``result``.
+
+    Returns a mapping covering **every** net in ``result.nets``: the bulk
+    aliases for ``deck`` (or ``aliases``, when given explicitly), magic's
+    unlabelled nets renamed to :data:`GENERATED_NET_PREFIX`-prefixed stable
+    names, and every other name passed through unchanged.
+
+    Fails closed, in the same spirit as the rest of this module:
+
+    - an unknown ``deck`` with no explicit ``aliases`` raises, rather than
+      translating nothing and letting a bulk-name difference read as a real
+      mismatch;
+    - an alias whose *source* name is absent from this netlist raises -- a
+      stale alias that silently does nothing is how a declared difference
+      turns back into a false verdict;
+    - two distinct magic names that would translate onto one name raise,
+      since merging two nets is a connectivity change, not a rename.
+    """
+    if aliases is None:
+        if deck not in BULK_NET_ALIASES_BY_DECK:
+            raise MagicOracleError(
+                f"no magic bulk-net alias table is declared for klt deck "
+                f"{deck!r} -- pass aliases= explicitly (see "
+                "docs/design/magic-oracle.md)"
+            )
+        aliases = BULK_NET_ALIASES_BY_DECK[deck]
+
+    missing = sorted(name for name in aliases if name not in result.nets)
+    if missing:
+        raise MagicOracleError(
+            f"declared bulk-net alias(es) {missing} are not nets of magic's "
+            f"own netlist for {result.top!r} (it has {sorted(result.nets)}) "
+            "-- the alias table is stale for this deck/cell and would "
+            "silently translate nothing"
+        )
+
+    translation: dict[str, str] = {}
+    generated = 0
+    for name in sorted(result.nets):
+        if name in aliases:
+            translation[name] = aliases[name]
+        elif _is_magic_generated_net(name):
+            generated += 1
+            translation[name] = f"{GENERATED_NET_PREFIX}{generated}"
+        else:
+            translation[name] = name
+
+    collisions = sorted(
+        {
+            translated
+            for translated in translation.values()
+            if sum(1 for value in translation.values() if value == translated) > 1
+        }
+    )
+    if collisions:
+        raise MagicOracleError(
+            f"net-name translation would merge distinct magic nets onto "
+            f"{collisions} -- that is a connectivity change, not a rename: "
+            f"{translation}"
+        )
+    for original, translated in sorted(translation.items()):
+        if not translated or _UNSAFE_NAME_RE.search(translated):
+            raise MagicOracleError(
+                f"translated net name {translated!r} (from {original!r}) is "
+                "not safe to write into a SPICE netlist"
+            )
+    return translation
+
+
+def _format_spice_value(value: float) -> str:
+    """One device parameter, in the shortest form that round-trips the
+    value magic reported (``0.169``, ``1``, ``2.03``)."""
+    return f"{value:.10g}"
+
+
+def magic_lvs_netlist_text(
+    result: MagicExtractResult,
+    *,
+    deck: str,
+    aliases: dict[str, str] | None = None,
+    extra_ports: tuple[str, ...] | list[str] = (),
+) -> str:
+    """Render ``result`` as SPICE `klt lvs` can read as ``request.layout.netlist``.
+
+    ``extra_ports`` promotes already-existing nets to top-level ports. The
+    one case that needs it is the other half of the bulk-naming difference:
+    `klt`'s extraction promotes its synthesized substrate net (``vsubs``) to
+    a top-level pin, magic does not declare a port for the substrate node at
+    all, and a pin-count difference is a *verdict* (``pin.unmatched``) in
+    every LVS comparer. Naming a net that does not exist raises -- an
+    invented port is a connectivity claim, not a rename.
+
+    Fails closed on everything that would make a compare meaningless:
+    an empty device list (a netlist with no devices matches nothing and
+    would report a spurious clean verdict against an equally empty
+    reference), a device this adapter cannot express as an `M` card, a
+    MOSFET whose terminal count is not magic's documented four, and a
+    missing parameter.
+    """
+    if not result.devices:
+        raise MagicOracleError(
+            f"magic extracted no devices from {result.top!r} -- refusing to "
+            "write a device-less layout netlist for an LVS compare (it would "
+            "report a verdict about nothing)\n" + result.netlist_text
+        )
+
+    translation = magic_net_translation(result, deck=deck, aliases=aliases)
+    ports = [translation[port] for port in result.ports]
+    for extra in extra_ports:
+        if extra in ports:
+            continue
+        if extra not in translation.values():
+            raise MagicOracleError(
+                f"extra_ports names {extra!r}, which is not a net of magic's "
+                f"netlist for {result.top!r} (translated nets: "
+                f"{sorted(set(translation.values()))})"
+            )
+        ports.append(extra)
+
+    lines = [
+        f"* {result.top} as extracted by magic {magic_version()} "
+        f"({result.tech_name} {result.tech_version}), rendered for klt lvs",
+        f".SUBCKT {result.top} {' '.join(ports)}",
+    ]
+    for index, device in enumerate(result.devices):
+        if device.kind not in _MOSFET_KINDS:
+            raise MagicOracleError(
+                f"magic device {index} of {result.top!r} is a "
+                f"{device.kind!r} ({device.model!r}), which this LVS adapter "
+                "cannot write as a SPICE MOSFET card -- refusing to drop it"
+            )
+        if len(device.terminals) != len(MAGIC_MOSFET_TERMINAL_ORDER):
+            raise MagicOracleError(
+                f"magic device {index} of {result.top!r} has terminals "
+                f"{device.terminals}, not the "
+                f"{MAGIC_MOSFET_TERMINAL_ORDER} an ext2spice MOSFET call is "
+                "documented to carry"
+            )
+        missing_params = [
+            name
+            for name, _key, _suffix in _SPICE_MOSFET_PARAMS
+            if name not in device.params
+        ]
+        if missing_params:
+            raise MagicOracleError(
+                f"magic device {index} of {result.top!r} is missing "
+                f"parameter(s) {missing_params}: {device.params}"
+            )
+        terminals = " ".join(translation[net] for net in device.terminals)
+        params = " ".join(
+            f"{key}={_format_spice_value(device.params[name])}{suffix}"
+            for name, key, suffix in _SPICE_MOSFET_PARAMS
+        )
+        lines.append(f"M{index} {terminals} {device.kind} {params}")
+    lines.append(f".ENDS {result.top}")
+    return "\n".join(lines) + "\n"
+
+
+def write_magic_lvs_netlist(
+    result: MagicExtractResult,
+    path: str | Path,
+    *,
+    deck: str,
+    aliases: dict[str, str] | None = None,
+    extra_ports: tuple[str, ...] | list[str] = (),
+) -> str:
+    """:func:`magic_lvs_netlist_text`, written to ``path``; returns the path."""
+    text = magic_lvs_netlist_text(
+        result, deck=deck, aliases=aliases, extra_ports=extra_ports
+    )
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(text, encoding="utf-8")
+    return str(destination)
+
+
 def oracle_provenance(
     *,
     deck: str,

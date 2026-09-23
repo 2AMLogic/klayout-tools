@@ -1035,6 +1035,47 @@
       ]
     }
   },
+  "tap.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            200,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      65,
+      44
+    ],
+    "threshold_dbu": 150,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            100,
+            4000
+          ],
+          "layer": [
+            65,
+            44
+          ]
+        }
+      ]
+    }
+  },
   "via.space.1": {
     "check": "space",
     "clean": {

@@ -1,14 +1,19 @@
-name: magic cross-validation oracle (drc, extract)
+name: magic cross-validation oracle (drc, extract, lvs)
 
-# Issue #2014 (pairing #1 of tracking issue #2007): a CI-runnable execution
-# path for the magic-backed cross-validation oracle --
-# `tests/test_drc_magic_oracle.py` and `tests/test_extract_magic_oracle.py`.
-# Both modules check `klt drc` / `klt extract` against magic, a genuinely
-# independent geometry engine, on a clean sky130/gf180mcu corpus cell and on
-# seeded defects (a met1 spacing violation, an input-to-output short, a set
-# of missing vias). See `docs/design/magic-oracle.md` for the methodology.
+# Issues #2014 and #2316 (pairing #1 of tracking issue #2007): a
+# CI-runnable execution path for the magic-backed cross-validation oracle --
+# `tests/test_drc_magic_oracle.py`, `tests/test_extract_magic_oracle.py`
+# and `tests/test_lvs_magic_oracle.py`. The first two check `klt drc` /
+# `klt extract` against magic, a genuinely independent geometry engine, on a
+# clean sky130/gf180mcu corpus cell and on seeded defects (a met1 spacing
+# violation, an input-to-output short, a set of missing vias). The third
+# (#2316) feeds magic's `ext2spice` netlist to `klt lvs` as its *layout*
+# side and checks the resulting match/mismatch verdict against `klt lvs`'s
+# own, which is what makes the LVS pairing extraction-independent and not
+# only comparison-independent. See `docs/design/magic-oracle.md` for the
+# methodology.
 #
-# Both modules are real-binary-gated (the pattern `tests/test_lvs.py`'s
+# All three modules are real-binary-gated (the pattern `tests/test_lvs.py`'s
 # netgen tier established): without `magic` and a magic technology file they
 # skip cleanly, so the ordinary `ci.yml` test job stays green and silent on
 # them. This job is what makes them actually run.
@@ -23,8 +28,9 @@ name: magic cross-validation oracle (drc, extract)
 #
 # `workflow_dispatch` only, matching the other oracle/canary workflows:
 # nothing here gates a PR. Trigger from the Actions tab, or `gh workflow run
-# magic-oracle.yml`, whenever `klt drc`, `klt extract`, `decks/sky130.py`,
-# `decks/gf180mcu.py`, or the oracle itself changes -- and before a release.
+# magic-oracle.yml`, whenever `klt drc`, `klt extract`, `klt lvs`,
+# `decks/sky130.py`, `decks/gf180mcu.py`, or the oracle itself changes --
+# and before a release.
 
 on:
   workflow_dispatch:
@@ -41,14 +47,14 @@ env:
 
 jobs:
   magic-oracle:
-    name: klt drc / klt extract vs. magic (sky130A, gf180mcuC)
+    name: klt drc / klt extract / klt lvs vs. magic (sky130A, gf180mcuC)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
 
@@ -106,6 +112,7 @@ jobs:
         run: |
           uv run --frozen --extra dev pytest \
             tests/test_drc_magic_oracle.py tests/test_extract_magic_oracle.py \
+            tests/test_lvs_magic_oracle.py \
             -v -rs | tee pytest-magic-oracle.log
 
       - name: Confirm the oracle ran to completion, not skipped

@@ -4451,6 +4451,11 @@ def test_stubbed_route_without_power_reports_measured_zeros_and_warns(
     # flat "no power delivery ... and no fill" prose.
     assert "no substrate/well taps and no fill" in warning
     assert "not a signoff result" in warning
+    # Issue #1985: no fallback fired (`row_rail.emitted` is `False` on
+    # gf180mcu -- no `_ROW_RAIL_STRAP` entry), so no row-rail caveat
+    # either; the omitted-power warning is the whole array.
+    assert report["power"]["row_rail"]["emitted"] is False
+    assert not any("row_rail" in w for w in report["warnings"])
 
 
 def test_stubbed_route_without_power_on_sky130_describes_the_row_rail_fallback(
@@ -4462,7 +4467,9 @@ def test_stubbed_route_without_power_on_sky130_describes_the_row_rail_fallback(
     `filler_placement` call, but no tapcells, no straps and no PDN vias.
     The warning must describe *that* -- a fixed "no filler cells ... no
     fill" template would contradict its own parenthetical counts, which is
-    the exact unmeasured-claim defect issue #2086 exists to remove."""
+    the exact unmeasured-claim defect issue #2086 exists to remove. Issue
+    #1985 adds the second entry: the row-rail caveat, stating in the
+    artifact itself that rails-plus-fillers is not PDN-complete."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(monkeypatch, def_text=_ROW_RAIL_FALLBACK_DEF)
     _stub_merge_def_to_gds(monkeypatch)
@@ -4478,7 +4485,9 @@ def test_stubbed_route_without_power_on_sky130_describes_the_row_rail_fallback(
     assert [net["name"] for net in placed["special_nets"]] == ["VPWR", "VGND"]
     assert placed["missing"] == ["tapcells", "stripe_segments", "pdn_vias"]
 
-    assert len(report["warnings"]) == 1
+    # Two entries now: the measured omitted-power warning (issue #2086),
+    # then the row-rail caveat (issue #1985).
+    assert len(report["warnings"]) == 2
     warning = report["warnings"][0]
     assert "request.power was omitted" in warning
     # Measured, and therefore true: what the fallback did *not* place.
@@ -4491,6 +4500,19 @@ def test_stubbed_route_without_power_on_sky130_describes_the_row_rail_fallback(
     # Never the unmeasured claim: the DEF this path writes has both.
     assert "no fill" not in warning
     assert "no filler cell" not in warning
+
+    # Issue #1985: the caveat is a separate entry, so each string stays
+    # true to its own evidence -- the measured warning above never has to
+    # claim "no rails", and this one states the structural fact (horizontal
+    # rails only) that makes the grid incomplete even with every count
+    # nonzero.
+    caveat = report["warnings"][1]
+    assert "power.row_rail fallback (issue #1442)" in caveat
+    assert "met1" in caveat
+    assert "no vertical straps" in caveat
+    assert "no tapcells" in caveat
+    assert "not PDN-complete" in caveat
+    assert "request.power" in caveat
 
 
 def test_stubbed_route_with_complete_power_reports_complete_and_no_warnings(
@@ -4519,7 +4541,12 @@ def test_stubbed_route_with_complete_power_reports_complete_and_no_warnings(
     assert placed["tapcells"] == 3
     assert placed["fillers"] == 7
     assert placed["missing"] == []
+    # Issue #1985: a full `request.power` PDN run never fires the row-rail
+    # fallback (`emitted` is `False` whenever `power is not None`), so the
+    # caveat is absent and the complete audit's warnings stay empty.
+    assert report["power"]["row_rail"]["emitted"] is False
     assert report["warnings"] == []
+    assert not any("row_rail" in w for w in report["warnings"])
 
 
 def test_stubbed_route_with_power_but_no_straps_reports_partial_and_warns(
@@ -4634,7 +4661,10 @@ def test_stubbed_place_stage_audits_the_unrouted_def_without_grading_fillers(
 def test_cli_json_keeps_stdout_clean_and_warns_on_stderr(tmp_path, monkeypatch, capsys):
     """Issue #2086: the warning has to reach an operator who never opens
     the JSON -- so it goes to stderr in `--format json` too, leaving
-    stdout a single parseable document and the exit code unchanged."""
+    stdout a single parseable document and the exit code unchanged. On
+    this default sky130 route-stage path there are two entries (issue
+    #1985): the measured omitted-power warning and the row-rail caveat --
+    both go to stderr, one line each."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     # The DEF this default (`request.power`-less, sky130) path really
     # writes: the row-rail fallback's rails and fillers, no straps or vias.
@@ -4646,8 +4676,14 @@ def test_cli_json_keeps_stdout_clean_and_warns_on_stderr(tmp_path, monkeypatch, 
     assert exit_code == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload["warnings"] == [captured.err.split("warning: ", 1)[1].strip()]
+    assert len(payload["warnings"]) == 2
+    stderr_warnings = [
+        line.removeprefix("klt place-and-route: warning: ")
+        for line in captured.err.splitlines()
+    ]
     assert captured.err.startswith("klt place-and-route: warning: ")
+    assert payload["warnings"] == stderr_warnings
+    assert any("power.row_rail fallback" in w for w in stderr_warnings)
 
 
 def test_cli_text_reports_placed_power_counts_regardless(tmp_path, monkeypatch, capsys):

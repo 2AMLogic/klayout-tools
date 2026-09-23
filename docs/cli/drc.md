@@ -5,7 +5,7 @@ report violations as structured data.
 
 ```
 klt drc <file> --deck sky130|gf180mcu|sg13g2|sg13cmos5l [--top <cell>] [--pdk <variant> [--pdk-root <path>]] [--format text|json]
-klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--format text|json]
+klt drc <file> --engine klayout [--deck-file <path> | --pdk <variant> [--pdk-root <path>]] [--timeout-s <seconds>] [--allow-deck-errors] [--allow-missing-host-tools] [--format text|json]
 klt drc <request.json>|-|'{...}' [--format text|json]
 klt drc --check <report.json> [--rerun] [--format text|json]
 ```
@@ -48,6 +48,13 @@ klt drc --check <report.json> [--rerun] [--format text|json]
   `klayout` exit status or an `ERROR`-prefixed line in its output fails the
   run (exit 1) **even when a report file exists** — see "Engine" →
   `"klayout"` → "A partially-executed deck is never reported as clean".
+- `--allow-missing-host-tools` — skip the host preflight that refuses to run
+  a deck script shelling out to a command missing from `PATH` (`--engine
+  klayout` only, issue #2333; ignored for `--engine curated`). Off by
+  default: a PDK driver's *host* assumptions abort the deck before any rule
+  runs, and the error the deck itself produces names something else entirely
+  — see "Engine" → `"klayout"` → "A driver's host assumptions are not rule
+  checking".
 - `--check` — verify a previously committed `--format json` report instead
   of running a fresh check (issue #1106). Mutually exclusive with `<file>`
   (the input path is read from the report itself) — see "`--check` /
@@ -101,6 +108,7 @@ A `--engine klayout` run, with the native deck's own script globals:
 | `deck_vars` | object\<string, string\|number\|bool\> | repeatable `--deck-var NAME=VALUE`. JSON `true`/`3` are rendered as the strings `"true"`/`"3"`, so a deck flag can be written as a natural JSON boolean. A key containing `=` is rejected (the flag encoding cannot represent it). |
 | `timeout_s` | number | `--timeout-s` |
 | `allow_deck_errors` | boolean | `--allow-deck-errors` |
+| `allow_missing_host_tools` | boolean | `--allow-missing-host-tools` |
 | `pdk` | string | `--pdk` |
 | `pdk_root` | string | `--pdk-root` |
 
@@ -131,7 +139,8 @@ than a JSON parse error.
 
 **A request document may not be combined with any of this command's own input
 flags** (`--deck`, `--top`, `--engine`, `--deck-file`, `--deck-var`, `--pdk`,
-`--pdk-root`, `--timeout-s`, `--allow-deck-errors`). Passing both is a clean
+`--pdk-root`, `--timeout-s`, `--allow-deck-errors`,
+`--allow-missing-host-tools`). Passing both is a clean
 application error
 (exit `1`):
 
@@ -240,6 +249,77 @@ report to accept in that case, only nothing at all. `--check --rerun`
 (below) re-runs a committed report that carries `engine_deck_errors` with
 the same tolerance the original invocation used, so verifying such a report
 diffs it rather than failing outright.
+
+**A deck-abort error quotes klayout's *whole* output, not just its `ERROR`
+lines (issue #2333).** The `ERROR`-prefix filter above decides *whether* a
+deck failed; it is the wrong filter for explaining *why*, because the line
+that says why is routinely not `ERROR`-prefixed. The motivating case is a
+driver that shells out to a host utility the machine does not have:
+
+```
+sh: pmap: command not found
+ERROR: In .../main.drc: undefined method 'strip' for nil
+ERROR: NoMethodError: undefined method 'strip' for nil in Executable::execute
+```
+
+Quoting only the `ERROR` lines left a nil dereference that reads like a
+broken or mis-assembled rule deck, and dropped the one line naming the real
+cause. The raised error now carries the full captured stdout/stderr (stdout
+first), so **a host-level cause — a missing binary or command the driver
+invokes — is visible in the same message as the DRC-DSL error it produced**,
+alongside the deck-construct errors this message has always covered. Only
+the message changed: what counts as a deck error is still the `ERROR`-prefix
+test, so a rule named `ERROR_CHECK.1` is still not misread as a failure. An
+enormous capture (a deck printing a progress line per rule) is truncated to
+its tail — where the abort is — with an explicit `... (N earlier lines
+omitted …)` marker, and any `ERROR` line from the omitted head repeated so
+truncation never costs the detection signal.
+
+**A driver's host assumptions are not rule checking (issue #2333).** Running
+a PDK's own driver script makes that vendor's *host* assumptions part of
+this engine's contract, and they routinely have nothing to do with rules. A
+real open-PDK driver installs a Ruby `Logger` formatter that shells out to
+procps `pmap(1)` on every log line:
+
+```ruby
+logger.formatter = proc do |_severity, datetime, _progname, msg|
+  "#{datetime}: Memory Usage (" + `pmap #{Process.pid} | tail -1`[10, 40].strip + ") : #{msg}"
+end
+```
+
+`pmap` is absent on macOS and on many minimal Linux images; there the
+backtick yields `""`, `""[10, 40]` is `nil`, and `nil.strip` raises — so the
+deck dies on its **first** `logger.info`, before executing a single rule.
+Before launching `klayout`, `klt drc` therefore scans the deck script and
+the files it pulls in via literal-path `require_relative`/`require`/`load`
+for shelled-out command names (backticks, `%x{...}`, `system`/`exec`/`spawn`,
+`IO.popen`, `Open3.*`) and fails up front (exit 1) when any is missing from
+`PATH`:
+
+```
+klt drc: the DRC-DSL deck script shells out to a host utility this machine
+does not have, so it would abort before reporting rules (typically with a
+downstream error naming something else entirely):
+  - deck requires 'pmap' (not found on PATH) -- shelled out to at /pdk/main.drc:42
+Install the missing utility (e.g. `pmap` ships with procps on Linux and has
+no macOS equivalent), point --deck-file at a driver that does not need it,
+or pass --allow-missing-host-tools to run the deck anyway.
+```
+
+The scan is **static and deliberately conservative**, and both of its error
+directions are safe. A word it is not sure names a command (a Ruby-
+interpolated command string, a shell builtin, a comment) is never reported —
+so a shell-out it cannot see still fails exactly the way it did before,
+now with the causal `sh: ...: command not found` line quoted in the
+deck-abort message above. And a shell-out on a branch this run never takes
+is a false positive with a one-flag answer: `--allow-missing-host-tools`
+skips the preflight entirely. klt deliberately does **not** substitute
+stand-ins for whatever a driver shells out to: that does not generalise, and
+it would silently change what the run measured.
+
+Note what this does *not* fix: the rule tables a PDK ships are the portable
+part, and there is still no way to run them **without** the vendor's driver.
+Composing a deck from a PDK's rule tables directly is tracked separately.
 
 **`--deck-var NAME=VALUE` (issue #1302, repeatable).** Passes an additional
 `-rd NAME=VALUE` script global to the `klayout` subprocess, beyond the
@@ -588,8 +668,9 @@ no per-net isolation) than it actually has.
 ## Coverage
 
 The `sky130` deck is a **curated starter subset**, not the full sky130
-design rule manual (which spans hundreds of rules). It currently covers 57
+design rule manual (which spans hundreds of rules). It currently covers 59
 rules — width, spacing, area, and enclosure checks across the `poly`, `diff`,
+`tap` (issue #2321),
 `li1`, `met1`, `licon1`, `mcon`, `met2`, `via` (met1&lt;-&gt;met2 via1),
 `met3`-`met5`, `via2`-`via4`, `capm`/`capm2` (MiM-cap top plates), and
 `nwell` (issue #1420) layers — transcribed directly from the official
@@ -608,13 +689,13 @@ Broken down by check kind:
 
 | kind         | count |
 | ------------ | ----: |
-| `width`      |    15 |
+| `width`      |    16 |
 | `space`      |    13 |
 | `isolated`   |     1 |
-| `enclosing`  |    16 |
+| `enclosing`  |    17 |
 | `separation` |     2 |
 | `area`       |    10 |
-| **total**    |**57** |
+| **total**    |**59** |
 
 (`isolated` is `nwell.space.1`, issue #1654 — see below. `area` is the
 five `met{1..5}.area.1` minimum-area rules, issue #1955, plus the five
@@ -637,12 +718,18 @@ boolean expression no `klt gen` generator draws today) — are deliberately
 **not** transcribed; see the "nwell (well-layer) rule coverage" note in
 `sky130.py`'s own module docstring for the full reasoning.
 
-Two of these rules approximate an official rule defined on a
-*compound* layer expression (a boolean union of two mask layers, e.g.
-`diff.or(tap)`) as a check against a single drawn layer, because the native
+Four of these rules approximate official rules our engine cannot transcribe
+literally. `diff.width.1` and `tap.width.1` (issue #2321) are the two
+curated halves of one rule defined on a *compound* layer expression (a
+boolean union of two mask layers — `difftap.1`'s `diff.or(tap)`), each
+checking one drawn layer of the union, because the native
 `Region` check primitives check one layer, or one layer against one other
 layer, at a time — they do not evaluate arbitrary layer expressions the way
-the DRC-DSL script runner does. Four more (`met2.width.1`, `via.width.1`,
+the DRC-DSL script runner does. `li1.enclosing.licon1.1` and
+`tap.enclosing.licon.1` (issue #2321) approximate `second_edges`-conditional
+enclosure rules (`li.5`, `licon.7`) at their unconditional zero-margin
+floor, the one positive-margin transcription that provably flags no
+correct-by-construction geometry. Four more (`met2.width.1`, `via.width.1`,
 `met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
 that additionally bounds a max size, length, or a periphery-scoped/
 corner-relaxed refinement our single-layer/two-layer check primitives don't
@@ -650,7 +737,7 @@ support — the same class of approximation `met1.enclosing.mcon.1` and
 gf180mcu's `contact.width.1` already make. Every approximation is called
 out explicitly in its rule's docstring; the threshold *values* used are
 always the real, unmodified source values, with exactly one documented
-exception described next.
+exception pattern (the `second_edges` zero floor above) described next.
 
 **No deck authors a `"density"` rule, and that is a decision, not an
 unstated gap (issue #1975).** The `"density"` check kind exists (issue #812,
@@ -1610,9 +1697,11 @@ claim that no provenance exists (the prose citation in each rule's own
 inline comment remains the record for those rules, exactly as before this
 field existed). sky130's five `met{1..5}.area.1` rules (issue #1955) each
 carry a populated `provenance` citing their own `sky130A_mr.drc` rule id
-(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), and its five
+(`m1.6`/`m2.6`/`m3.6`/`m4.4a`/`m5.4`), its five
 `met{1..5}.holes_area.1` rules (issue #1976) likewise cite `m1.7`/`m2.7`/
-`m3.7`/`m4.7`/`m5.7`, so 39 of its 57 rules are covered.
+`m3.7`/`m4.7`/`m5.7`, and issue #2321's `tap.width.1` cites the same
+`difftap.1` source id `diff.width.1` already carries (both halve the same
+compound rule), so 40 of its 59 rules are covered.
 
 ### The golden-pair manifest (`tests/golden_deck/`)
 
@@ -1775,7 +1864,7 @@ what a given report's outcome is.
 | Code | Meaning                                                     |
 | ---- | ------------------------------------------------------------ |
 | `0`  | At least one curated rule ran, with no violations — `status: "clean"`, or `"clean_partial"` when a rule that could have found something did not run (issue #2110; a real result, but not an unconditional pass — see "`coverage.skipped` vs. `coverage.inapplicable`"). Under `--check`: the committed report still holds (`status: "match"`). |
-| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`). Under `--check`: a missing/unparseable committed report. |
+| `1`  | Failed to run — bad file, unknown `--deck`, `--top` names a cell absent from the stream, or engine error (for `--engine klayout`, that includes a deck run `klayout` itself reported an error for: a non-zero exit status or an `ERROR` line in its output, even when a report file was written — issue #1941, opt out with `--allow-deck-errors`; and a deck script that shells out to a command missing from `PATH`, refused before the deck runs — issue #2333, opt out with `--allow-missing-host-tools`). Under `--check`: a missing/unparseable committed report. |
 | `2`  | Usage error (missing argument, bad `--format` value, or combining `<file>` with `--check`) — from argparse. |
 | `3`  | Ran successfully, violations found. Under `--check`: drifted (`status: "drifted"`) — see "`--check` / `--rerun`" above. |
 

@@ -24,14 +24,20 @@ example. Coverage is expected to grow incrementally in follow-on issues.
 
 Threshold-fidelity exception (issue #551): every rule below transcribes its
 source rule's threshold *value* unmodified, with exactly one deliberate
-exception -- ``li1.enclosing.licon1.1``, which is transcribed at its source
-rule's (``li.5``) unconditional zero-margin floor rather than at its
-published 0.08um. ``li.5`` requires that margin only on *two adjacent edges*
-of each cut, a per-edge-pair conditional this vocabulary cannot express, and
-real sky130 layout takes advantage of it (a minimum-width ``li`` strap sits
-flush with the cut on the other two edges), so an unconditional 0.08um check
-would flag correct-by-construction geometry throughout every standard cell.
-See that rule's own docstring for the measurement and the reasoning.
+exception *pattern* -- transcribing a DRC-DSL ``second_edges``-conditional
+enclosure rule at its unconditional zero-margin floor rather than at its
+published conditional margin. It now has two instances:
+``li1.enclosing.licon1.1`` (issue #551), transcribed at its source rule's
+(``li.5``) zero floor rather than at its published 0.08um, and
+``tap.enclosing.licon.1`` (issue #2321), transcribed at its source rule's
+(``licon.7``) zero floor rather than at its published 0.12um. Each source
+rule requires that margin only on *two opposite edges* of each cut, a
+per-edge-pair conditional this vocabulary cannot express, and real sky130
+layout takes advantage of it (a minimum-width ``li`` strap sits flush with
+the cut on the other two edges; a tap cell's cut sits flush with the tap
+edge on one), so an unconditional positive-margin check would flag
+correct-by-construction geometry. See those rules' own docstrings for the
+measurement (``li.5``) and the shared reasoning.
 
 Negative finding — bipolar (BJT) device-mark rule (issue #183): sky130's
 layer map (``sky130.lyt``) defines a ``pnp.drawing`` mark layer (82/44,
@@ -136,13 +142,19 @@ exactly -- unlike gf180mcu, no area-term correction is needed here) and
 term). Both stacks share one corner file, so the same ``perim_cap_f_um``
 value applies to both curated entries below.
 
-Two rules below (``poly.width.1`` is not one of them) approximate an
+Four rules below (``poly.width.1`` is not one of them) approximate an
 official rule defined on a *compound* layer expression (a union of two mask
-layers) as a check against a single drawn layer, because our engine (native
-``klayout.db.Region`` check primitives — see ``docs/cli/drc.md``) checks one
+layers) or on a ``second_edges``-conditional refinement of a plain enclosure
+check, because our engine (native ``klayout.db.Region`` check primitives —
+see ``docs/cli/drc.md``) checks one
 layer, or one layer against one other layer, at a time; it does not evaluate
 arbitrary boolean layer expressions the way the DRC-DSL script runner does.
-Each such approximation is called out explicitly in its rule's docstring.
+``diff.width.1`` and ``tap.width.1`` are the two curated halves of one
+compound rule (``difftap.1``'s ``diff.or(tap)`` -- issue #2321 added the tap
+half); ``li1.enclosing.licon1.1`` (``li.5``) and ``tap.enclosing.licon.1``
+(``licon.7``, issue #2321) transcribe their source rules' unconditional
+zero-margin floor (see the #551 exception note above). Each such
+approximation is called out explicitly in its rule's docstring.
 
 Layer numbers (verified against ``sky130.lyt``'s ``layer-map`` and the
 ``sky130.lydrc`` layer variable definitions, e.g. ``poly = polygons(66,
@@ -323,6 +335,30 @@ gap is left explicitly open: ``EXTRACTION_DECK`` still has no ``psdm``/
 entry for the ``nwell.*`` family, and a future issue that also teaches
 ``klt gen`` to draw implant layers is the natural place to revisit both
 rules together with real geometry to test them against.
+
+tap (tie-layer) rule coverage (issue #2321, closing the gap the
+``difftap``-family notes above and ``_PDK_ROLE_LAYERS["sky130"]["tap"]``'s
+own comment in ``gen_layer_params.py`` both recorded): before this, both of
+the deck's ``difftap``-family rules were scoped to ``diff.drawing`` (65/20)
+alone -- ``tap.drawing`` (65/44), the *other* half of the official
+``difftap = diff.or(tap)`` union, was named in ``LAYER_NAMES`` and drawn by
+every ``klt gen`` generator that draws a substrate/well tie ring
+(``guard_ring``, ``mos_array``, ``diff_pair``, ``esd_device``,
+``well_island``, and -- since PR #2320 -- ``bjt_array``'s collector ring)
+but checked by no rule at all, so a malformed tie ring (a sub-0.15um ring
+width, or a licon cut hanging out of its tap) passed
+``klt drc --deck sky130`` clean because nothing looked, not because the
+geometry was legal. ``tap.width.1`` and ``tap.enclosing.licon.1`` below
+close that gap: ``tap.width.1`` is the tap-side half of ``difftap.1``'s
+compound union (``diff.width.1`` has always been the diff-side half -- see
+its own comment), and ``tap.enclosing.licon.1`` transcribes the source
+deck's tap-side licon-enclosure rule ``licon.7`` at the same unconditional
+zero-margin floor ``li1.enclosing.licon1.1`` already establishes for the
+identically-shaped ``li.5`` (see the #551 exception note above for why an
+unconditional transcription of a ``second_edges``-conditional margin would
+be actively wrong rather than merely conservative; note ``licon.5`` itself,
+which ``diff.enclosing.licon.1`` transcribes, is plain ``diff``-scoped in
+the source -- there is no 0.04um tap rule to copy).
 """
 
 from __future__ import annotations
@@ -425,7 +461,28 @@ DECK: list[DrcRule] = [
         threshold_dbu=150,  # 0.15 um
         # sky130.lydrc rule "difftap.1": difftap.width(0.15, euclidian), where
         # difftap = diff.or(tap) -- a compound layer our engine does not
-        # evaluate; approximated here by checking diff.drawing alone. The
+        # evaluate; approximated as a pair of single-layer rules -- this one
+        # checks the diff.drawing half, and tap.width.1 below (issue #2321)
+        # checks the tap.drawing half, so together they cover the union the
+        # source rule is defined on. The threshold value (0.15um) is the
+        # real, unmodified source value.
+        # -> "difftap.1 : min. difftap width : 0.15um"
+        scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
+        provenance=_sky130_provenance("sky130/klayout/sky130.lydrc", "difftap.1"),
+    ),
+    DrcRule(
+        id="tap.width.1",
+        description="minimum tap width (approximates the official difftap.1 rule)",
+        layer=(65, 44),  # tap.drawing
+        check="width",
+        threshold_dbu=150,  # 0.15 um
+        # sky130.lydrc rule "difftap.1": difftap.width(0.15, euclidian), where
+        # difftap = diff.or(tap) -- a compound layer our engine does not
+        # evaluate; diff.width.1 above checks the diff.drawing half, and this
+        # rule checks the tap.drawing half, so together the pair covers the
+        # union the source rule is defined on (issue #2321 -- before this
+        # rule, every tap-role tie ring `klt gen` draws was width-unchecked,
+        # since diff.width.1 only ever read diff.drawing shapes). The
         # threshold value (0.15um) is the real, unmodified source value.
         # -> "difftap.1 : min. difftap width : 0.15um"
         scope="difftap",  # sky130.lydrc "difftap.*" rule-id family (#566)
@@ -537,6 +594,50 @@ DECK: list[DrcRule] = [
         threshold_dbu=40,  # 0.04 um
         # sky130.lydrc rule "licon.5": diff.enclosing(licon, 0.04, euclidian)
         # -> "licon.5 : min. diff enclosure of licon : 0.04um"
+        # (plain diff-scoped in the source, not compound -- the tap-side
+        # sibling rule is licon.7, transcribed as tap.enclosing.licon.1
+        # below at its own floor, issue #2321.)
+        scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
+    ),
+    DrcRule(
+        id="tap.enclosing.licon.1",
+        description="tap.drawing must cover its licon1 cuts",
+        layer=(65, 44),  # tap.drawing
+        other_layer=(66, 44),  # licon1.drawing
+        check="enclosing",
+        threshold_dbu=0,  # 0.0 um -- see the approximation note below
+        # sky130.lydrc rule "licon.7":
+        #   licon_edges_with_less_enclosure_tap =
+        #     tap.enclosing(licon, 0.12, projection).second_edges
+        #   opposite1 = (licon.edges - licon_edges_with_less_enclosure_tap)
+        #     .width(0.17 + 1.dbu, projection).polygons
+        #   licon.not_interacting(opposite1).output("licon.7", ...)
+        # -> "licon.7 : min. tap enclosure of licon by one of 2 opposite
+        #    edges : 0.12um" (issue #2321 -- before this rule, a licon1 cut
+        # drawn on a tap tie ring was enclosure-unchecked:
+        # diff.enclosing.licon.1 above only ever read diff.drawing shapes,
+        # and licon.5 itself is diff-scoped in the source, so there is no
+        # 0.04um tap rule to mirror it with.)
+        #
+        # Approximation (the same one li1.enclosing.licon1.1 above makes for
+        # the identically-derived li.5 -- see that rule's note and the #551
+        # threshold-fidelity exception note in the module docstring):
+        # licon.7 does not require 0.12um of tap enclosure on every side of
+        # a licon, only on one of the two pairs of opposite edges -- a
+        # per-edge-pair conditional this vocabulary cannot express, and real
+        # sky130 layout takes advantage of it (a tap cell's cut sits flush
+        # with the tap edge on one side), so an unconditional 0.12um check
+        # would flag correct-by-construction geometry. What licon.7
+        # unconditionally implies, and what our vocabulary can express
+        # exactly, is the zero-margin floor: the tap must actually cover the
+        # licon cut it hosts. A zero threshold makes `enclosing_check` itself
+        # report nothing and carries the whole rule in `_run_check`'s
+        # `outside_region` escape term (`drc.py`) -- the same shape as
+        # li1.enclosing.licon1.1 and gf180mcu's zero-threshold
+        # metal1.enclosing.via1.1. The accepted residue, identical to
+        # li1.enclosing.licon1.1's: a cut with an insufficient-but-present
+        # enclosure on every side (e.g. 0.05um all round, where the source
+        # demands 0.12um on one opposite pair) still passes this floor.
         scope="licon",  # sky130.lydrc "licon.*" rule-id family (#566)
     ),
     DrcRule(

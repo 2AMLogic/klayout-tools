@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { FieldViewer } from "./FieldViewer";
 import type { FieldViewerData } from "./types";
+import { makeFakeGL } from "@/test-utils/mocks";
 
 afterEach(() => {
   cleanup();
@@ -36,35 +37,6 @@ function scalarData(): FieldViewerData {
       { label: "5.0 GHz", scalar: [1, 0.25, 0, 0.4] },
     ],
   };
-}
-
-/**
- * A minimal fake WebGL context: known parameter/status getters return
- * truthy, object-creating calls return a plain object, everything else is
- * a no-op. Enough for `FieldViewer`'s init + draw effects to run their
- * full real code path (shader "compile", buffer upload, `drawElements`)
- * without a real GPU — this is what a headless CI browser without WebGL
- * would otherwise force through the fallback branch only.
- */
-function makeFakeGL(): WebGL2RenderingContext {
-  const overrides: Record<string, (...args: unknown[]) => unknown> = {
-    createShader: () => ({}),
-    createProgram: () => ({}),
-    createBuffer: () => ({}),
-    getShaderParameter: () => true,
-    getProgramParameter: () => true,
-    getAttribLocation: () => 0,
-    getUniformLocation: () => ({}),
-    getExtension: () => ({}),
-  };
-  const handler: ProxyHandler<Record<string, unknown>> = {
-    get(target, prop) {
-      if (typeof prop === "string" && prop in overrides) return overrides[prop];
-      if (typeof prop === "string" && /^[A-Z][A-Z0-9_]*$/.test(prop)) return 1;
-      return target[prop as string] ?? (() => undefined);
-    },
-  };
-  return new Proxy({}, handler) as unknown as WebGL2RenderingContext;
 }
 
 function mockWebglAvailable() {

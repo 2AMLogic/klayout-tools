@@ -267,6 +267,23 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   subcircuit instance) passes through untouched. A device-like `X` card
   whose subcircuit name is not in the resolved device map is a hard error,
   never a silent pass-through.
+- **Custom device classes pass through** (issue #2327). An `X` card naming
+  one of `reference.deck`'s own *custom*
+  (`kdb.GenericDeviceExtractor`-recognised) device classes — today exactly
+  its `mom_capacitors`, e.g. IHP's `cap_cmomi`/`cap_cmomf` — is left
+  untouched, `PARAMS:` separator and all, rather than converted or
+  rejected: that family has no plain-element card form to convert *to*, and
+  the round-tripped `X ... PARAMS:` card is already the shape `klt lvs`'s
+  own reader reads as a real device ("Custom device classes round-tripped
+  through an `X ... PARAMS:` card" below). So a single `form:
+  "subckt-call"` request carries a mixed netlist — curated MOS/resistor
+  cards converted, MoM-capacitor cards passed through — instead of failing
+  on the MoM card. This needs `reference.deck`: the pass-through is keyed
+  off that deck's own declared classes, never a global name list, so an
+  unrecognised name is still the hard error above. (SPICE's `PARAMS:`
+  keyword is read as the separator it is for *every* family, so a curated
+  device call written `X... <name> PARAMS: L=... W=...` converts exactly
+  like the same call written without it.)
 - **MOS** converts to a plain `M` card. `L`/`W` are carried and converted to
   explicit micrometre-suffixed literals (`0.5u` → `L=0.5U`; SI metres
   `1.5e-6` → `W=1.5U`). A `.option scale` bare-micrometre convention is
@@ -307,7 +324,29 @@ parameter/unit mapping into a sign-off tool must never pass silently):
   purely by subcircuit name); its only real call-site parameter is an
   optional `mult`, carried onto the plain-element `Q` card's `NE`
   (KLayout's `DeviceClassBJT3Transistor` natively represents multiple
-  parallel emitters via `NE`).
+  parallel emitters via `NE`). **The emitter geometry the call site omits is
+  stated anyway** (issue #2335): the curated cell name encodes it, so the
+  converted card carries the nominal emitter area `AE=` and, for these
+  square-emitter cells, the derived perimeter `PE=` (`side = sqrt(AE)`,
+  `PE = 4 * side`) — e.g.
+
+  ```
+  XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=1
+  ```
+
+  becomes `Q1 c b e pnp AE=11.56P PE=13.6U NE=1`, matching byte-for-byte the
+  `AE=`/`PE=` the sky130 extraction deck itself writes for that cell. This
+  matters because `AE` is one of `DeviceClassBJT3Transistor`'s two *primary*
+  (compared) parameters — `AE` and `NE` — so a geometry-free reference card
+  is a zero-vs-nonzero difference against the layout side's extracted `AE`,
+  which cascades into `device.unmatched` on *every* bipolar (and cannot be
+  rescued by `options.parameter_tolerance`, which is relative). With the
+  geometry carried, the **default** full-parameter compare reaches `status:
+  "match"` — no `options.compare_parameters` override needed. `AB`/`PB`/
+  `AC`/`PC` are deliberately *not* emitted: they measure drawn
+  base/collector geometry the fixed-geometry cell name does not encode, and
+  they are *secondary* parameters — once the primary `AE`/`NE` agree the
+  devices pair and the comparer never reports them.
 - `nf`/`m`/`mult` > 1 on a resistor/capacitor call, and `m`/`mult` > 1 on a
   MOS call (a multiplied device the curated plain-element form cannot
   represent) is **rejected** with a specific error naming the device —
@@ -472,6 +511,16 @@ identical `X <name> <net> <net> cap_cmomi PARAMS: W=<value> L=<value>` card
 shape `klt extract`'s own writer produces (see the example above) — there is
 no plain-element card form for this device family to convert to instead.
 
+**Works under `reference.form: "subckt-call"` too** (issue #2327). A
+reference that needs the conversion for its *other* cards (a curated MOS or
+drawn-resistor `X` card) can carry such a card in the same netlist: the
+converter passes it through untouched for this reader to pick up
+("Conversion (opt-in)" above). Before #2327 it could not — `PARAMS:` was
+read as a positional token, so the resolved subcircuit name was the literal
+string `PARAMS:` and the conversion raised `subcircuit 'PARAMS:' is not a
+known device`, leaving no single request shape that compared both device
+families at once.
+
 **Residual gap: no deck given.** `layout.deck`/`reference.deck` are already
 required for `layout.file` (inline extraction) and commonly given for
 `reference.netlist` (`form: "subckt-call"`'s own device-name resolution,
@@ -483,6 +532,42 @@ unable to run — the pre-#1942 mangled-abstract-circuit degradation described
 above still applies, silently, on that side. There is no separate
 diagnostic for this today; give `layout.deck`/`reference.deck` whenever a
 pre-extracted netlist may contain a custom device class.
+
+## Bulk-bearing drawn-resistor classes round-tripped through an `X` card (issue #1157)
+
+Since issue #1157, `klt extract`'s bare (non-`--pdk`) output writes a
+**three-terminal** (bulk-bearing) drawn-resistor class — sky130's
+`res_high_po`/`res_xhigh_po`, gf180mcu's `ppolyf_u` family, sg13g2's
+`rsil`/`rppd`/`rhigh` — as an `X` subcircuit call rather than the
+KLayout-shaped 3-net `R` card, because ngspice's native `R` element accepts
+exactly two nodes and the old card was not a simulatable deck at all (see
+`docs/cli/extract.md` → "Verified compatible with `klt sim`'s netlist
+convention" for the written contract and the caller-supplied `.subckt`
+wrapper it expects):
+
+```
+X$1 A B W res_high_po r=3248.27 L=6U W=1U
+```
+
+Read back through a plain `kdb.NetlistSpiceReader()`, that card degrades to
+the same mangled abstract-circuit fallback the #1942 section describes.
+**`layout.deck`/`reference.deck` fixes this too**: `klt lvs` recognises an
+`X` card naming one of that deck's own drawn-resistor classes (including
+every selectable flavour name, so a `--deck-option poly_res=2k` extraction
+round-trips even when the request names no `deck_options`) and restores a
+real `kdb.DeviceClassResistorWithBulk` device — `A`/`B`/`W` terminals,
+`R` (from the card's declared `r=`, ohms) and `L`/`W` (micrometres)
+parameters — the exact class shape and parameter set the pre-#1157 3-net
+`R` card's own read-back produced, so series `combine_devices` folding, the
+deferred `fixed_offset_ohm` correction (issue #585), `parameter_tolerance`,
+and every device-level finding behave identically to before the card shape
+changed. Two-terminal classes keep their native `R` card and never needed
+this recovery; a deck-resistor-named `X` card without the writer's 3-net
+shape or `r=` parameter is left to the default (abstract-circuit) handling.
+
+The same residual gap as #1942 applies: omit the relevant side's `deck` and
+this recognition cannot run. Give `layout.deck`/`reference.deck` whenever a
+pre-extracted netlist may contain drawn-resistor `X` cards.
 
 ## Digital gate-level LVS: `reference.form = "gate-level-verilog"` (issue #1336)
 
@@ -897,6 +982,29 @@ would silently exempt them.
 | `finding_count` | integer | `len(findings)`. |
 | `findings[].nets[]` | array\<object\> | Per finding, the nets that pin reached, each with the exact untruncated `instance_count` and a bounded `instances` sample (at most 10 `{circuit, instance, cell}` entries, with `instances_truncated` saying whether anything was left out). A real routed block puts hundreds of instances on one rail; a finding that dumped all of them would bury the few that differ. A `net` of `null` is an unconnected pin. |
 
+**Reading `power_connectivity.status: "unchecked"` on a non-`gate-level-verilog`
+reference (issue #1985).** The first `reason` case above — any `reference.form`
+other than `"gate-level-verilog"` — deserves a second look before it is cited
+as all-clear. On that path the check did not run, and the *only* thing standing
+between a fragmented power grid and a top-level `status: "match"` is the
+reference's own pin declarations: a well-formed SPICE reference declares
+`VDD`/`VSS` as pins on every instance, so the ordinary signal compare really
+does require rail continuity and the `reason`'s "the ordinary compare already
+checks" claim holds. But that protection is exactly as strong as the reference's
+own declarations — a reference whose instances declare placeholder or incomplete
+power pins gives the comparer nothing to contradict, and a fragmented PDN slips
+through under `status: "match"`. An org-wide audit (issue #1985's evidence) found
+that five of seven committed digital layouts carrying an LVS `match` compare
+against SPICE references — all five report `power_connectivity: "unchecked"`
+under klt. They happened to be fine, but a fleet remediation policy of "re-run
+LVS under new klt, check for `match`" would pass them on a technicality:
+**"re-ran LVS, got `match`" is not, on its own, a complete power-grid signoff**
+for a non-`gate-level-verilog` reference. Confirm the reference's own power pin
+declarations are real (every instantiated cell declares its supply pins, as the
+`"plain-element"` form requires of a schematic-equivalent netlist) or gate the
+block through a `gate-level-verilog` compare, where `power_connectivity` does
+run.
+
 ### Recommended usage
 
 Run the default (consistency-only) check on any gate-level compare — it
@@ -976,6 +1084,25 @@ it decline, and the degraded `device.unmatched` + `net.unmatched` cascade is
 reported as-is, all at `severity: "error"`. Two corrupted devices in the same
 minimal cell also decline — nothing in the event stream says which layout
 device belongs to which reference device.
+
+The recovery applies identically to both `request.layout` shapes (issue
+#2317): the inline-extraction shape (`layout.file` + `layout.deck`) and the
+pre-extracted shape (`layout.netlist`) reach the comparer through different
+code paths but produce the same recovery. Every *name* the recovery compares
+— device class, terminal, parameter, net — is matched case-insensitively:
+SPICE names are case-insensitive and `NetlistSpiceReader` normalises them to
+upper case, so the pre-extracted shape's SPICE round-trip has always compared
+upper-cased names on both sides, while the inline shape has no round-trip and
+keeps the deck's registered spelling verbatim (`nfet`, `vsubs`) against an
+upper-cased reference side (`NFET`, `VSUBS`). An exact-name comparison
+therefore silently declined every inline-shape recovery (#2317), degrading
+the very same parameter defect to a plain `device.unmatched` +
+`net.unmatched` error cascade — losing the actionable `w_um`-style finding
+exactly on the shape a caller runs against a GDS. Case-folding is the
+SPICE-honest reading of "same name" (the same case-insensitive convention
+request-side device-class resolution already applies) and loosens nothing
+structural: the pairing is still proven by the terminal-by-terminal net
+correspondence, never by a name.
 
 The verdict itself is unaffected either way: `status` and the exit code come
 from `compare()`, which reports the mismatch in every one of these cases.

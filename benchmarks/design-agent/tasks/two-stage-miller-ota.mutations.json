@@ -1,0 +1,13 @@
+{
+  "task": "two-stage-miller-ota",
+  "targeted": [
+    {
+      "name": "nulling-resistor-undersized",
+      "netlist": "ota_2stage.spice",
+      "find": ".param rz=6k",
+      "replace": ".param rz=10",
+      "why": "RHP-zero-nulling resistor collapsed from 6 kOhm to near-zero -> the Miller compensation network no longer cancels the feedforward right-half-plane zero it was sized to cancel, so phase margin drops well below the 60 degree minimum"
+    }
+  ],
+  "equivalent": []
+}

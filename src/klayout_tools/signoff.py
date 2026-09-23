@@ -684,7 +684,9 @@ Two halves, deliberately separate:
    fields that kind's envelope must carry and the optional ones the
    boundary reads. :func:`_build_check`/:func:`_check_passed`/:func:`_detail`
    take the resulting union (``_EvidenceEnvelope``) rather than
-   ``dict[str, Any]``.
+   ``dict[str, Any]``. Those declarations live in ``signoff_envelopes.py``
+   since issue #2313 and are re-imported here by name, so every
+   ``signoff.<shape>`` reference still resolves from this module.
 2. **Runtime validation at the read boundary** -- a ``TypedDict`` is erased
    at runtime, so the declaration alone would check nothing about an
    envelope read off disk. :func:`_validate_envelope` therefore re-reads the
@@ -775,15 +777,12 @@ import os
 import shlex
 import subprocess
 import sys
-import types
 from collections.abc import Mapping
 from functools import cache
 from pathlib import Path
 from typing import (
     Any,
     NoReturn,
-    TypedDict,
-    Union,
     cast,
     get_args,
     get_origin,
@@ -810,6 +809,51 @@ from .design_evidence_tiers import (
 )
 from .env_provenance import find_repo_root
 from .metrics import get_metric, is_registered
+
+# The typed envelope shapes this boundary validates against (issue #2033) live
+# in their own module since issue #2313 -- ~300 lines of pure `TypedDict`
+# declarations with no runtime logic, following the same split as
+# `extract_report.py`. Every moved name is re-imported here *by name* so
+# `signoff.<name>` keeps resolving exactly as it did before the split; the
+# `X as X` form marks the ones with no call site left in this module as
+# deliberate re-exports rather than dead imports.
+from .signoff_envelopes import (
+    _ENVELOPE_SHAPES,
+    _SCALAR_CHECKS,
+    _UNION_ORIGINS,
+    _EvidenceEnvelope,
+)
+from .signoff_envelopes import _DrcEnvelope as _DrcEnvelope
+from .signoff_envelopes import _DrcRequired as _DrcRequired
+from .signoff_envelopes import _EnvelopeCommon as _EnvelopeCommon
+from .signoff_envelopes import _ErcEnvelope as _ErcEnvelope
+from .signoff_envelopes import _ErcRequired as _ErcRequired
+from .signoff_envelopes import _ErrorEnvelope as _ErrorEnvelope
+from .signoff_envelopes import _ErrorRequired as _ErrorRequired
+from .signoff_envelopes import _ExtractEnvelope as _ExtractEnvelope
+from .signoff_envelopes import _ExtractRequired as _ExtractRequired
+from .signoff_envelopes import (
+    _FunctionalVerificationEnvelope as _FunctionalVerificationEnvelope,
+)
+from .signoff_envelopes import (
+    _FunctionalVerificationRequired as _FunctionalVerificationRequired,
+)
+from .signoff_envelopes import _GenericEnvelope as _GenericEnvelope
+from .signoff_envelopes import _GenericRequired as _GenericRequired
+from .signoff_envelopes import _LvsEnvelope as _LvsEnvelope
+from .signoff_envelopes import _LvsRequired as _LvsRequired
+from .signoff_envelopes import _PexEnvelope as _PexEnvelope
+from .signoff_envelopes import _PexRequired as _PexRequired
+from .signoff_envelopes import _PlaceAndRouteEnvelope as _PlaceAndRouteEnvelope
+from .signoff_envelopes import _PlaceAndRouteRequired as _PlaceAndRouteRequired
+from .signoff_envelopes import _PowerEnvelope as _PowerEnvelope
+from .signoff_envelopes import _PowerRequired as _PowerRequired
+from .signoff_envelopes import _SimEnvelope as _SimEnvelope
+from .signoff_envelopes import _SimRequired as _SimRequired
+from .signoff_envelopes import _StaEnvelope as _StaEnvelope
+from .signoff_envelopes import _StaRequired as _StaRequired
+from .signoff_envelopes import _YieldEnvelope as _YieldEnvelope
+from .signoff_envelopes import _YieldRequired as _YieldRequired
 
 __all__ = [
     "SignoffError",
@@ -897,6 +941,17 @@ DESCRIBE_GRADER_SCHEMA_VERSION = 1
 #: Block kinds recognised by ``docs/design-evidence-tiers.md``'s "Block
 #: kind" subsection -- the manifest's ``kind`` field must be one of these.
 _BLOCK_KINDS = ("analog", "digital", "mixed-signal")
+
+#: The one block kind that grades more than one partition, and therefore the
+#: only kind a ``partition_boundary`` declaration (issue #2278) is meaningful
+#: for -- an ``analog``/``digital`` block has a single partition, so it has no
+#: boundary to state.
+_PARTITIONED_BLOCK_KIND = "mixed-signal"
+
+#: The partition names a ``"mixed-signal"`` manifest may declare a boundary
+#: for (issue #2278) -- the same two names :func:`build_tier_report` renders
+#: rows for and :func:`_lookup_evidence` accepts as an evidence key suffix.
+_MIXED_SIGNAL_PARTITIONS = ("analog", "digital")
 
 #: Per-T1-item-id, **per-block-kind** restriction on which :func:`_classify`
 #: kinds may satisfy that item (issue #871, Phase 2b of epic #706; made
@@ -1920,337 +1975,14 @@ def _read_envelope(source: str) -> Any:
     return _read_json_source(source, "envelope")
 
 
-# --------------------------------------------------------------------------- #
-# Typed envelope shapes + runtime validation (issue #2033)
-#
-# One TypedDict per `_classify` kind. Each kind's *required* keys are the
-# ones this boundary genuinely cannot work without -- the fields
-# `_classify` discriminates on, plus the field `_check_passed` derives that
-# kind's verdict from. Everything else this boundary reads is declared
-# `total=False`: optional by construction, so evidence committed before a
-# later-added block existed (a `drc` report with no `coverage`, an `lvs`
-# report with no `power_connectivity`) still validates and still grades
-# exactly as it always did.
-#
-# Deliberately *not* an exhaustive transcription of each verb's full JSON
-# schema -- that lives in each verb's own `docs/cli/<verb>.md`, and
-# duplicating it here would create a second contract to keep in sync. These
-# declare the consumer's view: what `klt signoff` reads.
-#
-# See this module's "Typed, runtime-validated evidence ingestion" docstring
-# section for the scope of what this catches (malformed/incomplete
-# envelopes) and what it explicitly does not (semantic mismatches between
-# two well-formed values).
-# --------------------------------------------------------------------------- #
-
-
-class _EnvelopeCommon(TypedDict):
-    """The one field every ``klt`` JSON envelope carries
-    (``docs/json-contract.md``) -- already the first thing
-    :func:`_classify` checks for."""
-
-    schema_version: int
-
-
-class _DrcRequired(_EnvelopeCommon):
-    status: str
-    violations: list[Any]
-
-
-class _DrcEnvelope(_DrcRequired, total=False):
-    file: Any
-    deck: Any
-    violation_count: Any
-    coverage: dict[str, Any]
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _LvsRequired(_EnvelopeCommon):
-    status: str
-    mismatches: list[Any]
-
-
-class _LvsEnvelope(_LvsRequired, total=False):
-    layout: Any
-    reference: Any
-    mismatch_count: Any
-    counts: Any
-    power_connectivity: dict[str, Any] | None
-    body_verification: dict[str, Any] | None
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _SimRequired(_EnvelopeCommon):
-    status: str
-    measurements: list[Any]
-    corner_count: int
-
-
-class _SimEnvelope(_SimRequired, total=False):
-    netlist: Any
-    passed: Any
-    failed: Any
-    errored: Any
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _YieldRequired(_EnvelopeCommon):
-    status: str
-    measurements: list[Any]
-    measurement_count: int
-    source: dict[str, Any]
-
-
-class _YieldEnvelope(_YieldRequired, total=False):
-    samples: Any
-    limits: Any
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _ExtractRequired(_EnvelopeCommon):
-    # `status` is required even though `_check_passed` counts every extract
-    # envelope as passing: an extract report that reached this boundary
-    # without one is truncated, and grading it as the one unconditionally-
-    # passing kind is exactly the #1987/#1988 failure this validation
-    # exists to stop.
-    status: str
-    device_count: int
-    nets: list[Any]
-
-
-class _ExtractEnvelope(_ExtractRequired, total=False):
-    file: Any
-    deck: Any
-    net_count: Any
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _PexRequired(_EnvelopeCommon):
-    status: str
-    delta: list[Any]
-    # `Any`, not `str`: `klt pex` emits the repo-relative `{path, scope}`
-    # object `env_provenance.repo_relative_path` builds (issue #1261),
-    # while older committed evidence carries a bare path string. Presence is
-    # what this boundary discriminates on; the value's own shape belongs to
-    # `docs/cli/pex.md`, not here.
-    reference_netlist: Any
-
-
-class _PexEnvelope(_PexRequired, total=False):
-    # The layout stream this run extracted from, in the `{path, scope}`
-    # shape `klt pex` echoes every input path under (issue #1261) -- read
-    # since issue #2196 to re-hash the artifact `provenance.input` pins.
-    layout: Any
-    netlist: Any
-    corner_count: Any
-    passed: Any
-    failed: Any
-    errored: Any
-    body_bias: dict[str, Any] | None
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _PowerRequired(_EnvelopeCommon):
-    # `klt power` carries no top-level `status` at all (docs/cli/power.md);
-    # `em_verdict` is what `_check_passed` derives its verdict from, and is
-    # always present -- `None` when the spec declared no solve.
-    power_nets: list[Any]
-    networks: list[Any]
-    em_verdict: dict[str, Any] | None
-
-
-class _PowerEnvelope(_PowerRequired, total=False):
-    file: Any
-    spec: Any
-    worst_case_droop_mv: Any
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _StaRequired(_EnvelopeCommon):
-    # `status` is always `"ok"` (docs/cli/sta.md) -- this verb has no
-    # pass/fail concept of its own, so the verdict comes from the per-corner
-    # timing fields below, either flat or under `corners`.
-    status: str
-    geometry_source: str
-
-
-class _StaEnvelope(_StaRequired, total=False):
-    def_path: Any
-    verilog_path: Any
-    spef_path: Any
-    corners: list[Any]
-    timing_status: Any
-    worst_slack_ns: Any
-    worst_hold_slack_ns: Any
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _FunctionalVerificationRequired(_EnvelopeCommon):
-    status: str
-    tests: list[Any]
-    test_count: int
-
-
-class _FunctionalVerificationEnvelope(_FunctionalVerificationRequired, total=False):
-    hdl_toplevel: Any
-    testbench: Any
-    passed_count: Any
-    failed_count: Any
-    skipped_count: Any
-    environment: dict[str, Any] | None
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _ErcRequired(_EnvelopeCommon):
-    # `status` is what `_check_passed` grades ("clean"/"violations",
-    # docs/cli/erc.md); `gates`/`gate_role` are the two fields `_classify`
-    # recognises this shape by (issue #2025). Item 11's own grading
-    # (`_erc_supply_spec`/`_erc_supply_findings`) reads `spec`/`erc_findings`
-    # defensively via `.get(...) or []`, so neither is required here.
-    status: str
-    gates: list[Any]
-    gate_role: Any
-
-
-class _ErcEnvelope(_ErcRequired, total=False):
-    # The layout stream this run checked -- read since issue #2196 to
-    # re-hash the artifact `provenance.input` pins.
-    file: Any
-    spec: Any
-    stackup: Any
-    erc_findings: list[Any]
-    # The connectivity half's own roll-up and checked-work scope (issue
-    # #2179), optional because every `klt erc` envelope written before it
-    # carries neither -- and an envelope that does not state a connectivity
-    # verdict must keep grading exactly as it did (see `_coverage_refusal`).
-    erc_status: str
-    erc_coverage: dict[str, Any]
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _PlaceAndRouteRequired(_EnvelopeCommon):
-    # `status` is what `_check_passed` grades ("ok" = the run completed,
-    # docs/cli/place-and-route.md); `stage_reached`/`power` are the two
-    # fields `_classify` recognises this shape by (issue #2025). `power` is
-    # always present in a real response (possibly `{}`), so it is required
-    # here even though `_strap_layers` still reads it via `.get(...) or {}`
-    # for the same "defend the reader anyway" reason every other kind does.
-    status: str
-    stage_reached: str
-    power: dict[str, Any]
-
-
-class _PlaceAndRouteEnvelope(_PlaceAndRouteRequired, total=False):
-    worst_setup_slack_ns: Any
-    worst_hold_slack_ns: Any
-    timing_status: Any
-    corners: list[Any]
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _GenericRequired(_EnvelopeCommon):
-    # `kind` and `status` are the two fields docs/cli/signoff.md's "Generic
-    # evidence" section declares required; `summary`/`source` are explicitly
-    # optional there and stay optional here.
-    kind: str
-    status: str
-
-
-class _GenericEnvelope(_GenericRequired, total=False):
-    summary: Any
-    source: Any
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-class _ErrorRequired(_EnvelopeCommon):
-    error: dict[str, Any]
-
-
-class _ErrorEnvelope(_ErrorRequired, total=False):
-    metrics: dict[str, Any]
-    provenance: dict[str, Any] | None
-
-
-#: The union every envelope read at this boundary narrows to once
-#: :func:`_classify` has both recognised *and* validated it -- what
-#: :func:`_build_check`/:func:`_check_passed`/:func:`_detail` take in place
-#: of a bare ``dict[str, Any]``.
-_EvidenceEnvelope = (
-    _DrcEnvelope
-    | _LvsEnvelope
-    | _SimEnvelope
-    | _YieldEnvelope
-    | _ExtractEnvelope
-    | _PexEnvelope
-    | _PowerEnvelope
-    | _StaEnvelope
-    | _FunctionalVerificationEnvelope
-    | _ErcEnvelope
-    | _PlaceAndRouteEnvelope
-    | _GenericEnvelope
-    | _ErrorEnvelope
-)
-
-#: Every kind :func:`_classify` can return, mapped to the shape
-#: :func:`_validate_envelope` enforces for it. A kind added to
-#: :func:`_classify` without an entry here would silently re-open the
-#: unvalidated path for that kind, so the mapping is looked up (not
-#: ``.get``-ed with a fallback) and is covered by a drift test in
-#: ``tests/test_signoff.py``.
-_ENVELOPE_SHAPES: dict[str, Any] = {
-    "drc": _DrcEnvelope,
-    "lvs": _LvsEnvelope,
-    "sim": _SimEnvelope,
-    "yield": _YieldEnvelope,
-    "extract": _ExtractEnvelope,
-    "pex": _PexEnvelope,
-    "power": _PowerEnvelope,
-    "sta": _StaEnvelope,
-    "functional-verification": _FunctionalVerificationEnvelope,
-    "erc": _ErcEnvelope,
-    "place-and-route": _PlaceAndRouteEnvelope,
-    "generic": _GenericEnvelope,
-    "error": _ErrorEnvelope,
-}
-
-#: Runtime checks for the scalar annotations used above. ``bool`` is split
-#: out of ``int`` deliberately: ``isinstance(True, int)`` is ``True`` in
-#: Python, so a ``"schema_version": true`` envelope would otherwise validate
-#: as an integer.
-_SCALAR_CHECKS: dict[Any, Any] = {
-    bool: lambda value: isinstance(value, bool),
-    int: lambda value: isinstance(value, int) and not isinstance(value, bool),
-    float: lambda value: (
-        isinstance(value, (int, float)) and not isinstance(value, bool)
-    ),
-    str: lambda value: isinstance(value, str),
-    type(None): lambda value: value is None,
-}
-
-#: ``X | None`` (PEP 604) and ``Optional[X]`` produce different origins at
-#: runtime; both appear in the shapes above.
-_UNION_ORIGINS = (Union, types.UnionType)
-
-
 @cache
 def _shape_hints(kind: str) -> dict[str, Any]:
     """Resolved annotations for ``kind``'s :data:`_ENVELOPE_SHAPES` entry.
 
-    Resolved rather than read raw off ``__annotations__`` because this
-    module uses ``from __future__ import annotations``, so every annotation
-    above is a *string* until :func:`typing.get_type_hints` evaluates it.
+    Resolved rather than read raw off ``__annotations__`` because
+    ``signoff_envelopes.py`` (where the shapes are declared) uses
+    ``from __future__ import annotations``, so every annotation there is a
+    *string* until :func:`typing.get_type_hints` evaluates it.
     Cached because the result is immutable per kind and this runs once per
     ingested envelope.
     """
@@ -3818,6 +3550,17 @@ def build_tier_report(
         {
             "block": "my-block",              # optional, echoed back verbatim
             "kind": "analog" | "digital" | "mixed-signal",   # required
+            # optional, "mixed-signal" only (issue #2278): what this block's
+            # two partitions denote -- which nets/pins/cells belong to which
+            # side, as the tiers doc's "Block kind" subsection requires a
+            # mixed-signal claim to state. Echoed back verbatim, onto the
+            # report and onto every row of the partition it names; never
+            # graded. Either partition may be declared alone. See
+            # :func:`_read_partition_boundary`.
+            "partition_boundary": {
+                "analog": "bandgap + LDO: nets vref/vbg, cells bg_core, ota",
+                "digital": "trim SPI: nets sclk/sdi/csb, cells trim_ctl",
+            },
             "evidence": {                      # optional, default {}
                 "3": "drc.json",
                 "4": {"file": "lvs.json", "content_hash": "sha256:..."},
@@ -3856,6 +3599,10 @@ def build_tier_report(
             "schema_version": 1,
             "block": "my-block" | None,
             "kind": "analog",
+            # Present only when the manifest declared one (issue #2278) --
+            # a "mixed-signal" manifest's own statement of its partition
+            # boundary, echoed verbatim and never graded.
+            "partition_boundary": {"analog": "...", "digital": "..."},
             "tier": "T1" | None,
             "t1_item_count": 11,
             # How many T1 rows this build's *own* shipped doc would have
@@ -3888,6 +3635,9 @@ def build_tier_report(
                     "id": 3,
                     "title": "DRC clean",
                     "partition": None,
+                    # `"partition_boundary": "<text>"` here too, on every row
+                    # of a partition the manifest declared one for (issue
+                    # #2278) -- absent otherwise, as above.
                     "text": "latest `klt drc` JSON report: ...",
                     "notes": [],
                     "status": "met",
@@ -4229,7 +3979,10 @@ def build_tier_report(
 
     Raises :class:`SignoffError` if ``manifest`` is not a JSON object, its
     ``kind`` is missing or not one of ``analog``/``digital``/``mixed-signal``,
-    or its ``evidence`` field (when given) is not a JSON object. Raises
+    its ``evidence`` field (when given) is not a JSON object, or its
+    ``partition_boundary`` field (when given) is not a well-formed
+    declaration for a ``mixed-signal`` block
+    (:func:`_read_partition_boundary`). Raises
     :class:`~klayout_tools.design_evidence_tiers.DesignEvidenceTiersError`
     (re-exported here for convenient ``except`` handling alongside
     :class:`SignoffError`) if ``docs/design-evidence-tiers.md`` itself
@@ -4254,9 +4007,11 @@ def build_tier_report(
             f"{type(evidence).__name__}"
         )
 
+    partition_boundary = _read_partition_boundary(manifest, kind)
+
     doc = parse_tier_doc(tiers_doc)
     partitions: tuple[str, ...] = (
-        ("analog", "digital") if kind == "mixed-signal" else (kind,)
+        _MIXED_SIGNAL_PARTITIONS if kind == _PARTITIONED_BLOCK_KIND else (kind,)
     )
     # Issue #2176: the item ids *this build* was written against, so an item
     # the parsed doc lists but this build has no rules for is reported as
@@ -4282,6 +4037,7 @@ def build_tier_report(
                     notes=list(t1_item["notes"]),
                     partition=partition if kind == "mixed-signal" else None,
                     partition_kind=partition,
+                    partition_boundary=partition_boundary.get(partition),
                     evidence=evidence,
                     graded_by_build=graded_by_build,
                 )
@@ -4293,6 +4049,7 @@ def build_tier_report(
                     text=_t1_item_text(t1_item, partition),
                     notes=list(t1_item["notes"]),
                     partition=partition if kind == "mixed-signal" else None,
+                    partition_boundary=partition_boundary.get(partition),
                     evidence=evidence,
                     allowed_kinds=_allowed_kinds_for(t1_item["id"], partition),
                     require_post_layout=(
@@ -4328,6 +4085,13 @@ def build_tier_report(
         "schema_version": TIER_REPORT_SCHEMA_VERSION,
         "block": manifest.get("block"),
         "kind": kind,
+        # Issue #2278: the manifest's own statement of what its two
+        # partitions denote, echoed verbatim -- present only when the
+        # manifest declared one, so a report from a manifest that declares
+        # nothing is byte-identical to the one this build rendered before the
+        # field existed (and therefore does not read as `--check` drift on an
+        # upgrade alone). Never graded: see `_read_partition_boundary`.
+        **({"partition_boundary": partition_boundary} if partition_boundary else {}),
         "tier": tier,
         "t1_item_count": total,
         # Issue #2202: what this build's *own* doc would have rendered, so a
@@ -4341,6 +4105,95 @@ def build_tier_report(
         "build": _build_identity(),
         "items": items,
     }
+
+
+def _read_partition_boundary(manifest: dict[str, Any], kind: str) -> dict[str, str]:
+    """Validate and normalize a manifest's optional ``partition_boundary``
+    declaration (issue #2278), returning ``{}`` when none was made.
+
+    ``docs/design-evidence-tiers.md``'s "Block kind" subsection requires a
+    mixed-signal claim to "state the partition boundary explicitly (which
+    nets/pins/cells belong to which side) so a reviewer can tell which
+    evidence covers which silicon". ``kind: "mixed-signal"`` already asserts
+    that two partitions exist -- every T1 row of such a report carries
+    ``"partition": "analog"``/``"digital"``, and an evidence key may select
+    one with the ``"<id>.<analog|digital>"`` form -- but nothing in the
+    manifest said what those two words denote for *this* block. This field is
+    where that declaration lives::
+
+        {
+            "kind": "mixed-signal",
+            "partition_boundary": {
+                "analog": "bandgap + LDO: nets vref/vbg/vout, cells bg_core, ota",
+                "digital": "trim SPI: nets sclk/sdi/csb, cells trim_ctl"
+            }
+        }
+
+    It is a **declaration, not a verdict** -- reported, never graded, exactly
+    like ``drc_coverage`` (issue #2002) and ``body_bias`` (issue #1983). A
+    mixed-signal manifest that declares nothing still grades identically and
+    can still reach ``tier: "T1"``; `klt signoff` has no way to check a
+    free-text boundary against the silicon and must not pretend otherwise.
+    Declaring only one of the two partitions is likewise allowed: a partial
+    disclosure is worth carrying, and refusing it would make the honest
+    half-statement unrepresentable.
+
+    What *is* refused, as an authoring mistake rather than a missing
+    disclosure (:class:`SignoffError`):
+
+    - a declaration on an ``analog``/``digital`` manifest -- a single-partition
+      block has no boundary to state, and silently dropping the field would
+      leave the manifest looking like it made a disclosure it did not;
+    - a non-object declaration, or an empty one;
+    - a key that is not ``"analog"``/``"digital"`` (a typo'd partition name
+      would otherwise vanish from the report with no signal);
+    - a value that is not a non-blank string.
+
+    The returned mapping is ordered by :data:`_MIXED_SIGNAL_PARTITIONS`, not
+    by the manifest's own key order, so two manifests declaring the same
+    boundary render the same report bytes.
+    """
+    raw = manifest.get("partition_boundary")
+    if raw is None:
+        return {}
+    if kind != _PARTITIONED_BLOCK_KIND:
+        raise SignoffError(
+            "block manifest 'partition_boundary' is only meaningful for a "
+            f"{_PARTITIONED_BLOCK_KIND!r} block, which grades one partition "
+            f"per side (got kind {kind!r}, which has a single partition)"
+        )
+    if not isinstance(raw, dict):
+        raise SignoffError(
+            "block manifest 'partition_boundary' must be a JSON object keyed "
+            f"by partition name ({_join_partitions()}), got "
+            f"{type(raw).__name__}"
+        )
+    if not raw:
+        raise SignoffError(
+            "block manifest 'partition_boundary' must name at least one "
+            f"partition ({_join_partitions()}), got an empty object"
+        )
+    for name, text in raw.items():
+        if name not in _MIXED_SIGNAL_PARTITIONS:
+            raise SignoffError(
+                f"block manifest 'partition_boundary' key {name!r} is not a "
+                f"partition of a {_PARTITIONED_BLOCK_KIND!r} block "
+                f"({_join_partitions()})"
+            )
+        if not isinstance(text, str) or not text.strip():
+            raise SignoffError(
+                f"block manifest 'partition_boundary.{name}' must be a "
+                "non-empty string stating which nets/pins/cells belong to "
+                f"that side, got {text!r}"
+            )
+    return {name: raw[name] for name in _MIXED_SIGNAL_PARTITIONS if name in raw}
+
+
+def _join_partitions() -> str:
+    """``"'analog'/'digital'"`` -- the partition names an error message
+    offers, derived from :data:`_MIXED_SIGNAL_PARTITIONS` so the message can
+    never name a set the grading does not render."""
+    return "/".join(repr(name) for name in _MIXED_SIGNAL_PARTITIONS)
 
 
 def _allowed_kinds_for(item_id: int, partition_kind: str) -> set[str] | None:
@@ -5709,6 +5562,7 @@ def _build_power_delivery_item(
     notes: list[str],
     partition: str | None,
     partition_kind: str,
+    partition_boundary: str | None = None,
     evidence: dict[str, Any],
     graded_by_build: bool = True,
 ) -> dict[str, Any]:
@@ -5721,6 +5575,9 @@ def _build_power_delivery_item(
     the whole item :data:`_REASON_INVALID_EVIDENCE` rather than being
     silently dropped from the cited set), and that grading is delegated to
     :func:`_grade_power_delivery`.
+
+    ``partition_boundary`` (issue #2278) is echoed exactly as in
+    :func:`_build_tier_item`.
 
     ``graded_by_build`` (issue #2176) is reported and honoured exactly as in
     :func:`_build_tier_item`. In practice it is always ``True`` here --
@@ -5752,6 +5609,11 @@ def _build_power_delivery_item(
         "id": item_id,
         "title": title,
         "partition": partition,
+        **(
+            {"partition_boundary": partition_boundary}
+            if partition_boundary is not None
+            else {}
+        ),
         "text": text,
         "notes": notes,
         "status": status,
@@ -5770,6 +5632,7 @@ def _build_tier_item(
     text: str | None,
     notes: list[str],
     partition: str | None,
+    partition_boundary: str | None = None,
     evidence: dict[str, Any],
     allowed_kinds: set[str] | None = None,
     require_post_layout: bool = False,
@@ -5790,6 +5653,17 @@ def _build_tier_item(
     #2044 only T1 items 1, 2, 9 and 10 (the four naming no evidence at all)
     still pass ``None`` (see :data:`_ITEM_ALLOWED_KINDS` and
     :func:`_allowed_kinds_for`).
+
+    ``partition_boundary`` (issue #2278) is the manifest's own statement of
+    what *this row's* partition denotes, resolved by
+    :func:`_read_partition_boundary` and echoed verbatim onto the entry so a
+    row and the definition of the silicon it covers are readable together.
+    Omitted entirely (not rendered as ``None``) when the manifest declared
+    none for this partition -- an absent statement must not be
+    indistinguishable from a declared-empty one, and an undeclared manifest's
+    report must stay byte-identical to what this build rendered before the
+    field existed. It never touches ``status``/``reason``: there is no way to
+    check free text against silicon.
 
     ``require_post_layout`` (issue #1959) is forwarded to
     :func:`_grade_evidence` for the items in
@@ -5867,6 +5741,11 @@ def _build_tier_item(
         "id": item_id,
         "title": title,
         "partition": partition,
+        **(
+            {"partition_boundary": partition_boundary}
+            if partition_boundary is not None
+            else {}
+        ),
         "text": text,
         "notes": notes,
         "status": status,

@@ -536,6 +536,38 @@ def geometry_style_for_family(family: str) -> str:
     return _GEOMETRY_STYLE_BY_FAMILY.get(family, GEOMETRY_STYLE_UNIT_SUFFIX)
 
 
+def _unbound_resistor_card(
+    name: str,
+    pins: str,
+    class_name: str,
+    resistance: float,
+    length_um: float,
+    width_um: float,
+) -> str:
+    """The plain-element card for one *unbound* (no curated model binding)
+    named resistor device, with its measured geometry carried (issue #1927).
+
+    Two-terminal classes get the KLayout-shaped ``R`` card (value + trailing
+    model-name token + the ``L=``/``W=`` suffix KLayout's own writer omits).
+    A **three-terminal** (bulk-bearing) class instead gets the issue #1157
+    ``X`` subcircuit-call form -- ngspice's native ``R`` element accepts
+    exactly two nodes, so a 3-net ``R`` card is not a parseable deck at all
+    -- with the resistance on a declared ``r=`` parameter so the extracted,
+    offset-corrected value (issues #521/#588) stays on the written card.
+    See ``create_model_binding_delegate``'s docstring for the full contract.
+    """
+    if len(pins.split()) > 2:
+        return (
+            f"X{name} {pins} {class_name} "
+            f"r={resistance:.12g} "
+            f"L={_format_um(length_um)} W={_format_um(width_um)}"
+        )
+    return (
+        f"R{name} {pins} {resistance:.12g} {class_name} "
+        f"L={_format_um(length_um)} W={_format_um(width_um)}"
+    )
+
+
 class ModelBindingError(Exception):
     """Raised when a resolved PDK variant has no curated MOS device-model
     table entry for the extraction deck in use.
@@ -668,12 +700,26 @@ class DeviceLookup:
     ``None`` for a kind with no geometry call-site parameter (bipolar's
     fixed-geometry cells, see :func:`known_device_subckt_names`'s
     docstring).
+
+    ``emitter_area_um2`` (issue #2335) is the *bipolar* counterpart of those
+    call-site parameters: a fixed-geometry cell states no geometry at its
+    call site, but its curated name encodes one, and
+    :data:`_BIPOLAR_MODEL_TABLE` already records the nominal emitter area
+    (in um^2) that name denotes -- the same number
+    :func:`_select_bipolar_variant` uses in the *forward* direction to pick
+    which variant to call. Carrying it here lets the ingestion direction
+    state ``AE``/``PE`` on the converted ``Q`` card instead of emitting a
+    geometry-free card that can never match a layout-extracted one under
+    ``DeviceClassBJT3Transistor``'s default full-parameter compare.
+    ``None`` for every non-bipolar kind, and for a bipolar binding whose
+    geometry is not curated (a caller-supplied ``device_map`` override).
     """
 
     kind: str
     device_class: str
     length_param: str | None = None
     width_param: str | None = None
+    emitter_area_um2: float | None = None
 
 
 def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
@@ -716,9 +762,15 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
             )
     for (deck_name, _family), table in _BIPOLAR_MODEL_TABLE.items():
         for device_class, variants in table.items():
-            for _nominal_ae, subckt in variants:
+            for nominal_ae, subckt in variants:
                 result.setdefault(
-                    subckt, (deck_name, DeviceLookup("bipolar", device_class))
+                    subckt,
+                    (
+                        deck_name,
+                        DeviceLookup(
+                            "bipolar", device_class, emitter_area_um2=nominal_ae
+                        ),
+                    ),
                 )
     return result
 
@@ -852,8 +904,11 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
     for device_class, variants in _BIPOLAR_MODEL_TABLE.get(
         (deck_name, family), {}
     ).items():
-        for _nominal_ae, subckt in variants:
-            result.setdefault(subckt, DeviceLookup("bipolar", device_class))
+        for nominal_ae, subckt in variants:
+            result.setdefault(
+                subckt,
+                DeviceLookup("bipolar", device_class, emitter_area_um2=nominal_ae),
+            )
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:
@@ -1147,6 +1202,13 @@ _CAPACITOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
 #: ((nominal AE in um^2, subckt name), ...)}. gf180mcu is intentionally absent
 #: -- its recognised ``bjt`` stays a bare ``Q`` card (documented carve-out,
 #: see ``decks/gf180mcu.py:557-559`` and ``docs/cli/extract.md``).
+#:
+#: The nominal-AE half of each entry is used in *both* directions: forward
+#: (``klt extract --pdk``) to pick which fixed-geometry variant a measured
+#: emitter area should call (:func:`_select_bipolar_variant`), and ingestion
+#: (``klt lvs``'s ``form: "subckt-call"``) as
+#: :attr:`DeviceLookup.emitter_area_um2`, so the converted ``Q`` card can
+#: state the geometry the call site itself omits (issue #2335).
 _BIPOLAR_MODEL_TABLE: dict[
     tuple[str, str], dict[str, tuple[tuple[float, str], ...]]
 ] = {
@@ -1168,6 +1230,15 @@ _BIPOLAR_MODEL_TABLE: dict[
 #: written as an `X` card. `AE` itself is excluded: it *is* used, to select
 #: which fixed-geometry variant to call (see `_select_bipolar_variant`), so
 #: it is consumed rather than silently dropped.
+#:
+#: This lists what the *forward* (`X`-card-writing) direction cannot express
+#: and is unchanged by issue #2335 -- but note the ingestion direction is no
+#: longer symmetric with it: converting such an `X` card back to a `Q` card
+#: reconstructs `AE` (and, for these square-emitter cells, `PE`) from the
+#: curated nominal area in :data:`_BIPOLAR_MODEL_TABLE`, on top of the `NE`
+#: the call's own optional `mult` supplies. `AB`/`PB`/`AC`/`PC` stay
+#: genuinely lost in both directions: they measure drawn base/collector
+#: geometry that the fixed-geometry cell name does not encode.
 _BIPOLAR_DROPPED_PARAMS: tuple[str, ...] = ("PE", "AB", "PB", "AC", "PC", "NE")
 
 #: Per-PDK-family subcircuit length/width parameter spellings (see the module
@@ -1375,7 +1446,11 @@ def create_model_binding_delegate(
     ``extract_parasitics.py`` creates uses an anonymous
     ``kdb.DeviceClassResistor()`` with ``L``/``W`` never set (always
     ``0.0``, not a real measurement), so those are left to ``super()``
-    unchanged rather than gaining a meaningless ``L=0U W=0U``.
+    unchanged rather than gaining a meaningless ``L=0U W=0U``. One further
+    carve-out (issue #1157): a *three-terminal* (bulk-bearing) resistor
+    class is written as an ``X`` subcircuit call rather than an ``R``
+    card, because ngspice's ``R`` primitive accepts exactly two nodes --
+    see ``_write_resistor_card_with_geometry``'s own docstring.
 
     ``global_nets`` (issue #1503) is an independent, additive concern: when
     non-empty, the delegate's ``write_header`` override emits one
@@ -1467,7 +1542,7 @@ def create_model_binding_delegate(
             """Write a *named* (deck-declared) resistor device's plain ``R``
             card with its own `` L=...U W=...U`` geometry suffix appended,
             and report ``True``; report ``False`` (writing nothing) for any
-            device this narrow rewrite does not own.
+            device this rewrite does not own.
 
             Issue #1927: see :func:`create_model_binding_delegate`'s own
             docstring for the full rationale -- KLayout's default writer
@@ -1478,6 +1553,32 @@ def create_model_binding_delegate(
             terminal order, the same ``%.12g`` value formatting, and the
             same trailing class-name token) -- this only appends the
             geometry suffix KLayout's own writer omits.
+
+            A **three-terminal** (bulk-bearing) resistor class instead gets
+            an ``X``-prefixed subcircuit call (issue #1157): ngspice's
+            native ``R`` element accepts exactly two nodes, so the
+            KLayout-shaped ``R<name> a b w <value> <class>`` card is not a
+            valid deck for it at all -- ngspice consumes the third net and
+            the resistance value as ``<value>``/``<model>`` positions and
+            aborts with ``unknown parameter (...)``. The ``X`` card keeps
+            the same terminal order and class-name token -- the class name
+            becomes a *caller-suppliable subcircuit name*: the simulating
+            testbench declares ``.subckt <class> <a> <b> <w> r=... l=...
+            w=...`` and ngspice binds the written literals onto those
+            declared parameters (case-insensitively). The extracted
+            resistance rides a declared ``r=`` parameter -- not dropped:
+            the written card's value is load-bearing (issue #521's
+            two-term `res_high_po` correction reaches ``klt sim`` and
+            ``klt lvs`` through the written netlist, and issue #588's
+            deferred-offset contract reads it back), so losing it would
+            trade one silent fidelity loss for another. ``L``/``W`` keep
+            the #1927 suffix spelling. This is a documented caller
+            contract, not a resolvable binding -- ``klt extract`` cannot
+            know the caller's model, it only stops writing a card no
+            simulator can parse. Two-terminal classes keep the ``R``
+            card: ngspice's semiconductor-resistor primitive handles that
+            shape natively (see ``docs/cli/extract.md``'s "Verified
+            compatible with ``klt sim``'s netlist convention" section).
             """
             device_class = device.device_class()
             # An anonymous class (every `--parasitics` shunt/leg/DC-tie
@@ -1507,8 +1608,14 @@ def create_model_binding_delegate(
             name = self.format_name(device.expanded_name())
             pins = " ".join(self.net_to_string(net) for net in nets)
             self.emit_line(
-                f"R{name} {pins} {resistance:.12g} {device_class.name} "
-                f"L={_format_um(length_um)} W={_format_um(width_um)}"
+                _unbound_resistor_card(
+                    name,
+                    pins,
+                    device_class.name,
+                    resistance,
+                    length_um,
+                    width_um,
+                )
             )
             return True
 

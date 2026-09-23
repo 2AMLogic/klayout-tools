@@ -87,6 +87,7 @@ docs/
     em-field-sim-spike.md
     em-site-export-format.md
     extract-fidelity-roadmap.md
+    fastcap-oracle.md
     flute-congestion-precheck-results.md
     fst-writer-upstream-bug-report.md
     gen-bjt-array-spike.md
@@ -136,6 +137,7 @@ docs/
     wasm-spice-playground-spike.md
     waveform-query-contract-spike.md
     waveform-query-survey.md
+    xyce-oracle.md
     yosys-synthesis-spike.md
   library/                # standing resource library: mined resources -> what changed here
     README.md

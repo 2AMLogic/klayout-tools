@@ -240,6 +240,42 @@ use) — matching `klt power`'s own convention.
     combination is the more general `erc.multiply_driven_net`.
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
     `erc.supply_short` are never computed.
+
+  **A `"supply"` (or signal) connectivity spec must declare every metal
+  layer the design's real PDN straps use.** The worked `stackup`/`vias`
+  example above stops at `met2`/`via1` for brevity; a real digital block's
+  power straps usually do not. Straps live one or more metal layers above
+  the row rails, and `nets[]` connectivity is computed only through the
+  stackup roles and vias the spec declares — so a `VPWR`/`VSS` net whose
+  upper-metal straps are missing from the spec is, as far as this check can
+  see, several electrically separate shapes, each reported as its own
+  `erc.unconnected_net` island. That is a false positive on a correctly
+  strapped design, and it is not hypothetical: an `li1`..`met3` supply spec
+  auditing three layouts whose rails were correctly joined by `met4`/`met5`
+  straps reported **7**, **15** and **26** islands respectively (issue
+  #1985's audit evidence) — every one an artifact of the spec, not the
+  layout. When speccing a supply net, extend the stack to the top strap
+  layer and bridge each consecutive pair, e.g. for a sky130 block strapped
+  on `met4`/`met5`:
+
+  ```json
+  { "name": "met3", "layer": "70/20" },
+  { "name": "met4", "layer": "71/20" },
+  { "name": "met5", "layer": "72/20" }
+  ```
+
+  ```json
+  { "name": "via2", "layer": "69/44", "between": ["met2", "met3"] },
+  { "name": "via3", "layer": "70/44", "between": ["met3", "met4"] },
+  { "name": "via4", "layer": "71/44", "between": ["met4", "met5"] }
+  ```
+
+  (appended to the worked example's `stackup`/`vias` above). A spec layer
+  the layout never draws is not an error (see the convention note above),
+  so erring toward the full stack costs nothing on a small block — the
+  reverse omission silently disconnects exactly the straps that make the
+  grid correct.
+
 - `ties` (optional array, default `[]`, issue #861) — substrate/well tie
   declarations for the `erc.missing_tie` check:
   - `name` (string, optional, defaults to `"tie<index>"`) — echoed in each

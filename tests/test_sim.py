@@ -135,12 +135,260 @@ def test_run_sim_unsupported_engine_raises(tmp_path):
         tmp_path,
         {
             "netlist": "body.spice",
-            "engine": "xyce",
+            # Issue #2016 landed an `xyce` execution path; this gate is for
+            # engine names no path recognises at all.
+            "engine": "spectre",
             "analysis": {"kind": "tran", "args": "1n 1u"},
         },
     )
     with pytest.raises(sim.SimError, match="unsupported engine"):
         sim.run_sim(str(request))
+
+
+# --------------------------------------------------------------------------- #
+# run_sim: engine "xyce" request-level gates (issue #2016)
+#
+# Each unimplemented combination is refused up front with a SimError naming
+# what IS supported, before any corner runs.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_sim_xyce_refuses_remote_backend(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "backend": "remote",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="xyce.*local backends"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_refuses_supply_corners(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "dc", "args": "Vdd 0 2 0.5"},
+            "corners": {"supply_v": {"vdd": [1.0, 1.8]}},
+        },
+    )
+    with pytest.raises(sim.SimError, match="xyce.*supply_v"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_refuses_monte_carlo(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "monte_carlo": {"n": 3, "seed": 7, "vary": "process"},
+        },
+    )
+    with pytest.raises(sim.SimError, match="xyce.*monte_carlo"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_refuses_fail_fast_probe(tmp_path):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"fail_fast_probe": True},
+        },
+    )
+    with pytest.raises(sim.SimError, match="fail_fast_probe.*xyce"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_xyce_missing_binary_reports_per_corner_error(tmp_path, monkeypatch):
+    # A missing Xyce binary is not an exception: like a missing ngspice, it
+    # folds into per-corner `status: "error"` diagnostics ("every corner is
+    # reported"), so the caller sees which engine failed to launch. The
+    # binary name is monkeypatched rather than PATH-manipulated so the test
+    # is deterministic whether or not Xyce is installed.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "engine": "xyce",
+            "analysis": {"kind": "op", "args": ""},
+        },
+    )
+    monkeypatch.setattr(sim, "XYCE_BINARY", "xyce-not-on-path-xyz")
+    report = sim.run_sim(str(request))
+    assert report["corner_count"] == 1
+    corner = report["corners"][0]
+    assert corner["status"] == "error"
+    assert any(
+        "could not launch" in d["message"] and "xyce-not-on-path-xyz" in d["message"]
+        for d in corner["diagnostics"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Xyce deck generation and log parsing (issue #2016)
+#
+# Pure-function tests, no binary required: the deck Xyce receives must not
+# carry the ngspice-only cards Xyce ignores or rejects (.control/alter,
+# .temp), and the parser must read what Xyce actually writes.
+# --------------------------------------------------------------------------- #
+
+
+def _xyce_point() -> sim.CornerPoint:
+    return sim.CornerPoint(
+        process=None,
+        supply_v={},
+        temperature_c=85,
+    )
+
+
+def _xyce_bundle_point() -> sim.CornerPoint:
+    return sim.CornerPoint(
+        process="tt",
+        supply_v={},
+        temperature_c=85,
+        process_sections=["tt", "bjt_tt"],
+    )
+
+
+def test_write_xyce_deck_shape(tmp_path):
+    deck = tmp_path / "corner.cir"
+    sim._write_xyce_deck(
+        deck_path=str(deck),
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib=None,
+        point=_xyce_point(),
+        analysis={"kind": "tran", "args": "1n 10u"},
+        measurements_spec=[{"name": "vout", "spice": ".meas tran vmax MAX v(out)"}],
+    )
+    text = deck.read_text()
+    # The analysis is a top-level dot card (no .control block to live in).
+    assert ".tran 1n 10u" in text
+    # Temperature rides `.options device temp=` -- a `.temp` card is a
+    # silent no-op in Xyce (verified against 7.10.0).
+    assert ".options device temp=85" in text
+    assert ".temp " not in text
+    # No ngspice-only machinery ever reaches a Xyce deck.
+    assert ".control" not in text
+    assert "alter " not in text
+    # The request's .meas cards pass through verbatim, and the deck ends.
+    assert ".meas tran vmax MAX v(out)" in text
+    assert text.rstrip().endswith(".end")
+
+
+def test_write_xyce_deck_process_corner_lib_cards(tmp_path):
+    deck = tmp_path / "corner.cir"
+    sim._write_xyce_deck(
+        deck_path=str(deck),
+        netlist_path=str(tmp_path / "body.spice"),
+        models_lib="/pdk/corner.lib",
+        point=_xyce_bundle_point(),
+        analysis={"kind": "op", "args": ""},
+        measurements_spec=[],
+    )
+    text = deck.read_text()
+    assert ".lib /pdk/corner.lib tt" in text
+    assert ".lib /pdk/corner.lib bjt_tt" in text
+
+
+def test_extract_xyce_version_from_log():
+    log = (
+        "*****\n***** Welcome to the Xyce(TM) Parallel Electronic Simulator\n"
+        "*****\n***** This is version XyceNF Release 7.10.0\n"
+        "***** Date: Tue Sep 22 12:10:20 PDT 2026\n"
+    )
+    assert sim._extract_xyce_version(log) == "7.10.0"
+    # The open-source (non-NORAD) build labels itself without the NF.
+    opensource_banner = "***** This is version Xyce Release 7.9\n"
+    assert sim._extract_xyce_version(opensource_banner) == "7.9"
+    assert sim._extract_xyce_version("no banner here") is None
+
+
+def test_parse_xyce_measurements():
+    # The exact shapes XyceNF 7.10.0 prints in its "Measure Functions"
+    # section: value lines with analysis-specific trailers, FAILED lines,
+    # and the summary lines around the section (which must not parse).
+    log = (
+        "***** Netlist sensitive analysis...\n"
+        "\n ***** Measure Functions ***** \n"
+        "\n"
+        "VMAX = 9.691320e-01 at time = 6.544640e-09\n"
+        "\n"
+        "VOUT_MID = 5.000000e-01 for AT = 2.500000e+00\n"
+        "\n"
+        "TPHL = 1.391548e-09 with targ = 3.641548e-09 and trig = 2.250000e-09\n"
+        "\n"
+        "TDEAD = FAILED with targ = not found and trig = not found\n"
+        "\n"
+        "Measure Start Time= 0.000000e+00\tMeasure End Time= 8.000000e-09\n"
+        "***** Total Simulation Solvers Run Time: 0.01 seconds\n"
+    )
+    values = sim._parse_xyce_measurements(log)
+    # Xyce upper-cases names; the parser lower-cases them for the
+    # case-insensitive lookup `_run_corner` performs.
+    assert values == {
+        "vmax": pytest.approx(9.691320e-01),
+        "vout_mid": pytest.approx(5.000000e-01),
+        "tphl": pytest.approx(1.391548e-09),
+    }
+    # A failed measurement is absent, never zero-parsed into a value.
+    assert "tdead" not in values
+    # Section-scoped: nothing outside "Measure Functions" parses.
+    assert sim._parse_xyce_measurements("Time= 1.0 V(a)=2.0") == {}
+
+
+def test_classify_xyce_diagnostics():
+    log = (
+        "Netlist error in file lib at or near line 3\n"
+        " Simulation aborted due to error.\n"
+    )
+    diagnostics = sim._classify_xyce_diagnostics(log)
+    codes = [d["code"] for d in diagnostics]
+    assert "netlist" in codes
+    assert "unknown" in codes
+    # All Xyce classifications start fatal; `_recovered_from_stepping` owns
+    # any downgrade (same rule as the ngspice path).
+    assert all(d["severity"] == "error" for d in diagnostics)
+    assert sim._classify_xyce_diagnostics("***** End of Xyce(TM) Simulation") == []
+
+
+def test_xyce_downgraded_singular_matrix_when_measurements_returned():
+    # Xyce's Amesos "numerically singular matrix, returning zero" narration
+    # can accompany a run that ultimately produced every measurement; the
+    # same recovery rule as ngspice's stepping narration applies.
+    assert sim._recovered_from_stepping(
+        [{"name": "v"}],
+        [{"name": "v", "value": 1.0, "status": "pass", "unit": None, "margin": None}],
+        "Netlist warning: Numerically singular matrix found by Amesos",
+        aborted_re=sim._XYCE_SIMULATION_ABORTED_RE,
+    )
+    # But never when a measurement is missing or the abort trailer fired.
+    assert not sim._recovered_from_stepping(
+        [{"name": "v"}],
+        [{"name": "v", "value": None, "status": "error", "unit": None, "margin": None}],
+        "Netlist warning: Numerically singular matrix found by Amesos",
+        aborted_re=sim._XYCE_SIMULATION_ABORTED_RE,
+    )
+    assert not sim._recovered_from_stepping(
+        [{"name": "v"}],
+        [{"name": "v", "value": 1.0, "status": "pass", "unit": None, "margin": None}],
+        "Simulation aborted due to error",
+        aborted_re=sim._XYCE_SIMULATION_ABORTED_RE,
+    )
 
 
 def test_run_sim_unsupported_backend_raises(tmp_path):
@@ -3475,6 +3723,11 @@ def test_run_sim_invalid_max_workers_raises(tmp_path, bad_value):
 
 
 def test_default_max_workers_derives_from_cpu_count(monkeypatch):
+    # Pinned to "no host cap" (issue #2286) so the derived-default contract is
+    # asserted on its own terms even when the box running pytest exports
+    # `KLT_SIM_MAX_WORKERS` -- which is exactly what that feature asks a
+    # shared box to do.
+    monkeypatch.delenv(sim.MAX_WORKERS_ENV, raising=False)
     monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
     assert sim._default_max_workers() == 4
 
@@ -3483,6 +3736,317 @@ def test_default_max_workers_derives_from_cpu_count(monkeypatch):
 
     monkeypatch.setattr(sim.os, "cpu_count", lambda: None)
     assert sim._default_max_workers() == 1
+
+
+# --------------------------------------------------------------------------- #
+# Host-level worker cap: $KLT_SIM_MAX_WORKERS (issue #2286)
+# --------------------------------------------------------------------------- #
+
+
+def _recording_pool(monkeypatch):
+    """Record the `max_workers` the `local-parallel` backend actually hands
+    to its `ThreadPoolExecutor`, and return the dict it is recorded into."""
+    seen_workers = {}
+    real_pool = sim.ThreadPoolExecutor
+
+    class _RecordingPool(real_pool):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            seen_workers["max_workers"] = max_workers
+            super().__init__(*args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", _RecordingPool)
+    return seen_workers
+
+
+#: A stubbed `ngspice` log that satisfies `_PASSING_MEASUREMENT` below.
+_PASSING_LOG = (
+    "  Measurements for Transient Analysis\n\nvout                =  1.00000e+00\n"
+)
+_PASSING_MEASUREMENT = {
+    "name": "vout",
+    "spice": ".meas tran vout FIND v(out) AT=1u",
+    "limits": {"min": 0.5},
+}
+
+
+def _parallel_request(tmp_path, *, options=None, name="request.json", **extra):
+    _write_body(tmp_path)
+    body = {
+        "netlist": "body.spice",
+        "backend": "local-parallel",
+        "analysis": {"kind": "tran", "args": "1n 1u"},
+        **extra,
+    }
+    if options is not None:
+        body["options"] = options
+    return _write_request(tmp_path, body, name=name)
+
+
+def test_host_max_workers_cap_unset_is_unchanged(tmp_path, monkeypatch, capsys):
+    # Acceptance criterion: unset -> behaviour identical to before #2286.
+    monkeypatch.delenv(sim.MAX_WORKERS_ENV, raising=False)
+    assert sim._host_max_workers_cap() is None
+
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
+    assert sim._default_max_workers() == 4
+    assert sim._resolve_max_workers(None) == 4
+    assert sim._resolve_max_workers(64) == 64
+
+    request = _parallel_request(tmp_path, options={"max_workers": 6})
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 6
+    assert sim.MAX_WORKERS_ENV not in capsys.readouterr().err
+
+
+def test_host_max_workers_cap_empty_string_means_unset(monkeypatch):
+    # `KLT_SIM_MAX_WORKERS=` (an empty entry in a shell env file) is "no cap",
+    # not a malformed cap -- see `_host_max_workers_cap`.
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
+    for blank in ("", "   "):
+        monkeypatch.setenv(sim.MAX_WORKERS_ENV, blank)
+        assert sim._host_max_workers_cap() is None
+        assert sim._default_max_workers() == 4
+        assert sim._resolve_max_workers(64) == 64
+
+
+def test_host_max_workers_cap_bounds_the_derived_default(monkeypatch):
+    # Set, with no explicit max_workers anywhere: the CPU-derived default is
+    # bounded by the cap.
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 32)
+
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "2")
+    assert sim._host_max_workers_cap() == 2
+    assert sim._default_max_workers() == 2
+    assert sim._resolve_max_workers(None) == 2
+
+    # A cap *above* the derived default leaves it alone -- the cap is an upper
+    # bound, never a floor that widens the pool.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "16")
+    assert sim._default_max_workers() == 4
+    assert sim._resolve_max_workers(None) == 4
+
+
+def test_host_max_workers_cap_bounds_default_pool_end_to_end(
+    tmp_path, monkeypatch, capsys
+):
+    # The same thing through `run_sim`, which is the path the CLI, a library
+    # caller, and this test suite's own simulation fixtures all share.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
+    monkeypatch.setattr(sim.os, "cpu_count", lambda: 64)
+    request = _parallel_request(tmp_path)
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 1
+    # Nobody asked for a specific number here, so nothing is "clamped" and no
+    # notice is owed -- see `_default_max_workers`.
+    assert sim.MAX_WORKERS_ENV not in capsys.readouterr().err
+
+
+def test_host_max_workers_cap_leaves_request_below_cap_alone(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "4")
+    request = _parallel_request(tmp_path, options={"max_workers": 2})
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 2
+    assert sim.MAX_WORKERS_ENV not in capsys.readouterr().err
+
+    # An exactly-at-the-cap request is likewise untouched.
+    assert sim._resolve_max_workers(4) == 4
+
+
+def test_host_max_workers_cap_clamps_request_above_cap(tmp_path, monkeypatch, capsys):
+    # Acceptance criterion: clamped, not errored, and says so once.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "2")
+    request = _parallel_request(tmp_path, options={"max_workers": 16})
+    _stub_subprocess_run(monkeypatch)
+    seen_workers = _recording_pool(monkeypatch)
+
+    report = sim.run_sim(str(request))
+
+    assert seen_workers["max_workers"] == 2
+    assert report["status"] != "error"
+
+    captured = capsys.readouterr()
+    notices = [
+        line for line in captured.err.splitlines() if sim.MAX_WORKERS_ENV in line
+    ]
+    assert len(notices) == 1
+    assert "max_workers=16" in notices[0]
+    assert f"{sim.MAX_WORKERS_ENV}=2" in notices[0]
+    assert "clamping" in notices[0]
+    # stderr only -- the report JSON on stdout is unaffected.
+    assert sim.MAX_WORKERS_ENV not in captured.out
+
+
+def test_host_max_workers_cap_clamps_cli_flag_above_cap(tmp_path, monkeypatch, capsys):
+    # The `--max-workers` flag path (`klt sim ... --max-workers N`) is clamped
+    # the same way, and the run still succeeds (exit 0, not an error exit).
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
+    request = _parallel_request(
+        tmp_path,
+        options={"max_workers": 2},
+        measurements=[_PASSING_MEASUREMENT],
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_PASSING_LOG)
+    seen_workers = _recording_pool(monkeypatch)
+
+    exit_code = main(["sim", str(request), "--max-workers", "8", "--format", "json"])
+
+    assert exit_code == 0
+    assert seen_workers["max_workers"] == 1
+    captured = capsys.readouterr()
+    assert (
+        len([line for line in captured.err.splitlines() if sim.MAX_WORKERS_ENV in line])
+        == 1
+    )
+    # The JSON envelope on stdout still parses -- the notice never leaks into it.
+    json.loads(captured.out)
+
+
+def test_host_max_workers_cap_notice_is_once_per_sweep(tmp_path, monkeypatch, capsys):
+    # Deduped within a sweep (`hosts > 1` re-enters `_run_local_parallel` once
+    # per shard), but a *second* sweep in the same process is told again.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "2")
+    request = _parallel_request(tmp_path, options={"max_workers": 16})
+    _stub_subprocess_run(monkeypatch)
+
+    sim._reset_worker_cap_notices()
+    assert sim._resolve_max_workers(16) == 2
+    assert sim._resolve_max_workers(16) == 2
+    assert (
+        len(
+            [
+                line
+                for line in capsys.readouterr().err.splitlines()
+                if sim.MAX_WORKERS_ENV in line
+            ]
+        )
+        == 1
+    )
+
+    sim.run_sim(str(request))
+    first = capsys.readouterr().err
+    sim.run_sim(str(request))
+    second = capsys.readouterr().err
+
+    assert sim.MAX_WORKERS_ENV in first
+    assert sim.MAX_WORKERS_ENV in second
+
+
+def test_host_max_workers_cap_applies_to_sharded_local_parallel(
+    tmp_path, monkeypatch, capsys
+):
+    # `--hosts N` fans the unit list across N in-process shards, each of which
+    # builds its own `local-parallel` pool: every shard is capped, and the
+    # caller is still told exactly once.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "1")
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "backend": "local-parallel",
+            "corners": {"temperature_c": [10, 20, 30, 40]},
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"max_workers": 8},
+        },
+    )
+    _stub_subprocess_run(monkeypatch)
+
+    seen_workers = []
+    real_pool = sim.ThreadPoolExecutor
+
+    class _RecordingPool(real_pool):
+        def __init__(self, max_workers=None, *args, **kwargs):
+            seen_workers.append(max_workers)
+            super().__init__(*args, max_workers=max_workers, **kwargs)
+
+    monkeypatch.setattr(sim, "ThreadPoolExecutor", _RecordingPool)
+
+    report = sim.run_sim(str(request), hosts=2)
+
+    assert report["corner_count"] == 4
+    # Every `local-parallel` pool built during the sweep is capped. (The shard
+    # fan-out itself uses a pool too; it is sized by `hosts`, not by the
+    # worker cap, so only assert that no pool exceeded the cap for workers.)
+    assert seen_workers.count(1) >= 2
+    assert 8 not in seen_workers
+    assert (
+        len(
+            [
+                line
+                for line in capsys.readouterr().err.splitlines()
+                if sim.MAX_WORKERS_ENV in line
+            ]
+        )
+        == 1
+    )
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "1.5", "many", "0x4", "2 workers"])
+def test_invalid_host_max_workers_cap_is_an_application_error(
+    tmp_path, monkeypatch, bad_value
+):
+    # Acceptance criterion: a `KLT_SIM_MAX_WORKERS=0`/non-integer value is a
+    # hard error, deliberately consistent with `options.max_workers < 1` --
+    # silently degrading to "uncapped" would defeat the point of the cap.
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, bad_value)
+    with pytest.raises(sim.SimError, match=sim.MAX_WORKERS_ENV):
+        sim._host_max_workers_cap()
+
+    request = _parallel_request(tmp_path)
+    _stub_subprocess_run(monkeypatch)
+    with pytest.raises(sim.SimError, match=sim.MAX_WORKERS_ENV):
+        sim.run_sim(str(request))
+
+
+def test_invalid_host_max_workers_cap_fails_before_dispatch(tmp_path, monkeypatch):
+    # The cap is validated up front, so a malformed value never lets a single
+    # corner start (and never surfaces from inside a shard thread).
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "0")
+    request = _parallel_request(tmp_path)
+
+    calls = []
+
+    def fake_run(cmd, capture_output, text, timeout):  # pragma: no cover - guard
+        calls.append(cmd)
+        raise AssertionError("no corner should be dispatched with a malformed cap")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+    with pytest.raises(sim.SimError, match="must be a positive integer"):
+        sim.run_sim(str(request))
+    assert calls == []
+
+
+def test_invalid_host_max_workers_cap_is_a_clean_cli_error(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv(sim.MAX_WORKERS_ENV, "nope")
+    request = _parallel_request(tmp_path)
+    _stub_subprocess_run(monkeypatch)
+
+    exit_code = main(["sim", str(request)])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert (
+        f"klt sim: {sim.MAX_WORKERS_ENV} must be a positive integer (got 'nope')"
+        in captured.err
+    )
+    assert captured.out == ""
 
 
 # --------------------------------------------------------------------------- #

@@ -1213,6 +1213,245 @@ def test_minimal_cell_identical_netlists_still_match(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# The #282 recovery on the inline-extraction request shape (issue #2317):
+# `layout.file` + `deck` and pre-extracted `layout.netlist` both reach the
+# identical layout netlist, so a pure device-parameter defect must produce
+# the same `device.property` finding through either shape. The recovery's
+# name comparisons are case-insensitive (#2317): SPICE names are
+# case-insensitive and `NetlistSpiceReader` upper-cases them, so the
+# pre-extracted shape's SPICE round-trip compares upper-cased names on both
+# sides while the inline shape keeps the deck's registered spelling verbatim
+# (`nfet`, `vsubs`) against an upper-cased reference (`NFET`, `VSUBS`) --
+# an exact-name check silently declined every inline-shape recovery.
+# --------------------------------------------------------------------------- #
+
+#: Issue #2317's reference netlist verbatim: the corpus inverter's own
+#: schematic with the NMOS at its *nominal* `W=0.65U` -- the layout side
+#: (below) is the same cell with that one transistor's drawn width grown.
+_SKY130_INV_NOMINAL_SPICE = """
+.subckt sky130_fd_sc_hd__inv_1 A VGND VPB VPWR Y vsubs
+M1 Y A VGND vsubs nfet L=0.15U W=0.65U
+M2 Y A VPWR VPB pfet L=0.15U W=1.0U
+.ends
+"""
+
+
+def _write_sky130_inv_with_widened_nmos(path: Path) -> str:
+    """Issue #2317's repro layout: the real corpus cell with the NMOS
+    `diff` (65/20) island's top edge stretched from y=885 to y=990 dbu, so
+    the drawn channel width grows 0.65 um -> 0.755 um with connectivity
+    untouched -- a pure device-parameter defect on a minimal (two-device)
+    cell. The island is identified by its drawn extent (the NMOS diff box
+    tops out at y=885; the PMOS one at y=2485) per the issue's own repro
+    notes; the corpus cell is static, so these are stable."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    layout.read(str(SKY130_INV))
+    top = layout.top_cell()
+    diff = top.shapes(layout.layer(65, 20))
+    stretched = 0
+    for shape in list(diff.each()):
+        box = shape.box
+        if box.top == 885 and box.height() == 650:
+            diff.replace(
+                shape, kdb.Polygon(kdb.Box(box.left, box.bottom, box.right, 990))
+            )
+            stretched += 1
+    assert stretched == 1
+    layout.write(str(path))
+    return str(path)
+
+
+def test_pure_width_change_reports_device_property_on_both_request_shapes(tmp_path):
+    """Issue #2317's core acceptance test: the same widened-NMOS defect,
+    compared against the same reference, produces the same `device.property`
+    finding through *both* request shapes that reach the identical layout
+    netlist. Before the fix the inline shape (`layout.file` + `deck`)
+    reported a bare `device.unmatched` + `net.unmatched` error cascade --
+    "something about this transistor is wrong" without naming the parameter
+    -- exactly on the shape a caller actually runs against a GDS."""
+    from klayout_tools.extract import run_extract
+
+    gds = _write_sky130_inv_with_widened_nmos(tmp_path / "inv_widened.gds")
+    reference_path = _write(tmp_path / "ref.spice", _SKY130_INV_NOMINAL_SPICE)
+    top = "sky130_fd_sc_hd__inv_1"
+
+    # The pre-extracted shape's layout side is literally `klt extract`'s own
+    # output for the same widened GDS (the issue's framing: both requests
+    # compare the same layout netlist against the same reference).
+    extracted_path = str(tmp_path / "extracted.spice")
+    run_extract(gds, "sky130", output=extracted_path)
+
+    inline_report = run_lvs(
+        _write_request(
+            tmp_path / "inline.json",
+            {
+                "layout": {"file": gds, "deck": "sky130"},
+                "reference": {"netlist": reference_path, "top": top},
+            },
+        )
+    )
+    preextracted_report = run_lvs(
+        _write_request(
+            tmp_path / "preextracted.json",
+            {
+                "layout": {"netlist": extracted_path, "top": top},
+                "reference": {"netlist": reference_path, "top": top},
+            },
+        )
+    )
+
+    for label, report in (
+        ("inline", inline_report),
+        ("pre-extracted", preextracted_report),
+    ):
+        assert report["status"] == "mismatch", label
+        # Five parameter entries on both shapes: `w_um`, plus the deck-
+        # measured `as`/`ad`/`ps`/`pd` against the reader's implicit zeros
+        # (the reference declares only L/W). Same category, same count.
+        assert report["category_counts"]["device.property"] == 5, label
+        errors = [m for m in report["mismatches"] if m["severity"] == "error"]
+        assert [m["category"] for m in errors] == ["device.property"] * 5, label
+        # The recovery fired on this shape: the unmatched device pair and
+        # the nets it dragged in are collateral warnings, not errors.
+        collateral = [
+            m
+            for m in report["mismatches"]
+            if m["category"]
+            in (lvs.CATEGORY_DEVICE_UNMATCHED, lvs.CATEGORY_NET_UNMATCHED)
+        ]
+        assert len(collateral) == 6, label
+        assert all(m["severity"] == "warning" for m in collateral), label
+
+    # The actionable entry names the parameter and both values, identically
+    # on both shapes (issue #2317's acceptance criterion).
+    def _w_um_entries(report):
+        return [
+            m
+            for m in report["mismatches"]
+            if m["category"] == lvs.CATEGORY_DEVICE_PROPERTY
+            and m["property"]["name"] == "w_um"
+        ]
+
+    inline_w = _w_um_entries(inline_report)
+    preextracted_w = _w_um_entries(preextracted_report)
+    assert len(inline_w) == len(preextracted_w) == 1
+    assert inline_w[0]["side"] == preextracted_w[0]["side"] == "both"
+    assert (
+        inline_w[0]["property"]
+        == preextracted_w[0]["property"]
+        == {
+            "name": "w_um",
+            "layout": pytest.approx(0.755),
+            "reference": pytest.approx(0.65),
+        }
+    )
+
+    # The shapes' warning sets legitimately differ: only the inline shape
+    # carries a deck to disclose the sky130 synthetic-substrate note
+    # (`device.body_unverified`, issue #281) and the deck's zero-instance
+    # `pnp` class note (`topology`, issue #223). Every error-severity
+    # finding agrees; that is the contract this issue pins.
+    assert sorted(
+        m["category"] for m in inline_report["mismatches"] if m["severity"] == "warning"
+    ) == [
+        "device.body_unverified",
+        "device.unmatched",
+        "device.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "topology",
+    ]
+    assert sorted(
+        m["category"]
+        for m in preextracted_report["mismatches"]
+        if m["severity"] == "warning"
+    ) == [
+        "device.unmatched",
+        "device.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+        "net.unmatched",
+    ]
+
+
+@pytest.mark.parametrize(
+    "corruptions",
+    [
+        pytest.param(
+            [("Y A VPWR VPB pfet", "Y A VGND VPB pfet")],
+            id="rewired-device",
+        ),
+        pytest.param(
+            [("Y A VPWR VPB pfet L=0.15U W=1U", "Y A VGND VPB pfet L=0.15U W=2U")],
+            id="rewired-and-resized",
+        ),
+        pytest.param(
+            [("VPB pfet L=0.15U W=1U", "VPB nfet L=0.15U W=1U")],
+            id="device-class-swap",
+        ),
+        pytest.param(
+            [
+                ("nfet L=0.15U W=0.65U", "nfet L=0.15U W=0.8U"),
+                ("pfet L=0.15U W=1U", "pfet L=0.15U W=2U"),
+            ],
+            id="two-wrong-widths",
+        ),
+    ],
+)
+def test_inline_extraction_negative_controls(corruptions, tmp_path):
+    """Issue #2317's edge-case requirement: #282's negative controls hold on
+    the inline-extraction shape too. The recovery must not fire when the two
+    sides' unmatched devices are *not* a parameter-only difference -- a
+    rewired device (with or without a resize), a device-class swap, or two
+    corrupted widths stay plain, un-downgraded connectivity findings.
+
+    The reference is `klt extract`'s own output for the same (unmodified)
+    corpus cell with the corruption applied, so the corruption is the *only*
+    difference: a hand-written schematic would add AS/AD/PS/PD noise (the
+    reader's implicit zeros vs the deck-measured values), which is itself a
+    parameter difference and would defeat the control."""
+    from klayout_tools.extract import run_extract
+
+    extracted_path = str(tmp_path / "extracted.spice")
+    run_extract(str(SKY130_INV), "sky130", output=extracted_path)
+    reference_text = Path(extracted_path).read_text()
+    for old, new in corruptions:
+        assert old in reference_text
+        reference_text = reference_text.replace(old, new)
+    reference_path = _write(tmp_path / "ref.spice", reference_text)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": str(SKY130_INV), "deck": "sky130"},
+                "reference": {
+                    "netlist": reference_path,
+                    "top": "sky130_fd_sc_hd__inv_1",
+                },
+            },
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert "device.property" not in report["category_counts"]
+    # Nothing was downgraded: every unmatched device stayed an error -- the
+    # recovery declining must not soften the report either.
+    unmatched = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_UNMATCHED
+    ]
+    assert unmatched
+    assert all(m["severity"] == "error" for m in unmatched)
+
+
+# --------------------------------------------------------------------------- #
 # options.parameter_tolerance (issue #589): an opted-in *design* tolerance,
 # implemented as snap-and-recompare rather than by widening the float-noise
 # epsilon (`status` is always `compare()`'s own boolean)
@@ -3672,15 +3911,24 @@ def test_combine_devices_false_still_applies_fixed_offset_per_primitive(tmp_path
 
 def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
     """Issue #585: `apply_resistor_fixed_offset_corrections` must match a
-    device class read back from SPICE via `kdb.NetlistSpiceReader` -- which
-    uppercases class names to `RES_HIGH_PO` -- against the sky130 deck's own
-    lowercase `res_high_po` name.
+    device class read back from SPICE against the sky130 deck's own
+    lowercase `res_high_po` name, whatever case the reader reported.
 
-    Extract a single `res_high_po` primitive with the fixed-offset correction
-    *deferred*, write it to SPICE, read it back (uppercased class name),
-    confirm the correction is missing, then apply it via the public helper
-    and confirm it lands exactly once. Before the fix the case-sensitive
-    lookup silently missed `RES_HIGH_PO` and added nothing.
+    Extract a single `res_high_po` primitive with the fixed-offset
+    correction *deferred*, write it to SPICE, read it back, confirm the
+    correction is missing, then apply it via the public helper and confirm
+    it lands exactly once. Before the fix the case-sensitive lookup
+    silently missed `RES_HIGH_PO` and added nothing.
+
+    Since issue #1157 the written card for this bulk-bearing class is an
+    `X` subcircuit call (`X$1 RA RB vsubs res_high_po r=... L=... W=...` --
+    ngspice's `R` primitive is strictly 2-node), so the read-back that
+    `klt lvs` itself performs is the deck-aware recovery reader from
+    `netlist_capacitor_recovery` -- it restores the device under the deck's
+    canonical lowercase name. The uppercase spelling the original #585 bug
+    missed is still produced today by a *plain* `NetlistSpiceReader` on a
+    pre-#1157 (or 2-terminal-class) `R` card, so that path is asserted too,
+    via the same legacy card reconstructed by hand.
     """
     import klayout.db as kdb
 
@@ -3688,6 +3936,10 @@ def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
     from klayout_tools.extract import (
         apply_resistor_fixed_offset_corrections,
         run_extract,
+    )
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+        resistor_classes_for_deck,
     )
 
     segments = 1
@@ -3705,15 +3957,22 @@ def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
     assert len(resistor_devices) == segments
     assert resistor_devices[0]["params"]["r_ohm"] == pytest.approx(raw_body_r_ohm)
 
-    # Read the SPICE back: NetlistSpiceReader uppercases the class name.
+    # Read the SPICE back the way `klt lvs` itself does (deck-aware
+    # recovery): the #1157 `X` card restores as a real resistor device.
+    deck = get_extraction_deck("sky130")
     netlist = kdb.Netlist()
-    netlist.read(spice_path, kdb.NetlistSpiceReader())
+    netlist.read(
+        spice_path,
+        make_capacitor_class_recovery_reader(
+            {}, resistor_classes=resistor_classes_for_deck(deck)
+        ),
+    )
     class_names = {
         device.device_class().name
         for circuit in netlist.each_circuit()
         for device in circuit.each_device()
     }
-    assert "RES_HIGH_PO" in class_names  # the uppercased name the bug missed
+    assert "res_high_po" in class_names  # the deck's canonical name, restored
 
     def _only_resistor_r() -> float:
         rs = [
@@ -3727,11 +3986,42 @@ def test_deferred_extract_offset_lookup_is_case_insensitive(tmp_path):
 
     assert _only_resistor_r() == pytest.approx(raw_body_r_ohm)
 
-    # The public helper must fire despite the case mismatch, exactly once.
-    apply_resistor_fixed_offset_corrections(netlist, get_extraction_deck("sky130"))
+    # The public helper must fire, exactly once.
+    apply_resistor_fixed_offset_corrections(netlist, deck)
     assert _only_resistor_r() == pytest.approx(
         raw_body_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM
     )
+
+    # The uppercase spelling is what a *plain* reader reports for the
+    # pre-#1157 `R` card (still round-tripping: every 2-terminal class
+    # keeps that shape, and old committed netlists still carry it). The
+    # case-insensitive lookup exists for exactly that input -- assert it
+    # still fires on the reconstructed legacy card, uppercase and all.
+    legacy_text = (
+        ".SUBCKT RES RA RB vsubs\n"
+        f"R$1 RA RB vsubs {raw_body_r_ohm:.12g} res_high_po "
+        f"L={l_um:.0f}U W=1U\n"
+        f".ENDS RES\n"
+    )
+    legacy_path = tmp_path / "legacy.spice"
+    legacy_path.write_text(legacy_text)
+    legacy_netlist = kdb.Netlist()
+    legacy_netlist.read(str(legacy_path), kdb.NetlistSpiceReader())
+    legacy_names = {
+        device.device_class().name
+        for circuit in legacy_netlist.each_circuit()
+        for device in circuit.each_device()
+    }
+    assert "RES_HIGH_PO" in legacy_names  # uppercased by the plain reader
+    apply_resistor_fixed_offset_corrections(legacy_netlist, deck)
+    legacy_rs = [
+        device.parameter("R")
+        for circuit in legacy_netlist.each_circuit()
+        for device in circuit.each_device()
+        if device.device_class().name.lower() == "res_high_po"
+    ]
+    assert len(legacy_rs) == segments
+    assert legacy_rs[0] == pytest.approx(raw_body_r_ohm + _RES_HIGH_PO_FIXED_OFFSET_OHM)
 
 
 def test_pre_extracted_netlist_with_deck_applies_fixed_offset_once(tmp_path):
@@ -3804,6 +4094,80 @@ R1 RA RB vsubs {reference_r_ohm:.5f} res_high_po
     buggy_report = _run(buggy_r_ohm)
     assert buggy_report["counts"]["devices"]["layout"] == 1
     assert buggy_report["status"] == "mismatch"
+
+
+def test_recovered_resistor_x_cards_share_one_device_class_and_fold(tmp_path):
+    """PR #2336's CI regression, pinned at the reader/`combine_devices`
+    boundary: every recovered #1157 `X` card naming the same drawn-resistor
+    class must attach to ONE shared `DeviceClass` object, so a plain
+    `Netlist.combine_devices()` call -- no `dup()` retry, no platform help --
+    folds a series chain of recovered devices.
+
+    The pre-fix reader registered one fresh `DeviceClass` per recovered
+    card: `Netlist.device_class_by_name` normalizes its argument through the
+    netlist's case convention (uppercases it for a SPICE netlist) but
+    compares against each registered class's stored name verbatim, so the
+    deck's canonical lowercase `res_high_po` was never found and every card
+    added another class object. `Netlist.combine_devices()` groups devices
+    by class *object identity*, so the three segments then survived as three
+    devices -- deterministically on Linux (PR #2336's red matrix legs), and
+    on macOS only `Netlist.dup()`'s re-registration happened to merge them
+    (its cloned classes' copied ids read 0 there; `DeviceClass`'s copy
+    constructor copies an indeterminate `tl::UniqueId` in klayout 0.30.10,
+    so the dup path's fold was never anything to rely on).
+    """
+    import klayout.db as kdb
+
+    from klayout_tools.decks import get_extraction_deck
+    from klayout_tools.extract import run_extract
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+        resistor_classes_for_deck,
+    )
+
+    segments, l_um = 3, 10.0
+    gds = _write_series_res_high_po_gds(
+        tmp_path / "res_high_po_series_shared.gds", segments=segments, l_um=l_um
+    )
+    spice_path = str(tmp_path / "res_high_po_series_shared.spice")
+    run_extract(gds, "sky130", output=spice_path, apply_resistor_fixed_offset=False)
+
+    netlist = kdb.Netlist()
+    deck = get_extraction_deck("sky130")
+    netlist.read(
+        spice_path,
+        make_capacitor_class_recovery_reader(
+            {}, resistor_classes=resistor_classes_for_deck(deck)
+        ),
+    )
+
+    top = next(circuit for circuit in netlist.each_circuit() if circuit.name == "RES")
+    registered = [
+        klass for klass in netlist.each_device_class() if klass.name == "res_high_po"
+    ]
+    assert len(registered) == 1
+    assert all(
+        device.device_class().name == "res_high_po" for device in top.each_device()
+    )
+
+    # The fold itself, unassisted: no `_combine_devices_safely` retry
+    # machinery, no `dup()` -- the exact call the class-identity grouping
+    # gate on.
+    netlist.combine_devices()
+    folded = list(top.each_device())
+    assert len(folded) == 1
+    assert folded[0].parameter("R") == pytest.approx(
+        segments * (l_um / 1.0) * _RES_HIGH_PO_SHEET_RHO_OHM_SQ
+    )
+    assert folded[0].parameter("L") == pytest.approx(segments * l_um)
+    # The folded device spans the string end to end (the emptied interior
+    # nets stay behind, 0-terminal -- `run_lvs` purges those separately,
+    # issue #500).
+    assert {net.name for net in top.each_net() if net.terminal_count()} == {
+        "RA",
+        "RB",
+        "VSUBS",
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -9204,6 +9568,82 @@ XM2 Y A VPWR VPWR sky130_fd_pr__pfet_01v8 L=0.15u W=1.0u
     assert "M2 Y A VPWR VPWR pfet L=0.15U W=1U" in out
 
 
+# --------------------------------------------------------------------------- #
+# Issue #2327: a custom-device-class `X` card survives the subckt-call
+# conversion alongside the curated devices it converts
+# --------------------------------------------------------------------------- #
+
+
+def test_normalize_passes_through_custom_device_class_params_card():
+    """This issue's own repro: a reference mixing a curated drawn resistor
+    (`rppd`, converted) with a round-tripped MoM-capacitor card
+    (`cap_cmomi PARAMS: W=... L=...`, a *custom* -- GenericDeviceExtractor --
+    class with no plain-element form to convert to) converts instead of
+    raising `subcircuit 'PARAMS:' is not a known device`, and leaves the
+    custom card byte-for-byte intact for the downstream recovery reader
+    (issue #1942) to read as a device."""
+    text = """.subckt t A B
+XR1 A B rppd w=1u l=10u m=1
+XD1 A B cap_cmomi PARAMS: W=4.0 L=10.0
+.ends t
+"""
+    out = normalize_reference_netlist(text, deck="sg13cmos5l")
+    assert "R1 A B 0 rppd L=10U W=1U" in out
+    assert "XD1 A B cap_cmomi PARAMS: W=4.0 L=10.0" in out
+
+
+def test_normalize_passes_through_custom_device_class_without_params_keyword():
+    """The pre-#1942 spelling of the same card (no `PARAMS:` separator, and
+    unit-suffixed `w=`/`l=`) is recognised by class name alone -- its
+    device-like `w`/`l` no longer trips the unknown-device error."""
+    text = """.subckt t A B
+XR1 A B rppd w=1u l=10u m=1
+XD1 A B cap_cmomi w=4u l=10u
+.ends t
+"""
+    out = normalize_reference_netlist(text, deck="sg13cmos5l")
+    assert "R1 A B 0 rppd L=10U W=1U" in out
+    assert "XD1 A B cap_cmomi w=4u l=10u" in out
+
+
+def test_normalize_custom_device_class_needs_the_deck_that_declares_it():
+    """The pass-through is keyed off the *requested deck's* own custom
+    classes, never a global name list: a deck that declares no
+    `mom_capacitors` (sky130) still rejects the same card."""
+    text = "XD1 A B cap_cmomi PARAMS: W=4.0 L=10.0\n"
+    with pytest.raises(NormalizeError, match="cap_cmomi"):
+        normalize_reference_netlist(text, deck="sky130")
+
+
+def test_normalize_params_keyword_does_not_hide_an_unknown_device():
+    """Recognising `PARAMS:` as the separator it is must not weaken the
+    unknown-device check: a name that is neither curated nor a custom device
+    class still raises -- now naming the real subcircuit rather than the
+    literal string `PARAMS:`."""
+    with pytest.raises(NormalizeError, match="subcircuit 'not_a_device'"):
+        normalize_reference_netlist(
+            "XD1 A B not_a_device PARAMS: W=4.0 L=10.0\n", deck="sg13cmos5l"
+        )
+
+
+def test_normalize_params_keyword_converts_a_curated_device_call():
+    """`PARAMS:` is a SPICE separator, not a token, for every family -- a
+    curated MOS call written with it converts exactly like the same call
+    written without it."""
+    out = normalize_reference_netlist(
+        "XM1 d g s b sg13_lv_nmos PARAMS: L=0.13u W=1u\n", deck="sg13cmos5l"
+    )
+    assert "M1 d g s b nfet L=0.13U W=1U" in out
+
+
+def test_normalize_params_keyword_leaves_a_hierarchical_subckt_alone():
+    """A genuine hierarchical instance carrying `PARAMS:` still passes
+    through untouched -- the separator changes which token is read as the
+    subcircuit name, not the passthrough-vs-convert decision."""
+    text = "X1 A Y VPWR VGND some_hierarchical_block PARAMS: mult=2\n"
+    assert normalize_reference_netlist(text).strip() == text.strip()
+
+
 def test_detect_reports_undefined_known_device():
     assert detect_subckt_call_devices(_INVERTER_SUBCKT_CALL_SKY130) == [
         "sky130_fd_pr__nfet_01v8",
@@ -9377,18 +9817,41 @@ def test_normalize_capacitor_multiplicity_gt_one_rejected():
 
 def test_normalize_sky130_bipolar_resolves_by_name_no_lw_needed():
     # sky130's pnp_05v5 cells carry no length/width-style call-site
-    # parameter at all -- resolved by subcircuit name alone.
+    # parameter at all -- resolved by subcircuit name alone. The emitter
+    # geometry that name encodes is still stated on the card (issue #2335):
+    # 0.68um x 0.68um -> AE = 0.4624um^2, PE = 4 * 0.68um.
     out = normalize_reference_netlist(
         "XQ1 c b e sky130_fd_pr__pnp_05v5_W0p68L0p68\n", deck="sky130"
     )
-    assert out.strip() == "Q1 c b e pnp"
+    assert out.strip() == "Q1 c b e pnp AE=0.4624P PE=2.72U"
+
+
+def test_normalize_sky130_bipolar_large_variant_carries_nominal_ae():
+    # The other curated variant: 3.40um x 3.40um -> AE = 11.56um^2,
+    # PE = 13.6um -- byte-for-byte the `AE=`/`PE=` the sky130 extraction
+    # deck itself writes for the same cell (issue #2335's reproduction).
+    out = normalize_reference_netlist(
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40\n", deck="sky130"
+    )
+    assert out.strip() == "Q1 c b e pnp AE=11.56P PE=13.6U"
+
+
+def test_normalize_bipolar_never_emits_base_collector_geometry():
+    # AB/PB/AC/PC measure drawn base/collector geometry the fixed-geometry
+    # cell name does not encode -- deliberately never stated, so a
+    # parameter neither side declares stays out of the compare entirely.
+    out = normalize_reference_netlist(
+        "XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=2\n", deck="sky130"
+    )
+    for absent in ("AB=", "PB=", "AC=", "PC="):
+        assert absent not in out
 
 
 def test_normalize_bipolar_mult_carried_onto_ne():
     out = normalize_reference_netlist(
         "XQ1 c b e sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=4\n", deck="sky130"
     )
-    assert out.strip() == "Q1 c b e pnp NE=4"
+    assert out.strip() == "Q1 c b e pnp AE=11.56P PE=13.6U NE=4"
 
 
 def test_normalize_bipolar_wrong_terminal_count_fails():
@@ -9406,7 +9869,7 @@ def test_normalize_device_families_auto_resolve_without_deck():
         "XQ1 c b e sky130_fd_pr__pnp_05v5_W0p68L0p68\n"
     )
     assert "R1 r0 r1 0 res_generic_po L=1U W=1U" in out
-    assert "Q1 c b e pnp" in out
+    assert "Q1 c b e pnp AE=0.4624P PE=2.72U" in out
 
 
 def test_normalize_unresolvable_resistor_shaped_name_still_raises():
@@ -9867,6 +10330,101 @@ def test_run_lvs_subckt_call_reference_resistor_family_converts_and_reads(tmp_pa
     }
     report = run_lvs(json.dumps(request))
     assert report["status"] == "match"
+
+
+# --------------------------------------------------------------------------- #
+# Issue #2335: a sky130 fixed-geometry PNP converted from its `X` call must
+# reach `status: "match"` under the *default* full-parameter compare --
+# `DeviceClassBJT3Transistor` compares `AE`, so a geometry-free reference card
+# was a zero-vs-nonzero structural difference against the extracted side and
+# forced every caller through an `options.compare_parameters` override.
+# --------------------------------------------------------------------------- #
+
+#: Exactly what `klt extract --deck sky130` writes for one `klt gen bjt_array`
+#: unit of the 3.40um variant (issue #2335's reproduction).
+_BIPOLAR_LAYOUT_DEVICE = (
+    "pnp AE=11.56P PE=13.6U AB=12.96P PB=14.4U AC=12.96P PC=14.4U NE=1"
+)
+
+
+def _bipolar_request(tmp_path, layout_text, reference_text, top, options=None):
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_text),
+            "top": top,
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference_text),
+            "top": top,
+            "form": "subckt-call",
+            "deck": "sky130",
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return request
+
+
+def test_run_lvs_subckt_call_sky130_pnp_matches_without_compare_parameters(tmp_path):
+    # Issue #2335's minimal repro shape: one extracted PNP carrying the
+    # deck's own `AE=`, against the documented `subckt-call` reference form.
+    # No `options.compare_parameters` override -- the default compare must
+    # pass on its own now that the conversion states the curated geometry.
+    request = _bipolar_request(
+        tmp_path,
+        f".SUBCKT cell ec vss\nQ$1 vss vss ec {_BIPOLAR_LAYOUT_DEVICE}\n.ENDS cell\n",
+        ".subckt cell EC VSS\n"
+        "XQ1 VSS VSS EC sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=1\n"
+        ".ends\n",
+        "cell",
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+    assert not [
+        finding
+        for finding in report.get("findings", [])
+        if finding.get("kind") == "device.parameter_excluded"
+    ]
+
+
+def test_run_lvs_subckt_call_sky130_pnp_array_matches_without_overrides(tmp_path):
+    # The issue's own 8-unit `bjt_array` reproduction: every unit converts
+    # with its nominal `AE`, so the whole array pairs under the default
+    # compare instead of cascading into `device.unmatched` on both sides.
+    units = 8
+    layout = [".SUBCKT bjt_array vss " + " ".join(f"ec{i}" for i in range(units))]
+    reference = [".subckt bjt_array VSS " + " ".join(f"EC{i}" for i in range(units))]
+    for i in range(units):
+        layout.append(f"Q${i} vss vss ec{i} {_BIPOLAR_LAYOUT_DEVICE}")
+        reference.append(
+            f"XQ{i} VSS VSS EC{i} sky130_fd_pr__pnp_05v5_W3p40L3p40 mult=1"
+        )
+    layout.append(".ENDS bjt_array")
+    reference.append(".ends")
+    request = _bipolar_request(
+        tmp_path,
+        "\n".join(layout) + "\n",
+        "\n".join(reference) + "\n",
+        "bjt_array",
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] == "match"
+
+
+def test_run_lvs_subckt_call_sky130_pnp_wrong_variant_still_mismatches(tmp_path):
+    # The carried geometry is a real compared fact, not decoration: calling
+    # the small variant against a layout side extracted as the large one is
+    # now a detected difference rather than a silently-tolerated one.
+    request = _bipolar_request(
+        tmp_path,
+        f".SUBCKT cell ec vss\nQ$1 vss vss ec {_BIPOLAR_LAYOUT_DEVICE}\n.ENDS cell\n",
+        ".subckt cell EC VSS\n"
+        "XQ1 VSS VSS EC sky130_fd_pr__pnp_05v5_W0p68L0p68 mult=1\n"
+        ".ends\n",
+        "cell",
+    )
+    report = run_lvs(json.dumps(request))
+    assert report["status"] != "match"
 
 
 # --------------------------------------------------------------------------- #
@@ -14923,6 +15481,45 @@ XD2 A B unknown_subckt
     assert "D2" not in devices
 
 
+def test_custom_class_recovery_x_cards_share_one_device_class(tmp_path):
+    """Same one-class-object-per-name discipline as the #1157 resistor
+    recovery (PR #2336), asserted for the #1942 custom-class path: cards
+    recovered in one read must all attach to the single registered class
+    object, so a plain `combine_devices()` can group them (KLayout groups
+    devices by class object identity, and its case-insensitively-normalized
+    `device_class_by_name` never finds a lowercase stored name to reuse)."""
+    import klayout.db as kdb
+
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+    )
+
+    text = """
+.SUBCKT TOP A B
+XD1 A B cap_cmomi PARAMS: W=1.5 L=3.0
+XD2 B A cap_cmomi PARAMS: W=1.5 L=3.0
+.ENDS TOP
+"""
+    path = _write(tmp_path / "custom_class_shared.spice", text)
+    netlist = kdb.Netlist()
+    netlist.read(
+        path,
+        make_capacitor_class_recovery_reader(
+            {}, custom_device_classes={"CAP_CMOMI": "cap_cmomi"}
+        ),
+    )
+
+    registered = [
+        klass for klass in netlist.each_device_class() if klass.name == "cap_cmomi"
+    ]
+    assert len(registered) == 1
+
+    top = next(circuit for circuit in netlist.each_circuit() if circuit.name == "TOP")
+    assert all(
+        device.device_class().name == "cap_cmomi" for device in top.each_device()
+    )
+
+
 def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
     """The issue's own motivating scenario end to end: `klt extract`'s own
     SPICE writer round-trips `cap_cmomi` as an `X ... PARAMS:` card, and a
@@ -14966,6 +15563,59 @@ def test_mom_capacitor_round_trips_as_a_device_through_klt_lvs(tmp_path):
 
     assert report["status"] == "match"
     assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+
+
+_MIXED_FAMILY_LAYOUT = """.subckt mixed IN MID OUT
+R1 IN MID 1200 rppd L=10U W=1U
+XD1 MID OUT cap_cmomi PARAMS: W=4.0 L=10.0
+.ends mixed
+"""
+
+_MIXED_FAMILY_REFERENCE = """.subckt mixed IN MID OUT
+XR1 IN MID rppd w=1u l=10u
+XD1 MID OUT cap_cmomi PARAMS: W=4.0 L=10.0
+.ends mixed
+"""
+
+
+def test_subckt_call_reference_carries_a_custom_device_class_card(tmp_path):
+    """Issue #2327 end to end: one `reference.form: "subckt-call"` request
+    now compares a reference that mixes a curated drawn resistor (`rppd`,
+    converted to a plain `R` card) with a round-tripped MoM-capacitor `X ...
+    PARAMS:` card (a custom device class, passed through for the #1942
+    recovery reader). Before, the conversion raised `subcircuit 'PARAMS:' is
+    not a known device` and the only way through was to splice the custom
+    cards out, convert the remainder, and resubmit as `plain-element` --
+    which also meant re-deriving the `device.placeholder_value` disclosure
+    the `subckt-call` path emits for free (asserted below)."""
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", _MIXED_FAMILY_LAYOUT),
+            "top": "mixed",
+            "deck": "sg13cmos5l",
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", _MIXED_FAMILY_REFERENCE),
+            "top": "mixed",
+            "deck": "sg13cmos5l",
+            "form": "subckt-call",
+        },
+    }
+
+    report = run_lvs(json.dumps(request))
+
+    assert report["status"] == "match"
+    # Both device families reach the census in one request -- the resistor
+    # via conversion, the MoM capacitor via pass-through + recovery reader.
+    assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
+    assert report["error_count"] == 0
+    # The converted resistor's placeholder `R` is still disclosed by the
+    # subckt-call path itself (issue #1907) -- the caller does not have to
+    # re-derive it, which the splice workaround did.
+    assert report["category_counts"] == {"device.placeholder_value": 1}
+    (placeholder,) = report["mismatches"]
+    assert placeholder["device"]["class"] == "RPPD"
+    assert placeholder["severity"] == "warning"
 
 
 def test_mom_capacitor_parameter_tolerance_now_reaches_the_device(tmp_path):
@@ -15068,3 +15718,301 @@ def test_mom_capacitor_without_deck_still_degrades_to_the_pre_1942_fallback(
     assert report["counts"]["devices"]["layout"] == 0
     assert report["status"] == "mismatch"
     assert "device.property" not in report["category_counts"]
+
+
+# --------------------------------------------------------------------------- #
+# No-PDN power-grid regression suite (issue #1986)
+#
+# Issue #1982's surviving regression core: a *generated* standard-cell block
+# whose rows have no power distribution network -- only per-row rails, no
+# straps -- reproduces the real no-PDN design's exact signature (flipped
+# rows sharing rails; 113 rows collapsed to 57/57 supply fragments; exactly
+# one rail named per supply; nothing left unconnected). The
+# `power_connectivity` check must flag it, and a strapped twin of the same
+# generator must come back clean, so the check cannot silently stop
+# catching the defect it was added for.
+#
+# Novelty vs current main (issue #1986's first AC step): #1964 landed the
+# check itself and #2009 landed the #1978 refinements (remedy text naming
+# `request.power`, `unchecked_expected_pins`, the signoff FAIL-line
+# suffix), each with its own tests in this file. What main does NOT cover
+# -- and what survives here -- is the multi-row fragmentation shape at
+# scale (many instances per fragment net, not the 2-instance miswire the
+# #1952 tests use), the strapped-twin recovery to `"match"`, the
+# `_POWER_INSTANCE_SAMPLE_LIMIT` truncation path (only `is False` was ever
+# asserted), and a *real* `run_lvs` report pushed through `build_signoff`
+# (every signoff-side `power_connectivity` test feeds a synthetic
+# envelope). The offered #1978 pair ("`expected_nets` naming VNB / a pin
+# in no library is accepted silently") is dropped outright: #2009's
+# `unchecked_expected_pins` removed the silence those tests were written
+# to tolerate, and the `flags_unchecked_expected_pin` test now pins the
+# stronger behaviour.
+#
+# These run against the `layout.netlist` seam (the same shape `klt
+# place-and-route`'s own output netlists take): `klt lvs`'s inline GDS
+# extraction always flattens cells into devices (no subcircuit instances
+# survive), so an instance-level power check has nothing to walk on that
+# path -- which is exactly why a no-PDN GDS reports `unchecked` today.
+# --------------------------------------------------------------------------- #
+
+
+def _make_power_grid_layout_spice(rows: int, *, strapped: bool) -> str:
+    """A `rows`-row, 2-instances-per-row standard-cell block as a
+    hierarchical layout netlist.
+
+    Rows are paired the way flipped standard-cell rows share rails
+    (issue #1982's own arithmetic: 113 rows -> 57 rails per supply), so
+    `rows` rows produce `ceil(rows / 2)` rail fragments per supply. With
+    `strapped=False`, each fragment is its own net and exactly one
+    fragment per supply carries the plain `VPWR`/`VGND` name -- the
+    "one named rail per supply" of the real signature; the others are
+    numbered stand-ins (`VPWR_R1`, ...) for the anonymous `$N` nets the
+    real design extracted, since hand-written SPICE cannot write an
+    anonymous net. Every instance's supply pin lands on *some* net --
+    "nothing unconnected" is part of the signature being reproduced.
+
+    With `strapped=True`, every fragment joins into one net per supply --
+    the twin the real design became once `request.power` ran, and the
+    positive control for the check below.
+    """
+
+    def supply(prefix: str, row: int) -> str:
+        if strapped:
+            return prefix
+        fragment = row // 2
+        return prefix if fragment == 0 else f"{prefix}_R{fragment}"
+
+    lines = [".subckt top in out"]
+    instances = rows * 2
+    for k in range(instances):
+        row = k // 2
+        a = "in" if k == 0 else f"m{k - 1}"
+        y = "out" if k == instances - 1 else f"m{k}"
+        cell = "mylib__buf_1" if k == instances - 1 else "mylib__inv_1"
+        lines.append(f"X{k} {a} {y} {supply('VGND', row)} {supply('VPWR', row)} {cell}")
+    lines.append(".ends")
+    lines.append(".subckt mylib__inv_1 A Y VGND VPWR")
+    lines.append(".ends")
+    lines.append(".subckt mylib__buf_1 A Y VGND VPWR")
+    lines.append(".ends")
+    return "\n".join(lines) + "\n"
+
+
+def _make_power_grid_reference_verilog(rows: int) -> str:
+    """The signal-side twin of `_make_power_grid_layout_spice`: one chain
+    of `rows * 2` inverters ending in a buffer, supplies unconnected --
+    exactly the shape a `klt place-and-route` `verilog_path` writes
+    (power pins never appear in a gate-level netlist)."""
+    instances = rows * 2
+    lines = ["module top(in, out);", "  input in;", "  output out;"]
+    wires = [f"m{k}" for k in range(instances - 1)]
+    if wires:
+        lines.append("  wire " + ", ".join(wires) + ";")
+    for k in range(instances):
+        a = "in" if k == 0 else f"m{k - 1}"
+        y = "out" if k == instances - 1 else f"m{k}"
+        cell = "mylib__buf_1" if k == instances - 1 else "mylib__inv_1"
+        lines.append(f"  {cell} u{k} (.A({a}), .Y({y}));")
+    lines.append("endmodule")
+    return "\n".join(lines) + "\n"
+
+
+def _power_grid_request(tmp_path, rows: int, *, strapped: bool) -> str:
+    root = _make_fake_pdk_library(
+        tmp_path,
+        "myvariant",
+        "mylib",
+        ".subckt mylib__inv_1 A Y VGND VPWR\n.ends\n"
+        ".subckt mylib__buf_1 A Y VGND VPWR\n.ends\n",
+    )
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        _make_power_grid_layout_spice(rows, strapped=strapped),
+    )
+    reference_path = _write(
+        tmp_path / "ref.v", _make_power_grid_reference_verilog(rows)
+    )
+    return json.dumps(
+        {
+            "layout": {"netlist": layout_path, "top": "top"},
+            "reference": {
+                "netlist": reference_path,
+                "top": "top",
+                "form": "gate-level-verilog",
+                "library": "mylib",
+                "pdk": "myvariant",
+                "pdk_root": root,
+            },
+        }
+    )
+
+
+def test_power_grid_no_pdn_row_rail_fragmentation_is_detected(tmp_path):
+    """Issue #1982's no-PDN signature, caught: every instance's supply pin
+    reaches *a* net, but the per-row-rail fragments disagree, so both
+    supplies report `power.inconsistent_pin_net` while the signal-side
+    compare stays clean -- the exact way a no-PDN block passes LVS and
+    still has no power grid.
+
+    Six rows paired into three fragments per supply (the flipped-row
+    sharing arithmetic), one fragment named `VPWR`/`VGND`, the other two
+    numbered stand-ins for the real design's anonymous rails, four
+    instances per fragment, nothing unconnected. On the pre-#1964 build
+    this test fails with `KeyError: 'power_connectivity'` -- the report
+    block it reads did not exist yet."""
+    report = run_lvs(_power_grid_request(tmp_path, rows=6, strapped=False))
+
+    # The signal half never saw a defect: the chain matches instance for
+    # instance. The failure is purely the power half.
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+
+    power = report["power_connectivity"]
+    assert power["status"] == "mismatch"
+    assert power["expected_nets"] is None
+    assert power["power_pins"] == ["VGND", "VPWR"]
+
+    findings = {finding["pin"]: finding for finding in power["findings"]}
+    assert set(findings) == {"VGND", "VPWR"}
+    instances_per_supply = 12
+    assert all(
+        finding["rule"] == "power.inconsistent_pin_net" for finding in power["findings"]
+    )
+    assert all(
+        finding["instance_count"] == instances_per_supply
+        for finding in power["findings"]
+    )
+    for finding in power["findings"]:
+        # Three fragments, each carrying the two rows that share it --
+        # and no `None` group anywhere: "nothing unconnected" is part of
+        # the signature. The one *named* rail is always among the groups;
+        # which fragment it is has no bearing on the verdict.
+        assert {group["net"] for group in finding["nets"]} == {
+            finding["pin"],
+            f"{finding['pin']}_R1",
+            f"{finding['pin']}_R2",
+        }
+        assert all(group["net"] is not None for group in finding["nets"])
+        assert [group["instance_count"] for group in finding["nets"]] == [4, 4, 4]
+    # The remedy text must keep pointing a no-PDN caller at `request.power`
+    # (issue #1978) alongside the option-based advice.
+    assert all(
+        "request.power" in finding["description"] for finding in power["findings"]
+    )
+
+
+def test_power_grid_strapped_twin_reports_match(tmp_path):
+    """The positive control: the same generator with the fragments strapped
+    into one rail per supply -- what `request.power` adds -- reports
+    `power_connectivity.status: "match"` with zero findings, so the check
+    above is detecting the fragmentation, not the fixture."""
+    report = run_lvs(_power_grid_request(tmp_path, rows=6, strapped=True))
+
+    assert report["status"] == "match"
+    assert report["mismatch_count"] == 0
+    power = report["power_connectivity"]
+    assert power["status"] == "match"
+    assert power["findings"] == []
+    assert power["finding_count"] == 0
+    assert power["power_pins"] == ["VGND", "VPWR"]
+
+
+def test_power_grid_fragmented_rail_group_sample_truncates(tmp_path):
+    """The finding's `instances[]` sample is capped at
+    `_POWER_INSTANCE_SAMPLE_LIMIT` with `instances_truncated` saying when
+    anything was left out -- a contract every existing test sails under
+    (their largest group is 2 instances). A fragment carrying twelve
+    instances beside a two-instance fragment: the big group reports the
+    exact untruncated count (12), lists exactly the cap's worth (10), and
+    sets `instances_truncated`."""
+    lines = [".subckt top in out"]
+    instances = 14
+    for k in range(instances):
+        row = k // 2
+        # Rows 0-5 share the named rail (twelve instances); row 6 sits on
+        # its own fragment, which is what makes the pin inconsistent and
+        # forces the finding whose sample then has to truncate.
+        a = "in" if k == 0 else f"m{k - 1}"
+        y = "out" if k == instances - 1 else f"m{k}"
+        cell = "mylib__buf_1" if k == instances - 1 else "mylib__inv_1"
+        vpwr = "VPWR" if row <= 5 else "VPWR_R1"
+        vgnd = "VGND" if row <= 5 else "VGND_R1"
+        lines.append(f"X{k} {a} {y} {vgnd} {vpwr} {cell}")
+    lines.append(".ends")
+    lines.append(".subckt mylib__inv_1 A Y VGND VPWR")
+    lines.append(".ends")
+    lines.append(".subckt mylib__buf_1 A Y VGND VPWR")
+    lines.append(".ends")
+    root = _make_fake_pdk_library(
+        tmp_path,
+        "myvariant",
+        "mylib",
+        ".subckt mylib__inv_1 A Y VGND VPWR\n.ends\n"
+        ".subckt mylib__buf_1 A Y VGND VPWR\n.ends\n",
+    )
+    layout_path = _write(tmp_path / "layout.spice", "\n".join(lines) + "\n")
+    reference_path = _write(tmp_path / "ref.v", _make_power_grid_reference_verilog(7))
+    report = run_lvs(
+        json.dumps(
+            {
+                "layout": {"netlist": layout_path, "top": "top"},
+                "reference": {
+                    "netlist": reference_path,
+                    "top": "top",
+                    "form": "gate-level-verilog",
+                    "library": "mylib",
+                    "pdk": "myvariant",
+                    "pdk_root": root,
+                },
+            }
+        )
+    )
+
+    power = report["power_connectivity"]
+    assert power["status"] == "mismatch"
+    vpwr = next(f for f in power["findings"] if f["pin"] == "VPWR")
+    assert vpwr["instance_count"] == 14
+    named = next(group for group in vpwr["nets"] if group["net"] == "VPWR")
+    assert named["instance_count"] == 12
+    assert len(named["instances"]) == 10  # _POWER_INSTANCE_SAMPLE_LIMIT
+    assert named["instances_truncated"] is True
+    small = next(group for group in vpwr["nets"] if group["net"] == "VPWR_R1")
+    assert small["instance_count"] == 2
+    assert small["instances_truncated"] is False
+
+
+def test_power_grid_real_run_lvs_report_through_signoff_fail_and_pass(tmp_path):
+    """Issue #1986, tying #1964 to #1974 end to end: the *real* reports
+    `run_lvs` returns for the fragmentation fixture and its strapped twin,
+    written to disk and graded by `build_signoff` -- no synthetic envelope
+    in between, which is exactly how the signoff gate sees them. The
+    no-PDN report must fail the signoff (a `status: "match"` LVS check
+    that fails only because of `power_connectivity`, the #1974 rule), and
+    the strapped twin must pass. On the pre-#1964 build this test fails
+    with `KeyError: 'power_connectivity'` -- the block did not exist.
+
+    The two layouts are graded in two separate `build_signoff` calls:
+    their `provenance.input.content_hash` values legitimately differ
+    (they describe two different layouts), and a mixed-hash source set is
+    `build_signoff`'s own `"refused"` case, not a pass/fail pair."""
+    from klayout_tools.signoff import build_signoff
+
+    no_pdn = run_lvs(_power_grid_request(tmp_path / "a", rows=6, strapped=False))
+    strapped = run_lvs(_power_grid_request(tmp_path / "b", rows=6, strapped=True))
+    no_pdn_path = _write(tmp_path / "no_pdn.json", json.dumps(no_pdn))
+    strapped_path = _write(tmp_path / "strapped.json", json.dumps(strapped))
+
+    fail_result = build_signoff([no_pdn_path])
+    assert fail_result["status"] == "fail"
+    (check,) = fail_result["checks"]
+    assert check["kind"] == "lvs"
+    assert check["status"] == "match"  # the signal compare is clean...
+    assert check["passed"] is False  # ...but the power half failed it
+    assert check["detail"]["power_connectivity_status"] == "mismatch"
+
+    pass_result = build_signoff([strapped_path])
+    assert pass_result["status"] == "pass"
+    (check,) = pass_result["checks"]
+    assert check["kind"] == "lvs"
+    assert check["passed"] is True
+    assert check["detail"]["power_connectivity_status"] == "match"

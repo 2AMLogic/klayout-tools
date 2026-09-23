@@ -13,8 +13,14 @@ to the release that shipped it.
   for one deck or every registered deck, with no input layout needed.
   Complements ``hash``: ``hash`` is a single deck's identity, ``info`` adds
   device-class coverage and can report on every registered deck at once.
+- ``rules`` (issue #2308) -- report the *numbers* a deck enforces: every
+  registered ``DrcRule``'s id, description, and threshold (in micrometres),
+  alongside the deck's own ``content_hash``, with no layout and no check
+  run. ``info`` says which deck you have; ``rules`` says what it requires,
+  so pre-layout arithmetic can read a constant from the installed deck
+  rather than transcribing it out of a deck comment.
 
-All three emit through the shared envelope helpers in :mod:`.output` -- see
+All four emit through the shared envelope helpers in :mod:`.output` -- see
 ``docs/json-contract.md``.
 
 Exit codes:
@@ -31,7 +37,7 @@ from __future__ import annotations
 import argparse
 
 from .._provenance import UnknownProvenanceDeckError, deck_identity
-from ..decks.history import DeckHistoryError, deck_info, resolve_deck
+from ..decks.history import DeckHistoryError, deck_info, deck_rules, resolve_deck
 from .output import emit_error, emit_success
 
 
@@ -105,6 +111,50 @@ def run_info(args: argparse.Namespace) -> int:
 
     emit_success(report, args.format, _print_info_text)
     return 0
+
+
+def run_rules(args: argparse.Namespace) -> int:
+    try:
+        report = deck_rules(name=args.deck, rule_id=args.rule)
+    except DeckHistoryError as exc:
+        return emit_error("deck rules", str(exc), args.format)
+
+    emit_success(report, args.format, _print_rules_text)
+    return 0
+
+
+def _print_rules_text(report: dict) -> None:
+    print(f"deck: {report['deck']}")
+    print(f"content_hash: {report['content_hash']}")
+    print(f"nominal_dbu_um: {report['nominal_dbu_um']}")
+    print(f"rules: {len(report['rules'])}")
+    for rule in report["rules"]:
+        print()
+        print(f"{rule['id']} ({rule['check']})")
+        print(f"  description: {rule['description']}")
+        if rule["value_um"] is not None:
+            print(f"  value_um: {rule['value_um']}")
+        for key, value in rule["limits"].items():
+            print(f"  {key}: {value}")
+        print(f"  layers: {', '.join(rule['layers'])}")
+        if rule["scope"]:
+            print(f"  scope: {rule['scope']}")
+        print(f"  provenance: {_provenance_text(rule['provenance'])}")
+
+
+def _provenance_text(provenance: dict | None) -> str:
+    """One-line rendering of a rule's upstream citation -- ``none`` when the
+    rule carries no structured provenance (its inline comment in the deck
+    module remains the only record), deliberately distinct from a rule that
+    cites a source but pins no commit."""
+    if provenance is None:
+        return "none"
+    commit = provenance["commit"]
+    pinned = f" @ {commit}" if commit else ""
+    return (
+        f"{provenance['source_repo']}:{provenance['source_path']} "
+        f"rule {provenance['rule_id']}{pinned}"
+    )
 
 
 def _print_info_text(report: dict) -> None:

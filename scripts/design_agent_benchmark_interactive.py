@@ -138,13 +138,21 @@ class AgentSessionResult:
     """What a finished interactive session reports back. ``text`` is the
     final response (the fence fallback is parsed out of it when the session
     wrote no netlist file); the counters are recorded as run evidence, not
-    scored."""
+    scored.
+
+    ``usage`` is whatever token counts the CLI's own ``result`` event
+    reported (``input_tokens``/``output_tokens``/cache buckets, normalized by
+    ``design_agent_benchmark._normalize_token_usage``), or ``None`` for a CLI
+    version/stub whose envelope carries none -- optional and additive, issue
+    #2294, so a caller-supplied stub constructing this dataclass positionally
+    or by keyword keeps working unchanged."""
 
     text: str
     tool_calls: int = 0
     turns: int = 0
     transcript_path: Path | None = None
     wall_clock_s: float = 0.0
+    usage: dict[str, int] | None = None
 
 
 #: An interactive-session invoker. The swappable extension point tests stub
@@ -287,12 +295,22 @@ def _build_interactive_agent_prompt(
     body-only netlist constraint, and both session bounds. Same
     never-leak-the-answer-key rule: nothing here or in the sandbox carries
     the reference netlist's body.
+
+    When ``task`` carries ``ROUND_HISTORY_CONTEXT_KEY`` (round mode, issue
+    #2253), a "previous rounds" section is inserted before the block spec --
+    see ``design_agent_benchmark._format_round_history``.
     """
-    from design_agent_benchmark import _device_model_contract, _reference_testbenches
+    from design_agent_benchmark import (
+        ROUND_HISTORY_CONTEXT_KEY,
+        _device_model_contract,
+        _format_round_history,
+        _reference_testbenches,
+    )
 
     repo_root = Path(layout["repo_root"])
     testbenches = _reference_testbenches(task, repo_root)
     device_model_contract = _device_model_contract(task, repo_root, testbenches)
+    round_history_section = _format_round_history(task.get(ROUND_HISTORY_CONTEXT_KEY))
 
     skill_lines = "\n".join(f"  - ./{name}" for name in layout["skill_files"])
     request_lines = "\n".join(
@@ -369,7 +387,7 @@ the attempt as a failure. A full corner sweep is not free -- budget your
 Loop A iterations, and make sure your best netlist is written to disk
 before you run low rather than saving it for a final message.
 
-=== Block to design ===
+{round_history_section}=== Block to design ===
 
 Task id: {task["id"]}
 Title: {task["title"]}
@@ -414,7 +432,11 @@ def _default_invoke_interactive_agent(
     :func:`run_attempt` records as a failed attempt rather than letting it
     abort the sweep.
     """
-    from design_agent_benchmark import AGENT_CLI_ENV, AgentInvocationError
+    from design_agent_benchmark import (
+        AGENT_CLI_ENV,
+        AgentInvocationError,
+        _normalize_token_usage,
+    )
 
     cli = os.environ.get(AGENT_CLI_ENV, "claude")
     cmd = [
@@ -441,6 +463,7 @@ def _default_invoke_interactive_agent(
     tool_calls = 0
     turns = 0
     result_text: str | None = None
+    token_usage: dict[str, int] | None = None
     assistant_text: list[str] = []
     budget_exceeded = False
     session_error: str | None = None
@@ -493,6 +516,13 @@ def _default_invoke_interactive_agent(
                     elif event.get("type") == "result":
                         if isinstance(event.get("result"), str):
                             result_text = event["result"]
+                        # The same `result` event the text comes off of also
+                        # carries the session's own token accounting (issue
+                        # #2294). Absent on an older CLI version -- recorded
+                        # as "no usage known", never an error.
+                        token_usage = (
+                            _normalize_token_usage(event.get("usage")) or token_usage
+                        )
                         if event.get("is_error"):
                             # An unusable session (missing credentials, an API
                             # error) is reported as `is_error` on an otherwise
@@ -549,6 +579,7 @@ def _default_invoke_interactive_agent(
         turns=turns,
         transcript_path=transcript_path,
         wall_clock_s=wall_clock_s,
+        usage=token_usage,
     )
 
 
@@ -650,7 +681,10 @@ def make_interactive_agent_provider(
     def provider(
         task: dict[str, Any], attempt_index: int, repo_root: Path
     ) -> tuple[str, str | None]:
-        from design_agent_benchmark import _build_live_agent_descriptor
+        from design_agent_benchmark import (
+            _build_live_agent_descriptor,
+            _write_session_summary,
+        )
 
         workdir = _attempt_sandbox(task, attempt_index, sandbox_root)
         layout = _seed_agent_sandbox(
@@ -678,21 +712,23 @@ def make_interactive_agent_provider(
         descriptor = _build_live_agent_descriptor(
             task, repo_root, netlists_by_stem, eval_dir
         )
-        (workdir / SESSION_SUMMARY_FILENAME).write_text(
-            json.dumps(
-                {
-                    "task_id": task["id"],
-                    "attempt": attempt_index,
-                    "tool_calls": session.tool_calls,
-                    "turns": session.turns,
-                    "wall_clock_s": session.wall_clock_s,
-                    "netlists": sorted(netlists_by_stem),
-                    "tool_call_budget": tool_call_budget,
-                    "timeout_s": agent_timeout_s,
-                },
-                indent=2,
-            )
-            + "\n"
+        _write_session_summary(
+            workdir,
+            {
+                "task_id": task["id"],
+                "attempt": attempt_index,
+                "tool_calls": session.tool_calls,
+                "turns": session.turns,
+                # Whatever token counts the session's own CLI envelope
+                # reported (issue #2294) -- `null` for a CLI/stub that
+                # reports none, which `_usage_from_scratch_dir` reads back as
+                # "tool_calls/turns only", exactly as before.
+                "usage": session.usage,
+                "wall_clock_s": session.wall_clock_s,
+                "netlists": sorted(netlists_by_stem),
+                "tool_call_budget": tool_call_budget,
+                "timeout_s": agent_timeout_s,
+            },
         )
         return json.dumps(descriptor), None
 

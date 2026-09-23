@@ -3032,6 +3032,428 @@ def test_integration_real_icarus_sdf_resolves_a_toplevel_port_interconnect(tmp_p
 
 
 # --------------------------------------------------------------------------- #
+# A zero-delay `INTERCONNECT` onto an `assign`-aliased top-level port bit
+# (issue #2285) -- the tie-cell shape every P&R backend produces for a
+# constant-driven output:
+#
+#     klt_tielo const_drive_0 (.L_LO(net0));
+#     assign uio_oe[0] = net0;
+#     (INTERCONNECT const_drive_0.L_LO uio_oe[0] (0.000:0.000:0.000))
+#
+# Icarus 13.0 cannot insert an intermodpath across that `assign` join, so
+# each such entry costs one `SDF ERROR: ... Could not find intermodpath!` and
+# a real post-route SDF could not pass the diagnostic gate at all -- even
+# though every failing entry was zero-delay and therefore modelled no delay.
+# `_drop_sdf_zero_delay_alias_port_interconnects` removes exactly those
+# entries before annotation and reports the count as an
+# `environment.sdf.dropped` class; a **non**-zero-delay entry on the
+# identical destination is left in place and still fails loudly.
+# --------------------------------------------------------------------------- #
+
+#: Gate-level netlist in the shape a real post-route `write_verilog` emits:
+#: a **non-ANSI** module header with separate direction declarations (what
+#: Yosys/OpenROAD write, and the only form `verilog_netlist`'s narrow
+#: gate-level grammar models), a tie cell driving `net0`, and `net0` joined
+#: to the `uio_oe[0]` output bit by an `assign` alias rather than a
+#: structural port connection.
+_TIE_ALIAS_PORT_DUT_V = """\
+module klt_inv (input wire in, output wire out);
+  assign out = ~in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_buf (input wire in, output wire out);
+  assign out = in;
+  specify
+    (in => out) = (0.0, 0.0);
+  endspecify
+endmodule
+
+module klt_tielo (output wire L_LO);
+  assign L_LO = 1'b0;
+endmodule
+
+module tie_alias_top (a, uio_oe);
+  input a;
+  output [1:0] uio_oe;
+  wire net0;
+  wire w;
+  klt_tielo const_drive_0 (.L_LO(net0));
+  assign uio_oe[0] = net0;
+  klt_inv u1 (.in(a), .out(w));
+  klt_buf u2 (.in(w), .out(uio_oe[1]));
+endmodule
+"""
+
+_TIE_ALIAS_PORT_TESTBENCH_PY = '''\
+import cocotb
+from cocotb.triggers import Timer
+
+
+@cocotb.test()
+async def test_output_settles_within_one_ns(dut):
+    """`uio_oe[1]` follows `~a` through `u1` then `u2`; `uio_oe[0]` is tied
+    low by `const_drive_0` through an `assign` alias. At zero delay
+    `uio_oe[1]` tracks `~a` immediately (so it reads 0 once `a` is 1, and
+    this passes); once the real INTERCONNECT delay on `u2.out -> uio_oe[1]`
+    is annotated, `uio_oe[1]` still reads its old 1 a nanosecond after `a`
+    rises and this fails -- the same
+    "does the testbench's own verdict change" coverage metric #1069's and
+    #1619's own regressions use. Reaching that assertion at all is already
+    load-bearing for issue #2285: before the fix the tie-cell entry raised
+    `FunctionalVerificationError` before any report was returned."""
+    dut.a.value = 0
+    await Timer(10, unit="ns")
+    dut.a.value = 1
+    await Timer(1, unit="ns")
+    # cocotb 2.x cannot index a packed vector handle directly -- read the
+    # whole value and slice it instead, per cocotb's own guidance.
+    uio_oe = dut.uio_oe.value
+    assert uio_oe[0] == 0, f"uio_oe[0]={uio_oe[0]} (tied low, expected 0)"
+    assert uio_oe[1] == 0, f"uio_oe[1]={uio_oe[1]} 1 ns after a rose (expected 0)"
+'''
+
+
+def _tie_alias_port_sdf_text(tie_delay: str = "0.000:0.000:0.000") -> str:
+    """The SDF a post-route `write_sdf` produces for `_TIE_ALIAS_PORT_DUT_V`:
+    the tie cell's own `INTERCONNECT` onto the `assign`-aliased `uio_oe[0]`
+    bit (issue #2285's failing shape, zero-delay by default), a purely
+    internal entry, and a genuinely delayed entry onto the *structurally*
+    connected `uio_oe[1]` bit -- the one whose annotation the testbench's
+    verdict actually observes.
+
+    `tie_delay` parameterises only the aliased entry's triplet, so the same
+    fixture drives both the zero-delay (dropped) and non-zero-delay (still
+    fails loud) cases."""
+    return f"""\
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "tie_alias_top")
+  (DIVIDER .)
+  (TIMESCALE 1ns)
+  (CELL
+    (CELLTYPE "tie_alias_top")
+    (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT const_drive_0.L_LO uio_oe[0] ({tie_delay}) ({tie_delay}))
+      (INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))
+      (INTERCONNECT u2.out uio_oe[1] (2.000:2.000:2.000) (2.000:2.000:2.000))
+    ))
+  )
+)
+"""
+
+
+def test_collect_sdf_alias_port_bits_finds_a_tie_cell_aliased_output_bit(tmp_path):
+    """The alias map issue #2285's normalization keys on, read straight out
+    of `verilog_netlist`'s own `collect_gate_level_port_aliases` (issue
+    #2021) rather than by re-parsing `assign` statements a third time: only
+    the `assign`-driven bit is listed, never the structurally connected
+    sibling bit on the same vector port."""
+    source = _write(tmp_path / "tie_alias_top.v", _TIE_ALIAS_PORT_DUT_V)
+
+    assert fv._collect_sdf_alias_port_bits([source], "tie_alias_top") == {"uio_oe[0]"}
+
+
+def test_collect_sdf_alias_port_bits_is_empty_when_the_top_is_not_gate_level(tmp_path):
+    """A top module outside `verilog_netlist`'s narrow gate-level subset (an
+    ANSI-style header here) yields no alias map -- and must degrade to an
+    empty set rather than raising, since this is a normalization pass and
+    failing to normalize has to be no worse than never having tried."""
+    source = _write(
+        tmp_path / "ansi_top.v",
+        "module ansi_top (input wire a, output wire [1:0] y);\n"
+        "  wire net0;\n"
+        "  klt_tielo t (.L_LO(net0));\n"
+        "  assign y[0] = net0;\n"
+        "  assign y[1] = a;\n"
+        "endmodule\n",
+    )
+
+    assert fv._collect_sdf_alias_port_bits([source], "ansi_top") == set()
+
+
+def test_collect_sdf_alias_port_bits_is_empty_when_the_module_is_absent(tmp_path):
+    source = _write(tmp_path / "other.v", _TIE_ALIAS_PORT_DUT_V)
+
+    assert fv._collect_sdf_alias_port_bits([source], "not_this_module") == set()
+
+
+def test_drop_sdf_zero_delay_alias_port_interconnects_drops_only_that_entry(tmp_path):
+    """Issue #2285's normalization, in isolation: the zero-delay entry whose
+    destination is the `assign`-aliased bit is removed; the internal entry
+    and the structurally connected `uio_oe[1]` entry are byte-identical to
+    their originals."""
+    sdf_path = _write(tmp_path / "route.sdf", _tie_alias_port_sdf_text())
+
+    result = fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 1
+    assert "const_drive_0.L_LO" not in text
+    assert "(INTERCONNECT u1.out u2.in (0.000:0.000:0.000) (0.000:0.000:0.000))" in text
+    assert "(INTERCONNECT u2.out uio_oe[1] (2.000:2.000:2.000)" in text
+
+
+def test_drop_sdf_zero_delay_alias_port_interconnects_keeps_a_nonzero_entry(tmp_path):
+    """Acceptance criterion #2, at the unit level: a non-zero-delay entry on
+    the *identical* aliased destination is not dropped, so it reaches Icarus,
+    fails to annotate, and still raises through the diagnostic gate. Dropping
+    it would silently change simulated timing -- exactly what this exemption
+    must never do."""
+    sdf_path = _write(
+        tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay="1.000:1.000:1.000")
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
+        is None
+    )
+
+
+def test_drop_sdf_zero_delay_alias_port_interconnects_keeps_a_nonzero_corner(tmp_path):
+    """The zero test spans *every* `min:typ:max` member, not just the one
+    `iverilog -T <corner>` selects: an entry that is zero at `min`/`typ` but
+    not at `max` still models real delay at a corner a caller may ask for,
+    so it stays."""
+    sdf_path = _write(
+        tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay="0.000:0.000:1.000")
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
+        is None
+    )
+
+
+def test_drop_sdf_zero_delay_alias_port_interconnects_is_a_noop_without_aliases(
+    tmp_path,
+):
+    """No `assign`-aliased port bit (every design before this issue) means
+    the file is never even read -- the pass must be free on the common
+    case."""
+    sdf_path = str(tmp_path / "does-not-exist.sdf")
+
+    assert fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, set()) is None
+
+
+def test_drop_sdf_zero_delay_alias_port_interconnects_removes_an_emptied_delay(
+    tmp_path,
+):
+    """Structural cleanup, verified live against Icarus 13.0: a `(DELAY
+    (ABSOLUTE))` left with no entries at all is `Invalid/malformed delay
+    type`, so emptying the clause has to remove the clause. The `(CELL ...)`
+    itself is kept -- a `CELL` with only `CELLTYPE`/`INSTANCE` annotates
+    cleanly, while a `(DELAYFILE ...)` with no `CELL` is `Invalid DELAYFILE
+    format`."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "tie_alias_top")\n'
+        "  (DIVIDER .)\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "tie_alias_top")\n'
+        "    (INSTANCE)\n"
+        "    (DELAY (ABSOLUTE\n"
+        "      (INTERCONNECT const_drive_0.L_LO uio_oe[0] (0.000:0.000:0.000))\n"
+        "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+
+    result = fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
+
+    assert result is not None
+    text, dropped = result
+    assert dropped == 1
+    assert "(DELAY" not in text.replace("(DELAYFILE", "")
+    assert "ABSOLUTE" not in text
+    assert "INTERCONNECT" not in text
+    assert '(CELLTYPE "tie_alias_top")' in text
+    assert "(DELAYFILE" in text
+
+
+def test_drop_sdf_zero_delay_alias_port_interconnects_ignores_an_iopath(tmp_path):
+    """Only `INTERCONNECT` entries are eligible. An `IOPATH` (or any other
+    delay entry) is never dropped, however its endpoints are spelled --
+    widening the exemption past net delays is not what this issue
+    establishes."""
+    sdf_path = _write(
+        tmp_path / "route.sdf",
+        "(DELAYFILE\n"
+        '  (SDFVERSION "3.0")\n'
+        '  (DESIGN "tie_alias_top")\n'
+        "  (DIVIDER .)\n"
+        "  (TIMESCALE 1ns)\n"
+        "  (CELL\n"
+        '    (CELLTYPE "klt_tielo")\n'
+        "    (INSTANCE const_drive_0)\n"
+        "    (DELAY (ABSOLUTE\n"
+        "      (IOPATH L_LO uio_oe[0] (0.000:0.000:0.000))\n"
+        "    ))\n"
+        "  )\n"
+        ")\n",
+    )
+
+    assert (
+        fv._drop_sdf_zero_delay_alias_port_interconnects(sdf_path, {"uio_oe[0]"})
+        is None
+    )
+
+
+def test_stubbed_sdf_counts_a_dropped_alias_port_interconnect(tmp_path, monkeypatch):
+    """The JSON contract for issue #2285 (acceptance criterion #3): a run
+    that dropped an `assign`-aliased-port `INTERCONNECT` entry is
+    machine-distinguishable from an ordinary clean annotation -- `partial:
+    true` plus a counted `dropped` class beside #1102's `timingcheck`, with
+    `environment.sdf.file` still naming the caller's *own* SDF rather than
+    the normalized copy handed to `$sdf_annotate`."""
+    _write(tmp_path / "tie_alias_top.v", _TIE_ALIAS_PORT_DUT_V)
+    _write(tmp_path / "test_tie_alias_top.py", "# stub -- never imported\n")
+    _write(tmp_path / "route.sdf", _tie_alias_port_sdf_text())
+    request_path = _write_request(
+        tmp_path / "request.json",
+        {
+            "engine": "icarus",
+            "sources": ["tie_alias_top.v"],
+            "hdl_toplevel": "tie_alias_top",
+            "testbench": {"module": "test_tie_alias_top", "testcase": None},
+            "options": {"sdf": {"file": "route.sdf"}},
+        },
+    )
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["file"] == str(tmp_path / "route.sdf")
+    assert sdf["annotated"] is True
+    assert sdf["partial"] is True
+    assert sdf["dropped"].keys() == {"zero_delay_alias_port_interconnect"}
+    entry = sdf["dropped"]["zero_delay_alias_port_interconnect"]
+    assert entry["count"] == 1
+    assert "assign" in entry["reason"]
+    # The normalized copy is a build artifact, and it is what the generated
+    # `$sdf_annotate` shim names -- never the caller's own file.
+    output_dir = tmp_path / ".klt" / "functional-verification"
+    normalized = output_dir / "klt_sdf_alias_dropped.sdf"
+    assert normalized.is_file()
+    assert "const_drive_0.L_LO" not in normalized.read_text(encoding="utf-8")
+
+
+def test_stubbed_sdf_without_an_alias_port_reports_no_dropped_class(
+    tmp_path, monkeypatch
+):
+    """Regression guard for every design that has no `assign`-aliased
+    top-level port (the overwhelmingly common case, including this suite's
+    own #1056/#1619 fixtures): the new pass must leave `partial`/`dropped`
+    exactly as they were, and must not write a normalized copy at all."""
+    request_path = _sdf_request(tmp_path)
+    _stub_runner(monkeypatch, _FakeRunner(_RESULTS_XML_WITH_SKIP))
+
+    report = run_functional_verification(request_path)
+
+    sdf = report["environment"]["sdf"]
+    assert sdf["partial"] is False
+    assert sdf["dropped"] == {}
+    normalized = (
+        tmp_path / ".klt" / "functional-verification" / "klt_sdf_alias_dropped.sdf"
+    )
+    assert not normalized.exists()
+
+
+def _stage_tie_alias_port_design(tmp_path: Path, tie_delay: str) -> None:
+    _write(tmp_path / "tie_alias_top.v", _TIE_ALIAS_PORT_DUT_V)
+    _write(tmp_path / "test_tie_alias_top.py", _TIE_ALIAS_PORT_TESTBENCH_PY)
+    _write(tmp_path / "route.sdf", _tie_alias_port_sdf_text(tie_delay=tie_delay))
+
+
+def _tie_alias_port_request(tmp_path: Path, name: str, sdf: dict | None) -> str:
+    request = {
+        "sources": ["tie_alias_top.v"],
+        "hdl_toplevel": "tie_alias_top",
+        "testbench": {"module": "test_tie_alias_top"},
+    }
+    if sdf is not None:
+        request["options"] = {"sdf": sdf}
+    return _write_request(tmp_path / name, request)
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_drops_a_zero_delay_alias_port_interconnect(
+    tmp_path,
+):
+    """The load-bearing regression for issue #2285, end to end against the
+    real toolchain: a post-route SDF whose tie-cell `INTERCONNECT` lands on
+    an `assign`-aliased output port bit used to raise
+    `FunctionalVerificationError` (`did not fully apply ... Could not find
+    intermodpath!`) before any report was returned. It must now run, report
+    the drop as a counted class, and *still* annotate the genuinely delayed
+    entry -- verified by the same "does the testbench's own verdict change"
+    coverage metric #1056's and #1619's regressions use."""
+    _stage_tie_alias_port_design(tmp_path, tie_delay="0.000:0.000:0.000")
+    zero_delay = _tie_alias_port_request(tmp_path, "request-plain.json", None)
+    annotated = _tie_alias_port_request(
+        tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
+    )
+
+    plain_report = run_functional_verification(zero_delay)
+    # This call is the assertion: before the fix it raised instead of
+    # returning a report.
+    annotated_report = run_functional_verification(annotated)
+
+    assert plain_report["status"] == "pass"
+    assert plain_report["environment"]["sdf"] is None
+    assert annotated_report["status"] == "fail"
+    assert annotated_report["environment"]["sdf"] == {
+        "file": str(tmp_path / "route.sdf"),
+        "corner": "typ",
+        "annotated": True,
+        "partial": True,
+        "dropped": {
+            "zero_delay_alias_port_interconnect": {
+                "count": 1,
+                "reason": fv.SDF_BENIGN_DIAGNOSTIC_REASONS[
+                    fv.SDF_ALIAS_PORT_DROPPED_CLASS
+                ],
+            }
+        },
+    }
+
+
+@pytest.mark.skipif(not HAVE_COCOTB, reason="cocotb is not installed on this machine")
+@pytest.mark.skipif(
+    not HAVE_SIMULATOR["icarus"], reason="iverilog is not installed on this machine"
+)
+def test_integration_real_icarus_sdf_nonzero_alias_port_interconnect_fails_loud(
+    tmp_path,
+):
+    """Acceptance criterion #2 against the real toolchain: the identical
+    `assign`-aliased destination carrying a **non**-zero delay is left in
+    place, hits the same `Could not find intermodpath!` inside Icarus, and
+    still raises. The #2285 exemption is bounded by the delay value, not by
+    the diagnostic text -- so it can never silently retime a run."""
+    _stage_tie_alias_port_design(tmp_path, tie_delay="1.000:1.000:1.000")
+    annotated = _tie_alias_port_request(
+        tmp_path, "request-sdf.json", {"file": "route.sdf", "corner": "typ"}
+    )
+
+    with pytest.raises(
+        FunctionalVerificationError, match="did not fully apply"
+    ) as excinfo:
+        run_functional_verification(annotated)
+    assert "Could not find intermodpath" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------- #
 # Integration: a bit-selected top-level-port `INTERCONNECT` entry poisons a
 # *sibling* entry on the same net (issue #1619).
 #

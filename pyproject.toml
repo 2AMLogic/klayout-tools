@@ -1,6 +1,6 @@
 [project]
 name = "klayout-tools"
-version = "0.5.0"
+version = "0.6.0"
 description = "Tools for AI agents to work with IC layout (GDSII/OASIS via KLayout)"
 readme = "README.md"
 license = { text = "MIT" }
@@ -87,6 +87,37 @@ functional-verification = [
 #      a clear reason (see that test module's own skip logic).
 mom-cross-validation = [
     "PyNEC>=2.3,<3; python_version >= \"3.11\"",
+]
+# Backs `tests/test_mom_pypeec_cross_validation.py` (issue #1886, closing out
+# #1842's acceptance criterion 3): the external PEEC oracle used to cross-check
+# `klt mom`'s *spiral* partial-inductance sum. `pypeec` (Dartmouth College,
+# MPL-2.0, JOSS 10.21105/joss.06644) is a 3-D quasi-magnetostatic PEEC solver
+# with an FFT-accelerated dense operator -- the same method class as
+# `native/mom/src/peec.rs` and as FastHenry, but an entirely independent
+# implementation.
+#
+# It is its own extra, separate from `mom-cross-validation` above, for two
+# reasons:
+#   1. Different oracle, different gap. `mom-cross-validation` installs
+#      `PyNEC` for the *full-wave S-parameter* cross-check (#895) and is
+#      gated on Python >=3.11 by `PyNEC`'s own floor; this one installs
+#      `pypeec` for the *PEEC inductance* cross-check and has no such gate
+#      (`pypeec` declares `Requires-Python: >=3.10`, matching this repo's own
+#      floor). Keeping them separate means a failure in either CI step
+#      attributes to exactly one oracle.
+#   2. Weight. `pypeec`'s declared dependencies include its plotting/GUI
+#      stack (`vtk`, `pyvista`, `pyside6`) with no extras to opt out of, so
+#      installing it is ~1.6 GB. That is fine for one opt-in CI step and
+#      unacceptable in anything a plain `pip install klayout-tools` or
+#      `uv sync --extra dev` resolves -- neither of which touches this extra.
+#
+# License handling is the same subprocess-only discipline `PyNEC` gets (see
+# `docs/design/mom-cross-validation.md`'s "License" section): MPL-2.0 is
+# file-scoped weak copyleft rather than GPL, so the constraint is weaker, but
+# `klt mom` and everything under `src/` still never import `pypeec` -- only
+# `scripts/mom_pypeec_reference.py` does, always as its own subprocess.
+mom-pypeec-cross-validation = [
+    "pypeec>=5.8,<6",
 ]
 
 # Backs `klt mom` (issue #718, Phase 0/1 of the Method-of-Moments epic #701):

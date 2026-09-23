@@ -1,0 +1,13 @@
+{
+  "task": "common-source-amp",
+  "targeted": [
+    {
+      "name": "drain-resistor-undersized",
+      "netlist": "cs_amp.spice",
+      "find": ".param rd=10k",
+      "replace": ".param rd=1k",
+      "why": "drain load resistor shrunk 10x -> the DC self-bias feedback moves the operating point to a much larger drain current, but gm only grows with the square root of that current while the gain-setting Rd falls linearly, so the gm*Rd product collapses well below the 6 dB minimum"
+    }
+  ],
+  "equivalent": []
+}

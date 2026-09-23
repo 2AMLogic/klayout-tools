@@ -3139,6 +3139,19 @@ vendor deck expects:
 | gf180mcu | explicit unit suffixes — `L=0.28U W=10U AS=0.5P` | No `.option scale` anywhere in `libs.tech/ngspice/`; its subcircuits declare raw-metre defaults (`.subckt nfet_03v3 d g s b w=1e-5 l=2.8e-7`), so an absolute literal is correct. |
 | sg13g2 | explicit unit suffixes — `l=6U w=1U` | Confirmed (issue #1457) against a real fetched IHP-Open-PDK v0.3.0 install: no `.option scale` anywhere in `libs.tech/ngspice/`; its `sg13_lv_nmos`/`rsil`/`rppd`/`rhigh` subcircuits all declare raw-metre defaults, same convention as gf180mcu. |
 
+The sky130 convention covers the **resistor classes by name** (issue #1159's
+repro): a `--pdk`-bound `res_high_po`/`res_xhigh_po`/`res_generic_po` `X`
+card carries its geometry suffix-free (`X$1 A B W sky130_fd_pr__res_xhigh_po
+l=6 w=1`). This is load-bearing for the with-bulk poly flavours specifically:
+their vendor subcircuit's own `.param` block computes `leff = {l-0.0592}`
+and `Efac = {1/leff*(1+...*log(leff/w))}` in bare micron-scale units, so a
+unit-suffixed `l=6U` made `leff` negative at *any* drawn length and the
+`Efac` `log()` a `NaN` — ngspice aborted with `The internal check of parse
+tree ... ( nan ) ... failed` / `parameter value out of range or the wrong
+type`. (Verified against the real unmodified
+`sky130_fd_pr__res_xhigh_po.model.spice`: the suffix-free card solves to a
+sane divider, the suffixed one reproduces the exact `nan` abort.)
+
 This matters because `.option scale` is applied **on top of** the parsed
 literal — ngspice multiplies a MOS card's `l`/`w`/`ps`/`pd` by `scale` and its
 `as`/`ad` by `scale²`. Writing sky130's cards with unit suffixes therefore
@@ -5340,6 +5353,39 @@ testbench adds a matching `.model res_generic_po r`. (Unrelated to
 `--parasitics`, whose injected R/C elements are deliberately emitted as
 *bare* `R`/`C` cards with no model token and no `L=`/`W=` — see "Drawn
 resistors" below for the scope of the geometry suffix.)
+
+**Three-terminal (bulk-bearing) resistor classes are written as `X` calls,
+not `R` cards (issue #1157).** A drawn-resistor class whose recognised
+terminal set includes a bulk/tap node — sky130's `res_high_po`/
+`res_xhigh_po`, gf180mcu's `ppolyf_u` family, sg13g2's `rsil`/`rppd`/
+`rhigh` — has **three** nets, and ngspice's native `R` element accepts
+exactly two: the KLayout-shaped `R$1 A B W 3248.27 res_high_po` card makes
+ngspice consume `W` as the resistance position and abort with
+`unknown parameter (res_high_po)`. Those classes are therefore written as
+
+```
+X$1 A B W res_high_po r=3248.27 L=6U W=1U
+```
+
+— same terminal order, the class name now as a **caller-suppliable
+subcircuit name**, the extracted (offset-corrected, issue #521) resistance
+on a declared `r=` parameter so it stays on the written card, and the same
+`L=`/`W=` geometry suffix. The testbench supplies a matching 3-pin wrapper
+subcircuit, declaring **every parameter the card carries** (ngspice rejects
+an `X`-card parameter its subcircuit does not declare):
+
+```
+.subckt res_high_po a b w r=1 l=1 w=1
+Rmain a b {r}        * or a real model computed from r / l / w
+.ends res_high_po
+```
+
+This is a caller contract, not a resolved binding: `klt extract` cannot
+know the caller's model, it only stops writing a card no simulator can
+parse. (`klt lvs` re-reads these cards transparently — see
+`docs/cli/lvs.md`; `klt extract --pdk` resolves the same classes to real
+PDK subcircuits, see "SPICE model binding" above.) Two-terminal classes
+keep the `R` card and the `.model <class> r` convention above.
 
 **No substrate tie needs hand-authoring (issue #1263), and it reaches every
 instantiation (issue #1503).** A `--parasitics` extraction carries its own DC

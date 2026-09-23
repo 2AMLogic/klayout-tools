@@ -113,7 +113,9 @@ source and hands a plain-element source back to the reader.
 
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Mapping
 from typing import NamedTuple
 
 from ._paths import _fold_spice_continuations
@@ -175,6 +177,17 @@ _MOS_EXCLUDED_MULTIPLICITY_PARAMS = ("nf",)
 #: deck-object-free static tables.
 _CAPACITOR_TERMINALS = 2
 _BIPOLAR_TERMINALS = 3
+
+#: SPICE's own ``PARAMS:`` keyword -- the optional separator between an ``X``
+#: card's positional tokens (nodes + subcircuit name) and its ``key=value``
+#: parameters (issue #2327). ``kdb.NetlistSpiceWriter`` emits it for every
+#: custom (``GenericDeviceExtractor``-recognised) device class it round-trips
+#: as an ``X`` card -- ``XD_$1 A B cap_cmomi PARAMS: W=1 L=2`` -- and
+#: ``kdb.NetlistSpiceReader`` consumes it natively. It carries no ``=``, so
+#: without this it would be mistaken for a positional token (and, being the
+#: *last* one, for the subcircuit name itself). Matched case-insensitively,
+#: like every other SPICE keyword this module reads.
+_PARAMS_SEPARATOR = "params:"
 
 #: SPICE engineering-notation multiplier suffixes, longest-match first so
 #: ``meg`` is not shadowed by ``m``. The base unit for a MOS ``W``/``L`` is
@@ -351,10 +364,18 @@ def _split_params(tokens: list[str]) -> tuple[list[str], dict[str, str]]:
     ``key=value`` parameter map (keys lower-cased).
 
     A parameter is any token containing ``=``; positional tokens never do.
+    SPICE's own :data:`_PARAMS_SEPARATOR` (``PARAMS:``) keyword is neither --
+    it is dropped as the pure separator it is (issue #2327), so the
+    subcircuit name stays ``positional[-1]`` for the ``X ... <name> PARAMS:
+    W=... L=...`` shape ``kdb.NetlistSpiceWriter`` round-trips a custom
+    device class through. Before this, that card's ``positional[-1]``
+    resolved to the literal string ``"PARAMS:"``.
     """
     positional: list[str] = []
     params: dict[str, str] = {}
     for token in tokens:
+        if token.lower() == _PARAMS_SEPARATOR:
+            continue
         if "=" in token:
             key, _, value = token.partition("=")
             params[key.strip().lower()] = value.strip()
@@ -369,6 +390,7 @@ def _convert_x_card(
     device_map_names: frozenset[str] = frozenset(),
     geometry_style: str | None = None,
     placeholder_value_classes: dict[str, str] | None = None,
+    custom_device_classes: Mapping[str, str] | None = None,
 ) -> str:
     """Convert one ``X`` subcircuit-call line to a plain-element ``M``/``R``/
     ``C``/``Q`` line, or return it unchanged if it is not a recognised device
@@ -401,6 +423,22 @@ def _convert_x_card(
     ``"capacitor"``), so a downstream consumer can tell that the class's
     value token is the literal ``0`` placeholder rather than a real
     resistance/capacitance. ``None`` (the default) records nothing.
+
+    ``custom_device_classes`` (issue #2327) is ``deck``'s
+    :func:`~klayout_tools.netlist_capacitor_recovery.custom_device_classes_for_deck`
+    table -- ``{<UPPER-CASED class name>: <canonical name>}`` for every custom
+    (``kdb.GenericDeviceExtractor``-recognised) device class the deck declares,
+    today exactly its ``mom_capacitors``. An ``X`` card naming one of those is
+    **passed through untouched**, because such a class has no plain-element
+    SPICE element letter to convert *to*: the round-tripped ``X ... PARAMS:``
+    card is already the form ``klt lvs``'s own reader recognises, via
+    :func:`~klayout_tools.netlist_capacitor_recovery.make_capacitor_class_recovery_reader`'s
+    ``custom_device_classes`` parameter (issue #1942). Without this the card's
+    carried ``W``/``L`` tripped the device-like heuristic below and
+    :func:`_resolve_binding` raised -- making ``form: "subckt-call"``
+    unusable for any netlist that mixes a curated device with a MoM
+    capacitor. ``None``/``{}`` (the default, and every deck that declares no
+    custom class) leaves behaviour byte-for-byte unchanged.
     """
     tokens = _tokenize(line)
     if not tokens:
@@ -415,16 +453,8 @@ def _convert_x_card(
     subckt_name = positional[-1]
     nodes = positional[:-1]
 
-    # A device call is recognised either by its subcircuit name resolving
-    # against the curated table (covers every family, including bipolar,
-    # which carries no geometry-style parameter at all -- see the module
-    # docstring), or, when the name does not resolve, by carrying a
-    # geometry-style parameter that *looks* like a device call gone wrong
-    # (the original #280 MOS-only heuristic, now shared with
-    # resistor/capacitor). Neither signal present means a genuine
-    # hierarchical subcircuit instance -- pass it through untouched.
-    if not _binding_known(subckt_name, subckt_to_binding) and not any(
-        key in params for key in _DEVICE_LIKE_PARAMS
+    if _passes_through_unconverted(
+        subckt_name, params, subckt_to_binding, custom_device_classes
     ):
         return line
 
@@ -735,6 +765,31 @@ def _convert_bipolar_card(
     parallel emitters), which ``DeviceClassBJT3Transistor`` natively
     supports -- so, unlike MOS/resistor/capacitor, ``mult`` here is carried,
     not rejected.
+
+    The *emitter geometry* those cells omit at the call site is not unknown
+    (issue #2335): the curated cell name encodes it, and
+    :attr:`~klayout_tools.pdk_models.DeviceLookup.emitter_area_um2` carries
+    the nominal emitter area ``pdk_models``' own bipolar table already
+    records for it. When present it is stated on the card as
+    ``AE=``/``PE=``, because ``AE`` is one of
+    ``DeviceClassBJT3Transistor``'s two *primary* (compared) parameters
+    (``AE``, ``NE``; confirmed against the installed ``klayout.db`` module):
+    a geometry-free reference card is a zero-vs-nonzero difference against
+    the layout side's extracted ``AE``, so *every* bipolar reports as
+    unmatched under the default full-parameter compare unless the caller
+    scopes it down with ``options.compare_parameters`` (issue #1928's
+    generic escape hatch). ``PE`` is derived rather than stored -- both
+    curated sky130 variants are square emitters (``W<n>L<n>`` with equal
+    ``W``/``L``), so ``side = sqrt(AE)`` and ``PE = 4 * side``, which keeps
+    the table's nominal area the single source of truth.
+
+    ``AB``/``PB``/``AC``/``PC`` are deliberately *not* emitted: they measure
+    drawn base/collector geometry that the fixed-geometry cell name does not
+    encode, so there is nothing to state honestly (see
+    :data:`~klayout_tools.pdk_models._BIPOLAR_DROPPED_PARAMS`). Leaving them
+    at the class default costs nothing: they are *secondary* parameters, so
+    once the primary ``AE``/``NE`` agree the comparer pairs the devices and
+    never reports them (asserted end to end in ``tests/test_lvs.py``).
     """
     if len(nodes) != _BIPOLAR_TERMINALS:
         raise NormalizeError(
@@ -744,6 +799,10 @@ def _convert_bipolar_card(
         )
 
     extra = ""
+    area_um2 = lookup.emitter_area_um2
+    if area_um2 is not None and area_um2 > 0:
+        side_um = math.sqrt(area_um2)
+        extra += f" AE={_format_um2(area_um2)} PE={_format_um(4.0 * side_um)}"
     if "mult" in params:
         try:
             mult = float(params["mult"])
@@ -752,7 +811,7 @@ def _convert_bipolar_card(
                 f"device '{instance}' (subcircuit '{subckt_name}'): "
                 f"parameter 'mult' value '{params['mult']}' is not numeric"
             ) from exc
-        extra = f" NE={mult:g}"
+        extra += f" NE={mult:g}"
 
     return f"{instance} {' '.join(nodes)} {lookup.device_class}{extra}"
 
@@ -855,6 +914,45 @@ def _binding_known(
     if subckt_to_binding is not None:
         return subckt_name in subckt_to_binding
     return subckt_name in known_device_subckt_names()
+
+
+def _passes_through_unconverted(
+    subckt_name: str,
+    params: dict[str, str],
+    subckt_to_binding: dict[str, DeviceLookup] | None,
+    custom_device_classes: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether :func:`_convert_x_card` must leave this ``X`` card exactly as
+    written -- the passthrough-vs-convert-or-raise decision, factored out of
+    that function so each of its three (independent) reasons stays readable.
+
+    A device call is recognised either by its subcircuit name resolving
+    against the curated table (covers every family, including bipolar, which
+    carries no geometry-style parameter at all -- see the module docstring),
+    or, when the name does not resolve, by carrying a geometry-style
+    parameter that *looks* like a device call gone wrong (the original #280
+    MOS-only heuristic, now shared with resistor/capacitor). Neither signal
+    present means a genuine hierarchical subcircuit instance -- passed
+    through untouched.
+
+    Between those two, a name matching one of ``custom_device_classes``
+    (issue #2327) also passes through: a custom
+    (``kdb.GenericDeviceExtractor``-recognised) device class of the requested
+    deck is a *real* device, but one with no plain-element form to convert
+    to -- its round-tripped ``X ... PARAMS:`` card is already what the
+    downstream reader wants (see :func:`_convert_x_card`'s own docstring).
+    Checked only for a name the curated table did **not** already bind, so a
+    curated binding always wins.
+
+    A ``False`` here does not promise the card converts -- a device-like
+    name that resolves in neither table is exactly the case
+    :func:`_resolve_binding` raises on, deliberately.
+    """
+    if _binding_known(subckt_name, subckt_to_binding):
+        return False
+    if custom_device_classes and subckt_name.upper() in custom_device_classes:
+        return True
+    return not any(key in params for key in _DEVICE_LIKE_PARAMS)
 
 
 def _resolve_binding(
@@ -1031,6 +1129,43 @@ def _build_subckt_map(
     return resolved or None, device_map_names
 
 
+def _resolve_custom_device_classes(deck: str | None) -> dict[str, str]:
+    """``deck``'s custom (``kdb.GenericDeviceExtractor``-recognised) device
+    classes as ``{<UPPER-CASED class name>: <canonical name>}`` -- the table
+    :func:`_convert_x_card` passes a round-tripped ``X ... PARAMS:`` card
+    through on (issue #2327), ``{}`` when no ``deck`` was given.
+
+    Resolved exactly the way ``lvs.py``'s own ``_resolve_layout`` /
+    ``_read_reference_netlist`` already resolve it for the *reading* side
+    (:func:`~klayout_tools.decks.get_extraction_deck` +
+    :func:`~klayout_tools.netlist_capacitor_recovery.custom_device_classes_for_deck`)
+    -- never a second, independent table -- so a card this module passes
+    through is exactly a card that reader recognises as a device.
+
+    Best-effort by design: an unresolvable ``deck`` name is swallowed here
+    and yields ``{}``, because :func:`_build_subckt_map` already owns raising
+    the authoritative :class:`NormalizeError` for a bad ``deck`` (the same
+    division of labour ``_read_reference_netlist`` documents). Imported
+    lazily -- ``klayout_tools.decks`` pulls in the extraction stack, which
+    this otherwise dependency-light text transform should not require at
+    import time.
+    """
+    if not deck:
+        return {}
+    from .decks import (
+        InvalidDeckOptionError,
+        UnknownExtractionDeckError,
+        get_extraction_deck,
+    )
+    from .netlist_capacitor_recovery import custom_device_classes_for_deck
+
+    try:
+        resolved = get_extraction_deck(deck)
+    except (UnknownExtractionDeckError, InvalidDeckOptionError):
+        return {}
+    return custom_device_classes_for_deck(resolved)
+
+
 class ReferenceConversion(NamedTuple):
     """The result of one :func:`convert_reference_netlist` run.
 
@@ -1086,6 +1221,15 @@ def convert_reference_netlist(
     device lines converts correctly. Raises :class:`NormalizeError` for any
     device card that cannot be converted correctly and unambiguously.
 
+    An ``X`` card naming one of ``deck``'s *custom*
+    (``kdb.GenericDeviceExtractor``-recognised) device classes -- today its
+    ``mom_capacitors``, e.g. IHP's ``cap_cmomi`` -- likewise passes through
+    untouched (issue #2327), ``PARAMS:`` separator and all: that card is
+    already the form ``klt lvs``'s own reader reads as a device (issue
+    #1942), and the class has no plain-element element letter to convert to.
+    So one ``form: "subckt-call"`` request can carry both device families of
+    a mixed netlist, instead of failing on the MoM card.
+
     A *bare* (unsuffixed, non-exponent) ``L``/``W``-style geometry literal
     (issue #1492) is resolved per ``deck``'s own
     :func:`~klayout_tools.pdk_models.geometry_style_for_family` convention --
@@ -1100,6 +1244,7 @@ def convert_reference_netlist(
     """
     subckt_to_binding, device_map_names = _build_subckt_map(deck, device_map)
     geometry_style = geometry_style_for_family(deck) if deck is not None else None
+    custom_device_classes = _resolve_custom_device_classes(deck)
     logical_lines = _merge_continuations(text.splitlines())
 
     placeholder_value_classes: dict[str, str] = {}
@@ -1118,6 +1263,7 @@ def convert_reference_netlist(
                     device_map_names,
                     geometry_style,
                     placeholder_value_classes,
+                    custom_device_classes,
                 )
             )
         else:
