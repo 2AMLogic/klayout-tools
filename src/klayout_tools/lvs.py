@@ -256,15 +256,23 @@ CATEGORY_DEVICE_PARAMETER_TOLERATED = "device.parameter_tolerated"
 CATEGORY_DEVICE_PARAMETER_EXCLUDED = "device.parameter_excluded"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
-#: Issue #1497: KLayout's native `Netlist.combine_devices()` can leave a
-#: capacitor device's *primary* `C` parameter at a single pre-combine
-#: instance's own value instead of the summed total across the parallel
-#: group it folded together -- while correctly summing that same group's
-#: *secondary* `A`/`P` parameters -- with no exception raised and no
+#: Issues #1497/#2374: KLayout's native `Netlist.combine_devices()` can
+#: return **normally** with a combined device's parameters inconsistent with
+#: the parallel group it folded -- with no exception raised and no
 #: `device.combine_incomplete` warning (the existing #1185/#466 retry only
 #: catches KLayout's own `RuntimeError`, which never fires here: the call
-#: returns normally, just with a wrong `C`). See
-#: `_correct_capacitor_combine_parameters`.
+#: succeeds, just with wrong numbers). Two shapes have been reported:
+#:
+#: * issue #1497 -- a capacitor's *primary* `C` left at a single pre-combine
+#:   instance's own value instead of the summed total across its parallel
+#:   group, while that same group's *secondary* `A`/`P` parameters summed
+#:   correctly;
+#: * issue #2374 -- a `DeviceClassBJT3Transistor` array's accumulation
+#:   *inverted*: the emitter parameters the fold should sum (`AE`, `NE`)
+#:   left at one instance's value, and the shared base/collector region
+#:   parameters it should leave alone (`AB`/`PB`/`AC`/`PC`) summed instead.
+#:
+#: See `_correct_combine_parameters`.
 CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED = "device.combine_parameter_corrected"
 CATEGORY_PIN_UNMATCHED = "pin.unmatched"
 CATEGORY_TOPOLOGY = "topology"
@@ -958,7 +966,7 @@ def run_lvs(request: str) -> dict[str, Any]:
     combine_per_circuit_warnings: list[dict[str, Any]] = []
     # Issue #1557: the whole-netlist `Netlist.dup()` snapshot taken *before*
     # any per-circuit combining runs on this side -- the pre-combine input
-    # `_correct_capacitor_combine_parameters` needs below, mirroring the
+    # `_correct_combine_parameters` needs below, mirroring the
     # whole-netlist `combine_devices` path's own `layout_snapshot`/
     # `reference_snapshot` (taken the same way, for the same reason, further
     # down). `layout_combined_circuits` collects the subset of
@@ -986,32 +994,33 @@ def run_lvs(request: str) -> dict[str, Any]:
             _unmatched_combine_devices_per_circuit_warnings(layout_unmatched, "layout")
         )
 
-        # Issue #1497/#1557: the same capacitor `C` sum-conservation
-        # correction the whole-netlist `combine_devices` path applies
-        # (further down, gated on `combine_devices_enabled`), scoped here to
-        # just the circuit(s) this side actually combined *cleanly* -- a
-        # circuit left uncombined (named `False`, unmatched, or not named at
-        # all) or whose combine was reported `device.combine_incomplete` is
-        # never touched. Applied here, immediately, rather than deferred
-        # alongside the reference side's own correction below (where it
-        # would be more symmetric-looking): `flatten_layout` runs
-        # immediately after this block, and once it collapses this side's
-        # circuit boundaries away, `_capacitor_c_sums`'s per-circuit-name
-        # grouping key can no longer line up a post-combine device's
+        # Issue #1497/#1557/#2374: the same post-combine parameter-
+        # conservation correction the whole-netlist `combine_devices` path
+        # applies (further down, gated on `combine_devices_enabled`), scoped
+        # here to just the circuit(s) this side actually combined *cleanly*
+        # -- a circuit left uncombined (named `False`, unmatched, or not
+        # named at all) or whose combine was reported
+        # `device.combine_incomplete` is never touched. Applied here,
+        # immediately, rather than deferred alongside the reference side's
+        # own correction below (where it would be more symmetric-looking):
+        # `flatten_layout` runs immediately after this block, and once it
+        # collapses this side's circuit boundaries away,
+        # `_combine_parameter_expectations`'s per-circuit-name grouping key
+        # can no longer line up a post-combine device's
         # (now-`layout_spec.get("top")`-named) circuit against the
         # pre-combine snapshot's original circuit name -- silently matching
-        # nothing and leaving a corrupted `C` uncorrected (caught by this
-        # fix's own end-to-end test after initially placing this call after
-        # `flatten_layout`, alongside the reference side's).
+        # nothing and leaving a corrupted parameter uncorrected (caught by
+        # this fix's own end-to-end test after initially placing this call
+        # after `flatten_layout`, alongside the reference side's).
         if layout_combined_circuits:
-            layout_c_correction = _correct_capacitor_combine_parameters(
+            layout_parameter_correction = _correct_combine_parameters(
                 layout_pre_combine_snapshot,
                 layout_netlist,
                 "layout",
                 circuit_names=layout_combined_circuits,
             )
-            if layout_c_correction is not None:
-                combine_per_circuit_warnings.append(layout_c_correction)
+            if layout_parameter_correction is not None:
+                combine_per_circuit_warnings.append(layout_parameter_correction)
 
     if flatten_layout:
         layout_flatten_warning = _flatten_netlist_safely(layout_netlist, "layout")
@@ -1220,14 +1229,14 @@ def run_lvs(request: str) -> dict[str, Any]:
         # no such ordering hazard here: `flatten_reference` does not run
         # until after this whole block, so this is still scoped correctly.
         if reference_combined_circuits:
-            reference_c_correction = _correct_capacitor_combine_parameters(
+            reference_parameter_correction = _correct_combine_parameters(
                 reference_pre_combine_snapshot,
                 reference_netlist,
                 "reference",
                 circuit_names=reference_combined_circuits,
             )
-            if reference_c_correction is not None:
-                combine_per_circuit_warnings.append(reference_c_correction)
+            if reference_parameter_correction is not None:
+                combine_per_circuit_warnings.append(reference_parameter_correction)
 
     if flatten_reference:
         reference_flatten_warning = _flatten_netlist_safely(
@@ -1421,28 +1430,30 @@ def run_lvs(request: str) -> dict[str, Any]:
             _purge_emptied_nets(layout_netlist)
             _purge_emptied_nets(reference_netlist)
 
-            # Issue #1497: KLayout's own `combine_devices()` can leave a
-            # capacitor device's `C` parameter inconsistent with the
-            # pre-combine sum of the parallel group it folded -- silently,
-            # with no exception and no `device.combine_incomplete` warning
-            # (that category only covers the unrelated #1185/#466
-            # `RuntimeError` case above). Checked and corrected in place
-            # against each side's own pre-combine snapshot (already taken,
-            # for the #1370 symmetric-degrade rollback, before either
-            # combine call ran), appended to `combine_warnings` -- but only
-            # *after* `combine_incomplete` was computed above, so a
-            # correction here never triggers that rollback: the value is
-            # already fixed, there is nothing left to roll back for.
-            layout_c_correction = _correct_capacitor_combine_parameters(
+            # Issues #1497/#2374: KLayout's own `combine_devices()` can leave
+            # a combined device's parameters inconsistent with the parallel
+            # group it folded -- silently, with no exception and no
+            # `device.combine_incomplete` warning (that category only covers
+            # the unrelated #1185/#466 `RuntimeError` case above): a
+            # capacitor's `C` left at one instance's value (#1497), or a
+            # bipolar array's whole accumulation inverted (#2374). Checked
+            # and corrected in place against each side's own pre-combine
+            # snapshot (already taken, for the #1370 symmetric-degrade
+            # rollback, before either combine call ran), appended to
+            # `combine_warnings` -- but only *after* `combine_incomplete` was
+            # computed above, so a correction here never triggers that
+            # rollback: the value is already fixed, there is nothing left to
+            # roll back for.
+            layout_parameter_correction = _correct_combine_parameters(
                 layout_snapshot, layout_netlist, "layout"
             )
-            if layout_c_correction is not None:
-                combine_warnings.append(layout_c_correction)
-            reference_c_correction = _correct_capacitor_combine_parameters(
+            if layout_parameter_correction is not None:
+                combine_warnings.append(layout_parameter_correction)
+            reference_parameter_correction = _correct_combine_parameters(
                 reference_snapshot, reference_netlist, "reference"
             )
-            if reference_c_correction is not None:
-                combine_warnings.append(reference_c_correction)
+            if reference_parameter_correction is not None:
+                combine_warnings.append(reference_parameter_correction)
 
         if layout_deck is not None:
             # Issue #559/#585: apply the deferred resistor `fixed_offset_ohm`
@@ -3649,11 +3660,29 @@ def _combine_devices_safely(
     ``netlist.circuit_by_name(name)``) -- ``run_lvs`` does this immediately
     after both sides' calls to this function.
 
-    Only the *last* attempt (``max_attempts`` reached) runs directly against
-    ``netlist`` itself rather than a throwaway copy, so the graceful-degrade
-    result in that case is byte-for-byte the same shape issue #466
-    originally shipped: whatever ``combine_devices()`` managed to merge
-    before hitting the error on that final attempt stays merged; this
+    **Why the first attempt runs in place (issue #2374):** a ``dup()`` copy is
+    not merely an *independent* trial of KLayout's address-dependent ordering
+    -- it is a *worse* one. A freshly allocated copy walks its nets in an
+    order that bears no relation to the order they were created in, and on
+    roughly a quarter of copies that lands ``combine_devices()`` in a
+    different accumulation branch that returns **normally** with silently
+    wrong combined parameters (issue #2374 measured ~24% of ``dup()`` copies
+    of a ``DeviceClassBJT3Transistor`` array producing an *inverted*
+    parameter accumulation, versus 1000/1000 correct runs against the
+    netlist itself). So attempt 0 runs directly against ``netlist``, exactly
+    as this module behaved before issue #1185 added the retry, and only the
+    *retries* -- reached solely when attempt 0 raised the ``RuntimeError``
+    above -- resample against independent copies. Those copies are taken from
+    a pristine ``snapshot`` captured before attempt 0 ran, not from the
+    partially-merged ``netlist``, so every retry is still a genuinely
+    independent trial rather than a retry-from-partial-damage. (The residual
+    exposure on the retry path is covered separately, and independently of
+    *why* KLayout got it wrong, by :func:`_correct_combine_parameters`'s
+    post-combine conservation check.)
+
+    Because attempt 0 runs in place, ``netlist`` keeps whatever that attempt
+    managed to merge before hitting the error when *every* attempt fails --
+    byte-for-byte the same shape issue #466 originally shipped: this
     netlist's remaining, not-yet-combined devices are simply left as
     individual devices for the rest of this run, exactly as they would be
     with ``options.combine_devices: false``. (``run_lvs`` no longer *ships*
@@ -3669,6 +3698,9 @@ def _combine_devices_safely(
     Applied per attempt rather than once up front so a retry against a fresh
     ``Netlist.dup()`` copy -- which carries its own, unrestricted copies of
     the device classes -- is restricted the same way the first attempt was.
+    The pristine ``snapshot`` the retries are copied from is captured
+    *before* that restriction is applied to ``netlist``, so a retry restricts
+    its own copy from the same unrestricted starting point attempt 0 had.
 
     Returns a ``severity: "warning"`` ``mismatches[]`` entry
     (``category: "device.combine_incomplete"``) to append to the report when
@@ -3684,14 +3716,24 @@ def _combine_devices_safely(
     unchanged immediately (no retry), so an unrelated failure is never
     silently swallowed or masked as this issue's shape.
     """
+    # Issue #2374: captured before attempt 0 mutates `netlist` in place, so
+    # every *retry* below copies from the pristine pre-combine state rather
+    # than from a partially-merged one. Skipped entirely when there is no
+    # retry budget to spend (`max_attempts == 1`), which keeps the
+    # single-attempt path allocation-for-allocation identical to the
+    # pre-#1185 behaviour.
+    snapshot = netlist.dup() if max_attempts > 1 else None
+    last_error = ""
     for attempt in range(max_attempts):
-        is_last_attempt = attempt == max_attempts - 1
-        # Every attempt but the last runs against a fresh, independent copy
-        # -- `netlist` itself is never mutated until either a copy succeeds
-        # (assigned back below) or the last attempt runs directly against it,
-        # so each non-final attempt is a genuinely independent trial of
-        # KLayout's internal ordering, not a retry-from-partial-damage.
-        candidate = netlist if is_last_attempt else netlist.dup()
+        # Attempt 0 runs directly against `netlist` -- the ordering KLayout
+        # produces for a netlist walked in the order it was built, which is
+        # the one that combines correctly (issue #2374). Only the retries,
+        # reached solely after attempt 0 raised, resample against independent
+        # copies of the pristine snapshot (issue #1185's mitigation).
+        # `snapshot` is never `None` here: `attempt > 0` implies
+        # `max_attempts > 1`, which is exactly the condition it was taken
+        # under.
+        candidate = netlist if attempt == 0 or snapshot is None else snapshot.dup()
         if device_classes is not None:
             _restrict_device_combination(candidate, device_classes)
         try:
@@ -3699,68 +3741,155 @@ def _combine_devices_safely(
         except RuntimeError as exc:
             if _COMBINE_DEVICES_ERROR_MARKER not in str(exc):
                 raise
-            if not is_last_attempt:
-                continue
-            attempts_disclosure = (
-                f" after {max_attempts} attempts against independent netlist "
-                "copies (issue #1185)"
-                if max_attempts > 1
-                else ""
-            )
-            restriction_disclosure = (
-                f" (restricted to device class(es) {', '.join(device_classes)})"
-                if device_classes is not None
-                else ""
-            )
-            return _mismatch(
-                CATEGORY_DEVICE_COMBINE_INCOMPLETE,
-                "warning",
-                "options.combine_devices could not fully combine devices on "
-                f"the {side} netlist{restriction_disclosure}"
-                f"{attempts_disclosure}: KLayout's "
-                "Netlist.combine_devices() hit an internal-consistency error "
-                "on a partial-match device group (instances sharing only "
-                "some, not all, of their matching terminals) and stopped -- "
-                "devices it had already combined before the error remain "
-                "combined, but the rest of this netlist's devices were left "
-                f"uncombined ({exc})",
-                side,
-                # Issue #1370: the failing attempt's own machine-readable
-                # identifiers, resolved against `candidate` (the netlist the
-                # error was actually raised on) rather than left `None`.
-                **_combine_failure_identifiers(candidate, side, str(exc)),
-            )
+            last_error = str(exc)
+            continue
         else:
             if candidate is not netlist:
                 netlist.assign(candidate)
             return None
-    return None  # pragma: no cover -- loop always returns (max_attempts >= 1)
 
-
-#: Issue #1497: the `klayout.db` device classes whose primary `C` parameter
-#: is a simple per-device sum under parallel combination
-#: (`CapacitorDeviceCombiner::parallel` in KLayout's own
-#: `dbNetlistDeviceClasses.cc` -- see also `extract.py`'s
-#: `_apply_device_parameter_corrections` docstring, which asserts the same
-#: for `DeviceExtractorCapacitor`-produced devices). Both declare a
-#: parameter named exactly `"C"` (verified against `klayout==0.30.10`).
-#: Deliberately narrow: a resistor's parallel combination is *not* a simple
-#: sum (`1/R = 1/R1 + 1/R2`), so extending this same conservation check to
-#: `DeviceClassResistor`/`DeviceClassResistorWithBulk` would be wrong, not
-#: merely unnecessary.
-def _capacitor_device_classes(kdb_module: Any) -> tuple[type, ...]:
-    return (
-        kdb_module.DeviceClassCapacitor,
-        kdb_module.DeviceClassCapacitorWithBulk,
+    # Every attempt hit KLayout's partial-match error. `netlist` still
+    # carries attempt 0's own in-place partial merge (issue #466's shape);
+    # the identifiers below are therefore resolved against `netlist`, the
+    # state the caller is actually left holding.
+    attempts_disclosure = (
+        f" after {max_attempts} attempts against independent netlist "
+        "copies (issue #1185)"
+        if max_attempts > 1
+        else ""
+    )
+    restriction_disclosure = (
+        f" (restricted to device class(es) {', '.join(device_classes)})"
+        if device_classes is not None
+        else ""
+    )
+    return _mismatch(
+        CATEGORY_DEVICE_COMBINE_INCOMPLETE,
+        "warning",
+        "options.combine_devices could not fully combine devices on "
+        f"the {side} netlist{restriction_disclosure}"
+        f"{attempts_disclosure}: KLayout's "
+        "Netlist.combine_devices() hit an internal-consistency error "
+        "on a partial-match device group (instances sharing only "
+        "some, not all, of their matching terminals) and stopped -- "
+        "devices it had already combined before the error remain "
+        "combined, but the rest of this netlist's devices were left "
+        f"uncombined ({last_error})",
+        side,
+        # Issue #1370: machine-readable identifiers for the failure, resolved
+        # against the netlist the caller keeps rather than left `None`.
+        **_combine_failure_identifiers(netlist, side, last_error),
     )
 
 
-def _capacitor_combine_group_key(
+#: Issues #1497/#2374: per-device-class parameter-conservation rules for
+#: KLayout's own **parallel** `combine_devices()` fold, as
+#: `(device-class attribute names, summed parameters, preserved parameters)`.
+#: Each rule says what a combined device's parameters must be, given the
+#: pre-combine group it absorbed:
+#:
+#: * a *summed* parameter's post-combine value is the pre-combine group's
+#:   total (it is a conserved quantity -- combining can only redistribute it
+#:   across fewer surviving devices, never change it);
+#: * a *preserved* parameter's post-combine value is the group's single
+#:   shared value (it describes a region the parallel instances have in
+#:   common, so it does not accumulate) -- checked only when every member of
+#:   the group actually agrees on it, since nothing can be asserted about a
+#:   group whose members differ.
+#:
+#: Capacitors (issue #1497): `C` is a simple per-device sum under parallel
+#: combination (`CapacitorDeviceCombiner::parallel` in KLayout's own
+#: `dbNetlistDeviceClasses.cc` -- see also `extract.py`'s
+#: `_apply_device_parameter_corrections` docstring, which asserts the same
+#: for `DeviceExtractorCapacitor`-produced devices). `A`/`P` are secondary
+#: and likewise sum, but issue #1497 only ever observed `C` going wrong, so
+#: they are deliberately left unasserted here.
+#:
+#: Bipolars (issue #2374): a parallel `DeviceClassBJT3Transistor` array folds
+#: with the emitter parameters summed (`AE`, `PE`, `NE`) and the shared
+#: base/collector region parameters left at the array's common value (`AB`,
+#: `PB`, `AC`, `PC`) -- verified directly against `klayout==0.30.10` by
+#: combining an N-instance parallel array and reading the surviving device
+#: back. `DeviceClassBJT4Transistor` (the substrate-terminal flavour)
+#: subclasses `DeviceClassBJT3Transistor`, declares the identical parameter
+#: set, and folds identically; it is listed explicitly anyway so the rule
+#: does not silently depend on that subclass relationship.
+#:
+#: Deliberately narrow -- a device class is listed here only when *every*
+#: combination KLayout will perform on it is a parallel one with a known
+#: accumulation rule:
+#:
+#: * resistors: a parallel combination is not a simple sum
+#:   (`1/R = 1/R1 + 1/R2`) and a series one is, so neither `DeviceClass
+#:   Resistor` nor `DeviceClassResistorWithBulk` belongs here;
+#: * MOS transistors: `combine_devices()` folds them both in parallel (`W`
+#:   sums) and in series (`L` sums), and a series fold's surviving device has
+#:   terminal connectivity no pre-combine group shares, so a
+#:   connectivity-keyed conservation rule cannot describe it.
+_COMBINE_PARAMETER_CONSERVATION_RULES: tuple[
+    tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]], ...
+] = (
+    (
+        ("DeviceClassCapacitor", "DeviceClassCapacitorWithBulk"),
+        ("C",),
+        (),
+    ),
+    (
+        ("DeviceClassBJT3Transistor", "DeviceClassBJT4Transistor"),
+        ("AE", "PE", "NE"),
+        ("AB", "PB", "AC", "PC"),
+    ),
+)
+
+
+def _combine_conservation_rules(
+    kdb_module: Any,
+) -> list[tuple[tuple[type, ...], tuple[str, ...], tuple[str, ...]]]:
+    """Resolve :data:`_COMBINE_PARAMETER_CONSERVATION_RULES`'s device-class
+    *names* into the live `klayout.db` classes, once per correction pass."""
+    return [
+        (
+            tuple(getattr(kdb_module, name) for name in class_names),
+            summed,
+            preserved,
+        )
+        for class_names, summed, preserved in _COMBINE_PARAMETER_CONSERVATION_RULES
+    ]
+
+
+def _combine_conservation_rule_for(
+    device_class: Any,
+    rules: Sequence[tuple[tuple[type, ...], tuple[str, ...], tuple[str, ...]]],
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """The `(summed, preserved)` parameter names governing `device_class`,
+    or `None` when no conservation rule covers it (the common case -- MOS
+    transistors, resistors, diodes and every custom class)."""
+    for classes, summed, preserved in rules:
+        if isinstance(device_class, classes):
+            return summed, preserved
+    return None
+
+
+def _combine_parameter_tolerance(expected: float) -> float:
+    """Comparison tolerance for one conserved parameter.
+
+    A relative tolerance, floored by a tiny absolute term for the
+    ``expected == 0`` edge case -- *not* ``1e-15`` (a plausible
+    femtofarad-scale `C` value in its own right, which would mask exactly the
+    single-instance-vs-summed-total discrepancy this check exists to catch,
+    e.g. `1e-15` vs. a summed `2e-15`).
+    """
+    return max(1e-21, abs(expected) * 1e-9)
+
+
+def _combine_group_key(
     circuit_name: str, device: Any, device_class: Any
 ) -> tuple[Any, ...]:
     """A key identifying the group of parallel devices `device` combines
     with: the same circuit, the same device-class name, and the same set of
-    (terminal name, connected net) pairs.
+    (terminal name, connected net) pairs. A parallel fold only ever merges
+    devices that agree on every one of those, so one key names exactly one
+    combinable group -- on either side of the combine.
 
     Identifies each terminal's net by `Net.expanded_name()` -- always
     non-empty (KLayout synthesizes a name like `"$1"` for an internal,
@@ -3783,46 +3912,167 @@ def _capacitor_combine_group_key(
     return (circuit_name, device_class.name, tuple(sorted(terminals)))
 
 
-def _capacitor_c_sums(netlist: Any, kdb_module: Any) -> dict[tuple[Any, ...], float]:
-    """Sum of the `C` parameter, grouped by
-    :func:`_capacitor_combine_group_key`, across every capacitor-class
-    device in `netlist`."""
-    classes = _capacitor_device_classes(kdb_module)
-    sums: dict[tuple[Any, ...], float] = {}
+def _combine_parameter_expectations(
+    netlist: Any,
+    rules: Sequence[tuple[tuple[type, ...], tuple[str, ...], tuple[str, ...]]],
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    """What every conservation-governed device group in `netlist` says a
+    combined device folded from it must look like.
+
+    Keyed by :func:`_combine_group_key`, each value is
+    ``{"summed": {name: total}, "common": {name: value | None}}`` -- the
+    group's per-parameter total for the rule's *summed* parameters, and its
+    single shared value for the rule's *preserved* parameters (``None`` when
+    the group's members do not all agree on one, in which case nothing can be
+    asserted about that parameter and it is skipped).
+    """
+    groups: dict[tuple[Any, ...], dict[str, Any]] = {}
     for circuit in netlist.each_circuit():
         for device in circuit.each_device():
             device_class = device.device_class()
-            if not isinstance(device_class, classes):
+            rule = _combine_conservation_rule_for(device_class, rules)
+            if rule is None:
                 continue
-            key = _capacitor_combine_group_key(circuit.name, device, device_class)
-            sums[key] = sums.get(key, 0.0) + device.parameter("C")
-    return sums
+            summed_names, preserved_names = rule
+            key = _combine_group_key(circuit.name, device, device_class)
+            entry = groups.get(key)
+            if entry is None:
+                entry = groups[key] = {
+                    "summed": {name: 0.0 for name in summed_names},
+                    "common": {
+                        name: device.parameter(name) for name in preserved_names
+                    },
+                }
+            for name in summed_names:
+                entry["summed"][name] += device.parameter(name)
+            for name in preserved_names:
+                common = entry["common"][name]
+                if common is None:
+                    continue
+                value = device.parameter(name)
+                if abs(value - common) > _combine_parameter_tolerance(common):
+                    entry["common"][name] = None
+    return groups
 
 
-def _correct_capacitor_combine_parameters(
+def _combine_group_survivors(
+    netlist: Any,
+    rules: Sequence[tuple[tuple[type, ...], tuple[str, ...], tuple[str, ...]]],
+    circuit_names: Sequence[str] | None,
+) -> list[tuple[tuple[Any, ...], str, Any, Any, tuple[str, ...], tuple[str, ...]]]:
+    """Every conservation-governed device in `netlist` that is the **only**
+    survivor under its :func:`_combine_group_key`, as
+    ``(key, circuit name, device, device class, summed, preserved)``.
+
+    A group with more than one survivor is dropped here rather than in the
+    caller: it did not fold to a single device, so the group-total rule is
+    not assertable against any of its members -- see
+    :func:`_correct_combine_parameters`'s docstring.
+    """
+    found: list[tuple[tuple[Any, ...], str, Any, Any, tuple[str, ...], tuple[str, ...]]]
+    found = []
+    counts: dict[tuple[Any, ...], int] = {}
+    for circuit in netlist.each_circuit():
+        if circuit_names is not None and circuit.name not in circuit_names:
+            continue
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            rule = _combine_conservation_rule_for(device_class, rules)
+            if rule is None:
+                continue
+            key = _combine_group_key(circuit.name, device, device_class)
+            counts[key] = counts.get(key, 0) + 1
+            found.append((key, circuit.name, device, device_class, *rule))
+    return [entry for entry in found if counts[entry[0]] == 1]
+
+
+def _combine_expected_values(
+    group: Mapping[str, Any],
+    summed: Sequence[str],
+    preserved: Sequence[str],
+) -> list[tuple[str, float]]:
+    """The `(parameter, expected value)` pairs a single-survivor device must
+    satisfy: its group's total for each *summed* parameter, and its group's
+    common value for each *preserved* parameter the group agrees on."""
+    values = [(name, group["summed"][name]) for name in summed]
+    values += [
+        (name, group["common"][name])
+        for name in preserved
+        if group["common"][name] is not None
+    ]
+    return values
+
+
+def _apply_combine_parameter_expectations(
+    circuit_name: str,
+    device: Any,
+    device_class: Any,
+    expectations: Sequence[tuple[str, float]],
+) -> list[dict[str, Any]]:
+    """Overwrite, in place, every parameter of `device` that disagrees with
+    its expected value beyond floating-point tolerance, and describe each
+    correction for the `device.combine_parameter_corrected` entry's
+    ``details.corrected[]``."""
+    corrected: list[dict[str, Any]] = []
+    for name, expected_value in expectations:
+        actual_value = device.parameter(name)
+        if abs(actual_value - expected_value) <= _combine_parameter_tolerance(
+            expected_value
+        ):
+            continue
+        device.set_parameter(name, expected_value)
+        corrected.append(
+            {
+                "circuit": circuit_name,
+                "device": device.name or None,
+                "class": device_class.name,
+                "parameter": name,
+                "before": actual_value,
+                "after": expected_value,
+            }
+        )
+    return corrected
+
+
+def _correct_combine_parameters(
     pre_combine_netlist: Any,
     netlist: Any,
     side: str,
     *,
     circuit_names: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Repair a capacitor device's `C` parameter left inconsistent by
-    `Netlist.combine_devices()` (issue #1497).
+    """Repair a combined device's parameters left inconsistent by
+    `Netlist.combine_devices()` (issues #1497, #2374).
 
-    Because a parallel capacitor's `C` is mathematically a simple per-device
-    sum, the total `C` summed across every capacitor device sharing one
-    (circuit, terminal-net-connectivity) identity is a conserved quantity
-    under `combine_devices()`: combining can only redistribute that total
-    across fewer surviving devices, never change it. This compares `netlist`
-    (just combined, potentially in place) against `pre_combine_netlist` (the
-    untouched snapshot taken before combining ran) and overwrites any
-    post-combine device's `C` with its pre-combine group's correctly-summed
-    total wherever the two disagree beyond floating-point tolerance --
-    independent of *why* KLayout's own combine got it wrong, and regardless
-    of whether that specific failure mode can be forced on demand (see
-    `tests/test_lvs.py`'s capacitor combine-correction tests, which simulate
-    it via a monkeypatched `combine_devices()` rather than a live
-    reproduction).
+    Every group of parallel devices sharing one (circuit, device class,
+    terminal-net-connectivity) identity has a *known* post-combine parameter
+    set, given only the group's pre-combine members -- see
+    :data:`_COMBINE_PARAMETER_CONSERVATION_RULES` for the per-class rules and
+    their provenance. A capacitor group's `C` is a conserved total (combining
+    can only redistribute it across fewer surviving devices, never change
+    it); a parallel bipolar array's emitter parameters (`AE`/`PE`/`NE`) are
+    likewise totals, while its shared base/collector region parameters
+    (`AB`/`PB`/`AC`/`PC`) stay at the array's single common value.
+
+    This compares `netlist` (just combined, potentially in place) against
+    `pre_combine_netlist` (the untouched snapshot taken before combining ran)
+    and overwrites any post-combine parameter that disagrees with its group's
+    rule beyond floating-point tolerance -- independent of *why* KLayout's
+    own combine got it wrong, and regardless of whether that specific failure
+    mode can be forced on demand (see `tests/test_lvs.py`'s combine-
+    correction tests, which simulate both reported shapes via a
+    monkeypatched `combine_devices()` rather than a live reproduction).
+
+    Only groups that actually **folded to a single surviving device** are
+    checked. A group KLayout left uncombined -- because combining was
+    restricted away from its class by a list-valued
+    ``options.combine_devices`` (issue #1370), or because it is a lone
+    device to begin with -- keeps more than one post-combine device under its
+    key, and asserting a group *total* against each of those individually
+    would corrupt correct values rather than repair wrong ones. That
+    single-survivor condition is exactly the shape both reported failures
+    take (issue #1497's folded capacitor group, issue #2374's folded bipolar
+    array), so nothing this check exists to catch is given up by it.
 
     Called only when `_combine_devices_safely` reported success (`None`) on
     both sides -- a hard combine failure already rolls both sides back to
@@ -3832,12 +4082,12 @@ def _correct_capacitor_combine_parameters(
 
     Returns a `severity: "warning"` `mismatches[]` entry
     (:data:`CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED`) naming every
-    corrected device, or `None` when every post-combine `C` already matched
-    its pre-combine group's total (the expected, common case: this is a
-    defensive invariant check applied unconditionally, not a response to a
-    failure this module has observed directly against its own synthetic
-    netlists -- see this module's docstring / issue #1497 for the
-    investigation).
+    corrected `(device, parameter)` pair, or `None` when every post-combine
+    parameter already agreed with its pre-combine group (the expected, common
+    case: this is a defensive invariant check applied unconditionally, not a
+    response to a failure this module has observed directly against its own
+    synthetic netlists -- see this module's docstring / issues #1497 and
+    #2374 for the investigations).
 
     ``circuit_names`` (issue #1557): restricts the post-combine scan to just
     these circuit names -- ``options.combine_devices_per_circuit``'s own
@@ -3845,67 +4095,52 @@ def _correct_capacitor_combine_parameters(
     path (which always passes ``None``, the default, and scans every
     circuit), only wants this check applied to the circuit(s) it actually
     combined *cleanly*. A circuit this ran over unnecessarily would be a
-    no-op anyway (its post-combine `C` already equals its own pre-combine
-    sum, since nothing touched it), but the explicit restriction keeps a
-    circuit whose combine was reported incomplete untouched too, matching
-    this function's own docstring contract ("called only when ... reported
-    success") even though nothing here rolls an incomplete per-circuit
-    combine back the way the whole-netlist symmetric degrade does.
+    no-op anyway (its post-combine parameters already agree with their own
+    pre-combine groups, since nothing touched them), but the explicit
+    restriction keeps a circuit whose combine was reported incomplete
+    untouched too, matching this function's own docstring contract ("called
+    only when ... reported success") even though nothing here rolls an
+    incomplete per-circuit combine back the way the whole-netlist symmetric
+    degrade does.
     """
     import klayout.db as kdb_module
 
-    expected = _capacitor_c_sums(pre_combine_netlist, kdb_module)
-    classes = _capacitor_device_classes(kdb_module)
+    rules = _combine_conservation_rules(kdb_module)
+    expected = _combine_parameter_expectations(pre_combine_netlist, rules)
+    survivors = _combine_group_survivors(netlist, rules, circuit_names)
+
     corrected: list[dict[str, Any]] = []
-    for circuit in netlist.each_circuit():
-        if circuit_names is not None and circuit.name not in circuit_names:
+    for key, circuit_name, device, device_class, summed, preserved in survivors:
+        group = expected.get(key)
+        if group is None:
+            # Defensive only: combining can only merge existing pre-combine
+            # connectivity groups, never invent a new one, so every
+            # post-combine key should already be present above.
             continue
-        for device in circuit.each_device():
-            device_class = device.device_class()
-            if not isinstance(device_class, classes):
-                continue
-            key = _capacitor_combine_group_key(circuit.name, device, device_class)
-            expected_c = expected.get(key)
-            if expected_c is None:
-                # Defensive only: combining can only merge existing
-                # pre-combine connectivity groups, never invent a new one,
-                # so every post-combine key should already be present above.
-                continue
-            actual_c = device.parameter("C")
-            # A relative tolerance, floored by a tiny absolute term for the
-            # `expected_c == 0` edge case -- *not* `1e-15` (a plausible
-            # femtofarad-scale `C` value in its own right, which would mask
-            # exactly the single-instance-vs-summed-total discrepancy this
-            # check exists to catch, e.g. `1e-15` vs. a summed `2e-15`).
-            tolerance = max(1e-21, abs(expected_c) * 1e-9)
-            if abs(actual_c - expected_c) > tolerance:
-                device.set_parameter("C", expected_c)
-                corrected.append(
-                    {
-                        "circuit": circuit.name,
-                        "device": device.name or None,
-                        "class": device_class.name,
-                        "before": actual_c,
-                        "after": expected_c,
-                    }
-                )
+        corrected += _apply_combine_parameter_expectations(
+            circuit_name,
+            device,
+            device_class,
+            _combine_expected_values(group, summed, preserved),
+        )
 
     if not corrected:
         return None
 
     names = ", ".join(
-        f"{entry['circuit']}/{entry['device'] or '<unnamed>'} "
+        f"{entry['circuit']}/{entry['device'] or '<unnamed>'}.{entry['parameter']} "
         f"({entry['before']!r} -> {entry['after']!r})"
         for entry in corrected
     )
     return _mismatch(
         CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED,
         "warning",
-        "options.combine_devices produced one or more capacitor devices "
-        "whose combined 'C' parameter did not equal the pre-combine sum of "
-        "the parallel group KLayout's own Netlist.combine_devices() folded "
-        f"them from, on the {side} netlist -- corrected in place to the "
-        "pre-combine sum (see docs/cli/lvs.md, "
+        "options.combine_devices produced one or more combined devices whose "
+        "parameters did not agree with the parallel group KLayout's own "
+        "Netlist.combine_devices() folded them from (a summed parameter not "
+        "equal to the group's pre-combine total, or a shared-region "
+        f"parameter not equal to the group's common value), on the {side} "
+        "netlist -- corrected in place (see docs/cli/lvs.md, "
         f"'device.combine_parameter_corrected'): {names}",
         side,
         details={"corrected": corrected},

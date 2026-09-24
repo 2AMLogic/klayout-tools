@@ -14,6 +14,46 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2374, `klt lvs` `options.combine_devices` — additive, **no**
+  `schema_version` bump: no category is added or removed, and the existing
+  `device.combine_parameter_corrected` entry's `details.corrected[]` objects
+  gain one new key, `parameter`): `options.combine_devices: true` could
+  report a **nondeterministic** verdict — `status: "match"` on ~76% of runs
+  and a false `status: "mismatch"` with a dozen `device.property` findings on
+  the rest, against byte-identical inputs, the same request document, and the
+  same build. KLayout's own `Netlist.combine_devices()` groups combination
+  candidates in an order derived from raw heap addresses, so a freshly
+  allocated `Netlist.dup()` copy walks a parallel
+  `DeviceClassBJT3Transistor` array in a different order and, on ~24% of
+  copies, lands in a different accumulation branch that returns **normally**
+  with the array's parameter accumulation *inverted*: `AE`/`NE` (which the
+  correct fold sums) left at a single instance's value, and `AB`/`PB`/`AC`/
+  `PC` (which the correct fold leaves at the array's shared value) summed
+  instead. No exception is raised, so #1185's retry budget had no signal to
+  act on and no `device.combine_incomplete` warning was emitted. #1185's own
+  mitigation made this the *normal* path: the first attempt — the one whose
+  result is adopted — always ran against a `dup()` copy. Two changes:
+  - The adopted combine now runs directly against the netlist itself (0/1000
+    observed failures), exactly as before #1185. Only the retries — reached
+    solely when that first attempt raised the internal-consistency
+    `RuntimeError` #466/#1185 already degrade gracefully on — resample
+    against independent copies, and those copies are taken from a pristine
+    pre-combine snapshot rather than from the partially-merged netlist, so
+    #1185's "every attempt is an independent trial" property is preserved.
+    The retry budget, its `options.combine_devices_max_attempts` knob, the
+    `device.combine_incomplete` warning, and #1370's symmetric degrade are
+    all unchanged.
+  - #1497's post-combine capacitor `C` sum-conservation check is generalised
+    into a per-device-class parameter-conservation check covering capacitors
+    (`C` sums) and bipolars (`AE`/`PE`/`NE` sum; `AB`/`PB`/`AC`/`PC` stay at
+    the group's shared value), so a mis-accumulation is corrected in place
+    and disclosed as a `device.combine_parameter_corrected` warning whichever
+    attempt produced it — never adopted silently. The check only asserts
+    against a group that actually folded to a single surviving device, and
+    only for classes whose every combination is a parallel fold with a known
+    rule (MOS transistors and resistors are never inspected). Each
+    `details.corrected[]` entry now names the `parameter` it corrected
+    alongside the existing `circuit`/`device`/`class`/`before`/`after`.
 - **Fixed** (#2373, `klt lvs --engine netgen` binary resolution — additive,
   **no** `schema_version` bump: one new always-present `environment` key,
   `netgen_binary`): the netgen engine invoked the hardcoded binary name
