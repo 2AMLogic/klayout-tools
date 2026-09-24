@@ -216,6 +216,15 @@ def _abstract_cell_mask_layers(deck: ExtractionDeck) -> set[tuple[int, int]]:
       :func:`_resolve_abstract_cell_pins` reads a pin's name and access point
       directly off these, in the cell's own (otherwise-erased) definition.
 
+    ``tap`` *is* erased by this set, but its well-tie half is separately
+    re-derived as a pure connectivity bridge from the pre-erasure geometry
+    (:func:`_abstract_cell_well_tie_cover`, issue #2398) -- without it the
+    ``nwell`` conductor #1911/#2082 restores has no drawn path to the
+    surviving ``contact``/``metals`` stack, so a macro's body pin binds to an
+    isolated island. Erasing the layer here and restoring only that slice
+    keeps ``tap``'s device-recognition roles (diode recognition, the
+    derived-tap ``active`` split) out of the black box.
+
     A resistor/capacitor whose recognition layer happens to be one of the
     deck's own ``metals`` (a real but rare deck configuration) is a known,
     documented gap: that layer is never erased (it is routing), so such a
@@ -285,6 +294,10 @@ def _abstract_cell_body_identity_cover(
     well gaps; no pin names or bounding boxes are used to invent continuity.
     Active/poly and other device-recognition layers remain erased, so this
     does not reintroduce devices or internal signal ties into black boxes.
+
+    The restored well conductor is only *reachable* from the parent when
+    something still bridges it to the surviving contact/metal stack --
+    :func:`_abstract_cell_well_tie_cover` captures that bridge (issue #2398).
     """
     import klayout.db as kdb
 
@@ -309,6 +322,152 @@ def _abstract_cell_body_identity_cover(
         return cover.merged()
 
     return cover_for(deck.nwell), cover_for(deck.substrate_isolation)
+
+
+def _abstract_cell_well_tie_cover(
+    layout: kdb.Layout,
+    deck: ExtractionDeck,
+    instances: list[tuple[int, kdb.ICplxTrans]],
+) -> kdb.Region:
+    """The **well-tie conductor** cover every ``--abstract-cells`` instance
+    contributes, in top-cell coordinates -- issue #2398.
+
+    Must be computed **before** :func:`_erase_abstracted_cell_geometry`
+    mutates ``layout``, exactly like
+    :func:`_abstract_cell_body_identity_cover` (whose call site this shares).
+
+    **Why the restored well is not enough on its own.** #1911/#2082 restore an
+    abstracted cell's ``deck.nwell`` as both a body-identity classification
+    region and a real conductor, so a body pin declared by a ``well_label``
+    text probes onto a well island rather than onto nothing. But a macro that
+    exposes its body terminal the ordinary way -- one well tie inside the
+    well, contacted up through the cell's own local interconnect to a landing
+    pad the parent routes to (``tap`` -> ``contact`` -> ``metals[0]`` -> ...)
+    -- has its ``tap`` erased by :func:`_abstract_cell_mask_layers`, which is
+    the *only* drawn conductor joining that restored well island to the
+    surviving contact/metal stack. The ``contact`` cut then lands on nothing,
+    the well island is cut off, and the black box's body pin binds to an
+    isolated single-terminal net the parent never reaches -- while a flat
+    extraction of the same layout resolves the very same pin onto the
+    parent's supply net. Downstream, ``klt lvs`` reports the macro as an
+    unmatched subcircuit plus an unmatched layout net, for a layout that is
+    physically correct.
+
+    This captures just that bridge: whatever geometry the deck's own tap
+    mechanism recognises as a *tie* inside each matched instance, unioned
+    across instances in top-cell coordinates. Both mechanisms
+    :class:`~klayout_tools.decks.ExtractionDeck` supports are covered:
+
+    - a **drawn** ``deck.tap`` layer (sky130's ``tap.drawing``) -- the shapes
+      themselves;
+    - a **derived** tie for a deck with no drawn tap layer (issue #1084 --
+      gf180mcu, sg13g2/sg13cmos5l): the ``tap_nplus``-covered diffusion
+      slice, minus ``poly``, mirroring ``_extract_netlist``'s own
+      ``(tap_nplus_region & active & nwell_body_cover) - poly`` well-tie
+      half. Only the ``nplus`` (well-tie) implant is read here, never
+      ``tap_pplus``: a p+ diffusion *inside* an nwell is a PMOS
+      source/drain, not a tie, and restoring it as a conductor would short
+      that device's terminals onto the well.
+
+    The caller intersects this with ``nwell_body_cover`` before using it
+    (:func:`~klayout_tools.extract._extract_netlist`), which is what makes
+    this the **well**-tie half rather than all ties: the substrate-tie half
+    (``tap - nwell_body_cover``, issue #490) is deliberately left erased --
+    it reaches its net through ``connect_global(deck.substrate_net)``, not
+    through drawn geometry, so restoring it inside a black box would merge
+    the design-wide substrate net through a cell whose interior is by
+    construction unverifiable. Because the returned region is used only
+    after that intersection, it can never change any tie's well-vs-substrate
+    *classification* (``tap_substrate`` subtracts exactly the region this is
+    restricted to).
+
+    Restored purely as a **connectivity bridge**, on its own registered
+    layer: it is never folded into ``tap``/``active``, so it feeds no device
+    recognition (the tap layer also drives diode recognition and the
+    derived-tap ``active`` split) and no probe-layer role -- an abstracted
+    cell stays device-free, and :data:`_BODY_IDENTITY_PROBE_ROLES`' fallback
+    exclusion (issue #2142) is untouched.
+
+    **It cannot over-connect.** Every polygon returned here is geometry a
+    *flat* extraction of the same layout already registers as a conductor
+    tied to both ``nwell`` and ``contact``, so any net merge this restores is
+    one flat extraction performs too -- the restored connectivity is a subset
+    of flat connectivity, never a superset. Two nets a flat extraction keeps
+    apart therefore stay apart: a macro whose landing pad no parent wire
+    reaches still resolves its body pin onto an island, exactly as before.
+    """
+    import klayout.db as kdb
+
+    def tie_for(cell_index: int) -> kdb.Region:
+        cell = layout.cell(cell_index)
+        if deck.tap is not None:
+            return _region(layout, cell, deck.tap)
+        if deck.tap_nplus is None:
+            return kdb.Region()
+        return (
+            _region(layout, cell, deck.tap_nplus) & _region(layout, cell, deck.active)
+        ) - _region(layout, cell, deck.poly)
+
+    cover = kdb.Region()
+    # One read per *cell type*, reused across every instance of it -- the
+    # same caching `_abstract_cell_body_identity_cover` does.
+    local: dict[int, kdb.Region] = {}
+    for cell_index, trans in instances:
+        shapes = local.get(cell_index)
+        if shapes is None:
+            shapes = tie_for(cell_index)
+            local[cell_index] = shapes
+        cover += shapes.transformed(trans)
+    return cover.merged()
+
+
+def _connect_abstract_well_tie(
+    l2n: kdb.LayoutToNetlist,
+    nwell: kdb.Region,
+    nwell_body_cover: kdb.Region,
+    contact: kdb.Region,
+    well_tie_cover: kdb.Region | None,
+) -> kdb.Region:
+    """Register :func:`_abstract_cell_well_tie_cover`'s bridge and wire it
+    into ``l2n``'s connectivity graph -- issue #2398.
+
+    Returns the registered region, which the caller must keep a reference to
+    for ``l2n``'s lifetime (the same contract every other region registered
+    in :func:`~klayout_tools.extract._extract_netlist` is held to).
+
+    ``well_tie_cover`` is the caller's pre-erasure capture, or ``None`` when
+    no ``--abstract-cells`` pattern matched. It is intersected with
+    ``nwell_body_cover`` here, which is what makes this the **well**-tie half
+    -- the exact complement of ``tap_substrate``'s ``tap - nwell_body_cover``
+    -- so restoring it can never change any tie's well-vs-substrate
+    classification, and a macro's own *substrate* tie stays erased (it
+    reaches its net through ``connect_global(deck.substrate_net)``, not
+    through drawn geometry).
+
+    Mirrors the ``tap``/``nwell``/``contact`` triangle
+    :func:`~klayout_tools.extract._extract_netlist` already draws for a
+    surviving tap, and nothing else: the bridge is its own registered,
+    ordinary (never device-terminal) layer, so it feeds no device
+    recognition and is not one of :func:`_wire_abstract_cells`'s probe-layer
+    roles. No connection to ``tap`` itself is needed -- both meet ``nwell``
+    and ``contact``, which is what merges their nets.
+
+    A no-op for a run with no ``--abstract-cells`` (or whose macros draw no
+    tie at all): nothing is registered and no ``connect`` is issued, so
+    ``l2n`` sees the exact same layer set as before this fix.
+    """
+    import klayout.db as kdb
+
+    if well_tie_cover is None:
+        return kdb.Region()
+    well_tie = well_tie_cover & nwell_body_cover
+    if well_tie.is_empty():
+        return well_tie
+    l2n.register(well_tie, "abstract_well_tie")
+    l2n.connect(well_tie)
+    l2n.connect(nwell, well_tie)
+    l2n.connect(well_tie, contact)
+    return well_tie
 
 
 def _abstract_cell_global_net_ports(

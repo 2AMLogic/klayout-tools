@@ -797,6 +797,37 @@ Device-recognition geometry, including active/poly and internal signal
 ties, remains erased; retaining a well does not restore devices inside a
 black box.
 
+**A macro's own well tie is restored as a connectivity bridge (issue
+#2398).** Retaining the well *conductor* is only half of what a body pin
+needs. A macro that exposes its body terminal the ordinary way gives that
+well exactly one external landing through a well tie drawn **inside** the
+macro (`tap` → `contact` → local metal → a landing pad the parent routes
+to) — and `tap` is a device-recognition layer, so erasure takes it away.
+The `contact` cut then lands on nothing, the retained well becomes an
+island, and a `well_label`-declared body pin binds to an isolated
+single-terminal net the parent never reaches, while a flat extraction of
+the same layout resolves that same pin onto the parent's supply net. A
+downstream `klt lvs` then reports the macro as an unmatched subcircuit plus
+an unmatched layout net, for a design that is physically correct.
+
+The **well-tie half** of each matched instance's pre-erasure tie geometry is
+therefore restored alongside the well cover, for both tap mechanisms a deck
+can declare: a drawn `tap` layer (sky130), or the `tap_nplus`-inside-`nwell`
+derivation used by a deck with no drawn tap layer (gf180mcu, sg13g2,
+sg13cmos5l). It is a **bridge only** — registered as its own conductor
+joined to `nwell` and `contact`, deliberately kept *off* `tap` itself, so it
+feeds no device recognition (diode recognition, the derived-tap `active`
+split) and is not a pin-probe target; `#2142`'s rule that `nwell`/`tap` are
+never a cross-layer fallback probe answer is unaffected. Only the well-tie
+half is restored: the substrate-tie half (tie geometry outside every well)
+reaches its net through the deck's synthesized substrate global rather than
+through drawn geometry, so restoring it inside a black box would merge the
+design-wide substrate net through a cell whose interior is unverifiable by
+construction. And because the restored geometry is a subset of what a flat
+extraction already joins to `nwell`/`contact`, this can never merge two nets
+a flat extraction of the same layout keeps apart — a macro whose landing pad
+no parent wire actually reaches still resolves its body pin onto an island.
+
 A newly extracted SPICE netlist therefore carries the resolved well
 connectivity directly. Standalone SPICE files produced by older versions
 carry no abstraction metadata and must be re-extracted to recover it; LVS

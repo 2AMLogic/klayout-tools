@@ -48,6 +48,38 @@ not `klt --version`, if you need to detect this kind of drift. See
   reference-side device, and stays silent for a reference naming exactly one
   class of a family (the normal, supported `deck_options` case). See
   `docs/cli/lvs.md`'s "`device.class_family_unsatisfiable`" section.
+- **Fixed** (#2398, `klt extract --abstract-cells` — no `schema_version`
+  bump: no field changes shape, only which net an abstracted macro's body
+  pin is bound to): a macro whose **only** external well access is a well
+  tie drawn inside the macro (`tap` → `contact` → local metal → a landing
+  pad the parent routes to) had its `well_label`-declared body pin bound to
+  an isolated, single-terminal net instead of the parent's supply net — even
+  though a flat extraction of the same layout resolved that pin correctly,
+  so a downstream `klt lvs` against a hierarchical reference reported the
+  macro as an unmatched subcircuit plus an unmatched layout net for a
+  physically correct design. #1911/#2082 restore an abstracted cell's
+  `nwell` as a conductor so a body pin has something to probe, but `tap` is
+  a device-recognition layer and stays erased — and inside such a macro that
+  tie is the only drawn conductor joining the restored well to the
+  `contact`/metal stack abstraction deliberately leaves intact, so the
+  `contact` cut landed on nothing and the well was cut off. The **well-tie
+  half** of each matched instance's pre-erasure tie geometry is now captured
+  alongside the well cover and registered as its own conductor joined to
+  `nwell` and `contact`, for both tap mechanisms a deck can declare (a drawn
+  `tap` layer, or the `tap_nplus`-inside-`nwell` derivation of a deck with
+  no drawn tap layer). It is a bridge only: kept off `tap` itself, so it
+  feeds no device recognition (diode recognition, the derived-tap `active`
+  split) and is not a pin-probe target — #2142's rule that `nwell`/`tap` are
+  never a cross-layer fallback probe answer is untouched. Only the well-tie
+  half is restored; the substrate-tie half reaches its net through the
+  deck's synthesized substrate global rather than drawn geometry, so
+  restoring it inside a black box would merge the design-wide substrate net.
+  Because the restored geometry is a subset of what a flat extraction
+  already joins to `nwell`/`contact`, it can never merge two nets a flat
+  extraction of the same layout keeps apart: a macro whose landing pad no
+  parent wire reaches still resolves its body pin onto an island. See
+  `docs/cli/extract.md`'s "A macro's own well tie is restored as a
+  connectivity bridge".
 - **Added** (#2389, `klt erc`, additive — **no** `schema_version` bump: one
   new `erc_coverage` key, no new spec key, no new finding kind, and no
   change to any existing field's value for any input): a new
