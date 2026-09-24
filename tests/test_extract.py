@@ -6276,6 +6276,39 @@ def test_gf180mcu_unmarked_metal1_bar_is_not_a_resistor(tmp_path):
     assert report["device_counts"] == {}
 
 
+#: Every caller-selectable deck option gf180mcu declares, mapped to the
+#: flavour the deck silently applies when `--deck-option` does not pin it
+#: (issue #2394). Transcribed from the deck's own entries -- `ppolyf_u_1k`
+#: (`POLY_RES = '1k'`), `cap_mim_2f0_m4m5_noshield` (the PDK's own default
+#: MiM density) and `tm9k` (`METAL_TOP = '9K'`) -- deliberately as literals
+#: rather than read back out of `ExtractionDeck.resolved_option_values`, so
+#: these tests check the provenance echo against the PDK's documented
+#: defaults rather than against the resolver's own answer.
+_GF180MCU_DEFAULT_DECK_OPTIONS = {
+    "metal_top": "9K",
+    "mim_cap": "cap_mim_2f0_m4m5_noshield",
+    "poly_res": "1k",
+}
+
+
+def _assert_resolved_deck_options(report, **explicitly_passed):
+    """Assert `report`'s `provenance.deck` records gf180mcu's *fully
+    resolved* option set (issue #2394) -- every declared key, with
+    `explicitly_passed` overriding the deck default -- plus the
+    `options_explicit` markers and an `options_hash` over the resolved
+    values.
+
+    Before #2394 only `explicitly_passed` appeared at all, so a run that
+    took a default was provenance-identical to one against a deck with no
+    selectable options."""
+    deck = report["provenance"]["deck"]
+    assert deck["options"] == {**_GF180MCU_DEFAULT_DECK_OPTIONS, **explicitly_passed}
+    assert deck["options_explicit"] == {
+        key: key in explicitly_passed for key in _GF180MCU_DEFAULT_DECK_OPTIONS
+    }
+    assert deck["options_hash"].startswith("sha256:")
+
+
 @pytest.mark.parametrize(
     ("value", "device_class", "sheet_rho"),
     [
@@ -6309,7 +6342,7 @@ def test_gf180mcu_metal_top_deck_option_selects_flavour(
     (device,) = report["devices"]
     assert device["class"] == device_class
     assert device["params"]["r_ohm"] == pytest.approx(_METAL_RES_SQUARES * sheet_rho)
-    assert report["provenance"]["deck"]["options"] == {"metal_top": value}
+    _assert_resolved_deck_options(report, metal_top=value)
 
 
 def test_gf180mcu_metal_top_deck_option_9k_matches_omitted_default(tmp_path):
@@ -6328,8 +6361,16 @@ def test_gf180mcu_metal_top_deck_option_9k_matches_omitted_default(tmp_path):
 
     assert baseline["netlist_sha256"] == explicit["netlist_sha256"]
     assert baseline["device_counts"] == explicit["device_counts"]
-    assert "options" not in baseline["provenance"]["deck"]
-    assert explicit["provenance"]["deck"]["options"] == {"metal_top": "9K"}
+    # Issue #2394: the two records now agree on *what was extracted* -- both
+    # resolve `metal_top=9K`, and their `options_hash` matches -- and differ
+    # only in who chose it. Before #2394 the baseline recorded no `options`
+    # key at all, so "took the 9K default" was unreadable from the record.
+    _assert_resolved_deck_options(baseline)
+    _assert_resolved_deck_options(explicit, metal_top="9K")
+    assert (
+        baseline["provenance"]["deck"]["options_hash"]
+        == explicit["provenance"]["deck"]["options_hash"]
+    )
 
 
 def test_gf180mcu_metal_top_deck_option_invalid_value_is_extract_error(tmp_path):
@@ -6486,7 +6527,7 @@ def test_gf180mcu_poly_res_deck_option_selects_flavour(
     assert device["class"] == device_class
     assert device["params"]["r_ohm"] == pytest.approx(_RES_SQUARES * sheet_rho)
     assert device["nets"]["w"] == get_extraction_deck("gf180mcu").substrate_net
-    assert report["provenance"]["deck"]["options"] == {"poly_res": value}
+    _assert_resolved_deck_options(report, poly_res=value)
 
 
 def test_gf180mcu_poly_res_deck_option_1k_matches_omitted_default(tmp_path):
@@ -6509,9 +6550,22 @@ def test_gf180mcu_poly_res_deck_option_1k_matches_omitted_default(tmp_path):
 
     assert baseline["netlist_sha256"] == explicit["netlist_sha256"]
     assert baseline["device_counts"] == explicit["device_counts"]
-    # The only difference is the additive `provenance.deck.options` echo.
-    assert "options" not in baseline["provenance"]["deck"]
-    assert explicit["provenance"]["deck"]["options"] == {"poly_res": "1k"}
+    # Issue #2394: both records now say `poly_res=1k` -- the omitted run
+    # because the deck resolved it, the explicit run because the caller
+    # pinned it -- and `options_explicit` is the only thing that tells them
+    # apart. Before #2394 the omitted run carried no `options` key at all,
+    # which read as "this deck has no selectable options" rather than "it
+    # silently took the 1k one".
+    _assert_resolved_deck_options(baseline)
+    _assert_resolved_deck_options(explicit, poly_res="1k")
+    assert baseline["provenance"]["deck"]["options_explicit"]["poly_res"] is False
+    assert explicit["provenance"]["deck"]["options_explicit"]["poly_res"] is True
+    # ...and the hash covers the resolved *values* only, so two runs that
+    # extracted identically compare equal on it (issue #2394's pin field).
+    assert (
+        baseline["provenance"]["deck"]["options_hash"]
+        == explicit["provenance"]["deck"]["options_hash"]
+    )
 
 
 def test_gf180mcu_poly_res_deck_option_invalid_value_is_extract_error(tmp_path):
@@ -6530,6 +6584,154 @@ def test_gf180mcu_poly_res_deck_option_invalid_value_is_extract_error(tmp_path):
             output=str(tmp_path / "bad.spice"),
             deck_options={"poly_res": "4k"},
         )
+
+
+# --------------------------------------------------------------------------- #
+# Resolved-with-defaults deck-option provenance (issue #2394): what the
+# record says about the options a run *did not* pass, and the `options_hash`
+# that pins the resolved set.
+# --------------------------------------------------------------------------- #
+
+
+def test_deck_options_resolved_with_defaults_when_none_passed(tmp_path):
+    """A run that passes no `--deck-option` at all still records every
+    option gf180mcu declares, at the value the deck silently resolved, each
+    flagged `explicit: false` (issue #2394).
+
+    This is the record the original friction report could not read: the
+    resistance/device class in the payload is *one option's* answer, and
+    before this the provenance block said nothing at all about which."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / "defaulted.gds",
+    )
+    report = run_extract(path, "gf180mcu", output=str(tmp_path / "defaulted.spice"))
+
+    deck = report["provenance"]["deck"]
+    assert deck["options"] == {
+        "metal_top": "9K",
+        "mim_cap": "cap_mim_2f0_m4m5_noshield",
+        "poly_res": "1k",
+    }
+    assert deck["options_explicit"] == {
+        "metal_top": False,
+        "mim_cap": False,
+        "poly_res": False,
+    }
+    # ...and the recorded `poly_res` really is the flavour the payload was
+    # extracted at, not a label pasted on after the fact.
+    assert report["device_counts"] == {"ppolyf_u_1k": 1}
+
+
+def test_deck_without_selectable_options_omits_the_option_fields(tmp_path):
+    """A deck that declares no `flavour_option` at all (sky130) keeps its
+    `provenance.deck` block exactly as it was -- no `options`,
+    `options_explicit` or `options_hash` key (issue #2394).
+
+    Resolved-with-defaults only ever *adds* information for a deck that has
+    options to resolve; "this deck has no selectable options" stays readable
+    as the absence of the field."""
+    path = _write_gds(_make_poly_resistor_layout("sky130"), tmp_path / "sky130.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "sky130.spice"))
+
+    assert set(report["provenance"]["deck"]) == {"name", "content_hash", "released"}
+
+
+def test_resolved_option_values_reads_the_wired_flavour_off_the_deck():
+    """`ExtractionDeck.resolved_option_values` answers the same question
+    either side of `get_extraction_deck`'s flavour rewrite (issue #2394):
+    the registered deck reports each key's silent default, a resolved deck
+    reports what that call actually selected."""
+    from klayout_tools.decks import resolve_deck_option_values
+
+    assert get_extraction_deck("gf180mcu").resolved_option_values == {
+        "metal_top": "9K",
+        "mim_cap": "cap_mim_2f0_m4m5_noshield",
+        "poly_res": "1k",
+    }
+    assert get_extraction_deck(
+        "gf180mcu", {"poly_res": "2k"}
+    ).resolved_option_values == {
+        "metal_top": "9K",
+        "mim_cap": "cap_mim_2f0_m4m5_noshield",
+        "poly_res": "2k",
+    }
+    # ...and the by-name wrapper the provenance block calls agrees.
+    assert resolve_deck_option_values("gf180mcu", {"metal_top": "30K"}) == {
+        "metal_top": "30K",
+        "mim_cap": "cap_mim_2f0_m4m5_noshield",
+        "poly_res": "1k",
+    }
+    assert resolve_deck_option_values("sky130") == {}
+
+
+def test_resolved_option_values_skips_an_entry_with_no_matching_flavour():
+    """A hypothetical deck entry that declares a `flavour_option` but whose
+    `flavours` list contains no entry matching its own `name` has no value
+    to report -- it contributes no key, rather than a fabricated one."""
+    import dataclasses
+
+    from klayout_tools.decks import ExtractionDeck, ResistorDevice, ResistorFlavour
+
+    orphan = ResistorDevice(
+        name="not_in_its_own_flavour_list",
+        body=(30, 0),
+        marker=(110, 5),
+        sheet_rho_ohm_sq=1.0,
+        flavour_option="orphan_option",
+        flavours=(
+            ResistorFlavour(value="a", name="some_other_name", sheet_rho_ohm_sq=1.0),
+        ),
+    )
+    deck = dataclasses.replace(
+        get_extraction_deck("sky130"), resistors=(orphan,), capacitors=()
+    )
+    assert isinstance(deck, ExtractionDeck)
+    assert deck.resolved_option_values == {}
+
+
+def test_deck_options_hash_pins_resolved_values_not_how_they_were_chosen(tmp_path):
+    """`provenance.deck.options_hash` compares equal for two runs that
+    resolved the same option values and differs when a value differs, so a
+    pinned record can be gated option-for-option with a string compare
+    instead of a structural dict diff (issue #2394)."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / "hash.gds",
+    )
+    defaulted = run_extract(path, "gf180mcu", output=str(tmp_path / "a.spice"))
+    pinned_same = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "b.spice"),
+        deck_options={"poly_res": "1k"},
+    )
+    pinned_other = run_extract(
+        path,
+        "gf180mcu",
+        output=str(tmp_path / "c.spice"),
+        deck_options={"poly_res": "3k"},
+    )
+
+    assert (
+        defaulted["provenance"]["deck"]["options_hash"]
+        == pinned_same["provenance"]["deck"]["options_hash"]
+    )
+    assert (
+        defaulted["provenance"]["deck"]["options_hash"]
+        != pinned_other["provenance"]["deck"]["options_hash"]
+    )
+    # The hash is a sibling of `content_hash`, never folded into it -- that
+    # field still pins the deck *source*, which `klt deck resolve
+    # --content-hash` looks up in the released-deck history table.
+    assert (
+        defaulted["provenance"]["deck"]["content_hash"]
+        == pinned_other["provenance"]["deck"]["content_hash"]
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -6578,7 +6780,7 @@ def test_gf180mcu_mim_cap_deck_option_selects_flavour(
     assert device["params"]["c_f"] == pytest.approx(expected_c_f)
     assert device["params"]["area_um2"] == pytest.approx(100.0)
     assert device["params"]["perimeter_um"] == pytest.approx(40.0)
-    assert report["provenance"]["deck"]["options"] == {"mim_cap": value}
+    _assert_resolved_deck_options(report, mim_cap=value)
 
 
 def test_gf180mcu_mim_cap_deck_option_2f0_matches_omitted_default(tmp_path):
@@ -6597,11 +6799,14 @@ def test_gf180mcu_mim_cap_deck_option_2f0_matches_omitted_default(tmp_path):
 
     assert baseline["netlist_sha256"] == explicit["netlist_sha256"]
     assert baseline["device_counts"] == explicit["device_counts"]
-    # The only difference is the additive `provenance.deck.options` echo.
-    assert "options" not in baseline["provenance"]["deck"]
-    assert explicit["provenance"]["deck"]["options"] == {
-        "mim_cap": "cap_mim_2f0_m4m5_noshield"
-    }
+    # Issue #2394: both records resolve the same density; only
+    # `options_explicit` distinguishes the pinned run from the defaulted one.
+    _assert_resolved_deck_options(baseline)
+    _assert_resolved_deck_options(explicit, mim_cap="cap_mim_2f0_m4m5_noshield")
+    assert (
+        baseline["provenance"]["deck"]["options_hash"]
+        == explicit["provenance"]["deck"]["options_hash"]
+    )
 
 
 def test_gf180mcu_mim_cap_deck_option_invalid_value_is_extract_error(tmp_path):
@@ -6863,9 +7068,7 @@ def test_cli_deck_option_selects_mim_cap_flavour(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
 
     assert out["device_counts"] == {"cap_mim_1f5_m4m5_noshield": 1}
-    assert out["provenance"]["deck"]["options"] == {
-        "mim_cap": "cap_mim_1f5_m4m5_noshield"
-    }
+    _assert_resolved_deck_options(out, mim_cap="cap_mim_1f5_m4m5_noshield")
 
 
 @pytest.mark.parametrize("deck_name", ["sky130", "gf180mcu"])
@@ -6917,7 +7120,7 @@ def test_cli_deck_option_selects_flavour(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
 
     assert out["device_counts"] == {"ppolyf_u_2k": 1}
-    assert out["provenance"]["deck"]["options"] == {"poly_res": "2k"}
+    _assert_resolved_deck_options(out, poly_res="2k")
 
 
 def test_cli_deck_option_malformed_entry_is_a_clean_error(tmp_path, capsys):
@@ -18814,6 +19017,43 @@ def test_rerun_extract_report_detects_device_recognition_change(tmp_path):
         field.startswith("devices.") and field.endswith(".nets.b")
         for field in drifted_fields
     )
+
+
+def test_rerun_extract_report_replays_only_the_options_the_caller_pinned(tmp_path):
+    """`--rerun` replays a committed report's *explicitly pinned* deck
+    options only, never the silently-defaulted ones the resolved
+    `provenance.deck.options` mapping also carries since issue #2394.
+
+    Re-pinning a defaulted key would replay over exactly the
+    changed-deck-default drift this mode exists to surface, and the
+    resulting all-`true` `options_explicit` would itself register as drift
+    against the committed record."""
+    path = _write_gds(
+        _make_poly_resistor_layout(
+            "gf180mcu", extra=((62, 0, _RES_MARKED.enlarged(500, 500)),)
+        ),
+        tmp_path / "poly.gds",
+    )
+    report_path = tmp_path / "poly.extract.json"
+    _write_report(
+        report_path,
+        run_extract(
+            path,
+            "gf180mcu",
+            output=str(tmp_path / "poly.spice"),
+            deck_options={"poly_res": "3k"},
+        ),
+    )
+
+    result = rerun_extract_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+    assert result["fresh"]["provenance"]["deck"]["options_explicit"] == {
+        "metal_top": False,
+        "mim_cap": False,
+        "poly_res": True,
+    }
 
 
 def test_rerun_extract_report_excludes_volatile_provenance_fields(tmp_path):

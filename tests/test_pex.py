@@ -2797,9 +2797,19 @@ def test_run_pex_deck_options_threaded_through_to_extraction(tmp_path, monkeypat
     assert calls["n"] == 2
     assert report["pin_count_mismatch"] is None
     assert report["flat_dut_mismatch"] is None
-    # The resolved flavour is pinned in this run's own provenance echo.
-    assert report["provenance"]["deck"]["options"] == {
-        "mim_cap": "cap_mim_1f0_m4m5_noshield"
+    # The resolved flavour is pinned in this run's own provenance echo --
+    # alongside the keys `klt pex` did not pass, at the deck's own defaults
+    # and flagged as such (issue #2394).
+    deck = report["provenance"]["deck"]
+    assert deck["options"] == {
+        "metal_top": "9K",
+        "mim_cap": "cap_mim_1f0_m4m5_noshield",
+        "poly_res": "1k",
+    }
+    assert deck["options_explicit"] == {
+        "metal_top": False,
+        "mim_cap": True,
+        "poly_res": False,
     }
 
     # ... and the extracted netlist is exactly `klt extract --deck-option`'s.
@@ -2828,8 +2838,11 @@ def test_run_pex_without_deck_options_still_extracts_the_deck_default(
     tmp_path, monkeypatch
 ):
     """Backward-compatibility guard: omitting `deck_options` entirely
-    reproduces the pre-#1558 run exactly -- the deck's own default flavour,
-    and no `provenance.deck.options` key at all."""
+    reproduces the pre-#1558 run exactly -- the deck's own default flavour.
+
+    Issue #2394: `provenance.deck.options` now says which default that was
+    (`explicit: false` throughout) instead of omitting the key, so the
+    *extraction* is unchanged while the record of it is no longer silent."""
     from klayout_tools.extract import run_extract
 
     layout, request = _mim_pex_inputs(tmp_path)
@@ -2842,7 +2855,13 @@ def test_run_pex_without_deck_options_still_extracts_the_deck_default(
         output=str(tmp_path / "pex_extracted.spice"),
     )
 
-    assert "options" not in report["provenance"]["deck"]
+    deck = report["provenance"]["deck"]
+    assert deck["options"]["mim_cap"] == "cap_mim_2f0_m4m5_noshield"
+    assert deck["options_explicit"] == {
+        "metal_top": False,
+        "mim_cap": False,
+        "poly_res": False,
+    }
     default_flavour = run_extract(
         layout,
         "gf180mcu",

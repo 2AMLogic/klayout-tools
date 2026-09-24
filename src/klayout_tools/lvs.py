@@ -134,6 +134,7 @@ from ._provenance import (
     _klayout_version,
     _klt_version,
     build_provenance,
+    explicit_deck_options,
     sha256_file,
 )
 from ._report_verify import (
@@ -2113,6 +2114,13 @@ def run_lvs(request: str) -> dict[str, Any]:
             # shape exactly (`_deck_block` omits the key entirely when
             # `deck_options` is `None`/empty).
             deck_options=deck_options,
+            # Issue #2394: ...and, identically to `klt extract`, record the
+            # *fully resolved* option set (the deck's own defaults for every
+            # key `layout.deck_options` did not pin) plus `options_explicit`/
+            # `options_hash`. `layout_deck_name` is `None` for the
+            # pre-extracted `layout.netlist` shape, where `_deck_block`
+            # returns `None` and this has no effect.
+            resolve_deck_options=True,
             include_klayout_version_mismatch=True,
         ),
         "mismatches": mismatches,
@@ -2301,7 +2309,11 @@ def _reconstruct_lvs_request(committed: dict[str, Any]) -> dict[str, Any]:
     if has_deck:
         layout_spec["file"] = committed.get("layout")
         layout_spec["deck"] = deck["name"]
-        deck_options = deck.get("options")
+        # Issue #2394: replay only the options the *caller* pinned, not the
+        # resolved set `provenance.deck.options` now records -- re-pinning a
+        # silently-defaulted key would replay over exactly the deck-default
+        # change a rerun exists to surface as drift.
+        deck_options = explicit_deck_options(deck)
         if deck_options:
             layout_spec["deck_options"] = deck_options
     else:

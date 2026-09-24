@@ -94,6 +94,145 @@ def test_build_provenance_deck_name_without_resolvable_path():
 
 
 # --------------------------------------------------------------------------- #
+# Resolved deck options (issue #2394)
+# --------------------------------------------------------------------------- #
+#
+# `resolve_deck_options=True` (passed by `klt extract`/`klt lvs`, and by
+# `klt pex` through the former) records the *resolved* option set -- every
+# key the deck declares, defaults included -- plus which of those values the
+# caller pinned and a hash over the resolved values. Left `False` (`klt drc
+# --deck-var`, every other caller) the block stays exactly as it was.
+
+
+def test_deck_options_are_caller_only_without_resolution():
+    """`klt drc --engine klayout`'s `--deck-var` path: an external `.drc`
+    file has no declared option surface klt can enumerate, so the block
+    stays the pre-#2394 verbatim echo -- no `options_explicit`, no
+    `options_hash`."""
+    prov = _provenance.build_provenance(
+        deck_name="custom.drc", deck_path=None, deck_options={"feol": "true"}
+    )
+    assert prov["deck"]["options"] == {"feol": "true"}
+    assert "options_explicit" not in prov["deck"]
+    assert "options_hash" not in prov["deck"]
+
+
+def test_resolved_deck_options_fill_in_defaults_for_unpassed_keys():
+    prov = _provenance.build_provenance(
+        deck_name="gf180mcu",
+        deck_path=deck_source_path("gf180mcu"),
+        deck_options={"poly_res": "3k"},
+        resolve_deck_options=True,
+    )
+    assert prov["deck"]["options"] == {
+        "metal_top": "9K",
+        "mim_cap": "cap_mim_2f0_m4m5_noshield",
+        "poly_res": "3k",
+    }
+    assert prov["deck"]["options_explicit"] == {
+        "metal_top": False,
+        "mim_cap": False,
+        "poly_res": True,
+    }
+
+
+def test_resolved_deck_options_omitted_for_a_deck_that_declares_none():
+    """No regression for a deck with no `flavour_option` entries: absence of
+    the field keeps meaning "this deck has no selectable options"."""
+    prov = _provenance.build_provenance(
+        deck_name="sky130",
+        deck_path=deck_source_path("sky130"),
+        resolve_deck_options=True,
+    )
+    assert set(prov["deck"]) == {"name", "content_hash", "released"}
+
+
+def test_resolved_deck_options_survive_an_unresolvable_deck_name():
+    """Provenance is written after a successful run, so this cannot happen
+    in practice -- but a name the extraction registry does not know must
+    degrade to the pre-#2394 caller-only echo rather than raise out of a
+    completed verb."""
+    prov = _provenance.build_provenance(
+        deck_name="not-a-registered-deck",
+        deck_path=None,
+        deck_options={"poly_res": "2k"},
+        resolve_deck_options=True,
+    )
+    assert prov["deck"]["options"] == {"poly_res": "2k"}
+    assert prov["deck"]["options_explicit"] == {"poly_res": True}
+
+
+def test_deck_options_hash_covers_values_not_explicitness():
+    """Two runs that resolved the same values hash equal even though one
+    pinned a value the other defaulted to -- they extracted the same thing.
+    A differing *value* changes the hash."""
+    pinned = _provenance.build_provenance(
+        deck_name="gf180mcu",
+        deck_path=deck_source_path("gf180mcu"),
+        deck_options={"poly_res": "1k"},
+        resolve_deck_options=True,
+    )["deck"]
+    defaulted = _provenance.build_provenance(
+        deck_name="gf180mcu",
+        deck_path=deck_source_path("gf180mcu"),
+        resolve_deck_options=True,
+    )["deck"]
+    other = _provenance.build_provenance(
+        deck_name="gf180mcu",
+        deck_path=deck_source_path("gf180mcu"),
+        deck_options={"poly_res": "2k"},
+        resolve_deck_options=True,
+    )["deck"]
+
+    assert pinned["options_hash"].startswith("sha256:")
+    assert pinned["options_hash"] == defaulted["options_hash"]
+    assert pinned["options_explicit"] != defaulted["options_explicit"]
+    assert pinned["options_hash"] != other["options_hash"]
+    # `content_hash` still pins the deck *source* only -- folding options
+    # into it would break `klt deck resolve --content-hash`'s lookup against
+    # the released-deck history table for every optioned run.
+    assert pinned["content_hash"] == other["content_hash"]
+
+
+# --------------------------------------------------------------------------- #
+# explicit_deck_options (issue #2394) -- the `--rerun` replay filter
+# --------------------------------------------------------------------------- #
+
+
+def test_explicit_deck_options_returns_only_caller_pinned_keys():
+    deck_block = {
+        "name": "gf180mcu",
+        "options": {"metal_top": "9K", "poly_res": "3k"},
+        "options_explicit": {"metal_top": False, "poly_res": True},
+    }
+    assert _provenance.explicit_deck_options(deck_block) == {"poly_res": "3k"}
+
+
+def test_explicit_deck_options_none_when_everything_was_defaulted():
+    deck_block = {
+        "options": {"metal_top": "9K"},
+        "options_explicit": {"metal_top": False},
+    }
+    assert _provenance.explicit_deck_options(deck_block) is None
+
+
+def test_explicit_deck_options_treats_a_pre_2394_record_as_all_explicit():
+    """A report written before `options_explicit` existed recorded only
+    caller-passed keys, so every one of them was explicit -- such a report
+    must rerun exactly as it used to."""
+    assert _provenance.explicit_deck_options({"options": {"poly_res": "2k"}}) == {
+        "poly_res": "2k"
+    }
+
+
+@pytest.mark.parametrize(
+    "deck_block", [None, {}, {"options": None}, {"options": {}}, "not-a-mapping"]
+)
+def test_explicit_deck_options_none_for_a_block_with_no_options(deck_block):
+    assert _provenance.explicit_deck_options(deck_block) is None
+
+
+# --------------------------------------------------------------------------- #
 # klayout_version_mismatch (issue #1490)
 # --------------------------------------------------------------------------- #
 #
