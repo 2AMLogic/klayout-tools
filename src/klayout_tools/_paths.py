@@ -62,6 +62,20 @@ now takes the three marker values (``begin``, ``end``, ``pattern``) as
 parameters instead of reading module-local constants, since that was the
 only per-module variation.
 
+``lvs_netgen.py``'s ``_resolve_netgen_binary`` (issue #2373) established the
+"``options.<tool>_binary`` -> ``$KLT_<TOOL>_BINARY`` -> bare name(s) on
+``PATH``" resolution order for an externally-wrapped engine binary, so an
+agent whose ``yosys``/``ngspice``/``iverilog``/``vvp`` on ``PATH`` is wrong
+(a WASI-sandboxed ``yowasp-yosys`` build that cannot read a script file off
+disk, a second ngspice build, ...) has a documented escape hatch instead of
+having to reshape ``$PATH`` itself. :func:`resolve_tool_binary` below (issue
+#2423) generalises that one netgen-specific function into a shared helper
+``equiv.py`` (``yosys``, ``iverilog``, ``vvp``) and ``sim.py`` (``ngspice``)
+both call -- ``lvs_netgen.py`` keeps its own already-shipped, already-tested
+``_resolve_netgen_binary`` rather than being retrofitted onto this shared
+version, since netgen alone has a second built-in fallback name
+(``netgen-lvs``) this helper's callers do not need.
+
 ``pex.py``, ``op_sanity.py``, and ``netlist_normalize.py`` each also
 independently implemented the SPICE ``+`` continuation-line fold -- glue a
 line starting with ``+`` onto the end of the previously-collected line,
@@ -80,8 +94,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 
@@ -91,6 +106,86 @@ def _resolve_relative(path: str, base_dir: str) -> str:
     if os.path.isabs(expanded):
         return expanded
     return os.path.join(base_dir, expanded)
+
+
+def resolve_tool_binary(
+    tool_label: str,
+    values: Mapping[str, Any],
+    *,
+    option_key: str,
+    option_label: str,
+    env_var: str,
+    request_dir: str,
+    fallback_names: tuple[str, ...],
+    error_cls: type[Exception],
+    install_hint: str,
+    required: bool = True,
+) -> str | None:
+    """Resolve an external engine's binary, returning an absolute path (or
+    ``None`` when unresolved and ``required`` is ``False``) -- the shared
+    generalisation (issue #2423) of ``lvs_netgen._resolve_netgen_binary``
+    (issue #2373), reused by ``equiv.py`` (``yosys``, ``iverilog``, ``vvp``)
+    and ``sim.py`` (``ngspice``).
+
+    Resolution order, first runnable candidate wins:
+
+    1. ``values[option_key]`` -- an explicit binary name or path from the
+       request document, for a from-source build in an unusual location.
+    2. ``$env_var`` -- the same override without editing the request
+       document.
+    3. Each of ``fallback_names`` on ``PATH``, in order.
+
+    An explicitly-named binary (from either of the first two sources) that
+    is not runnable is an ``error_cls`` naming *which* source named it
+    (``option_label`` or ``$env_var``) -- never a silent fallback to the
+    next source: an override the caller believes is in force but is not
+    would be worse than not supporting one at all. A value containing a
+    path separator is resolved against ``request_dir`` first (via
+    :func:`_resolve_relative`); a bare name is looked up on ``PATH``.
+
+    When nothing resolves (no override given, and no ``fallback_names``
+    entry is on ``PATH``): raises ``error_cls`` naming every fallback tried
+    plus ``install_hint`` when ``required`` is ``True`` (the default,
+    matching ``_resolve_netgen_binary``'s always-required behaviour); returns
+    ``None`` when ``required`` is ``False`` -- for a caller (``equiv.py``'s
+    ``iverilog``/``vvp`` counterexample replay) whose pre-existing contract
+    already degrades gracefully to a diagnostic when the tool is simply
+    absent, and must keep doing so for that case. Either way, an
+    *explicitly-named-but-broken* override always raises regardless of
+    ``required`` -- that distinction is never silently dropped.
+    """
+    for value, source in (
+        (values.get(option_key), option_label),
+        (os.environ.get(env_var), f"${env_var}"),
+    ):
+        if value is None or value == "":
+            continue
+        candidate = value
+        if os.sep in value or (os.altsep and os.altsep in value):
+            candidate = _resolve_relative(value, request_dir)
+        resolved = shutil.which(candidate)
+        if resolved is None:
+            raise error_cls(
+                f"{source} does not name a runnable {tool_label} binary: "
+                f"'{candidate}' is not an executable file and was not found "
+                "on PATH"
+            )
+        return resolved
+
+    for name in fallback_names:
+        resolved = shutil.which(name)
+        if resolved is not None:
+            return resolved
+
+    if not required:
+        return None
+
+    tried = ", ".join(f"'{name}'" for name in fallback_names)
+    raise error_cls(
+        f"could not launch {tool_label}: no {tool_label} binary found on "
+        f"PATH (tried {tried}). {install_hint} Name the binary explicitly "
+        f"with {option_label} or ${env_var}."
+    )
 
 
 def _load_request_json(request_path: str, error_cls: type[Exception]) -> Any:

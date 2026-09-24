@@ -320,7 +320,7 @@ import subprocess
 import time
 from typing import Any
 
-from ._paths import _load_request_json, validate_request_shape
+from ._paths import _load_request_json, resolve_tool_binary, validate_request_shape
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._provenance import (
     INPUT_ROLE_SOURCE,
@@ -421,6 +421,51 @@ DEFAULT_TIMEOUT_S = 60.0
 #: -- matches ``equiv_induct``'s own Yosys-internal default, so omitting the
 #: field behaves identically to not passing ``-seq`` at all.
 DEFAULT_INDUCTION_DEPTH = 4
+
+#: Environment-variable overrides for this module's three wrapped engine
+#: binaries (issue #2423, the ``equiv.py``/``sim.py`` port of
+#: ``lvs_netgen.py``'s ``$KLT_NETGEN_BINARY``, issue #2373) -- checked after
+#: the matching ``request.<name>_binary`` field and before the bare name on
+#: ``PATH``. ``request.<name>_binary`` rather than an ``options.<name>_binary``
+#: sub-object: unlike ``klt lvs``'s ``options`` block, every other
+#: ``klt equiv`` request field (``engine``, ``timeout_s``, ``sim_backend``,
+#: ``induction_depth``) already sits directly on the request document, so
+#: these three match that existing convention instead of introducing a new
+#: nesting shape this module has never had.
+_YOSYS_BINARY_ENV_VAR = "KLT_YOSYS_BINARY"
+_IVERILOG_BINARY_ENV_VAR = "KLT_IVERILOG_BINARY"
+_VVP_BINARY_ENV_VAR = "KLT_VVP_BINARY"
+
+#: Unlike ``netgen``/``netgen-lvs`` (issue #2373), there is no known
+#: distro-name collision for any of these three -- a single bare name each.
+_YOSYS_BINARY_NAMES: tuple[str, ...] = ("yosys",)
+_IVERILOG_BINARY_NAMES: tuple[str, ...] = ("iverilog",)
+_VVP_BINARY_NAMES: tuple[str, ...] = ("vvp",)
+
+
+def _resolve_yosys_binary(request_doc: dict[str, Any], request_dir: str) -> str:
+    """Resolve the ``yosys`` binary to invoke for this run (issue #2423),
+    via ``request.yosys_binary`` -> ``$KLT_YOSYS_BINARY`` -> ``yosys`` on
+    ``PATH`` (:func:`klayout_tools._paths.resolve_tool_binary`).
+
+    Concretely fixes the friction issue #2423 names: on a host whose
+    ``yosys`` on ``PATH`` is a WASI-sandboxed build (e.g. ``yowasp-yosys``,
+    issue #1755/#1368) that cannot read this module's own generated
+    ``.ys`` script off disk, a caller can now point at a native build
+    elsewhere instead of having to reshape ``$PATH``.
+    """
+    return resolve_tool_binary(
+        "yosys",
+        request_doc,
+        option_key="yosys_binary",
+        option_label="request.yosys_binary",
+        env_var=_YOSYS_BINARY_ENV_VAR,
+        request_dir=request_dir,
+        fallback_names=_YOSYS_BINARY_NAMES,
+        error_cls=EquivError,
+        install_hint="Install yosys (https://github.com/YosysHQ/yosys).",
+    )
+
 
 #: RTLIL cell-type prefixes that mean "this module has state" -- flip-flops
 #: (``$dff``/``$adff``/``$sdff`` and their enable/async-reset/set-reset
@@ -909,6 +954,15 @@ def run_equiv(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
 
+    # Issue #2423: resolve *which* yosys binary to run before launching it
+    # (`request.yosys_binary` > `$KLT_YOSYS_BINARY` > `yosys` on PATH),
+    # rather than hardcoding the name `yosys` -- both engines (combinational
+    # and "yosys-sequential") always invoke Yosys, so this is resolved once
+    # up front. The resolved path is what gets spawned, what `_yosys_version`
+    # below re-derives its `engine_version` from, and what the returned
+    # report's own `yosys_binary` field (alongside `engine_version`) records.
+    yosys_binary = _resolve_yosys_binary(request_doc, request_dir)
+
     effective_sim_backend = _resolve_sim_backend(sim_backend, request_doc)
 
     effective_timeout_s = timeout_s
@@ -965,6 +1019,9 @@ def run_equiv(
             engine=engine,
             sim_backend=effective_sim_backend,
             resume_block=resume_block,
+            yosys_binary=yosys_binary,
+            request_doc=request_doc,
+            request_dir=request_dir,
         )
 
     # engine == "yosys" (combinational, Phase 0/1) continues below, unchanged.
@@ -992,7 +1049,7 @@ def run_equiv(
     returncode: int | None = None
     try:
         completed = subprocess.run(
-            ["yosys", "-s", script_path],
+            [yosys_binary, "-s", script_path],
             capture_output=True,
             text=True,
             timeout=effective_timeout_s,
@@ -1019,13 +1076,19 @@ def run_equiv(
     except OSError:
         pass
 
-    engine_version = _yosys_version()
+    # Issue #2423: re-derive `engine_version` from the *same* binary that
+    # was actually invoked above, so a `request.yosys_binary`/
+    # `$KLT_YOSYS_BINARY` override never reports the bare-PATH `yosys`'s
+    # version (or `None`, if no bare `yosys` is even on PATH) for a run
+    # that used a different build entirely.
+    engine_version = _yosys_version(yosys_binary)
 
     if timed_out:
         return _build_report(
             resume=resume_block,
             engine=engine,
             engine_version=engine_version,
+            yosys_binary=yosys_binary,
             sim_backend=effective_sim_backend,
             status="inconclusive",
             gold=gold,
@@ -1068,6 +1131,8 @@ def run_equiv(
             output_dir=output_dir,
             diagnostics=diagnostics,
             sim_backend=effective_sim_backend,
+            request_doc=request_doc,
+            request_dir=request_dir,
         )
         if _replay_evidence_is_untrustworthy(counterexample):
             # Either the solver reported a counterexample whose own replay
@@ -1089,6 +1154,7 @@ def run_equiv(
         resume=resume_block,
         engine=engine,
         engine_version=engine_version,
+        yosys_binary=yosys_binary,
         sim_backend=effective_sim_backend,
         status=status,
         gold=gold,
@@ -1493,6 +1559,52 @@ def _replay_backends(sim_backend: str) -> tuple[str, str | None]:
     return (sim_backend, None)
 
 
+def _resolve_iverilog_binary(
+    request_doc: dict[str, Any], request_dir: str
+) -> str | None:
+    """Resolve the ``iverilog`` binary for the counterexample-replay path
+    (issue #2423), via ``request.iverilog_binary`` -> ``$KLT_IVERILOG_BINARY``
+    -> ``iverilog`` on ``PATH``. ``required=False``: unlike
+    :func:`_resolve_yosys_binary`, a bare ``iverilog`` genuinely absent from
+    ``PATH`` (no override given) is not an application error here -- it is
+    ``_run_replay_backend``'s own long-standing "simulator not installed"
+    degrade to a diagnostic, which this function must not disturb. An
+    *explicitly-named* override that is not runnable still raises
+    (never a silent fallback), exactly like every other tool this issue
+    covers."""
+    return resolve_tool_binary(
+        "iverilog",
+        request_doc,
+        option_key="iverilog_binary",
+        option_label="request.iverilog_binary",
+        env_var=_IVERILOG_BINARY_ENV_VAR,
+        request_dir=request_dir,
+        fallback_names=_IVERILOG_BINARY_NAMES,
+        error_cls=EquivError,
+        install_hint="Install Icarus Verilog (https://steveicarus.github.io/iverilog/).",
+        required=False,
+    )
+
+
+def _resolve_vvp_binary(request_doc: dict[str, Any], request_dir: str) -> str | None:
+    """Resolve the ``vvp`` binary for the counterexample-replay path (issue
+    #2423) -- the ``vvp`` counterpart of :func:`_resolve_iverilog_binary`;
+    see that function's docstring for the shared ``required=False``
+    rationale."""
+    return resolve_tool_binary(
+        "vvp",
+        request_doc,
+        option_key="vvp_binary",
+        option_label="request.vvp_binary",
+        env_var=_VVP_BINARY_ENV_VAR,
+        request_dir=request_dir,
+        fallback_names=_VVP_BINARY_NAMES,
+        error_cls=EquivError,
+        install_hint="Install Icarus Verilog (https://steveicarus.github.io/iverilog/).",
+        required=False,
+    )
+
+
 def _run_replay_backend(
     *,
     backend: str,
@@ -1500,15 +1612,31 @@ def _run_replay_backend(
     tb_path: str,
     output_dir: str,
     stem: str,
-) -> tuple[str | None, str | None]:
+    request_doc: dict[str, Any],
+    request_dir: str,
+) -> tuple[str | None, str | None, dict[str, str | None]]:
     """Compile and run the generated replay testbench ``tb_path`` against
     the flattened ``netlist_path`` under ``backend``.
 
-    Returns ``(stdout, None)`` on a completed run, or ``(None, message)``
-    naming exactly why the replay could not be completed (missing binary,
-    compile timeout, compile error, run failure). Never raises and never
-    falls back to the other backend -- an unavailable backend is reported
-    as unavailable, never fabricated, per this repo's own convention.
+    Returns ``(stdout, failure_message, binaries)``: ``(stdout, None, ...)``
+    on a completed run, or ``(None, message, ...)`` naming exactly why the
+    replay could not be completed (missing binary, compile timeout, compile
+    error, run failure). ``binaries`` is ``{"iverilog_binary": ...,
+    "vvp_binary": ...}`` for the ``iverilog`` backend (``None`` for whichever
+    of the two never got resolved/attempted), or ``{}`` for ``verilator``
+    (issue #2423 adds no override for that backend -- see this module's own
+    docstring, "Replay backend").
+
+    Never raises for a plain "not installed" absence -- an unavailable
+    backend is reported as unavailable, never fabricated, per this repo's
+    own convention -- **except** when ``request.iverilog_binary``/
+    ``request.vvp_binary`` (or their ``$KLT_*_BINARY`` env var counterparts)
+    explicitly names a binary that turns out not to be runnable: that one
+    case *does* raise :class:`EquivError` (issue #2423, mirrors
+    ``lvs_netgen._resolve_netgen_binary``'s "never a silent fallback" rule)
+    rather than silently degrading to the same diagnostic a simple absence
+    produces -- an override the caller believes is in force but is not
+    would otherwise go unnoticed.
     """
     if backend == "verilator":
         mdir = os.path.join(output_dir, f"{stem}_verilator")
@@ -1534,12 +1662,30 @@ def _run_replay_backend(
         compile_timeout_s = _VERILATOR_COMPILE_TIMEOUT_S
         run_cmd = [os.path.join(mdir, exe_name)]
         run_tool = "the verilator --binary executable"
+        binaries: dict[str, str | None] = {}
     else:
+        iverilog_binary = _resolve_iverilog_binary(request_doc, request_dir)
+        vvp_binary = _resolve_vvp_binary(request_doc, request_dir)
+        binaries = {"iverilog_binary": iverilog_binary, "vvp_binary": vvp_binary}
+        if iverilog_binary is None:
+            return (
+                None,
+                "iverilog not found on $PATH -- counterexample reported by "
+                "the solver only, not independently confirmed by simulation",
+                binaries,
+            )
         vvp_path = os.path.join(output_dir, f"{stem}.vvp")
-        compile_cmd = ["iverilog", "-g2012", "-o", vvp_path, netlist_path, tb_path]
+        compile_cmd = [iverilog_binary, "-g2012", "-o", vvp_path, netlist_path, tb_path]
         compile_tool = "iverilog"
         compile_timeout_s = _IVERILOG_COMPILE_TIMEOUT_S
-        run_cmd = ["vvp", vvp_path]
+        if vvp_binary is None:
+            return (
+                None,
+                "vvp not found on $PATH -- counterexample reported by the "
+                "solver only, not independently confirmed by simulation",
+                binaries,
+            )
+        run_cmd = [vvp_binary, vvp_path]
         run_tool = "vvp"
 
     try:
@@ -1555,12 +1701,14 @@ def _run_replay_backend(
             f"{compile_tool} not found on $PATH -- counterexample "
             "reported by the solver only, not independently confirmed "
             "by simulation",
+            binaries,
         )
     except subprocess.TimeoutExpired:
         return (
             None,
             f"{compile_tool} did not complete within {compile_timeout_s}s "
             "while compiling the counterexample-confirmation testbench",
+            binaries,
         )
 
     if compiled.returncode != 0:
@@ -1569,6 +1717,7 @@ def _run_replay_backend(
             None,
             f"{compile_tool} failed to compile the counterexample-"
             f"confirmation testbench: {tail}",
+            binaries,
         )
 
     try:
@@ -1579,9 +1728,10 @@ def _run_replay_backend(
         return (
             None,
             f"could not run confirmation testbench with {run_tool}: {exc}",
+            binaries,
         )
 
-    return (ran.stdout or "", None)
+    return (ran.stdout or "", None, binaries)
 
 
 def _parse_replay_outputs(stdout: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -1801,6 +1951,8 @@ def _confirm_counterexample(
     output_dir: str,
     diagnostics: list[dict[str, str]],
     sim_backend: str = DEFAULT_SIM_BACKEND,
+    request_doc: dict[str, Any],
+    request_dir: str,
 ) -> None:
     """Independently confirm ``counterexample`` by actually running it
     through the flattened ``gold``/``gate`` netlists Yosys wrote to
@@ -1815,6 +1967,10 @@ def _confirm_counterexample(
     degradation (a missing simulator binary, a compile error, a
     re-simulation that does *not* reproduce the divergence the solver
     reported, or a disagreement between the two replay backends).
+
+    ``request_doc``/``request_dir`` (issue #2423) are threaded down to
+    :func:`_run_replay_backend` for the ``iverilog``/``vvp`` binary
+    resolution -- see that function's docstring.
     """
     tb_path = os.path.join(output_dir, "equiv_tb.v")
 
@@ -1834,12 +1990,14 @@ def _confirm_counterexample(
 
     canonical_backend, cross_backend = _replay_backends(sim_backend)
 
-    stdout, failure = _run_replay_backend(
+    stdout, failure, canonical_binaries = _run_replay_backend(
         backend=canonical_backend,
         netlist_path=netlist_path,
         tb_path=tb_path,
         output_dir=output_dir,
         stem="equiv_tb",
+        request_doc=request_doc,
+        request_dir=request_dir,
     )
     if stdout is None:
         diagnostics.append(
@@ -1856,11 +2014,20 @@ def _confirm_counterexample(
 
     counterexample["simulation"] = {
         "engine": _SIM_ENGINE_LABEL[canonical_backend],
-        "engine_version": _sim_backend_version(canonical_backend),
+        "engine_version": _sim_backend_version(
+            canonical_backend, canonical_binaries.get("iverilog_binary")
+        ),
         "four_state": _SIM_BACKEND_FOUR_STATE[canonical_backend],
         "gold_outputs": sim_gold,
         "gate_outputs": sim_gate,
         "diverging_outputs": sim_diverging,
+        # Issue #2423: alongside `engine_version` above -- the resolved
+        # absolute paths `_run_replay_backend` actually invoked, so a
+        # committed report distinguishes which `iverilog`/`vvp` build
+        # produced this confirmation (or an explicitly named one). `{}`
+        # (both keys absent) for the `verilator` canonical backend, which
+        # this issue's scope adds no override for.
+        **canonical_binaries,
     }
     confirmed = bool(sim_diverging)
     counterexample["confirmed_by_simulation"] = confirmed
@@ -1880,12 +2047,14 @@ def _confirm_counterexample(
     if cross_backend is None:
         return
 
-    cross_stdout, cross_failure = _run_replay_backend(
+    cross_stdout, cross_failure, _cross_binaries = _run_replay_backend(
         backend=cross_backend,
         netlist_path=netlist_path,
         tb_path=tb_path,
         output_dir=output_dir,
         stem="equiv_tb",
+        request_doc=request_doc,
+        request_dir=request_dir,
     )
     if cross_stdout is None:
         counterexample["simulation_cross_check"] = _cross_check_block(
@@ -1970,12 +2139,23 @@ def _build_testbench(counterexample: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _sim_backend_version(backend: str) -> str | None:
+def _sim_backend_version(backend: str, binary: str | None = None) -> str | None:
     """The replay ``backend``'s own reported version string, or ``None``
     when it is not installed / does not report one -- the per-backend
     generalisation of the old ``iverilog -V``-only probe, mirroring
-    ``functional_verification.py``'s ``_ENGINE_VERSION_COMMANDS`` table."""
+    ``functional_verification.py``'s ``_ENGINE_VERSION_COMMANDS`` table.
+
+    ``binary`` (issue #2423), when given, replaces the version command's own
+    bare tool name with the resolved absolute path the caller actually
+    invoked for compile/run -- so a ``request.iverilog_binary``/
+    ``$KLT_IVERILOG_BINARY`` override never reports the bare-PATH
+    ``iverilog``'s version (or ``None``) for a replay that used a different
+    build. Left ``None`` (the default) for the ``verilator`` backend, which
+    this issue's scope does not add an override for.
+    """
     command, pattern = _SIM_BACKEND_VERSION_COMMANDS[backend]
+    if binary is not None:
+        command = [binary, *command[1:]]
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
@@ -1989,6 +2169,7 @@ def _build_report(
     *,
     engine: str,
     engine_version: str | None,
+    yosys_binary: str | None,
     sim_backend: str,
     status: str,
     gold: dict[str, Any],
@@ -2022,6 +2203,13 @@ def _build_report(
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
+        # Issue #2423: the absolute path `_resolve_yosys_binary` settled on
+        # for this run -- alongside `engine_version`, so a committed report
+        # distinguishes a native yosys build from a WASI-sandboxed one (or
+        # from an explicitly named build) the same way `klt lvs`'s
+        # `environment.netgen_binary` (issue #2373) does for netgen. Always
+        # present (both engines always invoke Yosys), never null.
+        "yosys_binary": yosys_binary,
         "sim_backend": sim_backend,
         "status": status,
         "gold": gold,
@@ -2076,11 +2264,20 @@ class _YosysRunResult:
         self.elapsed_s = elapsed_s
 
 
-def _run_yosys_subprocess(script_path: str, timeout_s: float) -> _YosysRunResult:
-    """Run ``yosys -s <script_path>``, bounded by ``timeout_s`` -- the same
-    subprocess-invocation shape ``run_equiv``'s own combinational path uses
-    inline, factored out so the sequential engine's two stages
-    (:func:`_run_sequential`) can share it."""
+def _run_yosys_subprocess(
+    script_path: str, timeout_s: float, binary: str = "yosys"
+) -> _YosysRunResult:
+    """Run ``<binary> -s <script_path>``, bounded by ``timeout_s`` -- the
+    same subprocess-invocation shape ``run_equiv``'s own combinational path
+    uses inline, factored out so the sequential engine's two stages
+    (:func:`_run_sequential`) can share it.
+
+    ``binary`` (issue #2423) is the resolved absolute path
+    ``_resolve_yosys_binary`` settled on for this run; both of
+    :func:`_run_sequential`'s call sites always pass it explicitly -- the
+    ``"yosys"`` default exists only so a direct test of this function need
+    not also stub binary resolution.
+    """
     started = time.monotonic()
     timed_out = False
     stdout = ""
@@ -2088,7 +2285,7 @@ def _run_yosys_subprocess(script_path: str, timeout_s: float) -> _YosysRunResult
     returncode: int | None = None
     try:
         completed = subprocess.run(
-            ["yosys", "-s", script_path],
+            [binary, "-s", script_path],
             capture_output=True,
             text=True,
             timeout=timeout_s,
@@ -2538,6 +2735,8 @@ def _confirm_sequential_counterexample(
     output_dir: str,
     diagnostics: list[dict[str, str]],
     sim_backend: str = DEFAULT_SIM_BACKEND,
+    request_doc: dict[str, Any],
+    request_dir: str,
 ) -> None:
     """Multi-cycle counterpart of :func:`_confirm_counterexample`:
     independently re-runs ``counterexample``'s entire captured trace through
@@ -2547,7 +2746,9 @@ def _confirm_sequential_counterexample(
 
     Mutates ``counterexample`` in place (``confirmed_by_simulation``,
     ``simulation``); appends to ``diagnostics`` on any degradation, exactly
-    as :func:`_confirm_counterexample` does.
+    as :func:`_confirm_counterexample` does. ``request_doc``/``request_dir``
+    (issue #2423) are threaded down to :func:`_run_replay_backend` the same
+    way.
 
     **Confirmed if the reported divergence reproduces anywhere in the
     trace, not necessarily at the identical cycle index.** A real Verilog
@@ -2591,12 +2792,14 @@ def _confirm_sequential_counterexample(
 
     canonical_backend, cross_backend = _replay_backends(sim_backend)
 
-    stdout, failure = _run_replay_backend(
+    stdout, failure, canonical_binaries = _run_replay_backend(
         backend=canonical_backend,
         netlist_path=netlist_path,
         tb_path=tb_path,
         output_dir=output_dir,
         stem="equiv_seq_tb",
+        request_doc=request_doc,
+        request_dir=request_dir,
     )
     if stdout is None:
         diagnostics.append(
@@ -2612,10 +2815,14 @@ def _confirm_sequential_counterexample(
 
     counterexample["simulation"] = {
         "engine": _SIM_ENGINE_LABEL[canonical_backend],
-        "engine_version": _sim_backend_version(canonical_backend),
+        "engine_version": _sim_backend_version(
+            canonical_backend, canonical_binaries.get("iverilog_binary")
+        ),
         "four_state": _SIM_BACKEND_FOUR_STATE[canonical_backend],
         "cycles": sim_cycle_entries,
         "diverging_outputs": sorted(sim_diverging_union),
+        # Issue #2423: see `_confirm_counterexample`'s identical comment.
+        **canonical_binaries,
     }
 
     reported_diverging = set(counterexample["diverging_outputs"])
@@ -2637,12 +2844,14 @@ def _confirm_sequential_counterexample(
     if cross_backend is None:
         return
 
-    cross_stdout, cross_failure = _run_replay_backend(
+    cross_stdout, cross_failure, _cross_binaries = _run_replay_backend(
         backend=cross_backend,
         netlist_path=netlist_path,
         tb_path=tb_path,
         output_dir=output_dir,
         stem="equiv_seq_tb",
+        request_doc=request_doc,
+        request_dir=request_dir,
     )
     if cross_stdout is None:
         counterexample["simulation_cross_check"] = _cross_check_block(
@@ -2735,6 +2944,7 @@ def _build_sequential_report(
     *,
     engine: str,
     engine_version: str | None,
+    yosys_binary: str | None,
     sim_backend: str,
     status: str,
     gold: dict[str, Any],
@@ -2796,6 +3006,9 @@ def _build_sequential_report(
         "schema_version": SCHEMA_VERSION,
         "engine": engine,
         "engine_version": engine_version,
+        # Issue #2423: same convention as `_build_report`'s own
+        # `yosys_binary` -- see that field's comment.
+        "yosys_binary": yosys_binary,
         "sim_backend": sim_backend,
         "status": status,
         "gold": gold,
@@ -2919,6 +3132,7 @@ def _resume_report_from_committed_stage1(
     *,
     engine: str,
     engine_version: str | None,
+    yosys_binary: str | None,
     sim_backend: str,
     gold: dict[str, Any],
     gate: dict[str, Any],
@@ -2972,6 +3186,7 @@ def _resume_report_from_committed_stage1(
         _build_sequential_report(
             engine=engine,
             engine_version=engine_version,
+            yosys_binary=yosys_binary,
             sim_backend=sim_backend,
             status="equivalent",
             gold=gold,
@@ -3007,6 +3222,9 @@ def _run_sequential(
     engine: str,
     sim_backend: str = DEFAULT_SIM_BACKEND,
     resume_block: dict[str, Any] | None = None,
+    yosys_binary: str,
+    request_doc: dict[str, Any],
+    request_dir: str,
 ) -> dict[str, Any]:
     """The ``"yosys-sequential"`` engine's own top-level driver, called from
     ``run_equiv`` once ``gold``/``gate``/``port_map``/``output_dir`` are
@@ -3025,7 +3243,7 @@ def _run_sequential(
     record_path = _stage_record_path(output_dir, 1)
 
     int_timeout = max(1, round(effective_timeout_s))
-    engine_version = _yosys_version()
+    engine_version = _yosys_version(yosys_binary)
     fingerprint = _stage_fingerprint(
         gold=gold,
         gate=gate,
@@ -3074,6 +3292,7 @@ def _run_sequential(
             stage1_record,
             engine=engine,
             engine_version=engine_version,
+            yosys_binary=yosys_binary,
             sim_backend=sim_backend,
             gold=gold,
             gate=gate,
@@ -3106,7 +3325,7 @@ def _run_sequential(
             # the loop can never push stage 1 past the one-stage budget the JSON
             # contract documents.
             stage1 = _run_yosys_subprocess(
-                script1_path, effective_timeout_s - total_elapsed_s
+                script1_path, effective_timeout_s - total_elapsed_s, yosys_binary
             )
             total_elapsed_s = round(total_elapsed_s + stage1.elapsed_s, 3)
             try:
@@ -3153,6 +3372,7 @@ def _run_sequential(
             return _build_sequential_report(
                 engine=engine,
                 engine_version=engine_version,
+                yosys_binary=yosys_binary,
                 sim_backend=sim_backend,
                 status="inconclusive",
                 gold=gold,
@@ -3229,6 +3449,7 @@ def _run_sequential(
             return _build_sequential_report(
                 engine=engine,
                 engine_version=engine_version,
+                yosys_binary=yosys_binary,
                 sim_backend=sim_backend,
                 status="equivalent",
                 gold=gold,
@@ -3276,7 +3497,7 @@ def _run_sequential(
         sat_timeout_s=int_timeout,
     )
 
-    stage2 = _run_yosys_subprocess(script2_path, effective_timeout_s)
+    stage2 = _run_yosys_subprocess(script2_path, effective_timeout_s, yosys_binary)
     try:
         with open(log2_path, "w", encoding="utf-8") as handle:
             handle.write(stage2.stdout)
@@ -3292,6 +3513,7 @@ def _run_sequential(
         return _build_sequential_report(
             engine=engine,
             engine_version=engine_version,
+            yosys_binary=yosys_binary,
             sim_backend=sim_backend,
             status="inconclusive",
             gold=gold,
@@ -3354,6 +3576,7 @@ def _run_sequential(
         return _build_sequential_report(
             engine=engine,
             engine_version=engine_version,
+            yosys_binary=yosys_binary,
             sim_backend=sim_backend,
             status="inconclusive",
             gold=gold,
@@ -3382,6 +3605,8 @@ def _run_sequential(
         output_dir=output_dir,
         diagnostics=diagnostics2,
         sim_backend=sim_backend,
+        request_doc=request_doc,
+        request_dir=request_dir,
     )
 
     # Mirrors the combinational engine's own downgrade (see `run_equiv`
@@ -3408,6 +3633,7 @@ def _run_sequential(
     return _build_sequential_report(
         engine=engine,
         engine_version=engine_version,
+        yosys_binary=yosys_binary,
         sim_backend=sim_backend,
         status=status3,
         gold=gold,
@@ -3448,6 +3674,32 @@ def _run_sequential(
 #: Neither key is verdict-bearing: ``status``/``counterexample``/
 #: ``diagnostics`` all stay in the diff.
 RERUN_BOOKKEEPING_KEYS: frozenset[str] = frozenset({"elapsed_s", "resume"})
+
+#: `klt equiv`'s own ``--rerun`` exclusion set: everything
+#: :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS` already covers,
+#: plus the three host-local absolute binary paths issue #2423 added
+#: (``yosys_binary`` and the counterexample-replay
+#: ``counterexample.simulation.iverilog_binary``/``vvp_binary``) -- the same
+#: "resolved against *this* host's PATH, not a property of the evidence"
+#: reasoning ``lvs.py``'s own ``_LVS_RERUN_EXCLUDE_PATHS`` documents for
+#: ``environment.netgen_binary`` (issue #2373): a second host resolving the
+#: identical tool at a different path (or under an explicitly named build)
+#: is not a change in what was proved/replayed. Deliberately module-local
+#: rather than folded into the shared ``VOLATILE_FLOW_PATHS`` constant --
+#: `klt synthesize`/`klt place-and-route` (that constant's other two
+#: callers) have no analogous binary-path field to exclude, so widening it
+#: would be correct here but dead configuration there (mirrors
+#: `_LVS_RERUN_EXCLUDE_PATHS`'s own module-local-vs-shared reasoning).
+#: A report committed before #2423 carries none of these three keys at all;
+#: excluding them (rather than requiring presence) means such a report
+#: re-runs clean instead of spuriously drifting on a field it never had --
+#: the same "a field a report never carried cannot itself have drifted"
+#: rule `_LVS_RERUN_EXCLUDE_PATHS`'s own docstring states.
+_EQUIV_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_FLOW_PATHS | {
+    ("yosys_binary",),
+    ("counterexample", "simulation", "iverilog_binary"),
+    ("counterexample", "simulation", "vvp_binary"),
+}
 
 
 def _canonicalize_equiv_report_for_rerun_diff(
@@ -3533,9 +3785,11 @@ def rerun_equiv_report(
     committed one.
 
     Diffs via :func:`klayout_tools._report_verify.diff_verdict_fields`,
-    excluding :data:`klayout_tools._report_verify.VOLATILE_FLOW_PATHS`
-    (``provenance.klt_version``/``klayout_version``/``pdk.version`` plus
-    the Yosys ``engine_version`` build string) and canonicalizing
+    excluding :data:`_EQUIV_RERUN_EXCLUDE_PATHS`
+    (``provenance.klt_version``/``klayout_version``/``pdk.version``, the
+    Yosys ``engine_version`` build string, and -- issue #2423 -- the
+    host-local ``yosys_binary``/``counterexample.simulation.iverilog_binary``/
+    ``vvp_binary`` absolute paths) and canonicalizing
     :data:`RERUN_BOOKKEEPING_KEYS` (``elapsed_s``, the ``resume`` block)
     out of both sides first. ``status: "drifted"`` names every other field
     that changed -- a moved ``status``, a different ``counterexample``,
@@ -3560,7 +3814,7 @@ def rerun_equiv_report(
         report_path=report_path,
         committed=committed,
         fresh=fresh,
-        exclude=VOLATILE_FLOW_PATHS,
+        exclude=_EQUIV_RERUN_EXCLUDE_PATHS,
         committed_for_diff=_canonicalize_equiv_report_for_rerun_diff(committed),
         fresh_for_diff=_canonicalize_equiv_report_for_rerun_diff(fresh),
     )

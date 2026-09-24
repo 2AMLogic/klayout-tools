@@ -85,6 +85,31 @@ digital-flow verb's own precedent — `synthesize.py`,
 `functional_verification.py`) — `"yosys"` and `"yosys-sequential"` are
 both implemented. An unsupported value is an application error (exit `1`).
 
+**Which binaries are run (issue #2423).** `yosys`, `iverilog`, and `vvp` are
+each resolved, not hardcoded — first runnable candidate wins:
+
+1. `request.yosys_binary` / `request.iverilog_binary` / `request.vvp_binary`,
+   when given (see the request field table below);
+2. `$KLT_YOSYS_BINARY` / `$KLT_IVERILOG_BINARY` / `$KLT_VVP_BINARY`, when set;
+3. the bare name (`yosys` / `iverilog` / `vvp`) on `$PATH`.
+
+An explicitly-named binary (option or env var) that is not runnable is a
+clear, actionable error naming which source named it — never a silent
+fallback to the next source. This is the concrete fix for a host whose
+`yosys` on `$PATH` is a WASI-sandboxed build (e.g. `yowasp-yosys`) that
+cannot read this command's own generated `.ys` script off disk: point
+`request.yosys_binary`/`$KLT_YOSYS_BINARY` at a native build elsewhere
+instead of reshaping `$PATH`. The resolved `yosys` path is recorded in the
+response as `yosys_binary` (alongside `engine_version`); the resolved
+`iverilog`/`vvp` paths (when the counterexample-replay path actually ran
+them) are recorded in `counterexample.simulation.iverilog_binary`/
+`vvp_binary`. `iverilog`/`vvp` absence with **no** explicit override is
+*not* an error — it degrades to the pre-existing `simulation_unavailable`
+diagnostic (see "Counterexample shape" below), since the solver's own
+verdict still stands without independent confirmation. Mirrors `klt lvs`'s
+`options.netgen_binary`/`$KLT_NETGEN_BINARY`/`environment.netgen_binary`
+(issue #2373).
+
 ### `"yosys"` (default) — combinational
 
 Orchestrates Yosys's own built-in equivalence-checking primitives directly
@@ -262,6 +287,7 @@ Nothing is fabricated and nothing silently substitutes for it:
 | `sim_backend` | string | Which simulator replays a counterexample: `"iverilog"` (default, canonical), `"verilator"` (compiled fast path), or `"both"` (run both, require agreement). Overridden by `--sim-backend` when given. See "Replay backend" above. |
 | `timeout_s` | number | Overall wall-clock timeout in seconds (default `60`). Overridden by `--timeout-s` when given. Must be positive. Applied independently to *each* stage of the `"yosys-sequential"` engine's two-stage run — a worst-case run may take up to 2x this budget. |
 | `induction_depth` | integer | **`"yosys-sequential"` only.** `equiv_induct -seq`/stage-2 `sat -seq` depth (default `4`, matching `equiv_induct`'s own Yosys-internal default). Must be a positive integer. Ignored (no effect) for the `"yosys"` engine. |
+| `yosys_binary` / `iverilog_binary` / `vvp_binary` | string \| omitted | Issue #2423. Explicit binary name or path for the corresponding tool, overriding `$KLT_YOSYS_BINARY`/`$KLT_IVERILOG_BINARY`/`$KLT_VVP_BINARY` and the bare name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. See "Engine" above. |
 
 **State/register mapping.** The `"yosys"` engine's `port_map` only ever
 covers I/O renaming (state mapping is out of scope — either side containing
@@ -280,6 +306,7 @@ before `equiv_make` runs.
   "schema_version": 1,
   "engine": "yosys",
   "engine_version": "0.33",
+  "yosys_binary": "/usr/bin/yosys",
   "sim_backend": "iverilog",
   "status": "counterexample",
   "gold": { "top": "adder4", "sources": ["/abs/adder4.v"], "liberty": null },
@@ -299,7 +326,9 @@ before `equiv_make` runs.
       "four_state": true,
       "gold_outputs": { "sum": "1011" },
       "gate_outputs": { "sum": "1010" },
-      "diverging_outputs": ["sum"]
+      "diverging_outputs": ["sum"],
+      "iverilog_binary": "/usr/bin/iverilog",
+      "vvp_binary": "/usr/bin/vvp"
     },
     "simulation_cross_check": null
   },
@@ -322,7 +351,8 @@ before `equiv_make` runs.
 | Field | Type | Description |
 | --- | --- | --- |
 | `schema_version` | integer | Per-command version, per `docs/json-contract.md`. |
-| `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`yosys -V`). `engine_version` is `null` if unresolvable. |
+| `engine` / `engine_version` | string | Echo of the request's engine, plus the resolved Yosys build string (`<yosys_binary> -V`). `engine_version` is `null` if unresolvable. |
+| `yosys_binary` | string | Issue #2423. The absolute path of the `yosys` executable that produced this verdict, as resolved from `request.yosys_binary` / `$KLT_YOSYS_BINARY` / `yosys` on `$PATH` — see "Engine" above. Always present (both engines always invoke Yosys). A host-local path, so it is excluded from `klt equiv --check --rerun`'s drift diff — see "`--check` / `--rerun`" below. |
 | `sim_backend` | string | Echo of the effective counterexample-replay backend (`"iverilog"`, `"verilator"`, or `"both"`) — the request field, or `--sim-backend`, or the `"iverilog"` default. Always present; which backend actually produced a replay is never left implicit. See "Replay backend" above. |
 | `status` | string | `"equivalent"`, `"counterexample"` (proven non-equivalent **and** independently reproduced by simulation), or `"inconclusive"` (solver/process timeout, a solver-reported counterexample that simulation did *not* reproduce, or — under `sim_backend: "both"` — a disagreement between the two replay backends; **never** `"equivalent"`). See "Timeout and the inconclusive verdict" below, "Backend agreement policy" above, and "Counterexample shape" for the simulation-confirmation downgrade. |
 | `gold` / `gate` | object | Echo of the resolved request side: `{top, sources, liberty}` (absolute paths; `liberty` is `null` when not given). |
@@ -343,7 +373,7 @@ before `equiv_make` runs.
 | `gold_outputs` / `gate_outputs` | object\<string, object\> | Same `{bin, width, value}` shape, per output port, as reported by the SAT solver for `gold`/`gate` respectively under `inputs`. |
 | `diverging_outputs` | array\<string\> | Output port names where `gold_outputs`/`gate_outputs` actually differ (a bus can legally share some bits and diverge on others). |
 | `confirmed_by_simulation` | boolean \| null | `true` when `iverilog`/`vvp` independently reproduced the divergence (top-level `status` stays `"counterexample"`); `false` when the re-simulation ran but did **not** reproduce it — the top-level `status` is downgraded to `"inconclusive"` in this case (issue #1349: an unproven-`$equiv`/miter artifact is not a demonstrated functional difference), and `diagnostics` carries the `counterexample_not_reproduced` explanation; `null` when confirmation could not be attempted at all (e.g. `iverilog` not installed — see `diagnostics`), in which case `status` is left as the solver's own `"counterexample"` verdict since there is no simulation evidence either way. |
-| `simulation` | object \| null | `{engine, engine_version, four_state, gold_outputs, gate_outputs, diverging_outputs}` from the independent **canonical** replay run (`iverilog`/`vvp` unless `sim_backend` says otherwise) — `gold_outputs`/`gate_outputs` here are raw `{name: bin_string}`, not the richer `{bin, width, value}` shape above. `four_state` declares whether that backend models `x`/`z` at all (`true` for Icarus, `false` for Verilator). `null` when confirmation could not be attempted. |
+| `simulation` | object \| null | `{engine, engine_version, four_state, gold_outputs, gate_outputs, diverging_outputs, iverilog_binary, vvp_binary}` from the independent **canonical** replay run (`iverilog`/`vvp` unless `sim_backend` says otherwise) — `gold_outputs`/`gate_outputs` here are raw `{name: bin_string}`, not the richer `{bin, width, value}` shape above. `four_state` declares whether that backend models `x`/`z` at all (`true` for Icarus, `false` for Verilator). `iverilog_binary`/`vvp_binary` (issue #2423) are the resolved absolute paths of the executables that produced this replay — see "Engine" above; both keys are absent (not `null`) when the canonical backend is `verilator`, which this issue adds no override for. `null` (the whole `simulation` object) when confirmation could not be attempted. |
 | `simulation_cross_check` | object \| null | **`sim_backend: "both"` only** (`null` otherwise, #2223). The second (Verilator) replay's own `{engine, engine_version, four_state, gold_outputs, gate_outputs, diverging_outputs, confirmed_by_simulation}`, plus `agreement` (`"agree"` / `"disagree"` / `"unavailable"`) and `output_mismatches` — one `{side, name, canonical, cross_check, explained_by}` entry per differing signal (`explained_by: "two_state_backend"` for a difference the declared 2-state/4-state gap accounts for, `null` for a real disagreement). On `"unavailable"` (no `verilator` installed) every result field is `null`; the canonical evidence above is unaffected. See "Backend agreement policy" above. |
 
 ### Response additions for `"yosys-sequential"`
@@ -565,8 +595,14 @@ reproduce *from this request*".
   diffs verdict-bearing fields against the committed report, excluding
   the shared volatile identity set (`provenance.klt_version`,
   `provenance.klayout_version`, `provenance.pdk.version`, and the Yosys
-  `engine_version` build string) plus this verb's run-scoped bookkeeping:
-  `elapsed_s` and the `resume` block. Its known limitation is the mirror
+  `engine_version` build string), this verb's own host-local binary paths
+  (issue #2423 — `yosys_binary` and
+  `counterexample.simulation.iverilog_binary`/`vvp_binary`: a second host
+  resolving the identical tool at a different path is not a change in what
+  was proved/replayed, the same reasoning `klt lvs`'s
+  `environment.netgen_binary` exclusion documents), plus this verb's
+  run-scoped bookkeeping: `elapsed_s` and the `resume` block. Its known
+  limitation is the mirror
   image of cheap mode's strength: the echoed `gold`/`gate` paths are
   absolute, so a full-mode re-run on a different host legitimately drifts
   on those paths even when the verdict is identical — cheap mode is the
