@@ -244,9 +244,7 @@ _OFFHOST_BACKENDS = ("remote", "batch")
 BACKEND_ENV = "KLT_SIM_BACKEND"
 
 
-def resolve_backend(
-    backend: str | None, request: dict[str, Any]
-) -> tuple[str, bool]:
+def resolve_backend(backend: str | None, request: dict[str, Any]) -> tuple[str, bool]:
     """``(backend, from_host_default)`` by the precedence ``--backend`` flag >
     ``request["backend"]`` > ``$KLT_SIM_BACKEND`` > ``"local"``.
 
@@ -279,6 +277,7 @@ def _yield_host_default_backend(
     if from_host_default and backend in _OFFHOST_BACKENDS and not reason_ok:
         return "local"
     return backend
+
 
 #: Recognised values for ``request.monte_carlo.vary`` -- which axis (or
 #: axes) of statistical variation the sample sequence is declared to

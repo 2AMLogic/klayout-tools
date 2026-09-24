@@ -464,6 +464,11 @@ def test_yield_host_default_backend_only_overrides_env_sourced_offhost():
     assert y("local-parallel", True, reason_ok=False) == "local-parallel"
 
 
+_HOST_DEFAULT_LOG = (
+    "  Measurements for Transient Analysis\n\nvout                =  1.00000e+00\n"
+)
+
+
 class _BatchCalled(Exception):
     pass
 
@@ -507,7 +512,7 @@ def test_host_default_batch_keeps_a_single_corner_probe_local(tmp_path, monkeypa
     _arm_fake_batch(monkeypatch)
     _stub_subprocess_run(
         monkeypatch,
-        log_text="  Measurements for Transient Analysis\n\nvout                =  1.00000e+00\n",
+        log_text=_HOST_DEFAULT_LOG,
     )
     request = _host_default_request(tmp_path, {"process": ["tt"]})
     report = sim.run_sim(str(request))
@@ -520,7 +525,7 @@ def test_host_default_never_overrides_an_explicit_local_flag(tmp_path, monkeypat
     _arm_fake_batch(monkeypatch)
     _stub_subprocess_run(
         monkeypatch,
-        log_text="  Measurements for Transient Analysis\n\nvout                =  1.00000e+00\n",
+        log_text=_HOST_DEFAULT_LOG,
     )
     request = _host_default_request(
         tmp_path, {"process": ["tt", "ss"], "temperature_c": [-40, 125]}
@@ -532,7 +537,9 @@ def test_host_default_never_overrides_an_explicit_local_flag(tmp_path, monkeypat
 def test_host_default_unknown_value_is_named_as_env_sourced(tmp_path, monkeypatch):
     monkeypatch.setenv(sim.BACKEND_ENV, "bogus")
     request = _host_default_request(tmp_path, {"process": ["tt", "ss"]})
-    with pytest.raises(sim.SimError, match=r"unsupported backend 'bogus' \(from \$KLT_SIM_BACKEND\)"):
+    with pytest.raises(
+        sim.SimError, match=r"unsupported backend 'bogus' \(from \$KLT_SIM_BACKEND\)"
+    ):
         sim.run_sim(str(request))
 
 
