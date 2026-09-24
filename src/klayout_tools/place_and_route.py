@@ -474,6 +474,18 @@ clear error as soon as a ``request.power``-bearing run reaches the stage
 that needs it, exactly like the existing CTS/routing-layer/antenna-diode
 checks.
 
+One deliberate exception (issue #2441): a standard-cell library that
+verifiably ships **no** tap or endcap cells at all is listed in
+:data:`_NO_TAPCELL_LIBRARIES` instead, and a ``request.power`` run against
+it emits no ``tapcell`` line while running every other step above
+unchanged -- nothing in the global-connect/PDN/filler sequence depends on
+``tapcell`` having run. That allowlist is explicit per library, never a
+"missing from :data:`_TAPCELL_CELLS` => skip it" fallback: an unverified
+library must keep failing loudly rather than silently losing its well-tie
+step. ``sg13g2_stdcell`` is its only member today; its response's
+``power.tapcell_master``/``endcap_master`` are ``null`` even though
+``power.pdn``/``global_connect`` are ``true``.
+
 **Scope deliberately excluded from this v1 of ``request.power``:**
 macro-specific PDN grids (``define_pdn_grid -macro``, with their own
 halo/orientation config) -- a design with hard macros needs a caller-supplied
@@ -1107,13 +1119,17 @@ _POWER_PIN_PATTERNS: dict[str, tuple[tuple[str, str, bool], ...]] = {
 #: (`WELLTAP_CELL`/`ENDCAP_CELL` are both left commented out), and the
 #: sibling `libs.tech/librelane/config.tcl` sets `FP_TAPCELL_DIST 0` with
 #: its own `"No tap cells"` comment. Inventing a tapcell entry here would be
-#: exactly the guess this table's docstring convention exists to avoid --
-#: so `request.power` correctly raises "no tapcell master known for
-#: standard-cell library 'sg13g2_stdcell'" (this module's own validation,
-#: above) rather than silently skipping the well-tie step a caller asked
-#: for. A `klt place-and-route` run that never sets `request.power`, or
-#: that reaches only the `"floorplan"`/`"place"`/`"cts"`/`"route"` stages
-#: without it, is unaffected -- none of those paths consult this table.
+#: exactly the guess this table's docstring convention exists to avoid. It
+#: is instead listed in :data:`_NO_TAPCELL_LIBRARIES` below (issue #2441),
+#: which records "this library verifiably has no tap/endcap masters" as its
+#: own explicit, cited fact -- so `request.power` skips *only* the `tapcell`
+#: Tcl line for it and runs the rest of the power-delivery sequence
+#: normally, rather than raising. A plain absence from *both* tables still
+#: means "no tapcell masters have been verified for this library yet" and
+#: still raises. A `klt place-and-route` run that never sets
+#: `request.power`, or that reaches only the
+#: `"floorplan"`/`"place"`/`"cts"`/`"route"` stages without it, is
+#: unaffected -- none of those paths consult this table.
 _TAPCELL_CELLS: dict[str, tuple[str, str | None, int]] = {
     "sky130_fd_sc_hd": ("sky130_fd_sc_hd__tapvpwrvgnd_1", None, 14),
     "gf180mcu_fd_sc_mcu9t5v0": (
@@ -1127,6 +1143,62 @@ _TAPCELL_CELLS: dict[str, tuple[str, str | None, int]] = {
         100,
     ),
 }
+
+#: Standard-cell libraries that verifiably ship **no** tap/endcap cell
+#: masters at all (issue #2441). A `request.power` run against one of these
+#: emits no `tapcell` Tcl line -- and nothing else changes: the
+#: `add_global_connection`/`global_connect` wiring, the
+#: `define_pdn_grid`/`add_pdn_stripe`/`add_pdn_connect`/`pdngen` grid, and
+#: the `"route"`-stage `filler_placement` call all run exactly as they do
+#: for a library with tapcells (nothing in those steps depends on `tapcell`
+#: having run first).
+#:
+#: This is deliberately an explicit allowlist and **not** a "missing from
+#: :data:`_TAPCELL_CELLS` => skip tapcell" fallback. The two states look
+#: identical in that table (no entry) but mean opposite things:
+#:
+#: - *in neither table* -- nobody has verified this library's tapcell
+#:   masters yet. `request.power` keeps raising the existing "no tapcell
+#:   master known" error, so a library added to the sibling tables before
+#:   its tapcell masters are known fails loudly instead of silently
+#:   skipping the well-tie step a caller asked for.
+#: - *listed here* -- the library's own PDK states it has no such cells, so
+#:   skipping `tapcell` is the *correct* Tcl for it, not a degraded
+#:   fallback.
+#:
+#: `sg13g2_stdcell` (issues #1784, #2441) -- IHP-Open-PDK v0.3.0's own
+#: LibreLane platform config says so outright; see
+#: :data:`_TAPCELL_CELLS`'s own docstring above for the two citations
+#: (`libs.tech/librelane/sg13g2_stdcell/config.tcl`'s `"There are no endcap
+#: and welltie cells in ihp-sg13g2"` comment, and the sibling
+#: `libs.tech/librelane/config.tcl`'s `FP_TAPCELL_DIST 0`). What makes
+#: *skipping* the right answer rather than *refusing* is the rest of that
+#: same sibling config, read 2026-09-23 from a fetched IHP-Open-PDK v0.3.0
+#: install: it configures a full PDN grid for this library unconditionally,
+#: independent of the no-tapcell posture --
+#: `PDN_RAIL_LAYER Metal1`/`PDN_RAIL_OFFSET 0`,
+#: `PDN_VERTICAL_LAYER TopMetal1`/`PDN_HORIZONTAL_LAYER TopMetal2`,
+#: `PDN_{V,H}WIDTH 2.2`/`PDN_{V,H}SPACING 4.0`/`PDN_{V,H}PITCH 75.6`/
+#: `PDN_{V,H}OFFSET 13.6` (plus `PDN_CORE_RING_*` defaults, which
+#: `request.power` has no field for -- core rings are a documented v1
+#: exclusion, see :func:`_power_delivery_lines`). IHP's own reference flow
+#: therefore builds a real multi-layer PDN for this library *without*
+#: `tapcell`/well-ties -- not no PDN at all.
+#:
+#: Verification status, stated plainly: the same bar as the entries in
+#: :data:`_TAPCELL_CELLS`/:data:`_FILLER_CELLS`. This path was driven
+#: through a real `openroad 26Q3-1278-g4421880472` (`openroad/orfs:latest`)
+#: against a real fetched IHP-Open-PDK v0.3.0 install on 2026-09-24 --
+#: `request.power` with the `Metal1` followpin rail plus the
+#: `TopMetal1`/`TopMetal2` strap pair above completed floorplan through a
+#: full detailed route with `route_drc_violation_count: 0`,
+#: `power.pdn: true`, `tapcell_master`/`endcap_master` both `null`, 2343
+#: filler instances and **0** tapcell/endcap instances placed, and real
+#: `VDD`/`VSS` `SPECIALNETS` spanning `Metal1`..`TopMetal2`. See
+#: `docs/cli/place-and-route.md`'s "Live verification" section for that
+#: run's own numbers, including what a `klt drc --deck sg13g2` pass over
+#: its GDS does and does not report.
+_NO_TAPCELL_LIBRARIES: frozenset[str] = frozenset({"sg13g2_stdcell"})
 
 #: Per-cell-library filler-cell masters for the optional `request.power`
 #: PDN stage's post-route `filler_placement` call (issue #1091). Same
@@ -1859,10 +1931,21 @@ def run_place_and_route(
             f"'{cell_library}' (supported: {', '.join(sorted(_POWER_PIN_PATTERNS))}) "
             "-- cannot honor request.power"
         )
-    if power is not None and cell_library not in _TAPCELL_CELLS:
+    # A library in `_NO_TAPCELL_LIBRARIES` (issue #2441) is the one
+    # deliberate exception: its PDK states it ships no tap/endcap cells at
+    # all, so `request.power` skips the `tapcell` line and runs every other
+    # power-delivery step. A library in *neither* table still raises -- the
+    # absence there means "unverified", not "none exist".
+    if (
+        power is not None
+        and cell_library not in _TAPCELL_CELLS
+        and cell_library not in _NO_TAPCELL_LIBRARIES
+    ):
         raise PlaceAndRouteError(
             f"no tapcell master known for standard-cell library "
-            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}) "
+            f"'{cell_library}' (supported: {', '.join(sorted(_TAPCELL_CELLS))}; "
+            f"libraries with no tap/endcap cells at all: "
+            f"{', '.join(sorted(_NO_TAPCELL_LIBRARIES))}) "
             "-- cannot honor request.power"
         )
     if (
@@ -2172,7 +2255,12 @@ def run_place_and_route(
     # docstring's own "Scope deliberately excluded" note). `filler_masters`
     # is `[]` unless this run actually reached the `"route"` stage (the
     # `"floorplan"`-stage `tapcell`/PDN Tcl always runs first, but
-    # `filler_placement` is a `"route"`-stage-only call). `straps`/`connects`
+    # `filler_placement` is a `"route"`-stage-only call). Both master fields
+    # are `None` on a `_NO_TAPCELL_LIBRARIES` library (issue #2441) even
+    # though `request.power` ran and `pdn`/`global_connect` are `True` --
+    # that library has no tap/endcap masters to name, and naming one would
+    # be the invention this module's table convention exists to avoid.
+    # `straps`/`connects`
     # (issue #1133) echo exactly what `_power_delivery_lines` actually put on
     # each `add_pdn_stripe`/`add_pdn_connect` call -- so a caller citing a
     # real platform PDN config (e.g. gf180's own
@@ -2242,7 +2330,7 @@ def run_place_and_route(
             "row_rail": row_rail_info,
         }
     else:
-        tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
+        tap_master, endcap_master, _distance_um = _tapcell_masters(cell_library)
         power_info = {
             "preset": power["preset"],
             "pdn": True,
@@ -2280,7 +2368,11 @@ def run_place_and_route(
     # `def_path` at `"route"`, the pre-route `unrouted_def_path` at
     # `"place"`/`"cts"`, and none at all at `"floorplan"` (no DEF is
     # written there, reported as `evidence: "unavailable"` rather than a
-    # fabricated zero).
+    # fabricated zero). The `.get` default covers both "no verified entry"
+    # and `_NO_TAPCELL_LIBRARIES` (issue #2441); a `None` master tells the
+    # audit there is no such instance to look for, so it *skips* the
+    # tapcell/endcap checks rather than grading their absence as a hole --
+    # which is exactly right for a library that has no tap cells to place.
     audit_tap_master, audit_endcap_master, _audit_distance_um = _TAPCELL_CELLS.get(
         cell_library, (None, None, 0)
     )
@@ -3921,6 +4013,52 @@ def _pdn_connects_applied(power: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _tapcell_masters(cell_library: str) -> tuple[str | None, str | None, int | None]:
+    """``(tapcell_master, endcap_master, distance_um)`` for this library's
+    ``request.power`` ``tapcell`` call -- all ``None`` for a library in
+    :data:`_NO_TAPCELL_LIBRARIES`, which has no tap/endcap masters to place
+    and therefore gets no ``tapcell`` line at all (issue #2441).
+
+    Only ever reached after the ``request.power`` validation above has
+    established that ``cell_library`` is in one of the two tables, so the
+    ``KeyError`` a third, unverified library would raise here is
+    unreachable -- deliberately a hard failure rather than a silent
+    all-``None`` that would look identical to the verified no-tapcell case.
+    """
+    if cell_library in _NO_TAPCELL_LIBRARIES:
+        return None, None, None
+    return _TAPCELL_CELLS[cell_library]
+
+
+def _tapcell_lines(cell_library: str) -> list[str]:
+    """The ``request.power`` ``tapcell`` Tcl for ``cell_library`` -- one
+    line, or **none at all** for a library in
+    :data:`_NO_TAPCELL_LIBRARIES` (issue #2441), which has no tap/endcap
+    masters to place. ``-endcap_master`` is appended only for a library
+    whose :data:`_TAPCELL_CELLS` entry names one.
+    """
+    tap_master, endcap_master, distance_um = _tapcell_masters(cell_library)
+    if tap_master is None:
+        return []
+    call = f"tapcell -distance {distance_um} -tapcell_master {tap_master}"
+    if endcap_master is not None:
+        call += f" -endcap_master {endcap_master}"
+    return [call]
+
+
+def _power_physical_only_masters(cell_library: str) -> list[str]:
+    """The physical-only cell masters a ``request.power`` run inserts for
+    ``cell_library``: its tapcell and (when it names one) endcap master,
+    followed by its filler masters. A :data:`_NO_TAPCELL_LIBRARIES` library
+    (issue #2441) contributes fillers only -- it places no tapcell/endcap
+    instances, so naming any here would ask ``write_verilog
+    -remove_cells`` to strip cells the layout does not contain.
+    """
+    tap_master, endcap_master, _distance_um = _tapcell_masters(cell_library)
+    masters = [master for master in (tap_master, endcap_master) if master is not None]
+    return masters + list(_FILLER_CELLS[cell_library])
+
+
 def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]:
     """Tcl for the optional ``request.power`` PDN stage (issue #1091):
     ``tapcell`` well/substrate ties, ``add_global_connection``/
@@ -3932,6 +4070,12 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     (immediately after ``place_macro``/``make_tracks``, before that stage's
     own ``write_db``) -- see :func:`_stage_script_lines`'s own ``"floorplan"``
     branch.
+
+    The ``tapcell`` line is the one conditional piece: a ``cell_library``
+    listed in :data:`_NO_TAPCELL_LIBRARIES` (issue #2441) ships no
+    tap/endcap masters at all, so no ``tapcell`` call is emitted for it and
+    the sequence starts at ``add_global_connection``. Every other line below
+    is identical either way.
 
     Builds a single flat standard-cell PDN grid from ``power["straps"]``
     (already validated/normalized by :func:`_validate_power`): one
@@ -3951,11 +4095,10 @@ def _power_delivery_lines(power: dict[str, Any], cell_library: str) -> list[str]
     power_net = power["power_net"]
     ground_net = power["ground_net"]
 
-    tap_master, endcap_master, distance_um = _TAPCELL_CELLS[cell_library]
-    tapcell_call = f"tapcell -distance {distance_um} -tapcell_master {tap_master}"
-    if endcap_master is not None:
-        tapcell_call += f" -endcap_master {endcap_master}"
-    lines = [tapcell_call]
+    # No `tapcell` line at all on a library that ships no tap/endcap cells
+    # (issue #2441) -- everything below is unchanged for it, since nothing
+    # in the global-connect/PDN sequence depends on `tapcell` having run.
+    lines: list[str] = _tapcell_lines(cell_library)
 
     for net_role, pin_pattern, is_primary in _POWER_PIN_PATTERNS[cell_library]:
         net = power_net if net_role == "power" else ground_net
@@ -4475,13 +4618,13 @@ def _stage_script_lines(
         # inserts a tapcell/endcap (the fallback deliberately carries no
         # `tapcell` call), so its own physical-only set is just the filler
         # masters, unlike `request.power`'s tapcell+endcap+filler set below.
+        # A `_NO_TAPCELL_LIBRARIES` library (issue #2441) places no
+        # tapcell/endcap instances even with `request.power`, so its own
+        # physical-only set is just the filler masters -- same shape as the
+        # row-rail branch below, for the same reason.
         physical_only_masters: list[str] = []
         if power is not None:
-            tap_master, endcap_master, _distance_um = _TAPCELL_CELLS[cell_library]
-            physical_only_masters.append(tap_master)
-            if endcap_master is not None:
-                physical_only_masters.append(endcap_master)
-            physical_only_masters += list(_FILLER_CELLS[cell_library])
+            physical_only_masters += _power_physical_only_masters(cell_library)
         elif row_rail_active:
             physical_only_masters += list(_FILLER_CELLS[cell_library])
         if physical_only_masters:

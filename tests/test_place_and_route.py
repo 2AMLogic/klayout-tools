@@ -6517,21 +6517,210 @@ def test_sg13g2_cts_and_route_scripts_carry_verified_reference_data(
     assert not any("gf180mcu_fd_sc_mcu9t5v0__antenna" in line for line in route_lines)
 
 
-def test_sg13g2_stdcell_has_no_tapcell_entry(tmp_path, monkeypatch):
-    """Issue #1784: `sg13g2_stdcell` deliberately has no `_TAPCELL_CELLS`
-    entry -- this standard-cell library ships no tap/endcap cells at all
-    (IHP's own LibreLane config: `"There are no endcap and welltie cells in
-    ihp-sg13g2"`). A `request.power` PDN run therefore still fails with the
-    existing clear error rather than inventing a tapcell master or silently
-    skipping well-tie insertion."""
+#: IHP's own LibreLane PDN geometry for `sg13g2_stdcell`, bottom-to-top:
+#: the `Metal1` row rail plus the `TopMetal1`/`TopMetal2` strap pair
+#: (`libs.tech/librelane/config.tcl`'s `PDN_RAIL_LAYER`/`PDN_RAIL_OFFSET`
+#: and `PDN_{VERTICAL,HORIZONTAL}_LAYER`/`PDN_{V,H}WIDTH`/`_SPACING`/
+#: `_PITCH`/`_OFFSET`, plus `sg13g2_stdcell/config.tcl`'s own
+#: `PDN_RAIL_WIDTH 0.44`; the rail's `pitch_um` is this repo's own
+#: derivation -- 2x the 3.78 um `CoreSite` row height, i.e. one VDD/VSS
+#: rail pair -- since `-followpins` takes its placement from the rows
+#: themselves). This exact block was driven through a real
+#: `openroad/orfs` run against a real IHP-Open-PDK v0.3.0 install (issue
+#: #2441) -- see `docs/cli/place-and-route.md`'s "Live verification"
+#: section for that run's own numbers.
+_SG13G2_STRAPS = [
+    {"layer": "Metal1", "width_um": 0.44, "pitch_um": 7.56, "followpins": True},
+    {
+        "layer": "TopMetal1",
+        "width_um": 2.2,
+        "pitch_um": 75.6,
+        "offset_um": 13.6,
+        "spacing_um": 4.0,
+    },
+    {
+        "layer": "TopMetal2",
+        "width_um": 2.2,
+        "pitch_um": 75.6,
+        "offset_um": 13.6,
+        "spacing_um": 4.0,
+    },
+]
+
+
+def test_sg13g2_stdcell_power_run_skips_tapcell_instead_of_raising(
+    tmp_path, monkeypatch
+):
+    """Issue #2441 (superseding #1784's original posture): `sg13g2_stdcell`
+    still has no `_TAPCELL_CELLS` entry -- this standard-cell library ships
+    no tap/endcap cells at all (IHP's own LibreLane config: `"There are no
+    endcap and welltie cells in ihp-sg13g2"`) -- but that fact is now
+    recorded explicitly in `_NO_TAPCELL_LIBRARIES`, so a `request.power` run
+    skips *only* the `tapcell` Tcl line and builds the rest of the PDN,
+    rather than raising. The library's own PDK asks for a full PDN grid
+    independent of the tapcell step, so refusing one was the wrong answer.
+
+    The two response fields that name a master it has none of are `null`,
+    never a fabricated name.
+    """
+    assert _SG13G2_CELL_LIBRARY not in place_and_route._TAPCELL_CELLS
+    assert _SG13G2_CELL_LIBRARY in place_and_route._NO_TAPCELL_LIBRARIES
+
     request_path = _setup_sg13g2_success_env(
         tmp_path,
         monkeypatch,
-        power={"straps": _BASE_STRAPS},
+        power={"straps": _SG13G2_STRAPS},
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    power = report["power"]
+    assert power["pdn"] is True
+    assert power["global_connect"] is True
+    assert power["tapcell_master"] is None
+    assert power["endcap_master"] is None
+    assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
+    assert [strap["layer"] for strap in power["straps"]] == [
+        "Metal1",
+        "TopMetal1",
+        "TopMetal2",
+    ]
+    assert [connect["layers"] for connect in power["connects"]] == [
+        ["Metal1", "TopMetal1"],
+        ["TopMetal1", "TopMetal2"],
+    ]
+    # Issue #1442's fallback is `request.power`'s complement, never active
+    # alongside it -- including on this no-tapcell path.
+    assert power["row_rail"]["emitted"] is False
+
+
+def test_sg13g2_power_scripts_omit_tapcell_but_keep_global_connect_and_pdngen(
+    tmp_path, monkeypatch
+):
+    """Issue #2441: the *only* difference in the generated Tcl for a
+    no-tapcell library is the missing `tapcell` line. Every other
+    power-delivery call -- `add_global_connection`/`global_connect`,
+    `set_voltage_domain`/`define_pdn_grid`/`add_pdn_stripe`/
+    `add_pdn_connect`/`pdngen`, and the `"route"` stage's own
+    `filler_placement` -- is emitted exactly as it is for a library with
+    tapcells, at exactly the same insertion points.
+
+    The values asserted here are the ones a real `openroad/orfs` run
+    against a real IHP-Open-PDK v0.3.0 install accepted (issue #2441).
+    """
+    request_path = _setup_sg13g2_success_env(
+        tmp_path,
+        monkeypatch,
+        power={"straps": _SG13G2_STRAPS},
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    run_place_and_route(request_path)
+
+    floorplan_lines = _script_lines(_stage_script(request_path, "floorplan"))
+    assert not any(line.startswith("tapcell") for line in floorplan_lines)
+    assert (
+        "add_global_connection -net {VDD} -inst_pattern {.*} "
+        "-pin_pattern {^VDD$} -power" in floorplan_lines
+    )
+    assert (
+        "add_global_connection -net {VSS} -inst_pattern {.*} "
+        "-pin_pattern {^VSS$} -ground" in floorplan_lines
+    )
+    assert floorplan_lines.count("global_connect") == 1
+    assert (
+        "set_voltage_domain -name {CORE} -power {VDD} -ground {VSS}" in floorplan_lines
+    )
+    assert (
+        "define_pdn_grid -name {grid} -voltage_domains {CORE} -pins {TopMetal2}"
+        in floorplan_lines
+    )
+    assert (
+        "add_pdn_stripe -grid {grid} -layer {Metal1} -width {0.44} "
+        "-pitch {7.56} -offset {0.0} -followpins" in floorplan_lines
+    )
+    assert (
+        "add_pdn_stripe -grid {grid} -layer {TopMetal1} -width {2.2} "
+        "-spacing {4.0} -pitch {75.6} -offset {13.6}" in floorplan_lines
+    )
+    assert (
+        "add_pdn_stripe -grid {grid} -layer {TopMetal2} -width {2.2} "
+        "-spacing {4.0} -pitch {75.6} -offset {13.6}" in floorplan_lines
+    )
+    assert "add_pdn_connect -grid {grid} -layers {Metal1 TopMetal1}" in floorplan_lines
+    assert (
+        "add_pdn_connect -grid {grid} -layers {TopMetal1 TopMetal2}" in floorplan_lines
+    )
+    assert "pdngen" in floorplan_lines
+    # Same insertion point as every other platform: after `make_tracks`,
+    # before that stage's own `write_db` -- the PDN block just starts at
+    # `add_global_connection` here instead of at `tapcell`.
+    floorplan_write_db_index = next(
+        i for i, line in enumerate(floorplan_lines) if line.startswith("write_db ")
+    )
+    assert (
+        floorplan_lines.index("make_tracks")
+        < floorplan_lines.index("pdngen")
+        < floorplan_write_db_index
+    )
+
+    route_lines = _script_lines(_stage_script(request_path, "route"))
+    assert "filler_placement {sg13g2_fill_1 sg13g2_fill_2}" in route_lines
+    assert route_lines.count("global_connect") == 1
+    # `-remove_cells` strips only the fillers: this library places no
+    # tapcell/endcap instances to strip, so it must name none.
+    assert any(
+        line.startswith("write_verilog ")
+        and line.endswith("-remove_cells {sg13g2_fill_1 sg13g2_fill_2}")
+        for line in route_lines
+    )
+
+
+def test_power_still_raises_for_a_library_in_neither_tapcell_table(
+    tmp_path, monkeypatch
+):
+    """Issue #2441's own guardrail: the no-tapcell skip is an explicit
+    per-library allowlist, never a "missing from `_TAPCELL_CELLS` => skip
+    it" fallback. A library with every *other* power table populated but no
+    entry in either tapcell table is an *unverified* library, not a
+    verified tap-cell-less one, and must keep failing loudly."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    monkeypatch.setitem(
+        place_and_route._POWER_PIN_PATTERNS,
+        "acme_fd_sc_hd",
+        place_and_route._POWER_PIN_PATTERNS["sky130_fd_sc_hd"],
+    )
+    monkeypatch.setitem(
+        place_and_route._FILLER_CELLS, "acme_fd_sc_hd", ("acme_fd_sc_hd__fill_1",)
+    )
+    assert "acme_fd_sc_hd" not in place_and_route._TAPCELL_CELLS
+    assert "acme_fd_sc_hd" not in place_and_route._NO_TAPCELL_LIBRARIES
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "acmeA", cell_library="acme_fd_sc_hd")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd_synth.v", "// netlist\n")
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            pdk={"cell_library": "acme_fd_sc_hd", "corner": "tt_025C_1v80"},
+            target_stage="floorplan",
+            constraints=None,
+            io=None,
+            power={"straps": _BASE_STRAPS},
+        ),
     )
     with pytest.raises(
         PlaceAndRouteError,
-        match=("no tapcell master known for standard-cell library 'sg13g2_stdcell'"),
+        match=(
+            r"no tapcell master known for standard-cell library 'acme_fd_sc_hd' "
+            r"\(supported: .*; libraries with no tap/endcap cells at all: "
+            r"sg13g2_stdcell\)"
+        ),
     ):
         run_place_and_route(request_path)
 
@@ -9440,6 +9629,123 @@ def test_integration_real_openroad_gcd_worked_example_sg13g2(tmp_path, monkeypat
     assert os.path.isfile(report["gds_path"])
     assert report["die_area_um2"] is not None
     assert report["core_area_um2"] is not None
+
+
+@pytest.mark.skipif(
+    not HAVE_OPENROAD, reason="openroad is not installed on this machine"
+)
+@pytest.mark.skipif(
+    _REAL_SG13G2_PNR_VARIANT is None,
+    reason=(
+        "no real sg13g2_stdcell LEF/liberty/GDS set resolves via "
+        "_find_real_ihp_pnr_variant()"
+    ),
+)
+def test_integration_real_openroad_power_pdn_sg13g2(tmp_path, monkeypatch):
+    """Issue #2441: the same GCD worked example as the run above, this time
+    **with** `request.power` -- the case that raised "no tapcell master
+    known" before this issue, because `sg13g2_stdcell` ships no tap/endcap
+    cells at all.
+
+    This is the automated form of that issue's own acceptance criterion
+    ("`request.power` against `sg13g2_stdcell` completes without raising,
+    `power.pdn` is `true`, and the resulting routed DEF/GDS is not
+    obviously broken -- `route__drc_errors: 0` at minimum"), and the
+    guarantee it protects is narrow but exact: skipping the `tapcell` Tcl
+    line must cost nothing downstream. `pdngen` still builds the grid,
+    `filler_placement` still closes every row gap, and the routed DEF still
+    carries real `VDD`/`VSS` `SPECIALNETS` -- with *zero* tapcell/endcap
+    instances, because there are none to place.
+
+    Verified live 2026-09-24 against `openroad 26Q3-1278-g4421880472` + a
+    real fetched IHP-Open-PDK v0.3.0 install: `route_drc_violation_count:
+    0`, 2732 components (0 tapcells, 0 endcaps, 2343 fillers), and `VDD`/
+    `VSS` special nets spanning `Metal1`..`TopMetal2`. See
+    `docs/cli/place-and-route.md`'s "Live verification" section for the
+    full numbers, including what `klt drc --deck sg13g2` does and does not
+    report over the merged GDS (a standing platform gap, #2444, that
+    predates this run).
+
+    Every setting other than `power` reproduces that live run's own request
+    verbatim -- including `core_margin_um: 4.0`, where the no-power test
+    above uses `2.0` -- so `power` is the only variable between the numbers
+    recorded in the docs and what this test asserts. The `power` block
+    itself is `_SG13G2_STRAPS`: IHP's own LibreLane PDN geometry, cited at
+    that constant's own definition.
+    """
+    root, variant = _REAL_SG13G2_PNR_VARIANT
+    monkeypatch.setenv("PDK_ROOT", root)
+    monkeypatch.setenv("PDK", variant)
+
+    from klayout_tools.synthesize import run_synthesize
+
+    rtl_path = tmp_path / "gcd.v"
+    rtl_path.write_text(_GCD_RTL, encoding="utf-8")
+    synth_request = _write_request(
+        tmp_path / "synth_request.json",
+        {
+            "engine": "yosys",
+            "sources": ["gcd.v"],
+            "hdl_toplevel": "gcd",
+            "pdk": {"cell_library": _SG13G2_CELL_LIBRARY},
+        },
+    )
+    synth_report = run_synthesize(synth_request)
+
+    request_path = _write_request(
+        tmp_path / "pnr_request.json",
+        _base_request(
+            netlist=_synth_netlist_path(synth_request, "gcd", synth_report["run_id"]),
+            pdk={"cell_library": _SG13G2_CELL_LIBRARY},
+            floorplan={
+                "method": "utilization",
+                "utilization_pct": 38,
+                "aspect_ratio": 1.0,
+                "core_margin_um": 4.0,
+                "site": "CoreSite",
+            },
+            io={"layer_h": "Metal3", "layer_v": "Metal2"},
+            constraints={"clock_port": "clk", "clock_period_ns": 10.0},
+            power={"straps": _SG13G2_STRAPS},
+        ),
+    )
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+    assert report["stage_reached"] == "route"
+    assert report["route_drc_violation_count"] == 0
+    assert report["antenna_violation_count"] == 0
+
+    power = report["power"]
+    assert power["pdn"] is True
+    assert power["global_connect"] is True
+    # No master is named for cells this library does not have.
+    assert power["tapcell_master"] is None
+    assert power["endcap_master"] is None
+    assert power["filler_masters"] == ["sg13g2_fill_1", "sg13g2_fill_2"]
+
+    placed = report["power"]["placed"]
+    assert placed["evidence"] == "def"
+    assert placed["status"] == "complete"
+    assert placed["missing"] == []
+    # The point of the whole change: no tapcells/endcaps, but a real PDN.
+    assert placed["tapcells"] == 0
+    assert placed["endcaps"] == 0
+    assert placed["fillers"] > 0
+    special_nets = {net["name"]: net for net in placed["special_nets"]}
+    assert set(special_nets) == {"VDD", "VSS"}
+    for net in special_nets.values():
+        assert net["followpin_segments"] > 0
+        assert net["stripe_segments"] > 0
+        assert net["vias"] > 0
+        # `add_pdn_connect -layers {Metal1 TopMetal1}` spans Metal2-Metal5;
+        # a live run is the only thing that can confirm `pdngen` built that
+        # non-adjacent via stack rather than rejecting the pairing.
+        assert {"Metal1", "TopMetal1", "TopMetal2"} <= set(net["stripe_layers"])
+
+    assert report["gds_path"] is not None
+    assert os.path.isfile(report["gds_path"])
 
 
 def _run_preset_pdn_integration(

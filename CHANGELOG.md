@@ -43,6 +43,38 @@ not `klt --version`, if you need to detect this kind of drift. See
   still take their `.subckt` defaults — see
   [`docs/cli/extract.md`](docs/cli/extract.md)'s "MoM capacitor devices"
   section, and #2445 for whether `feed` is recoverable at all.
+- **Added** (#2441, `klt place-and-route`, additive — **no**
+  `schema_version` bump: no new request or response field, only a request
+  that previously always errored now succeeding): `request.power` is
+  supported on IHP's **`sg13g2_stdcell`**. That library ships no tap or
+  endcap cells at all (its own LibreLane config: `"There are no endcap and
+  welltie cells in ihp-sg13g2"`, `FP_TAPCELL_DIST 0`), so `_TAPCELL_CELLS`
+  has no entry for it — and until now that absence gated the *entire*
+  feature: any `request.power` run against it raised "no tapcell master
+  known" before the global-connect/PDN/filler steps, none of which depend
+  on `tapcell` having run. The same IHP config that establishes the
+  no-tapcell posture also configures a full PDN grid for this library
+  unconditionally (`PDN_RAIL_LAYER Metal1`, `TopMetal1`/`TopMetal2` straps
+  at width 2.2 / spacing 4.0 / pitch 75.6 / offset 13.6), so refusing one
+  was the wrong answer. The library is now listed in a new, explicit
+  `_NO_TAPCELL_LIBRARIES` allowlist that suppresses **only** the `tapcell`
+  Tcl line; `add_global_connection`/`global_connect`, `define_pdn_grid`/
+  `add_pdn_stripe`/`add_pdn_connect`/`pdngen`, and the `"route"`-stage
+  `filler_placement` all run unchanged. The response reports
+  `power.tapcell_master`/`endcap_master` as `null` — never a fabricated
+  master name — alongside `power.pdn: true`, and
+  `power.placed.tapcells`/`.endcaps` are `0`. This is an allowlist, not a
+  "missing from `_TAPCELL_CELLS` ⇒ skip it" fallback: a library in neither
+  table is *unverified*, not verified tap-cell-less, and still raises the
+  same error (now naming both sets). Live-verified end to end against
+  `openroad 26Q3-1278-g4421880472` and a real IHP-Open-PDK v0.3.0 install —
+  `route_drc_violation_count: 0`, 2343 fillers and 0 tapcells/endcaps
+  placed, `VDD`/`VSS` `SPECIALNETS` spanning `Metal1`..`TopMetal2`. See
+  [`docs/cli/place-and-route.md`](docs/cli/place-and-route.md)'s "Power
+  delivery" and "Live verification" sections (the latter also records, with
+  measured counts, that `klt drc --deck sg13g2` is not clean over this
+  platform's routed GDS with *or* without `request.power` — a standing gap
+  tracked in #2444, not introduced here).
 - **Added** (#2421, `klt lvs`, additive — **no** `schema_version` bump: one
   new `mismatches[].category` value, no new request field and no change to
   any existing field's value for any input that does not trigger it): a new
