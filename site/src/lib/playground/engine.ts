@@ -44,18 +44,18 @@ import { assembleNetlist, type StimulusParams } from "./netlist";
  * ngspice tag was latest at its own build time, so an unpinned bump could
  * silently change the embedded numerics.
  */
-export const EECIRCUIT_ENGINE_VERSION = "1.7.0";
+export const EECIRCUIT_ENGINE_VERSION = "1.8.0";
 
 /**
  * The ngspice version embedded in {@link EECIRCUIT_ENGINE_VERSION}, recorded
  * from the result header's `Command:` line at pin time
- * (`Command: ngspice-45.2+, Build Tue Mar 24 02:02:56 UTC 2026`). Verified at
+ * (`Command: ngspice-45.2, Build Sat Sep  5 01:00:10 UTC 2026`). Verified at
  * runtime by {@link extractNgspiceVersion}; update alongside any engine bump.
  */
-export const EMBEDDED_NGSPICE_VERSION = "ngspice-45.2+";
+export const EMBEDDED_NGSPICE_VERSION = "ngspice-45.2";
 
 /** The ngspice build date string recorded at pin time (informational). */
-export const EMBEDDED_NGSPICE_BUILD = "Tue Mar 24 02:02:56 UTC 2026";
+export const EMBEDDED_NGSPICE_BUILD = "Sat Sep  5 01:00:10 UTC 2026";
 
 /**
  * Memoized start-promise for the single `Simulation` instance. Held at module

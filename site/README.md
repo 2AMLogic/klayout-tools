@@ -335,9 +335,9 @@ MIT-licensed WASM build of ngspice (BSD-3 core) recommended by the spike
   `WaveformData` shape.
 
 **Engine version pinning** (spike open question): `eecircuit-engine` is pinned to
-an **exact** version in `package.json` (`1.7.0`); the ngspice version it embeds
-is recorded in `EMBEDDED_NGSPICE_VERSION` (`ngspice-45.2+`, build
-`Tue Mar 24 02:02:56 UTC 2026`) and confirmed at runtime from each result
+an **exact** version in `package.json` (`1.8.0`); the ngspice version it embeds
+is recorded in `EMBEDDED_NGSPICE_VERSION` (`ngspice-45.2`, build
+`Sat Sep  5 01:00:10 UTC 2026`) and confirmed at runtime from each result
 header by `extractNgspiceVersion()` — the same way `klt sim`'s
 `environment.engine_version` records the server-side engine.
 
