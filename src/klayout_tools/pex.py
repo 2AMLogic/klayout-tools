@@ -717,6 +717,40 @@ def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
     return counts
 
 
+def _reference_is_hierarchical(netlist_text: str) -> bool:
+    """``True`` if ``netlist_text`` contains an `X` device-instance card
+    whose target names a `.subckt` **defined elsewhere in the same file**
+    -- i.e. the netlist is hierarchical (a leaf `.subckt` plus one or more
+    instance calls of it) rather than flat.
+
+    `klt extract`'s own output is always flat, by design
+    (``docs/cli/extract.md``: "Extraction is flat, not hierarchical"), so a
+    hierarchical *reference* netlist compared against it is exactly the
+    shape issue #1085 already documents for `klt lvs` (a leaf `.subckt`
+    called N times on the reference side has no counterpart circuit on the
+    flat extracted side to pair against). The same mismatch shows up here:
+    a device nested inside a locally-defined `.subckt` appears once per
+    *definition* in `_device_model_counts`'s card scan, not once per
+    physical *instance*, while the flat extracted side always counts once
+    per instance -- so a purely hierarchy-representation difference can
+    produce the same divergent multiset a genuine device-flavour swap
+    would, without being one. See :func:`_model_mismatch`.
+    """
+    local_subckts = set(_subckt_interfaces(netlist_text))
+    if not local_subckts:
+        return False
+    for line in _logical_lines(netlist_text):
+        stripped = line.strip()
+        if not stripped or stripped[0].upper() != "X":
+            continue
+        parts = [token for token in stripped.split() if "=" not in token]
+        if len(parts) < 2:
+            continue
+        if parts[-1].lower() in local_subckts:
+            return True
+    return False
+
+
 def _model_mismatch(
     *, reference_netlist: str, extracted_netlist: str
 ) -> dict[str, Any] | None:
@@ -743,6 +777,13 @@ def _model_mismatch(
     this run produces compares two different physical devices, not a
     parasitic effect, yet nothing else in the `klt pex` envelope reports it.
 
+    **A hierarchical reference is a known false-positive shape.** When the
+    reference netlist is hierarchical (:func:`_reference_is_hierarchical`),
+    a divergence can be a pure hierarchy-vs-flat representation artifact
+    (issue #1085) rather than a real device-flavour mismatch -- the
+    ``detail`` names this explicitly instead of asserting the two sides are
+    electrically unrelated, since that claim is not reliable in this shape.
+
     **Reported, not enforced.** Never changes `status`/grade -- the same
     "surface it structurally and let the caller decide" precedent
     :func:`_body_bias_report` established (issue #1983). A caller
@@ -756,7 +797,8 @@ def _model_mismatch(
     different number of each still reports the divergence, since that
     could equally mean a device was dropped/duplicated on one side.
     """
-    reference_counts = _device_model_counts(_read_text(reference_netlist) or "")
+    reference_text = _read_text(reference_netlist) or ""
+    reference_counts = _device_model_counts(reference_text)
     extracted_counts = _device_model_counts(_read_text(extracted_netlist) or "")
 
     reference_multiset = {
@@ -779,6 +821,29 @@ def _model_mismatch(
         if key not in reference_multiset
     )
 
+    hierarchical_reference = _reference_is_hierarchical(reference_text)
+    if hierarchical_reference:
+        unrelated_clause = (
+            "the reference netlist is hierarchical (it instantiates at "
+            "least one locally-defined `.subckt`), while `klt extract`'s "
+            "output is always flat -- see docs/cli/extract.md's "
+            '"Extraction is flat, not hierarchical" note and issue #1085 '
+            "(the same shape `klt lvs`'s `options.flatten_reference` "
+            "exists for). This divergence may simply be a "
+            "hierarchy-representation artifact -- a device nested inside a "
+            "locally-defined `.subckt` is counted once per definition here, "
+            "not once per physical instance -- rather than a genuine "
+            "device-flavour mismatch; verify with a flattened reference "
+            "before treating this as evidence the two sides are unrelated. "
+        )
+    else:
+        unrelated_clause = (
+            "the reference (schematic) and extracted netlists instantiate "
+            "different device models/`.subckt`s, and the two sides may be "
+            "electrically unrelated, so `delta[]` rows could compare two "
+            "different physical devices rather than a parasitic effect. "
+        )
+
     return {
         "reference_only": reference_only,
         "extracted_only": extracted_only,
@@ -787,11 +852,7 @@ def _model_mismatch(
             "extracted": dict(sorted(extracted_counts.values())),
         },
         "detail": (
-            "the reference (schematic) and extracted netlists instantiate "
-            "different device models/`.subckt`s -- same top-level pin list, "
-            "but the two sides are electrically unrelated, so `delta[]` "
-            "rows compare two different physical devices rather than a "
-            "parasitic effect. "
+            unrelated_clause
             + (
                 f"Only in the reference netlist: {', '.join(reference_only)}. "
                 if reference_only
@@ -802,11 +863,15 @@ def _model_mismatch(
                 if extracted_only
                 else ""
             )
-            + "A common cause: the layout carries no voltage-domain marker "
-            "geometry, so `klt extract --pdk` bound every MOS to the PDK "
-            "family's default flavour while the reference netlist names a "
-            "different one -- see docs/cli/pex.md's `model_mismatch` "
-            "section"
+            + (
+                "A common cause: the layout carries no voltage-domain "
+                "marker geometry, so `klt extract --pdk` bound every MOS "
+                "to the PDK family's default flavour while the reference "
+                "netlist names a different one -- see docs/cli/pex.md's "
+                "`model_mismatch` section"
+                if not hierarchical_reference
+                else "See docs/cli/pex.md's `model_mismatch` section"
+            )
         ),
     }
 

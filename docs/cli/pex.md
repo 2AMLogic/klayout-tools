@@ -540,6 +540,22 @@ consumer of the evidence (see [`signoff.md`](signoff.md) and
 [`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7), not one
 this command answers on the caller's behalf.
 
+**Caveat: a hierarchical reference netlist is a known false-positive
+shape.** `klt extract`'s output is always flat, by design
+([`extract.md`](extract.md)'s "Extraction is flat, not hierarchical" note,
+issue #1085 — the same mismatch `klt lvs`'s `options.flatten_reference`
+exists to fix). If the reference (schematic) netlist is instead
+hierarchical — a leaf `.subckt` plus one or more `X`-card instance calls of
+it — a device nested inside that leaf is counted once per *definition* by
+this comparison, not once per physical *instance*, while the flat extracted
+side always counts once per instance. That can produce the same divergent
+multiset a genuine device-flavour swap would, without the two sides
+actually naming different devices. `model_mismatch`'s `detail` names this
+explicitly (rather than asserting the two sides are electrically unrelated)
+whenever the reference netlist is hierarchical; treat a hierarchical-shaped
+`detail` as inconclusive on its own and verify against a flattened
+reference before discarding the run's `delta[]` evidence.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught

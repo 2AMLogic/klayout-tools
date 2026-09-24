@@ -46,6 +46,7 @@ from klayout_tools.pex import (
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
     _prepare_extracted_request,
+    _reference_is_hierarchical,
     _rewrite_dut_include,
     _row_status,
     _status_from_coverage,
@@ -924,6 +925,76 @@ def test_model_mismatch_detects_instance_count_only_divergence(tmp_path):
     assert mismatch["extracted_only"] == []
     assert mismatch["counts"]["reference"] == {"nfet_01v8": 2}
     assert mismatch["counts"]["extracted"] == {"nfet_01v8": 1}
+
+
+def test_reference_is_hierarchical_detects_local_subckt_call(tmp_path):
+    """`_reference_is_hierarchical` is `True` only when an `X` card's target
+    is a `.subckt` defined in the same file -- an `X` card naming an
+    external PDK model/subcircuit (the ordinary, flat case) does not
+    count."""
+    hierarchical = (
+        ".SUBCKT INV A Y VDD VSS\n"
+        "Xn Y A VSS VSS nfet_01v8\n"
+        "Xp Y A VDD VDD pfet_01v8\n"
+        ".ENDS INV\n"
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xi1 A M VDD VSS INV\n"
+        "Xi2 M Y VDD VSS INV\n"
+        ".ENDS BUF\n"
+    )
+    assert _reference_is_hierarchical(hierarchical) is True
+
+    flat = (
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xn1 A M VSS VSS nfet_01v8\n"
+        "Xp1 A M VDD VDD pfet_01v8\n"
+        "Xn2 M Y VSS VSS nfet_01v8\n"
+        "Xp2 M Y VDD VDD pfet_01v8\n"
+        ".ENDS BUF\n"
+    )
+    assert _reference_is_hierarchical(flat) is False
+
+
+def test_model_mismatch_names_hierarchy_not_electrically_unrelated(tmp_path):
+    """A hierarchical reference netlist (a leaf `.subckt` called N times)
+    diffed against `klt extract`'s always-flat output is the *same circuit*
+    -- devices nested inside the leaf are counted once per *definition*
+    here, not once per physical *instance* -- so `model_mismatch` must name
+    hierarchy-vs-flat as the likely cause instead of asserting the two sides
+    are electrically unrelated, the way it does for a genuine device-flavour
+    swap (PR #2430 review feedback on issue #2402)."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        "Xn Y A VSS VSS nfet_01v8\n"
+        "Xp Y A VDD VDD pfet_01v8\n"
+        ".ENDS INV\n"
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xi1 A M VDD VSS INV\n"
+        "Xi2 M Y VDD VSS INV\n"
+        ".ENDS BUF\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xn1 A M VSS VSS nfet_01v8\n"
+        "Xp1 A M VDD VDD pfet_01v8\n"
+        "Xn2 M Y VSS VSS nfet_01v8\n"
+        "Xp2 M Y VDD VDD pfet_01v8\n"
+        ".ENDS BUF\n"
+    )
+
+    mismatch = _model_mismatch(
+        reference_netlist=str(reference), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    # Same circuit: the only divergence is hierarchy depth, not device
+    # identity -- `reference_only` names the leaf `.subckt` call itself.
+    assert mismatch["reference_only"] == ["INV"]
+    assert mismatch["extracted_only"] == []
+    assert "electrically unrelated" not in mismatch["detail"]
+    assert "hierarchical" in mismatch["detail"]
+    assert "#1085" in mismatch["detail"]
 
 
 # --------------------------------------------------------------------------- #
