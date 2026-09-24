@@ -8,7 +8,7 @@ const startCalls = { count: 0 };
 const setNetListArgs: string[] = [];
 let failNextStart = false;
 
-const FAKE_HEADER = "Title: * playground\nDate: now\nPlotname: Transient Analysis\nCommand: ngspice-45.2+, Build Tue Mar 24 02:02:56 UTC 2026\n";
+const FAKE_HEADER = "Title: * playground\nDate: now\nPlotname: Transient Analysis\nCommand: ngspice-45.2, Build Sat Sep  5 01:00:10 UTC 2026\n";
 
 function fakeResult() {
   return {
@@ -100,7 +100,7 @@ describe("loadSimulation", () => {
 
 describe("extractNgspiceVersion", () => {
   it("parses the ngspice token from a result header", () => {
-    expect(extractNgspiceVersion(FAKE_HEADER)).toBe("ngspice-45.2+");
+    expect(extractNgspiceVersion(FAKE_HEADER)).toBe("ngspice-45.2");
   });
 
   it("returns null when no token is present", () => {
@@ -194,7 +194,7 @@ describe("runPlayground", () => {
     expect(setNetListArgs[0]).toContain("VVPWR VPWR 0 DC 1.8");
     expect(setNetListArgs[1]).toContain("VVPWR VPWR 0 DC 1.62");
 
-    expect(first.ngspiceVersion).toBe("ngspice-45.2+");
+    expect(first.ngspiceVersion).toBe("ngspice-45.2");
     expect(first.waveform.variables.map((v) => v.name)).toEqual(["time", "v(y)"]);
     expect(second.netlist).toContain("* VENDORED-MODEL-MARKER");
 
