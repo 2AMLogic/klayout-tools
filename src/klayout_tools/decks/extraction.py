@@ -594,6 +594,51 @@ class ExtractionDeck:
         return tuple(classes)
 
     @property
+    def resolved_option_values(self) -> dict[str, str]:
+        """Every caller-selectable deck-option key this deck declares
+        (``ResistorDevice.flavour_option``/``CapacitorDevice.flavour_option``)
+        mapped to the flavour ``value`` **currently wired into this deck
+        object** -- sorted by key (issue #2394).
+
+        Read off the deck itself rather than off the caller's
+        ``deck_options`` mapping, so it answers the same question either way
+        round: on the *registered* deck (nothing overridden) each key maps to
+        the flavour the deck silently defaults to, and on a deck already
+        resolved by :func:`~klayout_tools.decks.get_extraction_deck` each key
+        maps to the flavour that call actually selected. That is what makes a
+        provenance echo of this mapping honest for the defaulted case --
+        ``provenance.deck.options`` previously recorded only keys the caller
+        passed, so a run that silently took gf180mcu's ``poly_res='1k'``
+        default was indistinguishable in its own record from a deck with no
+        selectable options at all (issue #2394's "a wrong default reads as
+        fact").
+
+        The wired value is recovered by matching each entry's own ``name``
+        against its declared ``flavours`` -- both families' flavour objects
+        carry the ``name`` the owning entry is rewritten to when that flavour
+        is selected (:class:`ResistorFlavour`/:class:`CapacitorFlavour`), and
+        :func:`~klayout_tools.decks.get_extraction_deck` performs exactly
+        that rewrite, so the match is exact in both directions. An entry that
+        declares a ``flavour_option`` but no matching ``flavours`` entry
+        contributes nothing: there is no value to report, and a fabricated
+        one would be worse than an absent key.
+
+        Empty for every deck that declares no ``flavour_option`` at all (e.g.
+        sky130) -- the caller is expected to omit the field entirely in that
+        case rather than record an empty mapping, keeping "this deck has no
+        selectable options" distinguishable from "it has some".
+        """
+        values: dict[str, str] = {}
+        for device in (*self.resistors, *self.capacitors):
+            key = device.flavour_option
+            if key is None or key in values:
+                continue
+            wired = next((f for f in device.flavours if f.name == device.name), None)
+            if wired is not None:
+                values[key] = wired.value
+        return dict(sorted(values.items()))
+
+    @property
     def merge_layers(self) -> frozenset[tuple[int, int]]:
         """The ``(layer, datatype)`` pairs whose shapes actually *merge* two
         nets together -- exactly ``metals`` plus ``vias``, this deck's

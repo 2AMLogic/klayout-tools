@@ -4281,7 +4281,20 @@ def test_deck_options_selects_gf180mcu_poly_res_flavour_for_inline_extraction(
 
     assert report["status"] == "match"
     assert report["counts"]["devices"]["layout"] == 1
-    assert report["provenance"]["deck"]["options"] == {"poly_res": "2k"}
+    # Issue #2394: the resolved set, with the caller's own pin marked --
+    # identical treatment to `klt extract`'s.
+    deck = report["provenance"]["deck"]
+    assert deck["options"] == {
+        "metal_top": "9K",
+        "mim_cap": "cap_mim_2f0_m4m5_noshield",
+        "poly_res": "2k",
+    }
+    assert deck["options_explicit"] == {
+        "metal_top": False,
+        "mim_cap": False,
+        "poly_res": True,
+    }
+    assert deck["options_hash"].startswith("sha256:")
 
 
 def test_deck_options_omitted_falls_back_to_1k_default_and_mismatches_2k_reference(
@@ -4290,8 +4303,12 @@ def test_deck_options_omitted_falls_back_to_1k_default_and_mismatches_2k_referen
     """The bug this issue fixes: without `layout.deck_options`, the same 2k
     -flavour-drawn layout used above extracts at the deck's `1k` default
     (1000 ohm/sq) instead -- a spurious resistance mismatch against a
-    reference sized for the actual (2k) flavour, and `provenance.deck` omits
-    `options` entirely (issue #600)."""
+    reference sized for the actual (2k) flavour (issue #600).
+
+    Issue #2394: and the record now *says so* -- `provenance.deck.options`
+    carries the resolved `poly_res: "1k"` with `explicit: false`, where it
+    previously omitted `options` entirely and so read exactly like a deck
+    with no selectable flavour at all."""
     from klayout_tools.decks import get_extraction_deck
 
     gds = _write_gf180mcu_poly_res_gds(tmp_path / "poly_res.gds")
@@ -4313,7 +4330,13 @@ def test_deck_options_omitted_falls_back_to_1k_default_and_mismatches_2k_referen
     )
 
     assert report["status"] == "mismatch"
-    assert "options" not in report["provenance"]["deck"]
+    deck = report["provenance"]["deck"]
+    assert deck["options"]["poly_res"] == "1k"
+    assert deck["options_explicit"] == {
+        "metal_top": False,
+        "mim_cap": False,
+        "poly_res": False,
+    }
 
 
 def test_deck_options_unrecognised_value_raises_lvs_error(tmp_path):
@@ -4536,7 +4559,17 @@ def test_deck_options_selects_gf180mcu_metal_top_flavour_for_inline_extraction(
 
     assert report["status"] == "match"
     assert report["counts"]["devices"]["layout"] == 1
-    assert report["provenance"]["deck"]["options"] == {"metal_top": "30K"}
+    deck = report["provenance"]["deck"]
+    assert deck["options"] == {
+        "metal_top": "30K",
+        "mim_cap": "cap_mim_2f0_m4m5_noshield",
+        "poly_res": "1k",
+    }
+    assert deck["options_explicit"] == {
+        "metal_top": True,
+        "mim_cap": False,
+        "poly_res": False,
+    }
 
 
 def test_body_unverified_warns_nmos_and_pmos_on_gf180mcu_undrawn_tie(tmp_path):

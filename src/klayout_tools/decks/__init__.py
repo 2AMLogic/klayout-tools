@@ -86,6 +86,7 @@ __all__ = [
     "get_parasitics_deck",
     "get_unmodeled_voltage_markers",
     "known_extraction_deck_names",
+    "resolve_deck_option_values",
 ]
 
 
@@ -330,6 +331,28 @@ def get_extraction_deck(
     if not deck_options:
         return deck
     return _resolve_device_flavours(name, deck, deck_options)
+
+
+def resolve_deck_option_values(
+    name: str, deck_options: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The **fully resolved** deck-option mapping for deck ``name`` under
+    ``deck_options`` -- every caller-selectable option key the deck declares,
+    including the ones ``deck_options`` never mentions, mapped to the value
+    actually wired for this call (issue #2394).
+
+    Exactly :attr:`ExtractionDeck.resolved_option_values` read off the deck
+    :func:`get_extraction_deck` resolves for the same arguments, so it can
+    never drift from what the run itself extracted with. ``{}`` for a deck
+    that declares no ``flavour_option`` at all.
+
+    Raises the same :class:`UnknownExtractionDeckError`/
+    :class:`InvalidDeckOptionError` :func:`get_extraction_deck` raises -- a
+    caller recording provenance *after* a successful run (``_provenance.py``)
+    has already passed that validation, so neither can fire there; a caller
+    that has not should let them surface rather than record a guess.
+    """
+    return get_extraction_deck(name, deck_options).resolved_option_values
 
 
 def _resolve_device_flavours(

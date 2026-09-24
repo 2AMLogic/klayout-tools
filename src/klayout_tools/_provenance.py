@@ -373,10 +373,107 @@ def _pdk_block(pdk: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+#: Bumped whenever :func:`_deck_options_hash`'s canonical serialisation below
+#: changes shape, so an ``options_hash`` computed by an older klt build can
+#: never be mistaken for one computed by a newer build over the same resolved
+#: option set (the two would differ for reasons that have nothing to do with
+#: the options themselves differing). Same discipline as
+#: :data:`_LAYOUT_GEOMETRY_DIGEST_VERSION` above.
+_DECK_OPTIONS_DIGEST_VERSION = "klt-deck-options-digest/1"
+
+
+def _deck_options_hash(options: Mapping[str, str]) -> str:
+    """A ``sha256:``-prefixed digest of a **resolved** deck-option mapping
+    (issue #2394) -- the sibling of ``deck.content_hash`` that pins *which
+    flavour of the deck* a run resolved, rather than which deck source.
+
+    ``content_hash`` deliberately stays exactly what it was: a byte digest of
+    the deck file, the value ``klt deck resolve --content-hash`` looks up in
+    the released-deck history table. Folding options into it would break that
+    lookup for every optioned run. So option-for-option equality gets its own
+    field, and two committed records can be gated on it with a string compare
+    instead of a structural dict diff.
+
+    Covers the resolved *values* only -- never which of them the caller
+    passed explicitly. Two runs that extract identically (one passing
+    ``poly_res=1k``, one silently taking the ``1k`` default) must hash equal,
+    because they did the same thing; ``options_explicit`` is what records the
+    difference in how they were asked for it.
+    """
+    digest = hashlib.sha256()
+    digest.update(_DECK_OPTIONS_DIGEST_VERSION.encode("utf-8"))
+    digest.update(b"\n")
+    for key in sorted(options):
+        digest.update(f"{key}={options[key]}\n".encode())
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _resolved_deck_options(
+    name: str, deck_options: Mapping[str, str] | None
+) -> tuple[dict[str, str], dict[str, bool]]:
+    """``(resolved, explicit)`` for deck ``name`` under ``deck_options``
+    (issue #2394): every option key the deck declares mapped to the value
+    actually wired, plus the same key set mapped to whether the *caller*
+    passed it (``False`` -- the deck applied its own default).
+
+    Falls back to echoing ``deck_options`` alone (every key ``explicit``)
+    when the deck's declared option surface cannot be read at all -- an
+    unregistered deck name, or any error resolving it. Provenance is written
+    *after* a successful run, so the resolution here cannot legitimately
+    fail; degrading to the pre-#2394 caller-only echo beats letting a
+    provenance lookup raise out of a completed verb.
+    """
+    passed = dict(deck_options or {})
+    try:
+        from .decks import resolve_deck_option_values
+
+        resolved = resolve_deck_option_values(name, deck_options)
+    except Exception:
+        resolved = dict(passed)
+    # A caller-passed key the deck does not declare cannot reach here (both
+    # `klt extract` and `klt lvs` validate options before extracting), but if
+    # one ever did, echoing it beats dropping a value that shaped the run.
+    for key, value in passed.items():
+        resolved.setdefault(key, value)
+    explicit = {key: key in passed for key in resolved}
+    return dict(sorted(resolved.items())), dict(sorted(explicit.items()))
+
+
+def explicit_deck_options(deck_block: Any) -> dict[str, str] | None:
+    """The **caller-passed** subset of a committed report's
+    ``provenance.deck.options``, or ``None`` when there is none (issue
+    #2394).
+
+    ``--rerun`` modes (``klt extract --check --rerun``,
+    ``klt lvs --check --rerun``) reconstruct a request from a committed
+    report and re-run it. Since ``options`` became the *resolved* mapping,
+    feeding it back verbatim would pin every silently-defaulted key as if the
+    caller had pinned it -- which is precisely the opposite of what a rerun
+    should test. Replaying only what the caller actually passed lets a
+    changed deck default surface as drift (the record's own reason for
+    existing) instead of being replayed over.
+
+    A report written before ``options_explicit`` existed carries no such
+    marker; every key it recorded *was* caller-passed back then, so the whole
+    mapping is returned and such a report reruns exactly as it used to.
+    """
+    if not isinstance(deck_block, Mapping):
+        return None
+    options = deck_block.get("options")
+    if not isinstance(options, Mapping) or not options:
+        return None
+    explicit = deck_block.get("options_explicit")
+    if not isinstance(explicit, Mapping):
+        return dict(options)
+    passed = {key: value for key, value in options.items() if explicit.get(key)}
+    return passed or None
+
+
 def _deck_block(
     name: str | None,
     path: str | None,
     deck_options: Mapping[str, str] | None = None,
+    resolve_deck_options: bool = False,
 ) -> dict[str, Any] | None:
     """The provenance ``deck`` shape ``{name, content_hash, released}``;
     ``None`` when no rule/model deck was involved (e.g. LVS against a
@@ -401,13 +498,43 @@ def _deck_block(
       Deliberately distinct from ``False``: a broken/missing history table
       must never be reported as a confirmed "this deck is unreleased" claim.
 
-    ``deck_options`` (issue #595, ``klt extract --deck-option``) is echoed
-    verbatim as an additional ``options`` key when non-empty -- e.g. gf180mcu's
-    caller-selectable resistor sheet-rho flavour (``{"poly_res": "2k"}``) --
-    so a record can pin exactly which flavour of a shared-geometry device
-    family a run resolved. Omitted entirely when ``deck_options`` is
-    ``None``/empty, keeping the block byte-identical to before this
-    parameter existed for every call site that does not pass it.
+    ``deck_options`` (issue #595, ``klt extract --deck-option``) is the
+    caller-passed deck-option mapping, recorded under an additional
+    ``options`` key -- e.g. gf180mcu's caller-selectable resistor sheet-rho
+    flavour (``{"poly_res": "2k"}``) -- so a record can pin exactly which
+    flavour of a shared-geometry device family a run resolved.
+
+    ``resolve_deck_options`` (issue #2394) says whether ``name`` is a
+    registered *extraction* deck whose declared option surface can be read,
+    in which case ``options`` records the **fully resolved** set rather than
+    only the caller's overrides, and two siblings join it:
+
+    - ``options`` -- every option key the deck declares, mapped to the value
+      actually wired, including keys the caller never passed (gf180mcu's
+      ``poly_res``/``mim_cap``/``metal_top`` all appear even for a bare
+      ``klt extract --deck gf180mcu``). This is the load-bearing half of
+      #2394: a silently-taken default used to be indistinguishable, in the
+      record, from a deck with no selectable options at all.
+    - ``options_explicit`` -- the same key set mapped to ``true``/``false``:
+      did the *caller* pin this value, or did the deck apply its own
+      default. Without it a consumer could not tell "pinned ``poly_res=1k``"
+      from "defaulted to ``1k``", and a ``--rerun`` could not replay a record
+      without over-pinning it (see :func:`explicit_deck_options`).
+    - ``options_hash`` -- :func:`_deck_options_hash` over the resolved values,
+      so option-for-option equality is a string compare.
+
+    Passed by ``klt extract``/``klt lvs`` (and ``klt pex`` through the
+    former), the verbs whose ``deck_options`` genuinely select an extraction
+    flavour. ``klt drc --engine klayout``'s ``--deck-var`` globals reach this
+    same ``options`` key with ``resolve_deck_options`` left ``False``: an
+    external ``.drc`` file's variables have no declared surface klt can
+    enumerate, so there are no defaults to resolve and that path stays
+    byte-identical (caller-passed keys only, no siblings).
+
+    All three keys are omitted entirely when there is nothing to record --
+    a deck that declares no selectable option and a caller that passed none
+    -- keeping the block byte-identical to before these parameters existed
+    for every call site that does not pass them.
     """
     if name is None:
         return None
@@ -417,7 +544,13 @@ def _deck_block(
         "content_hash": content_hash,
         "released": is_deck_hash_released(name, content_hash),
     }
-    if deck_options:
+    if resolve_deck_options:
+        options, explicit = _resolved_deck_options(name, deck_options)
+        if options:
+            block["options"] = options
+            block["options_explicit"] = explicit
+            block["options_hash"] = _deck_options_hash(options)
+    elif deck_options:
         block["options"] = dict(deck_options)
     return block
 
@@ -500,6 +633,7 @@ def build_provenance(
     input_path: str | None = None,
     input_role: str = INPUT_ROLE_LAYOUT,
     deck_options: Mapping[str, str] | None = None,
+    resolve_deck_options: bool = False,
     include_klayout_version_mismatch: bool = False,
 ) -> dict[str, Any]:
     """Build the shared ``provenance`` envelope block.
@@ -540,9 +674,12 @@ def build_provenance(
     false alarm rather than caught staleness. Raises :class:`ValueError` for
     a role outside :data:`INPUT_ROLES` -- a silently-unknown role would
     disable the cross-check for that verb instead of failing loudly.
-    ``deck_options`` (issue #595) is echoed onto ``provenance.deck.options``
-    via :func:`_deck_block` when non-empty -- see that function's docstring.
-    ``klt_version``/``klayout_version`` are read at call time.
+    ``deck_options`` (issue #595) is recorded onto ``provenance.deck.options``
+    via :func:`_deck_block`; ``resolve_deck_options`` (issue #2394) additionally
+    fills in the options the deck resolved *by default* and records which of
+    the resulting values the caller actually pinned
+    (``options_explicit``/``options_hash``) -- see that function's docstring
+    for both. ``klt_version``/``klayout_version`` are read at call time.
 
     ``include_klayout_version_mismatch`` (issue #1490, opt-in and ``False``
     by default) adds ``provenance.klayout_version_mismatch``: ``True`` when
@@ -565,7 +702,7 @@ def build_provenance(
         "klt_version": _klt_version(),
         "klayout_version": actual_klayout_version,
         "pdk": _pdk_block(pdk),
-        "deck": _deck_block(deck_name, deck_path, deck_options),
+        "deck": _deck_block(deck_name, deck_path, deck_options, resolve_deck_options),
         "input": _input_block(input_path, input_role),
     }
     if include_klayout_version_mismatch:

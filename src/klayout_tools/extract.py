@@ -148,7 +148,13 @@ from ._layout import texts as _texts
 from ._paths import _load_request_json
 from ._paths import load_request_arg as _shared_load_request_arg
 from ._paths import validate_request_shape as _shared_validate_request_shape
-from ._provenance import _content_hash, _klt_version, build_provenance, sha256_file
+from ._provenance import (
+    _content_hash,
+    _klt_version,
+    build_provenance,
+    explicit_deck_options,
+    sha256_file,
+)
 from ._report_verify import build_check_result, build_rerun_result, get_path, hash_check
 from ._report_verify import load_committed_report as _load_committed_report
 from .decks import (
@@ -1395,12 +1401,19 @@ def run_extract(
                 "klt_version": <str | None>,
                 "klayout_version": <str | None>,
                 "pdk": {"name", "source", "version"} | None,
-                # "options" is present only when `deck_options` was given
-                # (issue #595) -- omitted entirely otherwise.
+                # "options"/"options_explicit"/"options_hash" (issues #595,
+                # #2394) are present together whenever this deck declares
+                # at least one caller-selectable option, whether or not the
+                # caller passed any -- omitted entirely for a deck that
+                # declares none (e.g. sky130). "options" is the *resolved*
+                # set (defaults included); "options_explicit" says which of
+                # those values the caller pinned.
                 "deck": {
                     "name": <deck name>,
                     "content_hash": "sha256:...",
                     "options": {<deck option key>: <value>, ...},
+                    "options_explicit": {<deck option key>: <bool>, ...},
+                    "options_hash": "sha256:...",
                 },
             },
         }
@@ -2797,6 +2810,13 @@ def run_extract(
         pdk=pdk_info,
         input_path=path,
         deck_options=deck_options,
+        # Issue #2394: record the *resolved* option set (every key this deck
+        # declares, defaults filled in) plus which of those the caller
+        # pinned, not only the caller's own overrides -- a run that silently
+        # took gf180mcu's `poly_res='1k'` default was otherwise
+        # indistinguishable, in its own record, from a deck with no
+        # selectable options at all.
+        resolve_deck_options=True,
     )
 
     # Additive, independently-optional field (issue #216 addendum): `null`
@@ -3368,7 +3388,14 @@ def rerun_extract_report(report_path: str) -> dict[str, Any]:
             f"committed report has no 'deck' field to rerun: {report_path}"
         )
 
-    deck_options = get_path(committed, ("provenance", "deck", "options"))
+    # Issue #2394: replay only the options the *caller* pinned. Since
+    # `provenance.deck.options` became the fully *resolved* set (defaults
+    # included), feeding it back verbatim would pin every silently-defaulted
+    # key as if the caller had chosen it -- replaying over exactly the
+    # changed-deck-default drift this mode exists to surface. A report
+    # predating `options_explicit` reruns exactly as it used to (see
+    # `explicit_deck_options`).
+    deck_options = explicit_deck_options(get_path(committed, ("provenance", "deck")))
 
     fresh = run_extract(
         file_path,

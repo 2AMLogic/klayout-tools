@@ -504,14 +504,28 @@ def _run_check(args: argparse.Namespace) -> int:
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"deck: {report['deck']}")
-    # Present only when `--deck-option` selected a non-default flavour
-    # (issue #595) -- mirrors `provenance.deck.options` in the JSON report.
+    # Present whenever this deck declares a caller-selectable option at all
+    # (issues #595, #2394) -- mirrors `provenance.deck.options` in the JSON
+    # report, which since #2394 is the *resolved* set rather than only the
+    # caller's `--deck-option` overrides. Each silently-defaulted value is
+    # marked `(default)` from `options_explicit`, so the text surface cannot
+    # present one option's answer as *the* answer either.
     # `or {}` at each hop, not just a `.get` default: a present-but-`null`
     # `provenance`/`deck` would otherwise chain a `.get()` onto `None`.
     deck_provenance = (report.get("provenance") or {}).get("deck") or {}
     deck_options = deck_provenance.get("options")
     if deck_options:
-        print(f"deck_options: {deck_options}")
+        # No `options_explicit` at all == a record predating #2394, whose
+        # `options` held caller-passed keys only -- so every key there was
+        # explicit, and none should be marked `(default)`.
+        explicit = deck_provenance.get("options_explicit")
+        rendered = ", ".join(
+            f"{key}={value}"
+            if explicit is None or explicit.get(key)
+            else f"{key}={value} (default)"
+            for key, value in sorted(deck_options.items())
+        )
+        print(f"deck_options: {rendered}")
     print(f"top: {report['top']}")
     print(f"dbu_um: {report['dbu_um']}")
     print(f"status: {report['status']}")

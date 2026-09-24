@@ -440,17 +440,65 @@ stability statement, concrete precedents, and drift-detection guidance, and
   `{name, content_hash, released}`. `content_hash` is a `sha256:`-prefixed
   hex digest of the deck file actually used, so "clean against *this exact*
   rule set" is a checkable claim. The whole block is `null` when no deck was
-  involved (e.g. `lvs` against a pre-extracted netlist). `klt extract`
-  additionally carries an `options` key (issue #595) when `--deck-option`
-  selected a non-default flavour of a shared-geometry device family (e.g.
-  gf180mcu's `{"poly_res": "2k"}`) — omitted entirely when no such option was
-  given, so the block is otherwise unchanged. See `docs/cli/extract.md`'s
-  "Selecting a shared-geometry resistor flavour". `klt drc --engine klayout`
-  carries the same `options` key (issue #1306) when one or more `--deck-var
-  NAME=VALUE` flags were passed, recording the extra `-rd` script globals
-  that were threaded into the deck for that run (e.g. `{"feol": "true"}`) —
-  likewise omitted entirely when no `--deck-var` was given. See
-  `docs/cli/drc.md`.
+  involved (e.g. `lvs` against a pre-extracted netlist).
+  - `options` / `options_explicit` / `options_hash` (issues #595, #2394) —
+    the deck-option flavour selection a run resolved, present together
+    **whenever the deck declares at least one caller-selectable option**,
+    whether or not the caller passed any, and omitted together for a deck
+    that declares none (e.g. sky130). Carried by `klt extract` and `klt lvs`
+    (and `klt pex`, which extracts through the former).
+
+    ```json
+    "deck": {
+      "name": "gf180mcu",
+      "content_hash": "sha256:<hex>",
+      "released": true,
+      "options": {"metal_top": "9K", "mim_cap": "cap_mim_2f0_m4m5_noshield", "poly_res": "3k"},
+      "options_explicit": {"metal_top": false, "mim_cap": false, "poly_res": true},
+      "options_hash": "sha256:<hex>"
+    }
+    ```
+
+    `options` is the **fully resolved** set: every option key the deck
+    declares, mapped to the value actually wired — *including* the ones the
+    deck applied by default because `--deck-option` (CLI) /
+    `request.layout.deck_options` (`klt lvs`) never mentioned them. It was
+    caller-passed keys only before #2394, which made a run that silently
+    took gf180mcu's `poly_res='1k'` default provenance-identical to a run
+    against a deck with no selectable options at all — the stored device
+    class and resistance were *one option's* answer with nothing in the
+    record saying so.
+
+    `options_explicit` maps the same key set to `true` (the caller pinned
+    this value) or `false` (the deck applied its own default), so a consumer
+    can tell "pinned `poly_res=1k`" from "defaulted to `1k`" with no
+    deck-specific knowledge.
+
+    `options_hash` is a `sha256:`-prefixed digest of the resolved **values**
+    (never of `options_explicit`), so two records can be gated on
+    option-for-option equality with a string compare instead of a structural
+    dict diff. Two runs that extracted identically — one pinning a value,
+    one defaulting to it — hash equal. `content_hash` deliberately does not
+    fold options in: it pins the deck *source*, and is the value `klt deck
+    resolve --content-hash` looks up in the released-deck history table.
+
+    `klt extract --check --rerun` / `klt lvs --check --rerun` replay only
+    the keys `options_explicit` marks `true`; re-pinning a defaulted key
+    would replay over exactly the changed-deck-default drift those modes
+    exist to surface. A report written before #2394 carries no
+    `options_explicit` and reruns exactly as it used to (every key it
+    recorded *was* caller-passed).
+
+    See `docs/cli/extract.md`'s "Selecting a shared-geometry resistor
+    flavour".
+  - `klt drc --engine klayout` carries an `options` key of its own (issue
+    #1306) when one or more `--deck-var NAME=VALUE` flags were passed,
+    recording the extra `-rd` script globals that were threaded into the
+    deck for that run (e.g. `{"feol": "true"}`) — likewise omitted entirely
+    when no `--deck-var` was given. This path records **caller-passed keys
+    only** and carries no `options_explicit`/`options_hash`: an external
+    `.drc` file has no declared option surface klt can enumerate, so there
+    are no defaults to resolve and none are invented. See `docs/cli/drc.md`.
   A pinned `content_hash` can be turned back into the klayout-tools git
   tag/PyPI version that shipped it with `klt deck resolve --content-hash
   <hash>` (issue #623) — a resolve-only lookup against a generated

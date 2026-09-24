@@ -53,9 +53,11 @@ klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netl
   one** — no warning, and every `delta[]` row is then computed from the
   wrong parasitics. An unrecognised key or value is a clean error (exit 1),
   not a silently-kept default. Off by default — byte-identical to before
-  this flag existed. The resolved mapping is echoed in
+  this flag existed. The fully resolved mapping — including the options the
+  deck applied by default, flagged as such in
+  `provenance.deck.options_explicit` (issue #2394) — is recorded in
   `provenance.deck.options`, so a committed record pins exactly which
-  flavour a run selected.
+  flavour a run resolved, not only which one it was told to.
 - `--pins` — comma-separated declared pin set (e.g. `'A,B,VDD,VSS'`),
   passed through to `klt extract --pins` (issue #1558); see
   [`extract.md`](extract.md). Every

@@ -94,6 +94,44 @@ not `klt --version`, if you need to detect this kind of drift. See
     rule (MOS transistors and resistors are never inspected). Each
     `details.corrected[]` entry now names the `parameter` it corrected
     alongside the existing `circuit`/`device`/`class`/`before`/`after`.
+- **Changed** (#2394, `provenance.deck.options` on `klt extract`/`klt lvs`/
+  `klt pex` — additive, **no** `schema_version` bump: two new keys beside an
+  existing one whose *contents* broaden; no field is renamed or removed):
+  `provenance.deck.options` recorded only the deck options a caller passed
+  explicitly, so a run that silently took a deck default carried no
+  `options` key at all — provenance-identical to a run against a deck with
+  no caller-selectable options whatsoever, even though the recorded device
+  class and parameter values were *one option's* answer (gf180mcu's
+  `poly_res='1k'` default yields `ppolyf_u_1k` at 1000 Ω/□; the `3k`
+  flavour of the identical drawn geometry is 3× that). It is now the
+  **fully resolved** set — every option key the deck declares, mapped to
+  the value actually wired, defaults included — and gains two siblings:
+  - `options_explicit` — the same key set mapped to `true` (the caller
+    pinned this value) / `false` (the deck applied its own default), so
+    "pinned `poly_res=1k`" is distinguishable from "defaulted to `1k`"
+    without deck-specific knowledge.
+  - `options_hash` — a `sha256:` digest over the resolved *values* (never
+    over `options_explicit`), so two records can be gated option-for-option
+    with a string compare instead of a structural dict diff. Two runs that
+    extracted identically — one pinning a value, one defaulting to it —
+    hash equal. `content_hash` is deliberately unchanged and still pins the
+    deck *source* only: folding options into it would break `klt deck
+    resolve --content-hash`'s lookup against the released-deck history
+    table for every optioned run.
+
+  All three are omitted together for a deck that declares no selectable
+  option at all (e.g. sky130), so absence of the field still means "this
+  deck has no options", not "this run happened to pass none". `klt drc
+  --engine klayout`'s `--deck-var` globals reach the same `options` key and
+  are **unchanged** (caller-passed keys only, no siblings): an external
+  `.drc` file has no declared option surface `klt` can enumerate, so there
+  are no defaults to resolve and none are invented. `klt extract --check
+  --rerun` / `klt lvs --check --rerun` replay only the caller-pinned subset
+  — re-pinning a defaulted key would replay over exactly the
+  changed-deck-default drift those modes exist to surface — and a report
+  written before this change (no `options_explicit`) reruns exactly as it
+  used to. `klt extract --format text`'s `deck_options:` line now marks
+  each silently-applied value `(default)`.
 - **Fixed** (#2373, `klt lvs --engine netgen` binary resolution — additive,
   **no** `schema_version` bump: one new always-present `environment` key,
   `netgen_binary`): the netgen engine invoked the hardcoded binary name

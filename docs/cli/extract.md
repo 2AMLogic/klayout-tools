@@ -1482,17 +1482,38 @@ Rules of thumb:
 
 - Selecting the flavour that already matches the deck's default (`poly_res=1k`
   today) is byte-for-byte identical to omitting `--deck-option` entirely,
-  other than the additive `provenance.deck.options` echo below.
+  including `provenance.deck.options_hash` — only
+  `provenance.deck.options_explicit` records the difference between pinning
+  that value and defaulting to it (see below).
 - An unrecognised key (one no resistor entry in this deck declares) or an
   unrecognised value (not one of the entry's declared flavours) is an
   application error (exit 1), never a silently-kept default and never a
   guessed resistance — the same "known-unmodelled short beats a silently
   wrong value" discipline the deck's own `requires`/`excludes` narrowing
   already applies.
-- The resolved mapping is echoed verbatim as `provenance.deck.options` in the
-  JSON response (present only when `--deck-option` was given), so a record
-  can pin exactly which flavour a run selected alongside the deck's own
-  `content_hash`.
+- The **fully resolved** mapping is recorded as `provenance.deck.options` in
+  the JSON response — every option key this deck declares, including the ones
+  the deck resolved by default because `--deck-option` never named them
+  (issue #2394), alongside `provenance.deck.options_explicit` (which values
+  the caller pinned) and `provenance.deck.options_hash` (a digest over the
+  resolved values, for option-for-option comparison of two records). So a
+  record pins exactly which flavour a run resolved — not only which one it
+  was *told* to — alongside the deck's own `content_hash`. All three are
+  omitted entirely for a deck that declares no selectable option at all (e.g.
+  sky130). Full field documentation:
+  [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance`
+  block".
+
+  ```console
+  $ klt extract cell.gds --deck gf180mcu -o cell.spice --format json | jq .provenance.deck.options
+  { "metal_top": "9K", "mim_cap": "cap_mim_2f0_m4m5_noshield", "poly_res": "1k" }
+  ```
+
+  Before #2394 this echoed caller-passed keys only, so a run that silently
+  took the `1k` default carried no `options` key at all and was
+  provenance-identical to a run against a deck with no selectable options —
+  the recorded device class and resistance were *one option's* answer with
+  nothing in the record saying so.
 - This changes only *which* device class/sheet-rho a matched resistor segment
   is reported as — never *whether* a segment is recognised, and never how
   many devices a drawn segment produces (still exactly one, whichever flavour
@@ -1545,15 +1566,17 @@ Rules of thumb:
   `cap_mim_1f5_m4m5_noshield`, `cap_mim_2f0_m4m5_noshield`.
 - Selecting the flavour that already matches the deck's default
   (`mim_cap=cap_mim_2f0_m4m5_noshield` today) is byte-for-byte identical to
-  omitting `--deck-option` entirely, other than the additive
-  `provenance.deck.options` echo below.
+  omitting `--deck-option` entirely, including
+  `provenance.deck.options_hash` — only `provenance.deck.options_explicit`
+  records the difference between pinning that value and defaulting to it.
 - An unrecognised key or an unrecognised value is an application error (exit
   1), never a silently-kept default and never a guessed capacitance — the
   same discipline `poly_res` above already applies. A `deck_options` mapping
   that names both `poly_res` and `mim_cap` together resolves both
   independently in the same call.
-- The resolved mapping is echoed verbatim as `provenance.deck.options` in the
-  JSON response, exactly as for `poly_res` above.
+- The fully resolved mapping is recorded as `provenance.deck.options` (with
+  `options_explicit`/`options_hash` beside it), exactly as for `poly_res`
+  above.
 - This changes only *which* device class/area-and-perimeter coefficients a
   matched MiM overlap is reported as — never *whether* it is recognised, and
   never how many devices a drawn overlap produces (still exactly one,
@@ -5842,8 +5865,13 @@ no longer be trusted to still reproduce without re-running.
 ### Full mode (`--rerun`)
 
 Actually re-runs the extraction (`run_extract`) against the `file`/`deck`/
-`top` the committed report itself names, plus `provenance.deck.options`
-(`--deck-option`) when present, writing the fresh netlist back to the same
+`top` the committed report itself names, plus the `--deck-option` values
+the committed `provenance.deck.options_explicit` marks as **caller-pinned**
+(issue #2394 — the silently-defaulted keys `provenance.deck.options` also
+carries are deliberately *not* re-pinned, so a changed deck default shows up
+as drift instead of being replayed over; a report predating
+`options_explicit` replays every key it recorded, exactly as before),
+writing the fresh netlist back to the same
 `netlist_path` the committed report recorded. Diffs the fresh report against
 the committed one, field by field, after normalizing every **bookkeeping**
 field on both sides (issue #1559 — see "Field classes: content, bookkeeping,
@@ -5881,8 +5909,8 @@ diff computation itself uses the normalized view. Response shape:
 complete report `--rerun` just produced, so a consumer can inspect the
 current state without a second invocation.
 
-**Known limitation**: only `file`/`deck`/`top`/`provenance.deck.options` are
-reconstructed from the committed report. Every other optional flag
+**Known limitation**: only `file`/`deck`/`top` and the caller-pinned subset
+of `provenance.deck.options` are reconstructed from the committed report. Every other optional flag
 (`--parasitics`, `--mom-net`, `--spef`, `--critical-net`,
 `--distributed-rc`, `--def-net-names`, `--def-net-connections`,
 `--mom-rlc-*`, `--top-cell-pins`, `--pins`,
