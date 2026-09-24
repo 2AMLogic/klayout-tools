@@ -354,6 +354,17 @@ def _build_batch_job_spec(
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
     )
+    # One ngspice per PHYSICAL core on the job instance. `local-parallel`'s
+    # own default divides os.cpu_count() by _ASSUMED_THREADS_PER_NGSPICE (8),
+    # which on a 16-vCPU Spot box is 2 workers: a 5-corner grid ran in three
+    # waves (575 s) where one wave (~230 s) was available. That default is a
+    # guard for SHARED hosts; a job instance is dedicated to this one job, and
+    # 2am#117's probe measured one-per-physical-core at 99% efficiency. The
+    # harness exports $EDA_PHYSICAL_CORES from lscpu; `${var:+...}` leaves an
+    # image that predates it on the old default rather than on a wrong guess.
+    # An explicit `options.max_workers` in the request still wins.
+    if not (remote_request.get("options") or {}).get("max_workers"):
+        command += ' ${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}'
     if keep_artifacts:
         command += f' --outdir "$EDA_OUTPUT_DIR/{BATCH_ARTIFACTS_DIRNAME}"'
     command += f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'

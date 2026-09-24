@@ -312,6 +312,51 @@ def test_job_cmd_redirects_report_to_output_dir(tmp_path):
     assert "--outdir" not in spec.cmd
 
 
+def test_job_cmd_runs_one_worker_per_physical_core_on_the_job_instance(tmp_path):
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=5,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert '${EDA_PHYSICAL_CORES:+--max-workers "$EDA_PHYSICAL_CORES"}' in spec.cmd
+    # ...and it lands before the redirect, as a klt argument.
+    assert spec.cmd.index("--max-workers") < spec.cmd.index("> ")
+
+
+def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
+    import subprocess
+
+    spec = sb._build_batch_job_spec(
+        {"models": {}},
+        str(_write_body(tmp_path)),
+        corner_count=5,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    flag = spec.cmd.split("--format json", 1)[1].split(">", 1)[0].strip()
+    probe = f'printf "%s|" {flag}'
+    with_cores = subprocess.run(
+        ["sh", "-c", probe], env={"EDA_PHYSICAL_CORES": "8"}, capture_output=True, text=True
+    ).stdout
+    without = subprocess.run(["sh", "-c", probe], env={}, capture_output=True, text=True).stdout
+    assert with_cores == "--max-workers|8|"
+    # An image that predates $EDA_PHYSICAL_CORES keeps klt's own default.
+    assert without == "|"
+
+
+def test_job_cmd_respects_an_explicit_request_max_workers(tmp_path):
+    spec = sb._build_batch_job_spec(
+        {"models": {}, "options": {"max_workers": 3}},
+        str(_write_body(tmp_path)),
+        corner_count=5,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert "--max-workers" not in spec.cmd
+
+
 def test_job_cmd_points_outdir_into_output_dir_when_keeping_artifacts(tmp_path):
     spec = sb._build_batch_job_spec(
         {"models": {}},
