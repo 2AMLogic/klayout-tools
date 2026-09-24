@@ -2028,7 +2028,13 @@ def test_ties_well_with_no_tap_geometry_reports_honest_missing_tie(tmp_path):
     assert report["gate_count"] == 2
 
 
-# Case (c): a tap layer but no well geometry -> nothing to check, clean.
+# Case (c): a tap layer but no well geometry -> the same absence-of-evidence
+# state as a typo'd/never-drawn tub layer (issue #2377) -- both ties' wells
+# resolve to an empty region, so their per-well loop runs zero times and the
+# zero `erc.missing_tie` findings mean "nothing was examined", not "every
+# well is tied". Graded skipped, not a clean pass -- see
+# `test_ties_well_layer_with_no_geometry_is_skipped_not_clean` below for the
+# dedicated coverage of this reason.
 def test_ties_tap_without_well_geometry_is_clean(tmp_path):
     report = _run_routed_tie(
         tmp_path,
@@ -2039,6 +2045,15 @@ def test_ties_tap_without_well_geometry_is_clean(tmp_path):
     assert report["gate_count"] == 2
     assert report["erc_findings"] == []
     assert report["status"] == "clean"
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["nwell_tie"]': "empty_well_region",
+        'erc.missing_tie:["pwell_tie"]': "empty_well_region",
+    }
+    assert not any(
+        identity.startswith("erc.missing_tie:")
+        for identity in report["erc_coverage"]["checked"]
+    )
+    assert report["erc_status"] == "clean_partial"
 
 
 # Case (d) -- the one that used to break: a real well plus a real tap must
@@ -3133,6 +3148,90 @@ def test_a_null_well_selection_is_the_same_as_omitting_it(tmp_path, key):
 
     assert report["erc_coverage"]["skipped"] == []
     assert _BASE_ID in report["erc_coverage"]["checked"]
+
+
+# --- ties: a well layer with no geometry at all (issue #2377) ------------
+#
+# The unselected form of `test_a_selection_that_keeps_no_well_is_degenerate`
+# above: a `ties[]` entry naming a *drawn* `well_layer` that draws no
+# geometry in this stream at all -- a typo'd layer/datatype, a PDK whose tub
+# layer number changed, a GDS written without the tub layer -- collapses
+# `_tie_findings`'s per-well loop to zero iterations exactly as an empty
+# `well_requires`/`well_excludes` selection does. Before this issue, that
+# state was graded as a clean pass (`test_ties_tap_without_well_geometry_is_
+# clean` above asserted it deliberately); now it is skipped work, like every
+# other member of this family.
+
+
+def test_ties_well_layer_with_no_geometry_is_skipped_not_clean(tmp_path):
+    """The reproduction from the issue: `well_layer` names a layer/datatype
+    this stream never draws. No `erc.missing_tie` findings are emitted --
+    the per-well loop never runs -- but the envelope must not read that as
+    "every well is tied"."""
+    report = _run_routed_tie(
+        tmp_path,
+        "empty_well",
+        _routed_tie_entries(nwell_layer="98/0", pwell_layer="98/0"),
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _tie_skips(report) == {
+        'erc.missing_tie:["nwell_tie"]': "empty_well_region",
+        'erc.missing_tie:["pwell_tie"]': "empty_well_region",
+    }
+    assert not any(
+        identity.startswith("erc.missing_tie:")
+        for identity in report["erc_coverage"]["checked"]
+    )
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_a_real_well_layer_is_never_graded_empty(tmp_path):
+    """The control: the same spec shape, but naming a well layer this
+    stream actually draws. Real geometry must never be misread as an
+    absent layer. (`tap_requires` keeps the tap side non-degenerate too, so
+    the only variable between this test and the one above is the well
+    layer's own geometry.)"""
+    report = _run_routed_tie(
+        tmp_path, "real_well", _routed_tie_entries(tap_requires=["12/0"])
+    )
+
+    assert report["erc_coverage"]["skipped"] == []
+    assert {
+        'erc.missing_tie:["nwell_tie"]',
+        'erc.missing_tie:["pwell_tie"]',
+    } <= set(report["erc_coverage"]["checked"])
+    assert report["erc_status"] == "clean"
+
+
+def test_asserted_substrate_region_is_never_graded_empty(tmp_path):
+    """The scope boundary the issue calls out explicitly: an asserted
+    region (`well_layer: null` + `well_boxes`) can never be empty -- boxes
+    are validated non-degenerate at spec-parse time -- so this reason must
+    never fire for it, even though its own `well_degenerate` test can (see
+    `test_a_whole_extent_well_assertion_is_degenerate_not_evidence` in the
+    #2255 section above)."""
+    report = _run_native_substrate(
+        tmp_path, "asserted_never_empty", [_substrate_tie([_SUBSTRATE_BAND])]
+    )
+
+    assert _tie_skips(report) == {}
+    assert report["erc_status"] == "clean"
+
+
+def test_the_empty_well_region_reason_is_distinct_from_the_tap_one(tmp_path):
+    """Two different defects, two different remedies: "your well layer
+    draws nothing" must not render as "narrow your tap". The well tests are
+    applied before the tap test, for the same reason #2199's and #2339's
+    are -- the tap narrowing is measured *inside* the well region, so on a
+    well that draws nothing the tap answer is about the wrong set of
+    shapes."""
+    # No `tap_requires` declared, so this tie would *also* be tap-degenerate
+    # if the well test did not win first.
+    tie = _routed_tie_entries(nwell_layer="98/0", pwell_layer="98/0")[0]
+    report = _run_routed_tie(tmp_path, "empty_well_and_tap", [tie])
+
+    assert _tie_skips(report) == {'erc.missing_tie:["nwell_tie"]': "empty_well_region"}
 
 
 # --- ties: disclosed-unexpressible taps (issue #2234) --------------------

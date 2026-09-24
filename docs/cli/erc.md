@@ -321,7 +321,13 @@ draws that the spec never declared" below.
     this block draws **no** well/tub layer for this tie at all — the
     native-substrate case — and requires `well_boxes` below to assert the
     region instead. The key itself is always required: the absence of a
-    drawn well must be declared, never inferred from an omitted key.
+    drawn well must be declared, never inferred from an omitted key. A
+    non-`null` value that draws **no geometry at all** in the stream (a
+    typo'd layer/datatype, a PDK whose tub layer number changed, a GDS
+    written without the tub layer) is not an error — same convention as
+    every other spec layer — but the resulting tie is recorded as skipped
+    work rather than a clean pass (`empty_well_region`, issue #2377; see
+    "A well layer with no geometry at all" below).
   - `well_boxes` (optional array of `[left, bottom, right, top]` micrometre
     boxes, default `[]`, issue #2255) — a caller **assertion** of the
     substrate region this tie covers, for a block that draws no well/tub
@@ -1061,6 +1067,51 @@ read anything in `erc_coverage.skipped` as a clean missing-tie verdict, and
 it matches on the `erc.missing_tie:` work-identity prefix rather than on the
 skip reason, so the new token is covered by construction.
 
+#### A well layer with no geometry at all (issue #2377)
+
+Every test above assumes the drawn `well_layer` actually draws something.
+It does not have to: a typo'd layer/datatype, a PDK whose tub layer number
+changed between revisions, or a GDS written without the tub layer entirely
+all produce a `ties[]` entry whose resolved well region is **empty**. Before
+this issue that state was graded as a clean pass — the per-well loop then
+runs zero times, so zero `erc.missing_tie` findings looked exactly like
+"every well is tied" rather than "nothing was there to examine". It is the
+unselected form of the "keeps nothing" endpoint the previous section
+describes: `well_requires`/`well_excludes` already refuses that state for a
+*declared* selection, and this closes the same gap for the well layer
+itself, whether or not a selection is declared on top of it.
+
+Such a tie's `erc.missing_tie` work is recorded in `erc_coverage.skipped`
+with reason `empty_well_region`, and the connectivity roll-up reports
+`erc_status: "clean_partial"` rather than `"clean"` — the same shape as
+every other member of this family. Distinct from `degenerate_well_selection`
+because the two name different defects to go fix: that reason means "the
+layer is there but the declared class selector kept none of it"; this one
+means "the layer itself drew nothing here, before any selection was even
+applied" — and it is measured first, so a selection declared on top of an
+empty layer is reported under this reason rather than the selection one.
+
+**`well_boxes` is never subject to this test.** An asserted substrate region
+is validated non-degenerate at spec-parse time (an empty or omitted
+`well_boxes` list is a spec error, not a tie that quietly checks nothing —
+see "A block with no drawn well at all" above), so it can never be empty by
+the time this module measures it. This reason applies only to a *drawn*
+`well_layer`. Nor does it distinguish "the layer/datatype pair is absent
+from the stream entirely" from "the layer is present but every shape on it
+happens to be empty" — both collapse to the same empty region, and the
+remedy is the same either way: check the spec's `well_layer` value against
+the layout's own resolved tub layer number.
+
+**`erc_findings` is unchanged by this**, exactly as for every other member
+of this family: the empty well produces zero findings whether or not the
+skip fires, because there is nothing in it to report on. What changes is
+that the envelope now states the check could not be performed instead of
+letting `erc_status: "clean"` stand for an absence of evidence.
+
+`klt signoff`'s T1 item 11 needs no change for this either, for the same
+reason issue #2339's token needed none: the gate matches on the
+`erc.missing_tie:` work-identity prefix, not on the specific skip reason.
+
 ### Device bodies are not wires (`devices[]`, issue #2183)
 
 A conductor role carries *geometry*, and the model above has no way to tell
@@ -1502,17 +1553,22 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
 - **`erc_status: "clean_partial"`** — no finding, but some requested
   connectivity work was skipped: today that means a **degenerate `ties[]`
   declaration**, whose `erc.missing_tie` verdict could not be told apart
-  from one that never looked at a tap. Three forms, all under "Well/tap
+  from one that never looked at a tap. Four forms, all under "Well/tap
   connectivity" above: a degenerate *tap* (issue #2199,
   `degenerate_tap_declaration` — the declared tap region is
   indistinguishable from an ordinary source/drain contact reaching the
   declared net), a degenerate *well assertion* (issue #2255,
   `degenerate_well_assertion` — a caller-asserted substrate region
-  indistinguishable from the whole top-cell extent), and a degenerate *well
+  indistinguishable from the whole top-cell extent), a degenerate *well
   selection* (issue #2339, `degenerate_well_selection` — a declared
   `well_requires`/`well_excludes` that kept every merged shape of the drawn
-  `well_layer`, or none of them). A successful, but not unconditional,
-  result: read `erc_coverage.skipped` for which tie, and which of the three.
+  `well_layer`, or none of them), and an *empty well region* (issue #2377,
+  `empty_well_region` — a *drawn* `well_layer` that draws no geometry at all
+  in this stream: a typo'd layer/datatype, a PDK whose tub layer number
+  changed, a GDS written without the tub layer; never applicable to an
+  asserted `well_boxes` region, which cannot be empty after spec
+  validation). A successful, but not unconditional, result: read
+  `erc_coverage.skipped` for which tie, and which of the four.
 - `"not_checked"` is a reachable token of the shared rollup vocabulary,
   listed for completeness: `erc_coverage` always grades at least one gate
   (a run with no gate net at all is exit 1), so a successful run reports
@@ -1861,18 +1917,22 @@ envelope alone. The gate scope is never empty: a run in which no net
 carries gate-role geometry is exit 1, not a zero-coverage report.
 
 A declared `ties[]` entry is the one case this scope records as **skipped**:
-work that was requested and could not be performed. Three reasons today —
+work that was requested and could not be performed. Four reasons today —
 `degenerate_tap_declaration` (issue #2199: the declared tap region is
 indistinguishable from an ordinary source/drain contact),
 `degenerate_well_assertion` (issue #2255: a caller-asserted substrate region
-is indistinguishable from the whole top-cell extent), and
+is indistinguishable from the whole top-cell extent),
 `degenerate_well_selection` (issue #2339: a declared well-side class
 selection kept every merged shape of the drawn `well_layer`, or none of
-them). The well tests are applied first when more than one would hold, since
-the tap narrowing is measured inside the well region. Any of them is a
-requested skip, so it does make the scope partial — see "A degenerate tie is
-reported as skipped, not as a pass", "A block with no drawn well at all",
-and "One well layer, two bias classes" above.
+them), and `empty_well_region` (issue #2377: a *drawn* `well_layer` that
+draws no geometry at all in this stream — a typo'd layer/datatype, a PDK
+whose tub layer number changed, a GDS written without the tub layer; never
+applicable to an asserted `well_boxes` region, which cannot be empty after
+spec validation). The well tests are applied first when more than one would
+hold, since the tap narrowing is measured inside the well region. Any of
+them is a requested skip, so it does make the scope partial — see "A
+degenerate tie is reported as skipped, not as a pass", "A block with no
+drawn well at all", and "One well layer, two bias classes" above.
 
 **No new coverage list for a well-side selection.** `well_requires`/
 `well_excludes` narrow *drawn* geometry, exactly as `tap_requires` does, so
