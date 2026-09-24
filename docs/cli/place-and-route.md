@@ -303,15 +303,98 @@ the generated Tcl of the run above.
 
 Two scope notes specific to this platform:
 
-- **`request.power` is still unsupported**, deliberately — this library
-  ships no tap or endcap cells at all, so `_TAPCELL_CELLS` has no entry and
-  a PDN run raises the existing clear "no tapcell master known" error. See
-  "Power delivery" below. The run above omitted `request.power`, so the
-  response's `power` block reports that nothing there ran.
+- **The run above omitted `request.power`** — at the time it was made, a
+  PDN run against this library raised. That is no longer true; see the
+  `request.power` run recorded immediately below.
 - **The merged GDS was not DRC-checked.** Unlike the gf180mcu entry above,
   no `klt drc` pass was run against this run's output — the routed-GDS
   claim here is OpenROAD's own `route__drc_errors`, not a KLayout
-  signoff-deck result.
+  signoff-deck result. The `request.power` run below closes that gap with
+  measured numbers, for both the with- and without-power GDS.
+
+#### `request.power` on `sg13g2_stdcell` (issue #2441)
+
+Run 2026-09-24 with the same `openroad 26Q3-1278-g4421880472` and the same
+real fetched IHP-Open-PDK v0.3.0 install, on the same GCD worked example and
+the same floorplan/IO/constraint settings as the run above — the only
+difference being a `request.power` block built from IHP's own LibreLane
+`libs.tech/librelane/config.tcl` PDN geometry (see "Power delivery" below
+for the config citation):
+
+```jsonc
+"power": {
+  "power_net": "VDD",
+  "ground_net": "VSS",
+  "straps": [
+    { "layer": "Metal1",    "width_um": 0.44, "pitch_um":  7.56, "offset_um": 0,    "followpins": true },
+    { "layer": "TopMetal1", "width_um": 2.2,  "pitch_um": 75.6,  "offset_um": 13.6, "spacing_um": 4.0 },
+    { "layer": "TopMetal2", "width_um": 2.2,  "pitch_um": 75.6,  "offset_um": 13.6, "spacing_um": 4.0 }
+  ]
+}
+```
+
+(`PDN_RAIL_WIDTH 0.44` comes from `sg13g2_stdcell/config.tcl`; the rail's
+`pitch_um` is this repo's own derivation — 2× the 3.78 µm `CoreSite` row
+height, i.e. one VDD/VSS rail pair — since `-followpins` takes its placement
+from the rows themselves. `PDN_CORE_RING_*` has no `request.power` field;
+core rings are a documented v1 exclusion.)
+
+**Result**: `status: "ok"`, `stage_reached: "route"`,
+`route_drc_violation_count: 0`, `antenna_violation_count: 0`,
+`setup_violation_count`/`hold_violation_count` both `0`, 13372 µm routed
+wirelength on the same 17392.3 µm² die, and a valid merged GDS. The
+response's `power` block reports `pdn: true`, `global_connect: true`,
+`tapcell_master: null`, `endcap_master: null`, `filler_masters:
+["sg13g2_fill_1", "sg13g2_fill_2"]`, and `placed` (read back from the routed
+DEF) reports 2732 components — **0 tapcells, 0 endcaps**, 2343 fillers — with
+`VDD`/`VSS` `SPECIALNETS` each carrying 16 followpin segments, 168 stripe
+segments and 164 vias over `Metal1`, `Metal2`, `Metal3`, `Metal4`, `Metal5`,
+`TopMetal1`, `TopMetal2`.
+
+Automated as
+`tests/test_place_and_route.py::test_integration_real_openroad_power_pdn_sg13g2`,
+behind the same `_find_real_ihp_pnr_variant()` gate as the no-power test
+above. Its request reproduces this manual run's own floorplan/IO/constraint
+values verbatim (including `core_margin_um: 4.0`, where
+`test_integration_real_openroad_gcd_worked_example_sg13g2` uses `2.0`), so
+`power` is the only variable between the measured numbers here and the
+test's own assertions.
+
+Three things this run settled that the config alone could not:
+
+1. **`add_pdn_connect -layers {Metal1 TopMetal1}` across a non-adjacent
+   pair works.** The generated Tcl asks `pdngen` to bridge the `Metal1`
+   followpin rail to the `TopMetal1` strap directly, spanning
+   `Metal2`–`Metal5`; OpenROAD built the full via stack (the seven stripe
+   layers above are the evidence) rather than rejecting the pairing.
+2. **No core ring is needed for a clean route on this library.** The two
+   straps plus the rail routed with `route__drc_errors: 0` without one.
+3. **Omitting `tapcell` costs nothing downstream.** `filler_placement`
+   closed every row gap (2343 instances) and the second `global_connect`
+   wired them, with no well-tie step ahead of it.
+
+**`klt drc --deck sg13g2` over the merged GDS is *not* clean — and was not
+clean before this change either.** Measured on both GDS files from the two
+runs above, with the same deck:
+
+| | without `request.power` | with `request.power` |
+|---|---|---|
+| `metal2.width.1` | 2464 | 3126 |
+| `metal1.space.1` | 18 | 19 |
+| `metal1.enclosing.via1.1` | 0 | 36 |
+| **total** | **2482** | **3181** |
+
+Every `metal2.width.1` finding is inside an OpenROAD-generated via cell
+(`VIA_Via2_YX`, `VIA_Via1_YY`, `VIA_Via1_XY` at baseline; the PDN's own
+`VIA_via2_3_2200_440_1_5_410_410` adds the extra 640), and every
+`metal1.space.1` finding is inside a standard-cell master
+(`sg13g2_nor2_1`, `sg13g2_nor2b_1`, `sg13g2_buf_16`) — i.e. both predate
+power delivery and are a deck-versus-tech-LEF question, not a PDN one. The
+`metal1.enclosing.via1.1` group is new with the PDN (the followpin rail's
+Via1 landings on standard-cell M1 pins). **This is a standing platform gap,
+tracked in #2444** — it is not a bar `sg13g2_stdcell` cleared before this
+change, so `request.power` support is not gated on it. The gf180mcu entry
+above remains the only platform with a measured 0-violation `klt drc` pass.
 
 ## Stage granularity and invocation shape
 
@@ -2056,7 +2139,10 @@ at the end of the `"floorplan"` stage (immediately after
 1. `tapcell` — well/substrate ties, using the per-library master + distance
    this command already knows (sourced the same verified-not-guessed way as
    the CTS buffer/routing-layer-range/antenna-diode tables — see
-   `place_and_route.py`'s own module docstring).
+   `place_and_route.py`'s own module docstring). **Omitted entirely** for a
+   standard-cell library that verifiably ships no tap or endcap cells at
+   all (`_NO_TAPCELL_LIBRARIES`; `sg13g2_stdcell` is its only member — see
+   below); steps 2–5 are unchanged for it.
 2. `add_global_connection` (one call per per-library pin-pattern rule) +
    `global_connect` — wiring every standard cell's PG pin to the named
    power/ground net.
@@ -2080,19 +2166,6 @@ antenna-repair loop, before `write_def`):
 This insertion ordering mirrors OpenROAD-flow-scripts' own stage sequence
 exactly (`flow/scripts/tapcell.tcl` → `pdn.tcl` → global placement;
 `detail_route.tcl` → `fillcell.tcl` → `final_connect.tcl`).
-
-**`sg13g2_stdcell` (issue #1784): `request.power` is not supported.**
-`_POWER_PIN_PATTERNS`/`_FILLER_CELLS` each carry a verified `sg13g2_stdcell`
-entry (`VDD`/`VSS`, and IHP's own LibreLane `FILL_CELLS` list
-respectively), but `_TAPCELL_CELLS` deliberately does not: this
-standard-cell library ships no tap or endcap cells at all — IHP's own
-LibreLane config says so explicitly (`sg13g2_stdcell/config.tcl`'s own
-comment, `"There are no endcap and welltie cells in ihp-sg13g2"`, and the
-sibling `config.tcl`'s `FP_TAPCELL_DIST 0`). A `request.power` run against
-`sg13g2_stdcell` therefore still raises the existing "no tapcell master
-known" error (step 1 above) rather than inventing a tapcell master or
-silently skipping well-tie insertion. `klt place-and-route` runs against
-this library that omit `request.power` are unaffected by this.
 
 `request.power` omitted (the default) preserves prior behavior for this
 full, caller-configured PDN exactly — no tapcells/fillers, and the
@@ -2126,6 +2199,54 @@ to before this field existed. The response's own `power.straps`/
 above), so a caller citing a platform config can confirm its request
 actually reproduced it, rather than silently falling back to this command's
 plain defaults.
+
+### `sg13g2_stdcell`: a supported PDN with no tapcell step (issues #1784, #2441)
+
+`sg13g2_stdcell` ships **no tap or endcap cells at all** — IHP's own
+LibreLane config says so explicitly (`sg13g2_stdcell/config.tcl`'s own
+comment, `"There are no endcap and welltie cells in ihp-sg13g2"`, and the
+sibling `config.tcl`'s `FP_TAPCELL_DIST 0`) — so `_TAPCELL_CELLS`
+deliberately has no entry for it, and never will. Until #2441 that absence
+also gated the whole feature: any `request.power` run against this library
+raised the "no tapcell master known" error at step 1 above, before steps 2–5
+ran.
+
+That was the wrong answer, and the same `libs.tech/librelane/config.tcl`
+that establishes `FP_TAPCELL_DIST 0` says why. It configures a full PDN grid
+for this library *unconditionally*, independent of the no-tapcell posture:
+
+```tcl
+set ::env(PDN_RAIL_LAYER) Metal1          ;# + PDN_RAIL_OFFSET 0
+set ::env(PDN_VERTICAL_LAYER) TopMetal1
+set ::env(PDN_HORIZONTAL_LAYER) TopMetal2
+set ::env(PDN_VWIDTH) 2.2   ;# PDN_VSPACING 4.0  PDN_VPITCH 75.6  PDN_VOFFSET 13.6
+set ::env(PDN_HWIDTH) 2.2   ;# PDN_HSPACING 4.0  PDN_HPITCH 75.6  PDN_HOFFSET 13.6
+```
+
+IHP's own reference flow therefore builds a real multi-layer PDN for this
+library *without* `tapcell`/well-ties — not no PDN at all. `request.power`
+now does the same: `sg13g2_stdcell` is listed in `_NO_TAPCELL_LIBRARIES`,
+which suppresses **only** the `tapcell` Tcl line (nothing in steps 2–5
+depends on `tapcell` having run) and leaves `add_global_connection`/
+`global_connect`, the `define_pdn_grid`/`add_pdn_stripe`/`add_pdn_connect`/
+`pdngen` grid, and the `"route"`-stage `filler_placement` exactly as they
+are for every other library. The response reports
+`power.tapcell_master`/`endcap_master` as `null` — never a fabricated master
+name — alongside `power.pdn: true`, and `power.placed.tapcells`/`.endcaps`
+are `0` by construction. Live-verified end to end; see the
+`sg13g2_stdcell` entry under "Live verification" above for that run's
+numbers and the request body it used.
+
+**This is an explicit per-library allowlist, not a fallback.** A library
+absent from *both* `_TAPCELL_CELLS` and `_NO_TAPCELL_LIBRARIES` still raises
+the same clear error, because the two states look identical in
+`_TAPCELL_CELLS` (no entry) but mean opposite things: *in neither table*
+means "nobody has verified this library's tapcell masters yet", and must
+keep failing loudly rather than silently dropping a well-tie step a caller
+asked for; *listed in `_NO_TAPCELL_LIBRARIES`* means "this library's own PDK
+states it has no such cells", which makes skipping `tapcell` the correct Tcl
+for it. The error message names both sets so the distinction is visible from
+the failure itself.
 
 ### Minimum core width for a PDN grid (issue #2170)
 
