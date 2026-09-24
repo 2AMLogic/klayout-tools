@@ -132,6 +132,45 @@ not `klt --version`, if you need to detect this kind of drift. See
   written before this change (no `options_explicit`) reruns exactly as it
   used to. `klt extract --format text`'s `deck_options:` line now marks
   each silently-applied value `(default)`.
+- **Added** (#2382, `klt synthesize` request-level standard-cell exclusion —
+  additive, **no** `schema_version` bump: two new optional request fields,
+  one new always-present response block `cell_exclusions`, one new
+  `warnings.by_category` value `dont_use_unsupported`): the `abc -dont_use`
+  list was a hardcoded per-cell-library table
+  (`synthesize.py`'s `_ABC_DONT_USE_GLOBS`) with no way for a request to add
+  to it, replace it, or turn it off. That table is a *library*-scoped policy
+  (keep non-logic cells — isolation, probe, scan — out of a mapped netlist)
+  and stays correctly hardcoded; the exclusion class it cannot express is
+  *corner*-scoped, where a cell family unusable at a slow corner is entirely
+  reasonable at the nominal one, and `constraints.clock_period_ns` alone does
+  not avoid it (ABC optimises area against its own model subject to the
+  target and measurably still selects such a family). New
+  `constraints.dont_use` (array of ABC cell names/globs — the same syntax the
+  built-in table's entries use) is **merged with** the built-in table by
+  default; new `constraints.dont_use_mode` is the explicit override —
+  `"additive"` (default), `"replace"` (only the request's, requires a
+  non-empty list), `"none"` (no exclusion at all, rejects a non-empty list),
+  so "exclude nothing" can never be spelled the same way as "exclude only
+  these". A pattern matching **zero** cells in the resolved liberty is a
+  `SynthesizeError` naming it rather than a silent no-op, since a typo in an
+  exclusion list otherwise changes the mapped netlist invisibly (checked
+  against the liberty's own `cell (...)` group names; skipped, and disclosed
+  as `cell_exclusions.validated: null`, when that cell list cannot be
+  established). The new `cell_exclusions` response block records `mode`,
+  `requested`, `library_defaults`, and the deduplicated `effective` list
+  actually handed to ABC, so a committed report says exactly what was
+  excluded instead of leaving it implicit in the tool version. On a Yosys
+  build whose `abc` has no `-dont_use` (Ubuntu 24.04's 0.33) a request-level
+  list degrades away through the same existing gate the built-in table
+  does — never attempted anyway, which would be a hard Yosys error — but,
+  unlike the table's long-standing silent degradation, that case is disclosed
+  via `cell_exclusions.engine_supports_dont_use: false` plus a
+  `dont_use_unsupported` warning, because the netlist then still contains the
+  cells the request meant to keep out of it. Behaviour is unchanged for every
+  request that supplies neither new field. The derived
+  percentage-of-`clock_period_ns` exclusion rule and the
+  "last implementation of a logic function" warning remain unimplemented
+  follow-ups; the explicit list is the primitive.
 - **Fixed** (#2373, `klt lvs --engine netgen` binary resolution — additive,
   **no** `schema_version` bump: one new always-present `environment` key,
   `netgen_binary`): the netgen engine invoked the hardcoded binary name

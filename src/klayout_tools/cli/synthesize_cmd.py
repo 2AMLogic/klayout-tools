@@ -191,6 +191,25 @@ def _print_text(report: dict) -> None:
         for cell_type in sorted(leakage_by_type_nw):
             print(f"  {cell_type}: {leakage_by_type_nw[cell_type]}")
 
+    # Issue #2382: only worth a line when this run actually excluded something
+    # (or was asked to) -- a library with no built-in exclusion entry and a
+    # request with no `constraints.dont_use` has nothing to report here.
+    # `.get()` because a committed pre-#2382 report read back by `--check`
+    # has no such block.
+    cell_exclusions = report.get("cell_exclusions") or {}
+    if cell_exclusions.get("effective") or cell_exclusions.get("requested"):
+        print()
+        print(
+            f"cell_exclusions: mode={cell_exclusions['mode']} "
+            f"effective={len(cell_exclusions['effective'])} "
+            f"(requested={len(cell_exclusions['requested'])}, "
+            f"library_defaults={len(cell_exclusions['library_defaults'])})"
+        )
+        for pattern in cell_exclusions["effective"]:
+            print(f"  {pattern}")
+        if not cell_exclusions["effective"]:
+            print("  (none applied -- abc -dont_use unsupported by this build)")
+
     structural = report["structural"]
     print()
     print(

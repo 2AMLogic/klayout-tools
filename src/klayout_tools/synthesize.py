@@ -197,6 +197,7 @@ number). See :func:`_compute_leakage`.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -439,6 +440,56 @@ _ABC_DONT_USE_GLOBS: dict[str, tuple[str, ...]] = {
         "sg13g2_dfrbp_2",
     ),
 }
+
+#: How a request's own ``constraints.dont_use`` list combines with the
+#: built-in per-library :data:`_ABC_DONT_USE_GLOBS` table (issue #2382).
+#:
+#: **Why the default is additive rather than replacement.** The two lists
+#: exist for different reasons. The built-in table is *library*-scoped and
+#: corner-independent -- "keep non-logic cells (power-domain isolation, test
+#: probe, scan/clock-gate) out of a mapped netlist" -- so it is correct for
+#: every run against that library and a request adding an exclusion of its
+#: own almost never means "and stop excluding the probe cells". A request's
+#: list, by contrast, is caller-scoped and typically *corner*-dependent: a
+#: cell family whose per-transition-polarity delay floor at a slow corner
+#: eats a double-digit percentage of the clock budget before any load is
+#: entirely reasonable at the nominal corner, so no per-library constant can
+#: express it, and ``constraints.clock_period_ns`` alone does not avoid it
+#: (ABC optimises area against its own model subject to the target and
+#: measurably still selects such a family). Suppressing the built-in table is
+#: therefore always an explicit request value -- never an implicit side
+#: effect of supplying a list of one's own.
+#:
+#: - ``"additive"`` (default) -- the built-in table's globs, then the
+#:   request's, deduplicated, order preserved.
+#: - ``"replace"`` -- only the request's globs; the built-in table is
+#:   suppressed for this run. Requires a non-empty ``dont_use``.
+#: - ``"none"`` -- no ``-dont_use`` flag at all, not even the built-in
+#:   table's (the pre-#807 mapping). Rejects a non-empty ``dont_use``, so
+#:   "exclude nothing" can never be spelled the same way as "exclude only
+#:   these".
+#:
+#: Naming note (issue #2378): ``klt place-and-route`` has an analogous
+#: request-level exclusion gap of its own for OpenROAD's resizer/CTS. If it
+#: grows one, it should reuse this field's name and shape rather than drift
+#: into a ``dont_use`` vs. ``dont_use_cells`` split by accident of which
+#: issue landed first.
+_DONT_USE_MODES: tuple[str, ...] = ("additive", "replace", "none")
+
+#: The :data:`_DONT_USE_MODES` value used when a request supplies
+#: ``constraints.dont_use`` without an explicit ``constraints.dont_use_mode``
+#: (and, trivially, when it supplies neither).
+_DEFAULT_DONT_USE_MODE = "additive"
+
+#: Characters a ``constraints.dont_use`` entry may contain: Liberty cell-name
+#: characters (``[A-Za-z0-9_]``) plus the glob metacharacters ``abc -dont_use``
+#: itself documents ("supports simple glob patterns in the cell name") and the
+#: punctuation real library cell names use. Deliberately an allowlist, not a
+#: blocklist: each entry is interpolated verbatim into a generated ``.ys``
+#: script's own ``abc`` line, so an entry containing whitespace or a command
+#: separator would silently corrupt that line into a different Yosys command
+#: rather than being rejected.
+_DONT_USE_PATTERN_RE = re.compile(r"^[A-Za-z0-9_.*?!\[\]-]+$")
 
 #: Per-cell-library tie-high/tie-low cell for Yosys's ``hilomap`` pass,
 #: as ``((hi_cell, hi_port), (lo_cell, lo_port))`` -- issue #854.
@@ -989,10 +1040,19 @@ def run_synthesize(
     if constraints is not None and not isinstance(constraints, dict):
         raise SynthesizeError("request.constraints must be a JSON object")
     delay_target_ps = _resolve_delay_target_ps(constraints)
+    # Issue #2382: request shape is validated here -- before any PDK
+    # resolution or run-directory creation -- so a malformed exclusion list
+    # fails as cheaply as a malformed `clock_period_ns` does. The
+    # liberty-dependent half (zero-match rejection) necessarily waits for the
+    # resolved liberty, just below.
+    dont_use_requested, dont_use_mode = _resolve_dont_use_request(constraints)
     expected_latches = _resolve_expected_latches(request)
 
     liberty_path, corner, pdk_info = _resolve_liberty(
         cell_library, requested_corner, variant=pdk_variant, root=pdk_root
+    )
+    dont_use_validated = _validate_dont_use_against_liberty(
+        dont_use_requested, liberty_path
     )
 
     input_state = {
@@ -1030,9 +1090,12 @@ def run_synthesize(
         abc_log_path = os.path.join(output_dir, f"{hdl_toplevel}_abc.log")
         _write_constr(constr_path, *constr_inputs)
 
-    dont_use_globs: tuple[str, ...] = ()
-    if _ABC_DONT_USE_GLOBS.get(cell_library) and _abc_supports_dont_use():
-        dont_use_globs = _ABC_DONT_USE_GLOBS[cell_library]
+    dont_use_globs, cell_exclusions = _resolve_cell_exclusions(
+        requested=dont_use_requested,
+        mode=dont_use_mode,
+        validated=dont_use_validated,
+        cell_library=cell_library,
+    )
 
     engine_options = _EngineOptions(
         liberty_path=liberty_path,
@@ -1132,6 +1195,7 @@ def run_synthesize(
         capability_warnings={
             **_library_capability_warnings(cell_library),
             **_missing_timing_warning(abc_log_path, timing),
+            **_dont_use_unsupported_warning(cell_exclusions),
         },
     )
     instance_counts_by_type = dict(
@@ -1192,6 +1256,13 @@ def run_synthesize(
         "timing": timing,
         "sta": sta,
         "structural": structural,
+        # Issue #2382: the fully-resolved standard-cell exclusion list this
+        # run actually handed ABC, plus the two inputs it was merged from and
+        # the mode that merged them -- so a committed report records what was
+        # excluded rather than leaving it implicit in the tool version.
+        # Always present (like `structural`/`warnings`); additive field, no
+        # `schema_version` bump (docs/json-contract.md).
+        "cell_exclusions": cell_exclusions,
         "warnings": warnings_summary,
         "netlist_path": _report_path(netlist_path, repo_root=repo_root),
         "script_path": _report_path(script_path, repo_root=repo_root),
@@ -2416,6 +2487,246 @@ def _abc_supports_dont_use() -> bool:
     if completed.returncode != 0:
         return False
     return "-dont_use" in (completed.stdout or "")
+
+
+def _resolve_dont_use_request(
+    constraints: dict[str, Any] | None,
+) -> tuple[tuple[str, ...], str]:
+    """``(patterns, mode)`` from ``constraints.dont_use`` and
+    ``constraints.dont_use_mode`` -- the request-level standard-cell exclusion
+    list (issue #2382), validated for *shape* only.
+
+    Pure request validation: nothing here reads the liberty or probes the
+    engine, so it is safe to call before any PDK resolution or run-directory
+    creation. The liberty-dependent half (does each pattern actually match a
+    cell?) is :func:`_validate_dont_use_against_liberty`; the merge with the
+    built-in per-library table is :func:`_resolve_cell_exclusions`.
+
+    Raises :class:`SynthesizeError` naming the field for a non-array value, a
+    non-string/empty entry, an entry containing a character that would corrupt
+    the generated ``.ys`` script's ``abc`` line
+    (:data:`_DONT_USE_PATTERN_RE`), an unknown ``dont_use_mode``, or a
+    mode/list combination that contradicts itself -- the same "a request that
+    means to constrain the run but expresses it wrongly must not be silently
+    downgraded" posture :func:`_resolve_delay_target_ps` already takes.
+    Duplicate patterns are collapsed (order preserved), matching
+    :func:`_resolve_arithmetic`'s own treatment of a duplicated candidate.
+    """
+    if not constraints:
+        return (), _DEFAULT_DONT_USE_MODE
+
+    mode = constraints.get("dont_use_mode")
+    if mode is None:
+        mode = _DEFAULT_DONT_USE_MODE
+    elif not isinstance(mode, str) or mode not in _DONT_USE_MODES:
+        raise SynthesizeError(
+            "request.constraints.dont_use_mode must be one of "
+            + ", ".join(f"'{value}'" for value in _DONT_USE_MODES)
+            + f" (got {mode!r})"
+        )
+
+    raw = constraints.get("dont_use")
+    patterns: tuple[str, ...] = ()
+    if raw is not None:
+        if not isinstance(raw, list):
+            raise SynthesizeError(
+                "request.constraints.dont_use must be an array of cell-name/"
+                "glob strings (a bare string is not accepted)"
+            )
+        collected: list[str] = []
+        for entry in raw:
+            if not isinstance(entry, str) or not entry:
+                raise SynthesizeError(
+                    "request.constraints.dont_use entries must be non-empty "
+                    f"strings (got {entry!r})"
+                )
+            if _DONT_USE_PATTERN_RE.match(entry) is None:
+                raise SynthesizeError(
+                    f"request.constraints.dont_use entry '{entry}' contains a "
+                    "character outside a cell name or ABC glob pattern "
+                    "(allowed: letters, digits, '_', '.', '-', '!', '*', '?', "
+                    "'[', ']')"
+                )
+            if entry not in collected:
+                collected.append(entry)
+        patterns = tuple(collected)
+
+    if mode == "none" and patterns:
+        raise SynthesizeError(
+            "request.constraints.dont_use_mode 'none' excludes nothing, so it "
+            "cannot be combined with a non-empty request.constraints.dont_use "
+            "list (use 'replace' to exclude only the listed patterns)"
+        )
+    if mode == "replace" and not patterns:
+        raise SynthesizeError(
+            "request.constraints.dont_use_mode 'replace' requires a non-empty "
+            "request.constraints.dont_use list (use 'none' to drop the "
+            "built-in per-library exclusions without adding any)"
+        )
+    return patterns, mode
+
+
+def _liberty_cell_names(liberty_path: str) -> frozenset[str] | None:
+    """Every ``cell (<name>) { ... }`` group name in the resolved liberty, or
+    ``None`` when that set cannot be established (issue #2382).
+
+    Deliberately minimal, the same scope discipline
+    :func:`_parse_liberty_leakage_nw` states for itself -- it reuses that
+    function's own :data:`_LIBERTY_CELL_HEADER_RE` and extracts *only* the
+    names, never a pin/timing model. This is the cell list
+    :func:`_validate_dont_use_against_liberty` checks a request's exclusion
+    patterns against, so that a typo cannot silently change the mapped
+    netlist.
+
+    ``None`` -- meaning "not establishable", which the caller treats as "do
+    not validate" rather than "zero cells, reject everything" -- when the file
+    cannot be read *or* when it contains no ``cell (...)`` group at all. The
+    second case is the important one: a liberty this regex cannot see any cell
+    in is a limitation of this deliberately-partial parser, not evidence that
+    the caller's pattern is a typo, and concluding otherwise would reject a
+    perfectly good request. Never raises, matching
+    :func:`_abc_supports_dont_use`'s "never break a run over an optional
+    probe" posture.
+    """
+    try:
+        with open(liberty_path, encoding="utf-8") as handle:
+            liberty_text = handle.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    names = frozenset(
+        match.group("name") for match in _LIBERTY_CELL_HEADER_RE.finditer(liberty_text)
+    )
+    return names or None
+
+
+def _validate_dont_use_against_liberty(
+    patterns: tuple[str, ...], liberty_path: str
+) -> bool | None:
+    """Reject a ``constraints.dont_use`` pattern matching **zero** cells in
+    the resolved liberty (issue #2382).
+
+    A silent typo in an exclusion list is invisible: the run succeeds, the
+    netlist differs from the one the author meant to produce, and nothing in
+    the report says so. So a pattern that matches nothing is a
+    :class:`SynthesizeError` naming the offending pattern, never a no-op.
+
+    Returns whether validation was actually performed: ``True`` when every
+    pattern matched at least one cell, ``None`` when there was nothing to
+    check (no request-level patterns) or the liberty's cell list could not be
+    established (:func:`_liberty_cell_names` returning ``None``), which the
+    response discloses as ``cell_exclusions.validated`` rather than passing
+    off an unchecked list as a checked one.
+
+    Only *request-supplied* patterns are checked. The built-in
+    :data:`_ABC_DONT_USE_GLOBS` entries deliberately are not: each was already
+    cross-checked against its library's real installed liberty when it was
+    added (see that table's docstring), and they are library-scoped by
+    construction, so re-deriving them per run would only add a way for a
+    partial liberty read to fail a run that is correct.
+
+    Matching is :func:`fnmatch.fnmatchcase` -- case-sensitive glob, the same
+    ``*``/``?``/``[...]`` shape ``abc -dont_use`` documents ("supports simple
+    glob patterns in the cell name"). A pattern with no metacharacter
+    therefore degrades to an exact cell-name match, exactly as ABC's own
+    handling does.
+    """
+    if not patterns:
+        return None
+    cell_names = _liberty_cell_names(liberty_path)
+    if cell_names is None:
+        return None
+    for pattern in patterns:
+        if not any(fnmatch.fnmatchcase(name, pattern) for name in cell_names):
+            raise SynthesizeError(
+                f"request.constraints.dont_use pattern '{pattern}' matches no "
+                f"cell in the resolved liberty "
+                f"'{os.path.basename(liberty_path)}' ({len(cell_names)} cells) "
+                "-- an exclusion that matches nothing silently changes nothing"
+            )
+    return True
+
+
+def _resolve_cell_exclusions(
+    *,
+    requested: tuple[str, ...],
+    mode: str,
+    validated: bool | None,
+    cell_library: str,
+) -> tuple[tuple[str, ...], dict[str, Any]]:
+    """``(dont_use_globs, cell_exclusions)`` -- the ``-dont_use`` glob list
+    actually passed to ABC, plus the response block disclosing how it was
+    arrived at (issue #2382).
+
+    Merges the request's own ``constraints.dont_use`` patterns (already
+    shape-validated by :func:`_resolve_dont_use_request` and liberty-validated
+    by :func:`_validate_dont_use_against_liberty`) with the built-in
+    per-library :data:`_ABC_DONT_USE_GLOBS` table per ``mode`` -- see
+    :data:`_DONT_USE_MODES` for why ``"additive"`` is the default.
+
+    Degradation is shared, never bypassed: the resolved list is passed only
+    when :func:`_abc_supports_dont_use` says the resolved Yosys build's
+    ``abc`` accepts the flag at all, exactly as the built-in table already
+    degraded before this field existed. The probe is still made only when
+    there is something to exclude, so a library with no table entry and a
+    request with no list runs no extra Yosys invocation. Because degrading
+    means a request that asked for an exclusion gets a netlist that still
+    contains those cells, that case is disclosed -- both here (as
+    ``engine_supports_dont_use: false`` alongside a non-empty ``requested``
+    and an empty ``effective``) and, so it cannot be missed, as the
+    ``dont_use_unsupported`` capability warning
+    :func:`_dont_use_unsupported_warning` emits.
+
+    The returned block's ``effective`` is exactly the list handed to ABC, so a
+    committed report records what was excluded instead of leaving it implicit
+    in the tool version that produced it. Additive response field, no
+    ``schema_version`` bump (``docs/json-contract.md``).
+    """
+    library_defaults = _ABC_DONT_USE_GLOBS.get(cell_library, ())
+    if mode == "none":
+        resolved: tuple[str, ...] = ()
+    elif mode == "replace":
+        resolved = requested
+    else:
+        resolved = tuple(dict.fromkeys((*library_defaults, *requested)))
+
+    supported: bool | None = None
+    if resolved:
+        supported = _abc_supports_dont_use()
+    effective = resolved if supported else ()
+
+    return effective, {
+        "mode": mode,
+        "requested": list(requested),
+        "library_defaults": list(library_defaults),
+        "effective": list(effective),
+        "validated": validated,
+        "engine_supports_dont_use": supported,
+    }
+
+
+def _dont_use_unsupported_warning(cell_exclusions: dict[str, Any]) -> dict[str, str]:
+    """A capability warning when the request asked for a cell exclusion the
+    resolved Yosys build's ``abc`` pass cannot express (issue #2382).
+
+    Emitted **only** for a request-supplied list. The built-in
+    :data:`_ABC_DONT_USE_GLOBS` table's own degradation on such a build is
+    pre-existing, documented behaviour (issue #807) and stays silent; a
+    caller's explicit request silently not taking effect is the new failure
+    mode worth a warning, since the netlist still contains exactly the cells
+    the request meant to keep out of it.
+    """
+    if cell_exclusions.get("engine_supports_dont_use") is not False:
+        return {}
+    if not cell_exclusions.get("requested"):
+        return {}
+    return {
+        "dont_use_unsupported": (
+            "The resolved Yosys build's abc pass does not support -dont_use, so "
+            "request.constraints.dont_use was not applied: "
+            + ", ".join(cell_exclusions["requested"])
+            + ". The netlist may still contain those cells."
+        )
+    }
 
 
 def _write_script(
