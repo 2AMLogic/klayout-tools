@@ -2174,6 +2174,17 @@ def _stub_openroad_success(
     max_transition_violations: int = 0,
     max_capacitance_violations: int = 0,
     per_corner_design_rule_violations: dict[str, tuple[int, int]] | None = None,
+    # Issue #2357: the library-only counterpart of the three parameters
+    # above -- `None` (the default) mirrors real no-stated-constraint
+    # behavior by falling back to the same value the effective pass above
+    # uses, so every pre-#2357 test (none of which sets a design-rule
+    # constraint) sees identical library/effective counts without having to
+    # be rewritten.
+    max_transition_violations_vs_library: int | None = None,
+    max_capacitance_violations_vs_library: int | None = None,
+    per_corner_design_rule_violations_vs_library: dict[str, tuple[int, int]] | None = (
+        None
+    ),
     stage_metrics: dict[str, dict[str, float]] | None = None,
     version: str = "26Q3-771-gdeadbeef",
     def_text: str | None = None,
@@ -2188,10 +2199,43 @@ def _stub_openroad_success(
     # a clean run (0/0), and per-corner defaults to the combined session's own
     # pair unless a test overrides a specific corner name.
     per_corner_design_rule_violations = per_corner_design_rule_violations or {}
+    per_corner_design_rule_violations_vs_library = (
+        per_corner_design_rule_violations_vs_library or {}
+    )
+    max_transition_violations_vs_library = (
+        max_transition_violations
+        if max_transition_violations_vs_library is None
+        else max_transition_violations_vs_library
+    )
+    max_capacitance_violations_vs_library = (
+        max_capacitance_violations
+        if max_capacitance_violations_vs_library is None
+        else max_capacitance_violations_vs_library
+    )
 
-    def _design_rule_stdout(transition: int, capacitance: int) -> str:
+    def _design_rule_stdout(
+        transition: int,
+        capacitance: int,
+        transition_vs_library: int,
+        capacitance_vs_library: int,
+    ) -> str:
+        # Matches the real script's own order (`_corner_sweep_script_lines`,
+        # issue #2357): the library-only pass runs *before* the effective
+        # pass (any caller-stated constraint is applied in between).
         return "\n".join(
             [
+                place_and_route._MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+                *[
+                    f"pin_{i}/A 0.75 1.20 -0.45 (VIOLATED)"
+                    for i in range(transition_vs_library)
+                ],
+                place_and_route._MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
+                place_and_route._MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+                *[
+                    f"pin_{i}/A 0.05 0.09 -0.04 (VIOLATED)"
+                    for i in range(capacitance_vs_library)
+                ],
+                place_and_route._MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
                 place_and_route._MAX_TRANSITION_VIOLATIONS_BEGIN,
                 *[f"pin_{i}/A 0.75 1.20 -0.45 (VIOLATED)" for i in range(transition)],
                 place_and_route._MAX_TRANSITION_VIOLATIONS_END,
@@ -2235,7 +2279,10 @@ def _stub_openroad_success(
             return fake_completed(
                 returncode=0,
                 stdout=_design_rule_stdout(
-                    max_transition_violations, max_capacitance_violations
+                    max_transition_violations,
+                    max_capacitance_violations,
+                    max_transition_violations_vs_library,
+                    max_capacitance_violations_vs_library,
                 ),
             )
         corner_script_match = re.match(
@@ -2259,9 +2306,23 @@ def _stub_openroad_success(
                     (max_transition_violations, max_capacitance_violations),
                 )
             )
+            corner_transition_vs_library, corner_capacitance_vs_library = (
+                per_corner_design_rule_violations_vs_library.get(
+                    corner_name,
+                    (
+                        max_transition_violations_vs_library,
+                        max_capacitance_violations_vs_library,
+                    ),
+                )
+            )
             return fake_completed(
                 returncode=0,
-                stdout=_design_rule_stdout(corner_transition, corner_capacitance),
+                stdout=_design_rule_stdout(
+                    corner_transition,
+                    corner_capacitance,
+                    corner_transition_vs_library,
+                    corner_capacitance_vs_library,
+                ),
             )
         stage = _stage_from_script_path(script_path)
         assert stage in stages
@@ -5334,6 +5395,30 @@ def test_design_rule_check_lines_reports_slew_and_cap_but_never_fanout():
     assert not any("max_fanout_violation_count" in line for line in lines)
 
 
+def test_design_rule_check_lines_accepts_custom_markers():
+    """Issue #2357: the new marker-override parameters default to the
+    module's original single marker pair each -- calling with no arguments
+    stays byte-identical (covered above) -- but a caller (in practice, only
+    `_corner_sweep_script_lines`'s own library-only pass) can substitute a
+    distinct marker pair per check, producing the identical
+    `report_check_types` Tcl with different `puts` delimiters."""
+    lines = place_and_route._design_rule_check_lines(
+        transition_begin=place_and_route._MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+        transition_end=place_and_route._MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
+        capacitance_begin=place_and_route._MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+        capacitance_end=place_and_route._MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+    )
+
+    assert lines == [
+        f'puts "{place_and_route._MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN}"',
+        "report_check_types -max_slew -violators",
+        f'puts "{place_and_route._MAX_TRANSITION_LIBRARY_VIOLATIONS_END}"',
+        f'puts "{place_and_route._MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN}"',
+        "report_check_types -max_capacitance -violators",
+        f'puts "{place_and_route._MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END}"',
+    ]
+
+
 def test_corner_sweep_script_runs_design_rule_checks_after_parasitics(
     tmp_path, monkeypatch
 ):
@@ -5359,6 +5444,63 @@ def test_corner_sweep_script_runs_design_rule_checks_after_parasitics(
     assert not any("-max_fanout" in line for line in lines)
 
 
+def test_corner_sweep_script_runs_library_check_before_constraint_and_effective_after(
+    tmp_path, monkeypatch
+):
+    """Issue #2357: the script now runs the design-rule check **twice** --
+    once immediately after `estimate_parasitics` but *before* any
+    `set_max_transition`/`set_max_capacitance` override
+    (`_design_rule_constraint_lines`) is applied (library-only pass), and
+    again afterward, unchanged from before this issue (effective pass). The
+    ordering is what makes the library-only pass a pure liberty-limit
+    verdict: a `set_max_transition`/`set_max_capacitance` emitted earlier in
+    the same OpenSTA session would still be in force when the library-only
+    report ran."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 1.5,
+            "max_capacitance_pf": 0.2,
+        },
+    )
+    _stub_openroad_success(monkeypatch)
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+    assert report["status"] == "ok"
+
+    lines = _script_lines(_corner_sweep_script(request_path))
+    estimate_idx = lines.index("estimate_parasitics -global_routing")
+    library_transition_idx = lines.index(
+        f'puts "{place_and_route._MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN}"'
+    )
+    library_capacitance_idx = lines.index(
+        f'puts "{place_and_route._MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN}"'
+    )
+    constraint_transition_idx = lines.index("set_max_transition 1.5 [current_design]")
+    constraint_capacitance_idx = lines.index("set_max_capacitance 0.2 [current_design]")
+    # Exactly two `report_check_types -max_slew -violators` calls now:
+    # once inside the library-only pass, once inside the effective pass.
+    effective_transition_indices = [
+        i
+        for i, ln in enumerate(lines)
+        if ln == "report_check_types -max_slew -violators"
+    ]
+    assert len(effective_transition_indices) == 2
+    assert (
+        estimate_idx
+        < library_transition_idx
+        < library_capacitance_idx
+        < constraint_transition_idx
+        < constraint_capacitance_idx
+        < effective_transition_indices[1]
+    )
+    assert effective_transition_indices[0] < constraint_transition_idx
+
+
 def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypatch):
     """The sweep invocation's own `report_check_types` stdout populates
     `max_transition_violation_count`/`max_capacitance_violation_count` at
@@ -5374,10 +5516,17 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
 
     assert report["max_transition_violation_count"] == 3
     assert report["max_capacitance_violation_count"] == 2
+    # Issue #2357: no `constraints.max_transition_ns`/`.max_capacitance_pf`
+    # was given, so the library-only counterpart is identical to the
+    # effective count above -- neither pass diverges the check target.
+    assert report["max_transition_violation_count_vs_library"] == 3
+    assert report["max_capacitance_violation_count_vs_library"] == 2
     route_stage = report["stages"][-1]
     assert route_stage["name"] == "route"
     assert route_stage["max_transition_violation_count"] == 3
     assert route_stage["max_capacitance_violation_count"] == 2
+    assert route_stage["max_transition_violation_count_vs_library"] == 3
+    assert route_stage["max_capacitance_violation_count_vs_library"] == 2
     # The single swept corner's own entry carries the same verdict.
     assert report["corners"] == [
         {
@@ -5390,6 +5539,8 @@ def test_corner_sweep_populates_design_rule_violation_counts(tmp_path, monkeypat
             "timing_status": "constrained",
             "max_transition_violation_count": 3,
             "max_capacitance_violation_count": 2,
+            "max_transition_violation_count_vs_library": 3,
+            "max_capacitance_violation_count_vs_library": 2,
         }
     ]
 
@@ -5408,6 +5559,10 @@ def test_design_rule_violation_counts_are_zero_on_a_clean_run(tmp_path, monkeypa
     assert report["max_transition_violation_count"] == 0
     assert report["max_capacitance_violation_count"] == 0
     assert report["stages"][-1]["max_capacitance_violation_count"] == 0
+    # Issue #2357: the library-only counterpart is present-but-zero too.
+    assert report["max_transition_violation_count_vs_library"] == 0
+    assert report["max_capacitance_violation_count_vs_library"] == 0
+    assert report["stages"][-1]["max_capacitance_violation_count_vs_library"] == 0
 
 
 def test_design_rule_violation_counts_null_before_route_stage(tmp_path, monkeypatch):
@@ -5422,9 +5577,15 @@ def test_design_rule_violation_counts_null_before_route_stage(tmp_path, monkeypa
     assert report["stage_reached"] == "place"
     assert report["max_transition_violation_count"] is None
     assert report["max_capacitance_violation_count"] is None
+    # Issue #2357: the library-only counterpart follows the same
+    # null-before-`"route"` gating.
+    assert report["max_transition_violation_count_vs_library"] is None
+    assert report["max_capacitance_violation_count_vs_library"] is None
     for stage in report["stages"]:
         assert "max_transition_violation_count" not in stage
         assert "max_capacitance_violation_count" not in stage
+        assert "max_transition_violation_count_vs_library" not in stage
+        assert "max_capacitance_violation_count_vs_library" not in stage
 
 
 def test_design_rule_violation_counts_reported_per_swept_corner(tmp_path, monkeypatch):
@@ -5443,6 +5604,14 @@ def test_design_rule_violation_counts_reported_per_swept_corner(tmp_path, monkey
             "tt_025C_1v80": (0, 0),
             "ss_100C_1v60": (7, 1),
         },
+        # Issue #2357: the library-only counterpart differs at the swept
+        # corner that's actually in scope, confirming the per-corner
+        # library-only pass is wired to each corner's own single-corner
+        # invocation, not accidentally shared across corners.
+        per_corner_design_rule_violations_vs_library={
+            "tt_025C_1v80": (0, 0),
+            "ss_100C_1v60": (2, 0),
+        },
     )
     _stub_merge_def_to_gds(monkeypatch)
 
@@ -5455,6 +5624,18 @@ def test_design_rule_violation_counts_reported_per_swept_corner(tmp_path, monkey
     assert corners_by_name["tt_025C_1v80"]["max_transition_violation_count"] == 0
     assert corners_by_name["ss_100C_1v60"]["max_transition_violation_count"] == 7
     assert corners_by_name["ss_100C_1v60"]["max_capacitance_violation_count"] == 1
+    assert (
+        corners_by_name["tt_025C_1v80"]["max_transition_violation_count_vs_library"]
+        == 0
+    )
+    assert (
+        corners_by_name["ss_100C_1v60"]["max_transition_violation_count_vs_library"]
+        == 2
+    )
+    assert (
+        corners_by_name["ss_100C_1v60"]["max_capacitance_violation_count_vs_library"]
+        == 0
+    )
 
 
 def test_design_rule_violation_counts_null_when_sweeping_zero_corners(
@@ -5480,6 +5661,8 @@ def test_design_rule_violation_counts_null_when_sweeping_zero_corners(
     assert report["corners"] == []
     assert report["max_transition_violation_count"] is None
     assert report["max_capacitance_violation_count"] is None
+    assert report["max_transition_violation_count_vs_library"] is None
+    assert report["max_capacitance_violation_count_vs_library"] is None
 
 
 def test_design_rule_verdict_independent_of_constraint_fields(tmp_path, monkeypatch):
@@ -5487,7 +5670,12 @@ def test_design_rule_verdict_independent_of_constraint_fields(tmp_path, monkeypa
     declare, so it is reported even when the caller sets none of
     `constraints.max_transition_ns`/`.max_capacitance_pf`/`.max_fanout` --
     issue #1709's own "useful *even if* none of the constraint options above
-    lands" framing."""
+    lands" framing. Issue #2357: with no constraint given, the two passes
+    never diverge -- the library-only counterpart equals the effective
+    count exactly, which is itself now a checkable, no-longer-ambiguous
+    property of the report (previously this test only documented that the
+    *effective* count was reported at all, not whether it agreed with the
+    library's own limit)."""
     request_path = _setup_success_env(tmp_path, monkeypatch)
     _stub_openroad_success(
         monkeypatch, max_transition_violations=1, max_capacitance_violations=4
@@ -5500,6 +5688,84 @@ def test_design_rule_verdict_independent_of_constraint_fields(tmp_path, monkeypa
     assert not any(line.startswith("set_max_") for line in sweep_lines)
     assert report["max_transition_violation_count"] == 1
     assert report["max_capacitance_violation_count"] == 4
+    assert report["max_transition_violation_count_vs_library"] == 1
+    assert report["max_capacitance_violation_count_vs_library"] == 4
+
+
+def test_design_rule_verdict_distinguishes_guard_band_overrun_from_library_violation(
+    tmp_path, monkeypatch
+):
+    """Issue #2357's own core reproduction: a caller-stated
+    `constraints.max_capacitance_pf` guard-band tighter than the library's
+    own per-pin limit produces buffers that overrun the *stated* guard-band
+    while staying inside the *library's* own limit. Before this issue, the
+    report's `max_capacitance_violation_count` alone could not tell that
+    apart from a genuine library violation -- now the report carries both
+    counts side by side, and a reader can tell a clean library check (`0`)
+    from a nonzero effective count without opening `stdout.log`."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_transition_ns": 4.0,
+            "max_capacitance_pf": 0.35,
+        },
+    )
+    _stub_openroad_success(
+        monkeypatch,
+        # The effective pass (against the caller's own 4.0 ns / 0.35 pF
+        # guard-band) finds violations...
+        max_transition_violations=720,
+        max_capacitance_violations=3,
+        # ...but the library-only pass, run before that guard-band is
+        # applied, is clean at every swept corner -- exactly the issue's own
+        # "Observed" scenario (an independent OpenSTA run against only the
+        # library limits reports 0 violations).
+        max_transition_violations_vs_library=0,
+        max_capacitance_violations_vs_library=0,
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["max_transition_violation_count"] == 720
+    assert report["max_capacitance_violation_count"] == 3
+    assert report["max_transition_violation_count_vs_library"] == 0
+    assert report["max_capacitance_violation_count_vs_library"] == 0
+    # The single swept corner's own entry carries the same distinction.
+    corner = report["corners"][0]
+    assert corner["max_transition_violation_count"] == 720
+    assert corner["max_capacitance_violation_count"] == 3
+    assert corner["max_transition_violation_count_vs_library"] == 0
+    assert corner["max_capacitance_violation_count_vs_library"] == 0
+
+
+def test_design_rule_verdict_confirms_a_real_library_violation(tmp_path, monkeypatch):
+    """The other half of the same distinction: when the library-only pass
+    is *also* nonzero, the design genuinely breaks the library's own limit
+    -- not just the caller's own tighter guard-band."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        constraints={
+            "clock_port": "clk",
+            "clock_period_ns": 1.1,
+            "max_capacitance_pf": 0.35,
+        },
+    )
+    _stub_openroad_success(
+        monkeypatch,
+        max_capacitance_violations=5,
+        max_capacitance_violations_vs_library=2,
+    )
+    _stub_merge_def_to_gds(monkeypatch)
+
+    report = run_place_and_route(request_path)
+
+    assert report["max_capacitance_violation_count"] == 5
+    assert report["max_capacitance_violation_count_vs_library"] == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -6801,6 +7067,11 @@ def test_corner_sweep_populates_worst_setup_and_hold_slack_fields(
             # design-rule verdict -- 0/0 here (the stub's clean-run default).
             "max_transition_violation_count": 0,
             "max_capacitance_violation_count": 0,
+            # Issue #2357: the library-only counterpart -- also 0/0 here,
+            # since no `constraints.max_transition_ns`/`.max_capacitance_pf`
+            # was given for this request.
+            "max_transition_violation_count_vs_library": 0,
+            "max_capacitance_violation_count_vs_library": 0,
         }
     ]
     assert route_stage["corners"] == report["corners"]
@@ -6889,6 +7160,9 @@ def test_corner_sweep_reports_per_corner_setup_and_hold_slack(tmp_path, monkeypa
         # entry -- 0/0 here (the stub's clean-run default).
         "max_transition_violation_count": 0,
         "max_capacitance_violation_count": 0,
+        # Issue #2357: the library-only counterpart, also 0/0 here.
+        "max_transition_violation_count_vs_library": 0,
+        "max_capacitance_violation_count_vs_library": 0,
     }
     assert corners_by_name["ss_100C_1v60"]["setup_slack_ns"] == pytest.approx(-22.2093)
     assert corners_by_name["ff_n40C_1v95"]["hold_slack_ns"] == pytest.approx(0.28443)

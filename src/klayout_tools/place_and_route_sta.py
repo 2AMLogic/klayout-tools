@@ -34,8 +34,9 @@ back from here or from ``place_and_route.py``. The handful of names that
 ``_violation_count_lines``, ``_read_metrics``, ``_engine_error_message``,
 ``_EXTRACT_DECK_FOR_CELL_LIBRARY``, and the ``_SETUP_VIOLATIONS_*``/
 ``_HOLD_VIOLATIONS_*``/``_MAX_TRANSITION_VIOLATIONS_*``/
-``_MAX_CAPACITANCE_VIOLATIONS_*``/``_SPEF_NET_CHECK_*`` markers) are
-imported *inside*
+``_MAX_CAPACITANCE_VIOLATIONS_*``/``_MAX_TRANSITION_LIBRARY_VIOLATIONS_*``/
+``_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_*``/``_SPEF_NET_CHECK_*`` markers,
+issue #2357) are imported *inside*
 the functions that use them, deferred rather than at module scope, because
 ``place_and_route.py`` in turn imports this module's own public entry
 points back (module scope, no cycle -- this module never imports
@@ -142,10 +143,38 @@ def _corner_sweep_script_lines(
     max-capacitance verdict at those decks can be measured at all. Run
     **after** ``estimate_parasitics``, since a slew/capacitance check against
     an un-estimated network is not a meaningful number. Adds no OpenROAD
-    invocation of its own -- only two more report calls inside an invocation
-    the ``"route"`` stage already pays for.
+    invocation of its own -- only report calls inside an invocation the
+    ``"route"`` stage already pays for.
+
+    Issue #2357: that trailing pair alone cannot tell a caller *which* limit
+    a reported violation actually broke -- OpenSTA checks each pin against
+    whichever of the design-level ``set_max_transition``/``set_max_capacitance``
+    (:func:`~klayout_tools.place_and_route._design_rule_constraint_lines`,
+    emitted only when ``request.constraints.max_transition_ns``/
+    ``.max_capacitance_pf`` was given) or the loaded liberty deck's own
+    per-pin limit is tighter, and reports only the combined, "whichever
+    bound" verdict. This function now runs :func:`_design_rule_check_lines`
+    **twice**: once immediately after ``estimate_parasitics`` but *before*
+    ``_design_rule_constraint_lines`` applies any caller-stated override --
+    a pure **library-only** verdict, using the
+    ``_MAX_TRANSITION_LIBRARY_VIOLATIONS_*``/
+    ``_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_*`` marker pair -- and again at the
+    same point as before, *after* the override is applied, using the
+    original marker pair unchanged. Moving
+    ``_design_rule_constraint_lines`` later in the script (it used to run
+    right after ``_clock_lines``, before ``estimate_parasitics``) is safe:
+    ``set_max_transition``/``set_max_capacitance``/``set_max_fanout`` are
+    static design-rule declarations that ``estimate_parasitics`` and the two
+    ``report_worst_slack_metric``/``report_tns_metric`` pairs above never
+    read, so neither this session's slack/TNS aggregates nor the effective
+    design-rule verdict's own count changes -- only *when* the constraint
+    line is emitted relative to the new library-only pass.
     """
     from .place_and_route import (
+        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
         _clock_lines,
         _design_rule_check_lines,
         _design_rule_constraint_lines,
@@ -158,9 +187,6 @@ def _corner_sweep_script_lines(
         f"read_liberty -corner {corner['name']} {corner['path']}" for corner in corners
     ]
     lines += _clock_lines(clock_port, clock_period_ns)
-    lines += _design_rule_constraint_lines(
-        max_transition_ns, max_capacitance_pf, max_fanout
-    )
     # Issue #1865: the same `set_input_delay`/`set_output_delay` pair the
     # `"route"` stage's own script already emitted. `read_db` does not carry
     # SDC state across the process boundary (see this function's own
@@ -171,11 +197,26 @@ def _corner_sweep_script_lines(
     lines += [
         f"set_wire_rc -layer {io_spec['layer_v']}",
         "estimate_parasitics -global_routing",
+    ]
+    # Issue #2357: the library-only design-rule pass -- no caller-stated
+    # constraint applied yet at this point in the script.
+    lines += _design_rule_check_lines(
+        transition_begin=_MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+        transition_end=_MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
+        capacitance_begin=_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+        capacitance_end=_MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+    )
+    lines += _design_rule_constraint_lines(
+        max_transition_ns, max_capacitance_pf, max_fanout
+    )
+    lines += [
         "report_worst_slack_metric -setup",
         "report_worst_slack_metric -hold",
         "report_tns_metric -setup",
         "report_tns_metric -hold",
     ]
+    # The original, still-unchanged "effective" pass -- whichever of the
+    # constraint above (if any) or the library's own limit ends up tighter.
     lines += _design_rule_check_lines()
     return lines
 
@@ -784,22 +825,32 @@ def _run_corner_sweep(
     input_delay_ns: float | None = None,
     output_delay_ns: float | None = None,
     engine_logs: list[dict[str, Any]] | None = None,
-) -> tuple[float | None, float | None, list[dict[str, Any]], int | None, int | None]:
+) -> tuple[
+    float | None,
+    float | None,
+    list[dict[str, Any]],
+    int | None,
+    int | None,
+    int | None,
+    int | None,
+]:
     """Run the post-route multi-corner setup/hold sweep (issue #949) as a
     second OpenROAD invocation, after the ``"route"`` stage's own script has
     already written ``checkpoint_in`` -- see :func:`_corner_sweep_script_lines`
     for why this cannot be folded into that script's own session.
 
     Returns ``(worst_setup_slack_ns, worst_hold_slack_ns, corners,
-    max_transition_violation_count, max_capacitance_violation_count)``. The
-    first two, each rounded to 5 decimal places (matching
+    max_transition_violation_count, max_capacitance_violation_count,
+    max_transition_violation_count_vs_library,
+    max_capacitance_violation_count_vs_library)``. The first two, each
+    rounded to 5 decimal places (matching
     :func:`~klayout_tools.place_and_route._extract_stage_metrics`'s own
     ``worst_slack_ns`` rounding) or ``None`` if that invocation's own
     ``-metrics`` dump didn't populate the corresponding key, are issue #949's
     original aggregate fields -- unchanged by issue #1092, still sourced from
     this same combined, every-``corners``-loaded-at-once session's own
     unscoped ``report_worst_slack_metric -setup``/``-hold`` calls.
-    ``(None, None, [], None, None)`` when ``corners`` is empty --
+    ``(None, None, [], None, None, None, None)`` when ``corners`` is empty --
     either the "should not happen in practice" case the original #949
     docstring named (a resolved ``liberty_path`` implies at least one
     shipped ``.lib``), or issue #1092's own explicit
@@ -807,22 +858,33 @@ def _run_corner_sweep(
     ``null``/``[]`` rather than raising on an empty sweep target list keeps
     this helper total either way.
 
-    The last two elements are issue #1709's own addition: the
-    **design-rule-check verdict** at those same swept decks -- how many pins
-    violate the max-transition (``-max_slew``) and max-capacitance limits in
-    force at the corners actually loaded, counted out of this same combined
-    invocation's own stdout by the identical marker-delimited
-    ``"(VIOLATED)"`` scrape ``setup_violation_count``/``hold_violation_count``
-    already use (see
-    :func:`~klayout_tools.place_and_route._design_rule_check_lines`). They
-    are a *verdict against whatever limits the loaded decks declare*, so they
-    are meaningful whether or not the caller set
-    ``request.constraints.max_transition_ns``/``.max_capacitance_pf`` -- with
-    those set, they additionally say whether the ``repair_design`` pass that
-    was aimed at the caller's own tighter target actually hit it. No
+    The next two elements are issue #1709's own addition: the **effective
+    design-rule-check verdict** at those same swept decks -- how many pins
+    violate whichever of the max-transition (``-max_slew``) / max-capacitance
+    limit ends up tighter at the corners actually loaded: the caller's own
+    ``request.constraints.max_transition_ns``/``.max_capacitance_pf`` when
+    given, or the loaded liberty deck's own per-pin limit otherwise. Counted
+    out of this same combined invocation's own stdout by the identical
+    marker-delimited ``"(VIOLATED)"`` scrape
+    ``setup_violation_count``/``hold_violation_count`` already use (see
+    :func:`~klayout_tools.place_and_route._design_rule_check_lines`). No
     **fanout** counterpart is reported, deliberately: see
     ``_design_rule_check_lines``'s own docstring for the
     ``sta::max_fanout_violation_count`` SIGSEGV this avoids.
+
+    The last two elements are issue #2357's own addition: the same two
+    checks run a **second** time, *before* any caller-stated constraint is
+    applied to the session -- a pure **library-only** verdict against
+    whatever the loaded liberty decks declare on their own, independent of
+    ``request.constraints.max_transition_ns``/``.max_capacitance_pf``. The
+    two pairs above and here answer different questions and are reported
+    side by side rather than merged: the effective pair says whether the
+    ``repair_design`` pass aimed at the caller's own (possibly tighter)
+    target actually hit it; this pair says whether the design breaks the
+    *library's* own limit, which a caller cannot otherwise tell apart from a
+    guard-band overrun without reading raw ``stdout.log`` (issue #2357's own
+    "Observed" scenario). When no constraint was given, both pairs are
+    identical by construction -- neither line diverges the check target.
 
     The third element is issue #1092's own addition: a per-corner
     breakdown, ``[{"name": ..., "setup_slack_ns": ..., "hold_slack_ns":
@@ -875,8 +937,12 @@ def _run_corner_sweep(
     to support (T1 checklist item 5, ``docs/design-evidence-tiers.md``).
     """
     from .place_and_route import (
+        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
         _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
         _MAX_CAPACITANCE_VIOLATIONS_END,
+        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
         _MAX_TRANSITION_VIOLATIONS_BEGIN,
         _MAX_TRANSITION_VIOLATIONS_END,
         PlaceAndRouteError,
@@ -886,7 +952,7 @@ def _run_corner_sweep(
     )
 
     if not corners:
-        return None, None, [], None, None
+        return None, None, [], None, None, None, None
 
     script_path = os.path.join(output_dir, f"pnr_{hdl_toplevel}_route_corners.tcl")
     metrics_path = os.path.join(
@@ -933,11 +999,11 @@ def _run_corner_sweep(
     tns_setup = round(tns_setup_raw, 5) if tns_setup_raw is not None else None
     tns_hold = round(tns_hold_raw, 5) if tns_hold_raw is not None else None
 
-    # Issue #1709: the design-rule verdict at the swept decks. Scraped from
-    # this same combined invocation's own stdout -- with every swept corner
-    # loaded, `report_check_types` reports a pin that violates the limit at
-    # *any* of them, the same worst-case-across-loaded-corners semantics
-    # `report_worst_slack_metric` above already has.
+    # Issue #1709: the effective design-rule verdict at the swept decks.
+    # Scraped from this same combined invocation's own stdout -- with every
+    # swept corner loaded, `report_check_types` reports a pin that violates
+    # the limit at *any* of them, the same worst-case-across-loaded-corners
+    # semantics `report_worst_slack_metric` above already has.
     max_transition_violations = _count_violations(
         completed.stdout,
         _MAX_TRANSITION_VIOLATIONS_BEGIN,
@@ -947,6 +1013,19 @@ def _run_corner_sweep(
         completed.stdout,
         _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
         _MAX_CAPACITANCE_VIOLATIONS_END,
+    )
+    # Issue #2357: the library-only pass -- same stdout, distinct markers
+    # (`_corner_sweep_script_lines` runs this pass *before* any caller-stated
+    # constraint is applied to the session).
+    max_transition_violations_vs_library = _count_violations(
+        completed.stdout,
+        _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+        _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
+    )
+    max_capacitance_violations_vs_library = _count_violations(
+        completed.stdout,
+        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+        _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
     )
 
     if len(corners) == 1:
@@ -965,6 +1044,13 @@ def _run_corner_sweep(
                 "timing_status": _timing_status((worst_setup, worst_hold)),
                 "max_transition_violation_count": max_transition_violations,
                 "max_capacitance_violation_count": max_capacitance_violations,
+                # Issue #2357: this corner's own library-only counterpart.
+                "max_transition_violation_count_vs_library": (
+                    max_transition_violations_vs_library
+                ),
+                "max_capacitance_violation_count_vs_library": (
+                    max_capacitance_violations_vs_library
+                ),
             }
         ]
         return (
@@ -973,6 +1059,8 @@ def _run_corner_sweep(
             corner_breakdown,
             max_transition_violations,
             max_capacitance_violations,
+            max_transition_violations_vs_library,
+            max_capacitance_violations_vs_library,
         )
 
     corner_breakdown = []
@@ -1042,11 +1130,12 @@ def _run_corner_sweep(
                 ),
                 # Issue #1865: see the single-corner branch above.
                 "timing_status": _timing_status((corner_setup, corner_hold)),
-                # Issue #1709: this corner's *own* design-rule verdict, from
-                # its own single-corner invocation's stdout -- the per-corner
-                # counterpart of the combined aggregates above, letting a
-                # caller see which deck's limits a pin actually breaks
-                # (exactly the per-corner attribution #1092 added for slack).
+                # Issue #1709: this corner's *own* effective design-rule
+                # verdict, from its own single-corner invocation's stdout --
+                # the per-corner counterpart of the combined aggregates
+                # above, letting a caller see which deck's limits a pin
+                # actually breaks (exactly the per-corner attribution #1092
+                # added for slack).
                 "max_transition_violation_count": _count_violations(
                     corner_completed.stdout,
                     _MAX_TRANSITION_VIOLATIONS_BEGIN,
@@ -1057,6 +1146,18 @@ def _run_corner_sweep(
                     _MAX_CAPACITANCE_VIOLATIONS_BEGIN,
                     _MAX_CAPACITANCE_VIOLATIONS_END,
                 ),
+                # Issue #2357: this corner's own library-only counterpart,
+                # from the same single-corner invocation's stdout.
+                "max_transition_violation_count_vs_library": _count_violations(
+                    corner_completed.stdout,
+                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_BEGIN,
+                    _MAX_TRANSITION_LIBRARY_VIOLATIONS_END,
+                ),
+                "max_capacitance_violation_count_vs_library": _count_violations(
+                    corner_completed.stdout,
+                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_BEGIN,
+                    _MAX_CAPACITANCE_LIBRARY_VIOLATIONS_END,
+                ),
             }
         )
 
@@ -1066,4 +1167,6 @@ def _run_corner_sweep(
         corner_breakdown,
         max_transition_violations,
         max_capacitance_violations,
+        max_transition_violations_vs_library,
+        max_capacitance_violations_vs_library,
     )
