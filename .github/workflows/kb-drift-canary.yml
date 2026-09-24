@@ -64,7 +64,7 @@ concurrency:
 jobs:
   kb-drift-canary:
     name: Recheck kb/entries/*.json measured figures against a fresh klt sim
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Headroom for the worst case: a PDK cache miss (up to 20 min of volare
     # fetch) plus the measured corpus itself (the sky130-model
     # `pfd-charge-pump-tri-state` transient alone runs for minutes). Matches

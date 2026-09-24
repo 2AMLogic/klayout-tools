@@ -42,7 +42,7 @@ concurrency:
 jobs:
   design-agent-benchmark:
     name: Task-set validation + reference-solution self-check
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Measured, not guessed (issue #1781): a full run of this job on this
     # branch (workflow run 34806989777, 2026-09-14, PDK cache hit) took
     # 35m53s end to end -- "Regression-test..." 8m22s, "Validate task set +
@@ -184,7 +184,7 @@ jobs:
 
   design-agent-benchmark-live:
     name: Live-agent S4->S5->S6 pass@k (issue #1732)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Additive alongside the job above -- never replaces its deterministic
     # `reference`-provider self-check. Bounded well under this ceiling in
     # the common case (3 attempts x 4 easy-tier tasks, 120s/attempt agent
@@ -293,7 +293,7 @@ jobs:
 
   design-agent-benchmark-interactive:
     name: Interactive tool-using S4->S5->S6 smoke (issue #1739)
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     # Additive alongside BOTH jobs above -- neither is replaced. A single
     # easy-tier task, 2 attempts, because each attempt here is a multi-turn
     # session that may run several real 18-corner `ngspice` sweeps of its

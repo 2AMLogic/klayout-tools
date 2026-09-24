@@ -64,7 +64,7 @@ concurrency:
 jobs:
   pins:
     name: Resolve pins from pdk-versions.json
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       image: ${{ steps.read.outputs.image }}
@@ -126,15 +126,16 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ubuntu-latest
+            runner: blacksmith-4vcpu-ubuntu-2404
             platform: linux/amd64
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
             platform: linux/arm64
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - name: Log in to GHCR
         # Needed even when not publishing: the base image is a GHCR package,
@@ -185,13 +186,14 @@ jobs:
     name: Publish multi-arch manifest
     needs: [pins, build]
     if: needs.pins.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - uses: docker/login-action@v4
         with:
@@ -218,7 +220,7 @@ jobs:
     name: PDK-backed simulation (${{ matrix.family }})
     needs: [pins, build]
     if: needs.pins.outputs.pdk_sim == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     permissions:
       contents: read
@@ -230,7 +232,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - uses: docker/login-action@v4
         with:
