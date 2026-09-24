@@ -175,6 +175,9 @@ from .gen_layer_params import (
     _PDK_RES_FLAVOR_LAYERS as _PDK_RES_FLAVOR_LAYERS,
 )
 from .gen_layer_params import (
+    _PDK_RES_FLAVOR_MIN_W_UM as _PDK_RES_FLAVOR_MIN_W_UM,
+)
+from .gen_layer_params import (
     _PDK_ROLE_LAYERS as _PDK_ROLE_LAYERS,
 )
 from .gen_layer_params import (
@@ -248,6 +251,12 @@ from .gen_layer_params import (
 )
 from .gen_layer_params import (
     _res_flavor_layers as _res_flavor_layers,
+)
+from .gen_layer_params import (
+    _res_flavor_min_width_um as _res_flavor_min_width_um,
+)
+from .gen_layer_params import (
+    _res_flavor_min_width_um_floor as _res_flavor_min_width_um_floor,
 )
 from .gen_layer_params import (
     _resolve_expected_device_class as _resolve_expected_device_class,

@@ -3296,6 +3296,103 @@ def test_res_array_higher_sheet_rho_flavor_extracts_as_matching_class(
     assert report["device_counts"].get("res_generic_po", 0) == 0
 
 
+@pytest.mark.parametrize(
+    ("flavor", "device_class"),
+    [("high", "res_high_po"), ("xhigh", "res_xhigh_po")],
+)
+def test_res_array_sky130_flavor_accepts_pdk_native_0p35_width(
+    tmp_path, pdk_root, flavor, device_class
+):
+    """Issue #2407: sky130's `res_high_po`/`res_xhigh_po` each ship a
+    first-class 0.35um-wide PDK primitive
+    (`sky130_fd_pr__{res_high_po,res_xhigh_po}_0p35`), narrower than the
+    generator's generic, structural `UNIT_MIN_W_UM` floor (0.42um). A
+    schematic reference to that PDK-native width variant must be drawable
+    through `res_array`, and the result must still be DRC-clean and extract
+    as the expected device class -- not silently rejected the way the
+    unconditional pre-#2407 floor rejected it."""
+    output = tmp_path / f"res_array_{flavor}_0p35.gds"
+    report = generate(
+        {
+            "generator": "res_array",
+            "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+            "params": {
+                "length_um": 22,
+                "width_um": 0.35,
+                "num": 3,
+                "dummy": 1,
+                "flavor": flavor,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    assert report["device_count"] == 3
+
+    drc_report = run_drc(str(output), "sky130")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+
+    extract_report = run_extract(str(output), "sky130")
+    assert extract_report["device_counts"].get(device_class, 0) == 3
+
+
+@pytest.mark.parametrize("flavor", ("high", "xhigh"))
+def test_res_array_sky130_flavor_still_rejects_narrower_than_0p35(
+    tmp_path, pdk_root, flavor
+):
+    """A width below sky130's own real 0.35um `res_high_po`/`res_xhigh_po`
+    floor is still rejected -- issue #2407 narrows the floor to match the
+    PDK's own narrowest primitive, it does not remove it."""
+    with pytest.raises(GenError, match=r"width_um must be >= 0\.35"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {
+                    "length_um": 22,
+                    "width_um": 0.3,
+                    "num": 1,
+                    "flavor": flavor,
+                },
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_res_array_sky130_generic_flavor_floor_unchanged_at_0p42(tmp_path, pdk_root):
+    """The `"high"`/`"xhigh"` per-flavour floor (issue #2407) does not widen
+    to sky130's `"generic"` flavour (`res_generic_po`), which has no such
+    fixed-width PDK primitive on record -- a request between the new 0.35um
+    floor and the generic 0.42um structural floor still fails, with the
+    original 0.42um message."""
+    with pytest.raises(GenError, match=r"width_um must be >= 0\.42"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "sky130A", "root": str(pdk_root)},
+                "params": {"length_um": 22, "width_um": 0.35, "num": 1},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
+def test_res_array_gf180_generic_flavor_floor_unchanged_at_0p42(
+    tmp_path, both_pdk_root
+):
+    """The new sky130-only per-flavour floor table (issue #2407) leaves
+    gf180mcu's own flavours at the original, unconditional `UNIT_MIN_W_UM`
+    floor -- `_PDK_RES_FLAVOR_MIN_W_UM` has no gf180mcu entry, so this must
+    fall back byte-for-byte to the pre-#2407 behaviour."""
+    with pytest.raises(GenError, match=r"width_um must be >= 0\.42"):
+        generate(
+            {
+                "generator": "res_array",
+                "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+                "params": {"length_um": 22, "width_um": 0.35, "num": 1},
+                "options": {"output": str(tmp_path / "out.gds")},
+            }
+        )
+
+
 # --- cap_array (issue #1117) --------------------------------------------------- #
 
 _SKY130_CAP_TOP_PLATE_LAYER = (89, 44)  # capm.drawing

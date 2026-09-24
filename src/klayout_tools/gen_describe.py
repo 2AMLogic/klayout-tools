@@ -49,6 +49,7 @@ from __future__ import annotations
 from typing import Any
 
 from .gen_layer_params import (
+    _DEFAULT_RES_FLAVOR,
     _MAX_METAL_RES_LEVEL,
     _METAL_RES_GEOMETRY_MIN_KEYS,
     _PDK_ROLE_LAYERS,
@@ -71,6 +72,7 @@ from .gen_layer_params import (
     _mos_array_well_tap_role_layer,
     _pdk_family,
     _reject_deferred_family,
+    _res_flavor_min_width_um_floor,
     _role_layer_info,
     _voltage_flavor_mark_layer,
 )
@@ -518,9 +520,31 @@ def _res_array_validate(params: dict[str, Any]) -> None:
 
     if params["length_um"] <= 0:
         raise GenError("generator 'res_array': params.length_um must be > 0")
-    if params["width_um"] < UNIT_MIN_W_UM:
+    # This runs before `--pdk`'s family is resolved (`_produce` resolves
+    # `pdk_info` first, but `spec.validate` never receives it -- the same
+    # "PDK-agnostic" constraint `_guard_ring_validate` documents for itself),
+    # so a `metal_level=0` (poly-body) request can only be checked against
+    # the *loosest* floor any family declares for the requested `flavor`
+    # (issue #2407) -- e.g. sky130's `flavor="high"`/`"xhigh"` accept a
+    # PDK-native 0.35um primitive width, narrower than the generic
+    # structural `UNIT_MIN_W_UM` floor every other flavour/family still
+    # uses. This is a *necessary*, not *sufficient*, check: the exact,
+    # family-specific floor is enforced once the family is known, in
+    # `_resistor_layer_params` (`gen_layer_params.py`), which raises its own
+    # `GenError` naming that family if the resolved family's own floor is
+    # still violated. A `metal_level` request keeps the original,
+    # unconditional `UNIT_MIN_W_UM` floor -- that mode's own per-level
+    # geometry floors are advisory (see
+    # `test_res_array_metal_level_narrow_width_notes_not_rejected`), not
+    # sourced from this flavour table at all.
+    width_floor = (
+        UNIT_MIN_W_UM
+        if params.get("metal_level", 0)
+        else _res_flavor_min_width_um_floor(params.get("flavor", _DEFAULT_RES_FLAVOR))
+    )
+    if params["width_um"] < width_floor:
         raise GenError(
-            f"generator 'res_array': params.width_um must be >= {UNIT_MIN_W_UM}"
+            f"generator 'res_array': params.width_um must be >= {width_floor}"
         )
     if params["spacing_um"] < 0:
         raise GenError("generator 'res_array': params.spacing_um must be >= 0")
