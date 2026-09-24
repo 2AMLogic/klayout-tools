@@ -41,13 +41,23 @@ cleanly.
     caller-declared `placement.origins_um[id]` `{x, y}` origin instead of a
     computed row offset, so a genuinely two-dimensional floorplan (arbitrary
     positions, per-pair separation) can be expressed directly rather than
-    forced through a single row's uniform spacing. `placement.spacing_um` is
-    not read under `"explicit"` — the declared origins are the whole
-    placement. **One thing `"explicit"` does not do**: it performs no
-    overlap validation of its own — an overlapping or abutting pair of
-    declared origins composes successfully; `klt drc` remains the
-    rule-compliance authority on the composed output (see "Geometry is
-    advisory" below).
+    forced through a single row's uniform spacing. Alternatively (#2410),
+    `placement.target_bbox_um[id]` names the `{x, y}` position the block's
+    own **bounding box** `(x0, y0)` corner should land at and the verb
+    computes the translation (`offset = target − bbox.(x0, y0)`, the same
+    anchoring `"row"` applies between neighbours) — the two forms are
+    mutually exclusive per request (declaring both, or neither, is an
+    application error, exit 1). Reach for `origins_um` when you already
+    think in translations (e.g. stacking a block at a known delta from
+    another); reach for `target_bbox_um` when you think in absolute
+    footprint positions — especially for a library cell whose local origin
+    is not its bbox corner (see "Placing a cell out of a library" below).
+    `placement.spacing_um` is not read under `"explicit"` — the declared
+    origins/targets are the whole placement. **One thing `"explicit"` does
+    not do**: it performs no overlap validation of its own — an overlapping
+    or abutting pair of declared positions composes successfully; `klt drc`
+    remains the rule-compliance authority on the composed output (see
+    "Geometry is advisory" below).
   - `"array"` (#1053) — the **one** `blocks[]` entry named in
     `placement.order` is repeated on a regular `rows` x `cols` grid
     (`placement.rows`/`cols`/`row_pitch_um`/`col_pitch_um`, plus an optional
@@ -1897,7 +1907,8 @@ exit codes).
 | `placement.strategy` | string | `"row"` (single horizontal row, left to right in `order`, spaced by `spacing_um`), `"explicit"` (#321 — each block placed at its own declared `origins_um[id]`), or `"array"` (#1053 — the one `blocks[]` entry named in `order` repeated on a `rows` x `cols` grid). Any other value (e.g. `"grid"`, reserved by the spike for a different, still-unimplemented feature) is an application error (exit 1). |
 | `placement.order` | array\<string\> | Block `id`s in placement order. Every `id` in `blocks[]` must appear exactly once — a missing or extra/unknown `id` is an application error. **Under `strategy: "array"`, `blocks[]`/`order` must contain exactly one entry** — the single block repeated at every tile; more than one is an application error. Response `blocks[]` ordering follows `order` under every strategy. |
 | `placement.spacing_um` | number | Fixed gap between adjacent blocks' bounding boxes. Must be `>= 0`. **Only read under `strategy: "row"`** — ignored (not an error) when present alongside `strategy: "explicit"` or `"array"`. |
-| `placement.origins_um` | object | **Required when `strategy: "explicit"`**, otherwise not read. Maps every `placement.order` block `id` to its own `{"x": number, "y": number}` origin — that block's `offset_um`, applied exactly like a `"row"` offset (added directly to the block's own reported `bbox_um`; see "`blocks[]` entries" below). The key set must equal `order` exactly — a missing, extra, or unknown `id` is an application error (exit 1), as is a non-numeric `x`/`y`. |
+| `placement.origins_um` | object | **One of the two `"explicit"` placement forms — required when `strategy: "explicit"` and `target_bbox_um` is absent**, otherwise not read. Maps every `placement.order` block `id` to its own `{"x": number, "y": number}` origin — that block's `offset_um`, applied exactly like a `"row"` offset (added directly to the block's own reported `bbox_um`; see "`blocks[]` entries" below). The key set must equal `order` exactly — a missing, extra, or unknown `id` is an application error (exit 1), as is a non-numeric `x`/`y`. Declaring both `origins_um` and `target_bbox_um` is an application error (exit 1), mirroring `blocks[]`'s own exactly-one-source rule for `generator_report`/`cell`. |
+| `placement.target_bbox_um` | object | The bbox-target alternative to `origins_um` (#2410) — **one of the two `"explicit"` placement forms; required when `strategy: "explicit"` and `origins_um` is absent**, otherwise not read. Maps every `placement.order` block `id` to its own `{"x": number, "y": number}` target — the position that block's own reported (and, under `blocks[].orientation`, oriented) `bbox_um` `(x0, y0)` corner should land at. The verb computes the translation (`offset = target − bbox.(x0, y0)`), exactly the anchoring `"row"` placement applies between neighbours, so the *drawn* geometry lands on the requested corner under every `orientation` — no hand-subtraction of the block's own `bbox_um.x0`/`y0`. Same shape rules as `origins_um` (key set equals `order` exactly, numeric `x`/`y`; a violation is an application error, exit 1). For a block whose `bbox_um.x0`/`y0` are both `0` the two forms coincide. |
 | `placement.rows`/`placement.cols` | integer | **Required when `strategy: "array"`** (#1053), otherwise not read. The grid's row/column counts — each must be a positive integer (`>= 1`); a non-integer, zero, or negative value is an application error (exit 1). |
 | `placement.row_pitch_um`/`placement.col_pitch_um` | number | **Required when `strategy: "array"`**, otherwise not read. The fixed spacing between adjacent tile origins along each axis — each must be `> 0` (a zero or negative pitch is an application error, exit 1, even for a degenerate `rows: 1` or `cols: 1` array, where the corresponding pitch is otherwise unused geometrically). |
 | `placement.origin_um` | object | Optional, **`strategy: "array"` only** — the base (row 0, col 0) tile's own `{"x": number, "y": number}` origin, i.e. that block's `offset_um`. Defaults to `{"x": 0.0, "y": 0.0}` when omitted, mirroring `"row"` placement's own implicit first-block origin. A non-numeric `x`/`y` is an application error (exit 1). |
@@ -2546,14 +2557,19 @@ block's **bbox**, not on that origin: the offset applied to a block is computed
 relative to its own reported `bbox_um` (`offset_x = target_x - bbox.x0`), so the
 drawn geometry lands where the reported `bbox_um` says it does, whatever the
 cell's origin is, and under any `blocks[].orientation` (which flips the sign of
-that correction). `placement.strategy: "explicit"` is translation-only by
-design — `origins_um[id]` *is* the block's `offset_um`, exactly as the first
-block of a `"row"` is never translated — so an explicit origin moves a block's
-bbox by that amount rather than forcing the bbox's `(x0, y0)` corner onto it;
-the reported `bbox_um` reflects the same translation the geometry gets, so the
-two never disagree. Regression-tested against a non-zero-origin fixture,
-unrotated and under every orientation, in `tests/test_gen_compose.py`
-(`test_compose_cell_block_non_zero_origin_*`).
+that correction). `placement.strategy: "explicit"` offers both semantics
+(#2410): `origins_um[id]` is translation-only by design — it *is* the block's
+`offset_um`, exactly as the first block of a `"row"` is never translated — so
+an explicit origin moves a block's bbox by that amount rather than forcing the
+bbox's `(x0, y0)` corner onto it; the reported `bbox_um` reflects the same
+translation the geometry gets, so the two never disagree. When you want "put
+this cell's *footprint* at (x, y)" without subtracting the cell's own
+`bbox_um.x0`/`y0` by hand, declare `target_bbox_um[id]` instead — the verb
+applies the identical `target − bbox.(x0, y0)` anchoring `"row"` uses, so the
+drawn geometry lands exactly on the requested corner, unrotated or under any
+`blocks[].orientation`. Both forms are regression-tested against a
+non-zero-origin fixture, unrotated and under every orientation, in
+`tests/test_gen_compose.py` (`test_compose_cell_block_non_zero_origin_*`).
 
 **Related limitation, not fixed here.** `placement.strategy: "explicit"` still
 supports no per-block rotation beyond `blocks[].orientation`'s four
