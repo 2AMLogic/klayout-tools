@@ -4461,6 +4461,199 @@ def test_deck_options_invalid_value_on_pre_extracted_netlist_shape_raises(tmp_pa
 
 
 # --------------------------------------------------------------------------- #
+# `device.class_family_unsatisfiable` (issue #2421): a reference netlist that
+# names two or more device classes of one option-selected, shared-geometry
+# family (gf180mcu's `poly_res` `ppolyf_u_1k`/`_2k`/`_3k`) cannot match under
+# *any* `deck_options` value -- the deck recognises exactly one of those names
+# per run. Diagnosed up front instead of reported as a generic device
+# mismatch that looks identical for every option value.
+# --------------------------------------------------------------------------- #
+
+
+def _write_gf180mcu_two_poly_res_gds(path: Path) -> str:
+    """Two *identical* gf180mcu `Resistor` (62/0)-marked poly bars -- the
+    issue #2421 repro's "draw two identical high-Rs poly resistor PCells in
+    one layout". Same drawn geometry as `_write_gf180mcu_poly_res_gds` above,
+    twice, on four separately-labelled Metal1 terminals."""
+    import klayout.db as kdb
+
+    layout = kdb.Layout()
+    top = layout.create_cell("RES2")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    def label(layer, datatype, text, x, y):
+        top.shapes(layout.layer(layer, datatype)).insert(
+            kdb.Text(text, kdb.Trans(x, y))
+        )
+
+    for y0, terminals in ((0, ("RA", "RB")), (5000, ("RC", "RD"))):
+        bar = kdb.Box(0, y0, 12000, y0 + 1000)
+        marked = kdb.Box(3000, y0, 9000, y0 + 1000)
+
+        draw(30, 0, bar)  # Poly2
+        draw(110, 5, marked)  # RES_MK
+        draw(31, 0, marked.enlarged(500, 500))  # Pplus
+        draw(49, 0, marked.enlarged(500, 500))  # SAB
+        draw(62, 0, marked.enlarged(500, 500))  # Resistor -> a poly_res flavour
+
+        for x, name in zip((1500, 10500), terminals, strict=True):
+            draw(33, 0, kdb.Box(x - 100, y0 + 400, x + 100, y0 + 600))  # Contact
+            draw(34, 0, kdb.Box(x - 400, y0 + 200, x + 400, y0 + 800))  # Metal1
+            label(34, 10, name, x, y0 + 500)  # Metal1 pin
+
+    layout.write(str(path))
+    return str(path)
+
+
+def _gf180mcu_two_poly_res_reference_spice(
+    top: str, first_class: str, second_class: str, substrate_net: str
+) -> str:
+    """A plain-element reference for `_write_gf180mcu_two_poly_res_gds`,
+    naming each of the two identically-drawn resistors as a (possibly
+    different) `poly_res` flavour class, sized for that class's own sheet
+    rho."""
+    sheet_rho = {"ppolyf_u_1k": 1000.0, "ppolyf_u_2k": 2000.0, "ppolyf_u_3k": 3000.0}
+    r1 = _GF180_POLY_RES_SQUARES * sheet_rho[first_class]
+    r2 = _GF180_POLY_RES_SQUARES * sheet_rho[second_class]
+    return f"""
+.subckt {top} RA RB RC RD {substrate_net}
+R1 RA RB {substrate_net} {r1:.5f} {first_class}
+R2 RC RD {substrate_net} {r2:.5f} {second_class}
+.ends
+"""
+
+
+@pytest.mark.parametrize("poly_res", ["1k", "3k"])
+def test_reference_mixing_poly_res_flavours_reports_family_unsatisfiable(
+    tmp_path, poly_res
+):
+    """The issue #2421 repro: two identically-drawn high-Rs poly resistors,
+    a reference naming one `ppolyf_u_1k` and the other `ppolyf_u_3k`. Both
+    `poly_res` values report the same generic mismatch today; the new
+    `device.class_family_unsatisfiable` entry names the family, the option
+    that selects between its members, and the classes the reference used --
+    identically under either option value, since the reference is
+    unsatisfiable by construction."""
+    from klayout_tools.decks import get_extraction_deck
+
+    gds = _write_gf180mcu_two_poly_res_gds(tmp_path / "two_poly_res.gds")
+    substrate_net = get_extraction_deck("gf180mcu").substrate_net
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        _gf180mcu_two_poly_res_reference_spice(
+            "RES2", "ppolyf_u_1k", "ppolyf_u_3k", substrate_net
+        ),
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "file": gds,
+                    "deck": "gf180mcu",
+                    "deck_options": {"poly_res": poly_res},
+                },
+                "reference": {"netlist": reference_path, "top": "RES2"},
+            },
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert report["category_counts"]["device.class_family_unsatisfiable"] == 1
+    assert report["category_error_counts"]["device.class_family_unsatisfiable"] == 1
+
+    entry = next(
+        mismatch
+        for mismatch in report["mismatches"]
+        if mismatch["category"] == "device.class_family_unsatisfiable"
+    )
+    assert entry["severity"] == "error"
+    assert entry["side"] == "reference"
+    assert entry["details"]["option"] == "poly_res"
+    assert entry["details"]["device_kind"] == "resistor"
+    assert entry["details"]["family"] == [
+        "ppolyf_u_1k",
+        "ppolyf_u_2k",
+        "ppolyf_u_3k",
+    ]
+    assert [name.upper() for name in entry["details"]["reference_classes"]] == [
+        "PPOLYF_U_1K",
+        "PPOLYF_U_3K",
+    ]
+    # The description has to carry the whole diagnosis on its own -- the
+    # option that selects between the classes, and that no value of it can
+    # match -- so a reader never has to open the PDK deck's derivation rules.
+    assert "poly_res" in entry["description"]
+    assert "same drawn geometry" in entry["description"]
+    assert "No value of that option can therefore match" in entry["description"]
+
+
+def test_reference_using_one_poly_res_flavour_has_no_family_finding(tmp_path):
+    """No false positive: a reference naming exactly one class of the
+    `poly_res` family is perfectly satisfiable (that is the whole point of
+    `deck_options`), so the new category must not fire (issue #2421)."""
+    from klayout_tools.decks import get_extraction_deck
+
+    gds = _write_gf180mcu_two_poly_res_gds(tmp_path / "two_poly_res.gds")
+    substrate_net = get_extraction_deck("gf180mcu").substrate_net
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        _gf180mcu_two_poly_res_reference_spice(
+            "RES2", "ppolyf_u_2k", "ppolyf_u_2k", substrate_net
+        ),
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "file": gds,
+                    "deck": "gf180mcu",
+                    "deck_options": {"poly_res": "2k"},
+                },
+                "reference": {"netlist": reference_path, "top": "RES2"},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert "device.class_family_unsatisfiable" not in report["category_counts"]
+
+
+def test_deck_with_no_flavour_families_reports_no_family_finding(tmp_path):
+    """A deck declaring no `flavour_option` family at all (sky130 today) is a
+    clean no-op for the new check -- nothing to group by, nothing reported
+    (issue #2421)."""
+    gds = _write_flat_inverter_gds(tmp_path / "flat.gds")
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"file": gds, "deck": "sky130"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
+    )
+
+    assert "device.class_family_unsatisfiable" not in report["category_counts"]
+
+
+def test_flavour_family_check_skipped_without_a_layout_deck(tmp_path):
+    """The pre-extracted `layout.netlist` shape with no `layout.deck` has no
+    deck to read families from, so the check is a silent no-op rather than an
+    error (issue #2421)."""
+    from klayout_tools.lvs_mismatch import _device_class_family_findings
+
+    assert _device_class_family_findings(None, None) == []
+
+
+# --------------------------------------------------------------------------- #
 # gf180mcu drawn metal resistors `rm1`/`rm2`/`rm3` and the `tm6k`/`tm9k`/
 # `tm11k`/`tm30k` top-metal flavour set (issue #1640) reach `klt lvs`'s
 # existing generic device-comparison path with **no** LVS code change --

@@ -14,6 +14,40 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2421, `klt lvs`, additive — **no** `schema_version` bump: one
+  new `mismatches[].category` value, no new request field and no change to
+  any existing field's value for any input that does not trigger it): a new
+  `severity: "error"`, `side: "reference"` category
+  **`device.class_family_unsatisfiable`**, reported when the reference
+  netlist instantiates **two or more** device classes that the layout-side
+  deck derives from one and the same drawn geometry and tells apart only by
+  a whole-run deck option — gf180mcu's `poly_res` family (`ppolyf_u_1k`/
+  `_2k`/`_3k`, one drawn `Resistor`-marked poly segment at three sheet-rho
+  interpretations) being the worked example, with `mim_cap` and `metal_top`
+  its siblings. Such a reference cannot pass LVS under *any* option value:
+  the deck recognises exactly one of those names per run, so whichever is
+  selected, the instances of the other class(es) are compared against a
+  device class the extraction never produces. Until now that surfaced only
+  as an ordinary `device.class`/`device.unmatched` mismatch, **identical for
+  every option value** — so the obvious next step ("try the other value")
+  reproduced the same failure, and only reading the PDK deck's own
+  derivation rules revealed that the classes share one drawn layer. The new
+  entry names the family, the option that selects between its members, and
+  the classes the reference actually used, in both the `description` and a
+  machine-readable `details` block (`{"option", "device_kind", "family",
+  "reference_classes"}`). Run as a **pre-flight** check — on the reference
+  as given, against the deck's own `flavour_option`/`flavours` table,
+  independent of which `deck_options` value this run selected — so it fires
+  identically under every value, and is entirely data-driven: a PDK that
+  later declares another option-selected shared-geometry family is covered
+  with no further code change. Diagnostic only, exactly like
+  `device.class_arity`: it explains the mismatch the compare already
+  reported and never moves `status` on its own. Requires a resolved
+  `layout.deck` (the pre-extracted `layout.netlist` shape with no deck
+  reports nothing), counts only classes with at least one instantiated
+  reference-side device, and stays silent for a reference naming exactly one
+  class of a family (the normal, supported `deck_options` case). See
+  `docs/cli/lvs.md`'s "`device.class_family_unsatisfiable`" section.
 - **Added** (#2389, `klt erc`, additive — **no** `schema_version` bump: one
   new `erc_coverage` key, no new spec key, no new finding kind, and no
   change to any existing field's value for any input): a new
