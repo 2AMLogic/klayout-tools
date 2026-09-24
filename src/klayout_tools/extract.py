@@ -3624,6 +3624,7 @@ def extract_netlist_from_layout(
     ] = {}
     abstract_cell_global_net_ports: dict[int, int] = {}
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
+    abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None
     if abstract_cell_patterns:
         abstract_instances = _collect_abstract_instances(
             layout, top_cell, abstract_cell_patterns
@@ -3666,6 +3667,21 @@ def extract_netlist_from_layout(
                 )
                 for cell_index in matched_cell_indices
             }
+            # And computed *before* erasure for the same reason (issue
+            # #2396): a capacitor's `top_plate` is a device-recognition
+            # layer, so `_erase_abstracted_cell_geometry` clears it -- but
+            # its `top_plate_via` is *routing*, deliberately kept so a
+            # parent's connection to a black-boxed cell's pin can still
+            # reach through the cell's own local interconnect. Derived
+            # against the post-erasure layout, the #364/#1388 top-plate-via
+            # exclusion would therefore find no top plate to explain that
+            # via's DRM-required overlap with the bottom plate, go empty,
+            # and let the generic `vias[]` connectivity short every MiM cap
+            # in the black box plate-to-plate. See
+            # `_capacitor_top_via_exclusions`' own docstring.
+            abstract_capacitor_top_via_exclusions = _capacitor_top_via_exclusions(
+                layout, top_cell, deck
+            )
             _erase_abstracted_cell_geometry(layout, matched_cell_indices, mask_layers)
         if abstract_cell_lef_paths:
             lef_macros = _load_abstract_cell_lefs(abstract_cell_lef_paths)
@@ -3696,6 +3712,7 @@ def extract_netlist_from_layout(
         abstract_cell_local_candidates=abstract_cell_local_candidates,
         abstract_cell_global_net_ports=abstract_cell_global_net_ports,
         abstract_body_identity_cover=abstract_body_identity_cover,
+        abstract_capacitor_top_via_exclusions=abstract_capacitor_top_via_exclusions,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
@@ -5352,11 +5369,85 @@ def _capacitor_top_via_overlap_region(
     return top_via_region & scoped_bottom_region
 
 
+def _capacitor_top_via_exclusions(
+    layout: kdb.Layout, top_cell: kdb.Cell, deck: ExtractionDeck
+) -> dict[int, kdb.Region]:
+    """Every capacitor's ``top_plate_via ∩ bottom_plate`` overlap against this
+    layout, keyed by the **index into ``deck.vias``** of the via layer it must
+    be cut from -- :func:`_exclude_capacitor_top_via_overlap`'s working set.
+
+    Factored out of that function (issue #2396) so the *same* derivation can
+    be run a second time, at a different moment in the pipeline: with
+    ``--abstract-cells``,
+    :func:`~klayout_tools.extract_abstract._erase_abstracted_cell_geometry`
+    erases each black-boxed cell's capacitor ``top_plate`` (it is a
+    device-recognition layer) but deliberately keeps its routing layers,
+    including the ``top_plate_via``. Run against the post-erasure layout, the
+    derivation below therefore sees an empty ``top_region`` inside every
+    abstracted cell and returns no exclusion for it -- and every top-plate via
+    in the black box falls back into the deck's generic ``vias[]``
+    connectivity, shorting that capacitor's own top plate to its bottom plate
+    (and merging whatever *parent* nets each plate reaches). The caller
+    (:func:`extract_netlist_from_layout`) runs this once **before** erasure and
+    threads the result back in, the same pre-erasure-capture pattern
+    :func:`~klayout_tools.extract_abstract._abstract_cell_body_identity_cover`
+    already uses for the well/substrate-isolation cover (issue #1911).
+
+    A deck with no capacitor declaring ``top_plate_via``, or whose declared
+    ``top_plate_via`` is not one of the deck's own ``vias`` layers (so it never
+    reaches the generic connectivity loop in the first place), yields an empty
+    mapping.
+    """
+    import klayout.db as kdb
+
+    exclusions: dict[int, kdb.Region] = {}
+    for capacitor in deck.capacitors:
+        if capacitor.top_plate_via is None:
+            continue
+        if capacitor.top_plate_via not in deck.vias:
+            # Not one of this deck's tracked via layers -- the generic loop
+            # never touches it, so there is nothing to exclude (the
+            # deck-authoring validation for a mismatched
+            # `top_plate_via`/`top_plate_via_metal` pair is the main
+            # capacitor loop's job, not this helper's).
+            continue
+        via_index = deck.vias.index(capacitor.top_plate_via)
+        # For a deck whose `bottom_plate` is *not* clipped to the top
+        # plate's own footprint (`bottom_plate_oversize_um == 0`, e.g.
+        # sky130's MiM stacks), `_capacitor_plate_regions`'s zero-oversize
+        # branch returns the bottom conductor's *entire* drawn region --
+        # every shape on that metal layer anywhere in the layout, not just
+        # this capacitor's own plate. `_capacitor_top_via_overlap_region`
+        # narrows to `interacting(top_region)` (issue #1388) before
+        # intersecting it with the via footprint, keeping only the
+        # bottom-plate shape(s) that actually sit under *this* capacitor's
+        # top-plate marker. This both restores the issue #775 guard (an
+        # empty `top_region` -- no cap marker drawn anywhere -- makes the
+        # scoped bottom region empty too, so a digital/macro layout that
+        # only routes on the declared `bottom_plate` metal is untouched)
+        # *and* fixes the case #775 didn't cover: a layout that draws both a
+        # real capacitor and ordinary routing between the bottom-plate metal
+        # and the metal above elsewhere on the chip. Without this
+        # narrowing, `top_via_region` (every shape on the declared
+        # `top_plate_via` layer, e.g. sky130's real `via3`/`via4` routing
+        # vias used throughout ordinary signal routing) intersected against
+        # the unscoped, chip-wide bottom region excludes every legitimate
+        # via on that layer from the deck's generic `vias[]` connectivity --
+        # a false disconnect across the whole design, not the narrow
+        # false-short exclusion this function exists to apply.
+        overlap = _capacitor_top_via_overlap_region(layout, top_cell, capacitor)
+        if overlap.is_empty():
+            continue
+        exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + overlap
+    return exclusions
+
+
 def _exclude_capacitor_top_via_overlap(
     layout: kdb.Layout,
     top_cell: kdb.Cell,
     deck: ExtractionDeck,
     vias: list[kdb.Region],
+    pre_erasure_exclusions: dict[int, kdb.Region] | None = None,
 ) -> list[kdb.Region]:
     """Exclude each capacitor's own ``top_plate_via ∩ bottom_plate`` overlap
     from the deck's generic ``vias[]`` layers (issue #364), before those
@@ -5393,6 +5484,23 @@ def _exclude_capacitor_top_via_overlap(
     capacitor would exclude every via on the shared via layer chip-wide --
     including ordinary routing vias nowhere near a capacitor.
 
+    ``pre_erasure_exclusions`` (issue #2396) is the same mapping
+    :func:`_capacitor_top_via_exclusions` derived from this layout **before**
+    ``--abstract-cells`` erased each black-boxed cell's capacitor
+    ``top_plate``, unioned into the freshly-derived one here. It is what keeps
+    a MiM cap inside a black box from reading as a hard short between its own
+    plates: the erasure removes the ``capm``-style top plate that explains the
+    DRM-required ``via3``-on-``met3`` overlap, but not the via itself, so
+    without the pre-erasure capture the exclusion silently switches off in
+    exactly the cells the caller asked to treat as opaque -- and every parent
+    net that reaches one plate of some capacitor in the macro merges with
+    every net that reaches the other. Because the captured mapping is
+    precisely what a *flat* (non-abstracted) extraction of the same stream
+    would exclude, unioning it in can only restore connections flat extraction
+    also lacks; it never cuts a via an unabstracted run would keep. ``None``
+    (the default, and every non-abstracted run) leaves behaviour exactly as it
+    was.
+
     Returns a new ``vias`` list (the input list/regions are not mutated); a
     deck with no capacitor declaring ``top_plate_via``, or whose declared
     ``top_plate_via`` is not one of the deck's own ``vias`` layers (so it
@@ -5401,45 +5509,11 @@ def _exclude_capacitor_top_via_overlap(
     """
     import klayout.db as kdb
 
-    exclusions: dict[int, kdb.Region] = {}
-    for capacitor in deck.capacitors:
-        if capacitor.top_plate_via is None:
+    exclusions = _capacitor_top_via_exclusions(layout, top_cell, deck)
+    for via_index, region in (pre_erasure_exclusions or {}).items():
+        if region.is_empty():
             continue
-        if capacitor.top_plate_via not in deck.vias:
-            # Not one of this deck's tracked via layers -- the generic loop
-            # below never touches it, so there is nothing to exclude (the
-            # deck-authoring validation for a mismatched
-            # `top_plate_via`/`top_plate_via_metal` pair is the main
-            # capacitor loop's job, not this helper's).
-            continue
-        via_index = deck.vias.index(capacitor.top_plate_via)
-        # For a deck whose `bottom_plate` is *not* clipped to the top
-        # plate's own footprint (`bottom_plate_oversize_um == 0`, e.g.
-        # sky130's MiM stacks), `_capacitor_plate_regions`'s zero-oversize
-        # branch returns the bottom conductor's *entire* drawn region --
-        # every shape on that metal layer anywhere in the layout, not just
-        # this capacitor's own plate. `_capacitor_top_via_overlap_region`
-        # narrows to `interacting(top_region)` (issue #1388) before
-        # intersecting it with the via footprint, keeping only the
-        # bottom-plate shape(s) that actually sit under *this* capacitor's
-        # top-plate marker. This both restores the issue #775 guard (an
-        # empty `top_region` -- no cap marker drawn anywhere -- makes the
-        # scoped bottom region empty too, so a digital/macro layout that
-        # only routes on the declared `bottom_plate` metal is untouched)
-        # *and* fixes the case #775 didn't cover: a layout that draws both a
-        # real capacitor and ordinary routing between the bottom-plate metal
-        # and the metal above elsewhere on the chip. Without this
-        # narrowing, `top_via_region` (every shape on the declared
-        # `top_plate_via` layer, e.g. sky130's real `via3`/`via4` routing
-        # vias used throughout ordinary signal routing) intersected against
-        # the unscoped, chip-wide bottom region excludes every legitimate
-        # via on that layer from the deck's generic `vias[]` connectivity --
-        # a false disconnect across the whole design, not the narrow
-        # false-short exclusion this function exists to apply.
-        overlap = _capacitor_top_via_overlap_region(layout, top_cell, capacitor)
-        if overlap.is_empty():
-            continue
-        exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + overlap
+        exclusions[via_index] = exclusions.get(via_index, kdb.Region()) + region
 
     if not exclusions:
         return vias
@@ -6204,6 +6278,7 @@ def _extract_netlist(
     ) = None,
     abstract_cell_global_net_ports: dict[int, int] | None = None,
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
+    abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
@@ -6385,6 +6460,15 @@ def _extract_netlist(
     through to :func:`_wire_abstract_cells` for its ``warnings[]`` entry.
     Both ``None`` (the default) restore this function's pre-#1911
     behaviour exactly.
+
+    ``abstract_capacitor_top_via_exclusions`` (issue #2396) is a third such
+    pre-erasure capture: :func:`_capacitor_top_via_exclusions`' per-``vias``-
+    index ``top_plate_via ∩ bottom_plate`` mapping, taken before the erasure
+    removed each black-boxed cell's capacitor ``top_plate``, and unioned into
+    the same exclusion :func:`_exclude_capacitor_top_via_overlap` derives here
+    -- so a MiM cap inside a black box does not extract as a hard short
+    between its own plates. ``None`` (the default, and every non-abstracted
+    run) leaves that exclusion exactly as it was.
     """
     import klayout.db as kdb
 
@@ -6513,8 +6597,17 @@ def _extract_netlist(
     # Without this, a capacitor's own `top_plate_via` (#314), placed per the
     # PDK's DRM-legal minimum-overlap requirement against its bottom plate,
     # is read by that generic loop as an ordinary via shorting the two
-    # plates together.
-    vias = _exclude_capacitor_top_via_overlap(layout, top_cell, deck, vias)
+    # plates together. With `--abstract-cells`, the caller's pre-erasure
+    # capture of that same exclusion is unioned in here (issue #2396) --
+    # the black box's own top plate is gone by now, so this call alone can
+    # no longer explain its top-plate vias.
+    vias = _exclude_capacitor_top_via_overlap(
+        layout,
+        top_cell,
+        deck,
+        vias,
+        pre_erasure_exclusions=abstract_capacitor_top_via_exclusions,
+    )
 
     # Derived tap for a PDK family with no distinct tap layer (issue #1084):
     # when the deck declares no `tap` but does declare one or both of

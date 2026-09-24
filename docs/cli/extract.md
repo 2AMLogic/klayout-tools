@@ -745,6 +745,26 @@ configuration — no PDK shipped in this repo does this) is not erased, since
 that layer is routing. Neither `sky130` nor `gf180mcu` declares a
 resistor/capacitor body on a `metals[]` layer today.
 
+**A black-boxed MiM capacitor does not short its own plates (issue #2396).**
+The erase-vs-preserve split above cuts straight through a MiM capacitor: its
+`top_plate` (sky130's `capm`) is a device-recognition layer and is erased,
+while its `top_plate_via` (`via3`) is routing and is kept. But that via's
+overlap with the `met3` bottom plate — which the PDK's own DRM *requires*,
+and which the extraction engine has no notion of the dielectric to
+contradict — is only excluded from the deck's generic `vias[]` connectivity
+because a recognised top plate explains it (issues #364/#1388, "top-plate
+via exclusion"). Derived after erasure, that exclusion found no top plate,
+went empty, and every top-plate via inside the black box read as an ordinary
+via shorting the cap's top plate to its bottom plate — merging the *parent's*
+own otherwise-distinct nets wherever they each reached one plate. The
+exclusion is therefore captured **before** erasure, the same way the
+`nwell`/`substrate_isolation` cover below is, and unioned into the one
+derived afterwards. Because the captured region is exactly what a flat
+(non-abstracted) extraction of the same stream excludes, this can only
+withhold connections flat extraction also lacks: an ordinary routing via on
+the same physical via layer — inside or outside a black box, with no top
+plate over it — is untouched, and a real short stays visible.
+
 **Abstraction never changes net identity outside the black box (issue
 #1911).** The erasure above is scoped to the matched cell's own definition,
 but two of the erased layers — `nwell` and `substrate_isolation` — are

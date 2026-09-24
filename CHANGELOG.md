@@ -54,6 +54,33 @@ not `klt --version`, if you need to detect this kind of drift. See
   quote a non-empty value, on the same claimant-enforced (not
   tool-enforced) terms item 3 already applies to
   `coverage.layers_in_stream_without_rules`.
+- **Fixed** (#2396, `klt extract --abstract-cells` — no JSON shape change, so
+  **no** `schema_version` bump; the extracted connectivity itself changes for
+  an abstracted cell that contains MiM capacitors): black-boxing a macro made
+  every MiM capacitor inside it read as a hard **short between its own top and
+  bottom plates**, merging otherwise-distinct *parent* nets that each reached
+  one plate. `--abstract-cells` erases a matched cell's capacitor `top_plate`
+  (sky130's `capm` — a device-recognition layer) but deliberately keeps its
+  `top_plate_via` (`via3`), because a parent's connection to a black-boxed
+  cell's pin must still reach through the cell's own local interconnect. The
+  #364/#1388 exclusion that keeps such a via's DRM-required overlap with the
+  `met3` bottom plate out of the deck's generic `vias[]` connectivity is
+  scoped to `bottom_region.interacting(top_region)`, so with the top plate
+  erased it went empty over the whole black box and the top-plate via fell
+  back into the generic per-layer via loop as an ordinary `met3`↔`met4` short.
+  The exclusion is now captured **before** `--abstract-cells` erasure and
+  unioned into the one derived afterwards — the same pre-erasure-capture
+  pattern #1911 already uses for the `nwell`/`substrate_isolation` body-identity
+  cover. Because the captured region is exactly what a *flat* extraction of
+  the same stream excludes, this can only withhold connections flat extraction
+  also lacks: `top_plate_via` shapes are **not** erased wholesale (a declared
+  pin routed through that via layer still reaches its access point), ordinary
+  routing vias on the same physical layer with no top plate over them are
+  untouched inside and outside a black box, and a genuine via short stays
+  visible. Runs without `--abstract-cells`, and decks declaring no capacitor
+  `top_plate_via`, are byte-for-byte unchanged. See
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "Cell-level (black-box +
+  pins) abstraction".
 - **Fixed** (#2374, `klt lvs` `options.combine_devices` — additive, **no**
   `schema_version` bump: no category is added or removed, and the existing
   `device.combine_parameter_corrected` entry's `details.corrected[]` objects
