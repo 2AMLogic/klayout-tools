@@ -602,6 +602,46 @@ rule still encodes the 3.3 V column, which is what
 warns about — see that section for how the warning's gate distinguishes
 them.
 
+### Fixed-size rules: `"width"` with a maximum (`threshold_max_dbu`, issue #2370)
+
+A `"width"` rule normally encodes one bound — the minimum, `threshold_dbu`,
+checked by `klayout.db.Region.width_check`. Some published rules are
+*fixed-size* instead: gf180mcu's `CO.1` ("min/max contact size → 0.22um")
+and `Vn.1` ("min/max Vian size → 0.26um") require every contact/via cut to be
+exactly a 0.22 × 0.22 um (resp. 0.26 × 0.26 um) square, a minimum **and** a
+maximum. `DrcRule.threshold_max_dbu` adds that second bound; `contact.width.1`
+and `via1.width.1`–`via4.width.1` set it equal to their own `threshold_dbu`.
+
+The maximum is measured as a **bounding-box size** bound, not as an inverted
+`width_check`:
+
+- No `Region` primitive reports an upper-bound width violation, and the
+  obvious geometric substitute (shrink the region by half the maximum, flag
+  whatever survives) measures the distance between *facing* edges only. An
+  over-long contact drawn 0.22 × 2 um has a perfectly legal 0.22 um
+  facing-edge width — it collapses to nothing when shrunk and would go
+  unreported — yet it is exactly the geometry `CO.1` forbids.
+- So `run_drc` uses `Region.with_bbox_max(0, max + 1, inverse=True)`: the
+  merged polygons whose *larger* bounding-box dimension exceeds the maximum.
+  An oversized square, an elongated bar, and an L-shaped cut are all flagged;
+  a cut whose bounding box is exactly the threshold is legal and stays clean.
+- Because the bound is measured on the axis-aligned envelope, a
+  non-axis-aligned cut (e.g. a 45°-rotated square) is measured conservatively
+  by its envelope rather than its true size. These rules' official geometry is
+  an axis-aligned square, so no realistic drawn cut hits this.
+
+Violations from the maximum half are reported under the **same rule id** and
+the same `check: "width"` string as the minimum half, additive to it — the
+same pattern `"enclosing"`/`"enclosed"`'s zero-overlap escape term already
+uses. Like an `"area"` violation (and unlike an edge-pair one), each carries
+the violating polygon itself.
+
+`threshold_max_dbu` is valid only on `check: "width"`, must not be below the
+rule's own `threshold_dbu`, and is rescaled by the same `dbu_scale` as every
+other linear threshold (see "Database units" below). A deck that breaks either
+rule fails loudly with a `DrcError` naming the rule id, rather than having the
+field silently ignored.
+
 ### `"area"` / `"density"` / `"antenna"` check kinds (issue #812)
 
 Three more check kinds exist alongside `"width"`/`"space"`/`"notch"`/
@@ -733,8 +773,12 @@ correct-by-construction geometry. Four more (`met2.width.1`, `via.width.1`,
 `met1.enclosing.via.1`, `met2.enclosing.via.1`) approximate an official rule
 that additionally bounds a max size, length, or a periphery-scoped/
 corner-relaxed refinement our single-layer/two-layer check primitives don't
-support — the same class of approximation `met1.enclosing.mcon.1` and
-gf180mcu's `contact.width.1` already make. Every approximation is called
+support — the same class of approximation `met1.enclosing.mcon.1` already
+makes. (The max-size half of that class is no longer inherently
+unsupported: `DrcRule.threshold_max_dbu`, issue #2370, adds an upper size
+bound and gf180mcu's `contact.width.1`/`via1.width.1`-`via4.width.1` now use
+it — see "Fixed-size rules" below. Backfilling these four sky130 rules with
+it is separate, unclaimed work.) Every approximation is called
 out explicitly in its rule's docstring; the threshold *values* used are
 always the real, unmodified source values, with exactly one documented
 exception pattern (the `second_edges` zero floor above) described next.
@@ -940,9 +984,12 @@ primitives can't isolate (`comp.space.1`/`comp.space.mv.1`, `poly2.space.1`,
 curated layer set doesn't draw (`comp.width.1`/`comp.space.1` model the
 `Dualgate` half of the PDK's own thin-oxide region but not its `v5_xtor`
 half; `comp.width.mv.1` doesn't exclude the `mvsd`/`mvpsd` LDMOS drain
-markers the official `DF.1a_MV` does), a bound our primitives don't support
-(`contact.width.1`'s and `via1.width.1`-`via4.width.1`'s fixed-size squares,
-approximated as a minimum only), an array-density context our primitives
+markers the official `DF.1a_MV` does), the axis-aligned-envelope
+conservatism of a fixed-size bound (`contact.width.1`'s and
+`via1.width.1`-`via4.width.1`'s squares — *both* bounds are enforced as of
+issue #2370, see "Fixed-size rules" above, but the maximum is measured on
+the bounding box, so a hypothetical non-axis-aligned cut is measured by its
+envelope rather than its true size), an array-density context our primitives
 have no notion of (`via1.space.1`-`via4.space.1`, which use the ordinary
 two-via `Vn.2a` threshold rather than the tighter `Vn.2b` one that applies
 inside a >=4x4 via array), a plate-outline-vs-whole-polygon choice in one

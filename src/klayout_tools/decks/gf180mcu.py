@@ -247,16 +247,18 @@ are always the real, unmodified DRM values:
   permissive ``PL.1`` value across the whole ``poly2`` drawn layer, since
   isolating gate poly2 requires the same compound layer expression our
   engine does not evaluate.
-- ``contact.width.1``: ``CO.1`` specifies contact as a fixed 0.22 x 0.22um
-  square (a min **and** max bound); our ``width_check`` primitive only
-  supports a minimum-width lower bound, so only the min half of the rule is
-  enforced here.
-- ``via1.width.1``/``via2.width.1``/``via3.width.1``/``via4.width.1``: the
-  official ``Vn.1`` specifies each via as a fixed 0.26 x 0.26um square (a min
-  **and** max bound) -- the same shape of rule as ``contact.width.1``'s
-  ``CO.1`` above; our ``width_check`` primitive only supports a
-  minimum-width lower bound, so only the min half of the rule is enforced
-  here.
+- ``contact.width.1``/``via1.width.1``/``via2.width.1``/``via3.width.1``/
+  ``via4.width.1``: ``CO.1`` (fixed 0.22 x 0.22um contact) and ``Vn.1``
+  (fixed 0.26 x 0.26um via) are min **and** max size rules, and **both
+  halves are now enforced** (issue #2370) -- this was previously listed here
+  as a min-only approximation. The max half is measured as a bounding-box
+  size bound (``DrcRule.threshold_max_dbu``, see ``_run_width_max_check`` in
+  ``drc.py``), not as an inverted ``width_check``, so an oversized square, an
+  elongated bar, and an L-shaped cut are all flagged. The one residual
+  conservatism: a *non-axis-aligned* cut (e.g. a 45-degree-rotated square) is
+  measured by its axis-aligned envelope rather than its true size, so it can
+  be flagged while nominally within the fixed size -- these rules' official
+  geometry is an axis-aligned square, so no realistic drawn cut hits this.
 - ``via1.space.1``/``via2.space.1``/``via3.space.1``/``via4.space.1``: the
   official ``Vn.2a``/``Vn.2b`` split via-to-via spacing by array density
   (``Vn.2a`` 0.26um for an ordinary two-via space, ``Vn.2b`` a tighter 0.36um
@@ -680,15 +682,19 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="contact.width.1",
-        description="minimum contact size (approximates official min/max size rule)",
+        description="min/max contact size (fixed 0.22 x 0.22 um square)",
         layer=(33, 0),  # Contact
         check="width",
         threshold_dbu=220,  # 0.22 um
+        threshold_max_dbu=220,  # 0.22 um -- same value: a *fixed*-size rule
         # DRM 7.12 Contact, rule "CO.1": "Min/max contact size" -> 0.22um
         # (contacts are a fixed 0.22 x 0.22um square in the real deck).
-        # Approximation: our width_check enforces only a minimum-width
-        # lower bound; the "max" (fixed-size) half of the rule is not
-        # checked. Threshold value unmodified.
+        # Both halves are enforced (issue #2370): `threshold_dbu` is the
+        # minimum-width lower bound (`Region.width_check`), and the equal
+        # `threshold_max_dbu` is the fixed-size upper bound, measured as a
+        # bounding-box size so an over-long contact *bar* -- legal facing-edge
+        # width, illegal size -- is caught too (see `_run_width_max_check` in
+        # `drc.py`). Threshold value unmodified.
         scope="7.12 Contact",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("7.12 Contact", "CO.1"),
     ),
@@ -724,16 +730,16 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="via1.width.1",
-        description="minimum via1 size (approximates official min/max size rule)",
+        description="min/max via1 size (fixed 0.26 x 0.26 um square)",
         layer=(35, 0),  # Via1
         check="width",
         threshold_dbu=260,  # 0.26 um
+        threshold_max_dbu=260,  # 0.26 um -- same value: a *fixed*-size rule
         # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
         # 0.26um (each via is a fixed 0.26 x 0.26um square in the real
-        # deck). Approximation: our width_check enforces only a
-        # minimum-width lower bound; the "max" (fixed-size) half of the
-        # rule is not checked -- same class of approximation as
-        # contact.width.1's own CO.1 note above. Threshold value unmodified.
+        # deck). Both halves are enforced (issue #2370) -- the same
+        # min-plus-bounding-box-max pairing as contact.width.1's own CO.1
+        # note above. Threshold value unmodified.
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("7.14 Vian", "Vn.1"),
     ),
@@ -788,13 +794,13 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="via2.width.1",
-        description="minimum via2 size (approximates official min/max size rule)",
+        description="min/max via2 size (fixed 0.26 x 0.26 um square)",
         layer=(38, 0),  # Via2
         check="width",
         threshold_dbu=260,  # 0.26 um
+        threshold_max_dbu=260,  # 0.26 um -- same value: a *fixed*-size rule
         # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
-        # 0.26um. Approximation: see via1.width.1's note above (min-only
-        # width_check; the fixed-size "max" half is not checked).
+        # 0.26um. Both halves enforced: see via1.width.1's note above.
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("7.14 Vian", "Vn.1"),
     ),
@@ -838,13 +844,13 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="via3.width.1",
-        description="minimum via3 size (approximates official min/max size rule)",
+        description="min/max via3 size (fixed 0.26 x 0.26 um square)",
         layer=(40, 0),  # Via3
         check="width",
         threshold_dbu=260,  # 0.26 um
+        threshold_max_dbu=260,  # 0.26 um -- same value: a *fixed*-size rule
         # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
-        # 0.26um. Approximation: see via1.width.1's note above (min-only
-        # width_check; the fixed-size "max" half is not checked).
+        # 0.26um. Both halves enforced: see via1.width.1's note above.
         scope="7.14 Vian",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("7.14 Vian", "Vn.1"),
     ),
@@ -886,13 +892,13 @@ DECK: list[DrcRule] = [
     ),
     DrcRule(
         id="via4.width.1",
-        description="minimum via4 size (approximates official min/max size rule)",
+        description="min/max via4 size (fixed 0.26 x 0.26 um square)",
         layer=(41, 0),  # Via4
         check="width",
         threshold_dbu=260,  # 0.26 um
+        threshold_max_dbu=260,  # 0.26 um -- same value: a *fixed*-size rule
         # DRM 7.14 Vian (n = 1 to 5), rule "Vn.1": "Min/max Vian size" ->
-        # 0.26um. Approximation: see via1.width.1's note above (min-only
-        # width_check; the fixed-size "max" half is not checked). Via4
+        # 0.26um. Both halves enforced: see via1.width.1's note above. Via4
         # (41/0) was previously referenced only as mim.enclosing.via4.1's
         # other_layer (MiM top-plate overlap, DRM "MIMTM.2"); this rule adds
         # coverage of Via4's own size, which that reference alone did not
