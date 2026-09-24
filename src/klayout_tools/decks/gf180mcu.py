@@ -13,6 +13,18 @@ the canonical source repository for this issue:
   - ``drm_07_05.rst`` / ``tables_clear/13_Nwell31.csv`` — 7.4 Nwell (``NW.*``)
   - ``drm_07_06.rst`` / ``tables_clear/14_COMP33_1.csv`` — 7.5 Comp (``DF.*``)
   - ``drm_07_08.rst`` / ``tables_clear/16_Poly2_42.csv`` — 7.7 Poly2 (``PL.*``)
+  - ``drm_07_09.rst`` / ``tables_clear/17_Nplus_44.csv`` — 7.8 Nplus (``NP.*``)
+  - ``drm_07_10.rst`` / ``tables_clear/18_Pplus_48.csv`` — 7.9 Pplus (``PP.*``)
+    — the two implant sections (issue #2369). Their tables publish a single
+    ``LAYOUT RULE`` column each (no 3.3V/5V split), and the two are
+    transcribed independently rather than one assumed to mirror the other:
+    the values do coincide, but ``PP.3b``/``PP.3c`` order their sub-cases
+    the opposite way round from ``NP.3b``/``NP.3c``. Only ``NP.1``/``NP.2``/
+    ``NP.3a``/``NP.5a``/``NP.5b`` and their ``PP.*`` mirrors are
+    transcribed; the per-context splits (``NP.3b``-``NP.3e``, ``NP.4a``/
+    ``NP.4b``, ``NP.5c``/``NP.5d``, ``NP.6``-``NP.12``, and the ``PP.*``
+    equivalents) each key off a ``DNWELL``/``LVPWELL``/``SAB``/butting-edge
+    context this deck's curated layer set does not draw.
   - ``drm_07_13.rst`` / ``tables_clear/21_Contact_56.csv`` — 7.12 Contact (``CO.*``)
   - ``drm_07_14.rst`` / ``tables_clear/22_Metaln_58.csv`` — 7.13 Metaln (``Mn.*``,
     ``n = 1 to 5``, i.e. ``Metal1``-``Metal5``)
@@ -124,9 +136,11 @@ first increment of well/substrate-tap coverage (Nwell), one bipolar
 (BJT)-specific device rule, and one bond-pad rule (``PAD.4``, issue #545),
 wide enough to prove the deck-adapter shape
 (:class:`~klayout_tools.decks.DrcRule`) for a second PDK. Coverage is
-expected to grow incrementally in follow-on issues (e.g. Pplus/Nplus
-implant-specific rules, LVPWELL/DNWELL, the remaining BJT rules that key off
-DNWELL/LVPWELL, 5V/6V variants, and DFM guidelines). ``MIMTM.2``'s
+expected to grow incrementally in follow-on issues (as of #2369 the
+Nplus/Pplus implant layers are covered for the five context-free rule
+shapes named in the ``7.8 Nplus``/``7.9 Pplus`` citation above -- their
+per-context splits, LVPWELL/DNWELL, the remaining BJT rules that key off
+DNWELL/LVPWELL, 5V/6V variants, and DFM guidelines all remain uncovered). ``MIMTM.2``'s
 sized/derived-layer need (see its own note below) is closed as of #345 via
 :class:`~klayout_tools.decks.DerivedLayer`; ``MIMTM.1``'s equivalent need is
 closed as of #1033, the same way.
@@ -216,8 +230,8 @@ geometry is recognised (still exactly one drawn ``FuseTop``-over-``Metal4``
 overlap, never duplicated) -- only what device it is reported as and what
 capacitance it reports.
 
-Nineteen rules below approximate the official DRM rule in some way (each is
-called out again in its own docstring below); the threshold *values* used
+Twenty-five rules below approximate the official DRM rule in some way (each
+is called out again in its own docstring below); the threshold *values* used
 are always the real, unmodified DRM values:
 
 - ``comp.space.1``/``comp.space.mv.1``: the official ``DF.3a_LV``/
@@ -283,6 +297,46 @@ are always the real, unmodified DRM values:
   the whole ``comp`` drawn layer, since isolating NCOMP requires the same
   boolean layer expression (``comp AND Nplus``) our engine does not
   evaluate.
+- ``nplus.space.pcomp.1``/``pplus.space.ncomp.1``: the official ``NP.3a``/
+  ``PP.3a`` are one of four well-context splits of the same
+  implant-to-opposite-diffusion spacing rule -- ``NP.3b``/``NP.3c`` (and
+  their ``PP.*`` mirrors) publish the same 0.16um where the opposite COMP
+  sits within 0.43um of an ``LVPWELL``/``Nwell`` edge but a looser 0.08um
+  further away, selected by a ``DNWELL``/``LVPWELL`` boolean our engine
+  cannot evaluate. Approximated by applying the stricter 0.16um everywhere
+  (the conservative direction: a 0.08-0.16um gap in the far context is
+  over-flagged, no real violation is missed) -- note this is the *opposite*
+  choice from ``nwell.space.1``/``via*.space.1`` above, which take the less
+  strict value of their own splits, because here the geometric context that
+  selects the looser value is the rarer one. Both also drop the PDK deck's
+  own butted-COMP exclusion (``nplus.not_interacting(ncomp_butted)``, the
+  zero-space ``NP.3d``/``NP.3e`` cases), so a deliberately butted NCOMP/
+  PCOMP pair is flagged here where the official rule permits it. The
+  *checked region* is the real ``PCOMP``/``NCOMP`` boolean via
+  :class:`~klayout_tools.decks.DerivedLayer`, not raw ``Comp`` -- see the
+  rules' own comments for why an unscoped version would be actively wrong.
+- ``nplus.enclosing.poly2.1``/``pplus.enclosing.poly2.1``: the official
+  ``NP.5a``/``PP.5a`` scope to ``ngate``/``pgate``, which the PDK deck's own
+  ``main.drc`` derives from four drawn layers plus two well/marker
+  subtractions (``ngate = (comp AND nplus).not(nwell OR dnwell_n) AND
+  ((poly2 AND comp).not(res_mk))``, and the ``pgate`` mirror) --
+  ``DerivedLayer`` expresses a two-layer boolean only; approximated with the
+  two-layer gate region (``poly2 AND comp``), so
+  *every* transistor gate is measured against both implants. A gate of one
+  channel type drawn within 0.23um of the opposite implant is therefore
+  flagged where the official rule would not look at it -- conservative (a
+  false positive on geometry no ``NP.5a``/``PP.5a`` violation can hide in),
+  never a missed violation.
+- ``nplus.enclosing.comp.1``/``pplus.enclosing.comp.1``: the official
+  ``NP.5b``/``PP.5b`` exclude butting edges (``nplus.edges.not
+  (nplus_butted_edges)``) and are relaxed to 0.02um by the ``NP.5c``/
+  ``NP.5d`` (``PP.5c``/``PP.5d``) well-context splits for a tap further
+  than 0.43um from an ``LVPWELL``/``Nwell`` edge; neither context is
+  expressible here, so the strict 0.16um is applied to every NCOMP/PCOMP
+  edge. They also measure with KLayout's default ``euclidian`` metric where
+  the official rules use ``projection`` -- again the conservative direction
+  (a corner distance the official rule ignores can be reported, never the
+  reverse).
 - ``bjt.separation.comp.1``: the official ``BJT.3`` scopes to COMP
   "unrelated" to the BJT device (i.e. excludes COMP that is itself part of
   the same bipolar device, a connectivity/netlist notion); our engine has no
@@ -459,6 +513,8 @@ _GF180MCU_DRM_CSV: dict[str, str] = {
     "7.4 Nwell": f"{_DRM_TABLES_DIR}/13_Nwell31.csv",
     "7.5 Comp": f"{_DRM_TABLES_DIR}/14_COMP33_1.csv",
     "7.7 Poly2": f"{_DRM_TABLES_DIR}/16_Poly2_42.csv",
+    "7.8 Nplus": f"{_DRM_TABLES_DIR}/17_Nplus_44.csv",
+    "7.9 Pplus": f"{_DRM_TABLES_DIR}/18_Pplus_48.csv",
     "7.12 Contact": f"{_DRM_TABLES_DIR}/21_Contact_56.csv",
     "7.13 Metaln": f"{_DRM_TABLES_DIR}/22_Metaln_58.csv",
     "7.14 Vian": f"{_DRM_TABLES_DIR}/23_Vian_59.csv",
@@ -1203,6 +1259,292 @@ DECK: list[DrcRule] = [
         # unmodified.
         scope="7.5 Comp",  # DRM section this rule is transcribed from (#566)
         provenance=_gf180mcu_provenance("7.5 Comp", "DF.4d"),
+    ),
+    DrcRule(
+        id="nplus.width.1",
+        description="minimum Nplus implant width",
+        layer=(32, 0),  # Nplus
+        check="width",
+        threshold_dbu=400,  # 0.4 um
+        # DRM 7.8 Nplus, rule "NP.1": "Width" -> 0.4 (the implant tables
+        # publish a single column, no 3.3V/5V split). Cross-checked against
+        # the real fetched install's own executable deck (issue #2369):
+        # `rule_decks/nplus.drc`'s `nplus.width(0.4.um, euclidian)`, the
+        # same metric our `width_check` uses by default. Not an
+        # approximation.
+        scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.8 Nplus", "NP.1"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="nplus.space.1",
+        description="minimum Nplus implant spacing",
+        layer=(32, 0),  # Nplus
+        check="space",
+        threshold_dbu=400,  # 0.4 um
+        # DRM 7.8 Nplus, rule "NP.2": "Space" -> 0.4. Cross-checked against
+        # `rule_decks/nplus.drc`'s `nplus.space(0.4.um, euclidian)` (issue
+        # #2369) -- the same primitive/metric our `space_check` uses. Not an
+        # approximation.
+        scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.8 Nplus", "NP.2"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="nplus.space.pcomp.1",
+        description="minimum Nplus implant space to PCOMP (p-type diffusion)",
+        layer=(32, 0),  # Nplus -- reporting identity, shared with the rules above
+        other_layer=(32, 0),  # Nplus -- the "other" side of the separation check
+        check="separation",
+        threshold_dbu=160,  # 0.16 um
+        # DRM 7.8 Nplus, rule "NP.3a": "Space to PCOMP for PCOMP: (1) Inside
+        # Nwell (2) Outside LVPWELL but inside DNWELL" -> 0.16 (issue
+        # #2369). The checked region is the real PCOMP boolean (`Comp` AND
+        # `Pplus`, the PDK deck's own `pcomp` derivation in
+        # `rule_decks/main.drc`) via `DerivedLayer`, *not* raw `Comp`:
+        # `Nplus` covers NCOMP by construction (rule NP.5b below), so an
+        # unscoped `Nplus`-to-`Comp` separation check would report a
+        # zero-distance violation on every single NMOS in any layout -- the
+        # "actively wrong, not merely conservative" class of approximation
+        # `mim.enclosing.via4.1`'s own note describes, not an acceptable one.
+        # Two approximations remain, both documented in the module
+        # docstring's "known approximations" list: (a) the well context is
+        # collapsed -- NP.3b/NP.3c publish the same 0.16 for PCOMP near a
+        # well edge but a looser 0.08 further away, and our engine cannot
+        # evaluate the `lvpwell`/`dnwell` boolean context that selects
+        # between them, so the stricter 0.16 is applied everywhere
+        # (conservative: over-flags a 0.08-0.16 gap in the far context,
+        # never misses a real violation); (b) the PDK deck excludes `Nplus`
+        # interacting with a butted NCOMP (`np3_nplus =
+        # nplus.not_interacting(ncomp_butted)`, the NP.3d/NP.3e zero-space
+        # butting cases), which needs a three-layer boolean our engine has
+        # no vocabulary for -- so a deliberately butted NCOMP/PCOMP pair is
+        # flagged here where the official rule permits it. Threshold value
+        # unmodified.
+        derived_layer=DerivedLayer(
+            base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+        ),
+        scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
+        # Cited from the executable rule deck rather than the DRM's own CSV
+        # (the `comp.drc`/`CO.*`/`Vn.*` precedent above): the table publishes
+        # the 0.16 value, but only `rule_decks/nplus.drc` states the PCOMP
+        # derivation this rule's `derived_layer` models.
+        provenance=_gf180mcu_klayout_deck_provenance("nplus", "NP.3a"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="nplus.enclosing.poly2.1",
+        description="minimum Nplus implant overlap of the N-channel gate region",
+        layer=(32, 0),  # Nplus -- reporting identity, shared with the rules above
+        other_layer=(32, 0),  # Nplus -- the enclosing side of the `enclosed` check
+        check="enclosed",
+        threshold_dbu=230,  # 0.23 um
+        # DRM 7.8 Nplus, rule "NP.5a": "Overlap of N-channel gate" -> 0.23
+        # (issue #2369). Spelled as an `"enclosed"` check whose checked
+        # region is the transistor *gate* (`Poly2` AND `Comp`, via
+        # `DerivedLayer`) and whose enclosing `other_layer` is `Nplus` --
+        # the same direction as the PDK deck's own
+        # `ngate.enclosed(nplus, 0.23.um, euclidian)` in
+        # `rule_decks/nplus.drc`, including its second `ngate.not_outside
+        # (nplus).not(nplus)` term, which is exactly `_run_check`'s
+        # `outside_region` zero-overlap-escape term (see `drc.py`, #318).
+        # The plain `"enclosing"` spelling (Nplus enclosing the raw `Poly2`
+        # drawn layer) would be actively wrong rather than conservative:
+        # every gate's poly2 runs off the diffusion to route, so it escapes
+        # the implant by design and would be flagged on every transistor in
+        # every layout. Approximation: the official `ngate` is
+        # `nactive.and(tgate)` in the PDK deck's own `main.drc` -- i.e.
+        # `(comp AND nplus).not(nwell OR dnwell_n)` intersected with
+        # `(poly2 AND comp).not(res_mk)`, four drawn layers plus two
+        # subtractions, where `DerivedLayer` expresses a two-layer boolean
+        # only -- so the checked region is every
+        # gate -- P-channel gates included. A PMOS gate drawn within 0.23um
+        # of unrelated `Nplus` is therefore flagged here where the official
+        # rule would not look at it (conservative: a false positive on
+        # geometry no NP.5a violation can hide in, never a missed
+        # violation). Threshold value unmodified.
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp, unsized -- `gate = poly2 AND comp`
+            sized_by_um=0.0,
+            intersect_with=(30, 0),  # Poly2
+        ),
+        scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("nplus", "NP.5a"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="nplus.enclosing.comp.1",
+        description="minimum Nplus implant extension beyond NCOMP (n-type diffusion)",
+        layer=(32, 0),  # Nplus -- reporting identity, shared with the rules above
+        other_layer=(32, 0),  # Nplus -- the enclosing side of the `enclosed` check
+        check="enclosed",
+        threshold_dbu=160,  # 0.16 um
+        # DRM 7.8 Nplus, rule "NP.5b": "Extension beyond COMP for the COMP
+        # (1) inside LVPWELL (2) outside Nwell and DNWELL" -> 0.16 (issue
+        # #2369), i.e. `ncomp.edges.enclosed(nplus_edges, 0.16.um,
+        # projection)` in `rule_decks/nplus.drc`. Spelled the same way here:
+        # the checked region is the real NCOMP boolean (`Comp` AND `Nplus`,
+        # via `DerivedLayer`) and the enclosing `other_layer` is `Nplus`, so
+        # only diffusion this implant actually covers is measured -- an
+        # unscoped `Nplus`-encloses-`Comp` check would instead flag every
+        # PCOMP that happens to touch `Nplus` (and, via the zero-overlap
+        # escape term, the whole of any COMP polygon shared by a butted
+        # NCOMP/PCOMP pair). Two approximations: (a) the PDK deck excludes
+        # butting edges (`np5b_nplus_slct = nplus.edges.not
+        # (nplus_butted_edges)`) and scopes by well context (NP.5c/NP.5d
+        # relax the extension to 0.02 for a tap far from an LVPWELL/Nwell
+        # edge), neither expressible here, so the strict 0.16 is applied to
+        # every NCOMP edge including a butted one; (b) the official check
+        # uses the `projection` metric while our `enclosed_check` uses
+        # KLayout's default `euclidian`, which additionally measures
+        # corner-to-corner distances -- the conservative direction (it can
+        # report a corner the official rule ignores, never the reverse).
+        # Threshold value unmodified.
+        derived_layer=DerivedLayer(
+            base=(32, 0),  # Nplus, unsized -- `ncomp = comp AND nplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+        ),
+        scope="7.8 Nplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("nplus", "NP.5b"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="pplus.width.1",
+        description="minimum Pplus implant width",
+        layer=(31, 0),  # Pplus
+        check="width",
+        threshold_dbu=400,  # 0.4 um
+        # DRM 7.9 Pplus, rule "PP.1": "Width" -> 0.4 -- the `Pplus` mirror of
+        # `nplus.width.1` above, transcribed from the Pplus table in its own
+        # right rather than assumed symmetric (issue #2369), and
+        # cross-checked against `rule_decks/pplus.drc`'s
+        # `pplus.width(0.4.um, euclidian)`. Not an approximation.
+        scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.9 Pplus", "PP.1"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="pplus.space.1",
+        description="minimum Pplus implant spacing",
+        layer=(31, 0),  # Pplus
+        check="space",
+        threshold_dbu=400,  # 0.4 um
+        # DRM 7.9 Pplus, rule "PP.2": "Space" -> 0.4, cross-checked against
+        # `rule_decks/pplus.drc`'s `pplus.space(0.4.um, euclidian)` (issue
+        # #2369). Not an approximation.
+        scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_provenance("7.9 Pplus", "PP.2"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="pplus.space.ncomp.1",
+        description="minimum Pplus implant space to NCOMP (n-type diffusion)",
+        layer=(31, 0),  # Pplus -- reporting identity, shared with the rules above
+        other_layer=(31, 0),  # Pplus -- the "other" side of the separation check
+        check="separation",
+        threshold_dbu=160,  # 0.16 um
+        # DRM 7.9 Pplus, rule "PP.3a": "Space to NCOMP for NCOMP (1) inside
+        # LVPWELL (2) outside NWELL and DNWELL" -> 0.16 (issue #2369) --
+        # the `Pplus` mirror of `nplus.space.pcomp.1` above, with NCOMP
+        # (`Comp` AND `Nplus`) as the derived checked region. Note the
+        # mirror is *not* a pure transposition of the Nplus table: PP.3b/
+        # PP.3c order their sub-cases the other way round from NP.3b/NP.3c,
+        # which is why each side is transcribed from its own DRM table.
+        # Same two approximations as its Nplus twin (collapsed well context,
+        # butting cases PP.3d/PP.3e not excluded) -- see that rule's comment
+        # and the module docstring's "known approximations" list. Threshold
+        # value unmodified.
+        derived_layer=DerivedLayer(
+            base=(32, 0),  # Nplus, unsized -- `ncomp = comp AND nplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+        ),
+        scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.3a"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="pplus.enclosing.poly2.1",
+        description="minimum Pplus implant overlap of the P-channel gate region",
+        layer=(31, 0),  # Pplus -- reporting identity, shared with the rules above
+        other_layer=(31, 0),  # Pplus -- the enclosing side of the `enclosed` check
+        check="enclosed",
+        threshold_dbu=230,  # 0.23 um
+        # DRM 7.9 Pplus, rule "PP.5a": "Overlap of P-channel gate" -> 0.23
+        # (issue #2369), i.e. `rule_decks/pplus.drc`'s
+        # `pplus.enclosing(pgate, 0.23.um, euclidian)` plus its
+        # `pgate.not_outside(pplus).not(pplus)` escape term. The `Pplus`
+        # mirror of `nplus.enclosing.poly2.1` above, and carrying the same
+        # approximation: the checked region is every gate (`Poly2` AND
+        # `Comp`), N-channel gates included, since the official `pgate` is
+        # `pactive.and(tgate)` -- `(comp AND pplus).and(nwell OR dnwell_n)`
+        # intersected with `(poly2 AND comp).not(res_mk)`, beyond a
+        # two-layer `DerivedLayer` boolean. Threshold value unmodified.
+        derived_layer=DerivedLayer(
+            base=(22, 0),  # Comp, unsized -- `gate = poly2 AND comp`
+            sized_by_um=0.0,
+            intersect_with=(30, 0),  # Poly2
+        ),
+        scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5a"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
+    ),
+    DrcRule(
+        id="pplus.enclosing.comp.1",
+        description="minimum Pplus implant extension beyond PCOMP (p-type diffusion)",
+        layer=(31, 0),  # Pplus -- reporting identity, shared with the rules above
+        other_layer=(31, 0),  # Pplus -- the enclosing side of the `enclosed` check
+        check="enclosed",
+        threshold_dbu=160,  # 0.16 um
+        # DRM 7.9 Pplus, rule "PP.5b": "Extension beyond COMP for COMP (1)
+        # Inside NWELL (2) outside LVPWELL but inside DNWELL" -> 0.16 (issue
+        # #2369), i.e. `pcomp.edges.enclosed(pplus_edges, 0.16.um,
+        # projection)` in `rule_decks/pplus.drc`. The `Pplus` mirror of
+        # `nplus.enclosing.comp.1` above, with PCOMP (`Comp` AND `Pplus`) as
+        # the derived checked region, and carrying the same two
+        # approximations (butting edges not excluded, `euclidian` rather
+        # than `projection` metric). Threshold value unmodified.
+        derived_layer=DerivedLayer(
+            base=(31, 0),  # Pplus, unsized -- `pcomp = comp AND pplus`
+            sized_by_um=0.0,
+            intersect_with=(22, 0),  # Comp
+        ),
+        scope="7.9 Pplus",  # DRM section this rule is transcribed from (#566)
+        provenance=_gf180mcu_klayout_deck_provenance("pplus", "PP.5b"),
+        # The 7.8 Nplus/7.9 Pplus tables publish a single column (no
+        # 3.3V/5V split), so this rule can never have read the wrong
+        # voltage column -- see `DrcRule.voltage_independent`.
+        voltage_independent=True,
     ),
     DrcRule(
         id="bjt.separation.comp.1",

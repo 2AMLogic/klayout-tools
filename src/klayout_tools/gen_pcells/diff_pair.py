@@ -36,6 +36,7 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
         WELL_ENCLOSURE_MARGIN_UM,
         _diff_pair_layout,
         _insert_boxes,
+        _insert_implant_ring,
         _insert_ring,
         _shift_box,
     )
@@ -204,8 +205,9 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "ring_implant_layer",
                 self.TypeLayer,
-                "Guard-ring implant drawing layer, exactly coincident with "
-                "the tap ring (only used when add_guard_ring and "
+                "Guard-ring implant drawing layer, tracking the tap ring's "
+                "own band with ring_implant_margin_um of extension beyond "
+                "every edge of it (only used when add_guard_ring and "
                 "ring_implant_present)",
                 default=kdb.LayerInfo(0, 0),
             )
@@ -215,6 +217,14 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the guard ring's own shape (see _ring_tap_implant_layer)",
                 default=False,
+            )
+            self.param(
+                "ring_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the ring implant extends beyond the "
+                "ring's own band on every edge (only used when "
+                "ring_implant_present)",
+                default=0.0,
             )
             self.param(
                 "voltage_flavor_mark_layer",
@@ -414,16 +424,21 @@ def _build_diff_pair_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li_well, dbu, [_shift_box(well_box, ox, oy)]
                     )
                 if self.ring_implant_present:
-                    # Exactly coincident with the tap ring (issue #1580,
-                    # mirrors `well_island`'s own `well_tap_implant` ring
-                    # precedent) -- never a blanket over the enclosed pair.
-                    _insert_ring(
+                    # Tracks the tap ring, extended `ring_implant_margin_um`
+                    # past every edge of it (issue #2369's NP.5b/PP.5b
+                    # extension-beyond-COMP fix to #1580's originally
+                    # coincident implant) -- still a ring, never a blanket
+                    # over the enclosed pair (mirrors `well_island`'s own
+                    # `well_tap_implant` ring precedent).
+                    _insert_implant_ring(
                         self.cell,
                         self.layout.layer(self.ring_implant_layer),
                         dbu,
                         _shift_box(ring["outer_box_um"], ox, oy),
                         _shift_box(ring["inner_box_um"], ox, oy),
                         gap_box,
+                        ring["gap"]["side"] if ring["gap"] is not None else None,
+                        self.ring_implant_margin_um,
                     )
 
     return {"diff_pair": _DiffPairPCell}

@@ -201,6 +201,47 @@ against**, the same limitation #1575/#1577 both carry. `klt drc --deck
 gf180mcu` stays clean, which cannot itself confirm or deny signoff-deck
 cleanliness either way.
 
+**What #2369 changed (ring implant *extension*, not just coverage).** #1580's
+"exactly coincident" implant ring above is exactly the shape the same issue's
+new `NP.5b`/`PP.5b` deck rules ("Extension beyond COMP", 0.16µm) forbid:
+coincident means the implant extends *zero* past the diffusion it dopes, on
+every edge of the band. `DF.12` — the only implant rule either #1421 or #1580
+had to satisfy — is a coverage rule with no distance in it, so nothing caught
+this until the implant layers got width/space/extension rules of their own.
+Unlike #1575/#1577/#1580, this one was **not** sized from the DRM text alone:
+`klt drc --deck gf180mcu` now transcribes the rule, reproduces the violation
+on every ring-drawing generator's own documented defaults, and confirms it
+gone afterwards (37 `tests/test_gen.py` cases). The implant ring now tracks
+the tap/collector ring with `ring_implant_margin_um` (0.16µm on gf180mcu; the
+value is per-family and resolves to `0.0`, i.e. byte-for-byte unchanged
+geometry, on every family that draws no ring implant at all) of extension
+beyond every edge of the band — outward past the outer edge and inward past
+the inner edge by the same amount. #1580's invariant is preserved: it is
+still a *ring*, never a blanket over the enclosed array/pair/well. A ring cut
+by `ring_gap_side` keeps its opening in the implant too, inset by the same
+margin at each end so the ring's two cut faces — ordinary `Comp` edges — get
+their extension as well; an opening of `2 × margin` or less simply closes
+over, which dopes only field oxide (there is no `Comp` under the opening) and
+is the only shape that can satisfy the rule on both cut faces at once. No
+extra headroom is added above the 0.16µm threshold on purpose: the inner
+edge grows *toward* whatever the ring encloses, so every extra nanometre is
+spent out of the clearance that enclosed device needs for `NP.3a`/`PP.3a`
+(implant to opposite-type COMP, also 0.16µm). Because there is no headroom,
+the extension is applied as a **dbu-quantized** growth rather than as float-µm
+padding: the ring's own box is snapped to the grid first and then grown by
+exactly `round(margin_um / dbu)` database units, so every edge of the drawn
+implant sits exactly that many dbu from the drawn `Comp` edge it extends past,
+at *any* `ring_padding_um`. Growing in µm and rounding each grown coordinate
+independently is not equivalent — on a `ring_padding_um` that puts a ring edge
+on a half-dbu coordinate (`0.5015`, `0.5045`, `0.5085`, …) the un-grown and
+grown coordinates round the same direction and the extension comes out 159 dbu,
+one short, which the zero-headroom margin turns straight into an
+`NP.5b`/`PP.5b` violation. This is the same independent-rounding mechanism
+issues #685/#1551 fixed for contact squares, applied to a box's growth rather
+than its width; `ring_padding_um` is documented only as `>= 0` and is not
+required to land on the grid, so off-grid values are a supported input, not an
+edge case.
+
 **sg13g2 (IHP-Open-PDK, issues #1448/#1450/#1455).** `res_array`/`guard_ring`
 (#1448), `mos_array`/`diff_pair` (#1450), and `cap_array` (#1455) are wired
 up against this family's curated deck (`klayout_tools.decks.sg13g2`) today;
@@ -1117,9 +1158,11 @@ On a PDK family whose well tie is drawn on the same layer as transistor
 active (gf180mcu, whose `Comp` does double duty), the island also draws the
 well-tie implant that makes it *recognisable* as a tie — `Nplus` `(32, 0)`,
 the same layer `klayout_tools.decks.gf180mcu`'s `EXTRACTION_DECK.tap_nplus`
-declares — as a ring exactly coincident with the tap ring, never as a
-blanket over the enclosed area (which would re-dope whatever the caller
-places inside it). Without it, gf180mcu extracts the island's enclosed PMOS
+declares — as a ring tracking the tap ring with `NP.5b`'s own 0.16µm
+extension beyond every edge of it (issue #2369, see "What #2369 changed"
+above), never as a blanket over the enclosed area (which would re-dope
+whatever the caller places inside it). Without it, gf180mcu extracts the
+island's enclosed PMOS
 bodies as anonymous nets. sky130 needs no implant: its `tap.drawing` layer
 is already a tie by virtue of sitting inside `nwell`.
 
@@ -1756,7 +1799,10 @@ between releases — deliberately, as PDK-signoff-driven fixes land, not as
 uncontrolled drift. Two concrete precedents from `CHANGELOG.md`'s `## 0.5.0
 (2026-09-15)` section: `guard_ring`/`mos_array`/`diff_pair`/`bjt_array`/
 `esd_device`'s `gf180mcu` geometry gained new implant coverage to close real
-signoff-DRC gaps (issues #1577, #1580), and every generator's output database
+signoff-DRC gaps (issues #1577, #1580 — and, once `NP.5b`/`PP.5b` were
+actually transcribed, grew that ring implant past the diffusion it dopes
+rather than leaving it coincident with it, issue #2369), and every
+generator's output database
 unit moved from a fixed `0.001um` to one resolved per-PDK from the tech LEF's
 `DATABASE MICRONS` declaration (issue #1496) — both changed the exact bytes
 of a generated GDS for affected PDK families without any generator `params`

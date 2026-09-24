@@ -4163,6 +4163,396 @@ def test_run_drc_gf180mcu_pad_layer_now_covered(tmp_path):
     assert "37/0" not in report["coverage"]["layers_in_stream_without_rules"]
 
 
+# --- Nplus/Pplus implant rules (NP.1/2/3a/5a/5b, PP.*) (#2369) -------------
+#
+# Ten rules over the two implant layers -- Nplus (32/0) and Pplus (31/0) --
+# transcribed from DRM sections "7.8 Nplus"/"7.9 Pplus" and cross-checked
+# against a real fetched install's own executable
+# `rule_decks/{nplus,pplus}.drc` (see `decks/gf180mcu.py`'s module
+# docstring). Thresholds: width/space 0.4um, implant-to-opposite-diffusion
+# space 0.16um, gate overlap 0.23um, COMP extension 0.16um.
+#
+# The three non-trivial shapes all scope their checked region with a
+# `DerivedLayer` boolean rather than a raw drawn layer -- PCOMP
+# (`Comp AND Pplus`), NCOMP (`Comp AND Nplus`) and the transistor gate
+# (`Comp AND Poly2`) -- so the tests below cover both halves: the violation
+# each rule must catch, *and* the ordinary, legal geometry an unscoped
+# version of the same rule would have false-positived on.
+
+#: An implant-layer name lookup for the reporting assertions below.
+_IMPLANT_LAYERS = {"nplus": (32, 0), "pplus": (31, 0)}
+
+
+def _gf180mcu_implant_layout(shapes):
+    """Build a gf180mcu layout from `[(layer, datatype, name, Box), ...]`."""
+    layout = kdb.Layout()
+    layout.dbu = 0.001
+    top = layout.create_cell("TOP")
+    for layer_num, datatype, name, box in shapes:
+        index = layout.layer(layer_num, datatype)
+        layout.set_info(index, kdb.LayerInfo(layer_num, datatype, name))
+        top.shapes(index).insert(box)
+    return layout
+
+
+def _gf180mcu_mosfet_shapes(implant, implant_margin_dbu, comp_box=None):
+    """One transistor's worth of geometry: a `Comp` bar crossed by a `Poly2`
+    stripe that runs well off the diffusion (as every real gate does, to
+    route), with `implant` covering the diffusion by `implant_margin_dbu` on
+    every side.
+
+    `implant` is `"nplus"` or `"pplus"`; the poly stripe's overhang is what
+    makes this fixture a negative control for `*.enclosing.poly2.1`, whose
+    checked region is the *gate* (`Comp AND Poly2`) and not the raw `Poly2`
+    drawn layer.
+    """
+    comp = comp_box if comp_box is not None else kdb.Box(0, 0, 2000, 1000)
+    layer_num, datatype = _IMPLANT_LAYERS[implant]
+    return [
+        (22, 0, "Comp", comp),
+        (30, 0, "Poly2", kdb.Box(800, comp.bottom - 900, 1200, comp.top + 900)),
+        (
+            layer_num,
+            datatype,
+            implant.capitalize(),
+            kdb.Box(
+                comp.left - implant_margin_dbu,
+                comp.bottom - implant_margin_dbu,
+                comp.right + implant_margin_dbu,
+                comp.top + implant_margin_dbu,
+            ),
+        ),
+    ]
+
+
+@pytest.mark.parametrize("implant", ["nplus", "pplus"])
+def test_run_drc_gf180mcu_implant_width_violation(tmp_path, implant):
+    """NP.1/PP.1, the issue's own manual-verification case: a 0.2um-wide
+    implant bar (vs. the 0.4um minimum) trips `<implant>.width.1`."""
+    layer_num, datatype = _IMPLANT_LAYERS[implant]
+    layout = _gf180mcu_implant_layout(
+        [(layer_num, datatype, implant.capitalize(), kdb.Box(0, 0, 200, 4000))]
+    )
+    path = tmp_path / f"{implant}_width_violation.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"][f"{implant}.width.1"] >= 1
+    (violation,) = [
+        v for v in report["violations"] if v["rule"] == f"{implant}.width.1"
+    ]
+    assert violation["check"] == "width"
+    assert violation["layer"] == implant.capitalize()
+
+
+@pytest.mark.parametrize("implant", ["nplus", "pplus"])
+def test_run_drc_gf180mcu_implant_width_boundary_clean(tmp_path, implant):
+    """A bar exactly at the DRM's own 0.4um minimum is clean -- the boundary
+    condition the issue's Test Plan calls for."""
+    layer_num, datatype = _IMPLANT_LAYERS[implant]
+    layout = _gf180mcu_implant_layout(
+        [(layer_num, datatype, implant.capitalize(), kdb.Box(0, 0, 400, 4000))]
+    )
+    path = tmp_path / f"{implant}_width_clean.gds"
+    layout.write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean", report["rule_counts"]
+
+
+@pytest.mark.parametrize("implant", ["nplus", "pplus"])
+def test_run_drc_gf180mcu_implant_space_violation(tmp_path, implant):
+    """NP.2/PP.2: two implant shapes 0.3um apart (vs. the 0.4um minimum)
+    trip `<implant>.space.1`; the same pair at exactly 0.4um is clean."""
+    layer_num, datatype = _IMPLANT_LAYERS[implant]
+    name = implant.capitalize()
+    violate = _gf180mcu_implant_layout(
+        [
+            (layer_num, datatype, name, kdb.Box(0, 0, 1000, 4000)),
+            (layer_num, datatype, name, kdb.Box(1300, 0, 2300, 4000)),
+        ]
+    )
+    violate_path = tmp_path / f"{implant}_space_violation.gds"
+    violate.write(str(violate_path))
+
+    report = run_drc(str(violate_path), "gf180mcu")
+    assert report["status"] == "violations"
+    assert report["rule_counts"][f"{implant}.space.1"] >= 1
+
+    clean = _gf180mcu_implant_layout(
+        [
+            (layer_num, datatype, name, kdb.Box(0, 0, 1000, 4000)),
+            (layer_num, datatype, name, kdb.Box(1400, 0, 2400, 4000)),
+        ]
+    )
+    clean_path = tmp_path / f"{implant}_space_clean.gds"
+    clean.write(str(clean_path))
+
+    assert run_drc(str(clean_path), "gf180mcu")["status"] == "clean"
+
+
+@pytest.mark.parametrize(
+    "implant,other_implant,rule_suffix",
+    [("nplus", "pplus", "pcomp"), ("pplus", "nplus", "ncomp")],
+)
+def test_run_drc_gf180mcu_implant_space_to_opposite_comp(
+    tmp_path, implant, other_implant, rule_suffix
+):
+    """NP.3a/PP.3a: an implant drawn 0.11um from the *opposite-type*
+    diffusion island (vs. the 0.16um minimum) trips
+    `<implant>.space.<opposite>.1`; 0.21um away is clean.
+
+    The checked region is the real `Comp AND <opposite implant>` boolean, so
+    only genuine PCOMP/NCOMP counts -- the diffusion island here is fully
+    covered by its own implant, exactly as a real source/drain or well tap
+    is.
+    """
+    other_num, other_dt = _IMPLANT_LAYERS[other_implant]
+    layer_num, datatype = _IMPLANT_LAYERS[implant]
+    rule_id = f"{implant}.space.{rule_suffix}.1"
+
+    def build(gap):
+        return _gf180mcu_implant_layout(
+            [
+                (22, 0, "Comp", kdb.Box(0, 0, 1000, 4000)),
+                (
+                    other_num,
+                    other_dt,
+                    other_implant.capitalize(),
+                    kdb.Box(-200, -200, 1200, 4200),
+                ),
+                (
+                    layer_num,
+                    datatype,
+                    implant.capitalize(),
+                    kdb.Box(1000 + gap, 0, 2000 + gap, 4000),
+                ),
+            ]
+        )
+
+    violate_path = tmp_path / f"{rule_id}.violate.gds"
+    build(110).write(str(violate_path))
+    report = run_drc(str(violate_path), "gf180mcu")
+    assert report["status"] == "violations"
+    assert report["rule_counts"][rule_id] >= 1
+    violation = next(v for v in report["violations"] if v["rule"] == rule_id)
+    assert violation["check"] == "separation"
+    assert violation["layer"] == implant.capitalize()
+
+    clean_path = tmp_path / f"{rule_id}.clean.gds"
+    build(210).write(str(clean_path))
+    assert run_drc(str(clean_path), "gf180mcu")["status"] == "clean"
+
+
+@pytest.mark.parametrize("implant", ["nplus", "pplus"])
+def test_run_drc_gf180mcu_implant_enclosing_comp(tmp_path, implant):
+    """NP.5b/PP.5b: an implant extending only 0.11um beyond its own
+    diffusion (vs. the 0.16um minimum) trips `<implant>.enclosing.comp.1`;
+    exactly 0.16um -- the boundary condition -- is clean."""
+    layer_num, datatype = _IMPLANT_LAYERS[implant]
+    rule_id = f"{implant}.enclosing.comp.1"
+
+    def build(margin):
+        return _gf180mcu_implant_layout(
+            [
+                (22, 0, "Comp", kdb.Box(0, 0, 1000, 4000)),
+                (
+                    layer_num,
+                    datatype,
+                    implant.capitalize(),
+                    kdb.Box(-margin, -margin, 1000 + margin, 4000 + margin),
+                ),
+            ]
+        )
+
+    violate_path = tmp_path / f"{rule_id}.violate.gds"
+    build(110).write(str(violate_path))
+    report = run_drc(str(violate_path), "gf180mcu")
+    assert report["status"] == "violations"
+    assert report["rule_counts"][rule_id] >= 1
+    violation = next(v for v in report["violations"] if v["rule"] == rule_id)
+    assert violation["check"] == "enclosed"
+    assert violation["layer"] == implant.capitalize()
+
+    clean_path = tmp_path / f"{rule_id}.clean.gds"
+    build(160).write(str(clean_path))
+    assert run_drc(str(clean_path), "gf180mcu")["status"] == "clean"
+
+
+@pytest.mark.parametrize("implant", ["nplus", "pplus"])
+def test_run_drc_gf180mcu_implant_enclosing_gate(tmp_path, implant):
+    """NP.5a/PP.5a: a transistor whose implant overlaps the gate by only
+    0.18um (vs. the 0.23um minimum) trips `<implant>.enclosing.poly2.1`.
+
+    0.18um deliberately still clears NP.5b/PP.5b's 0.16um COMP extension, so
+    the gate-overlap rule is isolated: the sibling `*.enclosing.comp.1` must
+    stay silent on this fixture.
+    """
+    rule_id = f"{implant}.enclosing.poly2.1"
+    path = tmp_path / f"{rule_id}.violate.gds"
+    _gf180mcu_implant_layout(_gf180mcu_mosfet_shapes(implant, 180)).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "violations"
+    assert report["rule_counts"][rule_id] >= 1
+    assert f"{implant}.enclosing.comp.1" not in report["rule_counts"]
+    violation = next(v for v in report["violations"] if v["rule"] == rule_id)
+    assert violation["check"] == "enclosed"
+    assert violation["layer"] == implant.capitalize()
+
+
+@pytest.mark.parametrize("implant", ["nplus", "pplus"])
+def test_run_drc_gf180mcu_implant_enclosing_gate_boundary_clean(tmp_path, implant):
+    """The same transistor with exactly the DRM's own 0.23um gate overlap is
+    clean -- and, crucially, its `Poly2` stripe running far off the
+    diffusion (and so far outside the implant) is *not* reported.
+
+    This is the negative control for the rule's scoping decision: spelled as
+    an unscoped "implant encloses the raw `Poly2` layer" check, this rule
+    would flag the routing overhang of every gate in every layout, since
+    `_run_check`'s zero-overlap escape term reports any part of an
+    interacting enclosed shape that leaves the enclosing layer. Scoping the
+    checked region to the gate (`Comp AND Poly2`) is what keeps ordinary
+    poly routing legal.
+    """
+    path = tmp_path / f"{implant}_gate_overlap_clean.gds"
+    _gf180mcu_implant_layout(_gf180mcu_mosfet_shapes(implant, 230)).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean", report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_implant_rules_ignore_opposite_type_diffusion(tmp_path):
+    """A complementary pair -- an NMOS under `Nplus` next to a PMOS under
+    `Pplus`, each implant legally enclosing its own diffusion and standing
+    0.4um clear of the other -- is clean.
+
+    Both `*.enclosing.comp.1` rules read the same `Comp` drawn layer, so an
+    unscoped version would flag each implant for "failing to enclose" the
+    opposite type's diffusion. The `Comp AND <implant>` derivation is what
+    keeps each rule looking only at the diffusion its own implant covers.
+    """
+    shapes = _gf180mcu_mosfet_shapes("nplus", 300)
+    shapes += _gf180mcu_mosfet_shapes(
+        "pplus", 300, comp_box=kdb.Box(4000, 0, 6000, 1000)
+    )
+    path = tmp_path / "complementary_pair_clean.gds"
+    _gf180mcu_implant_layout(shapes).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean", report["rule_counts"]
+
+
+def test_run_drc_gf180mcu_no_implant_geometry_stays_clean(tmp_path):
+    """The issue's own false-positive guard: a layout that draws no implant
+    at all (`Comp` + `Poly2` only) still reports `status: clean`, and every
+    one of the ten implant rules is recorded in `coverage.rules_skipped`
+    rather than silently evaluated against an empty region."""
+    path = tmp_path / "no_implant.gds"
+    _gf180mcu_implant_layout(
+        [
+            (22, 0, "Comp", kdb.Box(0, 0, 2000, 1000)),
+            (30, 0, "Poly2", kdb.Box(800, -900, 1200, 1900)),
+        ]
+    ).write(str(path))
+
+    report = run_drc(str(path), "gf180mcu")
+
+    assert report["status"] == "clean", report["rule_counts"]
+    skipped = set(report["coverage"]["rules_skipped"])
+    for implant in ("nplus", "pplus"):
+        for suffix in ("width.1", "space.1", "enclosing.poly2.1", "enclosing.comp.1"):
+            assert f"{implant}.{suffix}" in skipped
+    assert "nplus.space.pcomp.1" in skipped
+    assert "pplus.space.ncomp.1" in skipped
+
+
+def test_gf180mcu_implant_rules_transcribe_the_verified_drm_values():
+    """Structural pin on the ten rules' thresholds, layers and check kinds --
+    every value independently re-verified for #2369 against both the DRM's
+    own `tables_clear/17_Nplus_44.csv`/`18_Pplus_48.csv` and a real fetched
+    install's executable `rule_decks/{nplus,pplus}.drc`."""
+    deck = {rule.id: rule for rule in get_deck("gf180mcu")}
+    expected = {
+        "nplus.width.1": ("width", 400, (32, 0), "NP.1"),
+        "nplus.space.1": ("space", 400, (32, 0), "NP.2"),
+        "nplus.space.pcomp.1": ("separation", 160, (32, 0), "NP.3a"),
+        "nplus.enclosing.poly2.1": ("enclosed", 230, (32, 0), "NP.5a"),
+        "nplus.enclosing.comp.1": ("enclosed", 160, (32, 0), "NP.5b"),
+        "pplus.width.1": ("width", 400, (31, 0), "PP.1"),
+        "pplus.space.1": ("space", 400, (31, 0), "PP.2"),
+        "pplus.space.ncomp.1": ("separation", 160, (31, 0), "PP.3a"),
+        "pplus.enclosing.poly2.1": ("enclosed", 230, (31, 0), "PP.5a"),
+        "pplus.enclosing.comp.1": ("enclosed", 160, (31, 0), "PP.5b"),
+    }
+    for rule_id, (check, threshold, layer, official_id) in expected.items():
+        rule = deck[rule_id]
+        assert rule.check == check, rule_id
+        assert rule.threshold_dbu == threshold, rule_id
+        assert rule.layer == layer, rule_id
+        assert rule.provenance is not None and rule.provenance.rule_id == official_id
+        assert rule.scope in ("7.8 Nplus", "7.9 Pplus"), rule_id
+        # Both implant tables publish a single `LAYOUT RULE` column, so
+        # these rules are outside `coverage.voltage_domain_warnings`' remit
+        # -- see the test below and `DrcRule.voltage_independent`.
+        assert rule.voltage_independent is True, rule_id
+    # The flag is opt-in, not a deck-wide default: every rule transcribed
+    # from a *multi*-column section keeps the conservative `False`.
+    assert deck["comp.width.1"].voltage_independent is False
+    assert deck["poly2.width.1"].voltage_independent is False
+
+
+def test_run_drc_gf180mcu_implant_rules_do_not_raise_a_voltage_domain_warning(
+    tmp_path,
+):
+    """Regression guard for #2369's one behavioural side effect on an
+    existing output field.
+
+    `coverage.voltage_domain_warnings` (#552, refined by #1110) warns that
+    geometry inside `Dualgate` was checked by a rule that ignores the
+    marker, i.e. one that may have applied the *wrong column* of a
+    multi-column DRM table. Adding implant rules puts `Nplus`/`Pplus` in
+    that gate's reach for the first time -- but the "7.8 Nplus"/"7.9 Pplus"
+    tables publish a single value column (verified against
+    `tables_clear/17_Nplus_44.csv`/`18_Pplus_48.csv`, and the PDK's own
+    `rule_decks/{nplus,pplus}.drc` reference neither `dualgate` nor
+    `v5_xtor`), so no second column exists for them to have misread. The
+    ten rules carry `voltage_independent=True` and must not resurrect the
+    warning #1110 retired on exactly this geometry.
+
+    The control below proves the gate itself still works: add a `Poly2`
+    shape -- whose rules *are* transcribed from a multi-column table and do
+    not read the marker -- and the warning comes back.
+    """
+    quiet = tmp_path / "implant_under_dualgate.gds"
+    _make_gf180mcu_dualgate_layout(overlap=True).write(str(quiet))
+
+    report = run_drc(str(quiet), "gf180mcu")
+
+    assert report["coverage"]["voltage_domain_warnings"] == []
+    # The implant really was checked -- this is not a vacuous pass.
+    assert "32/0" in report["coverage"]["layers_checked"]
+
+    layout = _make_gf180mcu_dualgate_layout(overlap=True)
+    poly2 = layout.layer(30, 0)
+    layout.set_info(poly2, kdb.LayerInfo(30, 0))
+    layout.top_cell().shapes(poly2).insert(kdb.Box(-800, 500, -300, 2500))
+    noisy = tmp_path / "poly2_under_dualgate.gds"
+    layout.write(str(noisy))
+
+    control = run_drc(str(noisy), "gf180mcu")
+
+    assert [w["marker"] for w in control["coverage"]["voltage_domain_warnings"]] == [
+        "55/0"
+    ]
+
+
 def test_sky130_met2_via_extraction_levels_have_drc_width_and_space_coverage():
     """Narrow instance of the issue's own "more generally" invariant
     suggestion (#513): the specific connectivity level this issue adds DRC

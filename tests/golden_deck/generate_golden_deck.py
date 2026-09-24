@@ -92,7 +92,12 @@ DECKS: dict[str, list[DrcRule]] = {
 #: module docstring's "deliberately per-deck" note above.
 ALLOWED_CHECKS: dict[str, tuple[str, ...]] = {
     "sky130": ("width", "space"),
-    "gf180mcu": ("width", "space", "enclosing", "separation"),
+    # `"enclosed"` joins the set with issue #2369's Nplus/Pplus implant
+    # rules -- the first rules in any deck to use it (the direction the PDK's
+    # own `ngate.enclosed(nplus, ...)`/`ncomp.edges.enclosed(nplus, ...)`
+    # statements are written in). All four are `DerivedLayer`-scoped, so all
+    # four are hand-authored in `_DERIVED_LAYER_FIXTURES` below.
+    "gf180mcu": ("width", "space", "enclosing", "separation", "enclosed"),
     # sg13g2 (issue #905/#911, Epic #711 Phase 3b): width/space rules go
     # through this manifest mechanism (14 entries); its 5 enclosing/
     # separation rules ship as hand-written violate/clean pairs directly in
@@ -467,6 +472,140 @@ _DERIVED_LAYER_FIXTURES: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {
     # 280 dbu `_LV` threshold, so -- as for the width pair above -- a clean
     # `comp.space.1` verdict on this fixture is itself part of what the
     # split is asserting.
+    # The six `DerivedLayer`-scoped Nplus/Pplus implant rules (issue #2369).
+    # None of them can use a generic builder: their checked region is a
+    # boolean of two *other* drawn layers (PCOMP = `Comp AND Pplus`, NCOMP =
+    # `Comp AND Nplus`, gate = `Comp AND Poly2`) and their `other_layer` is
+    # the same implant layer as their own reporting `layer`, so a generic
+    # `_separation_pair` would draw two bare implant bars with no diffusion
+    # at all and never build a non-empty region.
+    #
+    # Every `"clean"` fixture below is clean for the *whole* deck, not just
+    # its own rule: diffusion is enclosed by its implant with >= 200 dbu
+    # (clears NP.5b/PP.5b's 160), implant bars are >= 400 dbu wide (NP.1/
+    # PP.1) and never drawn twice on one layer (NP.2/PP.2), `Comp` clears
+    # `comp.width.1`'s 220, and `Poly2` (where drawn) clears
+    # `poly2.width.1`'s 180. Layers no fixture draws (Nwell, Dualgate,
+    # Contact, ...) leave their own rules skipped.
+    #
+    # `nplus.space.pcomp.1` (NP.3a, 160 dbu): a PCOMP island (`Comp` inside a
+    # `Pplus` box) and an unrelated `Nplus` bar placed 110 dbu (violate) /
+    # 210 dbu (clean) from the PCOMP's right edge. The `Nplus` bar
+    # deliberately never touches `Comp`, so the sibling
+    # `nplus.enclosing.comp.1` derives an empty NCOMP and stays silent. In
+    # the violate case the `Nplus` bar overlaps the `Pplus` box: unavoidable,
+    # and harmless (no rule in this deck compares the two implants directly)
+    # -- NP.3a's 0.16um spacing and PP.5b's 0.16um COMP extension are equal,
+    # so any sub-threshold NP.3a gap necessarily eats into the Pplus
+    # extension the clean fixture keeps legal.
+    "nplus.space.pcomp.1": (
+        {  # violate: Nplus 110 dbu (< 160) from the PCOMP island's right edge
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
+                {"layer": [32, 0], "box": [1110, 0, 2110, 4000]},  # Nplus
+            ]
+        },
+        {  # clean: Nplus 210 dbu (> 160) away
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (PCOMP)
+                {"layer": [31, 0], "box": [-200, -200, 1200, 4200]},  # Pplus
+                {"layer": [32, 0], "box": [1210, 0, 2210, 4000]},  # Nplus
+            ]
+        },
+    ),
+    # `pplus.space.ncomp.1` (PP.3a, 160 dbu): the exact mirror -- an NCOMP
+    # island (`Comp` inside `Nplus`) and an unrelated `Pplus` bar.
+    "pplus.space.ncomp.1": (
+        {  # violate: Pplus 110 dbu (< 160) from the NCOMP island's right edge
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [-200, -200, 1200, 4200]},  # Nplus
+                {"layer": [31, 0], "box": [1110, 0, 2110, 4000]},  # Pplus
+            ]
+        },
+        {  # clean: Pplus 210 dbu (> 160) away
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp (NCOMP)
+                {"layer": [32, 0], "box": [-200, -200, 1200, 4200]},  # Nplus
+                {"layer": [31, 0], "box": [1210, 0, 2210, 4000]},  # Pplus
+            ]
+        },
+    ),
+    # `nplus.enclosing.comp.1` (NP.5b, 160 dbu): one `Comp` box fully covered
+    # by `Nplus`, with the implant extending 110 dbu (violate) / 210 dbu
+    # (clean) beyond it on every side. No `Pplus`/`Poly2` is drawn, so every
+    # other implant rule derives an empty region or skips outright.
+    "nplus.enclosing.comp.1": (
+        {  # violate: 110 dbu extension (< 160)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [32, 0], "box": [-110, -110, 1110, 4110]},  # Nplus
+            ]
+        },
+        {  # clean: 210 dbu extension (> 160)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [32, 0], "box": [-210, -210, 1210, 4210]},  # Nplus
+            ]
+        },
+    ),
+    # `pplus.enclosing.comp.1` (PP.5b, 160 dbu): the exact mirror on `Pplus`.
+    "pplus.enclosing.comp.1": (
+        {  # violate: 110 dbu extension (< 160)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [31, 0], "box": [-110, -110, 1110, 4110]},  # Pplus
+            ]
+        },
+        {  # clean: 210 dbu extension (> 160)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 1000, 4000]},  # Comp
+                {"layer": [31, 0], "box": [-210, -210, 1210, 4210]},  # Pplus
+            ]
+        },
+    ),
+    # `nplus.enclosing.poly2.1` (NP.5a, 230 dbu): a one-transistor fixture --
+    # a `Comp` bar crossed by a `Poly2` stripe, so the derived gate region
+    # (`Comp AND Poly2`) spans the diffusion's full height with zero margin
+    # of its own, exactly the geometry NP.5a's 0.23um overlap is about. The
+    # violate case uses a 180 dbu implant margin rather than the generic
+    # `threshold - _margin_dbu(230)` (155): 180 is still short of NP.5a's 230
+    # but clears NP.5b's 160, so the fixture trips *only* the gate-overlap
+    # rule under test rather than both implant-enclosure rules at once.
+    "nplus.enclosing.poly2.1": (
+        {  # violate: Nplus overlaps the gate by 180 dbu (< 230)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 2000, 1000]},  # Comp
+                {"layer": [30, 0], "box": [800, -400, 1200, 1400]},  # Poly2
+                {"layer": [32, 0], "box": [-180, -180, 2180, 1180]},  # Nplus
+            ]
+        },
+        {  # clean: Nplus overlaps the gate by 305 dbu (> 230)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 2000, 1000]},  # Comp
+                {"layer": [30, 0], "box": [800, -400, 1200, 1400]},  # Poly2
+                {"layer": [32, 0], "box": [-305, -305, 2305, 1305]},  # Nplus
+            ]
+        },
+    ),
+    # `pplus.enclosing.poly2.1` (PP.5a, 230 dbu): the exact mirror on `Pplus`.
+    "pplus.enclosing.poly2.1": (
+        {  # violate: Pplus overlaps the gate by 180 dbu (< 230)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 2000, 1000]},  # Comp
+                {"layer": [30, 0], "box": [800, -400, 1200, 1400]},  # Poly2
+                {"layer": [31, 0], "box": [-180, -180, 2180, 1180]},  # Pplus
+            ]
+        },
+        {  # clean: Pplus overlaps the gate by 305 dbu (> 230)
+            "shapes": [
+                {"layer": [22, 0], "box": [0, 0, 2000, 1000]},  # Comp
+                {"layer": [30, 0], "box": [800, -400, 1200, 1400]},  # Poly2
+                {"layer": [31, 0], "box": [-305, -305, 2305, 1305]},  # Pplus
+            ]
+        },
+    ),
     "comp.space.mv.1": (
         {  # violate: 260 dbu gap (< 360), both bars inside Dualgate
             "shapes": [
@@ -518,10 +657,22 @@ def build_manifest(
                 rule.threshold_dbu,
                 max_sizes.get(rule.other_layer),
             )
-        else:  # "separation"
+        elif rule.check == "separation":
             assert rule.other_layer is not None, rule.id
             violate, clean = _separation_pair(
                 rule.layer, rule.other_layer, rule.threshold_dbu
+            )
+        else:  # "enclosed"
+            # Every `"enclosed"` rule in any deck today is `DerivedLayer`-
+            # scoped (issue #2369's four Nplus/Pplus implant rules), so it is
+            # hand-authored above and never reaches here -- there is no
+            # meaningful generic pair to build from `layer`/`other_layer`
+            # alone when `layer == other_layer` and the checked region comes
+            # from two *other* drawn layers. A future non-derived
+            # `"enclosed"` rule needs its own `_enclosed_pair` builder.
+            raise AssertionError(
+                f"{deck_name}/{rule.id}: 'enclosed' rules must be "
+                "hand-authored in _DERIVED_LAYER_FIXTURES"
             )
         prior = existing.get(rule.id, {})
         manifest[rule.id] = {

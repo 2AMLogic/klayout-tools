@@ -1959,6 +1959,355 @@
       ]
     }
   },
+  "nplus.enclosing.comp.1": {
+    "check": "enclosed",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -210,
+            -210,
+            1210,
+            4210
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      32,
+      0
+    ],
+    "threshold_dbu": 160,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -110,
+            -110,
+            1110,
+            4110
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "nplus.enclosing.poly2.1": {
+    "check": "enclosed",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            1000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            800,
+            -400,
+            1200,
+            1400
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            -305,
+            -305,
+            2305,
+            1305
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      32,
+      0
+    ],
+    "threshold_dbu": 230,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            1000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            800,
+            -400,
+            1200,
+            1400
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            -180,
+            -180,
+            2180,
+            1180
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "nplus.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        },
+        {
+          "box": [
+            2500,
+            0,
+            4500,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      32,
+      0
+    ],
+    "threshold_dbu": 400,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        },
+        {
+          "box": [
+            2300,
+            0,
+            4300,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "nplus.space.pcomp.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -200,
+            -200,
+            1200,
+            4200
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        },
+        {
+          "box": [
+            1210,
+            0,
+            2210,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      32,
+      0
+    ],
+    "threshold_dbu": 160,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -200,
+            -200,
+            1200,
+            4200
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        },
+        {
+          "box": [
+            1110,
+            0,
+            2110,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "nplus.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            500,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      32,
+      0
+    ],
+    "threshold_dbu": 400,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            300,
+            4000
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        }
+      ]
+    }
+  },
   "nwell.enclosing.comp.1": {
     "check": "enclosing",
     "clean": {
@@ -2319,6 +2668,355 @@
           ],
           "layer": [
             30,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "pplus.enclosing.comp.1": {
+    "check": "enclosed",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -210,
+            -210,
+            1210,
+            4210
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      31,
+      0
+    ],
+    "threshold_dbu": 160,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -110,
+            -110,
+            1110,
+            4110
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "pplus.enclosing.poly2.1": {
+    "check": "enclosed",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            1000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            800,
+            -400,
+            1200,
+            1400
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            -305,
+            -305,
+            2305,
+            1305
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      31,
+      0
+    ],
+    "threshold_dbu": 230,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            1000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            800,
+            -400,
+            1200,
+            1400
+          ],
+          "layer": [
+            30,
+            0
+          ]
+        },
+        {
+          "box": [
+            -180,
+            -180,
+            2180,
+            1180
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "pplus.space.1": {
+    "check": "space",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        },
+        {
+          "box": [
+            2500,
+            0,
+            4500,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      31,
+      0
+    ],
+    "threshold_dbu": 400,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            2000,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        },
+        {
+          "box": [
+            2300,
+            0,
+            4300,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "pplus.space.ncomp.1": {
+    "check": "separation",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -200,
+            -200,
+            1200,
+            4200
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        },
+        {
+          "box": [
+            1210,
+            0,
+            2210,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      31,
+      0
+    ],
+    "threshold_dbu": 160,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            1000,
+            4000
+          ],
+          "layer": [
+            22,
+            0
+          ]
+        },
+        {
+          "box": [
+            -200,
+            -200,
+            1200,
+            4200
+          ],
+          "layer": [
+            32,
+            0
+          ]
+        },
+        {
+          "box": [
+            1110,
+            0,
+            2110,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    }
+  },
+  "pplus.width.1": {
+    "check": "width",
+    "clean": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            500,
+            4000
+          ],
+          "layer": [
+            31,
+            0
+          ]
+        }
+      ]
+    },
+    "expected_disagreement": null,
+    "layer": [
+      31,
+      0
+    ],
+    "threshold_dbu": 400,
+    "violate": {
+      "shapes": [
+        {
+          "box": [
+            0,
+            0,
+            300,
+            4000
+          ],
+          "layer": [
+            31,
             0
           ]
         }

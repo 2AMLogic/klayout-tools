@@ -433,6 +433,22 @@ class DrcRule:
     precision than this primitive actually has. Defaults to ``None``, and
     ``run_drc()`` raises :class:`~klayout_tools.drc.DrcError` for an
     ``"antenna"`` rule that leaves it unset or omits ``other_layer``.
+
+    ``voltage_independent`` (issue #2369) opts a rule out of
+    ``run_drc()``'s ``coverage.voltage_domain_warnings`` gate (issue #552/
+    #1110, see ``drc.py``). That gate warns when geometry inside an
+    unmodelled voltage marker (gf180mcu's ``Dualgate``, 55/0) was checked by
+    a rule that ignores the marker -- i.e. one that may have applied the
+    *wrong column* of a multi-column DRM table. Set this only for a rule
+    whose source table publishes **one** column, so no other column exists
+    to have been read by mistake: gf180mcu's ``7.8 Nplus``/``7.9 Pplus``
+    implant tables are the first such case (their CSVs carry a single
+    ``LAYOUT RULE`` value per row, unlike ``7.5 Comp``'s ``3.3V``/``5V/6V``
+    or ``7.7 Poly2``'s ``3.3V``/``5V``/``6V`` pairs), and the PDK's own
+    executable ``rule_decks/{nplus,pplus}.drc`` conditions none of those
+    rules on ``dualgate``/``v5_xtor`` either. Defaults to ``False`` -- the
+    conservative value every pre-existing rule keeps, so the gate's
+    behaviour is unchanged for them.
     """
 
     id: str
@@ -451,6 +467,7 @@ class DrcRule:
     density_max: float | None = None
     antenna_ratio_max: float | None = None
     threshold_max_dbu: int | None = None
+    voltage_independent: bool = False
 
 
 class UnknownDeckError(Exception):

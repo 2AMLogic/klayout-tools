@@ -73,6 +73,7 @@ from .gen_layer_params import (
     _pdk_family,
     _reject_deferred_family,
     _res_flavor_min_width_um_floor,
+    _ring_implant_margin_um,
     _role_layer_info,
     _voltage_flavor_mark_layer,
 )
@@ -1656,6 +1657,15 @@ def _well_island_layer_params(
             implant if implant is not None else kdb.LayerInfo(0, 0)
         ),
         "well_tap_implant_present": implant is not None,
+        # How far that implant extends past the tap ring's own `Comp` band on
+        # every edge (issue #2369, NP.5b/PP.5b) -- shares the name, the table,
+        # and the resolver with every other ring-drawing generator's own
+        # `ring_implant_*` triple, since it is the same ring-shaped implant
+        # over the same shared `Comp` mask. `0.0` for a family that draws no
+        # tap-ring implant at all (byte-for-byte unchanged geometry there).
+        "ring_implant_margin_um": (
+            _ring_implant_margin_um(family) if implant is not None else 0.0
+        ),
         "well_margin_resolved_um": isolation["margin_um"],
     }
 

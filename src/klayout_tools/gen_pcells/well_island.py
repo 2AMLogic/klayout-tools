@@ -34,6 +34,7 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
     from klayout_tools.gen import (
         WELL_ENCLOSURE_MARGIN_UM,
         _insert_boxes,
+        _insert_implant_ring,
         _insert_ring,
         _ring_layout,
         _well_box_um,
@@ -217,8 +218,9 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             self.param(
                 "well_tap_implant_layer",
                 self.TypeLayer,
-                "Well-tie implant layer drawn over the tap ring (only used "
-                "when well_tap_implant_present)",
+                "Well-tie implant layer drawn over the tap ring, with "
+                "ring_implant_margin_um of extension beyond every edge of it "
+                "(only used when well_tap_implant_present)",
                 default=kdb.LayerInfo(0, 0),
             )
             self.param(
@@ -227,6 +229,14 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 "Whether the resolved PDK needs an implant mask to recognise "
                 "the tap ring as a well tie",
                 default=False,
+            )
+            self.param(
+                "ring_implant_margin_um",
+                self.TypeDouble,
+                "Harness-resolved margin the well-tie implant extends beyond "
+                "the tap ring's own band on every edge (only used when "
+                "well_tap_implant_present)",
+                default=0.0,
             )
             self.param(
                 "well_margin_resolved_um",
@@ -274,17 +284,22 @@ def _build_well_island_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
             )
             _insert_boxes(self.cell, li_contact, dbu, info["contact_boxes_um"])
             if self.well_tap_implant_present:
-                # Exactly coincident with the tap ring -- never a blanket over
-                # the enclosed area, which would re-dope whatever a caller
-                # later places inside the island (see the `well_tap_implant`
-                # role's own comment in `_PDK_ROLE_LAYERS`).
-                _insert_ring(
+                # Tracks the tap ring, extended `ring_implant_margin_um` past
+                # every one of its edges (issue #2369's NP.5b/PP.5b
+                # extension-beyond-COMP fix to the originally coincident
+                # implant) -- still a ring, never a blanket over the enclosed
+                # area, which would re-dope whatever a caller later places
+                # inside the island (see the `well_tap_implant` role's own
+                # comment in `_PDK_ROLE_LAYERS`).
+                _insert_implant_ring(
                     self.cell,
                     self.layout.layer(self.well_tap_implant_layer),
                     dbu,
                     info["outer_box_um"],
                     info["inner_box_um"],
                     gap_box,
+                    info["gap"]["side"] if info["gap"] is not None else None,
+                    self.ring_implant_margin_um,
                 )
             if self.well_present:
                 _insert_boxes(

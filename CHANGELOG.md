@@ -577,6 +577,35 @@ not `klt --version`, if you need to detect this kind of drift. See
   `w_um`/`l_um` off the new card shape. See `docs/cli/extract.md`'s "MoM
   capacitor devices" and `docs/cli/lvs.md`'s "Custom device classes
   round-tripped through an `X` card" sections.
+- **Fixed** (#2369, `klt drc --deck gf180mcu`, additive — **no**
+  `schema_version` bump): the curated `gf180mcu` deck had **no rule at all**
+  over the `Nplus` (32/0) / `Pplus` (31/0) implant layers, so a layout that
+  drew implant too narrow, too close together, or with too little gate
+  overlap came back `clean`. Ten rules are added — `nplus.width.1`/
+  `nplus.space.1`/`nplus.space.pcomp.1`/`nplus.enclosing.poly2.1`/
+  `nplus.enclosing.comp.1` and their `pplus.*` mirrors — transcribed from
+  DRM sections "7.8 Nplus" (`NP.1`/`NP.2`/`NP.3a`/`NP.5a`/`NP.5b`) and
+  "7.9 Pplus" (`PP.*`), each side read from its own published table rather
+  than assumed to mirror the other: width/space 0.4 µm, space to the
+  opposite-type diffusion 0.16 µm, gate overlap 0.23 µm, extension beyond
+  COMP 0.16 µm. The three non-trivial shapes scope their checked region
+  with a `DerivedLayer` boolean (`PCOMP`/`NCOMP`/gate) so they measure real
+  diffusion rather than the raw `Comp` drawn layer. The gf180mcu deck is now
+  56 rules (was 46), `coverage.rules_skipped` gains the ten new ids on a
+  stream that draws no implant, and `provenance.deck.content_hash` changes
+  accordingly. The per-context splits (`NP.3b`-`NP.3e`, `NP.4a`/`NP.4b`,
+  `NP.5c`/`NP.5d`, `NP.6`-`NP.12` and the `PP.*` equivalents) stay
+  uncovered — each keys off a `DNWELL`/`LVPWELL`/`SAB`/butting-edge context
+  this deck's curated layer set does not draw. See `docs/cli/drc.md`'s
+  "Coverage" section and the deck module's own "known approximations" list.
+  One knock-on: `coverage.voltage_domain_warnings` (issue #552/#1110) warns
+  that geometry inside `Dualgate` was checked by a rule which may have
+  applied the wrong *column* of a multi-column DRM table — a premise that
+  does not hold for the implant tables, which publish one value column. A
+  new opt-in `DrcRule.voltage_independent` flag (default `False`, so every
+  pre-existing rule is unaffected) keeps the ten implant rules out of that
+  gate, so issue #552's own `Dualgate`-over-`Comp`-and-`Nplus` reproducer
+  still reports **no** warning, exactly as #1110 established.
 - **Fixed** (#2377, `klt erc`, additive — **no** `schema_version` bump: one
   new coverage skip reason, no new output field, no new coverage list; a
   spec whose `ties[]` well layer already draws geometry produces
@@ -631,6 +660,38 @@ not `klt --version`, if you need to detect this kind of drift. See
   unchanged, and a deck that attaches it to another check kind, or sets a
   maximum below its own minimum, now fails loudly with a `DrcError` naming
   the rule rather than having the field silently ignored.
+- **Fixed** (#2369, `klt gen` gf180mcu tap/collector-ring implant geometry —
+  **no** `schema_version` bump; no request or response field changes, the
+  drawn implant polygon moves): the first thing the ten new implant rules
+  above found was a real violation in klt's own generators. Every generator
+  that draws a tap/collector ring on gf180mcu — `guard_ring`, `well_island`,
+  `mos_array`/`diff_pair` with `add_guard_ring`, `esd_device`, `bjt_array` —
+  drew that ring's implant (issues #1421/#1580) **exactly coincident** with
+  the ring's own `Comp` band. That satisfies `DF.12` ("COMP not covered by
+  Nplus or Pplus is forbidden"), which is what those issues targeted and is a
+  coverage rule with no distance in it, but it extends *zero* past the
+  diffusion and so violates `NP.5b`/`PP.5b` ("Extension beyond COMP", 0.16 µm)
+  on every edge of the band — a genuine DRC violation in the emitted layout,
+  not a deck artefact. The implant now tracks the ring with the new
+  harness-resolved `ring_implant_margin_um` (0.16 µm on gf180mcu, `0.0` —
+  i.e. byte-for-byte unchanged geometry — on every family that draws no ring
+  implant at all) of extension beyond every edge, inner and outer alike. It
+  stays a *ring*: it never blankets the area the ring encloses, so it cannot
+  re-dope what a caller places inside. A ring cut by `ring_gap_side` keeps its
+  opening, inset by the same margin at each end so the two cut faces get their
+  extension too (an opening of `2 × margin` or less closes over, doping only
+  field oxide). `examples/dogbone-terminal`'s committed streams are
+  regenerated: both families' GDS carry `mos_array`'s PCell parameter list, so
+  the new param drifts the sky130 fixture without moving a polygon. The
+  extension is applied as a single **dbu-quantized** growth, not as float-µm
+  padding: `margin_um` deliberately carries zero headroom above the 0.16 µm
+  threshold (`enclosed_check` is a strict less-than, so exactly the threshold
+  passes), so rounding a grown µm coordinate independently of the un-grown one
+  could lose a dbu on a half-dbu input and trip the very rule the margin
+  exists to satisfy — observed on `diff_pair` at `ring_padding_um` values such
+  as `0.5015`/`0.5045`/`0.5085`. This is the same independent-rounding
+  mechanism issues #685/#1551 fixed for contact squares, applied to a box's
+  growth rather than its width.
 - **Added** (#2339, `klt erc`, additive — **no** `schema_version` bump: two
   new optional spec keys and one new coverage skip reason, no new output
   field and no new coverage list; a spec that uses neither key produces

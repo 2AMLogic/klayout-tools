@@ -214,6 +214,49 @@ def _sd_implant_margin_um(family: str) -> float:
     return _PDK_SD_IMPLANT_MARGIN_UM.get(family, 0.0)
 
 
+#: Margin (um) a tap/collector *ring*'s own implant
+#: (:func:`_ring_tap_implant_layer`, issue #1580 -- and ``well_island``'s
+#: identical ``"well_tap_implant"`` ring, issue #1421) extends beyond the
+#: ring's ``Comp`` band on every edge, inner and outer alike. The
+#: ring-shaped counterpart of :data:`_PDK_SD_IMPLANT_MARGIN_UM`, which does
+#: the same job for a *unit device's* source/drain implant box.
+#:
+#: ``gf180mcu`` only (issue #2369): 0.16um, the real ``NP.5b``/``PP.5b``
+#: ("Extension beyond COMP") threshold. Both #1421 and #1580 drew their
+#: implant ring *exactly coincident* with the tap ring -- enough for
+#: ``DF.12`` ("COMP not covered by Nplus or Pplus is forbidden"), which is a
+#: coverage rule with no distance in it, but a genuine ``NP.5b``/``PP.5b``
+#: violation on every edge of the band once those two rules are actually
+#: checked. Unlike ``_PDK_SD_IMPLANT_MARGIN_UM``'s 0.25-for-0.23, no
+#: headroom is added over the threshold: the margin is uniform on all four
+#: sides of an axis-aligned band, so every ``Comp`` edge sits exactly
+#: ``margin_um`` from the implant edge facing it and every corner further
+#: still (``margin_um * sqrt(2)``) -- the ``euclidian`` metric
+#: ``enclosed_check`` uses reports *less than* the threshold, never equal --
+#: and the ring's inner edge grows *toward* whatever the ring encloses, so
+#: extra margin here is spent directly out of the clearance the enclosed
+#: device needs for ``NP.3a``/``PP.3a`` (implant to opposite-type COMP,
+#: 0.16um).
+#:
+#: A family absent from this table gets ``0.0``
+#: (:func:`_ring_implant_margin_um`), which
+#: :func:`~klayout_tools.gen._insert_implant_ring` treats as "draw exactly
+#: what :func:`~klayout_tools.gen._insert_ring` drew before" -- and no family
+#: besides gf180mcu resolves a ring implant layer at all (see
+#: :func:`_ring_tap_implant_layer`), so every other family's geometry is
+#: byte-for-byte unchanged.
+_PDK_RING_IMPLANT_MARGIN_UM: dict[str, float] = {
+    "gf180mcu": 0.16,  # NP.5b/PP.5b (extension beyond COMP) are 0.16um
+}
+
+
+def _ring_implant_margin_um(family: str) -> float:
+    """Return ``family``'s tap/collector-ring implant margin (see
+    :data:`_PDK_RING_IMPLANT_MARGIN_UM`), or ``0.0`` for a family that
+    declares none -- byte-for-byte unchanged geometry there."""
+    return _PDK_RING_IMPLANT_MARGIN_UM.get(family, 0.0)
+
+
 #: Margin (um) the ``voltage_flavor`` marker box (:data:`_PDK_VOLTAGE_FLAVOR_LAYERS`,
 #: issue #1054) grows beyond the array/pair's own shared active footprint --
 #: normally the *same* box :data:`WELL_ENCLOSURE_MARGIN_UM` sizes the
@@ -2701,6 +2744,13 @@ def _ring_layer_params(
             ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
         ),
         "ring_implant_present": ring_implant is not None,
+        # How far that implant extends past the ring's own `Comp` band on
+        # every edge (issue #2369, NP.5b/PP.5b) -- `0.0` for a family that
+        # draws no ring implant at all, which keeps its geometry
+        # byte-for-byte unchanged (see `_ring_implant_margin_um`).
+        "ring_implant_margin_um": (
+            _ring_implant_margin_um(family) if ring_implant is not None else 0.0
+        ),
     }
 
 
@@ -2818,6 +2868,13 @@ def _bjt_layer_params(
             ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
         ),
         "ring_implant_present": ring_implant is not None,
+        # How far that implant extends past the ring's own `Comp` band on
+        # every edge (issue #2369, NP.5b/PP.5b) -- `0.0` for a family that
+        # draws no ring implant at all, which keeps its geometry
+        # byte-for-byte unchanged (see `_ring_implant_margin_um`).
+        "ring_implant_margin_um": (
+            _ring_implant_margin_um(family) if ring_implant is not None else 0.0
+        ),
         "dummy_layer": dummy if dummy is not None else kdb.LayerInfo(0, 0),
         "dummy_present": dummy is not None,
     }
@@ -2935,4 +2992,11 @@ def _esd_device_layer_params(
             ring_implant if ring_implant is not None else kdb.LayerInfo(0, 0)
         ),
         "ring_implant_present": ring_implant is not None,
+        # How far that implant extends past the ring's own `Comp` band on
+        # every edge (issue #2369, NP.5b/PP.5b) -- `0.0` for a family that
+        # draws no ring implant at all, which keeps its geometry
+        # byte-for-byte unchanged (see `_ring_implant_margin_um`).
+        "ring_implant_margin_um": (
+            _ring_implant_margin_um(family) if ring_implant is not None else 0.0
+        ),
     }
