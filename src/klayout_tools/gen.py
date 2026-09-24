@@ -1316,7 +1316,7 @@ def _mos_array_layout(
             ring_gap_um,
             ring_gap_offset_um,
         )
-        ring_offset = (inner_x0 - ring_w, inner_y0 - ring_w)
+        ring_offset = _snap_offset_um(inner_x0 - ring_w, inner_y0 - ring_w)
 
     return {
         "unit": unit,
@@ -1793,6 +1793,28 @@ def _snap_square_box_um(
     )
 
 
+def _snap_offset_um(
+    ox_um: float, oy_um: float, dbu_um: float = _GRID_DBU_UM
+) -> tuple[float, float]:
+    """A placement offset ``(ox_um, oy_um)`` snapped to the ``dbu_um``
+    manufacturing grid, so boxes already grid-exact in their own local frame
+    stay grid-exact after the offset is applied.
+
+    This is the placement-offset counterpart of :func:`_snap_square_box_um`
+    (issue #2442): :func:`_insert_boxes`/``_insert_ring`` round each of a
+    box's four edges *independently* after adding the offset
+    (``int(round((x0 + ox_um) / dbu))`` ...). An un-snapped offset derived
+    from an arbitrary float param (e.g. ``ring_padding_um``, whose only
+    documented constraint is ``>= 0``) can land one edge of an exactly
+    ``CONTACT_SIZE_UM``-square contact just below a half-dbu rounding
+    boundary and the opposite edge just above it, silently drawing a
+    221x220dbu contact that trips gf180mcu's ``contact.width.1`` max-size
+    bound. Snapping the offset to integer dbu *first* makes every shifted
+    edge derive from the same grid as the un-shifted box, so per-edge
+    rounding can never drift an edge pair apart."""
+    return (round(ox_um / dbu_um) * dbu_um, round(oy_um / dbu_um) * dbu_um)
+
+
 def _ring_layout(
     inner_w_um: float,
     inner_h_um: float,
@@ -2113,7 +2135,7 @@ def _diff_pair_layout(
             ring_gap_um,
             ring_gap_offset_um,
         )
-        ring_offset = (-(ring_w + padding), -(ring_w + padding))
+        ring_offset = _snap_offset_um(-(ring_w + padding), -(ring_w + padding))
 
     return {
         "unit": unit,
@@ -2314,7 +2336,7 @@ def _bjt_array_layout(
             ring_gap_um,
             ring_gap_offset_um,
         )
-        ring_offset = (inner_x0 - ring_w, inner_y0 - ring_w)
+        ring_offset = _snap_offset_um(inner_x0 - ring_w, inner_y0 - ring_w)
 
     return {
         "unit": unit,
@@ -2383,7 +2405,7 @@ def _esd_device_layout(
             ring_gap_um,
             ring_gap_offset_um,
         )
-        ring_offset = (-(ring_w + padding), -(ring_w + padding))
+        ring_offset = _snap_offset_um(-(ring_w + padding), -(ring_w + padding))
 
     return {
         "unit": unit,

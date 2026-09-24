@@ -2914,6 +2914,185 @@ def test_res_array_off_tie_length_geometry_is_byte_identical_to_pre_fix(
     _assert_gds_geometry_equal(output, baseline)
 
 
+# --- guard-ring placement offset vs contact.width.1 (issue #2442) ------------ #
+#
+# `_ring_layout` snaps each contact box to the dbu grid in the ring's own
+# local frame (#685), but the ring's *placement* offset (`ring_offset_um`,
+# derived from the arbitrary-float `ring_padding_um` param) used to reach
+# `_insert_boxes` un-snapped. Its per-edge rounding then let one edge of an
+# exactly-220dbu contact land on the far side of a half-dbu boundary from
+# its opposite edge, silently drawing a 221x220dbu contact -- 1dbu over
+# gf180mcu's `contact.width.1` max-size bound (which PR #2390 began
+# enforcing). The fix snaps `ring_offset_um` at all four computation sites
+# (`_mos_array_layout`/`_diff_pair_layout`/`_bjt_array_layout`/
+# `_esd_device_layout`) via `_snap_offset_um`.
+
+#: The four historically-observed off-grid `ring_padding_um` values (PR
+#: #2384's commit message, via issue #2442) plus two further members of the
+#: same class -- all > gf180mcu's 0.28um comp space rule, so any remaining
+#: DRC output is a rounding artifact, not genuine crowding.
+_ISSUE_2442_OFF_GRID_PADDINGS_UM = (
+    0.5015,
+    0.5045,
+    0.5085,
+    0.5095,
+    1.2345,
+    3.1415,
+)
+
+_GF180_CONTACT_LAYER = (33, 0)  # Contact -- see gf180mcu's deck
+
+
+def _ring_contact_shapes_after_offset(info):
+    """The set of drawn `(width_dbu, height_dbu)` shapes the ring's contact
+    boxes take once `ring_offset_um` is applied and each edge is rounded to
+    the dbu grid exactly the way `_insert_boxes` does."""
+    ox, oy = info["ring_offset_um"]
+    dbu = gen._GRID_DBU_UM
+    return {
+        (
+            int(round((x1 + ox) / dbu)) - int(round((x0 + ox) / dbu)),
+            int(round((y1 + oy) / dbu)) - int(round((y0 + oy) / dbu)),
+        )
+        for x0, y0, x1, y1 in info["ring"]["contact_boxes_um"]
+    }
+
+
+def test_guard_ring_offset_off_grid_padding_draws_full_size_contacts():
+    """Unit-level #2442 invariant for all four ring-offset call sites: after
+    the (snapped) ring offset is applied and per-edge dbu rounding -- exactly
+    what `_insert_boxes` performs -- every ring contact must still be an
+    exact `CONTACT_SIZE_UM` square. Pre-fix, an un-snapped offset made this
+    221x220 at e.g. padding 0.5045."""
+    expected = int(round(gen.CONTACT_SIZE_UM / gen._GRID_DBU_UM))
+    for padding in _ISSUE_2442_OFF_GRID_PADDINGS_UM:
+        for info in (
+            gen._mos_array_layout(
+                0.42,
+                0.28,
+                1,
+                1,
+                2,
+                0,
+                "common_centroid",
+                add_guard_ring=True,
+                ring_padding_um=padding,
+            ),
+            gen._diff_pair_layout(0.42, 0.28, 1, True, ring_padding_um=padding),
+            gen._esd_device_layout(2.0, 0.28, 2, True, ring_padding_um=padding),
+            # bjt_array has no `ring_padding_um` (fixed collector gap), but
+            # the same offset-snap fix applies at its call site -- exercise
+            # it with an off-grid emitter size too.
+            gen._bjt_array_layout(0.61, 1, 2, 0, "common_centroid", True),
+        ):
+            assert _ring_contact_shapes_after_offset(info) == {(expected, expected)}
+
+
+def test_bjt_array_collector_ring_offset_snapped_like_sibling_rings():
+    """`_bjt_array_layout`'s collector ring shares the sibling generators'
+    `ring_offset_um` -> `_insert_boxes` path (#2442), so its offset must be
+    grid-exact too: at a fixed gap it usually already is, but the snap makes
+    that a guarantee instead of a coincidence."""
+    info = gen._bjt_array_layout(0.6, 3, 3, 1, "common_centroid", True)
+    ox, oy = info["ring_offset_um"]
+    assert ox == round(ox / gen._GRID_DBU_UM) * gen._GRID_DBU_UM
+    assert oy == round(oy / gen._GRID_DBU_UM) * gen._GRID_DBU_UM
+
+
+@pytest.mark.parametrize("ring_padding_um", _ISSUE_2442_OFF_GRID_PADDINGS_UM)
+def test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean(
+    tmp_path, both_pdk_root, ring_padding_um
+):
+    """Issue #2442's exact repro (the test PR #2384's own commit expected to
+    pass): `diff_pair` + `add_guard_ring` at an off-grid `ring_padding_um`
+    must produce a `klt drc --deck gf180mcu`-clean layout. Pre-fix, the
+    un-snapped ring offset drew 221x220dbu ring contacts that tripped
+    `contact.width.1`'s max-size bound at every one of these paddings."""
+    output = tmp_path / f"diff_pair_pad_{ring_padding_um}.gds"
+    generate(
+        {
+            "generator": "diff_pair",
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": {
+                "splits": 1,
+                "add_guard_ring": True,
+                "ring_padding_um": ring_padding_um,
+            },
+            "options": {"output": str(output)},
+        }
+    )
+    # Assert the drawn contact geometry directly, not just DRC status: a
+    # looser deck (or a future deck edit) must not be able to mask the
+    # 1dbu-drift mechanism (same reasoning as the #1551 counterpart test).
+    expected_dbu = int(round(gen.CONTACT_SIZE_UM / gen._GRID_DBU_UM))
+    boxes = _res_contact_boxes_dbu(output, *_GF180_CONTACT_LAYER)
+    assert boxes, "expected drawn ring + core contacts on the Contact layer"
+    for x0, y0, x1, y1 in boxes:
+        assert (x1 - x0, y1 - y0) == (expected_dbu, expected_dbu)
+
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert drc_report["rule_counts"] == {}
+
+
+@pytest.mark.parametrize(
+    ("generator", "params"),
+    [
+        (
+            "mos_array",
+            {
+                "rows": 1,
+                "cols": 2,
+                "dummy": 0,
+                "add_guard_ring": True,
+                "ring_padding_um": 1.2345,
+            },
+        ),
+        (
+            "esd_device",
+            {
+                "fingers": 2,
+                "add_guard_ring": True,
+                "ring_padding_um": 1.2345,
+            },
+        ),
+    ],
+)
+def test_gf180mcu_sibling_guard_ring_generators_off_grid_padding_drc_clean(
+    tmp_path, both_pdk_root, generator, params
+):
+    """AC counterpart for the other two `ring_padding_um` consumers (#2442):
+    the same un-snapped-offset mechanism drew `contact.width.1` violations
+    on `mos_array` and `esd_device` pre-fix; the shared `_snap_offset_um`
+    fix must keep them DRC-clean at an off-grid padding too."""
+    output = tmp_path / f"{generator}_off_grid_pad.gds"
+    generate(
+        {
+            "generator": generator,
+            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
+            "params": params,
+            "options": {"output": str(output)},
+        }
+    )
+    drc_report = run_drc(str(output), "gf180mcu")
+    assert drc_report["status"] == "clean", drc_report["violations"]
+    assert drc_report["rule_counts"] == {}
+
+
+def test_snap_offset_um_is_inert_on_grid_exact_inputs():
+    """The #2442 fix must be inert for on-grid offsets (e.g. the historical
+    default padding 0.5 + grid-exact ring width): `_snap_offset_um` returns
+    exactly its input, and its output is always an exact grid multiple."""
+    dbu = gen._GRID_DBU_UM
+    for ox, oy in ((0.0, 0.0), (-0.92, -0.92), (1.5, -3.25), (12.345, 0.0)):
+        snapped = gen._snap_offset_um(ox, oy)
+        assert snapped == (ox, oy)  # already on-grid -> unchanged
+    for ox, oy in ((-0.9245, -0.9245), (0.1235, 7.0001)):
+        sx, sy = gen._snap_offset_um(ox, oy)
+        assert sx == round(sx / dbu) * dbu
+        assert sy == round(sy / dbu) * dbu
+
+
 # --- res_array resistor-ID marker layer (issue #369) -------------------------- #
 
 _SKY130_RES_MARK_LAYER = (66, 13)  # poly.res
