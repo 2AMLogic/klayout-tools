@@ -1228,6 +1228,67 @@ when the relevant side's `layout.deck`/`reference.deck` is given; see
 `docs/cli/lvs.md`'s "Custom device classes round-tripped through an `X`
 card" section.
 
+**Known limitation: the written card carries `W`/`L` only, never the PDK
+subcircuit's remaining parameters (issue #2408).** The upstream `.subckt`
+this card's trailing class-name token binds onto declares more than the two
+geometry parameters `klt extract` measures. Verbatim, from IHP's own
+Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
+`607e18d4bd9214a52575c194b4181ef449f9252f`,
+`libs.tech/ngspice/models/cap_cmomi.lib:60` and `cap_cmomf.lib:53`):
+
+```spice
+.subckt cap_cmomi PLUS MINUS w=5e-6 l=5e-6 mmin=1 mmax=4 feed=double subblock=0 mm_ok=1
+.subckt cap_cmomf PLUS MINUS w=5e-6 l=5e-6 mmin=1 mmax=4 subblock=0 mm_ok=1
+```
+
+`mmin`/`mmax` (the inclusive Metal-index range the fingers are drawn on,
+`1=Metal1`), `feed` (`cap_cmomi` only — the feed-structure variant,
+`none`/`same`/`double`), `subblock`, and `mm_ok` are **not** emitted on the
+card, so each one silently takes its `.subckt` default above. That is a real
+fidelity gap, and it is deliberate rather than an oversight:
+
+- **They are not recoverable from the layout this extractor reads.** The
+  recognition step (`_build_mom_capacitor_extractor`, a transcription of
+  upstream's own `CapMomExtractor`) sees one recognition marker plus exactly
+  two pin-port polygons; `W`/`L` come from the marker's own bounding box and
+  nothing in that geometry encodes the finger stack's metal range, the feed
+  variant, or the PCell's `subblock`/`mm_ok` switches. Upstream's own LVS
+  extractor does not capture them either.
+- **Emitting the defaults explicitly would change nothing electrically and
+  would misrepresent the device.** A card written as `mmin=1 mmax=4
+  feed=double subblock=0 mm_ok=1` simulates identically to one that omits
+  them (they *are* the defaults), while asserting a specific drawn metal
+  range and feed variant that `klt extract` never measured — turning a
+  visible gap into an invisible wrong answer for any design that drew, say,
+  a Metal1–Metal3 `same`-feed device.
+- **There is no deck-independent default set to hardcode.** `mmax=4` is
+  keyed to cmos5l's own Metal1..Metal4 thin-metal stack (`cap_cmomi.lib`'s
+  header: "mmin/mmax metal indices (1=Metal1 .. 4=Metal4)"), while the
+  `sg13g2` deck declares the same two device names over a Metal1..Metal5
+  stack. `feed` exists on `cap_cmomi` only — writing it onto a `cap_cmomf`
+  card would pass a parameter that subcircuit does not declare.
+- **`mm_ok` is a documented no-op in this release** for both devices
+  ("accepted for interface parity … but a NO-OP — cap_cmom{i,f} has no
+  characterised mismatch model", same `.lib` headers), so omitting it costs
+  nothing at all today.
+
+**What this means for a consumer.** A `--pdk`-bound extraction's MoM-cap
+card is value-accurate for `W`/`L` and relies on the PDK subcircuit's own
+defaults for everything else. Diffing an extracted card against a design's
+own instantiation will therefore *not* show a mismatch when the design chose
+a non-default `mmin`/`mmax`/`feed`/`subblock`: the extracted card is simply
+silent on those. If your design overrides any of them, rewrite the card (or
+supply your own wrapper `.subckt`) before simulating — the same caller-side
+rewrite the issue reports already reproduces the device exactly. Closing the
+gap properly requires the recognition layer to capture the finger stack from
+the drawn metal geometry rather than defaulting it — tracked as its own
+issue (#2435) instead of being papered over here. Note `mmin`/`mmax` are not
+mere bookkeeping — both models scale capacitance with them (same `.lib`
+headers: `cap_cmomi`'s coefficients are "keyed by layer count `N = mmax -
+mmin + 1`", and `cap_cmomf` computes `C = areacap(mmin, mmax) * w * l`) — so
+a defaulted range that does not match the drawn one is a wrong modelled
+capacitance, not just missing metadata.
+
 Both decks declare the family, because both upstream rule decks do: `sg13g2`
 is its native home, and `sg13cmos5l`'s own (non-symlinked) top-level
 `sg13cmos5l.lvs` `%include`s the same `cap_cmomi`/`cap_cmomf` derivation

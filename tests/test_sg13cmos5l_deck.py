@@ -1192,6 +1192,97 @@ def test_sg13cmos5l_mom_capacitor_card_drops_params_keyword_and_suffixes_geometr
     assert card.endswith(f" {name} W=3U L=8U")
 
 
+#: The `cap_cmomi`/`cap_cmomf` `.subckt` parameters `klt extract` does NOT
+#: measure and therefore does NOT write onto the card (issue #2408). Verbatim
+#: from IHP's own Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
+#: `607e18d4bd9214a52575c194b4181ef449f9252f`,
+#: `libs.tech/ngspice/models/cap_cmomi.lib:60` / `cap_cmomf.lib:53`):
+#:
+#:   .subckt cap_cmomi PLUS MINUS w=5e-6 l=5e-6 mmin=1 mmax=4 feed=double
+#:                                subblock=0 mm_ok=1
+#:   .subckt cap_cmomf PLUS MINUS w=5e-6 l=5e-6 mmin=1 mmax=4 subblock=0
+#:                                mm_ok=1
+#:
+#: (each is one line in the source, soft-wrapped here for width; `feed` is
+#: declared on `cap_cmomi` only). Each tuple entry is the parameter name as
+#: it would be spelled on a written card, matched case-insensitively.
+_MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS = ("mmin", "mmax", "feed", "subblock", "mm_ok")
+
+
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+def test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params(
+    tmp_path: Path, name: str, marker: tuple[int, int]
+):
+    """Issue #2408, **decision pin (option b: document the gap, do not
+    fabricate defaults)**: a `--pdk`-bound MoM-capacitor card carries `W`/`L`
+    and nothing else -- never `mmin`/`mmax`/`feed`/`subblock`/`mm_ok`, the
+    remaining parameters of the upstream `.subckt` its trailing class-name
+    token binds onto (see `_MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS` above for
+    the cited source and each one's PDK default).
+
+    Those five are omitted deliberately, not accidentally:
+
+    - Nothing in the geometry this device's recognition step reads encodes
+      them. `_build_mom_capacitor_extractor` (a transcription of upstream's
+      own `CapMomExtractor`) sees one recognition marker plus exactly two
+      pin-port polygons; `W`/`L` are that marker's own bounding box, and the
+      finger stack's metal range, feed variant, and `subblock`/`mm_ok`
+      switches are simply not in the drawn shapes. Upstream's own LVS
+      extractor does not capture them either.
+    - Writing the PDK defaults explicitly would simulate *identically* (they
+      are the defaults) while asserting a drawn metal range and feed variant
+      `klt extract` never measured -- turning a visible gap into an invisible
+      wrong answer for a design that drew, say, a Metal1-Metal3 `same`-feed
+      device.
+    - There is no deck-independent default set to hardcode anyway: `mmax=4`
+      is keyed to cmos5l's own Metal1..Metal4 thin-metal stack, while the
+      `sg13g2` deck declares the same two device names over Metal1..Metal5;
+      and `feed` exists on `cap_cmomi` only, so emitting it uniformly would
+      pass `cap_cmomf` a parameter its subcircuit does not declare.
+
+    So this is a *pin*, not an aspiration: if a future change starts writing
+    any of the five, that must be a deliberate decision (with the values
+    actually recovered from layout, not defaulted), and this test is the
+    place it gets re-argued. The gap itself is documented for consumers in
+    `docs/cli/extract.md`'s "MoM capacitor devices" section.
+    """
+    path = _write_gds(_make_sg13cmos5l_mom_layout(marker=marker), tmp_path / "mom.gds")
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "mom.spice"),
+    )
+
+    assert report["device_counts"] == {name: 1}
+
+    (card,) = [line for line in _device_cards(report) if f" {name} " in line]
+
+    lowered = card.lower()
+    for param in _MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS:
+        assert f"{param}=" not in lowered, (
+            f"card writes '{param}=', a PDK subckt parameter `klt extract` "
+            f"never measures -- see this test's docstring (issue #2408): {card}"
+        )
+
+    # Positive half of the pin: exactly the two measured geometry parameters
+    # are written, so the loop above cannot pass by the card having lost its
+    # parameters altogether.
+    assert [token.split("=", 1)[0] for token in card.split() if "=" in token] == [
+        "W",
+        "L",
+    ]
+
+    # `--pdk` does not change this card: `cap_cmom*` has no curated model
+    # binding to resolve (see `mom_capacitors`'s own docstring), so the
+    # unbound-device writer owns it either way -- same #2355 shape as the
+    # no-`--pdk` test above.
+    assert card.endswith(f" {name} W=3U L=8U")
+
+
 def test_sg13cmos5l_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
     tmp_path: Path,
 ):

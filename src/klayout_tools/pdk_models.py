@@ -616,6 +616,37 @@ def _unbound_mom_capacitor_card(
     :data:`GEOMETRY_STYLE_UNIT_SUFFIX` produces for this family's resistor
     cards, so both geometry parameters parse as microns regardless of the
     caller's ``.option scale``.
+
+    **``W``/``L`` are the only parameters written -- deliberately (issue
+    #2408).** The upstream subcircuit this card's trailing class-name token
+    binds onto declares more (``IHP-GmbH/ihp-sg13cmos5l`` at
+    ``607e18d4bd9214a52575c194b4181ef449f9252f``,
+    ``libs.tech/ngspice/models/cap_cmomi.lib:60`` /
+    ``cap_cmomf.lib:53``)::
+
+        .subckt cap_cmomi PLUS MINUS w=5e-6 l=5e-6 mmin=1 mmax=4
+                                     feed=double subblock=0 mm_ok=1
+        .subckt cap_cmomf PLUS MINUS w=5e-6 l=5e-6 mmin=1 mmax=4
+                                     subblock=0 mm_ok=1
+
+    (each is one line in the source, soft-wrapped here for width.)
+
+    ``mmin``/``mmax``/``feed``/``subblock``/``mm_ok`` are left off, taking
+    those ``.subckt`` defaults, because none of them is recoverable from the
+    geometry this device's recognition step reads (one marker plus two pin
+    ports -- see ``_build_mom_capacitor_extractor`` in ``extract.py``;
+    upstream's own ``CapMomExtractor`` does not capture them either).
+    Writing the defaults out explicitly would simulate identically -- they
+    *are* the defaults -- while asserting a drawn metal range and feed
+    variant ``klt extract`` never measured, converting a visible gap into an
+    invisible wrong answer for any design that drew a non-default device.
+    ``mmax=4`` is keyed to cmos5l's own Metal1..Metal4 stack while the
+    ``sg13g2`` deck declares the same device names over Metal1..Metal5, and
+    ``feed`` exists on ``cap_cmomi`` only, so there is no deck-independent
+    set to hardcode in the first place. Documented as a known limitation for
+    consumers in ``docs/cli/extract.md``'s "MoM capacitor devices" section;
+    pinned by ``tests/test_sg13cmos5l_deck.py``'s own
+    ``test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params``.
     """
     return (
         f"X{name} {pins} {class_name} "
