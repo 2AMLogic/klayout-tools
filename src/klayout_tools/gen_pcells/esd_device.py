@@ -343,11 +343,13 @@ def _build_esd_device_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                 # would enclose this always-NMOS device in an Nwell and
                 # misclassify it as `pfet` under `klt extract`.
                 if self.ring_implant_present:
-                    # Exactly coincident with the tap ring (issue #1580,
-                    # mirrors `well_island`'s own `well_tap_implant` ring
-                    # precedent) -- always the substrate-tie doping (never
-                    # the well-tie one), since this ring never encloses a
-                    # well (see the no-well-tie note directly above).
+                    # Tracks the tap ring, extended `ring_implant_margin_um`
+                    # past every edge of it (issue #2369's NP.5b/PP.5b
+                    # extension-beyond-COMP fix to #1580's originally
+                    # coincident implant) -- always the substrate-tie doping
+                    # (never the well-tie one), since this ring never
+                    # encloses a well (see the no-well-tie note directly
+                    # above).
                     _insert_implant_ring(
                         self.cell,
                         self.layout.layer(self.ring_implant_layer),

@@ -524,9 +524,12 @@ def _build_mos_array_pcell() -> dict[str, type[kdb.PCellDeclarationHelper]]:
                         self.cell, li_well, dbu, [_shift_box(ring_well_box, ox, oy)]
                     )
                 if self.ring_implant_present:
-                    # Exactly coincident with the tap ring (issue #1580,
-                    # mirrors `well_island`'s own `well_tap_implant` ring
-                    # precedent) -- never a blanket over the enclosed array.
+                    # Tracks the tap ring, extended `ring_implant_margin_um`
+                    # past every edge of it (issue #2369's NP.5b/PP.5b
+                    # extension-beyond-COMP fix to #1580's originally
+                    # coincident implant) -- still a ring, never a blanket
+                    # over the enclosed array (mirrors `well_island`'s own
+                    # `well_tap_implant` ring precedent).
                     _insert_implant_ring(
                         self.cell,
                         self.layout.layer(self.ring_implant_layer),
