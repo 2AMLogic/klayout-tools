@@ -120,6 +120,21 @@ not `klt --version`, if you need to detect this kind of drift. See
   quote a non-empty value, on the same claimant-enforced (not
   tool-enforced) terms item 3 already applies to
   `coverage.layers_in_stream_without_rules`.
+- **Added** (#2403, `klt signoff --manifest`'s `generic` evidence kind —
+  additive, **no** `schema_version` bump): `input_verified` was structurally
+  always `null` for a `generic` envelope (the ingestion path T1 item 8
+  accepts exclusively since #2044), because `source` is documented as
+  purely informational and never read, and `generic` named no field in
+  `_INPUT_ARTIFACT_FIELDS` for `input_verified`'s re-hash to anchor to. A
+  `generic` envelope can now opt in via `provenance.input.path` — the same
+  `{path, scope}` shape (#1261) `klt sim`/`klt pex` already echo their own
+  input under, resolved the same way every other kind's input field is
+  (relative to the evidence file's own directory, or against the repo root
+  for a `{path, scope}` object). Setting it makes `input_verified: true`/
+  `false` reachable for item 8 for the first time; omitting it leaves
+  `input_verified: null`, unchanged from before this field existed. Purely
+  disclosure — no item's `met`/`unmet` verdict changes, per #2196's "No
+  verdict changes" rule.
 - **Fixed** (#2396, `klt extract --abstract-cells` — no JSON shape change, so
   **no** `schema_version` bump; the extracted connectivity itself changes for
   an abstracted cell that contains MiM capacitors): black-boxing a macro made
