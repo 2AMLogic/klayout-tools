@@ -185,8 +185,10 @@ from .extract_abstract import (
     _abstract_cell_body_identity_cover,
     _abstract_cell_global_net_ports,
     _abstract_cell_mask_layers,
+    _abstract_cell_well_tie_cover,
     _apply_def_net_name_overrides,
     _collect_abstract_instances,
+    _connect_abstract_well_tie,
     _def_net_name_probes,
     _erase_abstracted_cell_geometry,
     _load_abstract_cell_lefs,
@@ -3652,6 +3654,7 @@ def extract_netlist_from_layout(
     abstract_cell_global_net_ports: dict[int, int] = {}
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None
+    abstract_well_tie_cover: kdb.Region | None = None
     if abstract_cell_patterns:
         abstract_instances = _collect_abstract_instances(
             layout, top_cell, abstract_cell_patterns
@@ -3686,6 +3689,17 @@ def extract_netlist_from_layout(
             # through that global (`_abstract_cell_global_net_ports` --
             # warned about instead of silently dropped).
             abstract_body_identity_cover = _abstract_cell_body_identity_cover(
+                layout, deck, abstract_instances
+            )
+            # Same pre-erasure window, same reason (issue #2398): the
+            # well-tie slice of the matched instances' own tap geometry is
+            # the only drawn conductor joining the well cover above to the
+            # contact/metal stack abstraction leaves intact, so without it
+            # the restored well is an island the parent cannot reach. See
+            # `_abstract_cell_well_tie_cover` for why only the well-tie
+            # (never the substrate-tie) half is restored, and why it is kept
+            # off `tap` itself.
+            abstract_well_tie_cover = _abstract_cell_well_tie_cover(
                 layout, deck, abstract_instances
             )
             abstract_cell_global_net_ports = {
@@ -3740,6 +3754,7 @@ def extract_netlist_from_layout(
         abstract_cell_global_net_ports=abstract_cell_global_net_ports,
         abstract_body_identity_cover=abstract_body_identity_cover,
         abstract_capacitor_top_via_exclusions=abstract_capacitor_top_via_exclusions,
+        abstract_well_tie_cover=abstract_well_tie_cover,
         mom_net=mom_net,
         mom_background_permittivity=mom_background_permittivity,
         def_net_names=def_net_names,
@@ -6306,6 +6321,7 @@ def _extract_netlist(
     abstract_cell_global_net_ports: dict[int, int] | None = None,
     abstract_body_identity_cover: tuple[kdb.Region, kdb.Region] | None = None,
     abstract_capacitor_top_via_exclusions: dict[int, kdb.Region] | None = None,
+    abstract_well_tie_cover: kdb.Region | None = None,
     mom_net: str | None = None,
     mom_background_permittivity: float = MOM_CROSSCHECK_BACKGROUND_PERMITTIVITY,
     def_net_names: bool = False,
@@ -6496,6 +6512,16 @@ def _extract_netlist(
     -- so a MiM cap inside a black box does not extract as a hard short
     between its own plates. ``None`` (the default, and every non-abstracted
     run) leaves that exclusion exactly as it was.
+    ``abstract_well_tie_cover`` (issue #2398) is
+    :func:`_abstract_cell_well_tie_cover`'s pre-erasure capture of the tie
+    geometry inside those same matched instances, handed to
+    :func:`_connect_abstract_well_tie` below: intersected with
+    ``nwell_body_cover`` there -- so only the **well**-tie half survives --
+    and registered as its own conductor layer connected to ``nwell`` and
+    ``contact``. That is the drawn bridge from a macro's own well to the
+    contact/metal stack abstraction leaves intact, without which a
+    ``well_label`` body pin binds to an isolated island instead of the net
+    the parent routes it to. ``None`` (the default) makes it a no-op.
     """
     import klayout.db as kdb
 
@@ -7563,6 +7589,17 @@ def _extract_netlist(
         l2n.connect(tap_substrate_outside, contact)
         for isolated_slice in tap_substrate_isolated:
             l2n.connect(isolated_slice, contact)
+    # Re-join an abstracted macro's own well to the contact/metal stack its
+    # tie was contacted up through (issue #2398) -- the `tap`/`nwell`/
+    # `contact` triangle above, restricted to the well-tie geometry erasure
+    # took away. The returned region is bound to a deliberately-unused local
+    # purely to hold a Python reference for `l2n`'s lifetime, exactly like
+    # every other region registered above. Deliberately outside the
+    # `tap_declared` gate: it is empty whenever the deck has no tap mechanism
+    # at all, so the gate would be redundant.
+    _abstract_well_tie = _connect_abstract_well_tie(
+        l2n, nwell, nwell_body_cover, contact, abstract_well_tie_cover
+    )
     l2n.connect(nwell, well_label)
     # Name a poly/gate node directly off a text on the poly-label layer -- the
     # only way a bare-poly gate (no contact/metal landing pad) can carry a
