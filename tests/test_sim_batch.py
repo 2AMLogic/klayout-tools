@@ -338,9 +338,14 @@ def test_job_cmd_physical_core_workers_expand_as_intended_in_a_shell(tmp_path):
     flag = spec.cmd.split("--format json", 1)[1].split(">", 1)[0].strip()
     probe = f'printf "%s|" {flag}'
     with_cores = subprocess.run(
-        ["sh", "-c", probe], env={"EDA_PHYSICAL_CORES": "8"}, capture_output=True, text=True
+        ["sh", "-c", probe],
+        env={"EDA_PHYSICAL_CORES": "8"},
+        capture_output=True,
+        text=True,
     ).stdout
-    without = subprocess.run(["sh", "-c", probe], env={}, capture_output=True, text=True).stdout
+    without = subprocess.run(
+        ["sh", "-c", probe], env={}, capture_output=True, text=True
+    ).stdout
     assert with_cores == "--max-workers|8|"
     # An image that predates $EDA_PHYSICAL_CORES keeps klt's own default.
     assert without == "|"
