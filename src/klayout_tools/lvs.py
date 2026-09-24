@@ -163,6 +163,7 @@ from .lvs_mismatch import (
     _build_mismatches,
     _build_net_correspondence,
     _collect_tolerance_snaps,
+    _device_class_family_findings,
     _make_compare_logger,
     _mismatch,
     _parse_parameter_tolerance,
@@ -228,6 +229,21 @@ CATEGORY_DEVICE_CLASS = "device.class"
 #: extractor's three-terminal resistor class vs. a plain-element reference's
 #: two-terminal one) -- see `_device_class_arity_mismatch`.
 CATEGORY_DEVICE_CLASS_ARITY = "device.class_arity"
+#: Issue #2421: the reference netlist instantiates **two or more** device
+#: classes that the layout-side deck derives from one and the same drawn
+#: geometry and tells apart only by a whole-run `deck_options` key
+#: (`ResistorDevice.flavour_option`/`CapacitorDevice.flavour_option` -- e.g.
+#: gf180mcu's `poly_res`, whose `ppolyf_u_1k`/`_2k`/`_3k` are the *same*
+#: drawn `Resistor`-marked poly segment at three sheet-rho interpretations).
+#: Because the deck recognises exactly one of those names per run -- the
+#: flavour is a property of the wafer's process option, not of the drawn
+#: shape -- such a reference cannot match under *any* option value: whichever
+#: one is selected, every instance of the other class(es) is compared against
+#: a device class the extraction never produces. Reported as a pre-flight
+#: diagnosis so the run does not look like an ordinary `device.class`/
+#: `device.unmatched` mismatch that a different `deck_options` value might
+#: fix (see `_device_class_family_findings`).
+CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE = "device.class_family_unsatisfiable"
 #: Issue #506: `request.reference.device_bulk` reconciled a reference device
 #: class up to the layout side's terminal list before comparing -- the
 #: disclosure that a match on that class rests on a caller assertion, not on
@@ -1283,6 +1299,19 @@ def run_lvs(request: str) -> dict[str, Any]:
     except (UnknownExtractionDeckError, InvalidDeckOptionError) as exc:
         raise LvsError(str(exc)) from exc
 
+    # Issue #2421: a pre-flight check on the *reference* netlist against the
+    # deck's option-selected, shared-geometry device families (a
+    # `ResistorDevice`/`CapacitorDevice` entry carrying `flavour_option` plus
+    # two or more `flavours`, e.g. gf180mcu's `poly_res`). A reference that
+    # names more than one class of such a family cannot match under *any*
+    # `deck_options` value -- so the finding is collected here, from the
+    # reference netlist as given and independent of which value this run
+    # selected, and appended to `mismatches[]` further down (the same
+    # collect-early/append-late shape `flatten_warnings` above uses). Runs for
+    # both engines and both layout shapes: all it needs is a resolved
+    # `layout.deck` and the reference netlist.
+    family_findings = _device_class_family_findings(reference_netlist, layout_deck)
+
     if combine_devices_per_circuit is not None and layout_deck is not None:
         # Issue #559/#585/#1557: the same deferred resistor
         # `fixed_offset_ohm` correction the whole-netlist `combine_devices`
@@ -1896,6 +1925,17 @@ def run_lvs(request: str) -> dict[str, Any]:
         # `flatten_layout` above), not a `NetlistComparer` event, so it is
         # appended here rather than folded into `_build_mismatches`.
         mismatches.extend(power_only_pruning_warnings)
+
+    # Issue #2421: same append-here rationale as the disclosures above --
+    # this is a pre-flight determination about the reference netlist and the
+    # deck, made before the compare ran, not a `NetlistComparer` event.
+    # Unlike them it is `severity: "error"` (the reference really cannot
+    # match), but like `device.class_arity` it is diagnostic only: it never
+    # moves `status` on its own -- the compare that already ran reported the
+    # mismatch this entry explains. Extended unconditionally (like
+    # `supply_findings` below, unlike the `if`-guarded warnings above): the
+    # list is empty on every run that has no such family to report.
+    mismatches.extend(family_findings)
 
     if gate_level_port_alias_warnings:
         # Issue #2021: same rationale as the disclosures above -- joining an

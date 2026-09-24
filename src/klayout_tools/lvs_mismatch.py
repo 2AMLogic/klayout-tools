@@ -645,6 +645,140 @@ def _body_net_warnings(layout_circuit: Any, deck: Any) -> list[dict[str, Any]]:
     return entries
 
 
+def _flavour_families(deck: Any) -> list[tuple[str, str, list[str]]]:
+    """Every option-selected, shared-geometry device family ``deck`` declares
+    (issue #2421), as ``(device_kind, flavour_option, [class name, ...])``.
+
+    A family is a single :class:`~klayout_tools.decks.extraction.ResistorDevice`
+    / :class:`~klayout_tools.decks.extraction.CapacitorDevice` entry that
+    carries a ``flavour_option`` key and two or more ``flavours``: one drawn
+    geometry the deck recognises exactly once per run, whose *name* (and
+    sheet-rho / capacitance-density) is chosen by a whole-run deck option
+    rather than by anything drawn per instance -- see
+    ``ResistorDevice.flavour_option``'s own docstring for why such a family is
+    one entry with selectable flavours rather than several always-on entries.
+
+    Derived entirely from the deck's own data, so a PDK that later declares
+    another such family (a MiM-density option, a metal-resistor thickness
+    option, ...) is covered with no change here. The entry's own resolved
+    ``name`` is included in the class list alongside every declared flavour
+    name: a deck whose default name is not itself listed among its
+    ``flavours`` is still a member of its own family.
+    """
+    families: list[tuple[str, str, list[str]]] = []
+    for kind, entries in (
+        ("resistor", getattr(deck, "resistors", ())),
+        ("capacitor", getattr(deck, "capacitors", ())),
+    ):
+        for entry in entries:
+            option = getattr(entry, "flavour_option", None)
+            flavours = getattr(entry, "flavours", ())
+            if option is None or len(flavours) < 2:
+                continue
+            names = sorted(
+                {entry.name, *(flavour.name for flavour in flavours)},
+                key=str.lower,
+            )
+            families.append((kind, option, names))
+    return families
+
+
+def _device_class_family_findings(
+    reference_netlist: Any, deck: Any
+) -> list[dict[str, Any]]:
+    """Issue #2421: diagnose a reference netlist that is unsatisfiable *by
+    construction* -- it instantiates two or more device classes from the same
+    option-selected, shared-geometry family (:func:`_flavour_families`).
+
+    gf180mcu's high-sheet-rho poly resistors are the worked example:
+    ``ppolyf_u_1k``/``ppolyf_u_2k``/``ppolyf_u_3k`` are the *identical* drawn
+    ``Resistor``-marked poly segment, and the deck's ``poly_res`` option (the
+    wafer's implant option, not the geometry) decides which single name every
+    instance on that layer extracts as. A reference naming more than one of
+    them therefore cannot pass LVS under any option value: whichever one is
+    selected, the instances of the other class(es) are compared against a
+    device class the extraction never produces.
+
+    Without this check that shows up only as an ordinary ``device.class``/
+    ``device.unmatched`` mismatch, identical for every option value -- so the
+    natural next step ("try the other value") reproduces the same failure, and
+    only reading the PDK deck's own derivation rules reveals that the classes
+    share one drawn layer. This entry says it directly instead, naming the
+    family, the option that selects between its members, and the classes the
+    reference actually instantiates.
+
+    A **pre-flight** check, deliberately independent of which ``deck_options``
+    value this particular run selected (and of the compare's own outcome): the
+    question it answers is whether the *reference* is satisfiable at all, not
+    whether this run matched. Counts only device classes with at least one
+    instantiated device on the reference side, so a class merely registered by
+    a reader/deck but never instantiated cannot raise a false positive.
+    Matched case-insensitively, for the same ``NetlistSpiceReader``
+    upper-cases-class-names reason ``lvs.py``'s
+    ``_validate_combine_device_classes`` documents (``PPOLYF_U_1K`` read back
+    from SPICE vs. ``ppolyf_u_1k`` as the deck declares it).
+
+    Returns ``severity: "error"``, ``side: "reference"`` entries -- one per
+    affected family. Unlike the disclosure warnings around it this is a real
+    finding (the reference cannot match), but like ``device.class_arity`` it
+    is purely *diagnostic*: it never changes ``status`` on its own (the
+    compare this run performed already reported the mismatch it explains).
+    """
+    from .lvs import CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE
+
+    if reference_netlist is None or deck is None:
+        return []
+
+    families = _flavour_families(deck)
+    if not families:
+        return []
+
+    # Upper-cased class name -> the spelling the reference itself uses.
+    instantiated: dict[str, str] = {}
+    for circuit in reference_netlist.each_circuit():
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            if device_class is None:
+                continue
+            instantiated.setdefault(device_class.name.upper(), device_class.name)
+    if not instantiated:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for kind, option, names in families:
+        found = [
+            instantiated[name.upper()] for name in names if name.upper() in instantiated
+        ]
+        if len(found) < 2:
+            continue
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_CLASS_FAMILY_UNSATISFIABLE,
+                "error",
+                f"the reference netlist instantiates {len(found)} device "
+                f"classes of the deck's '{option}' {kind} family "
+                f"({', '.join(found)}) -- that family's members "
+                f"({', '.join(names)}) are all extracted from the same drawn "
+                f"geometry, and the deck option '{option}' selects which "
+                "single one every instance on that layer extracts as, for the "
+                "whole run. No value of that option can therefore match this "
+                "reference: whichever is selected, the instances of the other "
+                "class(es) are compared against a device class the extraction "
+                "never produces. The design has to commit to one class (one "
+                "process option) for the whole run (see docs/cli/lvs.md, "
+                "'device.class_family_unsatisfiable')",
+                "reference",
+                details={
+                    "option": option,
+                    "device_kind": kind,
+                    "family": names,
+                    "reference_classes": found,
+                },
+            )
+        )
+    return entries
+
+
 def _build_mismatches(
     logger: Any,
     layout_netlist: Any | None = None,
