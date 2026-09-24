@@ -130,8 +130,39 @@ BATCH_REPORT_FILENAME = "report.json"
 BATCH_ARTIFACTS_DIRNAME = "artifacts"
 
 #: ``job.json``'s ``tool`` field -- informational only (the harness echoes it
-#: into ``status.json`` and never inspects it).
+#: into ``status.json`` and never inspects it). The default when
+#: ``remote_request`` names no override -- see :func:`_batch_job_tool_label`
+#: (issue #2423) for the ``options.ngspice_binary``-aware label this
+#: constant is the fallback for.
 BATCH_JOB_TOOL = "ngspice"
+
+
+def _batch_job_tool_label(remote_request: dict[str, Any]) -> str:
+    """``job.json``'s ``tool`` label for this batch job (issue #2423):
+    ``options.ngspice_binary`` when the forwarded request document
+    explicitly names one, else :data:`BATCH_JOB_TOOL`.
+
+    Purely cosmetic, matching :data:`BATCH_JOB_TOOL`'s own "informational
+    only, the harness echoes it into ``status.json`` and never inspects it"
+    contract -- **never** resolved against ``$PATH`` here. This process (the
+    *submitting* host) and the job instance that actually runs
+    ``ngspice_binary`` are different machines with different filesystems and
+    `$PATH`s; a `shutil.which()` lookup on the submit side would answer a
+    question about the wrong host. The job instance's own `klt sim`
+    invocation (the ``cmd`` :func:`_build_batch_job_spec` builds) resolves
+    the real binary itself, fresh, from this same forwarded
+    ``options.ngspice_binary``/its own ``$KLT_NGSPICE_BINARY`` -- see
+    ``sim.py``'s ``_resolve_ngspice_binary``. ``$KLT_NGSPICE_BINARY`` itself
+    is not read here either, for the same "describes the submit host, not
+    the job host" reason ``_host_max_workers_cap``'s own docstring gives for
+    ``$KLT_SIM_MAX_WORKERS``.
+    """
+    options = remote_request.get("options") or {}
+    override = options.get("ngspice_binary")
+    if isinstance(override, str) and override:
+        return override
+    return BATCH_JOB_TOOL
+
 
 #: `aws` CLI profile *name* the submit path runs under by default -- 2am's
 #: ``BATCH_SUBMIT_PROFILE``. A profile name is not a credential (see this
@@ -328,7 +359,7 @@ def _build_batch_job_spec(
     command += f' > "$EDA_OUTPUT_DIR/{BATCH_REPORT_FILENAME}"'
     return BatchJobSpec(
         cmd=command,
-        tool=BATCH_JOB_TOOL,
+        tool=_batch_job_tool_label(remote_request),
         pdk_variant=models.get("pdk"),
         pdk_root=models.get("pdk_root"),
         cores_per_job=ASSUMED_THREADS_PER_CORNER,

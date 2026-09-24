@@ -263,6 +263,39 @@ def test_build_batch_job_spec_shape(tmp_path):
     assert document["timeout_seconds"] == 120 * 5 + 120
 
 
+def test_build_batch_job_spec_tool_echoes_ngspice_binary_override(tmp_path):
+    """Issue #2423: `job.json`'s `tool` label reflects `options.ngspice_binary`
+    when the forwarded request names one -- purely informational (the
+    harness never inspects it, see `_batch_job_tool_label`'s own docstring),
+    but should not silently keep reporting `"ngspice"` once the request says
+    otherwise."""
+    netlist = _write_body(tmp_path)
+    spec = sb._build_batch_job_spec(
+        {
+            "models": {"pdk": "sky130A"},
+            "netlist": "netlist.cir",
+            "options": {"ngspice_binary": "/opt/ngspice-custom"},
+        },
+        str(netlist),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert spec.to_job_json()["tool"] == "/opt/ngspice-custom"
+
+
+def test_build_batch_job_spec_tool_falls_back_without_an_override(tmp_path):
+    netlist = _write_body(tmp_path)
+    spec = sb._build_batch_job_spec(
+        {"models": {"pdk": "sky130A"}, "netlist": "netlist.cir", "options": {}},
+        str(netlist),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+    assert spec.to_job_json()["tool"] == sb.BATCH_JOB_TOOL == "ngspice"
+
+
 def test_job_cmd_redirects_report_to_output_dir(tmp_path):
     spec = sb._build_batch_job_spec(
         {"models": {}},

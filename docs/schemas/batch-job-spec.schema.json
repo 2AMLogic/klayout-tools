@@ -10,7 +10,7 @@
     "tool": {
       "type": "string",
       "minLength": 1,
-      "description": "Informational only -- the harness echoes it into status.json and never inspects it. Always \"ngspice\" for a `klt sim` job (sim_batch.BATCH_JOB_TOOL)."
+      "description": "Informational only -- the harness echoes it into status.json and never inspects it. \"ngspice\" for a `klt sim` job by default (sim_batch.BATCH_JOB_TOOL), or the forwarded request's `options.ngspice_binary` when it names one (issue #2423, sim_batch._batch_job_tool_label) -- either way this describes the *job* host's own binary, resolved fresh there; it is never looked up against this (submitting) host's PATH."
     },
     "cmd": {
       "type": "string",

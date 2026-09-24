@@ -83,6 +83,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from klayout_tools import _paths as paths_module
 from klayout_tools import equiv
 from klayout_tools import pdk as pdk_module
 from klayout_tools import synthesize as synthesize_module
@@ -91,6 +92,39 @@ from klayout_tools.equiv import EquivError, run_equiv
 from klayout_tools.synthesize import run_synthesize
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
+
+@pytest.fixture(autouse=True)
+def _bare_name_binary_resolution(monkeypatch):
+    """Issue #2423: ``equiv.py`` now resolves ``yosys``/``iverilog``/``vvp``
+    via :func:`klayout_tools._paths.resolve_tool_binary` (``shutil.which``)
+    before ever spawning a subprocess, rather than hardcoding the bare tool
+    name in ``argv[0]``. Every mocked-``subprocess.run`` test below (and the
+    ``@pytest.mark.skipif`` real-tool integration tests) was written, and
+    still asserts, against that pre-#2423 bare-name shape (``cmd[:2] ==
+    ["yosys", "-s"]``, etc.) -- this autouse fixture stubs resolution to
+    return each tool's own bare name unchanged, so every one of those
+    existing assertions keeps holding without editing dozens of call sites.
+
+    This does not test the resolution feature itself (path-separator
+    handling, an ``options.*_binary``/``$KLT_*_BINARY`` override, an
+    explicitly-named-but-broken binary) -- see
+    ``TestBinaryResolutionOverride`` below, whose tests override this
+    fixture's patch with their own ``which_map`` for exactly that reason.
+    A bare name resolving to itself is also not a lie about real behaviour:
+    ``subprocess.run(["yosys", ...])`` still resolves ``yosys`` via the
+    OS's own ``PATH`` search, identically to before this issue -- so the
+    real-tool integration tests below are unaffected by this stub.
+    """
+    real_which = shutil.which
+
+    def fake_which(cmd, *args, **kwargs):
+        if cmd in ("yosys", "iverilog", "vvp"):
+            return cmd
+        return real_which(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
+
 
 # --------------------------------------------------------------------------- #
 # Fixtures (RTL sources)
@@ -551,6 +585,8 @@ def test_confirm_counterexample_degrades_when_iverilog_missing(tmp_path, monkeyp
         netlist_path=str(tmp_path / "netlist.v"),
         output_dir=str(tmp_path),
         diagnostics=diagnostics,
+        request_doc={},
+        request_dir=str(tmp_path),
     )
 
     assert counterexample["confirmed_by_simulation"] is None
@@ -710,6 +746,221 @@ def test_solver_success_mocked_is_equivalent_not_inconclusive(tmp_path, monkeypa
 
 
 # --------------------------------------------------------------------------- #
+# yosys binary resolution override (issue #2423): request.yosys_binary /
+# $KLT_YOSYS_BINARY / the bare "yosys" name on PATH -- this module's own port
+# of lvs_netgen.py's _resolve_netgen_binary (issue #2373), whose equivalent
+# coverage lives in tests/test_lvs.py's test_netgen_engine_* binary-
+# resolution tests. These stub `equiv.subprocess.run` and `_paths.shutil.
+# which` directly (no real yosys binary needed, and no reliance on whichever
+# yosys build -- native or WASI-sandboxed -- happens to be on this host's
+# own PATH), so they exercise the resolution chain itself, not just its
+# already-covered "resolves to the unchanged bare name" default (the
+# `_bare_name_binary_resolution` autouse fixture above).
+# --------------------------------------------------------------------------- #
+
+
+def _which_only(which_map: dict[str, str | None]):
+    """A `shutil.which` stand-in that only recognises the names in
+    `which_map` -- everything else "isn't installed" (`None`). Keeps the
+    binary-resolution tests below independent of whatever this host's own
+    `PATH` actually contains."""
+
+    def _which(cmd, *args, **kwargs):
+        return which_map.get(cmd)
+
+    return _which
+
+
+def _mock_yosys_run_capturing(captured_cmds: list, *, run_stdout: str | None = None):
+    """Like `_mock_yosys_run` above, but records every invoked `cmd` (any
+    resolved binary path, not just the bare `"yosys"` name) so a test can
+    assert which one was actually spawned."""
+
+    def _run(cmd, **kwargs):
+        captured_cmds.append(cmd)
+        if cmd[1] == "-s":
+            return fake_completed(stdout=run_stdout or "", returncode=0)
+        if cmd[1] == "-V":
+            return fake_completed(stdout="Yosys 0.67 (git sha1 deadbeef)\n")
+        raise AssertionError(f"unexpected subprocess.run call in mock: {cmd!r}")
+
+    return _run
+
+
+def test_equiv_explicit_yosys_binary_option_wins(tmp_path, monkeypatch):
+    """`request.yosys_binary` beats the bare `yosys` name -- the resolved
+    absolute path is both what's spawned and what's recorded in the
+    report's own `yosys_binary` field, alongside `engine_version`."""
+    custom = str(tmp_path / "opt" / "yosys-custom")
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "yosys_binary": custom,
+        },
+    )
+    captured: list = []
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only({custom: custom}))
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_yosys_run_capturing(captured, run_stdout=_SAT_SUCCESS_TEXT),
+    )
+
+    report = run_equiv(request_path)
+
+    assert captured[0][0] == custom
+    assert report["yosys_binary"] == custom
+    assert report["status"] == "equivalent"
+
+
+def test_equiv_env_var_yosys_binary_overrides_path(tmp_path, monkeypatch):
+    """`$KLT_YOSYS_BINARY` beats the bare `yosys` name on PATH."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+    captured: list = []
+    monkeypatch.setattr(
+        paths_module.shutil,
+        "which",
+        _which_only({"yosys-from-env": "/opt/yosys-from-env"}),
+    )
+    monkeypatch.setenv("KLT_YOSYS_BINARY", "yosys-from-env")
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_yosys_run_capturing(captured, run_stdout=_SAT_SUCCESS_TEXT),
+    )
+
+    report = run_equiv(request_path)
+
+    assert captured[0][0] == "/opt/yosys-from-env"
+    assert report["yosys_binary"] == "/opt/yosys-from-env"
+
+
+def test_equiv_yosys_binary_option_beats_env_var(tmp_path, monkeypatch):
+    """Explicit `request.yosys_binary` wins over `$KLT_YOSYS_BINARY` -- the
+    documented precedence order."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "yosys_binary": "/opt/yosys-from-option",
+        },
+    )
+    captured: list = []
+    which_map = {
+        "/opt/yosys-from-option": "/opt/yosys-from-option",
+        "yosys-from-env": "/opt/yosys-from-env",
+    }
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only(which_map))
+    monkeypatch.setenv("KLT_YOSYS_BINARY", "yosys-from-env")
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_yosys_run_capturing(captured, run_stdout=_SAT_SUCCESS_TEXT),
+    )
+
+    report = run_equiv(request_path)
+
+    assert captured[0][0] == "/opt/yosys-from-option"
+    assert report["yosys_binary"] == "/opt/yosys-from-option"
+
+
+def test_equiv_unresolvable_yosys_binary_option_raises(tmp_path, monkeypatch):
+    """An explicit `request.yosys_binary` that is not runnable is a clean
+    application error naming the field -- never a silent fallback to the
+    bare name on PATH, and never a bare `FileNotFoundError`."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    missing = str(tmp_path / "nope" / "yosys-custom")
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {
+            "gold": _side(["gold.v"]),
+            "gate": _side(["gate.v"]),
+            "yosys_binary": missing,
+        },
+    )
+
+    with pytest.raises(EquivError, match="request.yosys_binary"):
+        run_equiv(request_path)
+
+
+def test_equiv_unresolvable_yosys_binary_env_var_raises(tmp_path, monkeypatch):
+    """Same for the env-var form -- an override the caller believes is in
+    force but silently is not would be worse than not supporting one."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+    monkeypatch.setenv("KLT_YOSYS_BINARY", str(tmp_path / "nope" / "yosys-env"))
+
+    with pytest.raises(EquivError, match="KLT_YOSYS_BINARY"):
+        run_equiv(request_path)
+
+
+def test_resolve_iverilog_binary_explicit_option_wins(tmp_path, monkeypatch):
+    """`request.iverilog_binary` beats the bare `iverilog` name -- unit-level
+    coverage of the resolver equiv.py's counterexample-replay path calls,
+    mirroring the yosys coverage above without needing a full replay run."""
+    custom = str(tmp_path / "opt" / "iverilog-custom")
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only({custom: custom}))
+    resolved = equiv._resolve_iverilog_binary(
+        {"iverilog_binary": custom}, str(tmp_path)
+    )
+    assert resolved == custom
+
+
+def test_resolve_iverilog_binary_missing_is_none_not_required(tmp_path, monkeypatch):
+    """No override, nothing on PATH: `_resolve_iverilog_binary` degrades to
+    `None` (required=False) rather than raising -- the counterexample-replay
+    path's pre-existing "iverilog absent" contract."""
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only({}))
+    assert equiv._resolve_iverilog_binary({}, str(tmp_path)) is None
+
+
+def test_resolve_iverilog_binary_unresolvable_option_raises(tmp_path, monkeypatch):
+    """An explicit-but-broken `request.iverilog_binary` still raises even
+    though a bare-name miss would not -- "required=False" only widens the
+    *unset* case, never lets a named-but-broken override degrade silently."""
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only({}))
+    missing = str(tmp_path / "nope" / "iverilog-custom")
+    with pytest.raises(EquivError, match="request.iverilog_binary"):
+        equiv._resolve_iverilog_binary({"iverilog_binary": missing}, str(tmp_path))
+
+
+def test_resolve_vvp_binary_explicit_option_wins(tmp_path, monkeypatch):
+    """`request.vvp_binary` beats the bare `vvp` name -- the `vvp` half of
+    the coverage above."""
+    custom = str(tmp_path / "opt" / "vvp-custom")
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only({custom: custom}))
+    resolved = equiv._resolve_vvp_binary({"vvp_binary": custom}, str(tmp_path))
+    assert resolved == custom
+
+
+def test_resolve_vvp_binary_env_var_overrides_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        paths_module.shutil,
+        "which",
+        _which_only({"vvp-from-env": "/opt/vvp-from-env"}),
+    )
+    monkeypatch.setenv("KLT_VVP_BINARY", "vvp-from-env")
+    assert equiv._resolve_vvp_binary({}, str(tmp_path)) == "/opt/vvp-from-env"
+
+
+# --------------------------------------------------------------------------- #
 # Issue #1349 AC1: a solver-reported counterexample whose own iverilog/vvp
 # replay does NOT reproduce a diverging output must be reported
 # `"inconclusive"`, never `"counterexample"` -- the engine already computes
@@ -743,7 +994,14 @@ def test_unconfirmed_combinational_counterexample_downgrades_to_inconclusive(
     )
 
     def _fake_confirm_not_reproduced(
-        *, counterexample, netlist_path, output_dir, diagnostics, sim_backend
+        *,
+        counterexample,
+        netlist_path,
+        output_dir,
+        diagnostics,
+        sim_backend,
+        request_doc,
+        request_dir,
     ):
         # Mirrors the real `_confirm_counterexample`'s own "not reproduced"
         # outcome shape (a simulation that ran, but found no divergence).
@@ -802,7 +1060,14 @@ def test_confirmed_by_simulation_none_keeps_combinational_counterexample_status(
     )
 
     def _fake_confirm_unavailable(
-        *, counterexample, netlist_path, output_dir, diagnostics, sim_backend
+        *,
+        counterexample,
+        netlist_path,
+        output_dir,
+        diagnostics,
+        sim_backend,
+        request_doc,
+        request_dir,
     ):
         counterexample["confirmed_by_simulation"] = None
         diagnostics.append(
@@ -1611,7 +1876,15 @@ def test_unconfirmed_sequential_counterexample_downgrades_to_inconclusive(
     )
 
     def _fake_confirm_not_reproduced(
-        *, counterexample, ports, netlist_path, output_dir, diagnostics, sim_backend
+        *,
+        counterexample,
+        ports,
+        netlist_path,
+        output_dir,
+        diagnostics,
+        sim_backend,
+        request_doc,
+        request_dir,
     ):
         counterexample["simulation"] = {
             "engine": "icarus",
@@ -1684,7 +1957,15 @@ def test_confirmed_by_simulation_none_keeps_sequential_counterexample_status(
     )
 
     def _fake_confirm_unavailable(
-        *, counterexample, ports, netlist_path, output_dir, diagnostics, sim_backend
+        *,
+        counterexample,
+        ports,
+        netlist_path,
+        output_dir,
+        diagnostics,
+        sim_backend,
+        request_doc,
+        request_dir,
     ):
         counterexample["confirmed_by_simulation"] = None
         diagnostics.append(
@@ -3230,11 +3511,15 @@ def test_sequential_replay_backend_disagreement_is_flagged(tmp_path, monkeypatch
         "verilator": "EQUIV_SIM_CYCLE 2 gold q 0\nEQUIV_SIM_CYCLE 2 gate q 0\n",
     }
 
-    def _fake_replay(*, backend, netlist_path, tb_path, output_dir, stem):
-        return (replies[backend], None)
+    def _fake_replay(
+        *, backend, netlist_path, tb_path, output_dir, stem, request_doc, request_dir
+    ):
+        return (replies[backend], None, {})
 
     monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
-    monkeypatch.setattr(equiv, "_sim_backend_version", lambda backend: "0.0")
+    monkeypatch.setattr(
+        equiv, "_sim_backend_version", lambda backend, binary=None: "0.0"
+    )
 
     diagnostics: list[dict] = []
     equiv._confirm_sequential_counterexample(
@@ -3244,6 +3529,8 @@ def test_sequential_replay_backend_disagreement_is_flagged(tmp_path, monkeypatch
         output_dir=str(tmp_path),
         diagnostics=diagnostics,
         sim_backend="both",
+        request_doc={},
+        request_dir=str(tmp_path),
     )
 
     assert counterexample["confirmed_by_simulation"] is None
@@ -3276,11 +3563,15 @@ def test_sequential_replay_two_state_start_state_is_explained(tmp_path, monkeypa
         ),
     }
 
-    def _fake_replay(*, backend, netlist_path, tb_path, output_dir, stem):
-        return (replies[backend], None)
+    def _fake_replay(
+        *, backend, netlist_path, tb_path, output_dir, stem, request_doc, request_dir
+    ):
+        return (replies[backend], None, {})
 
     monkeypatch.setattr(equiv, "_run_replay_backend", _fake_replay)
-    monkeypatch.setattr(equiv, "_sim_backend_version", lambda backend: "0.0")
+    monkeypatch.setattr(
+        equiv, "_sim_backend_version", lambda backend, binary=None: "0.0"
+    )
 
     diagnostics: list[dict] = []
     equiv._confirm_sequential_counterexample(
@@ -3290,6 +3581,8 @@ def test_sequential_replay_two_state_start_state_is_explained(tmp_path, monkeypa
         output_dir=str(tmp_path),
         diagnostics=diagnostics,
         sim_backend="both",
+        request_doc={},
+        request_dir=str(tmp_path),
     )
 
     assert counterexample["confirmed_by_simulation"] is True

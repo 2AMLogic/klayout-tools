@@ -255,8 +255,8 @@ def layout_geometry_digest(path: str | None) -> str | None:
     return f"sha256:{digest.hexdigest()}"
 
 
-def _yosys_version() -> str | None:
-    """Yosys's own reported version token (``yosys -V``'s output), or
+def _yosys_version(binary: str = "yosys") -> str | None:
+    """Yosys's own reported version token (``<binary> -V``'s output), or
     ``None`` if unresolvable -- never raises. Shared by ``equiv.py`` (SAT
     equivalence checking) and ``synthesize.py`` (RTL synthesis), which both
     invoke Yosys as an external engine and record its version as
@@ -264,10 +264,20 @@ def _yosys_version() -> str | None:
     independently accumulated before this dedup (issue #1112): a ``timeout``
     against a hung subprocess, and a non-zero-``returncode`` check against a
     Yosys invocation that printed nothing useful to stdout.
+
+    ``binary`` (issue #2423) defaults to the bare ``"yosys"`` name on
+    ``PATH`` -- ``synthesize.py``'s call sites are unchanged by this
+    parameter's existence. ``equiv.py`` passes the same resolved absolute
+    path its own ``yosys -s <script>`` invocation actually used (see
+    ``_resolve_yosys_binary``), so ``engine_version`` never reports a
+    *different* Yosys build's version than the one that produced the
+    verdict -- e.g. a host where the bare ``"yosys"`` on ``PATH`` is a
+    WASI-sandboxed build but ``options.yosys_binary``/``$KLT_YOSYS_BINARY``
+    points at a native one elsewhere.
     """
     try:
         completed = subprocess.run(
-            ["yosys", "-V"], capture_output=True, text=True, timeout=10
+            [binary, "-V"], capture_output=True, text=True, timeout=10
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

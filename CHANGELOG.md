@@ -366,6 +366,45 @@ not `klt --version`, if you need to detect this kind of drift. See
   percentage-of-`clock_period_ns` exclusion rule and the
   "last implementation of a logic function" warning remain unimplemented
   follow-ups; the explicit list is the primitive.
+- **Fixed** (#2423, `klt equiv`/`klt sim` engine binary resolution —
+  additive, **no** `schema_version` bump on either command: `klt equiv`
+  gains one new always-present top-level key, `yosys_binary`, plus
+  `counterexample.simulation.iverilog_binary`/`vvp_binary` when the
+  canonical replay backend actually ran them; `klt sim` gains one new
+  always-present-but-nullable `environment.ngspice_binary` key): `yosys`
+  (`klt equiv`), `ngspice` (`klt sim`), and `iverilog`/`vvp` (`klt equiv`'s
+  counterexample-replay path) were each invoked under a hardcoded bare
+  name, the same friction #2373 fixed for `netgen` — a host whose `yosys`
+  on `$PATH` is a WASI-sandboxed build (e.g. `yowasp-yosys`) that cannot
+  read this command's own generated `.ys` script off disk had no way to
+  point at a native build elsewhere without reshaping `$PATH` for every
+  other tool too. Each binary is now resolved via a shared helper
+  (`klayout_tools._paths.resolve_tool_binary`, the generalisation of
+  #2373's `_resolve_netgen_binary`), first runnable candidate wins:
+  `request.yosys_binary`/`request.iverilog_binary`/`request.vvp_binary`
+  (new, `klt equiv` — top-level request fields, matching that command's
+  existing convention rather than an `options` sub-object) or
+  `options.ngspice_binary` (new, `klt sim` — matching *that* command's own
+  `options` convention), then `$KLT_YOSYS_BINARY`/`$KLT_IVERILOG_BINARY`/
+  `$KLT_VVP_BINARY`/`$KLT_NGSPICE_BINARY`, then the bare name on `PATH`. An
+  explicitly-named binary that is not runnable is an application error
+  naming which source named it, never a silent fallback. `yosys` is always
+  required (both `klt equiv` engines invoke it); `iverilog`/`vvp` stay
+  optional (`required=False`) so their pre-existing "not installed"
+  degrade to a `simulation_unavailable` diagnostic is unchanged when no
+  override is given — only an explicitly-named-but-broken override raises.
+  `klt sim`'s `xyce` engine and `klt sim --backend batch`'s submit-side
+  `job.json` `tool` label (purely informational, echoing
+  `options.ngspice_binary` when the forwarded request names one, never
+  resolved against the submitting host's own `PATH`) are the only spots
+  this issue leaves untouched. The new keys are host-local paths, so
+  `klt equiv --check --rerun` excludes `yosys_binary`/
+  `counterexample.simulation.iverilog_binary`/`vvp_binary` from its drift
+  diff (mirroring #2373's `_LVS_RERUN_EXCLUDE_PATHS`), keeping reports
+  committed before this change re-running clean; `klt sim` has no
+  `--check`/`--rerun` mode, so there is nothing to exclude there.
+  `docs/cli/equiv.md`/`docs/cli/sim.md` document the resolution order and
+  new fields.
 - **Fixed** (#2373, `klt lvs --engine netgen` binary resolution — additive,
   **no** `schema_version` bump: one new always-present `environment` key,
   `netgen_binary`): the netgen engine invoked the hardcoded binary name

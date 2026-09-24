@@ -33,11 +33,43 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from klayout_tools import _paths as paths_module
 from klayout_tools import pdk, remote_transport, sim
 from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
+
+@pytest.fixture(autouse=True)
+def _bare_name_ngspice_resolution(monkeypatch):
+    """Issue #2423: ``sim.py`` now resolves the ``ngspice`` binary via
+    :func:`klayout_tools._paths.resolve_tool_binary` (``shutil.which``)
+    *before* dispatching any corner, rather than hardcoding the bare name
+    ``ngspice`` in ``argv[0]`` -- and, since ``ngspice`` is `klt sim`'s
+    *default* engine, that resolution now runs for every mocked-
+    ``subprocess.run`` test in this module too (not just ones that opt into
+    an ``engine: "netgen"``-style non-default engine, as `klt lvs`'s
+    analogous #2373 stub only had to cover). Several tests below are
+    explicitly designed to need "no binary required" (this module's own
+    ``# run_sim with a stubbed ngspice subprocess (no binary required)``
+    section header) -- this autouse fixture keeps that promise true even on
+    a host with no real ``ngspice`` install, by stubbing resolution to
+    return the bare name unchanged (mirrors ``test_equiv.py``'s identically-
+    named fixture, issue #2423). A real ``subprocess.run(["ngspice", ...])``
+    still resolves via the OS's own ``PATH`` search exactly as before this
+    issue, so tests that genuinely need a real ``ngspice`` (already gated on
+    their own ``shutil.which("ngspice")``-based skip) are unaffected.
+    """
+    real_which = shutil.which
+
+    def fake_which(cmd, *args, **kwargs):
+        if cmd == "ngspice":
+            return cmd
+        return real_which(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
+
 
 #: `KLT_SKIP_NGSPICE_TESTS=1` (local-only, set by `npm run check:ci` -- never
 #: by CI) opts a host with ngspice installed out of this slow tier too; see
@@ -1871,6 +1903,153 @@ def test_run_sim_stubbed_timeout_is_corner_error(tmp_path, monkeypatch):
     assert corner["status"] == "error"
     codes = [d["code"] for d in corner["diagnostics"]]
     assert codes == ["timeout"]
+
+
+# --------------------------------------------------------------------------- #
+# ngspice binary resolution override (issue #2423): options.ngspice_binary /
+# $KLT_NGSPICE_BINARY / the bare "ngspice" name on PATH -- this module's own
+# port of lvs_netgen.py's _resolve_netgen_binary (issue #2373), whose
+# equivalent coverage lives in tests/test_lvs.py's test_netgen_engine_*
+# binary-resolution tests. These stub `sim.subprocess.run` and
+# `_paths.shutil.which` directly (no real ngspice binary needed), so they
+# run identically on every host -- the module-level `_bare_name_ngspice_
+# resolution` autouse fixture above covers the unchanged bare-name default;
+# these tests override its stub per-case to exercise the resolution chain
+# itself.
+# --------------------------------------------------------------------------- #
+
+
+def _which_only(which_map: dict[str, str | None]):
+    """A `shutil.which` stand-in that only recognises the names in
+    `which_map` -- everything else "isn't installed" (`None`). Keeps these
+    tests independent of whatever this host's own `PATH` actually
+    contains."""
+
+    def _which(cmd, *args, **kwargs):
+        return which_map.get(cmd)
+
+    return _which
+
+
+def _stub_ngspice_subprocess(monkeypatch, *, captured_cmds: list | None = None):
+    """Like `_stub_subprocess_run` above, but also records every invoked
+    `cmd` so a test can assert which binary was actually spawned."""
+
+    def fake_run(cmd, capture_output, text, timeout):
+        if captured_cmds is not None:
+            captured_cmds.append(cmd)
+        log_path = cmd[cmd.index("-o") + 1]
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write("")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+def test_run_sim_explicit_ngspice_binary_option_wins(tmp_path, monkeypatch):
+    """`options.ngspice_binary` beats the bare `ngspice` name -- the
+    resolved absolute path is both what's spawned and what's recorded in
+    `environment.ngspice_binary`."""
+    _write_body(tmp_path)
+    custom = str(tmp_path / "opt" / "ngspice-custom")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"ngspice_binary": custom},
+        },
+    )
+    captured: list = []
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only({custom: custom}))
+    _stub_ngspice_subprocess(monkeypatch, captured_cmds=captured)
+
+    report = sim.run_sim(str(request))
+
+    assert captured[0][0] == custom
+    assert report["environment"]["ngspice_binary"] == custom
+
+
+def test_run_sim_env_var_ngspice_binary_overrides_path(tmp_path, monkeypatch):
+    """`$KLT_NGSPICE_BINARY` beats the bare `ngspice` name on PATH."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    captured: list = []
+    monkeypatch.setattr(
+        paths_module.shutil,
+        "which",
+        _which_only({"ngspice-from-env": "/opt/ngspice-from-env"}),
+    )
+    monkeypatch.setenv("KLT_NGSPICE_BINARY", "ngspice-from-env")
+    _stub_ngspice_subprocess(monkeypatch, captured_cmds=captured)
+
+    report = sim.run_sim(str(request))
+
+    assert captured[0][0] == "/opt/ngspice-from-env"
+    assert report["environment"]["ngspice_binary"] == "/opt/ngspice-from-env"
+
+
+def test_run_sim_ngspice_binary_option_beats_env_var(tmp_path, monkeypatch):
+    """Explicit `options.ngspice_binary` wins over `$KLT_NGSPICE_BINARY` --
+    the documented precedence order."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"ngspice_binary": "/opt/ngspice-from-option"},
+        },
+    )
+    captured: list = []
+    which_map = {
+        "/opt/ngspice-from-option": "/opt/ngspice-from-option",
+        "ngspice-from-env": "/opt/ngspice-from-env",
+    }
+    monkeypatch.setattr(paths_module.shutil, "which", _which_only(which_map))
+    monkeypatch.setenv("KLT_NGSPICE_BINARY", "ngspice-from-env")
+    _stub_ngspice_subprocess(monkeypatch, captured_cmds=captured)
+
+    report = sim.run_sim(str(request))
+
+    assert captured[0][0] == "/opt/ngspice-from-option"
+    assert report["environment"]["ngspice_binary"] == "/opt/ngspice-from-option"
+
+
+def test_run_sim_unresolvable_ngspice_binary_option_raises(tmp_path, monkeypatch):
+    """An explicit `options.ngspice_binary` that is not runnable is a clean
+    application error naming the option -- never a silent fallback to the
+    bare name on PATH, and never a bare `FileNotFoundError`."""
+    _write_body(tmp_path)
+    missing = str(tmp_path / "nope" / "ngspice-custom")
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"ngspice_binary": missing},
+        },
+    )
+
+    with pytest.raises(sim.SimError, match="options.ngspice_binary"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_unresolvable_ngspice_binary_env_var_raises(tmp_path, monkeypatch):
+    """Same for the env-var form -- an override the caller believes is in
+    force but silently is not would be worse than not supporting one."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {"netlist": "body.spice", "analysis": {"kind": "tran", "args": "1n 1u"}},
+    )
+    monkeypatch.setenv("KLT_NGSPICE_BINARY", str(tmp_path / "nope" / "ngspice-env"))
+
+    with pytest.raises(sim.SimError, match="KLT_NGSPICE_BINARY"):
+        sim.run_sim(str(request))
 
 
 # --------------------------------------------------------------------------- #

@@ -46,6 +46,7 @@ from pathlib import Path
 import pytest
 
 from helpers.subprocess_fakes import fake_completed
+from klayout_tools import _paths as paths_module
 from klayout_tools import equiv
 from klayout_tools.cli import main
 from klayout_tools.equiv import (
@@ -56,6 +57,24 @@ from klayout_tools.equiv import (
 )
 
 pytestmark = pytest.mark.usefixtures("real_build_identity_git")
+
+
+@pytest.fixture(autouse=True)
+def _bare_name_binary_resolution(monkeypatch):
+    """Issue #2423: see the identically-named fixture in ``test_equiv.py``
+    for the full rationale -- this module defines its own local copy of
+    ``_mock_yosys_run`` (deliberately self-contained, per this module's own
+    docstring) and needs the same bare-name resolution stub so those mocks'
+    ``cmd[:2] == ["yosys", "-s"]``-shaped assertions keep holding."""
+    real_which = shutil.which
+
+    def fake_which(cmd, *args, **kwargs):
+        if cmd in ("yosys", "iverilog", "vvp"):
+            return cmd
+        return real_which(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(paths_module.shutil, "which", fake_which)
+
 
 # --------------------------------------------------------------------------- #
 # Fixtures (RTL sources) -- deliberately local copies of the proven pairs in
@@ -72,6 +91,14 @@ _GATE_OR_BROKEN = """\
 module top(input a, input b, output y);
   assign y = a | b;
 endmodule
+"""
+
+# Combinational-engine SAT-success text (mirrors tests/test_equiv.py's own
+# `_SAT_SUCCESS_TEXT`) -- this module's own local copy, per its
+# self-contained-fixtures convention above.
+_SAT_SUCCESS_TEXT = """
+Solving problem with 24 variables and 56 clauses..
+SAT proof finished - no model found: SUCCESS!
 """
 
 # Register-preserving buffer insertion (the survey's SS2.2 shape): stage 1
@@ -696,7 +723,7 @@ def test_resume_unproven_cells_reenters_stage2_and_matches_control(tmp_path):
 
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
-def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path, monkeypatch):
+def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path):
     """The acceptance criterion verbatim: a staged sequential run killed
     mid-way (here: a SIGKILL-shaped death between stage 1's commit and
     stage 2's completion) leaves its committed stage-1 record on disk; an
@@ -716,15 +743,21 @@ def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path, monkeypatch
     # envelope is ever emitted for this "session").
     real_runner = equiv._run_yosys_subprocess
 
-    def killed_mid_stage2(script_path, timeout_s):
+    def killed_mid_stage2(script_path, timeout_s, binary="yosys"):
         if "stage2" in script_path:
             raise SystemExit(137)
-        return real_runner(script_path, timeout_s)
+        return real_runner(script_path, timeout_s, binary)
 
-    monkeypatch.setattr(equiv, "_run_yosys_subprocess", killed_mid_stage2)
-    with pytest.raises(SystemExit):
-        run_equiv(request_path, resume=True)
-    monkeypatch.undo()
+    # Manual save/restore rather than monkeypatch.setattr: this test's fixture
+    # instance is shared with the autouse `_bare_name_binary_resolution`
+    # fixture, so a monkeypatch.undo() here would revert that fixture's
+    # shutil.which stub too, not just this patch.
+    equiv._run_yosys_subprocess = killed_mid_stage2
+    try:
+        with pytest.raises(SystemExit):
+            run_equiv(request_path, resume=True)
+    finally:
+        equiv._run_yosys_subprocess = real_runner
 
     with open(_record_path(tmp_path), encoding="utf-8") as handle:
         record = json.load(handle)
@@ -964,6 +997,41 @@ def test_rerun_drifts_when_the_design_changed(tmp_path):
     assert result["status"] == "drifted"
     drifted_fields = {entry["field"] for entry in result["drift"]}
     assert "provenance.input.content_hash" in drifted_fields
+
+
+def test_rerun_excludes_yosys_binary_path_drift(tmp_path, monkeypatch):
+    """Issue #2423: `yosys_binary` (a host-local absolute path) must not
+    itself cause `--rerun` to report drift -- two hosts resolving the
+    identical proof via a different yosys install path is not a change in
+    what was proved, mirroring `klt lvs`'s `environment.netgen_binary`
+    exclusion. Mocked (no real yosys/wall-clock needed), unlike the
+    `HAVE_YOSYS`-gated rerun tests above."""
+    _write(tmp_path / "gold.v", _GOLD_AND)
+    _write(tmp_path / "gate.v", _GOLD_AND)
+    request_path = _write_request(
+        tmp_path / "r.json",
+        {"gold": _side(["gold.v"]), "gate": _side(["gate.v"])},
+    )
+    monkeypatch.setattr(
+        equiv.subprocess,
+        "run",
+        _mock_yosys_run(run_stdout=_SAT_SUCCESS_TEXT),
+    )
+
+    fresh = run_equiv(request_path)
+    assert fresh["status"] == "equivalent"
+    assert fresh["yosys_binary"] == "yosys"
+
+    committed = dict(fresh)
+    # Simulate a second host that resolved a *different* yosys install for
+    # the same proof.
+    committed["yosys_binary"] = "/opt/other-host/yosys"
+    committed_path = _commit_envelope(tmp_path, committed)
+
+    result = rerun_equiv_report(committed_path, request_path)
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
 
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")

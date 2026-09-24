@@ -89,7 +89,12 @@ from . import env_provenance
 #: `sim_remote._run_remote` for exactly this reason).
 from . import remote_fleet as remote_fleet
 from . import remote_transport as remote_transport
-from ._paths import _load_request_json, _resolve_relative, validate_request_shape
+from ._paths import (
+    _load_request_json,
+    _resolve_relative,
+    resolve_tool_binary,
+    validate_request_shape,
+)
 from ._provenance import INPUT_ROLE_NETLIST, build_provenance, sha256_file
 from ._text import line_containing as _line_containing
 from .coverage import (
@@ -553,6 +558,37 @@ class SimError(Exception):
     """
 
 
+#: Environment-variable override for the ngspice binary (issue #2423), the
+#: ``sim.py`` port of ``lvs_netgen.py``'s ``$KLT_NETGEN_BINARY`` (issue
+#: #2373) -- checked after ``options.ngspice_binary`` and before the bare
+#: ``ngspice`` name on ``PATH``. No known distro-name collision for ngspice
+#: (unlike netgen's ``netgen``/``netgen-lvs`` split), so a single bare name.
+_NGSPICE_BINARY_ENV_VAR = "KLT_NGSPICE_BINARY"
+_NGSPICE_BINARY_NAMES: tuple[str, ...] = ("ngspice",)
+
+
+def _resolve_ngspice_binary(options: dict[str, Any], request_dir: str) -> str:
+    """Resolve the ``ngspice`` binary to invoke for this sweep (issue
+    #2423), via ``options.ngspice_binary`` -> ``$KLT_NGSPICE_BINARY`` ->
+    ``ngspice`` on ``PATH`` (:func:`klayout_tools._paths.resolve_tool_binary`).
+
+    Only called for ``engine == "ngspice"`` -- the ``xyce`` engine's own
+    binary (:data:`XYCE_BINARY`) is out of this issue's scope (see that
+    name's own docstring: no known override need, unlike ngspice, where
+    more than one build/version commonly coexists on a host)."""
+    return resolve_tool_binary(
+        "ngspice",
+        options,
+        option_key="ngspice_binary",
+        option_label="options.ngspice_binary",
+        env_var=_NGSPICE_BINARY_ENV_VAR,
+        request_dir=request_dir,
+        fallback_names=_NGSPICE_BINARY_NAMES,
+        error_cls=SimError,
+        install_hint="Install ngspice (https://ngspice.sourceforge.io/).",
+    )
+
+
 def load_request(request_path: str) -> dict[str, Any]:
     """Read and minimally validate a ``klt sim`` request JSON file.
 
@@ -875,6 +911,18 @@ def run_sim(
             )
 
     options = request.get("options") or {}
+    # Issue #2423: resolve *which* ngspice binary to run before dispatching
+    # any corner (`options.ngspice_binary` > `$KLT_NGSPICE_BINARY` >
+    # `ngspice` on PATH), rather than hardcoding the name `ngspice` -- the
+    # resolved path is both what every corner spawns and what
+    # `environment.ngspice_binary` below records. `None` for the `xyce`
+    # engine, which this issue adds no override for (see
+    # `_resolve_ngspice_binary`'s own docstring) -- mirrors
+    # `environment.netgen_binary`'s "always present, null for the other
+    # engine" convention (`klt lvs`, issue #2373).
+    ngspice_binary = (
+        _resolve_ngspice_binary(options, request_dir) if engine == "ngspice" else None
+    )
     timeout_s = options.get("timeout_s", DEFAULT_TIMEOUT_S)
     keep_artifacts = bool(options.get("keep_artifacts", False))
     want_waveforms = bool(options.get("waveforms", False))
@@ -1082,6 +1130,7 @@ def run_sim(
             timeout_s=timeout_s,
             artifacts_dir=artifacts_dir,
             keep_artifacts=keep_artifacts,
+            ngspice_binary=ngspice_binary,
         )
 
     probe_abort: dict[str, Any] | None = None
@@ -1116,8 +1165,17 @@ def run_sim(
     # The engine seam (issue #2016) rides along to the local backends only:
     # `remote`/`batch` run whatever their provisioned box/job ships (the
     # ngspice toolchain -- and `run_sim` refuses `engine: "xyce"` for them
-    # above anyway), so the kwarg would be dead weight there.
-    local_engine_kwargs = {"engine": engine} if backend not in _OFFHOST_BACKENDS else {}
+    # above anyway), so the kwarg would be dead weight there. `ngspice_binary`
+    # (issue #2423) rides along the same way and for the same reason: a
+    # `remote`/`batch` shard re-invokes `klt sim` on a *different* host,
+    # which resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`
+    # fresh against its own PATH from the forwarded request document --
+    # this process's own resolution describes only this host.
+    local_engine_kwargs = (
+        {"engine": engine, "ngspice_binary": ngspice_binary}
+        if backend not in _OFFHOST_BACKENDS
+        else {}
+    )
 
     if hosts == 1:
         # The exact pre-#376 call for the default case (no budget, no
@@ -1329,6 +1387,13 @@ def run_sim(
     environment: dict[str, Any] = {
         "engine": engine,
         "engine_version": engine_version,
+        # Issue #2423: which ngspice executable actually produced this
+        # sweep's corners -- the absolute path `_resolve_ngspice_binary`
+        # settled on, alongside `engine_version`, mirroring `klt lvs`'s
+        # `environment.netgen_binary` (issue #2373). Always present-but-
+        # nullable: `None` for `"engine": "xyce"`, which this issue adds no
+        # override for (see `_resolve_ngspice_binary`'s own docstring).
+        "ngspice_binary": ngspice_binary,
         # Issue #1274: normalised like every other path field this response
         # echoes -- the resolved library usually lives outside the repo (a
         # PDK under the user's home directory), which reports
@@ -2197,6 +2262,7 @@ def _run_local(
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
     engine: str = "ngspice",
+    ngspice_binary: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -2273,6 +2339,7 @@ def _run_local(
             want_waveforms=want_waveforms,
             artifacts_dir=artifacts_dir,
             engine=engine,
+            ngspice_binary=ngspice_binary,
         )
         corners.append(result)
         if version is not None:
@@ -2411,6 +2478,7 @@ def _run_local_parallel(
     checkpoint: _Checkpoint | None = None,
     probe_abort: dict[str, Any] | None = None,
     engine: str = "ngspice",
+    ngspice_binary: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -2516,6 +2584,7 @@ def _run_local_parallel(
                     want_waveforms=want_waveforms,
                     artifacts_dir=artifacts_dir,
                     engine=engine,
+                    ngspice_binary=ngspice_binary,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -2586,12 +2655,21 @@ def _prepare_corner_run(
     measurements_spec: list[dict[str, Any]],
     want_waveforms: bool,
     engine: str,
+    ngspice_binary: str | None = None,
 ) -> tuple[list[str], str, str | None, str]:
     """Write the engine's per-corner deck and build its command line.
 
     Returns ``(command, log_path, raw_path, deck_path)``. The engine's own
     deck writer (``_write_corner_deck`` for ngspice, ``_write_xyce_deck``
     for Xyce) owns every syntax divergence; this is only the dispatch seam.
+
+    ``ngspice_binary`` (issue #2423) is the resolved absolute path
+    ``_resolve_ngspice_binary`` settled on for this sweep -- every
+    ``engine="ngspice"`` caller passes it explicitly; the ``None`` default
+    exists only so a direct unit test of this function (or the ``xyce``
+    branch, which never reads it) need not also stub binary resolution. A
+    ``None`` reaching the ``ngspice`` branch falls back to the bare
+    ``"ngspice"`` name, matching this function's pre-#2423 behaviour.
     """
     is_xyce = engine == "xyce"
     deck_path = os.path.join(corner_dir, "corner.cir")
@@ -2622,7 +2700,7 @@ def _prepare_corner_run(
             measurements_spec=measurements_spec,
             raw_path=raw_path,
         )
-        command = ["ngspice", "-b", deck_path, "-o", log_path]
+        command = [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path]
     return command, log_path, raw_path, deck_path
 
 
@@ -2658,6 +2736,7 @@ def _run_corner(
     want_waveforms: bool,
     artifacts_dir: str,
     engine: str = "ngspice",
+    ngspice_binary: str | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -2695,6 +2774,7 @@ def _run_corner(
         measurements_spec=measurements_spec,
         want_waveforms=want_waveforms,
         engine=engine,
+        ngspice_binary=ngspice_binary,
     )
 
     diagnostics: list[dict[str, str]] = []
@@ -3415,6 +3495,7 @@ def _run_calibration_probe(
     probe_timeout_s: float,
     artifacts_dir: str,
     keep_artifacts: bool,
+    ngspice_binary: str | None = None,
 ) -> dict[str, Any]:
     """Run one short, bounded ``tran`` slice -- the calibration half of the
     two-pass probe model -- and report how it went.
@@ -3439,6 +3520,12 @@ def _run_calibration_probe(
     did not complete cleanly) -- the caller treats that exactly like "no
     evidence either way" and skips the fail-fast check entirely, never
     aborting a grid on untrustworthy evidence.
+
+    ``ngspice_binary`` (issue #2423) is the resolved absolute path
+    ``_resolve_ngspice_binary`` settled on for this sweep -- the probe uses
+    the same binary the real corners will, so a ``None``/broken-override
+    misconfiguration surfaces at the (cheap) probe stage rather than only
+    after every real corner is dispatched.
     """
     probe_dir = (
         os.path.join(artifacts_dir, f"{point.slug}__probe")
@@ -3465,7 +3552,7 @@ def _run_calibration_probe(
     error: str | None = None
     try:
         subprocess.run(
-            ["ngspice", "-b", deck_path, "-o", log_path],
+            [ngspice_binary or "ngspice", "-b", deck_path, "-o", log_path],
             capture_output=True,
             text=True,
             timeout=probe_timeout_s,
@@ -3500,6 +3587,7 @@ def _run_fail_fast_probe(
     timeout_s: float,
     artifacts_dir: str,
     keep_artifacts: bool,
+    ngspice_binary: str | None = None,
 ) -> dict[str, Any] | None:
     """The two-pass probe model's dispatch-time entry point (issue #1694):
     run one short, bounded calibration ``tran`` slice on the grid's first
@@ -3541,6 +3629,7 @@ def _run_fail_fast_probe(
         probe_timeout_s=probe_timeout_s,
         artifacts_dir=artifacts_dir,
         keep_artifacts=keep_artifacts,
+        ngspice_binary=ngspice_binary,
     )
     if probe["error"] is not None:
         return None
