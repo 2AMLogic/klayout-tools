@@ -484,6 +484,62 @@ emitted for a run that checked and found every body biased — distinct from a
 pre-#1983 record that never reported it at all, where the field is simply
 absent.
 
+## A device-model divergence invalidates the comparison too: `model_mismatch`
+
+`pin_count_mismatch`/`flat_dut_mismatch` (above) both compare the top-level
+`.SUBCKT` **interface** each side's testbench-facing wrapper declares — its
+pin list. Neither one looks at what is *inside* that interface: which
+concrete device model each side's `M`/`X`/`Q`/`D` device cards actually
+instantiate. A layout drawn with **no voltage-domain marker geometry**
+always extracts onto a PDK family's *default* MOS flavour (`klt extract
+--pdk`'s documented fallback — e.g. sky130's thin-oxide
+`sky130_fd_pr__nfet_01v8`), while a reference (schematic) netlist naming a
+different flavour — a thick-oxide/high-voltage variant such as
+`sky130_fd_pr__nfet_g5v0` — is *topologically* identical: same device count,
+same connectivity, same top-level pin list. `pin_count_mismatch` and
+`flat_dut_mismatch` are both `null` for exactly this reason — yet the two
+netlists are electrically unrelated, so every `delta[]` row this run
+produces compares two different physical devices, not a parasitic effect.
+Before this diagnostic existed, the only way to notice was reading the
+extracted `.spice` snapshot by hand and comparing model tokens (issue
+#2402).
+
+`model_mismatch` compares the **multiset** of device model/`.subckt` names
+the reference and extracted netlists' `M`/`X`/`Q`/`D` cards instantiate —
+the same instance count per model matters too, not just which names appear,
+so a device silently dropped or duplicated on one side is caught the same
+way a substituted flavour is:
+
+```json
+"model_mismatch": {
+  "reference_only": ["sky130_fd_pr__nfet_g5v0"],
+  "extracted_only": ["sky130_fd_pr__nfet_01v8"],
+  "counts": {
+    "reference": {"sky130_fd_pr__nfet_g5v0": 2},
+    "extracted": {"sky130_fd_pr__nfet_01v8": 2}
+  },
+  "detail": "the reference (schematic) and extracted netlists instantiate different device models/`.subckt`s ..."
+}
+```
+
+`reference_only`/`extracted_only` name every model that appears on one side
+and not the other (by instance count, case-insensitively — ngspice itself is
+case-insensitive about model/subcircuit names); `counts` echoes each side's
+full per-model instance count so a caller can see a same-name-different-count
+divergence too, even though that case leaves both list fields empty. `null`
+when the two multisets agree exactly.
+
+**Reported, not enforced — the same precedent as `body_bias`.** `status` is
+untouched: a run whose deltas all met tolerance still reports `status:
+"pass"` with a non-`null` `model_mismatch`, and the exit code is unchanged.
+Unlike `pin_count_mismatch`/`flat_dut_mismatch`, this diagnostic **never
+skips the extracted-side simulation** — the two `.SUBCKT` interfaces still
+match, so the simulation itself runs and converges; it is the *result* that
+is not comparable to the schematic leg, which is a policy question for the
+consumer of the evidence (see [`signoff.md`](signoff.md) and
+[`design-evidence-tiers.md`](../design-evidence-tiers.md) item 7), not one
+this command answers on the caller's behalf.
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -575,6 +631,7 @@ full `repo`/`external`/`absent` scope meanings.
   },
   "pin_count_mismatch": null,
   "flat_dut_mismatch": null,
+  "model_mismatch": null,
   "provenance": {
     "klt_version": "0.4.2",
     "klayout_version": "0.30.10",
@@ -603,6 +660,7 @@ full `repo`/`external`/`absent` scope meanings.
 | `coverage`           | object            | Issue #1996 (additive field). What this `status` was actually compared over: `testbenches`, `delta_rows`, `corners_compared`, plus the shared `nothing_checked`/`nothing_checked_reasons` roll-up. See "`coverage`: an empty `delta[]` is not a pass" below. |
 | `pin_count_mismatch` | object \| null    | `null` on every run whose extracted side simulated (issue #1030 — additive field). Non-`null` names the schematic/extracted top-level pin-list mismatch that made the extracted-side deck unrunnable: `subcircuit`, a `schematic` and an `extracted` object (each `netlist`, `subcircuit`, `pin_count`, `pins` — `null` pin data when the header could not be read), `ngspice_message` (ngspice's own line, `null` when no per-corner log was kept), and a human-readable `detail`. See "The pin lists must match" above. |
 | `flat_dut_mismatch`  | object \| null    | `null` unless the schematic DUT is netlisted flat (no `.SUBCKT` wrapper) against a `.SUBCKT`-wrapped extraction (issue #1255, Gap 2 — additive field). Same shape as `pin_count_mismatch` (`subcircuit`, `schematic`/`extracted` objects, `ngspice_message` — always `null` here, no engine is ever invoked — and `detail`); mutually exclusive with `pin_count_mismatch` (the extracted side is never attempted when this fires). See "Flat schematic DUT vs `.SUBCKT`-wrapped extraction" above. |
+| `model_mismatch`     | object \| null    | `null` when the reference (schematic) and extracted netlists' `M`/`X`/`Q`/`D` device cards instantiate the same models/`.subckt`s the same number of times (issue #2402 — additive field). Non-`null` names the divergence: `reference_only`/`extracted_only` (model names unique to one side, by instance count), `counts` (each side's full per-model instance count), and a human-readable `detail`. Unlike `pin_count_mismatch`/`flat_dut_mismatch`, computed unconditionally (independent of whether the top-level pin lists match) and never skips the extracted-side simulation — it never changes `status`. See "A device-model divergence invalidates the comparison too" above. |
 | `provenance`         | object            | The extraction's own shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) — see [`json-contract.md`](../json-contract.md#shared-provenance-block). `deck` pins the extraction deck (name + `sha256:` content hash — the "deck version" this report pins); `input` pins `<layout>`. |
 
 ### `delta[]` entries

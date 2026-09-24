@@ -670,6 +670,147 @@ def _flat_dut_mismatch(
     }
 
 
+#: Device-instance card prefixes whose trailing (non-node) token names a
+#: model or `.subckt` -- see :func:`_device_model_counts`. Deliberately
+#: excludes passive cards (`R`/`C`/`L`) and sources (`V`/`I`): those are out
+#: of :func:`_model_mismatch`'s scope (issue #2402's own Acceptance
+#: Criteria -- "device-instance-based ... on `M`/`X` cards or equivalent",
+#: not every card that happens to carry a trailing token).
+_DEVICE_MODEL_CARD_PREFIXES = "MXQD"
+
+
+def _device_model_counts(netlist_text: str) -> dict[str, tuple[str, int]]:
+    """``{lowercased model/subcircuit name: (name as written, instance
+    count)}`` for every `M` (raw MOSFET)/`X` (subcircuit call, `klt
+    extract`'s own convention for a bound MOS/bipolar device -- see
+    ``pdk_models.py``'s ``_ModelBindingSpiceWriterDelegate.write_device``)/
+    `Q` (raw BJT)/`D` (raw diode) device-instance card in ``netlist_text``,
+    in file order.
+
+    The model/subcircuit name is *the last whitespace token on the card that
+    is not a ``name=value`` parameter assignment* -- SPICE's own convention
+    is that a device card's trailing tokens, after its nodes, are either
+    exactly one model/subcircuit name or a run of ``name=value`` parameters
+    (e.g. ``L=``/``W=``/``AS=``/``AD=``), never both interleaved. This holds
+    identically for a raw ``M<name> d g s b <model> [L=... W=...]`` card and
+    for an ``X<name> <nodes...> <subckt> [param=value ...]`` subcircuit
+    call, so one rule covers both without needing to know each card's exact
+    node count up front.
+
+    Lowercased keys, original-case values -- the same case-insensitive-key
+    convention :func:`_subckt_interfaces` uses, since ngspice is
+    case-insensitive about model/subcircuit names the same way it is about
+    `.subckt` names.
+    """
+    counts: dict[str, tuple[str, int]] = {}
+    for line in _logical_lines(netlist_text):
+        stripped = line.strip()
+        if not stripped or stripped[0].upper() not in _DEVICE_MODEL_CARD_PREFIXES:
+            continue
+        parts = [token for token in stripped.split() if "=" not in token]
+        if len(parts) < 2:
+            continue  # no nodes/model at all -- not a real device instance
+        name = parts[-1]
+        key = name.lower()
+        existing_name, existing_count = counts.get(key, (name, 0))
+        counts[key] = (existing_name, existing_count + 1)
+    return counts
+
+
+def _model_mismatch(
+    *, reference_netlist: str, extracted_netlist: str
+) -> dict[str, Any] | None:
+    """The structured ``model_mismatch`` diagnostic (issue #2402), or
+    ``None`` when the reference (schematic) and extracted netlists'
+    device model/`.subckt` instantiations agree exactly.
+
+    A *different* condition from :func:`_pin_count_mismatch`/
+    :func:`_flat_dut_mismatch`: those two compare the top-level `.SUBCKT`
+    *interface* each side's testbench-facing wrapper declares (its pin
+    list). This compares what is *inside* that interface -- which concrete
+    device model each side's `M`/`X`/`Q`/`D` cards actually instantiate (see
+    :func:`_device_model_counts`).
+
+    **The canonical trigger.** A layout drawn with no voltage-domain marker
+    geometry always extracts onto a PDK family's *default* MOS flavour
+    (`klt extract --pdk`'s documented fallback -- see ``docs/cli/extract.md``
+    -- e.g. sky130's thin-oxide ``sky130_fd_pr__nfet_01v8``), while a
+    reference netlist naming a different flavour (e.g. the thick-oxide/
+    high-voltage ``sky130_fd_pr__nfet_g5v0``) is *topologically* identical --
+    same device count, same connectivity, same top-level pin list -- and
+    therefore invisible to `pin_count_mismatch`/`flat_dut_mismatch`. The two
+    netlists are nonetheless electrically unrelated: every `delta[]` row
+    this run produces compares two different physical devices, not a
+    parasitic effect, yet nothing else in the `klt pex` envelope reports it.
+
+    **Reported, not enforced.** Never changes `status`/grade -- the same
+    "surface it structurally and let the caller decide" precedent
+    :func:`_body_bias_report` established (issue #1983). A caller
+    deliberately comparing a schematic against a different flavour (e.g.
+    stress-testing at a different voltage domain) is a legitimate use that
+    should not be blocked; the point is only that the divergence must be
+    *visible* rather than silently folded into an ordinary, gradeable delta.
+
+    The comparison is a multiset (instance *count* per model name, not just
+    which names appear): a run whose two sides name the same models but a
+    different number of each still reports the divergence, since that
+    could equally mean a device was dropped/duplicated on one side.
+    """
+    reference_counts = _device_model_counts(_read_text(reference_netlist) or "")
+    extracted_counts = _device_model_counts(_read_text(extracted_netlist) or "")
+
+    reference_multiset = {
+        key: count for key, (_name, count) in reference_counts.items()
+    }
+    extracted_multiset = {
+        key: count for key, (_name, count) in extracted_counts.items()
+    }
+    if reference_multiset == extracted_multiset:
+        return None
+
+    reference_only = sorted(
+        name
+        for key, (name, _count) in reference_counts.items()
+        if key not in extracted_multiset
+    )
+    extracted_only = sorted(
+        name
+        for key, (name, _count) in extracted_counts.items()
+        if key not in reference_multiset
+    )
+
+    return {
+        "reference_only": reference_only,
+        "extracted_only": extracted_only,
+        "counts": {
+            "reference": dict(sorted(reference_counts.values())),
+            "extracted": dict(sorted(extracted_counts.values())),
+        },
+        "detail": (
+            "the reference (schematic) and extracted netlists instantiate "
+            "different device models/`.subckt`s -- same top-level pin list, "
+            "but the two sides are electrically unrelated, so `delta[]` "
+            "rows compare two different physical devices rather than a "
+            "parasitic effect. "
+            + (
+                f"Only in the reference netlist: {', '.join(reference_only)}. "
+                if reference_only
+                else ""
+            )
+            + (
+                f"Only in the extracted netlist: {', '.join(extracted_only)}. "
+                if extracted_only
+                else ""
+            )
+            + "A common cause: the layout carries no voltage-domain marker "
+            "geometry, so `klt extract --pdk` bound every MOS to the PDK "
+            "family's default flavour while the reference netlist names a "
+            "different one -- see docs/cli/pex.md's `model_mismatch` "
+            "section"
+        ),
+    }
+
+
 def _match_line(text: str, match: re.Match[str]) -> str:
     """The whole (stripped) line of ``text`` containing ``match``."""
     start = text.rfind("\n", 0, match.start()) + 1
@@ -1268,6 +1409,17 @@ def run_pex(
         top_cell=extract_report["top"],
     )
 
+    # Issue #2402: a device model/`.subckt` divergence (e.g. a MOS
+    # voltage-flavour mismatch) is orthogonal to both diagnostics above --
+    # it can fire (or not) independently of whether the top-level pin lists
+    # agree -- so it is computed unconditionally, once, from the same two
+    # netlists' own text, before either side simulates. See
+    # `_model_mismatch`'s own docstring.
+    model_mismatch = _model_mismatch(
+        reference_netlist=reference_netlist,
+        extracted_netlist=extracted_netlist_path,
+    )
+
     testbenches_summary: list[dict[str, Any]] = []
     delta: list[dict[str, Any]] = []
     # Issue #1030 / #1041: populated (once) when the schematic/extracted
@@ -1499,6 +1651,17 @@ def run_pex(
         # simulation is even attempted, so `pin_count_mismatch` above stays
         # `None`.
         "flat_dut_mismatch": flat_dut_mismatch,
+        # Additive field (issue #2402): `None` on every run whose reference
+        # (schematic) and extracted netlists instantiate the same device
+        # models/`.subckt`s the same number of times -- byte-identical to
+        # before this feature existed. Non-`None` names the divergence (e.g.
+        # a MOS voltage-flavour substitution the layout's lack of
+        # voltage-domain marker geometry silently produced) that makes this
+        # run's `delta[]` a comparison between two electrically unrelated
+        # netlists rather than a parasitic effect; unlike `pin_count_
+        # mismatch`/`flat_dut_mismatch`, it never skips the extracted-side
+        # simulation and never changes `status` -- see `_model_mismatch`.
+        "model_mismatch": model_mismatch,
         "provenance": extract_report["provenance"],
     }
     return result
