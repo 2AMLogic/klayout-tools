@@ -8398,7 +8398,7 @@ def _apply_device_parameter_corrections(
     netlist built directly via the ``klayout.db`` device/circuit API at a
     comparable scale, so it remains unconfirmed against this module's own
     extraction path specifically. ``klt lvs``'s ``options.combine_devices``
-    wrapper (``lvs.py``'s ``_correct_capacitor_combine_parameters``)
+    wrapper (``lvs.py``'s ``_correct_combine_parameters``)
     defends against it unconditionally -- by checking and, if necessary,
     correcting ``C`` against a pre-combine sum-conservation invariant after
     every combine, independent of whether the underlying KLayout behavior

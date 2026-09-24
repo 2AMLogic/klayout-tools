@@ -5525,7 +5525,7 @@ def test_combine_circuit_devices_safely_returns_only_cleanly_combined_names(
 
 def test_correct_capacitor_combine_parameters_circuit_names_restricts_scope():
     """``circuit_names`` (issue #1557) restricts
-    `_correct_capacitor_combine_parameters` to just the named circuits --
+    `_correct_combine_parameters` to just the named circuits --
     `options.combine_devices_per_circuit`'s own per-circuit correction
     scoping. A circuit excluded from ``circuit_names`` is left with its
     inconsistent ``C`` uncorrected, even though the function would have
@@ -5563,7 +5563,7 @@ def test_correct_capacitor_combine_parameters_circuit_names_restricts_scope():
         for device in circuit.each_device():
             device.set_parameter("C", 1e-15)
 
-    warning = lvs._correct_capacitor_combine_parameters(
+    warning = lvs._correct_combine_parameters(
         pre_combine_snapshot, netlist, "layout", circuit_names=["A"]
     )
 
@@ -5962,6 +5962,95 @@ def test_combine_devices_safely_never_retries_unrelated_runtimeerror(monkeypatch
     assert call_count == 1
 
 
+def test_combine_devices_safely_first_attempt_runs_against_the_netlist_itself(
+    tmp_path, monkeypatch
+):
+    """Issue #2374: the combine whose result is *adopted* must run directly
+    against `netlist`, never against a `Netlist.dup()` copy.
+
+    A freshly allocated copy walks its nets in an order unrelated to the
+    order they were created in, and KLayout's own `combine_devices()` can
+    land in a different accumulation branch as a result -- returning
+    normally, with silently wrong combined parameters, on roughly a quarter
+    of copies. Under issue #1185's original retry loop the copy was the
+    *first* attempt, so the previously-unexercised path became the normal
+    one; this asserts it is not, by recording the receiver of every
+    `combine_devices()` call."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Netlist.combine_devices
+    receivers = []
+
+    def _record(self):
+        receivers.append(self)
+        return real_combine_devices(self)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _record)
+
+    netlist = kdb.Netlist()
+    netlist.read(
+        _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE),
+        kdb.NetlistSpiceReader(),
+    )
+
+    assert lvs._combine_devices_safely(netlist, "layout") is None
+
+    # A clean combine is reached on the first attempt, and that attempt ran
+    # in place -- no copy was combined, and nothing was assigned back.
+    assert len(receivers) == 1
+    assert receivers[0] is netlist
+
+
+def test_combine_devices_safely_retries_copy_from_the_pristine_pre_combine_state(
+    tmp_path, monkeypatch
+):
+    """Issue #2374 + #1185 together: because attempt 0 now runs in place, a
+    failure leaves `netlist` partially merged -- so the retries must copy
+    from a snapshot captured *before* attempt 0 ran, not from the damaged
+    netlist, or issue #1185's "every attempt is an independent trial"
+    property would be lost.
+
+    The fake below performs a real (partial) merge and *then* raises on the
+    first attempt, so a retry copied from the damaged netlist would visibly
+    see fewer devices than the original did."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Netlist.combine_devices
+    receivers = []
+    device_counts = []
+
+    def _merge_then_fail_once(self):
+        receivers.append(self)
+        device_counts.append(
+            sum(1 for circuit in self.each_circuit() for _ in circuit.each_device())
+        )
+        real_combine_devices(self)
+        if len(receivers) == 1:
+            raise RuntimeError(_COMBINE_DEVICES_PARTIAL_MATCH_ERROR)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _merge_then_fail_once)
+
+    netlist = kdb.Netlist()
+    netlist.read(
+        _write(tmp_path / "layout.spice", _MULTIFINGER_LAYOUT_SPICE),
+        kdb.NetlistSpiceReader(),
+    )
+    circuit = next(iter(netlist.each_circuit()))
+    devices_before = sum(1 for _ in circuit.each_device())
+
+    assert lvs._combine_devices_safely(netlist, "layout") is None
+
+    assert len(receivers) == 2
+    assert receivers[0] is netlist  # attempt 0: in place
+    assert receivers[1] is not netlist  # attempt 1: an independent copy...
+    # ...of the *pristine* pre-combine state, not of the netlist attempt 0
+    # already partially merged.
+    assert device_counts == [devices_before, devices_before]
+
+    combined_circuit = next(iter(netlist.each_circuit()))
+    assert sum(1 for _ in combined_circuit.each_device()) < devices_before
+
+
 def test_lvs_end_to_end_survives_combine_devices_circuit_reference_invalidation(
     tmp_path,
 ):
@@ -6097,7 +6186,7 @@ def _build_parallel_capacitor_netlist(counts_by_net, c_unit=1e-15):
 
 
 def test_correct_capacitor_combine_parameters_fixes_simulated_wrong_c(monkeypatch):
-    """`_correct_capacitor_combine_parameters` overwrites a post-combine
+    """`_correct_combine_parameters` overwrites a post-combine
     capacitor's `C` with its pre-combine group's summed total when the two
     disagree, and reports one `device.combine_parameter_corrected` warning
     naming the corrected device."""
@@ -6126,9 +6215,7 @@ def test_correct_capacitor_combine_parameters_fixes_simulated_wrong_c(monkeypatc
     assert device.parameter("C") == pytest.approx(1e-15)  # sanity: corrupted
     assert device.parameter("A") == pytest.approx(8.0)  # unaffected by corruption
 
-    warning = lvs._correct_capacitor_combine_parameters(
-        pre_combine_snapshot, netlist, "layout"
-    )
+    warning = lvs._correct_combine_parameters(pre_combine_snapshot, netlist, "layout")
 
     assert warning is not None
     assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
@@ -6147,9 +6234,7 @@ def test_correct_capacitor_combine_parameters_returns_none_when_already_correct(
 
     netlist.combine_devices()
 
-    warning = lvs._correct_capacitor_combine_parameters(
-        pre_combine_snapshot, netlist, "layout"
-    )
+    warning = lvs._correct_combine_parameters(pre_combine_snapshot, netlist, "layout")
 
     assert warning is None
     circuit = next(iter(netlist.each_circuit()))
@@ -6173,9 +6258,7 @@ def test_correct_capacitor_combine_parameters_ignores_non_capacitor_devices(
 
     netlist.combine_devices()
 
-    warning = lvs._correct_capacitor_combine_parameters(
-        pre_combine_snapshot, netlist, "layout"
-    )
+    warning = lvs._correct_combine_parameters(pre_combine_snapshot, netlist, "layout")
 
     assert warning is None
 
@@ -6276,6 +6359,356 @@ C2 G1 COMMON 2e-15
             {
                 "layout": {"netlist": layout_path, "top": "TOP"},
                 "reference": {"netlist": reference_path, "top": "TOP"},
+                "options": {"combine_devices": True},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert not any(
+        m["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
+        for m in report["mismatches"]
+    )
+
+
+# --------------------------------------------------------------------------- #
+# combine_devices() silent parameter *inversion* on a Netlist.dup() copy
+# (issue #2374)
+# --------------------------------------------------------------------------- #
+
+# Issue #2374's reported reproduction shape: a parallel array of N identical
+# `DeviceClassBJT3Transistor` instances read back through
+# `NetlistSpiceReader`. Combined correctly, the surviving device carries the
+# array's summed emitter parameters (`AE`/`PE`/`NE`) and the array's single
+# shared base/collector region parameters (`AB`/`PB`/`AC`/`PC`) -- verified
+# directly against `klayout==0.30.10`, and the basis of
+# `_COMBINE_PARAMETER_CONSERVATION_RULES`'s bipolar rule. On roughly a
+# quarter of `Netlist.dup()` copies, KLayout instead returns *normally* with
+# that accumulation inverted (`AE`/`NE` left at one instance's value,
+# `AB`/`PB`/`AC`/`PC` summed) -- no exception, so the `#1185` retry budget
+# never fires. Like the `RuntimeError` tests above, these tests force the
+# reported outcome rather than depending on the ~24% live flake rate.
+_BJT_ARRAY_INSTANCES = 8
+_BJT_ARRAY_UNIT = {
+    "AE": 1e-12,
+    "PE": 4e-06,
+    "AB": 2e-12,
+    "PB": 6e-06,
+    "AC": 3e-12,
+    "PC": 8e-06,
+}
+_BJT_ARRAY_SUMMED_PARAMETERS = ("AE", "PE", "NE")
+_BJT_ARRAY_SHARED_PARAMETERS = ("AB", "PB", "AC", "PC")
+_BJT_ARRAY_LAYOUT_SPICE = (
+    ".subckt TOP C B E\n"
+    + "".join(
+        f"Q{index} C B E npn "
+        + " ".join(f"{name}={value}" for name, value in _BJT_ARRAY_UNIT.items())
+        + "\n"
+        for index in range(_BJT_ARRAY_INSTANCES)
+    )
+    + ".ends\n"
+)
+# One lumped device declaring the array's correctly-combined geometry: the
+# emitter parameters summed across the array, the shared base/collector ones
+# at the array's common value.
+_BJT_ARRAY_REFERENCE_SPICE = (
+    ".subckt TOP C B E\n"
+    "Q0 C B E npn "
+    + " ".join(
+        f"{name}={value * _BJT_ARRAY_INSTANCES}"
+        for name, value in _BJT_ARRAY_UNIT.items()
+        if name in _BJT_ARRAY_SUMMED_PARAMETERS
+    )
+    + " "
+    + " ".join(
+        f"{name}={value}"
+        for name, value in _BJT_ARRAY_UNIT.items()
+        if name in _BJT_ARRAY_SHARED_PARAMETERS
+    )
+    + f" NE={_BJT_ARRAY_INSTANCES}\n"
+    ".ends\n"
+)
+
+
+def _invert_bjt_accumulation(netlist, kdb):
+    """Rewrite every *folded* bipolar device in `netlist` the way issue
+    #2374 reports KLayout's `dup()`-path combine does: the summed emitter
+    parameters pushed back down to a single instance's value, the shared
+    base/collector ones scaled up by the fold factor. A device that folded
+    nothing (`NE <= 1`) is left alone, so a reference side declaring one
+    lumped device is never "corrupted" into agreeing with a corrupted layout
+    side."""
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            if not isinstance(device.device_class(), kdb.DeviceClassBJT3Transistor):
+                continue
+            instances = device.parameter("NE")
+            if instances <= 1:
+                continue
+            device.set_parameter("AE", device.parameter("AE") / instances)
+            device.set_parameter("NE", 1.0)
+            for name in _BJT_ARRAY_SHARED_PARAMETERS:
+                device.set_parameter(name, device.parameter(name) * instances)
+
+
+def _read_netlist(path):
+    import klayout.db as kdb
+
+    netlist = kdb.Netlist()
+    netlist.read(path, kdb.NetlistSpiceReader())
+    return netlist
+
+
+def _only_device(netlist):
+    circuit = next(iter(netlist.each_circuit()))
+    return next(iter(circuit.each_device()))
+
+
+def test_correct_combine_parameters_fixes_inverted_bjt_accumulation(tmp_path):
+    """Issue #2374: `_correct_combine_parameters` repairs a combined bipolar
+    device whose parameter accumulation came back *inverted* -- the summed
+    emitter parameters left at one instance's value and the shared
+    base/collector parameters summed instead -- and names every corrected
+    `(device, parameter)` pair in one `device.combine_parameter_corrected`
+    warning. `PE` is summed on both the correct and the wrong path, so it is
+    deliberately expected *not* to appear: the check corrects what disagrees
+    with the group, not every parameter of an affected device."""
+    import klayout.db as kdb
+
+    netlist = _read_netlist(_write(tmp_path / "layout.spice", _BJT_ARRAY_LAYOUT_SPICE))
+    pre_combine_snapshot = netlist.dup()
+    netlist.combine_devices()
+
+    device = _only_device(netlist)
+    correct = {
+        name: device.parameter(name)
+        for name in _BJT_ARRAY_SUMMED_PARAMETERS + _BJT_ARRAY_SHARED_PARAMETERS
+    }
+    # Sanity: the array folded, and folded the way the conservation rule says.
+    assert correct["NE"] == pytest.approx(float(_BJT_ARRAY_INSTANCES))
+
+    _invert_bjt_accumulation(netlist, kdb)
+    assert device.parameter("NE") == pytest.approx(1.0)  # sanity: corrupted
+
+    warning = lvs._correct_combine_parameters(pre_combine_snapshot, netlist, "layout")
+
+    assert warning is not None
+    assert warning["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
+    assert warning["severity"] == "warning"
+    assert warning["side"] == "layout"
+    assert {entry["parameter"] for entry in warning["details"]["corrected"]} == {
+        "AE",
+        "NE",
+        *_BJT_ARRAY_SHARED_PARAMETERS,
+    }
+    for name, value in correct.items():
+        assert device.parameter(name) == pytest.approx(value)
+
+
+def test_correct_combine_parameters_leaves_an_unfolded_parallel_group_alone(tmp_path):
+    """The group-total rule is asserted only against a group that actually
+    folded to one surviving device. A parallel group `combine_devices()`
+    never folded -- e.g. because a list-valued `options.combine_devices`
+    restricted combining away from its class -- must be left exactly as
+    drawn, not have each of its N members individually "corrected" up to the
+    group's N-instance total."""
+    netlist = _read_netlist(_write(tmp_path / "layout.spice", _BJT_ARRAY_LAYOUT_SPICE))
+    pre_combine_snapshot = netlist.dup()
+
+    # No combine at all: every instance survives under the same group key.
+    warning = lvs._correct_combine_parameters(pre_combine_snapshot, netlist, "layout")
+
+    assert warning is None
+    circuit = next(iter(netlist.each_circuit()))
+    devices = list(circuit.each_device())
+    assert len(devices) == _BJT_ARRAY_INSTANCES
+    for device in devices:
+        assert device.parameter("NE") == pytest.approx(1.0)
+        assert device.parameter("AE") == pytest.approx(devices[0].parameter("AE"))
+
+
+def test_correct_combine_parameters_skips_a_shared_parameter_the_group_disagrees_on(
+    tmp_path,
+):
+    """A *preserved* (non-summing) parameter is only assertable when every
+    member of the pre-combine group agrees on its value. When they do not,
+    nothing is known about the folded device's value for it, so the check
+    must leave it alone rather than pick one member's value arbitrarily."""
+    layout_spice = (
+        ".subckt TOP C B E\n"
+        "Q0 C B E npn AE=1e-12 PE=4e-06 AB=2e-12 PB=6e-06 AC=3e-12 PC=8e-06\n"
+        "Q1 C B E npn AE=1e-12 PE=4e-06 AB=5e-12 PB=6e-06 AC=3e-12 PC=8e-06\n"
+        ".ends\n"
+    )
+    netlist = _read_netlist(_write(tmp_path / "layout.spice", layout_spice))
+    pre_combine_snapshot = netlist.dup()
+    netlist.combine_devices()
+
+    device = _only_device(netlist)
+    device.set_parameter("AB", 99.0)
+
+    warning = lvs._correct_combine_parameters(pre_combine_snapshot, netlist, "layout")
+
+    assert warning is None
+    assert device.parameter("AB") == pytest.approx(99.0)
+
+
+def test_correct_combine_parameters_ignores_mos_and_resistor_devices(tmp_path):
+    """No conservation rule covers MOS transistors or resistors -- a MOS
+    series fold's surviving device has connectivity no pre-combine group
+    shares, and a parallel resistor combination is not a simple sum -- so
+    neither is ever inspected, let alone rewritten, by this check."""
+    netlist = _read_netlist(
+        _write(tmp_path / "layout.spice", _MIXED_CLASS_LAYOUT_SPICE)
+    )
+    pre_combine_snapshot = netlist.dup()
+
+    netlist.combine_devices()
+
+    assert (
+        lvs._correct_combine_parameters(pre_combine_snapshot, netlist, "layout") is None
+    )
+
+
+def test_run_lvs_bjt_verdict_is_stable_when_dup_copies_mis_accumulate(
+    tmp_path, monkeypatch
+):
+    """Issue #2374, the headline acceptance bar: repeated `run_lvs()` calls
+    against identical inputs must not flip between `match` and a false
+    `mismatch` because of which netlist object the combine happened to run
+    against.
+
+    The live defect fires on ~24% of `Netlist.dup()` copies; this forces it
+    on **every** copy (tracking the objects `Netlist.dup()` hands back, then
+    inverting the accumulation whenever a combine that actually folded
+    something ran against one of them), which is the same defect at a
+    reproducible rate. Against `main` before this fix the layout side's
+    adopted combine always ran on such a copy and this reported
+    `status: "mismatch"` with a dozen `device.property` findings.
+    """
+    import klayout.db as kdb
+
+    real_dup = kdb.Netlist.dup
+    real_combine_devices = kdb.Netlist.combine_devices
+    copies = []
+
+    def _tracking_dup(self):
+        copy = real_dup(self)
+        copies.append(copy)
+        return copy
+
+    def _combine_then_invert_on_a_copy(self):
+        before = sum(1 for c in self.each_circuit() for _ in c.each_device())
+        real_combine_devices(self)
+        after = sum(1 for c in self.each_circuit() for _ in c.each_device())
+        if after < before and any(self is copy for copy in copies):
+            _invert_bjt_accumulation(self, kdb)
+
+    monkeypatch.setattr(kdb.Netlist, "dup", _tracking_dup)
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _combine_then_invert_on_a_copy)
+
+    request = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {
+                "netlist": _write(tmp_path / "layout.spice", _BJT_ARRAY_LAYOUT_SPICE),
+                "top": "TOP",
+            },
+            "reference": {
+                "netlist": _write(
+                    tmp_path / "reference.spice", _BJT_ARRAY_REFERENCE_SPICE
+                ),
+                "top": "TOP",
+            },
+            "options": {"combine_devices": True},
+        },
+    )
+
+    verdicts = {run_lvs(request)["status"] for _ in range(5)}
+
+    assert verdicts == {"match"}
+
+
+def test_run_lvs_corrects_an_inverted_bjt_combine_and_discloses_it(
+    tmp_path, monkeypatch
+):
+    """Issue #2374's second guarantee: even when the combine that *is*
+    adopted mis-accumulates (here: every combine does, copy or not), the
+    wrong parameters are never adopted silently. They are corrected in place
+    against the pre-combine group and disclosed as a
+    `device.combine_parameter_corrected` warning, so the resulting
+    `status: "match"` is reached on values `klt lvs` can account for."""
+    import klayout.db as kdb
+
+    real_combine_devices = kdb.Netlist.combine_devices
+
+    def _combine_then_invert(self):
+        before = sum(1 for c in self.each_circuit() for _ in c.each_device())
+        real_combine_devices(self)
+        after = sum(1 for c in self.each_circuit() for _ in c.each_device())
+        if after < before:
+            _invert_bjt_accumulation(self, kdb)
+
+    monkeypatch.setattr(kdb.Netlist, "combine_devices", _combine_then_invert)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": _write(
+                        tmp_path / "layout.spice", _BJT_ARRAY_LAYOUT_SPICE
+                    ),
+                    "top": "TOP",
+                },
+                "reference": {
+                    "netlist": _write(
+                        tmp_path / "reference.spice", _BJT_ARRAY_REFERENCE_SPICE
+                    ),
+                    "top": "TOP",
+                },
+                "options": {"combine_devices": True},
+            },
+        )
+    )
+
+    corrections = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_COMBINE_PARAMETER_CORRECTED
+    ]
+    assert len(corrections) == 1
+    assert corrections[0]["side"] == "layout"
+    assert {entry["parameter"] for entry in corrections[0]["details"]["corrected"]} == {
+        "AE",
+        "NE",
+        *_BJT_ARRAY_SHARED_PARAMETERS,
+    }
+    assert report["status"] == "match"
+
+
+def test_run_lvs_bjt_combine_unaffected_when_klayout_accumulates_correctly(tmp_path):
+    """Regression guard: an ordinary (non-monkeypatched) bipolar-array
+    combine never emits a `device.combine_parameter_corrected` warning -- the
+    bipolar conservation rule is a defensive check on KLayout's own output,
+    not something every bipolar combine trips."""
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": _write(
+                        tmp_path / "layout.spice", _BJT_ARRAY_LAYOUT_SPICE
+                    ),
+                    "top": "TOP",
+                },
+                "reference": {
+                    "netlist": _write(
+                        tmp_path / "reference.spice", _BJT_ARRAY_REFERENCE_SPICE
+                    ),
+                    "top": "TOP",
+                },
                 "options": {"combine_devices": True},
             },
         )
