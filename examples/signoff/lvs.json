@@ -70,6 +70,7 @@
   "environment": {
     "engine": "klayout",
     "engine_version": "0.30.10",
+    "netgen_binary": null,
     "layout_sha256": "1bc1899ad636c1bac4c903b45d7fecd99112056a2bf633cf50c13b5bd93ba692",
     "reference_sha256": "b3db003a75370b595c42edd12c525cfec7d6595b0b63fb312c1c46fd70aacb99",
     "extracted_netlist": null

@@ -175,6 +175,7 @@ from .lvs_mismatch import _classify_net_mismatches as _classify_net_mismatches
 from .lvs_mismatch import _net_mismatch_pools as _net_mismatch_pools
 from .lvs_netgen import (
     _NETGEN_DEFAULT_TIMEOUT_S,
+    _resolve_netgen_binary,
     _resolve_netgen_setup,
     _run_netgen_lvs,
 )
@@ -1627,6 +1628,11 @@ def run_lvs(request: str) -> dict[str, Any]:
             ]
         status = "match" if compare_result else "mismatch"
         engine_version = _engine_version()
+        # Issue #2373: the `klayout` engine launches no subprocess, so the
+        # field is present-and-null here rather than omitted -- the same
+        # always-present-but-nullable convention the rest of `environment`
+        # follows.
+        netgen_binary = None
         net_correspondence = _build_net_correspondence(logger, supply_universe)
         counts = {
             "nets": {
@@ -1703,6 +1709,12 @@ def run_lvs(request: str) -> dict[str, Any]:
             )
         setup_file = _resolve_netgen_setup(options, request_dir)
         timeout_s = float(options.get("netgen_timeout_s", _NETGEN_DEFAULT_TIMEOUT_S))
+        # Issue #2373: resolve *which* netgen binary to run before launching
+        # it (`options.netgen_binary` > `$KLT_NETGEN_BINARY` > `netgen` >
+        # `netgen-lvs`), rather than hardcoding the name `netgen` -- the
+        # resolved path is both what gets spawned and what
+        # `environment.netgen_binary` records below.
+        netgen_binary = _resolve_netgen_binary(options, request_dir)
         status, mismatches, engine_version = _run_netgen_lvs(
             layout_netlist=layout_netlist,
             layout_circuit=layout_circuit,
@@ -1710,6 +1722,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             reference_circuit=reference_circuit,
             setup_file=setup_file,
             timeout_s=timeout_s,
+            binary=netgen_binary,
         )
         layout_net_count = sum(1 for _ in layout_circuit.each_net())
         reference_net_count = sum(1 for _ in reference_circuit.each_net())
@@ -2037,6 +2050,13 @@ def run_lvs(request: str) -> dict[str, Any]:
         "environment": {
             "engine": engine,
             "engine_version": engine_version,
+            # Issue #2373: which netgen executable actually produced this
+            # verdict -- the absolute path `_resolve_netgen_binary` settled
+            # on, so a committed report distinguishes a from-source `netgen`
+            # from Debian/Ubuntu's `netgen-lvs` (and from an explicitly
+            # named build). Always `null` for `"engine": "klayout"`, which
+            # launches no subprocess.
+            "netgen_binary": netgen_binary,
             "layout_sha256": sha256_file(layout_hash_source),
             "reference_sha256": sha256_file(reference_netlist_path),
             "extracted_netlist": extracted_netlist_path,
@@ -2371,8 +2391,32 @@ def _supply_nets_replay_options(echoed: dict[str, Any]) -> dict[str, Any]:
 #: in `_report_verify.py`): `klt drc --rerun` has no analogous output-path
 #: field to exclude, so widening the shared constant would be correct for LVS
 #: but dead configuration for DRC.
+#:
+#: `environment.netgen_binary` (issue #2373) is excluded for the same
+#: host-local-path reason, plus one of its own:
+#:
+#: * It is an absolute path resolved against the *running host's* `PATH` --
+#:   `/usr/local/bin/netgen` on a from-source host, `/usr/bin/netgen-lvs` on
+#:   Debian/Ubuntu. Re-verifying a committed report on a second host is the
+#:   whole point of `--check --rerun`, and that host resolving the same
+#:   netgen at a different path (or under the other packaged name) is not a
+#:   change in what was compared. The comparator's *semantic* identity stays
+#:   diffed: `environment.engine_version` is netgen's own reported version
+#:   and is deliberately **not** excluded, so an actually-different netgen
+#:   build still surfaces as drift.
+#: * Every `klt lvs` report committed before #2373 carries no
+#:   `netgen_binary` key at all, and `diff_verdict_fields` compares the
+#:   union of both sides' keys -- so without this exclusion every such
+#:   report (both engines, including the `null`-vs-absent `"klayout"` case)
+#:   would re-run as `drifted` on a field it never carried. That is the same
+#:   "a field a report never carried cannot itself have drifted" rule
+#:   `rerun_lvs_report` applies to the #1205/#1952/#1983 request-echo
+#:   fields; an unconditional exclusion covers it without needing the
+#:   committed-report probe, because the field is volatile going forward
+#:   too.
 _LVS_RERUN_EXCLUDE_PATHS: frozenset[tuple[str, ...]] = VOLATILE_PROVENANCE_PATHS | {
-    ("environment", "extracted_netlist")
+    ("environment", "extracted_netlist"),
+    ("environment", "netgen_binary"),
 }
 
 
@@ -2396,7 +2440,12 @@ def rerun_lvs_report(report_path: str) -> dict[str, Any]:
     ``_reconstruct_lvs_request`` never re-asserts ``keep_extracted`` -- so a
     fresh rerun always reports it as ``null`` even when nothing else about
     the compare changed, which is a false drift, not a real one, on a
-    report committed from a ``keep_extracted: true`` request. ``status:
+    report committed from a ``keep_extracted: true`` request; plus
+    ``environment.netgen_binary`` (issue #2373), a host-local absolute path
+    whose value legitimately differs between the committing and the
+    verifying host without anything about the compare changing -- the
+    comparator's semantic identity stays diffed via the *not*-excluded
+    ``environment.engine_version``. ``status:
     "drifted"`` names every other changed field, including a changed
     ``status``/``mismatch_count``/``mismatches`` (the LVS-outcome-changed
     case) as well as changed ``environment.layout_sha256``/

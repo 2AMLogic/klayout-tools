@@ -56,10 +56,18 @@ pytestmark = pytest.mark.usefixtures("real_build_identity_git")
 #: has no simple package-manager install -- see the dated addendum in
 #: `docs/design/lvs-extraction-spike.md` for the from-source build this
 #: issue required), so this tier skips cleanly in CI and only runs on a
-#: machine that already has a `netgen` binary on `$PATH`.
-HAVE_NETGEN = shutil.which("netgen") is not None
+#: machine that already has a netgen binary on `$PATH`.
+#:
+#: Issue #2373: *either* binary name counts, matching the engine's own
+#: resolution order -- `netgen` (upstream's name, a from-source build) or
+#: `netgen-lvs` (what Debian's/Ubuntu's `netgen-lvs` package installs). A
+#: host with only the packaged binary is exactly the host this tier most
+#: needs to run on, since it is the configuration that used to be
+#: unreachable without a `PATH` shim.
+HAVE_NETGEN = any(shutil.which(name) is not None for name in ("netgen", "netgen-lvs"))
 _SKIP_NO_NETGEN = pytest.mark.skipif(
-    not HAVE_NETGEN, reason="netgen is not installed on this machine"
+    not HAVE_NETGEN,
+    reason="neither 'netgen' nor 'netgen-lvs' is installed on this machine",
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -11061,6 +11069,41 @@ Final result: Top level cell failed pin matching.
 """
 
 
+#: Where the stubbed `shutil.which` below pretends each netgen binary name
+#: lives (issue #2373). These are *not* probed on the test host -- the stub
+#: answers from `which_map` alone, so the whole resolution-order tier runs
+#: identically on a machine with netgen, with only Debian/Ubuntu's
+#: `netgen-lvs`, or with neither.
+_STUB_NETGEN_PATH = "/usr/bin/netgen"
+_STUB_NETGEN_LVS_PATH = "/usr/bin/netgen-lvs"
+
+
+def _stub_netgen_which(monkeypatch, which_map: dict[str, str | None] | None = None):
+    """Stub `lvs_netgen.shutil.which` for `_resolve_netgen_binary` (issue
+    #2373), so binary resolution is decided by `which_map` rather than by
+    what happens to be installed on the test host.
+
+    `which_map` maps a lookup name (or an explicit path) to the answer
+    `shutil.which` should give. Any *other* netgen-ish name resolves to
+    `None` ("not installed"); everything else falls through to the real
+    `shutil.which`, so unrelated lookups elsewhere in a `run_lvs` call are
+    unaffected. The default map is "a plain `netgen` is on PATH" -- the
+    pre-#2373 status quo every other netgen test assumes.
+    """
+    if which_map is None:
+        which_map = {"netgen": _STUB_NETGEN_PATH}
+    real_which = shutil.which
+
+    def fake_which(cmd, *args, **kwargs):
+        if cmd in which_map:
+            return which_map[cmd]
+        if os.path.basename(str(cmd)).startswith("netgen"):
+            return None
+        return real_which(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(lvs_netgen.shutil, "which", fake_which)
+
+
 def _stub_netgen_subprocess(
     monkeypatch,
     *,
@@ -11068,6 +11111,7 @@ def _stub_netgen_subprocess(
     stdout: str = _NETGEN_STDOUT_BANNER,
     side_effect: BaseException | None = None,
     captured_cmds: list | None = None,
+    which_map: dict[str, str | None] | None = None,
 ):
     """Stub `lvs_netgen.subprocess.run` for the netgen engine path
     (`_run_netgen_lvs` lives in `klayout_tools.lvs_netgen`, issue #1803) --
@@ -11077,7 +11121,13 @@ def _stub_netgen_subprocess(
     owns), so the fake reads it back off `cmd[-1]` (the last positional
     argument `_run_netgen_lvs` passes to `netgen -batch lvs`) rather than
     an `-o`-style flag (ngspice's convention, not netgen's).
+
+    Also stubs binary resolution (`_stub_netgen_which`, issue #2373) --
+    `_resolve_netgen_binary` now runs a `shutil.which` precheck before the
+    subprocess, so a stubbed `subprocess.run` alone would no longer get the
+    run as far as being called on a host without netgen installed.
     """
+    _stub_netgen_which(monkeypatch, which_map)
 
     def fake_run(cmd, capture_output, text, timeout):
         if captured_cmds is not None:
@@ -11304,13 +11354,238 @@ def test_netgen_engine_populates_counts_matched_zero_on_mismatch(tmp_path, monke
 
 
 def test_netgen_engine_missing_binary_raises_actionable_error(tmp_path, monkeypatch):
+    """Neither name on PATH -- the error must name *both* binaries that were
+    tried (issue #2373: the old message named only `netgen`, so a host with
+    Debian/Ubuntu's `netgen-lvs` installed was told to "install netgen" when
+    it already had)."""
+    _stub_netgen_subprocess(monkeypatch, which_map={})
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(LvsError) as excinfo:
+        run_lvs(path)
+
+    message = str(excinfo.value)
+    assert "netgen" in message
+    assert "netgen-lvs" in message
+    assert "options.netgen_binary" in message
+    assert "KLT_NETGEN_BINARY" in message
+
+
+def test_netgen_engine_resolves_netgen_from_path(tmp_path, monkeypatch):
+    """The common case: a plain `netgen` on PATH is used, exactly as before
+    issue #2373, and the resolved binary is recorded in `environment`."""
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        captured_cmds=captured,
+        which_map={"netgen": _STUB_NETGEN_PATH},
+    )
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == _STUB_NETGEN_PATH
+    assert report["status"] == "match"
+    assert report["environment"]["netgen_binary"] == _STUB_NETGEN_PATH
+
+
+def test_netgen_engine_falls_back_to_netgen_lvs_binary(tmp_path, monkeypatch):
+    """Issue #2373: Debian/Ubuntu's `netgen-lvs` package installs
+    `/usr/bin/netgen-lvs` (the name `netgen` there belongs to an unrelated
+    FEM mesh generator), so a host with netgen correctly installed from the
+    distribution must run without a PATH shim."""
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        captured_cmds=captured,
+        which_map={"netgen": None, "netgen-lvs": _STUB_NETGEN_LVS_PATH},
+    )
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == _STUB_NETGEN_LVS_PATH
+    assert report["status"] == "match"
+    assert report["environment"]["netgen_binary"] == _STUB_NETGEN_LVS_PATH
+
+
+def test_netgen_engine_prefers_netgen_over_netgen_lvs(tmp_path, monkeypatch):
+    """With both names installed, `netgen` wins -- `netgen-lvs` is a
+    fallback, never a preference change for hosts that already worked."""
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        captured_cmds=captured,
+        which_map={
+            "netgen": _STUB_NETGEN_PATH,
+            "netgen-lvs": _STUB_NETGEN_LVS_PATH,
+        },
+    )
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == _STUB_NETGEN_PATH
+    assert report["environment"]["netgen_binary"] == _STUB_NETGEN_PATH
+
+
+def test_netgen_engine_explicit_binary_option_wins(tmp_path, monkeypatch):
+    """`options.netgen_binary` beats both PATH names -- the escape hatch for
+    a from-source build in an unusual location."""
+    custom = str(tmp_path / "opt" / "netgen-custom")
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        captured_cmds=captured,
+        which_map={
+            custom: custom,
+            "netgen": _STUB_NETGEN_PATH,
+            "netgen-lvs": _STUB_NETGEN_LVS_PATH,
+        },
+    )
+    path = _netgen_request(tmp_path, options={"netgen_binary": custom})
+
+    report = run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == custom
+    assert report["environment"]["netgen_binary"] == custom
+
+
+def test_netgen_engine_env_var_binary_overrides_path(tmp_path, monkeypatch):
+    """`$KLT_NETGEN_BINARY` beats both PATH names, mirroring the
+    `KLT_TIERS_DOC`/`KLT_SIM_MAX_WORKERS` env-override convention."""
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        captured_cmds=captured,
+        which_map={
+            "netgen-from-env": "/opt/netgen-from-env",
+            "netgen": _STUB_NETGEN_PATH,
+        },
+    )
+    monkeypatch.setenv("KLT_NETGEN_BINARY", "netgen-from-env")
+    path = _netgen_request(tmp_path)
+
+    report = run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == "/opt/netgen-from-env"
+    assert report["environment"]["netgen_binary"] == "/opt/netgen-from-env"
+
+
+def test_netgen_engine_option_binary_beats_env_var(tmp_path, monkeypatch):
+    """Explicit request option > environment variable, the documented
+    precedence order."""
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        captured_cmds=captured,
+        which_map={
+            "netgen-from-option": "/opt/netgen-from-option",
+            "netgen-from-env": "/opt/netgen-from-env",
+            "netgen": _STUB_NETGEN_PATH,
+        },
+    )
+    monkeypatch.setenv("KLT_NETGEN_BINARY", "netgen-from-env")
+    path = _netgen_request(tmp_path, options={"netgen_binary": "netgen-from-option"})
+
+    run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == "/opt/netgen-from-option"
+
+
+def test_netgen_engine_unresolvable_binary_option_raises(tmp_path, monkeypatch):
+    """An explicit `options.netgen_binary` that is not runnable is a clean
+    application error naming the option (mirroring
+    `options.netgen_setup`'s own validation), never a silent fallback to a
+    PATH lookup and never a bare `FileNotFoundError`."""
+    _stub_netgen_subprocess(monkeypatch, which_map={"netgen": _STUB_NETGEN_PATH})
+    missing = str(tmp_path / "nope" / "netgen-custom")
+    path = _netgen_request(tmp_path, options={"netgen_binary": missing})
+
+    with pytest.raises(LvsError, match="options.netgen_binary"):
+        run_lvs(path)
+
+
+def test_netgen_engine_unresolvable_binary_env_var_raises(tmp_path, monkeypatch):
+    """Same for the env-var form -- an override the caller believes is in
+    force but silently is not would be worse than not supporting it."""
+    _stub_netgen_subprocess(monkeypatch, which_map={"netgen": _STUB_NETGEN_PATH})
+    monkeypatch.setenv("KLT_NETGEN_BINARY", str(tmp_path / "nope" / "netgen-env"))
+    path = _netgen_request(tmp_path)
+
+    with pytest.raises(LvsError, match="KLT_NETGEN_BINARY"):
+        run_lvs(path)
+
+
+def test_netgen_engine_binary_option_resolves_relative_to_request_dir(
+    tmp_path, monkeypatch
+):
+    """A path-shaped `options.netgen_binary` resolves against the request
+    file's own directory, the same convention `options.netgen_setup` uses."""
+    binary = tmp_path / "tools" / "netgen-local"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    captured: list = []
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        captured_cmds=captured,
+        which_map={str(binary): str(binary)},
+    )
+    path = _netgen_request(
+        tmp_path, options={"netgen_binary": os.path.join("tools", "netgen-local")}
+    )
+
+    report = run_lvs(path)
+
+    (cmd,) = captured
+    assert cmd[0] == str(binary)
+    assert report["environment"]["netgen_binary"] == str(binary)
+
+
+def test_netgen_engine_exec_failure_after_resolution_raises(tmp_path, monkeypatch):
+    """The resolved binary can still fail to exec (removed between the
+    `shutil.which` precheck and the spawn) -- that stays an actionable
+    `LvsError` naming the binary, not a traceback."""
     _stub_netgen_subprocess(
         monkeypatch, side_effect=FileNotFoundError("no such file: netgen")
     )
     path = _netgen_request(tmp_path)
 
-    with pytest.raises(LvsError, match="binary not found on PATH"):
+    with pytest.raises(LvsError, match="could not launch netgen"):
         run_lvs(path)
+
+
+def test_klayout_engine_reports_null_netgen_binary(tmp_path):
+    """`environment.netgen_binary` is always present, never omitted -- and
+    is `null` for the `klayout` engine, which launches no subprocess."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    path = _write_request(
+        tmp_path / "request.json",
+        {
+            "layout": {"netlist": layout_path, "top": "inv"},
+            "reference": {"netlist": reference_path, "top": "inv"},
+        },
+    )
+
+    report = run_lvs(path)
+
+    assert report["environment"]["engine"] == "klayout"
+    assert report["environment"]["netgen_binary"] is None
 
 
 def test_netgen_engine_timeout_raises(tmp_path, monkeypatch):
@@ -11489,7 +11764,7 @@ def test_netgen_engine_passes_setup_file_argument(tmp_path, monkeypatch):
     run_lvs(path)
 
     (cmd,) = captured
-    assert cmd[0] == "netgen"
+    assert cmd[0] == _STUB_NETGEN_PATH
     assert cmd[1:3] == ["-batch", "lvs"]
     assert cmd[5] == str(setup_path)
 
@@ -11785,6 +12060,16 @@ def test_netgen_engine_real_binary_clean_self_compare(tmp_path):
     assert report["status"] == "match"
     assert report["mismatches"] == []
     assert report["environment"]["engine_version"]
+    # Issue #2373: the real resolved executable, whichever of the two names
+    # this host has -- on Debian/Ubuntu that is `/usr/bin/netgen-lvs`, the
+    # configuration this whole tier could not reach before the engine
+    # resolved its binary instead of hardcoding the name `netgen`.
+    netgen_binary = report["environment"]["netgen_binary"]
+    assert netgen_binary in {
+        shutil.which("netgen"),
+        shutil.which("netgen-lvs"),
+    }
+    assert os.access(netgen_binary, os.X_OK)
 
 
 @_SKIP_NO_NETGEN
@@ -12256,6 +12541,63 @@ def test_rerun_lvs_report_excludes_extracted_netlist_path(tmp_path):
     assert result["status"] == "match"
     assert result["drift"] == []
     assert result["fresh"]["environment"]["extracted_netlist"] is None
+
+
+def test_rerun_lvs_report_legacy_report_without_netgen_binary(tmp_path):
+    """Issue #2373: every `klt lvs` report committed *before* this field
+    existed carries no `environment.netgen_binary` key, and the drift diff
+    compares the union of both sides' keys -- so without the exclusion such
+    a report would re-run as `drifted` on a field it never carried (even for
+    the `klayout` engine, where the fresh value is a plain `null`). Same
+    "a field a report never carried cannot itself have drifted" rule the
+    #1205/#1952/#1983 request-echo fields get."""
+    layout_path, reference_path = _matching_netlist_request(tmp_path)
+    request = {
+        "layout": {"netlist": layout_path, "top": "inv"},
+        "reference": {"netlist": reference_path, "top": "inv"},
+    }
+    report = run_lvs(json.dumps(request))
+    del report["environment"]["netgen_binary"]
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["status"] == "match"
+    assert result["drift"] == []
+
+
+def test_rerun_lvs_report_excludes_netgen_binary_path(tmp_path, monkeypatch):
+    """Issue #2373: `environment.netgen_binary` is a host-local absolute
+    path. Re-verifying a committed netgen report on a second host -- where
+    the same comparator lives at a different path, or under Debian/Ubuntu's
+    `netgen-lvs` name -- is not drift in what was compared, so the field is
+    excluded. `environment.engine_version` (the comparator's semantic
+    identity) is deliberately *not* excluded and still drifts honestly."""
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        which_map={"netgen": _STUB_NETGEN_PATH},
+    )
+    request_path = _netgen_request(tmp_path)
+    report = run_lvs(request_path)
+    assert report["environment"]["netgen_binary"] == _STUB_NETGEN_PATH
+
+    report_path = tmp_path / "lvs.json"
+    _write_report(report_path, report)
+
+    # The verifying host has only Debian/Ubuntu's packaged binary.
+    _stub_netgen_subprocess(
+        monkeypatch,
+        log_text=_NETGEN_MATCH_LOG,
+        which_map={"netgen": None, "netgen-lvs": _STUB_NETGEN_LVS_PATH},
+    )
+
+    result = rerun_lvs_report(str(report_path))
+
+    assert result["fresh"]["environment"]["netgen_binary"] == _STUB_NETGEN_LVS_PATH
+    assert result["status"] == "match"
+    assert result["drift"] == []
 
 
 def test_rerun_lvs_report_missing_layout_reference_raises(tmp_path):

@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2373, `klt lvs --engine netgen` binary resolution — additive,
+  **no** `schema_version` bump: one new always-present `environment` key,
+  `netgen_binary`): the netgen engine invoked the hardcoded binary name
+  `netgen`. On Debian and Ubuntu the netgen LVS tool is packaged as
+  `netgen-lvs` and installs `/usr/bin/netgen-lvs` (the name `netgen` there
+  belongs to an unrelated FEM mesh generator), so a host with netgen
+  correctly installed from its distribution got `could not launch netgen:
+  binary not found on PATH` — an error whose own remediation ("install
+  netgen") was already satisfied — and callers had to shim `PATH` with a
+  `netgen` symlink. The binary is now resolved, first runnable candidate
+  wins: `options.netgen_binary` (new, engine-scoped — a bare name or a path
+  resolved against the request file's directory, validated like
+  `options.netgen_setup`, an application error when not runnable rather
+  than a silent fallback), then `$KLT_NETGEN_BINARY`, then `netgen` on
+  `PATH`, then `netgen-lvs`. When none resolves the error names both
+  built-in candidates. `environment.netgen_binary` records the absolute
+  path of the executable that produced the verdict (`null` for `"engine":
+  "klayout"`, which launches no subprocess), so a committed report
+  distinguishes a from-source `netgen` from a packaged `netgen-lvs`.
+  Behaviour is unchanged on a host with `netgen` on `PATH` and neither
+  override set. The new key is a host-local path, so it is excluded from
+  `klt lvs --check --rerun`'s drift diff — re-verifying a committed report
+  on a host that resolves the same comparator elsewhere (or under the other
+  packaged name) is not drift in what was compared, and the exclusion also
+  keeps every report committed *before* this change (which carries no
+  `netgen_binary` key at all) re-running clean. `environment.engine_version`
+  — netgen's own reported version, the comparator's semantic identity — is
+  still diffed, so an actually-different netgen build still surfaces as
+  drift. `examples/signoff/lvs.json` is regenerated for the new key.
 - **Added** (#2365, `klt deck devices` + a `klt extract` `warnings[]`
   near-miss diagnostic — additive, **no** `schema_version` bump on either
   command: `klt deck devices` is a new verb with its own

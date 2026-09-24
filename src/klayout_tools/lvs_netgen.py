@@ -3,6 +3,7 @@ invocation + report parsing.
 
 Split out of ``lvs.py`` (issue #1803) as a self-contained subsystem --
 ``options.netgen_setup`` resolution (:func:`_resolve_netgen_setup`),
+netgen-binary resolution (:func:`_resolve_netgen_binary`, issue #2373),
 subprocess invocation (:func:`_run_netgen_lvs`, :func:`_cleanup_netgen_work_dir`),
 and report parsing (:func:`_locate_netgen_verdict`, :func:`_parse_netgen_report`,
 :func:`_declares_netgen_property_errors`, :func:`_netgen_property_error_context`,
@@ -25,7 +26,8 @@ calls out to ``lvs.py``'s ``LvsError`` and ``CATEGORY_*`` constants, imported
 this module never has a load-time dependency back on ``lvs.py`` -- only
 ``lvs.py`` depends on this module at import time. ``lvs.py`` in turn imports
 this module's entry points (:func:`_resolve_netgen_setup`,
-:func:`_run_netgen_lvs`, plus :data:`_NETGEN_DEFAULT_TIMEOUT_S`) back at
+:func:`_resolve_netgen_binary`, :func:`_run_netgen_lvs`, plus
+:data:`_NETGEN_DEFAULT_TIMEOUT_S`) back at
 module scope, preserving ``klayout_tools.lvs.<name>`` as a working import
 path for every name the test suite/callers used before this split.
 :func:`_mismatch` is imported from ``lvs_mismatch.py`` at module scope
@@ -37,6 +39,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from typing import TYPE_CHECKING, Any
@@ -210,6 +213,91 @@ _NETGEN_SECTION_BOUNDARIES: tuple[str, ...] = (
 _NETGEN_VERDICT_MARKERS: tuple[str, ...] = ("Final result:", "Result:")
 
 
+#: Binary names :func:`_resolve_netgen_binary` looks for on ``PATH``, in
+#: order, when the caller named none explicitly (issue #2373).
+#:
+#: ``netgen`` first -- it is upstream's own name, what a from-source build
+#: installs, and what every host that worked before this resolution order
+#: existed already has. ``netgen-lvs`` second: that is the binary name
+#: Debian/Ubuntu's ``netgen-lvs`` package installs (``/usr/bin/netgen-lvs``),
+#: because on those distributions the name ``netgen`` is taken by an
+#: unrelated FEM mesh generator. Without this fallback a host with netgen
+#: correctly installed from its distribution got a "binary not found" error
+#: whose own remediation ("install netgen") was already satisfied.
+_NETGEN_BINARY_NAMES: tuple[str, ...] = ("netgen", "netgen-lvs")
+
+#: Environment-variable override for the netgen binary, checked after
+#: ``options.netgen_binary`` and before the :data:`_NETGEN_BINARY_NAMES`
+#: ``PATH`` search -- the same "explicit option > env var > default"
+#: convention ``KLT_TIERS_DOC`` (``design_evidence_tiers.py``) and
+#: ``KLT_SIM_MAX_WORKERS`` (``cli/parser.py``) already follow.
+_NETGEN_BINARY_ENV_VAR = "KLT_NETGEN_BINARY"
+
+
+def _resolve_netgen_binary(options: dict[str, Any], request_dir: str) -> str:
+    """Resolve the netgen binary to invoke, returning an absolute path
+    (issue #2373).
+
+    Resolution order, first runnable candidate wins:
+
+    1. ``options.netgen_binary`` -- an explicit binary name or path, for a
+       from-source build in an unusual location.
+    2. ``$KLT_NETGEN_BINARY`` -- the same override without editing the
+       request document.
+    3. ``netgen`` on ``PATH``.
+    4. ``netgen-lvs`` on ``PATH`` -- Debian/Ubuntu's package installs the
+       binary under this name (see :data:`_NETGEN_BINARY_NAMES`).
+
+    An explicitly-named binary that is not runnable is an application error
+    naming *which* source named it, never a silent fallback to the ``PATH``
+    search: an override the caller believes is in force but is not would be
+    worse than not supporting one at all (the same reasoning
+    ``options.parameter_tolerance`` is rejected rather than ignored for this
+    engine). A value containing a path separator is resolved against
+    ``request_dir`` first, exactly like :func:`_resolve_netgen_setup`; a bare
+    name is looked up on ``PATH``.
+
+    When nothing resolves, the error names *both* built-in candidates -- the
+    pre-#2373 message named only ``netgen``, so the one host class that most
+    needed the message (Debian/Ubuntu, with ``netgen-lvs`` already installed)
+    was told to install what it already had.
+    """
+    from .lvs import LvsError
+
+    for value, source in (
+        (options.get("netgen_binary"), "options.netgen_binary"),
+        (os.environ.get(_NETGEN_BINARY_ENV_VAR), f"${_NETGEN_BINARY_ENV_VAR}"),
+    ):
+        if value is None or value == "":
+            continue
+        candidate = value
+        if os.sep in value or (os.altsep and os.altsep in value):
+            candidate = _resolve_relative(value, request_dir)
+        resolved = shutil.which(candidate)
+        if resolved is None:
+            raise LvsError(
+                f"{source} does not name a runnable netgen binary: "
+                f"'{candidate}' is not an executable file and was not found "
+                "on PATH"
+            )
+        return resolved
+
+    for name in _NETGEN_BINARY_NAMES:
+        resolved = shutil.which(name)
+        if resolved is not None:
+            return resolved
+
+    tried = ", ".join(f"'{name}'" for name in _NETGEN_BINARY_NAMES)
+    raise LvsError(
+        f"could not launch netgen: no netgen binary found on PATH (tried "
+        f"{tried} -- 'netgen-lvs' is the name Debian/Ubuntu's netgen-lvs "
+        "package installs). Install netgen "
+        "(https://github.com/RTimothyEdwards/netgen), name the binary "
+        f"explicitly with options.netgen_binary or ${_NETGEN_BINARY_ENV_VAR}, "
+        "or use engine 'klayout' instead."
+    )
+
+
 def _resolve_netgen_setup(options: dict[str, Any], request_dir: str) -> str | None:
     """Resolve ``options.netgen_setup`` (an explicit path to a netgen LVS
     setup ``.tcl`` file) against ``request_dir``, or ``None`` when omitted.
@@ -243,6 +331,7 @@ def _run_netgen_lvs(
     reference_circuit: kdb.Circuit,
     setup_file: str | None,
     timeout_s: float,
+    binary: str,
 ) -> tuple[str, list[dict[str, Any]], str | None]:
     """Invoke ``netgen -batch lvs`` headlessly in netlist-vs-netlist mode and
     return ``(status, mismatches, engine_version)``.
@@ -252,8 +341,15 @@ def _run_netgen_lvs(
     identically to what the ``klayout`` engine compares) to temporary SPICE
     files via ``klayout.db.NetlistSpiceWriter``, then runs::
 
-        netgen -batch lvs "<layout.spice> <top>" "<reference.spice> <top>" \\
+        <binary> -batch lvs "<layout.spice> <top>" "<reference.spice> <top>" \\
             <setup_file_or_""> <log_path>
+
+    ``binary`` is the already-resolved netgen executable -- the caller passes
+    :func:`_resolve_netgen_binary`'s result (issue #2373) rather than this
+    function hardcoding the name ``netgen``, so a host whose distribution
+    installs it as ``netgen-lvs`` is reachable without a ``PATH`` shim, and
+    so ``environment.netgen_binary`` can record which executable actually
+    produced the verdict.
 
     -- the syntax ``netgen::lvs`` (``tcltk/netgen.tcl.in``) expects: a
     ``"<file> <cell>"`` pair per side (a single argv token containing a
@@ -301,7 +397,7 @@ def _run_netgen_lvs(
             ) from exc
 
         cmd = [
-            "netgen",
+            binary,
             "-batch",
             "lvs",
             f"{layout_path} {layout_circuit.name}",
@@ -314,10 +410,16 @@ def _run_netgen_lvs(
                 cmd, capture_output=True, text=True, timeout=timeout_s
             )
         except FileNotFoundError as exc:
+            # `_resolve_netgen_binary` already proved this path was an
+            # executable file, so reaching here means it stopped being one
+            # between that check and the spawn (an upgrade/uninstall mid-run,
+            # a broken symlink target). Still an actionable application
+            # error, never a traceback -- and it names the resolved binary,
+            # since "install netgen" is not the remediation for this one.
             raise LvsError(
-                "could not launch netgen: binary not found on PATH. Install "
-                "netgen (https://github.com/RTimothyEdwards/netgen) or use "
-                f"engine 'klayout' instead. ({exc})"
+                f"could not launch netgen: '{binary}' could not be executed "
+                "-- it resolved on PATH but is no longer a runnable file. "
+                f"({exc})"
             ) from exc
         except subprocess.TimeoutExpired as exc:
             raise LvsError(
@@ -360,8 +462,6 @@ def _run_netgen_lvs(
 
 
 def _cleanup_netgen_work_dir(work_dir: str) -> None:
-    import shutil
-
     shutil.rmtree(work_dir, ignore_errors=True)
 
 
