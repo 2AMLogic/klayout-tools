@@ -73,9 +73,26 @@ or kill (spike section 1, "Invocation strategy").
 Wraps the ecosystem-standard open-flow LVS comparator,
 [`RTimothyEdwards/netgen`](https://github.com/RTimothyEdwards/netgen), as a
 subprocess (`netgen -batch lvs`), the same "wrap a proven engine" pattern
-`klt sim` uses for `ngspice`. Requires a `netgen` binary on `$PATH` — not
+`klt sim` uses for `ngspice`. Requires a netgen binary on `$PATH` — not
 bundled or pip-installable; a missing binary is a clear, actionable error
 (exit 1), never a traceback.
+
+**Which binary is run (issue #2373).** The executable is resolved, not
+hardcoded — first runnable candidate wins:
+
+1. `options.netgen_binary`, when given (see the options list below);
+2. `$KLT_NETGEN_BINARY`, when set;
+3. `netgen` on `$PATH` — upstream's own name, what a from-source build
+   installs;
+4. `netgen-lvs` on `$PATH` — the binary name Debian's and Ubuntu's
+   `netgen-lvs` package installs (`/usr/bin/netgen-lvs`), because on those
+   distributions the name `netgen` belongs to an unrelated FEM mesh
+   generator. `apt-get install netgen-lvs` is therefore enough; no `PATH`
+   shim is needed.
+
+When none resolves, the error names both built-in candidates rather than
+only `netgen` — the host class most likely to hit it is exactly the one that
+already has netgen installed under the other name.
 
 **Netlist-vs-netlist mode only — no `magic` dependency.** Per the accepted
 spike (`docs/design/lvs-extraction-spike.md` section 1, "netgen (contrast
@@ -116,7 +133,7 @@ with `"engine": "netgen"` is an application error (exit 1) rather than a
 silent no-op — an opted-in tolerance the caller believes is in force but is
 not would be worse than not supporting it at all.
 
-Two additional `options` apply only to this engine:
+Three additional `options` apply only to this engine:
 
 - `options.netgen_setup` — an explicit path to a netgen LVS setup `.tcl`
   file (e.g. the PDK's own, resolvable via `klayout_tools.pdk.netgen_setup_file`
@@ -132,13 +149,29 @@ Two additional `options` apply only to this engine:
 - `options.netgen_timeout_s` — wall-clock budget for the `netgen` subprocess
   (default `300`). A timeout is an application error (exit 1) — mirrors
   `klt sim`'s `options.timeout_s`.
+- `options.netgen_binary` (issue #2373) — the netgen executable to run,
+  overriding both `$KLT_NETGEN_BINARY` and the `netgen`/`netgen-lvs` `$PATH`
+  search above. Either a bare name to look up on `$PATH`
+  (`"netgen-lvs"`) or a path; a path is resolved against the request file's
+  directory, exactly like `options.netgen_setup`. Use it for a from-source
+  build in an unusual location, or to pin a specific build when several are
+  installed. A value that is not a runnable executable is an application
+  error (exit 1) naming the option — never a silent fallback to the `$PATH`
+  search, for the same reason `options.parameter_tolerance` is rejected
+  rather than ignored here: an override the caller believes is in force but
+  is not is worse than not supporting one.
 
 `environment.engine_version` for this engine is netgen's own reported
 version (parsed from its startup banner, `"Netgen <version> compiled on
 ..."`, verified against a from-source build for this issue — see the dated
 addendum in `docs/design/lvs-extraction-spike.md`), never a hardcoded
 string — the same convention `klt sim`'s `_ENGINE_VERSION_RE` uses for
-`ngspice`.
+`ngspice`. `environment.netgen_binary` (issue #2373) records the absolute
+path of the executable that produced the verdict beside it, so a committed
+report distinguishes a from-source `netgen` from a packaged `netgen-lvs`
+(or from an explicitly-named build) rather than leaving it to be inferred
+from the version string. It is `null` for `"engine": "klayout"`, which
+launches no subprocess.
 
 **Known limitation — `counts.*.matched`/`net_correspondence` are not
 reconstructed for this engine.** netgen's own text report does not expose a
@@ -1402,6 +1435,7 @@ reference's `.SUBCKT` would collapse every finding to a generic `topology`
   "environment": {
     "engine": "klayout",
     "engine_version": "0.30.10",
+    "netgen_binary": null,
     "layout_sha256": "1ab7...",
     "reference_sha256": "c93e...",
     "extracted_netlist": null
@@ -1444,7 +1478,8 @@ section this engine buckets rather than fully structures:
   },
   "environment": {
     "engine": "netgen",
-    "engine_version": "1.5.323"
+    "engine_version": "1.5.323",
+    "netgen_binary": "/usr/local/bin/netgen"
   },
   "mismatches": [
     {
@@ -1476,7 +1511,7 @@ section this engine buckets rather than fully structures:
 | `top` | string | The compared top circuit's name (the layout side's resolved top cell/circuit name). |
 | `reference_top` | string | The **reference** side's resolved top circuit name (issue #1205). Equal to `top` for the ordinary compare, but different by construction for an LVS negative control — a deliberately-broken `<cell>_shorted` layout compared against the *intact* `<cell>`'s reference netlist. Recording only one top made such a report unreconstructable by `--check --rerun` (it applied the single `top` to both sides and failed with "top cell/subcircuit not found in reference netlist"). |
 | `parameter_tolerance` | number \| `null` | Echo of the effective `options.parameter_tolerance` (issue #589) — `null` when the option was omitted (the default exact compare). Always present, never omitted, so a consumer reading only the response can always tell whether a `"match"` was reached under a caller-supplied design tolerance at all. |
-| `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted), and `power_connectivity` (boolean \| object \| `null`, issue #1952 — the caller's own `options.power_connectivity` value verbatim, or `null` when the option was omitted; note that `null` here means the check ran under its default-on setting, *not* that it was skipped — read `power_connectivity.status` for that). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input).  Also echoes the resolved `supply_nets` list, including `[]`, so `--rerun` preserves the chosen supply-name policy. |
+| `options` | object | Echo of every request option that shapes *what was compared*, as resolved (issue #1205): `combine_devices` (boolean, or the normalised array of device-class names when the array shape was used — issue #1370), `combine_devices_per_circuit` (object \| `null`, issue #1552 — the resolved `{"<circuit-name-glob>": <boolean>}` mapping, or `null` when the option was omitted), `flatten_layout`, `flatten_reference` (booleans), `netgen_setup` (string \| `null`, echoed exactly as given, not resolved against the request file's directory), `parameter_tolerance` (number \| `null`, the same value as the top-level field above, repeated here so this block is a complete request-side view), `compare_parameters` (object \| `null`, issue #1928 — the resolved `{"<device-class>": [<parameter>, ...]}` mapping, or `null` when the option was omitted), and `power_connectivity` (boolean \| object \| `null`, issue #1952 — the caller's own `options.power_connectivity` value verbatim, or `null` when the option was omitted; note that `null` here means the check ran under its default-on setting, *not* that it was skipped — read `power_connectivity.status` for that). Every key is always present, never omitted — so a consumer reading only the response can tell which compare the verdict belongs to, and `--check --rerun` can re-run *that* compare rather than a differently-shaped one whose difference it would then report as drift. `options.keep_extracted` is deliberately not echoed here (it is an output-side flag that cannot change a verdict, and is already visible as `environment.extracted_netlist`), nor is `options.netgen_timeout_s` (a runtime guard, not a compare input), nor `options.netgen_binary` (issue #2373 — host-side binary selection, already visible in its *resolved* form as `environment.netgen_binary`, which is strictly more informative than an echo of the raw request value; `--rerun` re-resolves it on the verifying host rather than replaying a path that may not exist there, and `environment.netgen_binary` is excluded from that mode's drift diff for the same reason — see "Full mode (`--rerun`)" below).  Also echoes the resolved `supply_nets` list, including `[]`, so `--rerun` preserves the chosen supply-name policy. |
 | `hints_applied` | object\<string, array\<array\<string\>\>\> \| `null` | Issue #1998. Every `hints.equivalent_pins` grouping actually passed to `NetlistComparer.equivalent_pins()` for this run, keyed by the (reference-side) subcircuit name it was declared against, with each group echoed verbatim as the caller wrote it — e.g. `{"ota_5t": [["inp", "inn"]]}`. `null` when the request supplied no `hints.equivalent_pins` (including a request with only a `hints.same_nets` hint, or no `hints` at all) — the same always-present-but-nullable convention `options.compare_parameters` follows for an optional dict-shaped echo, never a spuriously present empty `{}`. This is the only visibility a report gives into an applied `equivalent_pins` hint: unlike `hints.same_nets` (a hard assertion the comparer can refuse, surfaced as a `hints.rejected` mismatch entry — see below), a swappable-pin group has no "rejected" outcome, so without this field a reader could not tell whether — or how broadly — an `equivalent_pins` hint reshaped the verdict. Does not itself change `status`, `mismatch_count`, or any other verdict field; it only discloses that the hint was applied. A request naming an unknown subcircuit or pin fails the run outright (`LvsError`, exit 1, per `hints.equivalent_pins`'s own field description above) before any report is produced, so this field is never populated with a partial or invalid entry from a failed application. |
 | `status` | `"match"` \| `"mismatch"` \| `"inconclusive"` | `"match"` when `NetlistComparer.compare()` reports the netlists equivalent; `"mismatch"` otherwise. `"inconclusive"` (issue #1370) is the third outcome: the compare the request asked for could **not** be performed, so this run reached no verdict about the design. It has exactly one cause today — `options.combine_devices` was requested and `combine_devices()` exhausted its retry budget on at least one side, so both sides were rolled back to their uncombined state (the symmetric degrade described under `options.combine_devices`) and the resulting engine `"mismatch"` was downgraded. A `"match"` is never downgraded. This mirrors `klt equiv`'s own `"inconclusive"` vocabulary and gets its own exit code (`4`, the same value `klt equiv` uses) so an automation gate can tell "the design differs" from "the comparison could not be performed". Never `"error"` in-band — a failed run does not emit this envelope at all (see "Exit codes"). This is always the engine's own verdict, including when `options.parameter_tolerance` is in force — that option is implemented by re-running a real `compare()` on values snapped into agreement, never by re-deriving the verdict from this command's own findings (see "`device.parameter_tolerated`" below). |
 | `power_connectivity` | object | Issue #1952. The **power/ground half** of the verdict, reported beside `status` rather than folded into it — see "Power/ground connectivity" above for the full field table, what the check verifies, and the invariant it rests on. Always present, for every `reference.form`: `status` is `"match"`/`"mismatch"` when the check ran, and `"unchecked"` (with a human-readable `reason`) when it did not, so "was power connectivity verified by this run?" is answerable from any `klt lvs` report on its own. **A caller wanting full LVS on a digital block gates on both `status == "match"` and `power_connectivity.status == "match"`** — this field never changes `status`, `mismatch_count`, `error_count`, `category_counts` or `category_error_counts`, all of which stay exactly the signal-connectivity compare's own results. |
@@ -1487,7 +1522,7 @@ section this engine buckets rather than fully structures:
 | `category_error_counts` | object\<string, int\> | Issue #1132: `category_counts`, but counting only `severity: "error"` entries per category — lets a caller gate on "does category X have any real defect" without re-reading `mismatches[]` and re-filtering by `severity` itself. Same sorted-keys convention as `category_counts`; a category with zero `error` entries (all `warning`, e.g. an all-`warning` `topology.flattened` run) is simply absent from this object rather than reported as `0`, matching `category_counts`'s own "no entries of this category" convention. `sum(category_error_counts.values()) == error_count`. |
 | `counts` | object | Side-by-side `layout`/`reference`/`matched` tallies for `nets`, `devices`, `pins`. `matched` counts only a **strictly successful** pairing (e.g. a device paired with identical parameters and class) — a device paired despite a `device.property`/`device.class` mismatch is *not* counted as matched. **Scope mismatch for `"engine": "klayout"` (issue #1887):** `layout`/`reference` are scoped to the **top circuit only** (`layout_circuit.each_net()`/`pin_count()` and the reference-side equivalents — one circuit's own declared nets/pins), while `matched` is scoped to the **entire compared hierarchy** (every matched circuit, top and subcircuits alike — the same accumulators that back `net_correspondence`, see below). These are genuinely different scopes reported side by side under names that read as three comparable numbers for the same quantity, so `matched` can — and, once any subcircuit below top also matches, routinely does — numerically **exceed both** `layout` and `reference`. That is not a bug in the compare; it is a fact about what each field counts, and a caller comparing `matched` against `layout`/`reference` as if they shared a denominator will misread it. For `"engine": "netgen"`, this scope split does **not** apply: `layout`, `reference`, and `matched` are all top-circuit-scoped, and `matched` is exact on a `"match"` verdict and `0` on a `"mismatch"` verdict (a separate, netgen-only known limitation — see "Engine" -> `"netgen"` above). |
 | `device_classes` | array\<string\> \| `null` | The layout-side deck's `ExtractionDeck.device_classes` (see `klt extract`'s own field of the same name) — what that deck is structurally capable of recognising, not what this compare found. Deck-dependent, not MOS-only (issue #1130 added resistor/capacitor/bipolar/diode extraction to both registered decks) — as of 2026-08-21, sky130 reports `["nfet", "pfet", "pnp", "sky130_fd_pr__model__cap_mim", "sky130_fd_pr__model__cap_mim_m4", "resistor"]` and gf180mcu reports `["nfet", "pfet", "bjt", "cap_mim_2f0_m4m5_noshield", "resistor", "diode_nd2ps_06v0", "diode_pd2nw_06v0"]` — re-check the installed deck's own `device_classes` rather than treating either list as a value this doc pins for future decks/versions. Present whenever a `layout.deck` is given — always for `layout.file` (inline extraction, where the deck is required), and also for the pre-extracted `layout.netlist` shape when a `layout.deck` is supplied alongside it (issue #585). `null` only when no `layout.deck` was given (the bare `{"netlist": ..., "top": ...}` shape). |
-| `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise — excluded from `klt lvs --check --rerun`'s drift diff, see "Full mode (`--rerun`)" below). |
+| `environment` | object | Reproducibility block: `engine`, `engine_version` (the installed `klayout` package version for `"engine": "klayout"`; netgen's own reported version, parsed from its startup banner, for `"engine": "netgen"` — `null` if unparseable), `netgen_binary` (issue #2373 — the absolute path of the netgen executable that produced the verdict, as resolved from `options.netgen_binary` / `$KLT_NETGEN_BINARY` / `netgen` / `netgen-lvs` on `$PATH`; always `null` for `"engine": "klayout"`, which launches no subprocess. A host-local path, so it is excluded from `klt lvs --check --rerun`'s drift diff — the comparator's semantic identity is `engine_version`, which is not excluded), `layout_sha256` (of `layout.file`, or of `layout.netlist` when no extraction ran), `reference_sha256` (of `reference.netlist`), `extracted_netlist` (path to the retained intermediate netlist when `options.keep_extracted` is set and `layout.file` was given; `null` otherwise — excluded from `klt lvs --check --rerun`'s drift diff, see "Full mode (`--rerun`)" below). |
 | `provenance` | object | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `input` (issue #1969) is `{"content_hash": "sha256:<hex>", "role": ...}` for both engines, pinning the layout side of the compare. `role` (issue #2027) says *which kind* of artifact that hash covers, because this verb's two `request.layout` shapes pin different things: `"layout"` for the `layout.file` (inline-extraction) shape, whose hash is of the original GDS/OASIS stream — byte-identical to what `klt drc` hashes for the same file — and `"netlist"` for the pre-extracted `layout.netlist` shape, whose hash is of the supplied SPICE file. A consumer comparing `input.content_hash` across reports must compare only within one role; `klt signoff`'s `provenance_consistency` gate does, which is what stops a pre-extracted LVS report and a DRC report of the same design from being refused as if they described two layout revisions (see [`signoff.md`](signoff.md) and [`../json-contract.md`](../json-contract.md)). The hash itself pins the layout side of the compare — the same file `environment.layout_sha256` hashes, in the `sha256:`-prefixed form the shared block uses (`environment.layout_sha256` itself is unchanged, still a bare hex digest). It was `null` before #1969 on the reasoning that `environment.layout_sha256`/`reference_sha256` already covered it; `klt signoff --manifest`'s staleness gate reads `provenance.input.content_hash` generically and cannot see an LVS-only field, so every `content_hash`-pinned "LVS clean" citation graded `stale_evidence`. `pdk` (issue #1901) is `{"name": ..., "source": ..., "version": ...}` when `reference.form` is `"gate-level-verilog"` and `reference.pdk`/`reference.pdk_root` resolve a PDK (the same resolution the `"gate-level-verilog"` form already performs to read each standard cell's real pin order — see "Netlist form" above), else `null` — a plain SPICE-vs-SPICE (or `"subckt-call"`) reference genuinely resolves no PDK. An unresolvable `reference.pdk`/`reference.pdk_root` fails the run the same as any other application error (exit 1); `deck` pins the layout-side extraction deck by name and `sha256:` content hash whenever a `layout.deck` is given (both the `layout.file` and the pre-extracted `layout.netlist` shapes), and is `null` only when no `layout.deck` was given (matching `device_classes`). `deck.released` (issue #1193) is a non-fatal tri-state signal for whether that content hash ships in any released `klayout-tools` version — `false` flags an unreleased/dev-edited deck, `null` when unresolvable (e.g. the generated deck history table is missing). `deck.options` (issue #600) echoes the resolved `layout.deck_options` mapping — present only when non-empty, matching `klt extract`'s own `provenance.deck.options` shape exactly. `klayout_version` is populated the same way for both engines (it is this process's own `klayout` package build, used for netlist parsing/writing either way, not the comparator). `klayout_version_mismatch` (issue #1490, `true`\|`false`) flags whether that `klayout_version` differs from the version this `klayout-tools` build/commit was tested against (`klt version --format json`'s `klayout_version_expected`) — see [`../json-contract.md`](../json-contract.md)'s "Pinning the KLayout engine version". |
 | `mismatches` | array\<object\> | One entry per structured mismatch — see below. Empty on a clean match; always present. |
 | `net_correspondence` | array\<object\> | The layout↔reference net pairing `NetlistComparer` produced — see "`net_correspondence[]` entries" below. `len(net_correspondence) == counts.nets.matched` (the example above is illustrative, not exhaustive, for a 7-net compare). Always `[]` for `"engine": "netgen"` (see "Engine" -> `"netgen"` above). |
@@ -2897,18 +2932,30 @@ then diffs the fresh report against the committed one field by field — same
 volatile-field exclusions as `klt drc --rerun`
 (`provenance.klt_version`/`klayout_version`/`pdk.version`; `pdk` is `null`
 for most LVS runs, populated only for a `"gate-level-verilog"` reference —
-see the `provenance` row above), plus one LVS-only exclusion (issue #1223):
-`environment.extracted_netlist`. That
-field is populated only when the *original* request set
-`options.keep_extracted: true`, and its value is a path anchored to the
-original request document's own directory — `--rerun` never re-asserts
-`keep_extracted` (an output-side flag that cannot change a verdict, and
-re-running it would write files as a side effect), so a fresh rerun always
-reports it as `null` even when nothing else about the compare changed. This
-exclusion is scoped to `klt lvs --rerun` only; `klt drc --rerun` has no
-analogous output-path field. (A report committed before issue #1205 also has
-`reference_top`/`options` excluded — see below.) Response shape mirrors `klt
-drc --rerun`'s:
+see the `provenance` row above), plus two LVS-only exclusions, both
+host-local paths:
+
+- `environment.extracted_netlist` (issue #1223). That
+  field is populated only when the *original* request set
+  `options.keep_extracted: true`, and its value is a path anchored to the
+  original request document's own directory — `--rerun` never re-asserts
+  `keep_extracted` (an output-side flag that cannot change a verdict, and
+  re-running it would write files as a side effect), so a fresh rerun always
+  reports it as `null` even when nothing else about the compare changed.
+- `environment.netgen_binary` (issue #2373). Which netgen executable the
+  *verifying* host resolves — `/usr/local/bin/netgen` on a from-source host,
+  `/usr/bin/netgen-lvs` on Debian/Ubuntu — is a fact about that host, not
+  about what was compared, and re-verifying a committed report on a second
+  host is the whole point of this mode. The comparator's *semantic* identity
+  is still diffed: `environment.engine_version` is netgen's own reported
+  version and is **not** excluded, so an actually-different netgen build
+  still surfaces as drift. This exclusion also covers every report committed
+  before #2373, which carries no `netgen_binary` key at all.
+
+Both exclusions are scoped to `klt lvs --rerun` only; `klt drc --rerun` has
+no analogous host-local path field. (A report committed before issue #1205
+also has `reference_top`/`options` excluded — see below.) Response shape
+mirrors `klt drc --rerun`'s:
 
 ```json
 {
