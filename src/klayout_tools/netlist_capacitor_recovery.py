@@ -170,6 +170,17 @@ def parse_capacitor_class_comments(text: str) -> dict[tuple[str, str], str]:
     leaves that device out of the returned map (callers degrade gracefully
     to the generic capacitor class for anything not found here, see
     :func:`make_capacitor_class_recovery_reader`).
+
+    The returned map's circuit-name key is upper-cased (issue #2397):
+    ``kdb.NetlistSpiceReader`` case-folds every circuit name it reads to
+    upper case (verified against ``klayout==0.30.10``) before
+    :func:`make_capacitor_class_recovery_reader`'s delegate ever reads
+    ``circuit.name`` back to look this map up -- a lower- or mixed-case
+    ``.SUBCKT`` name (exactly what ``klt extract --top <lowercase-cell>``
+    writes) would otherwise never match its own recovered entry, silently
+    falling back to KLayout's generic ``CAP`` class. Upper-casing here, to
+    mirror the reader's own fold, keeps both sides of the lookup in the
+    same case regardless of which case the source text spells the name in.
     """
     recovered: dict[tuple[str, str], str] = {}
     current_circuit = _TOP_LEVEL_CIRCUIT_NAME
@@ -192,7 +203,7 @@ def parse_capacitor_class_comments(text: str) -> dict[tuple[str, str], str]:
 
         subckt_match = _SUBCKT_RE.match(line)
         if subckt_match:
-            current_circuit = subckt_match.group(1)
+            current_circuit = subckt_match.group(1).upper()
             pending = None
             continue
         if _ENDS_RE.match(line):
@@ -204,7 +215,14 @@ def parse_capacitor_class_comments(text: str) -> dict[tuple[str, str], str]:
             device_name, class_name = pending
             first_token = line.split(None, 1)[0]
             if first_token[:1].upper() == "C" and first_token[1:] == device_name:
-                recovered[(current_circuit, device_name)] = class_name
+                # Device names are upper-cased by `kdb.NetlistSpiceReader`
+                # exactly like circuit names are (verified against
+                # `klayout==0.30.10`), so the stored key is upper-cased here
+                # too -- see this function's own docstring. `element()`'s
+                # own `name` argument arrives already upper-cased by the
+                # reader, so this keeps both sides of that lookup matching
+                # regardless of the source text's own device-name case.
+                recovered[(current_circuit, device_name.upper())] = class_name
         pending = None
 
     return recovered

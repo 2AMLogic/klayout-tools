@@ -16223,6 +16223,71 @@ def test_pre_extracted_layout_netlist_carries_resistor_geometry_for_lvs_match(
     ]
 
 
+def test_pre_extracted_layout_netlist_recovers_capacitor_class_for_lowercase_top(
+    tmp_path,
+):
+    """Regression (issue #2397): `parse_capacitor_class_comments` used to
+    build its recovery map keyed on the `.SUBCKT` name exactly as spelled in
+    the SPICE text, but `kdb.NetlistSpiceReader` case-folds every circuit
+    name it reads to upper case (verified against `klayout==0.30.10`) before
+    `make_capacitor_class_recovery_reader`'s delegate ever reads
+    `circuit.name` back to look the map up -- so a lowercase top-cell name
+    (exactly what `klt extract --top <lowercase-cell>` writes) never matched
+    its own recovered entry, silently falling back to KLayout's generic
+    `CAP` class instead of the deck's own MiM class. Mirrors
+    `test_pre_extracted_layout_netlist_recovers_capacitor_class_for_lvs_match`
+    with a lowercase top-cell name that would previously have failed to
+    round-trip -- confirmed to actually depend on the fix: reverting the
+    `.upper()` normalization in `parse_capacitor_class_comments` reproduces
+    a `status: "mismatch"` report for this exact fixture."""
+    import klayout.db as kdb
+
+    from klayout_tools.extract import run_extract
+
+    layout = kdb.Layout()
+    top = layout.create_cell("mim_lower_top")
+
+    def draw(layer, datatype, box):
+        top.shapes(layout.layer(layer, datatype)).insert(box)
+
+    draw(70, 20, _box_um(-20, -20, 20, 20))  # met3.drawing (bottom plate)
+    draw(89, 44, _box_um(0, 0, 10, 5))  # capm.drawing (top plate)
+    gds = str(tmp_path / "mim_lower.gds")
+    layout.write(gds)
+
+    spice_path = str(tmp_path / "mim_lower.spice")
+    extracted = run_extract(gds, "sky130", output=spice_path)
+    top_name = extracted["top"]
+    assert top_name == "mim_lower_top"
+    assert top_name.lower() == top_name  # the fixture must stay lower-case
+
+    written_text = Path(spice_path).read_text()
+    assert f".SUBCKT {top_name}" in written_text
+
+    device = extracted["devices"][0]
+    device_class = device["class"]
+    capacitance_f = device["params"]["c_f"]
+
+    reference_spice = f"""
+.subckt {top_name}
+C1 n1 n2 {capacitance_f:.9e} {device_class}
+.ends
+"""
+    reference_path = _write(tmp_path / "ref.spice", reference_spice)
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": spice_path, "top": top_name},
+                "reference": {"netlist": reference_path, "top": top_name},
+            },
+        )
+    )
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+
+
 def test_reference_netlist_bare_capacitor_card_also_recovers_class(tmp_path):
     """The reference-side read path (`_read_reference_netlist`) needs the
     identical recovery, not just the layout-side pre-extracted shape: a
