@@ -295,9 +295,9 @@ def run_campaign(
     except YieldError as exc:
         raise CampaignError(str(exc)) from exc
 
-    resolved_backend = (
-        backend if backend is not None else request.get("backend", "local")
-    )
+    # Echo only: `run_sim` owns the real resolution (including the
+    # $KLT_SIM_BACKEND host default and when it steps aside to `local`).
+    resolved_backend, _ = sim.resolve_backend(backend, request)
     resolved_hosts = (
         hosts if hosts is not None else (request.get("remote") or {}).get("hosts", 1)
     )

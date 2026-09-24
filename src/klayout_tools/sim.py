@@ -233,6 +233,52 @@ SUPPORTED_BACKENDS = ("local", "local-parallel", "remote", "batch")
 #: ``options.resume`` and the fail-fast probe are refused/skipped for these.
 _OFFHOST_BACKENDS = ("remote", "batch")
 
+#: Host-level default backend (2am#1004): consulted only when neither the
+#: ``--backend`` flag nor the request's own ``backend`` field names one. A
+#: fleet host that should not run SPICE grids itself (the AWS dispatch
+#: workers) sets ``KLT_SIM_BACKEND=batch`` in its daemon environment so every
+#: sweep's ``klt sim`` goes to the Spot batch fleet without editing ~20
+#: repos' request files. It is a *preference*, not a requirement -- see
+#: :func:`resolve_backend` and ``_yield_host_default_backend`` for the cases
+#: where it steps aside to ``local``.
+BACKEND_ENV = "KLT_SIM_BACKEND"
+
+
+def resolve_backend(backend: str | None, request: dict[str, Any]) -> tuple[str, bool]:
+    """``(backend, from_host_default)`` by the precedence ``--backend`` flag >
+    ``request["backend"]`` > ``$KLT_SIM_BACKEND`` > ``"local"``.
+
+    ``from_host_default`` is ``True`` only when the value came from the
+    environment -- the one source that may later be overridden back to
+    ``local`` by :func:`_yield_host_default_backend`. An explicit flag or
+    request field is never second-guessed. The name is not validated here;
+    the caller's :data:`SUPPORTED_BACKENDS` check names the bad value.
+    """
+    if backend is not None:
+        return backend, False
+    requested = request.get("backend")
+    if requested is not None:
+        return requested, False
+    env_value = os.environ.get(BACKEND_ENV, "").strip()
+    if env_value:
+        return env_value, True
+    return "local", False
+
+
+def _yield_host_default_backend(
+    backend: str, from_host_default: bool, *, reason_ok: bool
+) -> str:
+    """Step an env-sourced off-host default back to ``local`` when
+    ``reason_ok`` is ``False`` -- i.e. the run cannot or should not leave
+    this host (an engine the off-host toolchain does not ship, a resumed
+    checkpoint, a single-unit probe that would spend minutes waiting on a
+    Spot instance to answer one corner). A no-op for an explicit choice.
+    """
+    if from_host_default and backend in _OFFHOST_BACKENDS and not reason_ok:
+        return "local"
+    return backend
+
+
 #: Recognised values for ``request.monte_carlo.vary`` -- which axis (or
 #: axes) of statistical variation the sample sequence is declared to
 #: exercise. See :func:`_expand_monte_carlo` and this module's "Monte Carlo
@@ -851,12 +897,18 @@ def run_sim(
             f"unsupported engine '{engine}' (supported: {', '.join(SUPPORTED_ENGINES)})"
         )
 
-    backend = backend if backend is not None else request.get("backend", "local")
+    backend, backend_from_host_default = resolve_backend(backend, request)
     if backend not in SUPPORTED_BACKENDS:
+        source = f" (from ${BACKEND_ENV})" if backend_from_host_default else ""
         raise SimError(
-            f"unsupported backend '{backend}' "
+            f"unsupported backend '{backend}'{source} "
             f"(supported: {', '.join(SUPPORTED_BACKENDS)})"
         )
+    # The off-host toolchain pins ngspice (see `_enforce_xyce_support_boundary`):
+    # a host default must not turn a valid xyce request into a refusal.
+    backend = _yield_host_default_backend(
+        backend, backend_from_host_default, reason_ok=engine == "ngspice"
+    )
 
     hosts = (
         hosts if hosts is not None else (request.get("remote") or {}).get("hosts", 1)
@@ -1070,6 +1122,9 @@ def run_sim(
     # does not construct, so there is no local `CornerPoint.corner_id` to
     # reconcile a checkpoint against yet; mirrors the existing `hosts > 1` +
     # `remote` restriction above rather than inventing a new error shape.
+    backend = _yield_host_default_backend(
+        backend, backend_from_host_default, reason_ok=not resume
+    )
     if resume and backend in _OFFHOST_BACKENDS:
         raise SimError(
             f"options.resume is not yet supported for backend {backend!r} -- "
@@ -1110,6 +1165,12 @@ def run_sim(
         [point for point in corner_points if point.corner_id not in pre_completed]
         if resume
         else corner_points
+    )
+    # A single-unit run under a host default stays here: one corner does not
+    # repay a Spot instance's minutes of boot, and it is exactly the "probe
+    # one corner locally" case 2am#1004's ruling keeps local.
+    backend = _yield_host_default_backend(
+        backend, backend_from_host_default, reason_ok=len(dispatch_points) > 1
     )
 
     # Two-pass fail-fast probe (issue #1694, opt-in via `fail_fast_probe`/

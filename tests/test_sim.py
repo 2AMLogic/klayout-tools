@@ -437,6 +437,112 @@ def test_run_sim_unsupported_backend_raises(tmp_path):
         sim.run_sim(str(request))
 
 
+# --------------------------------------------------------------------------- #
+# $KLT_SIM_BACKEND host default (2am#1004)
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_backend_precedence(monkeypatch):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    # flag > request > env > local
+    assert sim.resolve_backend("local", {"backend": "remote"}) == ("local", False)
+    assert sim.resolve_backend(None, {"backend": "local"}) == ("local", False)
+    assert sim.resolve_backend(None, {}) == ("batch", True)
+    monkeypatch.setenv(sim.BACKEND_ENV, "  ")
+    assert sim.resolve_backend(None, {}) == ("local", False)
+    monkeypatch.delenv(sim.BACKEND_ENV)
+    assert sim.resolve_backend(None, {}) == ("local", False)
+
+
+def test_yield_host_default_backend_only_overrides_env_sourced_offhost():
+    y = sim._yield_host_default_backend
+    assert y("batch", True, reason_ok=False) == "local"
+    assert y("batch", True, reason_ok=True) == "batch"
+    # An explicit choice is never second-guessed.
+    assert y("batch", False, reason_ok=False) == "batch"
+    # An on-host env default has nothing to step back from.
+    assert y("local-parallel", True, reason_ok=False) == "local-parallel"
+
+
+_HOST_DEFAULT_LOG = (
+    "  Measurements for Transient Analysis\n\nvout                =  1.00000e+00\n"
+)
+
+
+class _BatchCalled(Exception):
+    pass
+
+
+def _host_default_request(tmp_path, corners):
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    return _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": corners,
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {"name": "vout", "spice": ".meas tran vout FIND v(out) AT=1u"}
+            ],
+        },
+    )
+
+
+def _arm_fake_batch(monkeypatch):
+    def fake_batch(*args, **kwargs):
+        raise _BatchCalled()
+
+    monkeypatch.setitem(sim._BACKENDS, "batch", fake_batch)
+
+
+def test_host_default_batch_sends_a_multi_corner_grid_offhost(tmp_path, monkeypatch):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    _arm_fake_batch(monkeypatch)
+    request = _host_default_request(
+        tmp_path, {"process": ["tt", "ss"], "temperature_c": [-40, 125]}
+    )
+    with pytest.raises(_BatchCalled):
+        sim.run_sim(str(request))
+
+
+def test_host_default_batch_keeps_a_single_corner_probe_local(tmp_path, monkeypatch):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    _arm_fake_batch(monkeypatch)
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=_HOST_DEFAULT_LOG,
+    )
+    request = _host_default_request(tmp_path, {"process": ["tt"]})
+    report = sim.run_sim(str(request))
+    # Ran here: the fake batch backend would have raised.
+    assert len(report["corners"]) == 1
+
+
+def test_host_default_never_overrides_an_explicit_local_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv(sim.BACKEND_ENV, "batch")
+    _arm_fake_batch(monkeypatch)
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=_HOST_DEFAULT_LOG,
+    )
+    request = _host_default_request(
+        tmp_path, {"process": ["tt", "ss"], "temperature_c": [-40, 125]}
+    )
+    report = sim.run_sim(str(request), backend="local")
+    assert len(report["corners"]) == 4
+
+
+def test_host_default_unknown_value_is_named_as_env_sourced(tmp_path, monkeypatch):
+    monkeypatch.setenv(sim.BACKEND_ENV, "bogus")
+    request = _host_default_request(tmp_path, {"process": ["tt", "ss"]})
+    with pytest.raises(
+        sim.SimError, match=r"unsupported backend 'bogus' \(from \$KLT_SIM_BACKEND\)"
+    ):
+        sim.run_sim(str(request))
+
+
 def test_run_sim_unsupported_backend_via_cli_flag_raises(tmp_path):
     # The --backend flag overrides the request field and is validated the
     # same way (unknown name -> SimError, not a silent fallback to local).
