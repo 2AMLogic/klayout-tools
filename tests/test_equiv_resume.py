@@ -743,10 +743,10 @@ def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path, monkeypatch
     # envelope is ever emitted for this "session").
     real_runner = equiv._run_yosys_subprocess
 
-    def killed_mid_stage2(script_path, timeout_s):
+    def killed_mid_stage2(script_path, timeout_s, binary="yosys"):
         if "stage2" in script_path:
             raise SystemExit(137)
-        return real_runner(script_path, timeout_s)
+        return real_runner(script_path, timeout_s, binary)
 
     monkeypatch.setattr(equiv, "_run_yosys_subprocess", killed_mid_stage2)
     with pytest.raises(SystemExit):
