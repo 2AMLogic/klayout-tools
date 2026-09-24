@@ -5643,3 +5643,204 @@ def test_cli_findings_only_with_pdk_exits_1(tmp_path, capsys):
 
     assert exit_code == 1
     assert "--findings-only" in capsys.readouterr().err
+
+
+# --- `erc_coverage.layers_in_stream_without_declaration` (issue #2389) ------
+#
+# The inverse-direction disclosure `klt drc`'s
+# `coverage.layers_in_stream_without_rules` already makes: which layers this
+# stream actually draws that the spec never names, so a committed supply spec
+# cannot silently narrow as its layout is re-routed.
+
+
+def test_undeclared_stream_layers_are_empty_when_the_spec_names_everything(
+    tmp_path,
+):
+    """AC: empty when every drawn layer is declared -- the same convention
+    `klt drc`'s own empty `layers_in_stream_without_rules` carries.
+
+    `_strapped_supply_layout` draws poly (1/0), licon (2/0), li1 (3/0) and
+    the li1 label (3/5); the spec names all four (the label via
+    `stackup[].label_layer`, which is a declaration even though it carries
+    no conductor role)."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+
+    gds = tmp_path / "fully_declared.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "fully_declared.erc.json"
+    _write_spec(spec, _strapped_supply_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == []
+
+
+def test_undeclared_stream_layer_is_named_without_changing_any_verdict(tmp_path):
+    """AC, the headline case: a conductor layer the layout draws and the
+    spec's `stackup`/`vias` never declare is named -- and nothing else in
+    the report moves. This is the re-route scenario the issue describes: the
+    rail still resolves to one island through the declared roles, so the
+    report is clean, but the connectivity model is now narrower than the
+    layout and the envelope finally says so."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+    # A met1 (5/0) strap the committed spec never declared -- drawn over the
+    # li1 rail, so the declared net still resolves to exactly one island.
+    met1 = layout.layer(5, 0)
+    top.shapes(met1).insert(kdb.Box.new(_um(1), _um(0), _um(4), _um(1)))
+
+    gds = tmp_path / "rerouted.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "rerouted.erc.json"
+    _write_spec(spec, _strapped_supply_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["5/0"]
+    # Reported, never graded: the verdicts are exactly the clean ones the
+    # same layout produces without the undeclared strap.
+    assert report["erc_finding_count"] == 0
+    assert report["erc_status"] == "clean"
+    assert report["status"] == "not_checked"  # the antenna half, no --pdk
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_coverage"]["inapplicable"] == [
+        {"id": "erc.missing_tie:[]", "reason": "no_ties_declared"}
+    ]
+
+
+def test_undeclared_stream_layers_are_sorted_layer_then_datatype(tmp_path):
+    """Deterministic output, `klt drc`'s `layer/datatype` formatting, sorted
+    by `(layer, datatype)` -- so two runs of the same stream are diffable."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+    for layer, datatype in ((9, 0), (5, 2), (5, 0)):
+        index = layout.layer(layer, datatype)
+        top.shapes(index).insert(kdb.Box.new(_um(20), _um(0), _um(21), _um(1)))
+
+    gds = tmp_path / "sorted.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "sorted.erc.json"
+    _write_spec(spec, _strapped_supply_spec())
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == [
+        "5/0",
+        "5/2",
+        "9/0",
+    ]
+
+
+def test_undeclared_stream_layers_exclude_every_layer_the_spec_names(tmp_path):
+    """A layer named anywhere in the spec -- a `ties[]` well/tap layer, a
+    `tap_requires` narrowing marker -- is declared, not undisclosed: the
+    field must not train a reader to ignore it with false positives."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+    top.shapes(nwell).insert(kdb.Box.new(_um(3), _um(0), _um(4), _um(1)))
+    top.shapes(tap).insert(kdb.Box.new(_um(3.2), _um(0.2), _um(3.8), _um(0.8)))
+    marker = layout.layer(12, 0)
+    top.shapes(marker).insert(kdb.Box.new(_um(3.2), _um(0.2), _um(3.8), _um(0.8)))
+
+    gds = tmp_path / "declared_elsewhere.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "declared_elsewhere.erc.json"
+    _write_spec(
+        spec,
+        _strapped_supply_spec(
+            nets=[{"name": "VDD", "kind": "supply"}],
+            ties=[
+                {
+                    "name": "nwell_tie",
+                    "well_layer": "10/0",
+                    "tap_layer": "11/0",
+                    "tap_requires": ["12/0"],
+                    "connect_to": "li1",
+                    "net": "VDD",
+                }
+            ],
+        ),
+    )
+
+    report = run_erc(str(gds), str(spec))
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == []
+
+
+def test_undeclared_stream_layers_ignore_geometry_outside_the_selected_top(
+    tmp_path,
+):
+    """Scoped to the top cell actually analysed, exactly as `klt drc`'s own
+    `coverage` block is scoped by `--top`: a layer drawn only in a cell this
+    run never looked at is not a gap in *this* run's connectivity model."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+    other = layout.create_cell("OTHER")
+    other.shapes(layout.layer(7, 0)).insert(kdb.Box.new(_um(0), _um(0), _um(1), _um(1)))
+
+    gds = tmp_path / "two_tops.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "two_tops.erc.json"
+    _write_spec(spec, _strapped_supply_spec())
+
+    report = run_erc(str(gds), str(spec), top="TOP")
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == []
+
+
+def test_undeclared_stream_layers_unfiltered_without_a_deck(tmp_path):
+    """Without `--deck` there is no PDK-agnostic way to know which drawn
+    layers are conductors, so the list is unfiltered -- implants and markers
+    included. Strictly more information than silence, and the honest
+    behaviour to document rather than a guess at which layers matter."""
+    report = _run_gf180mcu_resistor_divider(tmp_path)
+
+    # RES_MK (110/5), Pplus (31/0) and SAB (49/0) are drawn by the fixture
+    # and named nowhere in the spec.
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == [
+        "31/0",
+        "49/0",
+        "110/5",
+    ]
+
+
+def test_deck_narrows_undeclared_stream_layers_to_the_routing_stack(tmp_path):
+    """AC: with `--deck`, the curated deck's own `metals`/`vias` (plus the
+    device-level conductors it recognises) narrow the list, so implants and
+    markers stop being reported as coverage gaps."""
+    report = _run_gf180mcu_resistor_divider(tmp_path, deck="gf180mcu")
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == []
+
+
+def test_deck_still_names_an_undeclared_metal_level(tmp_path):
+    """The narrowing filters noise, not signal: a Metal2 (36/0) strap the
+    spec never declared is a real gap in the connectivity model and is still
+    named under `--deck`."""
+    gds = tmp_path / "gf_met2.gds"
+    spec = tmp_path / "gf_met2.erc.json"
+    _gf180mcu_resistor_divider_fixture(gds)
+    layout = kdb.Layout()
+    layout.read(str(gds))
+    top = layout.top_cell()
+    top.shapes(layout.layer(36, 0)).insert(kdb.Box.new(_um(0), _um(2), _um(10), _um(3)))
+    layout.write(str(gds))
+    _write_spec(spec, _gf180mcu_resistor_divider_spec())
+
+    report = run_erc(str(gds), str(spec), deck="gf180mcu")
+
+    assert report["erc_coverage"]["layers_in_stream_without_declaration"] == ["36/0"]
+    assert report["erc_status"] == "clean"
+
+
+def test_cli_json_carries_undeclared_stream_layers(tmp_path, capsys):
+    """The field reaches the JSON envelope (the contract), not just the
+    in-process return value."""
+    layout, top, li1, label, nwell, tap = _strapped_supply_layout()
+    top.shapes(layout.layer(5, 0)).insert(kdb.Box.new(_um(1), _um(0), _um(4), _um(1)))
+
+    gds = tmp_path / "cli_undeclared.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "cli_undeclared.erc.json"
+    _write_spec(spec, _strapped_supply_spec(nets=[{"name": "VDD", "kind": "supply"}]))
+
+    main(["erc", str(gds), str(spec), "--format", "json"])
+    data = json.loads(capsys.readouterr().out)
+
+    assert data["erc_coverage"]["layers_in_stream_without_declaration"] == ["5/0"]

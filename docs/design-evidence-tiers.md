@@ -456,7 +456,30 @@ written to every block.
       mechanically distinguishable: `supply_spec_incomplete` (nobody asked
       the question), `supply_spec_disclosed_unexpressible` (no tap to
       name), and `supply_spec_disclosed_tool_limitation` (a tap, and a
-      build that cannot be trusted to grade it). Those are the
+      build that cannot be trusted to grade it).
+      **The spec's own coverage of the layout must be disclosed, not
+      assumed** (issue #2389), on the same principle item 3 applies to a
+      DRC deck's rule-free layers: `klt erc` scopes its connectivity model
+      down to the layers the cited spec declares, so a clean supply read is
+      only as wide as that declaration, and a spec is a committed artifact
+      graded against a layout that gets re-routed under it. The report
+      states its own gap — quote
+      `erc_coverage.layers_in_stream_without_declaration` (the layers this
+      stream draws that the spec declares nowhere) from the cited envelope,
+      alongside `provenance.deck`, which says whether that list was narrowed
+      to a curated deck's routing stack or is the unfiltered drawn-layer
+      list. A claim that leaves a non-empty
+      `layers_in_stream_without_declaration` unstated has not satisfied this
+      item however clean `erc_status` is: a rail that *moved* onto an
+      undeclared level reports loudly as extra `erc.unconnected_net`
+      islands, but one that merely *gained* routing there while staying
+      connected through the declared stack reports clean from a model
+      narrower than the layout. **This disclosure is claimant-enforced, not
+      tool-enforced**, exactly as item 3's is: `klt signoff` grades this
+      item on the rules below, and a spec with undeclared drawn layers
+      grades the same as a fully-declaring one — the field is reported so
+      the claimant can quote it, not so the tool can refuse on it.
+      Those are the
       rules this item grades, not the
       report's overall `status`: an antenna verdict or a floating-gate
       finding is a real defect, but it is not this item's subject and does
