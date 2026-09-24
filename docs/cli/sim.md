@@ -128,6 +128,17 @@ JSON, in the same corner order**, for the same request; the backend only
 changes how fast (and where) the sweep runs. An unsupported name is an
 application error (exit 1), exactly like an unsupported `engine`.
 
+**Host default — `$KLT_SIM_BACKEND`.** Precedence is `--backend` >
+`request.backend` > `$KLT_SIM_BACKEND` > `local`. A fleet host that must not
+run SPICE grids itself sets it in its daemon environment (2am#1004: the AWS
+dispatch workers run with `KLT_SIM_BACKEND=batch`), so every sweep's grid
+goes to the batch fleet with no per-repo request edit. It is a *preference*:
+when it names an off-host backend (`batch`/`remote`) it steps back to `local`
+for a single-unit run (one corner does not repay a Spot boot), an
+`engine: "xyce"` request (the off-host toolchain pins ngspice), and
+`options.resume`. An explicit flag or request field is never overridden —
+pass `--backend local` to keep a multi-corner run on the host on purpose.
+
 | `backend`        | Behaviour                                                                                                          |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `local` (default) | Runs corners sequentially, one `ngspice -b` subprocess at a time, in-process.                                       |
