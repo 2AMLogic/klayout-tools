@@ -2338,6 +2338,474 @@ def test_cell_library_without_table_entries_keeps_the_pre_807_script(
 
 
 # --------------------------------------------------------------------------- #
+# Request-level cell exclusion (`constraints.dont_use`, issue #2382)
+# --------------------------------------------------------------------------- #
+
+#: Cell names appended to the fabricated liberty by `_append_liberty_cells`
+#: below, so a request-level `constraints.dont_use` pattern has a real cell
+#: list to be validated against. `o41a`/`o21a` stand in for the compound
+#: non-inverting family whose slow-corner delay floor motivated issue #2382;
+#: `lpflow_isobufsrc_1` is one of the cells the built-in table's own
+#: `sky130_fd_sc_hd__lpflow_*` glob matches.
+_LIBERTY_CELLS = (
+    "sky130_fd_sc_hd__inv_1",
+    "sky130_fd_sc_hd__nand2_1",
+    "sky130_fd_sc_hd__o41a_1",
+    "sky130_fd_sc_hd__o21a_2",
+    "sky130_fd_sc_hd__lpflow_isobufsrc_1",
+)
+
+
+def _append_liberty_cells(
+    liberty_path: Path, cell_names: tuple[str, ...] = _LIBERTY_CELLS
+) -> None:
+    """Append bare `cell (<name>) { }` groups to a `_make_pdk_install`-
+    fabricated `.lib` file (which ships none), so `_liberty_cell_names` has a
+    real cell list and a request-level `constraints.dont_use` pattern can
+    actually be matched against it (issue #2382). Deliberately bare: the
+    zero-match check reads only the group *names*, never a pin or timing
+    model."""
+    liberty_path.write_text(
+        liberty_path.read_text(encoding="utf-8")
+        + "".join(f"    cell ({name}) {{\n    }}\n" for name in cell_names),
+        encoding="utf-8",
+    )
+
+
+def _sky130_liberty_path(tmp_path: Path) -> Path:
+    return (
+        tmp_path
+        / "install"
+        / "sky130A"
+        / "libs.ref"
+        / "sky130_fd_sc_hd"
+        / "lib"
+        / "sky130_fd_sc_hd__tt_025C_1v80.lib"
+    )
+
+
+def _setup_dont_use_env(tmp_path, monkeypatch, constraints: dict) -> str:
+    """`_setup_success_env` plus a liberty carrying real cell groups and a
+    request carrying `constraints` (issue #2382)."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _append_liberty_cells(_sky130_liberty_path(tmp_path))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    return _write_request(
+        tmp_path / "request.json", _base_request(constraints=constraints)
+    )
+
+
+def test_request_dont_use_is_additive_with_the_library_table(tmp_path, monkeypatch):
+    """`constraints.dont_use` merges *with* the built-in per-library
+    `_ABC_DONT_USE_GLOBS` entry rather than replacing it: both sets of globs
+    reach ABC as `-dont_use` flags. The two lists exist for different
+    reasons (library-scoped non-logic-cell exclusion vs. the caller's own,
+    typically corner-dependent exclusion), so additive is the default."""
+    request_path = _setup_dont_use_env(
+        tmp_path,
+        monkeypatch,
+        {"dont_use": ["sky130_fd_sc_hd__o41a_*", "sky130_fd_sc_hd__o21a_2"]},
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+
+    library_globs = synthesize._ABC_DONT_USE_GLOBS["sky130_fd_sc_hd"]
+    for glob in (
+        *library_globs,
+        "sky130_fd_sc_hd__o41a_*",
+        "sky130_fd_sc_hd__o21a_2",
+    ):
+        assert f"-dont_use {glob}" in abc_line
+    assert abc_line.count("-dont_use ") == len(library_globs) + 2
+
+    exclusions = report["cell_exclusions"]
+    assert exclusions["mode"] == "additive"
+    assert exclusions["requested"] == [
+        "sky130_fd_sc_hd__o41a_*",
+        "sky130_fd_sc_hd__o21a_2",
+    ]
+    assert exclusions["library_defaults"] == list(library_globs)
+    assert exclusions["effective"] == [
+        *library_globs,
+        "sky130_fd_sc_hd__o41a_*",
+        "sky130_fd_sc_hd__o21a_2",
+    ]
+    assert exclusions["validated"] is True
+    assert exclusions["engine_supports_dont_use"] is True
+
+
+def test_request_dont_use_replace_mode_suppresses_the_library_table(
+    tmp_path, monkeypatch
+):
+    """`dont_use_mode: "replace"` is the explicit opt-out: only the request's
+    own patterns reach ABC, the built-in table's do not."""
+    request_path = _setup_dont_use_env(
+        tmp_path,
+        monkeypatch,
+        {
+            "dont_use": ["sky130_fd_sc_hd__o41a_*"],
+            "dont_use_mode": "replace",
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+
+    assert abc_line.count("-dont_use ") == 1
+    assert "-dont_use sky130_fd_sc_hd__o41a_*" in abc_line
+    for glob in synthesize._ABC_DONT_USE_GLOBS["sky130_fd_sc_hd"]:
+        assert f"-dont_use {glob}" not in abc_line
+
+    exclusions = report["cell_exclusions"]
+    assert exclusions["mode"] == "replace"
+    assert exclusions["effective"] == ["sky130_fd_sc_hd__o41a_*"]
+    # The suppressed table is still disclosed, so a committed report says
+    # what was *not* excluded as well as what was.
+    assert exclusions["library_defaults"] == list(
+        synthesize._ABC_DONT_USE_GLOBS["sky130_fd_sc_hd"]
+    )
+
+
+def test_request_dont_use_mode_none_drops_every_exclusion(tmp_path, monkeypatch):
+    """`dont_use_mode: "none"` turns the exclusion off entirely -- not even
+    the built-in table's globs are passed, restoring the pre-#807 mapping for
+    that one run."""
+    request_path = _setup_dont_use_env(tmp_path, monkeypatch, {"dont_use_mode": "none"})
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+
+    assert "-dont_use" not in abc_line
+    # `-constr`/`stime` are untouched -- this knob is about cell exclusion.
+    assert "-constr " in abc_line
+
+    exclusions = report["cell_exclusions"]
+    assert exclusions["mode"] == "none"
+    assert exclusions["requested"] == []
+    assert exclusions["effective"] == []
+    # Nothing to exclude means the `help abc` capability probe is never even
+    # made, so "supported" is honestly unknown rather than a guessed `false`.
+    assert exclusions["engine_supports_dont_use"] is None
+
+
+def test_cell_exclusions_defaults_to_the_library_table_with_no_request_field(
+    tmp_path, monkeypatch
+):
+    """A request with no `constraints.dont_use` at all keeps exactly the
+    pre-#2382 behaviour, and the new response block reports it: the library
+    table's globs, `requested` empty, `validated` null (nothing to check)."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch)
+
+    exclusions = run_synthesize(request_path)["cell_exclusions"]
+
+    library_globs = list(synthesize._ABC_DONT_USE_GLOBS["sky130_fd_sc_hd"])
+    assert exclusions == {
+        "mode": "additive",
+        "requested": [],
+        "library_defaults": library_globs,
+        "effective": library_globs,
+        "validated": None,
+        "engine_supports_dont_use": True,
+    }
+
+
+def test_request_dont_use_duplicates_are_collapsed(tmp_path, monkeypatch):
+    """A pattern repeated in the request -- or one that duplicates a built-in
+    table entry -- is passed to ABC once, so `effective` is a real
+    deduplicated list."""
+    request_path = _setup_dont_use_env(
+        tmp_path,
+        monkeypatch,
+        {
+            "dont_use": [
+                "sky130_fd_sc_hd__o41a_*",
+                "sky130_fd_sc_hd__o41a_*",
+                "sky130_fd_sc_hd__lpflow_*",
+            ]
+        },
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+
+    library_globs = synthesize._ABC_DONT_USE_GLOBS["sky130_fd_sc_hd"]
+    assert "sky130_fd_sc_hd__lpflow_*" in library_globs
+    assert report["cell_exclusions"]["effective"] == [
+        *library_globs,
+        "sky130_fd_sc_hd__o41a_*",
+    ]
+    assert abc_line.count("-dont_use sky130_fd_sc_hd__lpflow_*") == 1
+    assert abc_line.count("-dont_use ") == len(library_globs) + 1
+
+
+def test_request_dont_use_matching_zero_cells_is_an_error(tmp_path, monkeypatch):
+    """A pattern matching no cell in the resolved liberty is a
+    `SynthesizeError` naming it -- a typo in an exclusion list would
+    otherwise silently change the mapped netlist with nothing saying so."""
+    request_path = _setup_dont_use_env(
+        tmp_path, monkeypatch, {"dont_use": ["sky130_fd_sc_hd__o41a_typo_*"]}
+    )
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(
+        SynthesizeError,
+        match=r"dont_use pattern 'sky130_fd_sc_hd__o41a_typo_\*' matches no cell",
+    ):
+        run_synthesize(request_path)
+
+
+def test_request_dont_use_zero_match_check_names_the_first_bad_pattern(
+    tmp_path, monkeypatch
+):
+    """The zero-match check rejects the offending pattern even when other
+    patterns in the same list do match -- one good entry never launders a
+    typo in the next."""
+    request_path = _setup_dont_use_env(
+        tmp_path,
+        monkeypatch,
+        {"dont_use": ["sky130_fd_sc_hd__o41a_*", "sky130_fd_sc_hd__nosuch_*"]},
+    )
+    _stub_yosys_success(monkeypatch)
+
+    with pytest.raises(SynthesizeError, match=r"'sky130_fd_sc_hd__nosuch_\*'"):
+        run_synthesize(request_path)
+
+
+def test_request_dont_use_exact_cell_name_matches_without_a_wildcard(
+    tmp_path, monkeypatch
+):
+    """A pattern with no glob metacharacter degrades to an exact cell-name
+    match, the same way `abc -dont_use` itself handles one (the built-in
+    `sg13g2_stdcell` entry is five such plain names)."""
+    request_path = _setup_dont_use_env(
+        tmp_path, monkeypatch, {"dont_use": ["sky130_fd_sc_hd__nand2_1"]}
+    )
+    _stub_yosys_success(monkeypatch)
+
+    report = run_synthesize(request_path)
+
+    assert "sky130_fd_sc_hd__nand2_1" in report["cell_exclusions"]["effective"]
+    assert report["cell_exclusions"]["validated"] is True
+
+
+def test_request_dont_use_is_not_validated_when_the_liberty_lists_no_cells(
+    tmp_path, monkeypatch
+):
+    """A liberty whose cell list cannot be established (this module's
+    deliberately-partial parser sees no `cell (...)` group at all) means the
+    zero-match check cannot run -- the request is honoured and the response
+    says `validated: null`, rather than rejecting a good pattern on the
+    strength of a parser limitation."""
+    # `_setup_success_env`'s fabricated `.lib` carries no `cell (...)` group.
+    _isolate_pdk(monkeypatch, tmp_path)
+    install_root = tmp_path / "install"
+    _make_pdk_install(install_root, "sky130A")
+    monkeypatch.setenv("PDK_ROOT", str(install_root))
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"dont_use": ["sky130_fd_sc_hd__o41a_*"]}),
+    )
+    _stub_yosys_success(monkeypatch)
+
+    exclusions = run_synthesize(request_path)["cell_exclusions"]
+
+    assert exclusions["validated"] is None
+    assert "sky130_fd_sc_hd__o41a_*" in exclusions["effective"]
+
+
+def test_request_dont_use_degrades_away_on_a_build_without_the_flag(
+    tmp_path, monkeypatch
+):
+    """On a Yosys build whose `abc` has no `-dont_use` (Ubuntu 24.04's 0.33),
+    a request-level exclusion degrades away exactly like the built-in table
+    already does -- never attempted anyway, which would be a hard Yosys
+    error. Unlike the table's silent degradation, this one is disclosed: the
+    request asked for something that did not happen."""
+    request_path = _setup_dont_use_env(
+        tmp_path, monkeypatch, {"dont_use": ["sky130_fd_sc_hd__o41a_*"]}
+    )
+    _stub_yosys_success(monkeypatch, version="0.33", supports_dont_use=False)
+
+    report = run_synthesize(request_path)
+    abc_line = _script_abc_line(_abs_path(report["script_path"], tmp_path))
+
+    assert "-dont_use" not in abc_line
+    exclusions = report["cell_exclusions"]
+    assert exclusions["effective"] == []
+    assert exclusions["requested"] == ["sky130_fd_sc_hd__o41a_*"]
+    assert exclusions["engine_supports_dont_use"] is False
+    assert report["warnings"]["by_category"]["dont_use_unsupported"] == 1
+    assert any(
+        representative["category"] == "dont_use_unsupported"
+        and "sky130_fd_sc_hd__o41a_*" in representative["text"]
+        for representative in report["warnings"]["representatives"]
+    )
+
+
+def test_library_table_degradation_stays_silent_without_a_request_list(
+    tmp_path, monkeypatch
+):
+    """The built-in table's own pre-existing degradation on such a build is
+    documented behaviour (#807) and does **not** gain a warning -- only a
+    caller's explicit, unhonoured request does."""
+    request_path = _setup_success_env(tmp_path, monkeypatch)
+    _stub_yosys_success(monkeypatch, version="0.33", supports_dont_use=False)
+
+    report = run_synthesize(request_path)
+
+    assert "dont_use_unsupported" not in report["warnings"]["by_category"]
+    assert report["cell_exclusions"]["engine_supports_dont_use"] is False
+
+
+@pytest.mark.parametrize("dont_use", ["sky130_fd_sc_hd__o41a_*", {"a": 1}, 7])
+def test_dont_use_must_be_an_array(tmp_path, monkeypatch, dont_use):
+    """A bare string is rejected rather than treated as a one-element list:
+    silently iterating it would pass one `-dont_use` per *character*."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"dont_use": dont_use}),
+    )
+    with pytest.raises(SynthesizeError, match="dont_use must be an array"):
+        run_synthesize(request_path)
+
+
+@pytest.mark.parametrize("entry", [None, 7, True, "", ["nested"]])
+def test_dont_use_entries_must_be_nonempty_strings(tmp_path, monkeypatch, entry):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"dont_use": [entry]}),
+    )
+    with pytest.raises(SynthesizeError, match="dont_use entries must be non-empty"):
+        run_synthesize(request_path)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "sky130_fd_sc_hd__o41a_1 -liberty /etc/passwd",
+        "sky130_fd_sc_hd__o41a_1; write_verilog /tmp/x.v",
+        "sky130_fd_sc_hd__o41a_1\nstat",
+    ],
+)
+def test_dont_use_entries_reject_script_corrupting_characters(
+    tmp_path, monkeypatch, entry
+):
+    """Each entry is interpolated verbatim into the generated `.ys` script's
+    own `abc` line, so whitespace or a command separator would silently turn
+    it into a different Yosys command. Rejected by allowlist."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"dont_use": [entry]}),
+    )
+    with pytest.raises(SynthesizeError, match="outside a cell name or ABC glob"):
+        run_synthesize(request_path)
+
+
+@pytest.mark.parametrize("mode", ["Additive", "off", "", 7, []])
+def test_dont_use_mode_must_be_a_known_value(tmp_path, monkeypatch, mode):
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"dont_use_mode": mode}),
+    )
+    with pytest.raises(SynthesizeError, match="dont_use_mode must be one of"):
+        run_synthesize(request_path)
+
+
+def test_dont_use_mode_none_rejects_a_nonempty_list(tmp_path, monkeypatch):
+    """`none` and "exclude only these" must never be spelled the same way --
+    a contradictory pair is an error, not a silent winner."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(
+            constraints={
+                "dont_use": ["sky130_fd_sc_hd__o41a_*"],
+                "dont_use_mode": "none",
+            }
+        ),
+    )
+    with pytest.raises(SynthesizeError, match="'none' excludes nothing"):
+        run_synthesize(request_path)
+
+
+def test_dont_use_mode_replace_requires_a_list(tmp_path, monkeypatch):
+    """`replace` with nothing to replace the table *with* is indistinguishable
+    from `none`, so it must be spelled `none` instead."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"dont_use_mode": "replace"}),
+    )
+    with pytest.raises(SynthesizeError, match="'replace' requires a non-empty"):
+        run_synthesize(request_path)
+
+
+def test_dont_use_request_validation_precedes_pdk_resolution(tmp_path, monkeypatch):
+    """The shape check runs before any liberty resolution or run-directory
+    creation (it is next to `clock_period_ns`'s), so a malformed exclusion
+    list fails cheaply -- no `.klt/synthesize/` directory is left behind."""
+    _isolate_pdk(monkeypatch, tmp_path)
+    _write(tmp_path / "gcd.v", _GCD_RTL)
+    request_path = _write_request(
+        tmp_path / "request.json",
+        _base_request(constraints={"dont_use": [42]}),
+    )
+    with pytest.raises(SynthesizeError, match="dont_use entries must be non-empty"):
+        run_synthesize(request_path)
+    assert not os.path.isdir(tmp_path / ".klt" / "synthesize")
+
+
+def test_resolve_dont_use_request_defaults_without_constraints():
+    """No `constraints` block at all is the same as an empty one: no
+    patterns, additive mode."""
+    assert synthesize._resolve_dont_use_request(None) == ((), "additive")
+    assert synthesize._resolve_dont_use_request({}) == ((), "additive")
+    assert synthesize._resolve_dont_use_request({"clock_period_ns": 10.0}) == (
+        (),
+        "additive",
+    )
+
+
+def test_liberty_cell_names_reads_group_names_and_degrades_to_none(tmp_path):
+    liberty_path = tmp_path / "lib.lib"
+    _write(liberty_path, "library (x) {\n")
+    _append_liberty_cells(liberty_path)
+
+    assert synthesize._liberty_cell_names(str(liberty_path)) == frozenset(
+        _LIBERTY_CELLS
+    )
+    # No `cell (...)` group at all, and a missing file, are both "cannot
+    # establish the cell list" -- never "zero cells, reject everything".
+    assert (
+        synthesize._liberty_cell_names(
+            _write(tmp_path / "empty.lib", "library (x) {\n}\n")
+        )
+        is None
+    )
+    assert synthesize._liberty_cell_names(str(tmp_path / "missing.lib")) is None
+
+
+# --------------------------------------------------------------------------- #
 # Constant-tie mapping (`hilomap`, issue #854)
 # --------------------------------------------------------------------------- #
 

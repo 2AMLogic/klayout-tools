@@ -283,6 +283,9 @@ anywhere in this flow.
   `sg13g2_dfrbp_2` — IHP's own LibreLane platform config's
   `SYNTH_EXCLUDED_CELL_FILE` list of clock-gate/scan/sign-hold sequential
   cells its own flow keeps out of mapping.
+- **`-dont_use <glob>` from the request**, once per
+  `constraints.dont_use` entry (issue #2382) — see the sub-section
+  immediately below.
 
 A `cell_library` in **neither** table is never given a guessed driving cell
 or exclusion list: its generated script keeps exactly the pre-#807 shape
@@ -309,6 +312,86 @@ per run and omits the exclusion list on builds that do not support it,
 rather than failing — the same graceful degradation `sequential_area_um2`
 already applies to those builds. `-constr`/`-D`/`stime -p` are supported on
 both.
+
+#### Request-level cell exclusion (`constraints.dont_use`)
+
+The per-library table above is a **library-scoped** policy: keep non-logic
+cells — power-domain isolation, test probe, scan/clock-gate — out of a mapped
+netlist. It is correct for every run against that library, and it is
+hardcoded precisely because it does not vary per request.
+
+A second, distinct exclusion class **cannot** be expressed that way, because
+it is *corner*-scoped (issue #2382). In a library with a wide
+voltage/temperature corner set, a whole cell family can be unusable at the
+slow corner while being entirely reasonable at the nominal one: measured on
+one open standard-cell library, the compound non-inverting families' falling
+delay floors sit one to two orders of magnitude above the inverting
+families' for comparable fan-in at the slow corner (a single 4-input
+non-inverting OR arc costing ~45% of a 10 ns budget before any load or
+wire), while at the nominal corner both values are negligible. Setting
+`constraints.clock_period_ns` at that corner does not avoid them — ABC
+optimizes area against its own delay model subject to the target and
+measurably still selects such a family.
+
+`constraints.dont_use` is that request-level primitive: an array of ABC cell
+names/globs, the same syntax the built-in table's entries already use
+(`abc -dont_use` "supports simple glob patterns in the cell name", `help
+abc`, degrading to an exact match for a pattern with no wildcard).
+
+```json
+"constraints": {
+  "clock_period_ns": 10.0,
+  "dont_use": ["sky130_fd_sc_hd__o41a_*", "sky130_fd_sc_hd__o21a_2"],
+  "dont_use_mode": "additive"
+}
+```
+
+**Merge semantics — additive by default.** The two lists exist for different
+reasons, so supplying one of your own never implicitly turns the built-in one
+off. `constraints.dont_use_mode` is the explicit override:
+
+| `dont_use_mode` | Effect |
+| --- | --- |
+| `"additive"` (default) | The built-in table's globs, then the request's, deduplicated and order-preserved. |
+| `"replace"` | **Only** the request's globs; the built-in table is suppressed for this run. Requires a non-empty `dont_use` (otherwise it is indistinguishable from `"none"`, and must be spelled that way instead). |
+| `"none"` | No `-dont_use` flag at all, not even the built-in table's — the pre-#807 mapping, for one run. Rejects a non-empty `dont_use`, so "exclude nothing" can never be spelled the same way as "exclude only these". |
+
+**A pattern that matches zero cells is an error**, naming the offending
+pattern — checked against the resolved liberty's own `cell (...)` group names
+before Yosys is invoked. A typo in an exclusion list is otherwise invisible:
+the run succeeds, the netlist differs from the one you meant to produce, and
+nothing says so. Only *request-supplied* patterns are checked; the built-in
+table's entries were each cross-checked against their library's real
+installed liberty when added. When the liberty's cell list cannot be
+established at all (this command reads cell *names* with a deliberately
+partial parser, not a full Liberty parse), the check is skipped rather than
+failing a good request — the response's `cell_exclusions.validated` says
+which happened.
+
+**On a Yosys build without `abc -dont_use`**, a request-level list degrades
+away exactly like the built-in table does (it is never passed anyway, which
+would be a hard Yosys error). Unlike the table's long-standing silent
+degradation, this is disclosed — `cell_exclusions.engine_supports_dont_use`
+is `false` with a non-empty `requested` and an empty `effective`, plus a
+`dont_use_unsupported` warning — because the netlist then still contains
+exactly the cells the request meant to keep out of it.
+
+**Why this is a request field rather than a hand-edited script.** The
+generated `.ys` script is right there, and appending `-dont_use` flags to it
+by hand works. But the resulting netlist is then not reproducible from a
+committed `klt` request, so no downstream timing/area claim built on it can
+be re-derived by re-running the committed flow. The fully-resolved list is
+echoed into the response as `cell_exclusions` for the same reason: a
+committed report records exactly what was excluded, rather than leaving it
+implicit in the tool version that produced it.
+
+Two derived conveniences are deliberately **not** implemented here: an
+"exclude every cell whose delay floor at the resolved corner exceeds N% of
+`clock_period_ns`" rule (computable from the liberty this command already
+reads, and — per the asymmetry above — it would have to be computed
+per-transition-polarity, not as one number per cell), and a warning when an
+exclusion removes the last implementation of some logic function. The
+explicit list is the primitive; those are natural second steps on top of it.
 
 ### Constant ties (`hilomap`)
 
@@ -1064,6 +1147,8 @@ separately if it turns out to matter for evidence-record committing.
 | `pdk.cell_library` | string | Standard-cell library name. Required. |
 | `pdk.corner` | string \| omitted | Liberty corner selector; defaults to the nominal corner when omitted. |
 | `constraints.clock_period_ns` | number \| null | The target clock period in nanoseconds, consumed as ABC's own delay target: passed as `abc -D <clock_period_ns × 1000>` picoseconds, and echoed in the response as `timing.delay_target_ps`. Must be a positive number when given (a non-numeric or non-positive value is an error, never silently ignored). Yosys still has no SDC-reading step — this is the request field translated into the one delay knob the engine does expose. Also the target `--restructure-timing` restructures the `sta` stage's `worst_path` against — required (not `null`) whenever that flag is given. |
+| `constraints.dont_use` | array\<string\> \| omitted | Standard cells this run must not map to, as ABC `-dont_use` cell names/globs (issue #2382) — **merged with** the built-in per-library exclusion table by default, see "ABC constraints, delay target, and cell exclusions" above for the merge semantics and `constraints.dont_use_mode`. Each entry must be a non-empty string of cell-name/glob characters (`[A-Za-z0-9_.*?!\[\]-]`) and must match **at least one** cell in the resolved liberty — a pattern matching nothing is an error, never a silent no-op. The fully-resolved list is echoed back as the response's `cell_exclusions.effective`. |
+| `constraints.dont_use_mode` | string \| omitted | How `constraints.dont_use` combines with the built-in per-library table: `"additive"` (default — both), `"replace"` (only the request's, requires a non-empty `dont_use`), `"none"` (no exclusion at all, rejects a non-empty `dont_use`). An unknown value is an error. |
 | `structural.expected_latches` | integer \| omitted | The number of latches this design intentionally infers (default `0`). Subtracted from the response's `structural.latches` to produce `structural.unexpected_latches` — see "`structural`" below. Must be a non-negative integer when given. |
 | `baseline.response_path` \| `baseline.netlist_path` | string | Optional; names a prior run to compare this one against — see "`baseline`" below. Set **exactly one**, resolved relative to the request file's own directory (like `sources`). |
 | `baseline.ref` | string \| omitted | A label identifying the baseline (e.g. a git ref or `"main"`), echoed verbatim into the response's `baseline.ref`. Defaults, when omitted, to the resolved `response_path`/`netlist_path`'s repo-relative form — or `<outside repo>` when it resolves outside the invocation's repo (issue #1844); never the literal, potentially-absolute request string. |
@@ -1130,6 +1215,14 @@ caller decision rather than something this command should pick.
     "multi_driven": 0,
     "has_critical": false
   },
+  "cell_exclusions": {
+    "mode": "additive",
+    "requested": [],
+    "library_defaults": ["sky130_fd_sc_hd__lpflow_*", "sky130_fd_sc_hd__probe*"],
+    "effective": ["sky130_fd_sc_hd__lpflow_*", "sky130_fd_sc_hd__probe*"],
+    "validated": null,
+    "engine_supports_dont_use": true
+  },
   "warnings": {
     "total": 0,
     "by_category": {},
@@ -1168,7 +1261,8 @@ caller decision rather than something this command should pick.
 | `timing` | object \| null | ABC's own `stime -p` critical-path estimate: `{source, wire_load, critical_path_ps, delay_target_ps}`. `source` is `"abc_stime"`; `wire_load` is ABC's own `WireLoad` echo, `null` for its `"none"`; `critical_path_ps` is picoseconds; `delay_target_ps` echoes the `-D` value derived from `constraints.clock_period_ns` (`null` when none was given). `null` when no `stime` number is available at all. **Pre-layout and wire-free, never signoff STA** — see "`timing`" above. |
 | `sta` | object \| null | `klt-statime-native`'s gate-level critical-path report over the whole mapped netlist: `{source, input_transition_ns, output_load_pf, top, num_cells, num_nets, worst_path, worst_reg_to_reg_path}`. `source` is `"klt_statime_native"`; `input_transition_ns`/`output_load_pf` echo the uniform boundary condition this run used. `worst_path` is the globally worst path — `{startpoint, startpoint_kind, endpoint, endpoint_kind, delay_ns, hops}`, where `hops` is the per-cell breakdown (`{point, cell, edge, arrival_ns, slew_ns}`) — and `worst_reg_to_reg_path` is the same shape for the worst *pure* register-to-register path (`null` for a purely combinational design). `null` when the optional `klt_statime_native` extension is not installed or the engine could not analyze this netlist/liberty pair. **A path delay, never slack, and never signoff STA** — no SDC/`create_clock`, still wire-free; see "`sta`" above. Additive as of issue #925 — `timing` is unaffected. |
 | `structural` | object | **Always present** (issue #1588) — a pass/fail verdict over the three unambiguously-wrong synchronous-design conditions Yosys's own `synth`/`stat` already know about: `{latches, expected_latches, unexpected_latches, comb_loops, multi_driven, has_critical}`. `latches` is the total instance count of every `stat -json` cell type whose name contains `"dlatch"` (case-insensitive) — `dfflibmap` maps only flip-flops, so an inferred latch survives, unmapped, as a bare gate-level primitive (`$_DLATCH_P_` and siblings). `expected_latches` echoes the request's `structural.expected_latches` (default `0`); `unexpected_latches` is `max(0, latches - expected_latches)`. `comb_loops`/`multi_driven` count the **distinct** `Warning: found logic loop` / `Warning: multiple conflicting drivers` lines `synth -top <top>`'s own internal `check` sub-stages print. `has_critical` is `true` iff `comb_loops > 0 \|\| multi_driven > 0 \|\| unexpected_latches > 0` — see "`structural`" below and "Exit codes". |
-| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
+| `cell_exclusions` | object | **Always present** (issue #2382) — the standard-cell exclusion this run actually applied, and how it was arrived at: `{mode, requested, library_defaults, effective, validated, engine_supports_dont_use}`. `mode` is the resolved `constraints.dont_use_mode` (`"additive"` by default); `requested` is the request's own `constraints.dont_use`, normalized and deduplicated; `library_defaults` is the built-in per-library table's entry for the resolved `pdk.cell_library` (always reported, even when `mode` suppressed it, so a report says what was *not* excluded too); **`effective` is exactly the `-dont_use` glob list handed to ABC**, deduplicated and order-preserved. `validated` is `true` when every `requested` pattern was matched against the resolved liberty's cell names, or `null` when there was nothing to check or that cell list could not be established. `engine_supports_dont_use` is the `yosys -p 'help abc'` probe result, or `null` when there was nothing to exclude and no probe was made — `false` with a non-empty `requested` and an empty `effective` is the "older Yosys build dropped it" case, also surfaced as a `dont_use_unsupported` warning. Additive field, no `schema_version` bump. See "Request-level cell exclusion" above. |
+| `warnings` | object | **Always present** (issue #1588) — a bounded, deterministic summary of every `Warning: ` line in the captured Yosys run log plus missing-library-capability warnings, never the raw log itself: `{total, by_category, representatives}`. `total` counts engine warning lines plus capability warnings (Yosys can reprint an unresolved problem's identical warning text at more than one of `synth`'s internal `check` calls, so this is "how noisy was this run", not a distinct-problem count — see `structural`'s own dedup discipline above for that). `by_category` is `{category: count}`, keys sorted for determinism, grouped into a small taxonomy (`latch_inferred`, `logic_loop`, `multiple_drivers`, `undriven_wire`, `other`, `unsupported_cell_library`, `dont_use_unsupported`). `representatives` is `[{category, count, text}]`, one entry per category (the first message text seen), sorted by category and capped at 10 entries. |
 | `netlist_path` | object | The mapped gate-level netlist (`write_verilog -noattr`'s output), normalized to the `{path, scope}` shape `env_provenance.repo_relative_path()` defines (issue #1844, matching the precedent `klt pex`/`klt sim` set in issue #1261): `path` is repo-relative and `scope` is `"repo"` when the netlist resolves inside the invocation's repo, else `{"path": null, "scope": "external"}` — the absolute path is never echoed, so a committed evidence record never leaks it. Never re-derive `instance_count`/`area_um2` by parsing this file. |
 | `script_path` | object | The generated `.ys` script, the same `{path, scope}` shape as `netlist_path` — kept as a debuggable artifact. This is the **commit-safe** form: every embedded path is either repo-relative or `$PDK_ROOT`-relative (issue #1870), so `klt env-provenance scan` on it is clean. Because Yosys does not expand environment variables, it is not the file Yosys was run on — see `run_script_path`. |
 | `run_script_path` | object | The `.ys` script Yosys was actually handed (issue #1870), same `{path, scope}` shape — the rehydrated `synth_<top>.run.ys` sibling with the real absolute liberty path substituted for `$PDK_ROOT`, or exactly `script_path` when no token was written (a liberty resolving outside the PDK install root). Additive field, no `schema_version` bump. Machine-specific by construction: commit `script_path`, not this. |
