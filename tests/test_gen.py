@@ -8876,36 +8876,15 @@ def test_gf180mcu_diff_pair_off_grid_ring_padding_implant_extension_is_exact(
     assert extension_dbu == (margin_dbu,) * 4
 
 
-def test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean(tmp_path, both_pdk_root):
-    """DRC counterpart of the extension assertion above, on one representative
-    off-grid padding (one `run_drc` rather than one per value -- the geometry
-    assertion covers all four). Before the dbu-space fix this reported
-    `pplus.enclosing.comp.1` x2."""
-    output = tmp_path / "diff_pair_off_grid_ring_drc.gds"
-    generate(
-        {
-            "generator": "diff_pair",
-            "pdk": {"variant": "gf180mcuD", "root": str(both_pdk_root)},
-            "params": {
-                "splits": 1,
-                "add_guard_ring": True,
-                "ring_padding_um": 0.5045,
-            },
-            "options": {"output": str(output)},
-        }
-    )
-
-    drc_report = run_drc(str(output), "gf180mcu")
-    # `contact.width.1` (CO.1's fixed 0.22 x 0.22 um max-size bound, added by
-    # #2370) fires on this off-grid ring_padding_um independent of the
-    # implant-margin fix this test actually covers -- see #2442 (reproduces
-    # identically on an unmodified origin/main, unrelated to this generator's
-    # nplus/pplus enclosing-implant DRC). Exclude it so this test keeps
-    # asserting on its own concern.
-    other_violations = [
-        v for v in drc_report["violations"] if v["rule"] != "contact.width.1"
-    ]
-    assert other_violations == [], drc_report["violations"]
+# DRC-clean coverage for this same off-grid-padding scenario now lives in
+# `test_gf180mcu_diff_pair_off_grid_ring_padding_is_drc_clean` above (#2450,
+# merged ahead of this branch) -- it already parametrizes over
+# `_ISSUE_2442_OFF_GRID_PADDINGS_UM`, which includes 0.5045, and asserts both
+# exact contact geometry and a fully clean `klt drc` report. A second,
+# same-named def here would silently shadow that one (Python keeps only the
+# last definition; ruff F811 catches it, pytest does not), so this PR's
+# redundant single-padding version was removed during evaluation rather than
+# reintroducing the collision.
 
 
 @pytest.mark.parametrize(
