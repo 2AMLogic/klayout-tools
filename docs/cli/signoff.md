@@ -518,8 +518,10 @@ a second input the envelope happens to mention:
 
 Every other kind reports `null`: `functional-verification`, `power` and
 `place-and-route` either populate no `provenance.input` at all or echo only
-their outputs, a `generic` envelope's author chooses their own field names,
-and an `error` envelope carries no verdict to anchor.
+their outputs, and an `error` envelope carries no verdict to anchor. A
+`generic` envelope's author chooses their own field names by definition, so
+`klt signoff` never guesses which one is the artifact — but it *can* opt in;
+see "Generic evidence (opt-in, non-`klt`-native)" below.
 
 **Path resolution is best-effort, and an unresolved path is reported, never
 guessed at.** A path an envelope names was written relative to whatever
@@ -1774,6 +1776,42 @@ misclassify it as a native kind instead:
   same way it already excludes an `error`-kind check or an unprovenanced
   `klt yield` report. A manifest entry with no pinned `content_hash` at all
   is unaffected either way — no staleness claim was made to check.
+
+**`provenance.input.path` (issue #2403) — optional, opt-in — the artifact
+`input_verified` re-hashes.** Even when `provenance` is given, a generic
+envelope's `content_hash` was, until this field existed, structurally
+unanchorable to any file: `source` is documented above as purely
+informational and never read, and `generic` names no field in
+`_INPUT_ARTIFACT_FIELDS` (the per-kind table "A pinned hash is checked
+against the artifact, not only against the envelope" above describes), since
+an envelope author's own field names cannot be guessed at safely. Setting
+`provenance.input.path` opts in: it names the file
+`provenance.input.content_hash` covers, resolved the same way every native
+kind's input field already is — relative to the evidence file's own
+directory, or (issue #1261) as the `{path, scope}` object `klt sim`/`klt
+pex` already echo their own input under:
+
+```json
+"provenance": {
+  "...": "...",
+  "input": {
+    "content_hash": "sha256:...",
+    "path": "2026-q3-report.md"
+  }
+}
+```
+
+`path` may be a bare string (resolved beside the evidence file, mirroring
+`klt drc`'s `file`) or a `{"path": <repo-relative path>, "scope": "repo"}`
+object (resolved against the repo root the evidence lives in, mirroring `klt
+sim`'s `netlist`) — never a raw absolute host path, for the same reason
+`repo_relative_path` never emits one for `scope: "external"`. Omitting
+`provenance.input.path` is unaffected either way: `input_verified` stays
+`null`, exactly as it always has for `generic`. This is purely additive —
+no `schema_version` bump, and it changes no item's `met`/`unmet` verdict
+(see "No verdict changes" below); it only makes `input_verified: true`/
+`false` *reachable* for item 8's characterization-report evidence, the one
+kind that previously could never report anything but `null`.
 
 `klt signoff` never validates a generic envelope's `summary`/`source`
 against anything external — it only reads `status` (pass/fail),

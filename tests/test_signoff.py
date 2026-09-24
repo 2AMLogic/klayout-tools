@@ -10194,6 +10194,104 @@ def test_citation_input_verified_null_when_the_envelope_records_no_hash(tmp_path
     assert item_8["citation"]["input_verified"] is None
 
 
+def test_generic_citation_input_verified_true_when_opted_in_path_matches(tmp_path):
+    """Issue #2403: a `generic` envelope's freshness claim was previously
+    unanchorable to any file -- `source` is documented as purely
+    informational and never read. Opting in via `provenance.input.path`
+    (the `{path, scope}` shape issue #1261 already uses for `klt
+    sim`/`klt pex`) makes `input_verified: true` reachable for item 8."""
+    report_path = tmp_path / "2026-q3-report.md"
+    report_path.write_text("Q3 characterization sweep: all spec rows within limits")
+    envelope = {
+        **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE,
+        "provenance": {
+            **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE["provenance"],
+            "input": {
+                "content_hash": _hash_of(report_path),
+                "path": "2026-q3-report.md",
+            },
+        },
+    }
+    generic_path = _write(tmp_path, "characterization.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"8": generic_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["input_verified"] is True
+
+
+def test_generic_citation_input_verified_false_when_opted_in_path_changed(tmp_path):
+    """The valuable new state this opt-in makes reachable: found and
+    *disagrees* -- the artifact a `generic` envelope names was regenerated
+    underneath a report that still claims the old hash. The verdict is
+    unchanged (still `met`); only `input_verified` says so."""
+    report_path = tmp_path / "2026-q3-report.md"
+    report_path.write_text("Q3 characterization sweep: all spec rows within limits")
+    recorded = _hash_of(report_path)
+    envelope = {
+        **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE,
+        "provenance": {
+            **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE["provenance"],
+            "input": {"content_hash": recorded, "path": "2026-q3-report.md"},
+        },
+    }
+    generic_path = _write(tmp_path, "characterization.json", envelope)
+    report_path.write_text("regenerated -- every spec row re-derived from scratch")
+
+    result = build_tier_report(
+        _manifest(evidence={"8": {"file": generic_path, "content_hash": recorded}})
+    )
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["content_hash"] == recorded
+    assert item_8["citation"]["input_verified"] is False
+
+
+def test_generic_citation_input_verified_null_when_not_opted_in(tmp_path):
+    """A `generic` envelope that records `provenance.input.content_hash` but
+    no `path` keeps `input_verified: null`, exactly as before this opt-in
+    field existed -- silence still means silence."""
+    generic_path = _write(
+        tmp_path, "characterization.json", GENERIC_PASS_ENVELOPE_WITH_PROVENANCE
+    )
+
+    result = build_tier_report(_manifest(evidence={"8": generic_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["input_verified"] is None
+
+
+def test_generic_citation_input_verified_repo_relative_path_shape(tmp_path):
+    """`provenance.input.path` also accepts the `{path, scope}` object shape
+    directly (not just a bare string), resolved against the repo root the
+    evidence file lives in -- the same convention `klt sim`/`klt pex` use."""
+    (tmp_path / ".git").mkdir()
+    report_dir = tmp_path / "characterization"
+    report_dir.mkdir()
+    report_path = report_dir / "2026-q3-report.md"
+    report_path.write_text("Q3 characterization sweep: all spec rows within limits")
+    envelope = {
+        **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE,
+        "provenance": {
+            **GENERIC_PASS_ENVELOPE_WITH_PROVENANCE["provenance"],
+            "input": {
+                "content_hash": _hash_of(report_path),
+                "path": {"path": "characterization/2026-q3-report.md", "scope": "repo"},
+            },
+        },
+    }
+    generic_path = _write(tmp_path, "characterization.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"8": generic_path}))
+
+    item_8 = next(item for item in result["items"] if item["id"] == 8)
+    assert item_8["status"] == "met"
+    assert item_8["citation"]["input_verified"] is True
+
+
 def test_citation_input_verified_never_moves_a_verdict(tmp_path):
     """The disclosure-only guarantee, stated as a test: an item graded with
     a changed artifact renders byte-identically to one graded with an

@@ -4686,9 +4686,16 @@ def _yield_samples_content_hash(
 #: own); ``functional-verification``/``power``/``place-and-route``
 #: populate no ``provenance.input`` at all today, or echo no path for
 #: the artifact they hashed (`klt place-and-route` pins the gate-level
-#: netlist it placed but echoes only its *outputs*); ``generic`` envelopes
-#: choose their own field names by definition; ``error`` envelopes carry no
-#: verdict to anchor.
+#: netlist it placed but echoes only its *outputs*); ``error`` envelopes
+#: carry no verdict to anchor.
+#:
+#: ``generic`` is deliberately absent from this table -- a generic
+#: envelope's author chooses their own field names, so this module must
+#: never guess which one is the artifact. It is handled by a separate,
+#: **opt-in** branch in :func:`_input_artifact_candidates` instead (issue
+#: #2403): an envelope that sets ``provenance.input.path`` is asking to be
+#: verified against it; one that does not keeps ``input_verified: null``,
+#: unchanged from before this field existed.
 _INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
     "drc": ("file",),
     "extract": ("file",),
@@ -4700,16 +4707,14 @@ _INPUT_ARTIFACT_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _input_artifact_candidates(
-    kind: str,
-    envelope: Mapping[str, Any],
-    spec: Mapping[str, Any],
-    evidence_file: str | None,
+def _resolve_input_artifact_value(
+    value: Any, spec: Mapping[str, Any], evidence_dir: str | None
 ) -> list[str]:
-    """Every filesystem path the cited envelope's own input-artifact field
-    (:data:`_INPUT_ARTIFACT_FIELDS`) could mean **from this grading
-    context** -- ``[]`` when the kind names no such field, the field is
-    absent, or its value is a shape that cannot be resolved here.
+    """Every filesystem path one input-artifact field's raw envelope
+    ``value`` could mean **from this grading context** -- ``[]`` when the
+    value's shape cannot be resolved here. Shared by every per-field branch
+    in :func:`_input_artifact_candidates`, native and ``generic`` alike, so
+    the two agree on exactly one resolution convention.
 
     A path an envelope names is not portable: it was written relative to
     whatever directory the producing run used, which is not necessarily the
@@ -4731,12 +4736,40 @@ def _input_artifact_candidates(
       ``layout.spice``) is only resolvable this way.
 
     The ``{path, scope}`` shape (issue #1261 -- `klt sim`'s ``netlist``,
-    `klt pex`'s ``layout``) is resolved against the repo root discovered
+    `klt pex`'s ``layout``; issue #2403 -- a ``generic`` envelope's opt-in
+    ``provenance.input.path``) is resolved against the repo root discovered
     from the evidence file's own location, which is what ``scope: "repo"``
     means by construction. ``scope: "external"`` carries no path at all (it
     is ``null`` on purpose, so a host-specific absolute path never lands in
     committed evidence) and is therefore unresolvable here -- correctly
     reported as "not verified" rather than guessed at.
+    """
+    candidates: list[str] = []
+    if isinstance(value, str) and value:
+        candidates.append(_resolve_relative_to_spec(value, spec))
+        if evidence_dir is not None and not os.path.isabs(value):
+            candidates.append(os.path.join(evidence_dir, value))
+    elif isinstance(value, Mapping) and value.get("scope") == "repo":
+        repo_relative = value.get("path")
+        if isinstance(repo_relative, str) and repo_relative:
+            root = find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
+            if root is not None:
+                candidates.append(os.path.join(root, repo_relative))
+    return list(dict.fromkeys(candidates))
+
+
+def _input_artifact_candidates(
+    kind: str,
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+    evidence_file: str | None,
+) -> list[str]:
+    """Every filesystem path the cited envelope's own input-artifact field
+    (:data:`_INPUT_ARTIFACT_FIELDS`, or ``generic``'s opt-in
+    ``provenance.input.path`` below) could mean **from this grading
+    context**, resolved by :func:`_resolve_input_artifact_value` -- ``[]``
+    when the kind names no such field, the field is absent, or its value is
+    a shape that cannot be resolved here.
     """
     evidence_dir = (
         os.path.dirname(os.path.abspath(evidence_file)) if evidence_file else None
@@ -4747,21 +4780,28 @@ def _input_artifact_candidates(
             # Not "unresolvable" -- this field simply was not the one the run
             # hashed (`klt sta`'s DEF/Verilog branch); try the next.
             continue
-        candidates: list[str] = []
-        if isinstance(value, str) and value:
-            candidates.append(_resolve_relative_to_spec(value, spec))
-            if evidence_dir is not None and not os.path.isabs(value):
-                candidates.append(os.path.join(evidence_dir, value))
-        elif isinstance(value, Mapping) and value.get("scope") == "repo":
-            repo_relative = value.get("path")
-            if isinstance(repo_relative, str) and repo_relative:
-                root = find_repo_root(evidence_dir or spec.get("cwd") or os.getcwd())
-                if root is not None:
-                    candidates.append(os.path.join(root, repo_relative))
         # The first *present* field decides: it is the one the producing run
         # hashed, so falling through to another on a failed resolution would
         # verify the wrong artifact.
-        return list(dict.fromkeys(candidates))
+        return _resolve_input_artifact_value(value, spec, evidence_dir)
+    if kind == "generic":
+        # Issue #2403: a `generic` envelope names its own fields by
+        # definition (`_INPUT_ARTIFACT_FIELDS` above has no entry for it),
+        # so the only field this module ever reads for it is this one
+        # explicit, opt-in name -- never `source` (documented as purely
+        # informational, `docs/cli/signoff.md`) and never a guess at some
+        # other author-chosen key. An envelope that omits
+        # `provenance.input.path` is unaffected: `[]` here means
+        # `_verify_input_artifact` reports `input_verified: null`, exactly
+        # as it did before this field existed.
+        provenance = envelope.get("provenance")
+        input_block = (
+            provenance.get("input") if isinstance(provenance, Mapping) else None
+        )
+        if isinstance(input_block, Mapping) and "path" in input_block:
+            return _resolve_input_artifact_value(
+                input_block.get("path"), spec, evidence_dir
+            )
     return []
 
 
