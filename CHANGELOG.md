@@ -14,6 +14,46 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2389, `klt erc`, additive — **no** `schema_version` bump: one
+  new `erc_coverage` key, no new spec key, no new finding kind, and no
+  change to any existing field's value for any input): a new
+  `erc_coverage.layers_in_stream_without_declaration` names the drawn
+  `(layer, datatype)` pairs this layout carries that the cited spec declares
+  **nowhere** — the inverse-direction counterpart of `klt drc`'s
+  `coverage.layers_in_stream_without_rules`, and the same plain set
+  difference. `klt erc` scopes its connectivity graph down to the layers the
+  spec declares, and a `stackup`/`vias` entry naming a layer the layout does
+  not draw is explicitly not an error; the opposite direction was invisible.
+  That matters because an ERC supply spec is a committed, long-lived
+  artifact (`docs/design-evidence-tiers.md` item 11) graded against a layout
+  that gets re-routed under it: a rail that *moves* onto an undeclared level
+  already reports loudly as extra `erc.unconnected_net` islands, but a rail
+  that merely *gains* routing there while staying connected through the
+  declared stack produced a clean report whose connectivity model was
+  narrower than the layout, with nothing in the envelope recording it —
+  forcing a consumer writing an item-11 flow to hand-roll a `klayout.db`
+  pre-flight beside `klt erc` just to diff "layers drawn" against "layers
+  declared". **Reported, never graded**, exactly as `klt drc`'s own coverage
+  block is: a non-empty list never changes `status`/`erc_status`, emits no
+  finding, and is not an input to either roll-up; `[]` means every drawn
+  layer is declared. "Declared" means named anywhere in the spec — a
+  `stackup[].label_layer`, `stackup[0].active_layer`, a `ties[]`
+  `well_layer`/`tap_layer` with its `tap_requires`/`well_requires`/
+  `well_excludes` markers, a `devices[].body_layer` — because a layer the
+  spec explicitly names is not one it never mentioned, and counting it would
+  put a false positive in the field of every fully-declared spec. Scoped to
+  the analysed top cell's own hierarchy, like `klt drc --top`'s own
+  `coverage`. With `--deck <name>` the list is narrowed to that curated
+  extraction deck's conducting layers (`metals`, `vias`, `contact`,
+  `active`, `poly`, plus an optional distinct `tap`/`poly_interconnect`),
+  so implants, markers and wells stop reading as coverage gaps; without a
+  deck there is no PDK-agnostic way to tell a conductor from a marker, so
+  the unfiltered drawn-layer list is reported — noisier, and still strictly
+  more information than silence. `provenance.deck` says which of the two a
+  reader has. `docs/design-evidence-tiers.md` item 11 now asks a claimant to
+  quote a non-empty value, on the same claimant-enforced (not
+  tool-enforced) terms item 3 already applies to
+  `coverage.layers_in_stream_without_rules`.
 - **Fixed** (#2374, `klt lvs` `options.combine_devices` — additive, **no**
   `schema_version` bump: no category is added or removed, and the existing
   `device.combine_parameter_corrected` entry's `details.corrected[]` objects

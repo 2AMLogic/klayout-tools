@@ -241,6 +241,17 @@ antenna half then reports what it actually did: ``null`` accumulation
 fields, ``"unchecked"`` verdicts, every level in ``coverage.skipped`` with
 reason :data:`REASON_FINDINGS_ONLY`, and ``status: "not_checked"``.
 
+Layers the spec never declared (issue #2389, the new ``erc_coverage`` key
+``layers_in_stream_without_declaration``): everything above
+scopes the connectivity model down to the declared ``stackup``/``vias``
+roles, and a spec entry naming a layer this layout does not draw is
+explicitly not an error. The opposite direction -- a layer this layout
+*draws* that the spec declares nowhere -- was invisible until this field,
+which matters because an ERC supply spec is a committed artifact graded
+against a layout that gets re-routed under it. Pure disclosure, mirroring
+``klt drc``'s ``coverage.layers_in_stream_without_rules``: it grades
+nothing and moves no verdict. See :func:`_undeclared_stream_layers`.
+
 See ``docs/cli/erc.md`` for the full spec-file schema and JSON contract.
 """
 
@@ -255,7 +266,7 @@ from ._devices import (
     _device_body_cuts,
     _validate_devices,
 )
-from ._layout import load_layout, select_top_cells
+from ._layout import cells_in_hierarchy, load_layout, select_top_cells
 from ._layout import region as _region
 from ._layout import texts as _texts
 from ._paths import _load_spec_json, _parse_layer_datatype, _validate_via_entries
@@ -365,6 +376,15 @@ from .extract import (
 #: that omits the key grades against 1 exactly as before, byte-identical,
 #: and no output field is added, removed, or renamed -- so, as with every
 #: prior additive change above, no bump.
+#: Issue #2389 adds one new ``erc_coverage`` key,
+#: ``layers_in_stream_without_declaration`` (the drawn-but-undeclared layer
+#: disclosure mirroring ``klt drc``'s
+#: ``coverage.layers_in_stream_without_rules`` -- see
+#: :func:`_undeclared_stream_layers`), and no new spec key at all. Additive
+#: in the strongest sense any entry above is: it is derived entirely from
+#: the layout and the spec this run already read, it is not an input to
+#: either roll-up, and no existing field's value changes for any input --
+#: a consumer that does not read it sees a byte-identical report. No bump.
 SCHEMA_VERSION = 1
 
 
@@ -541,6 +561,122 @@ def _ties_disclosure_reason(ties_disclosure: dict[str, str] | None) -> str:
     ]
 
 
+def _spec_declared_layers(
+    stackup: list[dict[str, Any]],
+    vias: list[dict[str, Any]],
+    ties: list[dict[str, Any]],
+    devices: list[dict[str, Any]],
+) -> set[tuple[int, int]]:
+    """Every ``(layer, datatype)`` this spec names *anywhere* -- the
+    declared side of :func:`_undeclared_stream_layers`' set difference
+    (issue #2389).
+
+    The conductor roles (:func:`_conductor_role_layers`, ``stackup`` +
+    ``vias``) are what the connectivity graph is actually built from, and
+    they are what the disclosure is *about*. But a layer the spec names in
+    any other capacity -- a ``stackup[].label_layer`` this run reads net
+    names off, ``stackup[0].active_layer``, a ``ties[]`` well/tap layer and
+    its ``tap_requires``/``well_requires``/``well_excludes`` narrowing
+    markers, a ``devices[].body_layer`` -- is not a layer "the spec never
+    mentioned", which is the question this field answers. Counting those as
+    undisclosed would put a false positive in the field of every
+    fully-declared spec (a label layer is drawn on essentially every real
+    stream), and a disclosure field that is never empty is one readers
+    learn to ignore.
+    """
+    declared = set(_conductor_role_layers(stackup, vias).values())
+    for entry in stackup:
+        for key in ("label_layer", "active_layer"):
+            if entry.get(key) is not None:
+                declared.add(entry[key])
+    for tie in ties:
+        if tie.get("well_layer") is not None:
+            declared.add(tie["well_layer"])
+        declared.add(tie["tap_layer"])
+        for key in ("tap_requires", "well_requires", "well_excludes"):
+            declared.update(tie.get(key) or ())
+    for device in devices:
+        declared.add(device["body_layer"])
+    return declared
+
+
+def _deck_conductor_layers(deck: ExtractionDeck) -> set[tuple[int, int]]:
+    """A curated extraction deck's own conducting layers (issue #2389): the
+    routing stack (``metals``/``vias``), what lands on it (``contact``), and
+    the device-level conductors below it (``active``/``poly``, plus the
+    optional distinct ``tap``/``poly_interconnect`` layers a family declares).
+
+    Deliberately excludes ``nwell`` and every marker/implant field: a well is
+    a body region, not routing, and the whole point of the narrowing is that
+    an implant or recognition marker drawn beside the stack is not a hole in
+    the connectivity model. Used only to filter
+    :func:`_undeclared_stream_layers` when ``--deck`` was given -- a run
+    without one has no PDK-agnostic way to tell a conductor from a marker and
+    reports the unfiltered list instead.
+    """
+    layers = {deck.active, deck.poly, deck.contact}
+    layers.update(deck.metals)
+    layers.update(deck.vias)
+    for optional in (deck.tap, deck.poly_interconnect):
+        if optional is not None:
+            layers.add(optional)
+    return layers
+
+
+def _undeclared_stream_layers(
+    layout: Any,
+    top_cell: Any,
+    declared: set[tuple[int, int]],
+    deck: ExtractionDeck | None,
+) -> list[str]:
+    """``erc_coverage.layers_in_stream_without_declaration`` (issue #2389):
+    the ``(layer, datatype)`` pairs this stream actually draws that the spec
+    names nowhere, formatted ``"<layer>/<datatype>"`` and sorted.
+
+    The inverse-direction disclosure of ``klt drc``'s
+    ``coverage.layers_in_stream_without_rules`` (see ``drc.py``), and the
+    same plain set difference. ``klt erc`` declares the opposite asymmetry
+    today: a ``stackup``/``vias`` entry naming a layer this layout does not
+    draw is explicitly not an error, while a layer this layout *does* draw
+    that no entry names is invisible -- the connectivity graph is simply
+    scoped down to the declared roles and nothing in the envelope says so.
+    That matters because an ERC supply spec is a committed, long-lived
+    artifact (``docs/design-evidence-tiers.md`` item 11) graded against a
+    layout that gets re-routed under it: a rail that *moves* onto an
+    undeclared level reports loudly as extra ``erc.unconnected_net``
+    islands, but a rail that merely *gains* routing there while staying
+    connected through the declared stack produces a clean report whose
+    model is narrower than the layout.
+
+    Reporting only, exactly as ``klt drc``'s own coverage block is: this
+    never moves ``status``/``erc_status``, never emits a finding, and never
+    touches the ``checked``/``skipped``/``inapplicable`` roll-up. An empty
+    list means full declaration coverage, matching ``klt drc``'s convention.
+
+    Scoped to ``top_cell``'s own hierarchy (:func:`cells_in_hierarchy`), so
+    a layer drawn only in a sibling top cell this run never analysed is not
+    reported as a gap in *this* run's model -- the same scoping ``klt
+    drc --top`` applies to its own ``coverage``. Only layers carrying at
+    least one shape in that scope count as *drawn*.
+
+    ``deck``, when given, narrows the result to that curated deck's own
+    conducting layers (:func:`_deck_conductor_layers`) -- without it there is
+    no PDK-agnostic way to tell a conductor from an implant or marker, so the
+    unfiltered list is reported.
+    """
+    scope_cells = cells_in_hierarchy(layout, top_cell)
+    drawn: set[tuple[int, int]] = set()
+    for layer_index in layout.layer_indexes():
+        if any(cell.shapes(layer_index).size() for cell in scope_cells):
+            info = layout.get_info(layer_index)
+            drawn.add((info.layer, info.datatype))
+
+    undeclared = drawn - declared
+    if deck is not None:
+        undeclared &= _deck_conductor_layers(deck)
+    return [f"{layer}/{datatype}" for layer, datatype in sorted(undeclared)]
+
+
 def _connectivity_coverage(
     gates: list[dict[str, Any]],
     nets_decl: list[dict[str, Any]],
@@ -549,6 +685,7 @@ def _connectivity_coverage(
     asserted_ties: set[str] | None = None,
     ties_disclosure: dict[str, str] | None = None,
     well_asserted_ties: set[str] | None = None,
+    undeclared_stream_layers: list[str] | None = None,
 ) -> dict[str, Any]:
     """The *second* checked-work scope this envelope carries (issue #2179):
     the connectivity/geometry rules behind ``erc_findings``.
@@ -628,6 +765,17 @@ def _connectivity_coverage(
     "this stream has no tap to name" from "this stream has a tap, but the
     build that must produce this evidence cannot grade a declared tie
     safely". See :func:`_ties_disclosure_reason`.
+
+    ``layers_in_stream_without_declaration`` (``undeclared_stream_layers``,
+    issue #2389) is the one key in this block that is not about *work
+    items* at all: it names the drawn layers this spec declares nowhere --
+    the inverse-direction disclosure of ``klt drc``'s
+    ``coverage.layers_in_stream_without_rules``. Computed by
+    :func:`_undeclared_stream_layers` in :func:`run_erc` (it needs the
+    layout, which this function deliberately does not take) and carried
+    here because it describes the same thing every other key here does:
+    what this run's connectivity model actually covered. Reporting only --
+    it feeds no roll-up and moves no verdict.
     """
     degenerate = degenerate_ties or {}
     asserted = asserted_ties or set()
@@ -669,6 +817,7 @@ def _connectivity_coverage(
         ),
         "checked_by_assertion": sorted(checked_by_assertion),
         "checked_by_well_assertion": sorted(checked_by_well_assertion),
+        "layers_in_stream_without_declaration": list(undeclared_stream_layers or []),
     }
 
 
@@ -3142,6 +3291,14 @@ def run_erc(
     # `"clean_partial"` for it: an `erc.missing_tie` check that cannot tell
     # a tap from a source/drain contact must not be readable as the clean
     # missing-tie verdict `docs/design-evidence-tiers.md` item 11 asks for.
+    #
+    # `layers_in_stream_without_declaration` (issue #2389) rides in the same
+    # block, computed here because it needs the layout: the drawn layers this
+    # spec declares nowhere, the inverse-direction counterpart of `klt drc`'s
+    # `coverage.layers_in_stream_without_rules`. Reporting only -- it is not
+    # an input to `erc_rollup` below (nor to `rollup` above), emits no
+    # finding, and so cannot move `status`/`erc_status`. See
+    # `_undeclared_stream_layers`.
     erc_coverage = _connectivity_coverage(
         gates,
         nets_decl,
@@ -3150,6 +3307,12 @@ def run_erc(
         asserted_ties,
         ties_disclosure,
         well_asserted_ties,
+        _undeclared_stream_layers(
+            layout,
+            top_cell,
+            _spec_declared_layers(stackup, vias, ties, devices),
+            deck_obj,
+        ),
     )
     erc_rollup = coverage_rollup(
         {"coverage": erc_coverage}, failed=bool(erc_finding_count)

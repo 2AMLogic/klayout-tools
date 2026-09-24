@@ -238,7 +238,11 @@ denominator from `klt erc`.
 
 A `stackup`/`vias` entry naming a layer absent from the given layout is not
 itself an error (a shared spec can list layers a particular fixture doesn't
-use) — matching `klt power`'s own convention.
+use) — matching `klt power`'s own convention. **The inverse direction is
+reported** (issue #2389): a layer this layout *draws* that the spec declares
+nowhere is named in
+`erc_coverage.layers_in_stream_without_declaration` — see "Layers this stream
+draws that the spec never declared" below.
 
 - `nets` (optional array, default `[]`, issue #861) — named nets to check
   for connectivity findings, mirroring `klt power`'s `power_nets` but with
@@ -488,6 +492,72 @@ findings (`erc.unconnected_net` / `erc.multiply_driven_net` /
 `erc.supply_short`) all come from that one graph. Since issue #2169 the
 `ties[]` declarations are **not** part of it — see "Well/tap connectivity"
 below.
+
+### Layers this stream draws that the spec never declared (issue #2389)
+
+`erc_coverage.layers_in_stream_without_declaration` (array\<string\>, each
+`"<layer>/<datatype>"`, sorted by `(layer, datatype)`) names the layers this
+layout actually **draws** that the spec declares **nowhere**. It is the
+inverse-direction counterpart of `klt drc`'s
+`coverage.layers_in_stream_without_rules` (`docs/cli/drc.md`), and the same
+plain set difference.
+
+**Why it exists.** Everything above this section scopes the connectivity
+graph down to the declared roles, and the sentence in "Spec file" above —
+"a `stackup`/`vias` entry naming a layer absent from the given layout is not
+itself an error" — says the *spec-has-more* direction is harmless. The
+*layout-has-more* direction was, until this field, invisible. That matters
+because an ERC supply spec is a committed, long-lived artifact
+(`docs/design-evidence-tiers.md` item 11) graded against a layout that gets
+re-routed under it:
+
+1. The spec is written against a stream drawing levels A..C and correctly
+   declares A..C.
+2. The layout is re-routed and now also draws level D.
+3. The committed spec still declares A..C and still produces a report.
+
+A rail that *moved* onto D reports loudly, as extra `erc.unconnected_net`
+islands — that is the right failure and it already worked. A rail that
+merely *gained* routing on D while staying connected through A..C produces a
+clean report whose connectivity model is narrower than the layout, and
+before this field nothing in the envelope recorded that. A consumer writing
+an item-11 flow otherwise had to hand-roll a `klayout.db` pre-flight beside
+`klt erc` purely to diff "layers drawn" against "layers declared".
+
+**Reported, never graded.** Exactly the posture `klt drc`'s coverage block
+already takes: a non-empty list never changes `status`/`erc_status`, never
+emits a finding, and is not an input to either roll-up. It is also not a
+`skipped`/`inapplicable` work item — those grade *declared work*, this
+describes the layers the declaration covered. An empty list means every drawn
+layer is declared, matching `klt drc`'s own empty-means-full-coverage
+convention.
+
+**"Declared" means named anywhere in the spec**, not only as a conductor
+role: a `stackup[].label_layer`, `stackup[0].active_layer`, a `ties[]`
+`well_layer`/`tap_layer` and its
+`tap_requires`/`well_requires`/`well_excludes` narrowing markers, and a
+`devices[].body_layer` all count. A layer the spec explicitly names is not a
+layer the spec never mentioned, and counting one would put a false positive
+in the field of every fully-declared spec — a label layer is drawn on
+essentially every real stream.
+
+**Scope.** Only layers carrying at least one shape inside the analysed top
+cell's own hierarchy count as drawn, so a layer drawn only in a sibling top
+cell this run never looked at is not reported — the same scoping
+`klt drc --top` applies to its own `coverage`.
+
+**`--deck` narrows it to the routing stack.** Without a deck there is no
+PDK-agnostic way to tell a conductor from an implant or a recognition
+marker, so the unfiltered list is reported — implants, markers and wells
+included. That is noisier, and still strictly more information than silence.
+With `--deck <name>` the curated extraction deck already knows its own
+`metals`/`vias` tables, so the list is narrowed to that deck's conducting
+layers (`metals`, `vias`, `contact`, `active`, `poly`, plus the optional
+distinct `tap`/`poly_interconnect` layers a family declares). `nwell` and
+every marker/implant field are deliberately excluded: a well is a body
+region, not routing. `provenance.deck` tells a reader which of the two
+readings they have. Narrowing removes noise, not signal — an undeclared
+metal level is still named under `--deck`.
 
 ### Known false-positive: diffusion/well continuity is not modeled (issue #2180)
 
@@ -1753,7 +1823,7 @@ forward regardless (a `diode_insertion` remedy):
 | `erc_findings[].islands[].shape_count` | integer | Number of merged polygons this island has across the `stackup` roles — separates a one-shape orphan stub from a whole sub-block that failed to strap up. |
 | `erc_finding_count` | integer      | `len(erc_findings)`.                                                                              |
 | `erc_status`     | string          | (issue #2179) The **connectivity** half's own roll-up, graded on `erc_findings` and the `nets[]`/`ties[]` work actually declared (`erc_coverage`), independently of any antenna table: `"violations"` if `erc_finding_count > 0`, else `"clean_partial"` if any requested connectivity work was skipped (a degenerate `ties[]` declaration — a degenerate tap, issue #2199, or a degenerate well assertion, issue #2255), else `"clean"`. Antenna violations never appear here — see "Two verdicts: `status` (antenna) vs. `erc_status` (connectivity)" above for which field to gate on. Vocabulary is the shared rollup one, so `"not_checked"` is a reachable token a reader must accept, but a successful run reports one of the three above today. |
-| `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. |
+| `erc_coverage`   | object          | (issue #2179) `erc_status`'s own checked-work block, `scope: "connectivity"` — see "Checked-work coverage" below. Additionally carries `layers_in_stream_without_declaration` (issue #2389), the drawn-but-undeclared layer disclosure, which grades nothing. |
 | `ties_disclosure` | object \| null | (issues #2234, #2247) The spec's top-level `ties_disclosure`, echoed verbatim (`{"reason": <string>}`, plus `"kind": "unexpressible"\|"tool_limitation"` when the spec declared one); `null` when the spec did not declare one. See "A tie with no distinguishing marker layer at all" and "When the obstacle is the build, not the stream" above. |
 | `status`         | string          | (issue #1968; `"clean_partial"` added by #2115) `"violations"` if any connectivity/antenna finding exists; otherwise, per the [common rollup rule](../coverage-contract.md) (#2109) applied to `coverage`: `"not_checked"` if no antenna level was graded (known zero checked work), `"clean_partial"` if every graded level passed but some requested antenna work was skipped (e.g. a full sky130 stack whose met3-5 roles have no antenna-ratio limit), else `"clean"`. A roll-up of both independent violation signals this envelope carries, mirroring `klt drc`'s own `"clean"`/`"violations"` split. This is what `klt signoff` reads as this command's pass/fail verdict — `"clean_partial"` is not signoff's unconditional pass. |
 | `provenance`     | object          | (issue #1968) The shared reproducibility block — see [`docs/json-contract.md`](../json-contract.md)'s "Shared `provenance` block". `provenance.input.content_hash` is `<file>`'s own hash; `provenance.pdk` is populated (`{"name": <pdk>, "source": "built-in", "version": null}`) only when `--pdk` was given, `null` otherwise — see that section's `klt erc` exception note on why `source`/`version` differ from every other verb's PDK-resolution-backed `provenance.pdk`. `provenance.deck` (issue #2204) is populated the same `{name, content_hash, released}` way every other `--deck`-taking verb populates it, only when `--deck` was given; `null` otherwise (and always `null` before issue #2204, since `klt erc` applied no rule/model deck at all until then). `provenance.spec.content_hash` (issue #2036) is `<spec>`'s own hash, in the same `sha256:`-prefixed form — the extra key `klt erc` carries because its verdict depends on two inputs, not one, and a report pinning only the layout can't be re-verified against the declarations it was actually run with. |
@@ -1827,6 +1897,17 @@ any other checked, non-degenerate tie:
   more entries in the first: asserting which drawn geometry counts as the
   tap and asserting where the substrate is are different claims, and the
   second is the weaker one. A tie may appear in both.
+
+`erc_coverage` carries one further key that is not a work-item list at all:
+
+- `layers_in_stream_without_declaration` (array\<string\>, issue #2389) —
+  the `"<layer>/<datatype>"` pairs this layout draws that the spec declares
+  nowhere, sorted by `(layer, datatype)`, `[]` when every drawn layer is
+  declared. Pure disclosure, mirroring `klt drc`'s
+  `coverage.layers_in_stream_without_rules`: it is not an input to
+  `erc_status` (nor `status`), emits no finding, and is narrowed to the
+  curated deck's conducting layers when `--deck` is given. See "Layers this
+  stream draws that the spec never declared" above.
 
 `status` is derived by applying the [common rollup rule](../coverage-contract.md)
 (#2109) to `coverage`, with any connectivity/antenna finding reported as
