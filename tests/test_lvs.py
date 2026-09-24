@@ -16644,6 +16644,114 @@ XD2 A B unknown_subckt
     assert "D2" not in devices
 
 
+def test_custom_device_class_recovery_reader_recovers_the_metal_range(tmp_path):
+    """Issue #2435's reader half: `MMIN`/`MMAX` on a round-tripped `X` card
+    come back as the plain 1-based integers the card spelled.
+
+    They carry no unit suffix -- a metal index is a dimensionless ordinal,
+    not a length -- so unlike `W`/`L` they ride through the reader's
+    SI-scaling untouched. A card that omits them (every pre-#2435 card, and
+    every hand-authored reference that takes the `.subckt` defaults) leaves
+    the recovered device at the shared class's own `0` default, which is
+    what marks "this side never stated it" rather than a measurement of
+    zero."""
+    import klayout.db as kdb
+
+    from klayout_tools.netlist_capacitor_recovery import (
+        make_capacitor_class_recovery_reader,
+    )
+
+    text = """
+.SUBCKT TOP A B
+XD1 A B cap_cmomi W=1.5U L=3.0U MMIN=2 MMAX=3
+XD2 A B cap_cmomi W=1.5U L=3.0U
+.ENDS TOP
+"""
+    path = _write(tmp_path / "custom_class_metal_range.spice", text)
+    netlist = kdb.Netlist()
+    netlist.read(
+        path,
+        make_capacitor_class_recovery_reader(
+            {}, custom_device_classes={"CAP_CMOMI": "cap_cmomi"}
+        ),
+    )
+
+    top = next(c for c in netlist.each_circuit() if c.name == "TOP")
+    devices = {device.name: device for device in top.each_device()}
+    assert set(devices) == {"D1", "D2"}
+
+    def param(device, name):
+        by_name = {p.name: p for p in device.device_class().parameter_definitions()}
+        return device.parameter(by_name[name].id())
+
+    assert param(devices["D1"], "MMIN") == pytest.approx(2.0)
+    assert param(devices["D1"], "MMAX") == pytest.approx(3.0)
+    # Still SI-scaled, exactly as before -- the new parameters did not
+    # disturb the existing `W`/`L` handling.
+    assert param(devices["D1"], "W") == pytest.approx(1.5)
+    assert param(devices["D1"], "L") == pytest.approx(3.0)
+
+    assert param(devices["D2"], "MMIN") == pytest.approx(0.0)
+    assert param(devices["D2"], "MMAX") == pytest.approx(0.0)
+
+
+def test_mom_capacitor_reference_may_omit_the_measured_metal_range(tmp_path):
+    """Issue #2435: a reference card that omits `MMIN`/`MMAX` still matches
+    a layout card that measured a non-default finger stack.
+
+    `klt extract` now writes the drawn metal range onto every MoM-capacitor
+    card, but a hand-written (or pre-#2435) reference is free to leave
+    `mmin`/`mmax` at the PDK `.subckt`'s own defaults. Such a reference is
+    not describing a *different device* -- it is saying nothing about the
+    finger stack -- so both parameters are declared non-primary on the
+    shared device class and `kdb.NetlistComparer` never compares them.
+    Without that, every single `cap_cmom*` compare against an ordinary
+    schematic netlist would report a `device.property` finding the moment
+    this feature landed.
+
+    `W`/`L` stay primary and are compared exactly as before -- see
+    `test_mom_capacitor_parameter_tolerance_now_reaches_the_device` for the
+    geometry mismatch this does still catch."""
+    layout_path = _write(
+        tmp_path / "layout.spice",
+        ".subckt capblock PLUS_NET MINUS_NET\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi W=4U L=10U MMIN=2 MMAX=3\n"
+        ".ends capblock\n",
+    )
+    reference_path = _write(
+        tmp_path / "ref.spice",
+        ".subckt capblock PLUS_NET MINUS_NET\n"
+        "XD1 PLUS_NET MINUS_NET cap_cmomi W=4U L=10U\n"
+        ".ends capblock\n",
+    )
+
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {
+                    "netlist": layout_path,
+                    "deck": "sg13g2",
+                    "top": "capblock",
+                },
+                "reference": {
+                    "netlist": reference_path,
+                    "top": "capblock",
+                    "deck": "sg13g2",
+                },
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["counts"]["devices"] == {"layout": 1, "reference": 1, "matched": 1}
+    assert not [
+        entry
+        for entry in report["mismatches"]
+        if "mmin" in json.dumps(entry).lower() or "mmax" in json.dumps(entry).lower()
+    ]
+
+
 def test_custom_class_recovery_x_cards_share_one_device_class(tmp_path):
     """Same one-class-object-per-name discipline as the #1157 resistor
     recovery (PR #2336), asserted for the #1942 custom-class path: cards

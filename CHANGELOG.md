@@ -14,6 +14,35 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2435, `klt extract`, additive — **no** `schema_version` bump:
+  two new `devices[].params` keys on one already-shipped device class, no
+  existing key renamed, retyped, or redefined; see
+  [`docs/json-contract.md`](docs/json-contract.md)'s "a new `params` key on
+  an *existing* `devices[].class`" note): a `cap_cmomi`/`cap_cmomf` MoM
+  capacitor now reports **`mmin`/`mmax`** — the inclusive, 1-based
+  metal-index range its fingers are actually drawn on (`1` = `Metal1`) —
+  alongside the `w_um`/`l_um` it has carried since #1466, and a
+  `--pdk`-bound extraction writes them onto the device's `X` card as
+  `MMIN=<n> MMAX=<n>`. Measured, not defaulted: the recognition step now
+  additionally reads each deck-declared metal level's own **drawn**
+  `Metal<n>` conductor geometry (not just `Metal<n>.pin`) narrowed to the
+  polygons lying entirely inside the recognition marker, and takes the
+  lowest/highest populated level. This closes the gap #2408 documented
+  rather than papered over — the upstream models key their capacitance on
+  the layer count `N = mmax - mmin + 1`, so a device drawn on a non-default
+  finger stack (say Metal2–Metal3 on a deck whose `.subckt` defaults to
+  `mmin=1 mmax=4`) was previously modelled at the wrong layer count with
+  nothing in the output saying so. Routing that merely *crosses* a
+  capacitor, and geometry on a level the deck does not let this device
+  family reach, are both excluded; a measured range with a gap in it is
+  reported as a `warnings[]` entry rather than silently accepted. Both
+  parameters are declared non-primary on the shared device class, so
+  `klt lvs` never compares them and a reference card that omits them (every
+  pre-#2435 card) can never turn that silence into a device-parameter
+  mismatch. `feed`/`subblock`/`mm_ok` are still omitted from the card and
+  still take their `.subckt` defaults — see
+  [`docs/cli/extract.md`](docs/cli/extract.md)'s "MoM capacitor devices"
+  section, and #2445 for whether `feed` is recoverable at all.
 - **Added** (#2421, `klt lvs`, additive — **no** `schema_version` bump: one
   new `mismatches[].category` value, no new request field and no change to
   any existing field's value for any input that does not trigger it): a new

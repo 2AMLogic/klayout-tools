@@ -137,7 +137,7 @@ import re
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from . import env_provenance
@@ -5570,13 +5570,35 @@ def mom_capacitor_device_class(name: str) -> kdb.DeviceClass:
     :class:`~klayout_tools.decks.MomCapacitorDevice` entry named ``name``
     registers -- two terminals ``A``/``B`` (declared
     EQUIVALENT, order is arbitrary -- see ``MomCapacitorDevice``'s
-    docstring), plus ``W``/``L`` geometry parameters and deliberately no
+    docstring), plus ``W``/``L`` geometry parameters, ``MMIN``/``MMAX``
+    finger-stack metal-index parameters, and deliberately no
     capacitance parameter at all (the real device's ``C`` is supplied by the
     SPICE/Verilog-A model, not computed here -- see ``docs/json-contract
     .md``'s "MoM capacitor devices" note for the resulting
     ``devices[].params`` shape). ``W``/``L`` (uppercase) match KLayout's own
     MOS convention so ``extract.py``'s ``_describe_devices`` reports them as
     ``w_um``/``l_um`` with no code change needed there.
+
+    ``MMIN``/``MMAX`` (issue #2435) are the inclusive **1-based metal index
+    range** the device's fingers are drawn on -- the upstream ``.subckt``'s
+    own ``mmin``/``mmax`` parameters, whose layer count ``N = mmax - mmin +
+    1`` keys the compact model's capacitance density, so they are a
+    value-bearing measurement rather than bookkeeping. Measured from drawn
+    geometry by :func:`_build_mom_capacitor_extractor` and reported as
+    ``devices[].params``' ``mmin``/``mmax`` (see ``_describe_devices``).
+
+    Both are declared **non-primary** (``is_primary=False``, KLayout's
+    "secondary parameter" flag): they are extracted and written, but never
+    compared by ``kdb.NetlistComparer``. A reference netlist's own
+    ``cap_cmom*`` instantiation is free to leave ``mmin``/``mmax`` at the
+    ``.subckt`` defaults, and a schematic-side card that does is not a
+    different *device* from the drawn one -- turning a metal-range
+    difference into an LVS device-parameter mismatch would report a
+    modelling discrepancy as a connectivity failure. ``W``/``L`` stay
+    primary exactly as before, so this addition cannot change any existing
+    compare's verdict (verified by ``tests/test_lvs.py``'s own
+    ``cap_cmomi`` round-trip tests, whose reference cards carry neither
+    parameter).
 
     Shared by :func:`_build_mom_capacitor_extractor`'s own
     ``GenericDeviceExtractor.setup()`` (the layout-extraction side, which
@@ -5600,7 +5622,110 @@ def mom_capacitor_device_class(name: str) -> kdb.DeviceClass:
     device_class.add_parameter(param_w)
     param_l = kdb.DeviceParameterDefinition("L", "Length")
     device_class.add_parameter(param_l)
+    # `is_primary=False` (the 4th positional argument): extracted and
+    # written, never compared -- see this function's own docstring for why.
+    param_mmin = kdb.DeviceParameterDefinition(
+        "MMIN", "Lowest metal index carrying finger geometry", 0.0, False
+    )
+    device_class.add_parameter(param_mmin)
+    param_mmax = kdb.DeviceParameterDefinition(
+        "MMAX", "Highest metal index carrying finger geometry", 0.0, False
+    )
+    device_class.add_parameter(param_mmax)
     return device_class
+
+
+def _mom_extractor_metal_layer_specs(num_metals: int) -> list[tuple[str, str]]:
+    """The ``(layer_name, description)`` pairs one MoM-capacitor extractor
+    defines between its ``core`` and ``dev_mk`` marker layers, in the exact
+    order :meth:`setup` must define them (issue #2435).
+
+    The whole ``m1p``..``mNp`` *port* run comes first -- that is upstream's
+    own ``define_layers`` order, and keeping it unbroken leaves upstream's
+    ``core``/``m<n>p`` layer indices byte-for-byte what they were before the
+    finger-stack measurement existed. The ``m1d``..``mNd``
+    *drawn-conductor* run this issue adds follows it, so
+    :meth:`get_connectivity` can address both with one contiguous
+    ``layers[1 : 1 + 2 * num_metals]`` slice.
+
+    Module-level rather than inline in :meth:`setup` so the two loops do not
+    count against ``_build_mom_capacitor_extractor``'s own baselined
+    cyclomatic complexity (``complexity-baseline.json``).
+    """
+    port_layers = [
+        (f"m{metal_number}p", f"Metal{metal_number} pin ports")
+        for metal_number in range(1, num_metals + 1)
+    ]
+    drawn_layers = [
+        (
+            f"m{metal_number}d",
+            f"Metal{metal_number} drawn finger geometry inside the marker",
+        )
+        for metal_number in range(1, num_metals + 1)
+    ]
+    return port_layers + drawn_layers
+
+
+def _mom_finger_stack_metal_range(
+    port_metal_indices: Iterable[int],
+    drawn_metals: Mapping[int, kdb.Region],
+    *,
+    device_name: str,
+    report_gap: Callable[[str, Any], None],
+    gap_context: Any,
+) -> tuple[int, int]:
+    """The inclusive, **1-based** metal-index range one recognised MoM
+    capacitor's fingers are drawn on -- the upstream ``.subckt``'s own
+    ``mmin``/``mmax`` (issue #2435).
+
+    ``drawn_metals`` maps each 1-based metal level to that level's drawn
+    conductor geometry lying **entirely inside** this device's recognition
+    marker (the caller does the containment narrowing); a level the deck
+    does not let this device family reach carries an empty region and is
+    therefore never counted. ``port_metal_indices`` are the levels the two
+    recognised ports sit on.
+
+    The two are **unioned** rather than the drawn geometry being taken
+    alone. Both pins always land on a level inside the drawn range (the
+    PCell puts them on ``mmax``, or on ``mmax``/``mmax-1`` stacked for the
+    ``same`` feed), so a port level can only ever confirm the drawn range,
+    never widen it past what was drawn -- while keeping the measurement
+    well-defined for a pin-only abstraction whose routing stubs all leave
+    the marker, so that nothing at all is *enclosed* by it.
+
+    A *gap* in the measured range is reported through ``report_gap`` (called
+    as ``report_gap(message, gap_context)``, which is how the extractor
+    binds its own ``self.error``/marker component to it) rather than
+    resolved here: a real finger stack is contiguous by construction (the
+    PCell paints every level in ``mmin..mmax``), so a hole means the marker
+    encloses something this measurement cannot tell from a finger. The
+    observed min/max is still returned, so the written card never silently
+    regresses to a PDK default.
+    """
+    populated_levels = sorted(
+        set(port_metal_indices)
+        | {
+            metal_index
+            for metal_index, drawn_region in drawn_metals.items()
+            if not drawn_region.is_empty()
+        }
+    )
+    mmin, mmax = populated_levels[0], populated_levels[-1]
+    missing = [
+        f"Metal{level}"
+        for level in range(mmin, mmax + 1)
+        if level not in populated_levels
+    ]
+    if missing:
+        report_gap(
+            f"{device_name}: drawn finger geometry under its recognition "
+            f"marker spans Metal{mmin}..Metal{mmax} but is missing on "
+            f"{', '.join(missing)} -- a real finger stack is contiguous, so "
+            "mmin/mmax may be measuring non-finger geometry enclosed by the "
+            f"marker. Reported as mmin={mmin}, mmax={mmax} anyway.",
+            gap_context,
+        )
+    return mmin, mmax
 
 
 def _build_mom_capacitor_extractor(
@@ -5640,6 +5765,30 @@ def _build_mom_capacitor_extractor(
     with the caller's own ``metal_pins``/``metals`` regions (an empty
     ``kdb.Region`` at every index the entry's ``metal_pins`` left ``None``).
 
+    **Finger-stack recovery (issue #2435) is this transcription's one
+    deliberate addition to upstream's extractor.** Alongside the
+    ``m1p``..``mNp`` *port* layers upstream defines, this instance defines
+    ``m1d``..``mNd`` -- the deck's own drawn ``metals[i]`` conductor
+    geometry lying **entirely inside** the recognition marker (the caller
+    does that containment narrowing; see ``_extract_netlist``'s own
+    ``mom_capacitors`` loop). ``MMIN``/``MMAX`` are then the lowest/highest
+    1-based metal index populated by either a drawn finger shape or one of
+    the two recognised ports, which is exactly the PCell's own
+    ``mmin``/``mmax``: every metal level in ``mmin..mmax`` carries the same
+    bar/tooth pattern (``cmomi_code.py``'s own "Every metal layer
+    mmin..mmax carries the same pattern" comment), and both pins land on a
+    level inside that range (``mmax``, or ``mmax``/``mmax-1`` stacked for
+    the ``same`` feed) -- so unioning the port levels in can never widen the
+    measured range beyond the drawn one, while keeping the measurement
+    well-defined for a pin-only abstraction that draws no conductor inside
+    the marker at all.
+
+    Upstream's ``CapMomExtractor`` does **not** capture this (checked
+    against ``custom_mom_extractor.lvs`` at the revision
+    ``decks/sg13cmos5l.py`` pins): nothing there is being diverged *from*,
+    the port half below still mirrors it line for line, and the addition is
+    purely extra input layers plus two extra parameters.
+
     A fresh instance is required per device *name* (not just per deck):
     ``kdb.GenericDeviceExtractor.setup()`` sets this extractor's own
     ``name``/registers its own device class once, so reusing one instance
@@ -5669,11 +5818,17 @@ def _build_mom_capacitor_extractor(
             # marker), one per-metal port layer per declared metal level,
             # then `dev_mk` (the same marker again, kept as its own layer
             # for 1:1 parity with upstream's `core`/`dev_mk` split -- see
-            # `custom_mom_extractor.lvs`'s own `define_layers`).
+            # `custom_mom_extractor.lvs`'s own `define_layers`). The
+            # `m<n>d` drawn-conductor block between the ports and `dev_mk`
+            # is issue #2435's own addition (see this builder's docstring);
+            # keeping it *after* the whole `m<n>p` run leaves upstream's own
+            # `core`/`m<n>p` layer indices unchanged.
             self.name = self._extractor_name
             self.define_layer("core", f"{self._extractor_name} recognition marker")
-            for metal_number in range(1, self._num_metals + 1):
-                self.define_layer(f"m{metal_number}p", f"Metal{metal_number} pin ports")
+            for layer_name, description in _mom_extractor_metal_layer_specs(
+                self._num_metals
+            ):
+                self.define_layer(layer_name, description)
             self.define_layer("dev_mk", "Device marker")
 
             # `DeviceCustomMIM`'s shape (`custom_mim_extractor.lvs`) --
@@ -5690,9 +5845,13 @@ def _build_mom_capacitor_extractor(
             terminal_a, terminal_b = device_class.terminal_definitions()
             self._terminal_a = terminal_a.id()
             self._terminal_b = terminal_b.id()
-            param_w, param_l = device_class.parameter_definitions()
+            param_w, param_l, param_mmin, param_mmax = (
+                device_class.parameter_definitions()
+            )
             self._param_w = param_w.id()
             self._param_l = param_l.id()
+            self._param_mmin = param_mmin.id()
+            self._param_mmax = param_mmax.id()
             self.register_device_class(device_class)
 
         def get_connectivity(
@@ -5706,13 +5865,22 @@ def _build_mom_capacitor_extractor(
             # wired into) the outer `LayoutToNetlist` connectivity graph the
             # caller builds with its own `l2n.connect()` calls.
             core = layers[0]
-            metal_port_layers = layers[1 : 1 + self._num_metals]
+            # Every per-metal layer -- upstream's `m<n>p` ports plus issue
+            # #2435's own `m<n>d` drawn-conductor layers -- is scoped to the
+            # marker the same way, so one slice covers both. The drawn half
+            # is safe to cluster on: the caller hands us only conductor
+            # polygons lying *entirely inside* a marker, so a route crossing
+            # over a MoM cap (or joining two of them) is never in this
+            # geometry and cannot merge two markers' clusters into one --
+            # the "found N != 2 ports, drop both devices" failure that
+            # merging causes.
+            marker_scoped_layers = layers[1 : 1 + 2 * self._num_metals]
             dev_mk = layers[-1]
             conn = kdb.Connectivity()
             conn.connect(core, core)
             conn.connect(core, dev_mk)
-            for metal_port_layer in metal_port_layers:
-                conn.connect(metal_port_layer, dev_mk)
+            for marker_scoped_layer in marker_scoped_layers:
+                conn.connect(marker_scoped_layer, dev_mk)
             return conn
 
         def extract_devices(self, layer_geometry: list[kdb.Region]) -> None:
@@ -5722,6 +5890,12 @@ def _build_mom_capacitor_extractor(
             core = layer_geometry[0]
             metal_ports = {
                 metal_index + 1: layer_geometry[1 + metal_index]
+                for metal_index in range(self._num_metals)
+            }
+            # Issue #2435: the drawn-conductor half of the finger-stack
+            # measurement, index-aligned with `metal_ports` above.
+            drawn_metals = {
+                metal_index + 1: layer_geometry[1 + self._num_metals + metal_index]
                 for metal_index in range(self._num_metals)
             }
             dev_mk = layer_geometry[-1]
@@ -5759,6 +5933,24 @@ def _build_mom_capacitor_extractor(
                 bbox = core.merged().bbox()
                 device.set_parameter(self._param_l, bbox.width() * self.dbu())
                 device.set_parameter(self._param_w, bbox.height() * self.dbu())
+
+                # Issue #2435: the drawn finger stack's inclusive 1-based
+                # metal range -- the upstream `.subckt`'s own `mmin`/`mmax`,
+                # whose layer count `N = mmax - mmin + 1` keys the compact
+                # model's capacitance density. The measurement itself lives
+                # in `_mom_finger_stack_metal_range` below; a non-contiguous
+                # range is reported through the `report_gap` callback (which
+                # is what binds this extractor's own `self.error`/`component`
+                # to it) rather than being resolved there.
+                mmin, mmax = _mom_finger_stack_metal_range(
+                    (port_metal_index for _, port_metal_index in ports),
+                    drawn_metals,
+                    device_name=self._extractor_name,
+                    report_gap=self.error,
+                    gap_context=component,
+                )
+                device.set_parameter(self._param_mmin, float(mmin))
+                device.set_parameter(self._param_mmax, float(mmax))
 
                 # Deterministic pick of two ports (by x, then y, then metal
                 # index) -- which of the two ends up on terminal A is
@@ -7410,9 +7602,10 @@ def _extract_netlist(
     # computed from their geometric overlap). `_build_mom_capacitor_extractor`
     # builds a fresh `kdb.GenericDeviceExtractor` subclass instance per entry
     # (a Python transcription of upstream's own `CapMomExtractor`) that
-    # reports only `W`/`L` (the marker's own bounding-box dimensions) as
-    # matched parameters -- no capacitance value, since the real device's
-    # `C` is supplied by the SPICE/Verilog-A model, not computed by LVS.
+    # reports `W`/`L` (the marker's own bounding-box dimensions) plus
+    # `MMIN`/`MMAX` (the drawn finger stack's inclusive metal-index range,
+    # issue #2435) -- but no capacitance value, since the real device's `C`
+    # is supplied by the SPICE/Verilog-A model, not computed by LVS.
     for mom_capacitor in deck.mom_capacitors:
         # Deck-authoring validation (mirrors the capacitor block's own
         # `top_plate_via`/`top_plate_via_metal` pairing check above):
@@ -7459,6 +7652,33 @@ def _extract_netlist(
             for pin in mom_capacitor.metal_pins
         ]
 
+        # Drawn finger geometry per metal level (issue #2435), index-aligned
+        # with `deck.metals`/`metals` exactly like `port_regions` above.
+        #
+        # Two deliberate narrowings, both load-bearing:
+        #
+        # * only levels the entry declares a `metal_pins` layer for are read
+        #   -- that tuple is the deck's own statement of which levels this
+        #   device family can reach, so a level it leaves `None` (cmos5l's
+        #   `TopMetal1`, sg13g2's `TopMetal1`/`TopMetal2`) is never mistaken
+        #   for a finger level by a design that merely routes across the
+        #   capacitor up there;
+        # * `inside()`, not `&` -- only conductor polygons lying *entirely*
+        #   within the marker count. Ordinary routing that crosses the
+        #   device (or lands on it and continues out) leaves the marker
+        #   footprint and is excluded, while the PCell's own bars/teeth are
+        #   enclosed by construction (the marker is painted over the full
+        #   device extent). This is also what keeps the extractor's own
+        #   marker-to-geometry clustering from bridging two devices joined
+        #   by a shared route.
+        merged_marker = marker_region.merged()
+        drawn_metal_regions = [
+            metals[metal_level].inside(merged_marker)
+            if pin is not None
+            else kdb.Region()
+            for metal_level, pin in enumerate(mom_capacitor.metal_pins)
+        ]
+
         l2n.register(marker_region, f"{mom_capacitor.name}_marker")
         layer_geometry = {"core": marker_region, "dev_mk": marker_region}
         # NOTE: this loop's own index variable is deliberately named
@@ -7469,10 +7689,25 @@ def _extract_netlist(
         # function scope in Python (unlike a comprehension's own scope), so
         # reusing that name here would silently clobber it with a bare
         # `int` on the last iteration.
-        for metal_level, port_region in enumerate(port_regions):
-            layer_name = f"m{metal_level + 1}p"
-            l2n.register(port_region, f"{mom_capacitor.name}_{layer_name}")
-            layer_geometry[layer_name] = port_region
+        for metal_level, (port_region, drawn_region) in enumerate(
+            zip(port_regions, drawn_metal_regions, strict=True)
+        ):
+            port_layer_name = f"m{metal_level + 1}p"
+            l2n.register(port_region, f"{mom_capacitor.name}_{port_layer_name}")
+            layer_geometry[port_layer_name] = port_region
+
+            # The drawn-finger recognition layers are registered but
+            # deliberately never `connect`ed into the outer connectivity
+            # graph (issue #2435): this geometry is already part of
+            # `metals[metal_level]`, which the generic per-layer
+            # `metals[i]`/`vias[i]` loop wires up on its own. Connecting it
+            # a second time here would be a no-op at best and a duplicate
+            # node at worst; it exists purely as an input layer for this
+            # extractor's own `mmin`/`mmax` measurement.
+            drawn_layer_name = f"m{metal_level + 1}d"
+            l2n.register(drawn_region, f"{mom_capacitor.name}_{drawn_layer_name}")
+            layer_geometry[drawn_layer_name] = drawn_region
+
             # Per-metal port connectivity (mirrors upstream's own
             # `cap_cmomi_connections.lvs`/`cap_cmomf_connections.lvs`): tie
             # each port *only* to its own metal's routed conductor, never to

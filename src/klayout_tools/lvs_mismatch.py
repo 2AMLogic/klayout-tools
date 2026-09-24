@@ -1349,7 +1349,10 @@ def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
             explained_reference.add(key_b)
 
     if not any(
-        _values_differ(a.parameter(param.id()), b.parameter(param.id()))
+        _param_pair_is_comparable(
+            param.name, a.parameter(param.id()), b.parameter(param.id())
+        )
+        and _values_differ(a.parameter(param.id()), b.parameter(param.id()))
         for param in params_a
     ):
         return None
@@ -1371,6 +1374,8 @@ def _classify_param_mismatch(a: Any, b: Any) -> list[dict[str, Any]]:
     for param in a.device_class().parameter_definitions():
         a_value = a.parameter(param.id())
         b_value = b.parameter(param.id())
+        if not _param_pair_is_comparable(param.name, a_value, b_value):
+            continue
         if _values_differ(a_value, b_value):
             display_name = _PARAM_DISPLAY_NAMES.get(param.name, param.name.lower())
             entries.append(
@@ -1419,6 +1424,48 @@ def _values_differ(a_value: float, b_value: float) -> bool:
     return abs(a_value - b_value) > max(
         _PARAM_ABS_EPSILON, _PARAM_REL_EPSILON * max(abs(a_value), abs(b_value))
     )
+
+
+#: Device-class parameters whose value is a **1-based metal index**, so that
+#: the class's own ``0.0`` default is not a measurement at all but the marker
+#: for "this side never stated it" (issue #2435).
+#:
+#: Today, exactly the MoM capacitor's ``MMIN``/``MMAX`` finger-stack range
+#: (:func:`klayout_tools.extract.mom_capacitor_device_class`). ``klt extract``
+#: measures both off the drawn geometry and writes them onto its ``X`` card;
+#: a hand-written or pre-#2435 reference card is free to omit them and take
+#: the PDK ``.subckt``'s own defaults, in which case
+#: :mod:`klayout_tools.netlist_capacitor_recovery` leaves the recovered
+#: device at ``0``.
+_METAL_INDEX_PARAMETER_NAMES = frozenset({"MMIN", "MMAX"})
+
+
+def _param_pair_is_comparable(param_name: str, a_value: float, b_value: float) -> bool:
+    """Whether one layout/reference parameter pair is a *comparison* at all
+    (issue #2435).
+
+    ``False`` only for a :data:`_METAL_INDEX_PARAMETER_NAMES` parameter that
+    one side left at ``0`` -- a metal index is 1-based, so ``0`` is never a
+    measurement; it means that side's card did not state the finger stack.
+    Reporting ``layout 1 vs reference 0`` as a ``device.property`` error (or
+    letting it veto an ``options.parameter_tolerance`` snap, which no finite
+    relative tolerance can ever absorb -- see :func:`_relative_delta`) would
+    manufacture a finding out of an omission, and would do it for *every*
+    ``cap_cmom*`` compare against an ordinary schematic netlist.
+
+    Two sides that both state a range are compared normally, so a genuinely
+    wrong finger stack is still caught. This is deliberately narrower than
+    skipping every KLayout "secondary" (``is_primary=False``) parameter:
+    several built-in classes mark real measurements secondary (a resistor's
+    ``W``/``L``), and those are reported today.
+
+    ``kdb.NetlistComparer`` itself never compares these two parameters --
+    they are declared non-primary -- so this only aligns *this module's* own
+    reporting and tolerance machinery with the engine's behaviour.
+    """
+    if param_name not in _METAL_INDEX_PARAMETER_NAMES:
+        return True
+    return a_value != 0.0 and b_value != 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -1551,6 +1598,10 @@ def _tolerated_device_pair(
         a_value = a.parameter(param.id())
         b_value = b.parameter(param.id())
         if a_value == b_value:
+            continue
+        if not _param_pair_is_comparable(param.name, a_value, b_value):
+            # Not a difference to absorb -- and not one that may veto this
+            # pair's snap either (issue #2435; see the helper's docstring).
             continue
         delta = _relative_delta(a_value, b_value)
         if delta > tolerance:

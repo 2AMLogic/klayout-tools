@@ -1230,8 +1230,8 @@ plate" pair of independently-drawn layers the way a MiM cap's `top_plate`/
 `DeviceExtractorCapacitor` call, since no built-in KLayout device extractor
 models this recognition shape.
 
-**JSON-contract decision: no computed value, `w_um`/`l_um` only.** Unlike a
-MiM cap (`c_f`/`area_um2`/`perimeter_um`, computed from the plates'
+**JSON-contract decision: no computed value, measured geometry only.**
+Unlike a MiM cap (`c_f`/`area_um2`/`perimeter_um`, computed from the plates'
 geometric overlap), this device's real compact model computes its own
 capacitance from `density[N]*active_area + Cfeed` — a value supplied by the
 SPICE/Verilog-A model, not by LVS extraction (upstream's own extractor
@@ -1248,6 +1248,49 @@ KLayout device parameter simply never populates those keys, exactly as a
 MOS or bipolar device already does not. No new JSON schema field or
 `schema_version` bump was needed for this — see "JSON response" below and
 `docs/json-contract.md`'s own capacitor-devices note.
+
+**Finger-stack metal range: `mmin`/`mmax` (issue #2435).** Alongside
+`w_um`/`l_um`, `devices[].params` carries `mmin`/`mmax` — the **inclusive,
+1-based metal-index range** the device's fingers are drawn on (`1` =
+`Metal1`), the upstream `.subckt`'s own `mmin`/`mmax` parameters. They are
+*measured*, never defaulted:
+
+- The recognition step additionally reads each deck-declared metal level's
+  own **drawn** `Metal<n>` conductor geometry (not just `Metal<n>.pin`) as
+  an extra input layer, narrowed to the polygons lying **entirely inside**
+  the recognition marker. `mmin`/`mmax` are the lowest/highest such
+  populated level, unioned with the two recognised ports' own levels.
+- Only levels the deck's `mom_capacitors[].metal_pins` declares are read.
+  A level the deck leaves unreachable for this device family (`sg13cmos5l`'s
+  `TopMetal1`, `sg13g2`'s `TopMetal1`/`TopMetal2`) is never counted as a
+  finger level, so a landing pad or shield drawn up there inside the marker
+  cannot inflate the range.
+- `inside()`, not intersection: ordinary routing that *crosses* the
+  capacitor leaves the marker footprint and is excluded, while the PCell's
+  own bars and teeth are enclosed by construction. Without that narrowing a
+  Metal4 flyover across a Metal2–Metal3 device would be reported as a
+  three-layer stack.
+- The port levels are unioned in because both pins always land on a level
+  *inside* the drawn range (the PCell puts them on `mmax`, or on
+  `mmax`/`mmax-1` stacked for the `same` feed), so they can only ever
+  confirm the drawn range, never widen it — while keeping the measurement
+  well-defined for a pin-only abstraction whose routing stubs all leave the
+  marker so nothing at all is enclosed by it.
+- A measured range with a **gap** in it (e.g. fingers on Metal1 and Metal3
+  but nothing on Metal2) is reported as a `warnings[]` entry naming the
+  missing levels. A real finger stack is contiguous by construction, so a
+  hole means the marker encloses something this measurement cannot tell from
+  a finger. The observed min/max is still reported — never silently replaced
+  by a PDK default.
+
+Both are emitted as JSON integers under the PDK's own parameter spelling
+(`mmin`/`mmax`, not a `_um`-suffixed name): they are dimensionless layer
+indices, not a measurement in a physical unit, and `mmin`/`mmax` is the
+spelling a consumer diffs against its own `cap_cmom*` instantiation. This is
+additive — two new keys on one device class's existing per-class
+`params` shape — so it earns **no** `schema_version` bump, exactly as the
+class's own arrival did (issue #1466); see `docs/json-contract.md`'s
+capacitor-devices note for that precedent.
 
 `devices[].nets` uses generic `"a"`/`"b"` terminal keys (mirroring
 `CapacitorDevice`'s own `DeviceClassCapacitor` `"a"`/`"b"` naming), declared
@@ -1270,19 +1313,24 @@ native SPICE element letter (it is not MOS/resistor/capacitor/bipolar/diode
 -shaped), so `-o <netlist>`'s `kdb.NetlistSpiceWriter` writes it as an
 ordinary subcircuit-call `X` card. Since issue #2355 the card drops the
 non-standard `PARAMS:` keyword and carries `W`/`L` with the same unit-suffix
-style this deck's resistor cards already use — e.g. `XD_$1 A B cap_cmomi
-W=4U L=10U`, not the bare-micron `PARAMS: W=4 L=10` a SPICE parser under
-`.option scale=1` would misread as 4/10 metres. `klt lvs` recognises that
+style this deck's resistor cards already use — and, since issue #2435, the
+measured finger-stack range — e.g. `XD_$1 A B cap_cmomi W=4U L=10U MMIN=1
+MMAX=5`, not the bare-micron `PARAMS: W=4 L=10` a SPICE parser under
+`.option scale=1` would misread as 4/10 metres. `MMIN`/`MMAX` carry no unit
+suffix: a metal index is a dimensionless 1-based ordinal, not a length. The
+uppercase spelling is purely for consistency with the `W=`/`L=` already on
+the card — SPICE subcircuit parameter names are case-insensitive, so both
+bind onto the `.subckt`'s own lowercase `w`/`l`/`mmin`/`mmax`. `klt lvs`
+recognises that
 same card shape back as a real device — not the mangled-name abstract
 circuit KLayout's own default SPICE reading would otherwise synthesise —
 when the relevant side's `layout.deck`/`reference.deck` is given; see
 `docs/cli/lvs.md`'s "Custom device classes round-tripped through an `X`
 card" section.
 
-**Known limitation: the written card carries `W`/`L` only, never the PDK
-subcircuit's remaining parameters (issue #2408).** The upstream `.subckt`
-this card's trailing class-name token binds onto declares more than the two
-geometry parameters `klt extract` measures. Verbatim, from IHP's own
+**Written card parameters vs. the PDK subcircuit's own (issues #2408,
+#2435).** The upstream `.subckt` this card's trailing class-name token binds
+onto declares more than `klt extract` measures. Verbatim, from IHP's own
 Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
 `607e18d4bd9214a52575c194b4181ef449f9252f`,
 `libs.tech/ngspice/models/cap_cmomi.lib:60` and `cap_cmomf.lib:53`):
@@ -1292,53 +1340,51 @@ Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
 .subckt cap_cmomf PLUS MINUS w=5e-6 l=5e-6 mmin=1 mmax=4 subblock=0 mm_ok=1
 ```
 
-`mmin`/`mmax` (the inclusive Metal-index range the fingers are drawn on,
-`1=Metal1`), `feed` (`cap_cmomi` only — the feed-structure variant,
-`none`/`same`/`double`), `subblock`, and `mm_ok` are **not** emitted on the
-card, so each one silently takes its `.subckt` default above. That is a real
-fidelity gap, and it is deliberate rather than an oversight:
+`w`/`l` and — since issue #2435 — `mmin`/`mmax` are **written**, from the
+measurements described above. `mmin`/`mmax` were never mere bookkeeping:
+both models scale capacitance with them (same `.lib` headers: `cap_cmomi`'s
+coefficients are "keyed by layer count `N = mmax - mmin + 1`", and
+`cap_cmomf` computes `C = areacap(mmin, mmax) * w * l`), so a defaulted
+range that does not match the drawn one is a wrong modelled capacitance, not
+just missing metadata. That is exactly why #2408 declined to write the
+defaults out and #2435 measured them instead.
 
-- **They are not recoverable from the layout this extractor reads.** The
-  recognition step (`_build_mom_capacitor_extractor`, a transcription of
-  upstream's own `CapMomExtractor`) sees one recognition marker plus exactly
-  two pin-port polygons; `W`/`L` come from the marker's own bounding box and
-  nothing in that geometry encodes the finger stack's metal range, the feed
-  variant, or the PCell's `subblock`/`mm_ok` switches. Upstream's own LVS
-  extractor does not capture them either.
-- **Emitting the defaults explicitly would change nothing electrically and
-  would misrepresent the device.** A card written as `mmin=1 mmax=4
-  feed=double subblock=0 mm_ok=1` simulates identically to one that omits
-  them (they *are* the defaults), while asserting a specific drawn metal
-  range and feed variant that `klt extract` never measured — turning a
-  visible gap into an invisible wrong answer for any design that drew, say,
-  a Metal1–Metal3 `same`-feed device.
-- **There is no deck-independent default set to hardcode.** `mmax=4` is
-  keyed to cmos5l's own Metal1..Metal4 thin-metal stack (`cap_cmomi.lib`'s
-  header: "mmin/mmax metal indices (1=Metal1 .. 4=Metal4)"), while the
-  `sg13g2` deck declares the same two device names over a Metal1..Metal5
-  stack. `feed` exists on `cap_cmomi` only — writing it onto a `cap_cmomf`
-  card would pass a parameter that subcircuit does not declare.
-- **`mm_ok` is a documented no-op in this release** for both devices
+**Still omitted: `feed`, `subblock`, `mm_ok`.** These three take their
+`.subckt` defaults above, deliberately rather than by oversight — the same
+#2408 rule applies unchanged to a value that is still not measured:
+
+- **`feed`** (`cap_cmomi` only — the feed-structure variant,
+  `none`/`same`/`double`) is only *partly* recoverable. The `same` variant
+  stacks the device's two pins on adjacent metal levels, so the two
+  recognised ports carry different metal indices — visible to this
+  recognition step. But `double` and `none` both place two ports on the top
+  metal and are told apart only by where those feed structures sit relative
+  to the finger core, which one marker plus two port polygons does not
+  encode. Writing `feed=double` for a layout drawn `feed=none` would be
+  exactly the invisible wrong answer #2408 rejected, and `none` is
+  upstream's own documented *not a standalone two-terminal device*
+  configuration. Tracked as issue #2445, which settles the question against
+  the PCell generator itself rather than guessing here.
+- **`subblock`** is a PCell layout switch (substrate isolation block) with
+  no counterpart in the recognition geometry at all.
+- **`mm_ok`** is a documented no-op in this release for both devices
   ("accepted for interface parity … but a NO-OP — cap_cmom{i,f} has no
   characterised mismatch model", same `.lib` headers), so omitting it costs
   nothing at all today.
 
 **What this means for a consumer.** A `--pdk`-bound extraction's MoM-cap
-card is value-accurate for `W`/`L` and relies on the PDK subcircuit's own
-defaults for everything else. Diffing an extracted card against a design's
-own instantiation will therefore *not* show a mismatch when the design chose
-a non-default `mmin`/`mmax`/`feed`/`subblock`: the extracted card is simply
-silent on those. If your design overrides any of them, rewrite the card (or
-supply your own wrapper `.subckt`) before simulating — the same caller-side
-rewrite the issue reports already reproduces the device exactly. Closing the
-gap properly requires the recognition layer to capture the finger stack from
-the drawn metal geometry rather than defaulting it — tracked as its own
-issue (#2435) instead of being papered over here. Note `mmin`/`mmax` are not
-mere bookkeeping — both models scale capacitance with them (same `.lib`
-headers: `cap_cmomi`'s coefficients are "keyed by layer count `N = mmax -
-mmin + 1`", and `cap_cmomf` computes `C = areacap(mmin, mmax) * w * l`) — so
-a defaulted range that does not match the drawn one is a wrong modelled
-capacitance, not just missing metadata.
+card is value-accurate for `W`/`L` and for the drawn finger stack's
+`MMIN`/`MMAX`, and relies on the PDK subcircuit's own defaults for
+`feed`/`subblock`/`mm_ok`. Diffing an extracted card against a design's own
+instantiation will therefore *not* show a mismatch when the design chose a
+non-default `feed` or `subblock`: the extracted card is simply silent on
+those. If your design overrides either, rewrite the card (or supply your own
+wrapper `.subckt`) before simulating. Note this also means an extracted card
+and a hand-written reference card can legitimately disagree on
+`mmin`/`mmax` — a reference that omits them is *not* asserting `1`/`4`, it
+is saying nothing, which is why `klt lvs` never compares these two
+parameters (they are declared non-primary on the device class, so a
+reference card's silence can never become a `device.property` mismatch).
 
 Both decks declare the family, because both upstream rule decks do: `sg13g2`
 is its native home, and `sg13cmos5l`'s own (non-symlinked) top-level
@@ -5864,7 +5910,7 @@ scope (see [`../design/metric-namespace.md`](../design/metric-namespace.md)'s
 | `name`   | string                      | The device's instance name in the written netlist (e.g. `"$1"`, matching the `M$1 ...` line). **This field is deliberately NOT backslash-escaped** (contrast `nets[].name` below): a KLayout-synthesized `$<n>` anonymous-device name is never the first token on an instance line — always preceded by a class-letter prefix (`M$1774`, `R$22`, etc.) — so the leading-`$` ngspice inline-comment hazard that `spice_safe_net_name()` guards against in net-name fields does not apply to device names. See "Anonymous nets are backslash-escaped" for the full rationale. |
 | `class`  | string                      | The deck's device-class name (`"nfet"` / `"pfet"`, a declared bipolar class like `"pnp"` / `"bjt"`, a declared MiM-capacitor class like `"sky130_fd_pr__model__cap_mim"` / `"cap_mim_2f0_m4m5_noshield"`, a declared drawn-resistor class like `"res_generic_po"` on sky130 / `"ppolyf_u"` on gf180mcu — see "Drawn resistors" — or a declared junction-diode class like `"diode_nd2ps_06v0"` on gf180mcu, see "Junction diodes"). |
 | `nets`   | object\<string, string\|null\> | Terminal → net-name map (same `\|`-joined spelling as `nets[].name` for a label-merged net, issue #696). MOS: `"s"`, `"g"`, `"d"`, `"b"`. Bipolar: `"c"`, `"b"`, `"e"` (collector/base/emitter — see "Bipolar (BJT) device recognition" above). MiM capacitor: `"a"`, `"b"` (the two plates — see "MiM capacitor device recognition" above). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"a"`, `"b"`, declared **equivalent** (order is arbitrary — see "MoM capacitor devices" above). Drawn resistor: `"a"`, `"b"` (the two heads), plus `"w"` for a resistor with a bulk terminal (gf180mcu's `ppolyf_u`, tied to the deck's substrate global — see "Drawn resistors"). Junction diode: `"a"`, `"c"` (anode/cathode — see "Junction diodes" above). `null` only if a terminal has no connected net at all (never observed for `s`/`g`/`d` in this deck's extraction; MOS `b`, bipolar `b` and a diode's `Nwell`-side terminal can be `null`-free but anonymous, see "Coverage"). |
-| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"w_um"` / `"l_um"` only — the marker's own bounding-box height/width — and deliberately **no** `"c_f"`/`"area_um2"`/`"perimeter_um"` key at all, since the real device's capacitance is supplied by the SPICE/Verilog-A model from `density[N]*active_area + Cfeed`, not computed by LVS extraction; see "MoM capacitor devices" above for the full JSON-contract decision. Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
+| `params` | object\<string, number\>    | MOS: `"w_um"` / `"l_um"`, the extracted gate width/length in micrometres, plus `"as_um2"` / `"ad_um2"` (source/drain junction area, square micrometres) and `"ps_um"` / `"pd_um"` (source/drain junction perimeter, micrometres) — the same measured junction geometry a `--pdk`-bound `X` card's own `AS`/`AD`/`PS`/`PD` carry (issue #695), present here regardless of `--pdk` since `devices[]` is built from the extracted device objects before the netlist is written. Bipolar: empty (KLayout's `DeviceClassBJT3Transistor` reports area/perimeter parameters this field does not extract — see "SPICE model binding" above for how those measured values are still surfaced, via a `warnings[]` entry, when `--pdk` binds a `pnp` device onto a fixed-geometry target subcircuit). MiM capacitor: `"c_f"` (extracted capacitance, in **Farads**), `"area_um2"` (the plates' overlap area, in square micrometres), and `"perimeter_um"` (the plates' overlap perimeter, in micrometres, issue #512) — `c_f = area_um2 * area_cap + perimeter_um * perim_cap`, see "MiM capacitor device recognition" above (`perim_cap` defaults to `0.0` for a deck that has not set `CapacitorDevice.perim_cap_f_um`, reproducing the pre-#512 area-only formula bit-for-bit). MoM capacitor (`cap_cmomi`/`cap_cmomf`, issue #1466): `"w_um"` / `"l_um"` — the marker's own bounding-box height/width — plus `"mmin"` / `"mmax"` (issue #2435), the **inclusive, 1-based metal-index range** the device's fingers are drawn on (`1` = `Metal1`), measured from the drawn per-metal conductor geometry enclosed by the recognition marker and emitted as integers (dimensionless layer indices, hence no `_um`-style suffix); and deliberately **no** `"c_f"`/`"area_um2"`/`"perimeter_um"` key at all, since the real device's capacitance is supplied by the SPICE/Verilog-A model from `density[N]*active_area + Cfeed`, not computed by LVS extraction; see "MoM capacitor devices" above for the full JSON-contract decision. Drawn resistor: `"w_um"` / `"l_um"` for the resistive segment's own width/length, plus `"r_ohm"` — the extracted resistance, `l_um / w_um * sheet_rho + fixed_offset_ohm` (issue #518; `fixed_offset_ohm` defaults to `0.0` for a deck that has not set `ResistorDevice.fixed_offset_ohm`, reproducing the pre-#518 `l_um / w_um * sheet_rho`-only formula bit-for-bit — see "Drawn resistors" above). Junction diode: `"area_um2"` / `"perimeter_um"`, the recognised junction's own area/perimeter (issue #542) — no I-V model is extracted, see "Junction diodes" above. |
 | `instance_path` | array\<object\> | Additive field (issue #1666). The chain of GDS-level cell placements this device's recognition geometry sits inside, **outermost first**: `[{"cell": str, "array_index": [ia, ib] \| null}, ...]`. `array_index` is the element's 0-based position within its `CellInstArray` for a regular array, `null` for a plain single placement. `[]` means the geometry was drawn directly in the top cell, inside no placed sub-cell — the normal result for a flat design. This is the device-level counterpart to `nets[].label_positions_um`/`pin_index`: the only thing in the report that tells otherwise-identical devices from repeated copies of the same leaf cell apart. Resolved positionally after extraction (see "Per-device GDS instance attribution" above for why, and for the caveat that `[ia, ib]`'s axis is the GDS file's rather than your authoring order). |
 
 `devices` is sorted by `name` for deterministic, diff-clean output.
