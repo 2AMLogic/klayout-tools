@@ -42,9 +42,11 @@ from klayout_tools.pex import (
     _dut_declares_a_circuit,
     _find_dut_include,
     _flat_dut_mismatch,
+    _model_mismatch,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
     _prepare_extracted_request,
+    _reference_is_hierarchical,
     _rewrite_dut_include,
     _row_status,
     _status_from_coverage,
@@ -778,6 +780,221 @@ def test_flat_dut_mismatch_none_when_extracted_lacks_top_cell(tmp_path):
         )
         is None
     )
+
+
+# --------------------------------------------------------------------------- #
+# Device-model / `.subckt` divergence diagnostic (issue #2402)
+# --------------------------------------------------------------------------- #
+
+
+def _write_model_pair(tmp_path, reference_model: str, extracted_model: str):
+    """A `(reference_netlist, extracted_netlist)` pair whose `.SUBCKT`
+    interfaces declare the identical pin list and whose devices share the
+    identical connectivity, differing only in the MOS model/subcircuit name
+    each side's `X` cards instantiate -- the "topologically comparable,
+    electrically unrelated" shape issue #2402 reports (a layout with no
+    voltage-domain marker geometry extracting onto a PDK family's default
+    flavour against a reference netlist naming a different one)."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        f"Xm1 Y A VSS VSS {reference_model} l=0.15 w=0.42\n"
+        f"Xm2 Y A VDD VDD {reference_model} l=0.15 w=0.84\n"
+        ".ENDS INV\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        f"Xm1 Y A VSS VSS {extracted_model} l=0.15 w=0.42 AS=0 AD=0 PS=0 PD=0\n"
+        f"Xm2 Y A VDD VDD {extracted_model} l=0.15 w=0.84 AS=0 AD=0 PS=0 PD=0\n"
+        ".ENDS INV\n"
+    )
+    return str(reference), str(extracted)
+
+
+def test_model_mismatch_reports_divergent_flavours(tmp_path):
+    """The issue's own reproducer shape: same device count/connectivity/pin
+    list on both sides (so `pin_count_mismatch`/`flat_dut_mismatch` would
+    both be `None` here), differing only in which MOS flavour each side's
+    `X` cards name."""
+    reference, extracted = _write_model_pair(
+        tmp_path,
+        reference_model="sky130_fd_pr__nfet_g5v0",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+
+    mismatch = _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["sky130_fd_pr__nfet_g5v0"]
+    assert mismatch["extracted_only"] == ["sky130_fd_pr__nfet_01v8"]
+    assert mismatch["counts"]["reference"] == {"sky130_fd_pr__nfet_g5v0": 2}
+    assert mismatch["counts"]["extracted"] == {"sky130_fd_pr__nfet_01v8": 2}
+    assert "sky130_fd_pr__nfet_g5v0" in mismatch["detail"]
+    assert "sky130_fd_pr__nfet_01v8" in mismatch["detail"]
+
+
+def test_model_mismatch_none_when_models_agree(tmp_path):
+    reference, extracted = _write_model_pair(
+        tmp_path,
+        reference_model="sky130_fd_pr__nfet_01v8",
+        extracted_model="sky130_fd_pr__nfet_01v8",
+    )
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_case_insensitive_model_names(tmp_path):
+    """ngspice is case-insensitive about model/subcircuit names -- so is this
+    comparison, mirroring `_subckt_interfaces`'s own convention."""
+    reference, extracted = _write_model_pair(tmp_path, "NFET_HV", "nfet_hv")
+    assert (
+        _model_mismatch(reference_netlist=reference, extracted_netlist=extracted)
+        is None
+    )
+
+
+def test_model_mismatch_detects_raw_m_card_divergence(tmp_path):
+    """The comparison also covers raw `M<name> d g s b <model>` cards, not
+    only `X`-card subcircuit calls -- a hand-written schematic DUT is more
+    likely to use the raw SPICE MOSFET primitive directly."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT INV A Y VDD VSS\nM1 Y A VSS VSS nfet_hv L=0.15u W=0.42u\n.ENDS INV\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        "Xm1 Y A VSS VSS sky130_fd_pr__nfet_01v8 l=0.15 w=0.42 AS=0 AD=0 PS=0 PD=0\n"
+        ".ENDS INV\n"
+    )
+
+    mismatch = _model_mismatch(
+        reference_netlist=str(reference), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["nfet_hv"]
+    assert mismatch["extracted_only"] == ["sky130_fd_pr__nfet_01v8"]
+
+
+def test_model_mismatch_ignores_passive_cards(tmp_path):
+    """Scoped to `M`/`X`/`Q`/`D` device-instance cards only (issue #2402's
+    Acceptance Criteria) -- an `R`/`C` card's own trailing model-name token
+    (e.g. a resistor's generic `r` model) must not be compared, so a run
+    with no active devices at all reports `None` rather than a spurious
+    per-passive-model mismatch."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT RES RA RB\nR1 RA RB 289.2 res_generic_po\n.ENDS RES\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(".SUBCKT RES RA RB\nR1 RA RB 291.0\n.ENDS RES\n")
+
+    assert (
+        _model_mismatch(
+            reference_netlist=str(reference), extracted_netlist=str(extracted)
+        )
+        is None
+    )
+
+
+def test_model_mismatch_detects_instance_count_only_divergence(tmp_path):
+    """Same model name on both sides, but a different *instance count* --
+    e.g. a device silently dropped or duplicated on one side -- is still a
+    reportable divergence, even though `reference_only`/`extracted_only`
+    both stay empty (no model name is unique to either side)."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        "Xm1 Y A VSS VSS nfet_01v8 l=0.15 w=0.42\n"
+        "Xm2 Y A VSS VSS nfet_01v8 l=0.15 w=0.42\n"
+        ".ENDS INV\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT INV A Y VDD VSS\nXm1 Y A VSS VSS nfet_01v8 l=0.15 w=0.42\n.ENDS INV\n"
+    )
+
+    mismatch = _model_mismatch(
+        reference_netlist=str(reference), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    assert mismatch["reference_only"] == []
+    assert mismatch["extracted_only"] == []
+    assert mismatch["counts"]["reference"] == {"nfet_01v8": 2}
+    assert mismatch["counts"]["extracted"] == {"nfet_01v8": 1}
+
+
+def test_reference_is_hierarchical_detects_local_subckt_call(tmp_path):
+    """`_reference_is_hierarchical` is `True` only when an `X` card's target
+    is a `.subckt` defined in the same file -- an `X` card naming an
+    external PDK model/subcircuit (the ordinary, flat case) does not
+    count."""
+    hierarchical = (
+        ".SUBCKT INV A Y VDD VSS\n"
+        "Xn Y A VSS VSS nfet_01v8\n"
+        "Xp Y A VDD VDD pfet_01v8\n"
+        ".ENDS INV\n"
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xi1 A M VDD VSS INV\n"
+        "Xi2 M Y VDD VSS INV\n"
+        ".ENDS BUF\n"
+    )
+    assert _reference_is_hierarchical(hierarchical) is True
+
+    flat = (
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xn1 A M VSS VSS nfet_01v8\n"
+        "Xp1 A M VDD VDD pfet_01v8\n"
+        "Xn2 M Y VSS VSS nfet_01v8\n"
+        "Xp2 M Y VDD VDD pfet_01v8\n"
+        ".ENDS BUF\n"
+    )
+    assert _reference_is_hierarchical(flat) is False
+
+
+def test_model_mismatch_names_hierarchy_not_electrically_unrelated(tmp_path):
+    """A hierarchical reference netlist (a leaf `.subckt` called N times)
+    diffed against `klt extract`'s always-flat output is the *same circuit*
+    -- devices nested inside the leaf are counted once per *definition*
+    here, not once per physical *instance* -- so `model_mismatch` must name
+    hierarchy-vs-flat as the likely cause instead of asserting the two sides
+    are electrically unrelated, the way it does for a genuine device-flavour
+    swap (PR #2430 review feedback on issue #2402)."""
+    reference = tmp_path / "schematic_dut.spice"
+    reference.write_text(
+        ".SUBCKT INV A Y VDD VSS\n"
+        "Xn Y A VSS VSS nfet_01v8\n"
+        "Xp Y A VDD VDD pfet_01v8\n"
+        ".ENDS INV\n"
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xi1 A M VDD VSS INV\n"
+        "Xi2 M Y VDD VSS INV\n"
+        ".ENDS BUF\n"
+    )
+    extracted = tmp_path / "extracted.spice"
+    extracted.write_text(
+        ".SUBCKT BUF A Y VDD VSS\n"
+        "Xn1 A M VSS VSS nfet_01v8\n"
+        "Xp1 A M VDD VDD pfet_01v8\n"
+        "Xn2 M Y VSS VSS nfet_01v8\n"
+        "Xp2 M Y VDD VDD pfet_01v8\n"
+        ".ENDS BUF\n"
+    )
+
+    mismatch = _model_mismatch(
+        reference_netlist=str(reference), extracted_netlist=str(extracted)
+    )
+    assert mismatch is not None
+    # Same circuit: the only divergence is hierarchy depth, not device
+    # identity -- `reference_only` names the leaf `.subckt` call itself.
+    assert mismatch["reference_only"] == ["INV"]
+    assert mismatch["extracted_only"] == []
+    assert "electrically unrelated" not in mismatch["detail"]
+    assert "hierarchical" in mismatch["detail"]
+    assert "#1085" in mismatch["detail"]
 
 
 # --------------------------------------------------------------------------- #
@@ -2832,6 +3049,66 @@ def test_run_pex_deck_options_threaded_through_to_extraction(tmp_path, monkeypat
     # The device card really did move to the requested density.
     text = Path(str(tmp_path / "pex_extracted.spice")).read_text()
     assert f"{_MIM_1F0_C_F:.12g}" in text
+
+
+def test_run_pex_model_mismatch_is_reported_but_does_not_change_status(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """Issue #2402: a `model_mismatch` finding is additive -- it is reported
+    beside `status`/`delta[].status`, never folded into either, mirroring
+    `body_bias`'s own "reported, not enforced" precedent (issue #1983). The
+    real extraction of `resistor_layout` writes only a plain `R` card (no
+    `M`/`X`/`Q`/`D` device at all), so a schematic DUT with an extra `X`-card
+    device the extracted side never instantiates is enough to trigger the
+    diagnostic without needing a real MOS layout fixture."""
+    dut = tmp_path / "schematic_dut.spice"
+    dut.write_text(
+        ".SUBCKT RES RA RB\n"
+        "R1 RA RB 289.2\n"
+        # A device the extracted (resistor-only) netlist never instantiates
+        # -- the same class of divergence issue #2402 reports (a MOS
+        # flavour the layout carries no voltage-domain marker geometry for).
+        "Xm1 RA RB RB sky130_fd_pr__nfet_g5v0 l=0.5 w=1\n"
+        ".ENDS RES\n"
+    )
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    calls = _install_two_call_fake_run_sim(monkeypatch)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert calls["n"] == 2
+    # The finding never changes the grade.
+    assert report["status"] == "pass"
+    assert report["passed"] == 1
+    assert report["failed"] == 0
+    assert report["errored"] == 0
+    assert all(row["status"] == "pass" for row in report["delta"])
+
+    mismatch = report["model_mismatch"]
+    assert mismatch is not None
+    assert mismatch["reference_only"] == ["sky130_fd_pr__nfet_g5v0"]
+    assert mismatch["extracted_only"] == []
+    # Orthogonal to the top-level interface checks -- both stay clean.
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+
+
+def test_run_pex_model_mismatch_none_when_devices_match(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """The ordinary case -- no active devices on either side -- reports
+    `model_mismatch: null`, byte-identical to a pre-#2402 run."""
+    dut = _write_schematic_dut(tmp_path / "schematic_dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    _install_two_call_fake_run_sim(monkeypatch)
+
+    report = run_pex(resistor_layout, [str(request)], "sky130")
+
+    assert report["model_mismatch"] is None
 
 
 def test_run_pex_without_deck_options_still_extracts_the_deck_default(

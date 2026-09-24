@@ -223,6 +223,32 @@ not `klt --version`, if you need to detect this kind of drift. See
   `top_plate_via`, are byte-for-byte unchanged. See
   [`docs/cli/extract.md`](docs/cli/extract.md)'s "Cell-level (black-box +
   pins) abstraction".
+- **Added** (#2402, `klt pex` `model_mismatch` — additive, **no**
+  `schema_version` bump: one new always-present top-level key): `klt pex`
+  compared an extracted netlist against a reference/schematic netlist naming
+  a different device model/`.subckt` (the canonical case: a layout with no
+  voltage-domain marker geometry extracts onto a PDK's default MOS flavour,
+  e.g. sky130's thin-oxide `sky130_fd_pr__nfet_01v8`, while the reference
+  names a different flavour) without ever flagging the divergence —
+  `pin_count_mismatch`/`flat_dut_mismatch` both stay `null` since the two
+  `.SUBCKT` interfaces (pin lists) are identical, so every `delta[]` row
+  silently compared two unrelated physical devices as an ordinary,
+  gradeable delta. `model_mismatch` compares the multiset of device
+  model/`.subckt` names each side's `M`/`X`/`Q`/`D` device-instance cards
+  instantiate (instance count included, so a device silently dropped or
+  duplicated on one side is caught too) and reports `{reference_only,
+  extracted_only, counts, detail}`, or `null` when the two multisets agree
+  exactly. Follows the `body_bias` precedent (#1983): reported, not
+  enforced — never changes `status`, grade, or skips the extracted-side
+  simulation. Also guards against a false positive on a **hierarchical**
+  reference netlist (a leaf `.subckt` called N times) diffed against `klt
+  extract`'s always-flat output (issue #1085): that shape can produce the
+  same divergent multiset a genuine device-flavour swap would, without the
+  two sides naming different devices, so `detail` names hierarchy-vs-flat as
+  the likely cause instead of asserting the two sides are electrically
+  unrelated whenever the reference netlist is hierarchical. Documented in
+  [`docs/cli/pex.md`](docs/cli/pex.md) → "A device-model divergence
+  invalidates the comparison too".
 - **Fixed** (#2374, `klt lvs` `options.combine_devices` — additive, **no**
   `schema_version` bump: no category is added or removed, and the existing
   `device.combine_parameter_corrected` entry's `details.corrected[]` objects
