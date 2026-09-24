@@ -3393,6 +3393,31 @@ def test_res_array_gf180_generic_flavor_floor_unchanged_at_0p42(
         )
 
 
+def test_docs_gen_md_res_array_documents_per_flavour_width_floor():
+    """Issue #2407: the reference docs' `res_array` `width_um` row must not
+    keep claiming an unconditional `>= 0.42` floor now that sky130's
+    `"high"`/`"xhigh"` accept the PDK-native 0.35um primitive width -- the
+    same docs-next-to-the-behaviour discipline
+    `test_docs_gen_md_diff_pair_documents_shared_x_columns` enforces for
+    `diff_pair`, and that `mos_array`'s own "Below `UNIT_MIN_W_UM`" note
+    already follows for its structural `w_um` floor."""
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "cli" / "gen.md").read_text(
+        encoding="utf-8"
+    )
+    section = doc.split("### `res_array`")[1].split("### `cap_array`")[0]
+    assert "0.35" in section
+    assert "sky130_fd_pr__res_high_po_0p35" in section
+    assert "sky130_fd_pr__res_xhigh_po_0p35" in section
+    # The `width_um` params-table row itself must carry the exception, not
+    # just the prose above it.
+    width_row = next(
+        line for line in section.splitlines() if line.startswith("| `width_um`")
+    )
+    assert "0.35" in width_row
+
+
 # --- cap_array (issue #1117) --------------------------------------------------- #
 
 _SKY130_CAP_TOP_PLATE_LAYER = (89, 44)  # capm.drawing

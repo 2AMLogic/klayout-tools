@@ -830,10 +830,71 @@ case. `width_um` is the one exception across every family/level: like
 so a `met5` request under `met5.width.1`'s own 1.6µm minimum is instead
 flagged via `drc_hints.notes`, not silently widened or rejected.
 
+**Below `UNIT_MIN_W_UM`: per-flavour floors for PDK-native narrow primitives
+(issue #2407).** `width_um`'s default floor, `0.42` µm (`UNIT_MIN_W_UM`), is the
+same generator-wide *structural* constant `mos_array`'s `w_um` uses, and is
+about the *contact*, not any target PDK's own poly-width minimum: it is the
+narrowest body that keeps a legally-placed end contact (`CONTACT_SIZE_UM`,
+`0.22` µm) clear of the poly edge by the generic, deliberately conservative
+`ENCLOSURE_MARGIN_UM` (`0.1` µm) on both long edges. Some PDK-native resistor
+flavours, though, ship a first-class fixed-width primitive *narrower* than that
+generic floor, so applying it unconditionally put a real schematic device out of
+`res_array`'s reach. Those exceptions are now declared per family and per
+flavour (`_PDK_RES_FLAVOR_MIN_W_UM` in `gen_layer_params.py`, alongside the
+`_PDK_RES_FLAVOR_LAYERS` flavour table the same section documents above):
+
+| PDK family | `flavor` | Minimum `width_um` | Why |
+| ---------- | -------- | ------------------ | --- |
+| `sky130` | `"high"` | `0.35` | `sky130_fd_pr__res_high_po_0p35`, the narrowest of the five discrete fixed widths (0.35/0.69/1.41/2.85/5.73 µm) this class ships — cited by name in `klayout_tools.decks.sky130`'s own `res_high_po` `ResistorDevice.provenance` |
+| `sky130` | `"xhigh"` | `0.35` | `sky130_fd_pr__res_xhigh_po_0p35`, the same five fixed widths, likewise cited in that deck's `res_xhigh_po` provenance |
+| *everything else* | *any* | `0.42` (`UNIT_MIN_W_UM`) | No fixed-width PDK primitive narrower than the generic structural floor on record — includes sky130's own `"generic"`, every gf180mcu flavour (`"generic"`/`"1k"`/`"2k"`/`"3k"`), and every sg13g2/sg13cmos5l flavour (`"generic"`/`"rppd"`/`"rhigh"`, plus sg13cmos5l's own `"rsil"` alias) |
+
+`0.35` µm is structurally safe under sky130's *real* curated-deck rule even
+though it is under the generic margin: the drawn end contact still keeps
+`(0.35 - 0.22) / 2 = 0.065` µm of poly enclosure on every side, above
+`poly.enclosing.licon.1`'s actual `0.05` µm threshold
+(`klayout_tools.decks.sky130`). It is also the width at which the *real*
+`sky130.lvs` deck recognises these classes at all — upstream gates each of the
+five SKUs on an exact drawn width (`poly_xhigh_0p35` and siblings), verified
+against a real `sky130.lvs` in
+`tests/test_lvs_native_extraction_cross_check.py`'s
+`test_res_xhigh_po_r_matches_native_deck_at_native_width` — so `0.35` µm is the
+width a native-deck round-trip actually needs, not merely one this generator now
+tolerates. Anything narrower than the resolved
+family/flavour's own floor is still rejected outright, with no override — same
+as before, and same as `mos_array`'s `w_um` (see its "Below `UNIT_MIN_W_UM`:
+dog-bone terminals drawn by hand" note above for the hand-drawn dog-bone escape
+hatch that class of device needs instead).
+
+The floor is checked in two stages, because `res_array`'s request-time
+`validate()` runs before `--pdk`'s family is resolved (the same "PDK-agnostic"
+constraint `guard_ring`'s own validation documents). That early stage can only
+compare `width_um` against the *loosest* floor any family declares for the
+requested `flavor` — a necessary, not sufficient, pre-check — so a
+`flavor: "high"` request clears it at `0.35` µm on any `--pdk`, while
+`flavor: "generic"` (no family overrides that name) is still rejected at
+`0.42` µm immediately, before any PDK resolution or layout work happens:
+`generator 'res_array': params.width_um must be >= 0.42`. The exact,
+family-specific floor is then enforced once the family *is* known, in
+`_resistor_layer_params`, whose error names the resolved family and flavour
+(`params.width_um must be >= <floor> for flavor '<flavor>' on PDK family
+'<family>'`). Today that second stage is a belt-and-braces backstop rather
+than a path a caller can reach — only sky130 both declares an overridden floor
+and exposes the `"high"`/`"xhigh"` flavour names, so requesting them elsewhere
+is already rejected by the per-family flavour check — but it is where the
+authoritative floor lives, so a second family declaring its own floor for a
+shared flavour name would be enforced correctly without touching the early
+check.
+
+`metal_level` (drawn-metal-resistor) requests are unaffected — they keep the
+original, unconditional `UNIT_MIN_W_UM` floor, since that mode's own per-level
+geometry minimums are advisory (flagged via `drc_hints.notes`, not rejected —
+see the `met5` discussion above) rather than sourced from this flavour table.
+
 | `params` field | Type   | Default | Description |
 | -------------- | ------ | ------- | ----------- |
 | `length_um`    | double | `2.0`   | Unit resistor body length (µm). Must be `> 0`. |
-| `width_um`     | double | `0.42`  | Unit resistor width (µm). Must be `>= 0.42`. |
+| `width_um`     | double | `0.42`  | Unit resistor width (µm). Must be `>= 0.42` (the smallest width that fits an end contact enclosed by the generic `ENCLOSURE_MARGIN_UM` -- a generator-side structural floor, not a target PDK's own poly-width minimum), **except** sky130's `flavor` `"high"`/`"xhigh"`, which accept `>= 0.35` to reach those classes' own narrowest PDK-native primitive (issue #2407) — see the per-flavour floor table above. Never auto-widened. |
 | `spacing_um`   | double | `0.5`   | Spacing between unit resistors (µm). Must be `>= 0`; below `0.4`um risks violating a target PDK's minimum same-layer spacing rule (flagged via `drc_hints.notes`, not rejected) — floored under `metal_level`'s own minimum on sky130's `met5` (see above). |
 | `num`          | int    | `4`     | Number of matched unit resistors. Must be `>= 1`. |
 | `dummy`        | int    | `1`     | Dummy unit resistors added at each end. Must be `>= 0`. |
