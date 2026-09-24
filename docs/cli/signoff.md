@@ -1849,6 +1849,21 @@ cannot reach `met` by simply omitting its P&R citation — its signal-only
 `gate-level-verilog` reference leaves the supplies unpaired in
 `net_correspondence`, so the other branch fails too.
 
+**A declared supply name matches a `net_correspondence` row by alias
+membership, not full-string equality** (issue #2405). `klt lvs` writes a
+row's `layout` field via `expanded_name()` (see `net_correspondence[]`
+entries in [`docs/cli/lvs.md`](lvs.md)): for a label-merged net — the
+ordinary shape a routed supply grid extracts as, with per-cell rail labels,
+strap labels, well-tie pad labels, and the promoted pin label all landing on
+one electrical net — every alias is joined with `|`, e.g.
+`"G_VDDR_M1|MNT_G|S1_VDDR_M1|VDDR|VDDR1"`. Item 11 treats that string as a
+`|`-split alias set and considers a declared supply name proven when it
+equals *any one* alias, not only when it equals the row's entire joined
+spelling — mirroring how `klt erc`'s own supply matching treats a net's
+comma-split `expanded_name()` as a label set (`_match_net_clusters`). A
+supply that is genuinely never paired to the reference (no alias contains
+the declared name) still renders `lvs_supply_unproven`.
+
 **Item 11 does not grade the ERC envelope's own `status`.** A `klt erc`
 report is `"clean"` only when it has zero findings of *any* rule and no
 antenna violation anywhere; item 11 grades exactly the three supply rules

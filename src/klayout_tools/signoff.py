@@ -5355,6 +5355,26 @@ def _lvs_reference_carries_supplies(
     Name comparison is case-insensitive, matching how `klt lvs` itself
     matches power pin/net names (``NetlistSpiceReader`` upper-cases what it
     reads -- see ``docs/cli/lvs.md``'s ``options.power_connectivity``).
+
+    A row's ``layout`` is `klt lvs`'s own ``expanded_name()``-derived alias
+    string (``_build_net_correspondence`` in ``lvs_mismatch.py``): for a
+    label-merged net -- the ordinary shape a routed supply grid extracts as,
+    with per-cell rail labels, strap labels, and the promoted pin label all
+    landing on one electrical net -- every alias is joined with ``|``, e.g.
+    ``"G_VDDR_M1|MNT_G|VDDR|VDDR1"``. A declared supply name is proven when
+    it is *any one* of a row's ``|``-split aliases, not only when it equals
+    the row's full joined string -- exact-string equality would reject
+    exactly the shape `klt lvs` produces for a real supply grid (issue
+    #2405). This mirrors the alias-membership interpretation
+    ``_match_net_clusters`` already applies on the erc side of item 11
+    (``erc.py``), keeping the two halves' notion of "the declared name
+    matches this net" consistent -- ``_match_net_clusters`` splits
+    ``expanded_name()`` on KLayout's own ``,`` separator (the raw,
+    un-escaped spelling ERC reads directly from ``pya``), while this
+    function splits on ``|`` (the ``spice_safe_net_name``-escaped spelling
+    `klt lvs` writes into its JSON envelope) -- different separators for the
+    same underlying alias set, each matching the convention of the string
+    it actually receives.
     """
     if (envelope.get("options") or {}).get("power_connectivity") is False:
         return False
@@ -5365,7 +5385,7 @@ def _lvs_reference_carries_supplies(
         layout = row.get("layout")
         reference = row.get("reference")
         if isinstance(layout, str) and isinstance(reference, str) and reference:
-            paired.add(layout.upper())
+            paired.update(alias.upper() for alias in layout.split("|") if alias)
     return all(name.upper() in paired for name in supply_nets)
 
 

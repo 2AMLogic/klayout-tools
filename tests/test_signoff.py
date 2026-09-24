@@ -1325,6 +1325,31 @@ LVS_MATCH_SUPPLY_CORRESPONDENCE_DISABLED_ENVELOPE = {
     ],
 }
 
+#: Issue #2405: the shape `klt lvs` actually emits for a routed supply grid
+#: -- `_build_net_correspondence` (`lvs_mismatch.py`) writes a label-merged
+#: net's `layout` field as *every* alias joined with `|`
+#: (`expanded_name()`-derived), not the bare declared supply name alone.
+#: Otherwise identical to `LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE` --
+#: exercises the alias-membership match against the met path so this shape
+#: does not regress back to the exact-string comparison that made item 11
+#: unmet for every real, label-merged supply net.
+LVS_MATCH_SUPPLY_ALIAS_CORRESPONDENCE_ENVELOPE = {
+    **LVS_MATCH_POWER_UNCHECKED_ENVELOPE,
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {
+            "layout": "G_VGND_M1|MNT_G|S1_VGND_M1|VGND|VGND1",
+            "reference": "VGND1",
+            "pin": True,
+        },
+        {
+            "layout": "G_VPWR_M1|MNT_G|S1_VPWR_M1|VPWR|VPWR1",
+            "reference": "VPWR1",
+            "pin": True,
+        },
+    ],
+}
+
 DRC_ERROR_ENVELOPE = {
     "schema_version": 1,
     "error": {"command": "drc", "message": "file not found: missing.gds"},
@@ -9041,6 +9066,47 @@ def test_item_11_full_custom_digital_is_met_through_the_analog_artifacts(tmp_pat
                     tmp_path,
                     kind="digital",
                     lvs_envelope=LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+                    par_envelope=None,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["pdn"] is False
+    assert item["citation"]["power_delivery"]["partition_kind"] == "digital"
+
+
+def test_item_11_analog_met_when_lvs_correspondence_layout_is_alias_joined(
+    tmp_path,
+):
+    """Issue #2405: `klt lvs` itself writes a label-merged net's
+    `net_correspondence` `layout` field as every alias joined with `|`
+    (`_build_net_correspondence` in `lvs_mismatch.py`) -- the ordinary shape
+    a routed supply grid extracts as. The declared supply name (`VGND1`/
+    `VPWR1`, the pin label the erc spec's `nets[]` names) must still be
+    recognized as proven when it is one alias among several, not only when
+    it equals the row's entire joined string -- the check must not regress
+    to `unmet`/`lvs_supply_unproven` for the shape `klt lvs` actually
+    produces."""
+    erc_spec = {
+        **ERC_SUPPLY_SPEC,
+        "nets": [
+            {"name": "VPWR1", "kind": "supply"},
+            {"name": "VGND1", "kind": "supply"},
+            {"name": "A", "kind": "signal"},
+        ],
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="digital",
+                    erc_spec=erc_spec,
+                    lvs_envelope=LVS_MATCH_SUPPLY_ALIAS_CORRESPONDENCE_ENVELOPE,
                     par_envelope=None,
                 )
             },
