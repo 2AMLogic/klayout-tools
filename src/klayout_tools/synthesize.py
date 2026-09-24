@@ -2489,6 +2489,63 @@ def _abc_supports_dont_use() -> bool:
     return "-dont_use" in (completed.stdout or "")
 
 
+def _resolve_dont_use_mode(constraints: dict[str, Any]) -> str:
+    """The validated ``constraints.dont_use_mode``, defaulting to
+    :data:`_DEFAULT_DONT_USE_MODE` when absent (issue #2382).
+
+    Split out of :func:`_resolve_dont_use_request` purely to keep that
+    function under the repo's cyclomatic-complexity ratchet
+    (``scripts/check_complexity_baseline.py``); it carries no behaviour of
+    its own beyond the mode half of that function's shape validation.
+    """
+    mode = constraints.get("dont_use_mode")
+    if mode is None:
+        return _DEFAULT_DONT_USE_MODE
+    if not isinstance(mode, str) or mode not in _DONT_USE_MODES:
+        raise SynthesizeError(
+            "request.constraints.dont_use_mode must be one of "
+            + ", ".join(f"'{value}'" for value in _DONT_USE_MODES)
+            + f" (got {mode!r})"
+        )
+    return mode
+
+
+def _resolve_dont_use_patterns(constraints: dict[str, Any]) -> tuple[str, ...]:
+    """The validated, de-duplicated ``constraints.dont_use`` pattern list
+    (issue #2382), empty when the field is absent.
+
+    The list half of :func:`_resolve_dont_use_request`'s shape validation,
+    split out for the same complexity-ratchet reason as
+    :func:`_resolve_dont_use_mode`. Order is preserved across the duplicate
+    collapse, matching :func:`_resolve_arithmetic`.
+    """
+    raw = constraints.get("dont_use")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise SynthesizeError(
+            "request.constraints.dont_use must be an array of cell-name/"
+            "glob strings (a bare string is not accepted)"
+        )
+    collected: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry:
+            raise SynthesizeError(
+                "request.constraints.dont_use entries must be non-empty "
+                f"strings (got {entry!r})"
+            )
+        if _DONT_USE_PATTERN_RE.match(entry) is None:
+            raise SynthesizeError(
+                f"request.constraints.dont_use entry '{entry}' contains a "
+                "character outside a cell name or ABC glob pattern "
+                "(allowed: letters, digits, '_', '.', '-', '!', '*', '?', "
+                "'[', ']')"
+            )
+        if entry not in collected:
+            collected.append(entry)
+    return tuple(collected)
+
+
 def _resolve_dont_use_request(
     constraints: dict[str, Any] | None,
 ) -> tuple[tuple[str, ...], str]:
@@ -2511,45 +2568,16 @@ def _resolve_dont_use_request(
     downgraded" posture :func:`_resolve_delay_target_ps` already takes.
     Duplicate patterns are collapsed (order preserved), matching
     :func:`_resolve_arithmetic`'s own treatment of a duplicated candidate.
+
+    The per-field shape checks live in :func:`_resolve_dont_use_mode` and
+    :func:`_resolve_dont_use_patterns`; what remains here is the
+    cross-field consistency pair (a mode that contradicts the list).
     """
     if not constraints:
         return (), _DEFAULT_DONT_USE_MODE
 
-    mode = constraints.get("dont_use_mode")
-    if mode is None:
-        mode = _DEFAULT_DONT_USE_MODE
-    elif not isinstance(mode, str) or mode not in _DONT_USE_MODES:
-        raise SynthesizeError(
-            "request.constraints.dont_use_mode must be one of "
-            + ", ".join(f"'{value}'" for value in _DONT_USE_MODES)
-            + f" (got {mode!r})"
-        )
-
-    raw = constraints.get("dont_use")
-    patterns: tuple[str, ...] = ()
-    if raw is not None:
-        if not isinstance(raw, list):
-            raise SynthesizeError(
-                "request.constraints.dont_use must be an array of cell-name/"
-                "glob strings (a bare string is not accepted)"
-            )
-        collected: list[str] = []
-        for entry in raw:
-            if not isinstance(entry, str) or not entry:
-                raise SynthesizeError(
-                    "request.constraints.dont_use entries must be non-empty "
-                    f"strings (got {entry!r})"
-                )
-            if _DONT_USE_PATTERN_RE.match(entry) is None:
-                raise SynthesizeError(
-                    f"request.constraints.dont_use entry '{entry}' contains a "
-                    "character outside a cell name or ABC glob pattern "
-                    "(allowed: letters, digits, '_', '.', '-', '!', '*', '?', "
-                    "'[', ']')"
-                )
-            if entry not in collected:
-                collected.append(entry)
-        patterns = tuple(collected)
+    mode = _resolve_dont_use_mode(constraints)
+    patterns = _resolve_dont_use_patterns(constraints)
 
     if mode == "none" and patterns:
         raise SynthesizeError(
