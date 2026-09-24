@@ -1501,6 +1501,75 @@ def _res_flavor_layers(family: str, flavor: str) -> tuple[tuple[int, int], ...]:
         ) from None
 
 
+#: Per-PDK-family poly-resistor *flavour* -> the minimum ``res_array``
+#: ``params.width_um`` that flavour accepts (issue #2407). :data:`UNIT_MIN_W_UM`
+#: (0.42um) is a single, generator-wide *structural* floor -- sized so
+#: :func:`~klayout_tools.gen._res_unit_layout`'s end contact
+#: (:data:`CONTACT_SIZE_UM`, 0.22um) keeps :data:`ENCLOSURE_MARGIN_UM`
+#: (0.1um, a conservative margin exceeding *both* curated decks' own real
+#: contact-enclosure rules) clear of the poly edge on every side -- applied
+#: unconditionally regardless of which PDK family or resistor flavour a
+#: request resolves to. But some PDK-native poly-resistor flavours ship a
+#: first-class fixed-width primitive narrower than that generic floor:
+#: sky130's ``res_high_po``/``res_xhigh_po`` (this generator's ``"high"``/
+#: ``"xhigh"`` flavours, :data:`_PDK_RES_FLAVOR_LAYERS`) each ship a
+#: ``sky130_fd_pr__res_{high,xhigh}_po_0p35`` primitive -- the narrowest of
+#: five discrete widths (0.35/0.69/1.41/2.85/5.73um) those two device
+#: classes support -- cited by name in
+#: ``klayout_tools.decks.sky130``'s own ``ResistorDevice.provenance`` for
+#: both classes. 0.35um is structurally safe even under sky130's own real
+#: curated-deck rule: the drawn contact still keeps ``(0.35 - 0.22) / 2 =
+#: 0.065um`` of poly enclosure on every side, comfortably above
+#: ``poly.enclosing.licon.1``'s actual 0.05um threshold
+#: (``klayout_tools.decks.sky130``) -- it is only *below* the generic,
+#: cross-family conservative :data:`ENCLOSURE_MARGIN_UM` (0.1um)
+#: :data:`UNIT_MIN_W_UM` was sized against, not below what sky130's own deck
+#: would actually flag.
+#:
+#: A family/flavour pair absent here (every entry not listed, including
+#: every non-sky130 family and sky130's own ``"generic"`` flavour -- which
+#: has no such fixed-width PDK primitive on record) falls back to
+#: :data:`UNIT_MIN_W_UM` via :func:`_res_flavor_min_width_um`, byte-for-byte
+#: this generator's pre-#2407 floor for every combination this issue does
+#: not concern.
+_PDK_RES_FLAVOR_MIN_W_UM: dict[str, dict[str, float]] = {
+    "sky130": {
+        "high": 0.35,
+        "xhigh": 0.35,
+    },
+}
+
+
+def _res_flavor_min_width_um(family: str, flavor: str) -> float:
+    """Return the minimum ``res_array`` ``params.width_um`` accepted for
+    ``flavor`` in ``family`` (see :data:`_PDK_RES_FLAVOR_MIN_W_UM`), falling
+    back to :data:`UNIT_MIN_W_UM` for any family/flavour this table does not
+    override."""
+    return _PDK_RES_FLAVOR_MIN_W_UM.get(family, {}).get(flavor, UNIT_MIN_W_UM)
+
+
+def _res_flavor_min_width_um_floor(flavor: str) -> float:
+    """The loosest (smallest) :data:`_PDK_RES_FLAVOR_MIN_W_UM` floor declared
+    for ``flavor`` across *every* family that names it, or
+    :data:`UNIT_MIN_W_UM` if no family overrides this flavour.
+
+    Used by :func:`~klayout_tools.gen_describe._res_array_validate`, which
+    checks ``params.width_um`` before the request's ``--pdk`` family is
+    resolved (the same "PDK-agnostic" constraint
+    :func:`~klayout_tools.gen_describe._guard_ring_validate` documents for
+    itself) -- it cannot look up one exact family's floor yet. Taking the
+    loosest floor across every family that defines this flavour name keeps
+    this early check a *necessary*, not *sufficient*, condition: an
+    obviously-too-narrow request is still rejected immediately, before any
+    PDK resolution or layout work happens, while the exact, family-specific
+    floor is enforced once the family *is* known, in
+    :func:`_resistor_layer_params` (via :func:`_res_flavor_min_width_um`)."""
+    candidates = [
+        table[flavor] for table in _PDK_RES_FLAVOR_MIN_W_UM.values() if flavor in table
+    ]
+    return min(candidates) if candidates else UNIT_MIN_W_UM
+
+
 #: Per-PDK-family metal-layer resistor levels (issue #1639): the ordered
 #: ``body``/``marker``/``via``/``landing`` layer set ``res_array``'s
 #: ``metal_level`` request param selects between, keyed ``1``..``5`` (sky130's
@@ -2398,6 +2467,14 @@ def _resistor_layer_params(
 
     flavor = params.get("flavor", _DEFAULT_RES_FLAVOR)
     flavor_layers = _res_flavor_layers(family, flavor)
+    min_width_um = _res_flavor_min_width_um(family, flavor)
+    if params["width_um"] < min_width_um:
+        from .gen import GenError
+
+        raise GenError(
+            f"generator 'res_array': params.width_um must be >= {min_width_um} "
+            f"for flavor '{flavor}' on PDK family '{family}'"
+        )
     mark = _role_layer_info(family, "res_mark")
     resolved = {
         "poly_layer": _role_layer_info(family, "poly"),
