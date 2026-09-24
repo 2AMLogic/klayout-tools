@@ -723,7 +723,7 @@ def test_resume_unproven_cells_reenters_stage2_and_matches_control(tmp_path):
 
 
 @pytest.mark.skipif(not HAVE_YOSYS, reason="yosys is not installed on this machine")
-def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path, monkeypatch):
+def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path):
     """The acceptance criterion verbatim: a staged sequential run killed
     mid-way (here: a SIGKILL-shaped death between stage 1's commit and
     stage 2's completion) leaves its committed stage-1 record on disk; an
@@ -748,10 +748,16 @@ def test_killed_run_resumes_from_committed_stage_artifacts(tmp_path, monkeypatch
             raise SystemExit(137)
         return real_runner(script_path, timeout_s, binary)
 
-    monkeypatch.setattr(equiv, "_run_yosys_subprocess", killed_mid_stage2)
-    with pytest.raises(SystemExit):
-        run_equiv(request_path, resume=True)
-    monkeypatch.undo()
+    # Manual save/restore rather than monkeypatch.setattr: this test's fixture
+    # instance is shared with the autouse `_bare_name_binary_resolution`
+    # fixture, so a monkeypatch.undo() here would revert that fixture's
+    # shutil.which stub too, not just this patch.
+    equiv._run_yosys_subprocess = killed_mid_stage2
+    try:
+        with pytest.raises(SystemExit):
+            run_equiv(request_path, resume=True)
+    finally:
+        equiv._run_yosys_subprocess = real_runner
 
     with open(_record_path(tmp_path), encoding="utf-8") as handle:
         record = json.load(handle)
