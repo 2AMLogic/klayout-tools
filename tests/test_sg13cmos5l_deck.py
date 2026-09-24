@@ -1147,14 +1147,26 @@ def test_golden_pair_sg13cmos5l_mom_capacitor_w_l_matches_marker_geometry(
     **no** `c_f`/`area_um2`/`perimeter_um` key at all -- this device's
     capacitance is supplied by its SPICE/Verilog-A model, not measured by
     `klt extract`. See `docs/json-contract.md`'s "MoM capacitor devices"
-    note for that JSON-shape decision."""
+    note for that JSON-shape decision.
+
+    `mmin`/`mmax` (issue #2435) are `1`/`1` here: this fixture draws no
+    conductor *inside* the marker at all (its two `Metal1` routing stubs
+    start at the marker edge and run outwards), so the measurement falls
+    back to the two recognised ports' own metal levels -- both `Metal1`.
+    That is the single-level `mmin == mmax` edge case, measured rather than
+    defaulted."""
     path = _write_gds(_make_sg13cmos5l_mom_layout(marker=marker), tmp_path / "mom.gds")
     report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "mom.spice"))
 
     assert report["device_counts"] == {name: 1}
     (device,) = report["devices"]
     assert device["class"] == name
-    assert device["params"] == {"w_um": pytest.approx(3.0), "l_um": pytest.approx(8.0)}
+    assert device["params"] == {
+        "w_um": pytest.approx(3.0),
+        "l_um": pytest.approx(8.0),
+        "mmin": 1,
+        "mmax": 1,
+    }
     assert {device["nets"]["a"], device["nets"]["b"]} == {"PLUS_NET", "MINUS_NET"}
 
 
@@ -1178,22 +1190,32 @@ def test_sg13cmos5l_mom_capacitor_card_drops_params_keyword_and_suffixes_geometr
     already use (`_format_um`'s default `GEOMETRY_STYLE_UNIT_SUFFIX`) --
     `w_um=3.0`/`l_um=8.0` (the golden pair test above) becomes `W=3U
     L=8U`. `devices[].params` itself is untouched -- this is a
-    netlist-text-only formatting fix."""
+    netlist-text-only formatting fix.
+
+    The trailing `MMIN=1 MMAX=1` is issue #2435's own measured finger-stack
+    range (see the golden pair test above for why this fixture measures a
+    single level); it carries no unit suffix because a metal index is a
+    dimensionless 1-based ordinal, not a length."""
     path = _write_gds(_make_sg13cmos5l_mom_layout(marker=marker), tmp_path / "mom.gds")
     report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "mom.spice"))
 
     assert report["device_counts"] == {name: 1}
     (device,) = report["devices"]
-    assert device["params"] == {"w_um": pytest.approx(3.0), "l_um": pytest.approx(8.0)}
+    assert device["params"] == {
+        "w_um": pytest.approx(3.0),
+        "l_um": pytest.approx(8.0),
+        "mmin": 1,
+        "mmax": 1,
+    }
 
     (card,) = [line for line in _device_cards(report) if f" {name} " in line]
     assert "PARAMS:" not in card
     assert card.startswith("X")
-    assert card.endswith(f" {name} W=3U L=8U")
+    assert card.endswith(f" {name} W=3U L=8U MMIN=1 MMAX=1")
 
 
-#: The `cap_cmomi`/`cap_cmomf` `.subckt` parameters `klt extract` does NOT
-#: measure and therefore does NOT write onto the card (issue #2408). Verbatim
+#: The `cap_cmomi`/`cap_cmomf` `.subckt` parameters `klt extract` still does
+#: NOT measure and therefore does NOT write onto the card. Verbatim
 #: from IHP's own Apache-2.0 model libraries (`IHP-GmbH/ihp-sg13cmos5l` at
 #: `607e18d4bd9214a52575c194b4181ef449f9252f`,
 #: `libs.tech/ngspice/models/cap_cmomi.lib:60` / `cap_cmomf.lib:53`):
@@ -1206,7 +1228,21 @@ def test_sg13cmos5l_mom_capacitor_card_drops_params_keyword_and_suffixes_geometr
 #: (each is one line in the source, soft-wrapped here for width; `feed` is
 #: declared on `cap_cmomi` only). Each tuple entry is the parameter name as
 #: it would be spelled on a written card, matched case-insensitively.
-_MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS = ("mmin", "mmax", "feed", "subblock", "mm_ok")
+#:
+#: `mmin`/`mmax` were on this list until issue #2435 taught the recognition
+#: step to measure them from the drawn per-metal finger geometry; they are
+#: now written, and pinned by
+#: `test_sg13cmos5l_mom_capacitor_card_writes_measured_metal_range` below.
+#: The three that remain are the ones #2435 deliberately left out -- see
+#: this module's `test_..._card_omits_unmeasured_pdk_subckt_params`
+#: docstring for each one's reason.
+_MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS = ("feed", "subblock", "mm_ok")
+
+#: The parameters a written `cap_cmomi`/`cap_cmomf` card DOES carry, in the
+#: order the writer emits them (`_unbound_mom_capacitor_card` in
+#: `pdk_models.py`): the two #2355 geometry parameters followed by issue
+#: #2435's measured finger-stack metal range.
+_MOM_CAPACITOR_WRITTEN_CARD_PARAMS = ["W", "L", "MMIN", "MMAX"]
 
 
 @pytest.mark.parametrize(
@@ -1215,38 +1251,39 @@ _MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS = ("mmin", "mmax", "feed", "subblock", "
 def test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params(
     tmp_path: Path, name: str, marker: tuple[int, int]
 ):
-    """Issue #2408, **decision pin (option b: document the gap, do not
-    fabricate defaults)**: a `--pdk`-bound MoM-capacitor card carries `W`/`L`
-    and nothing else -- never `mmin`/`mmax`/`feed`/`subblock`/`mm_ok`, the
-    remaining parameters of the upstream `.subckt` its trailing class-name
-    token binds onto (see `_MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS` above for
-    the cited source and each one's PDK default).
+    """Issue #2408's decision pin (option b: document the gap, do not
+    fabricate defaults), **narrowed by issue #2435** to the parameters that
+    are still genuinely unmeasured: a `--pdk`-bound MoM-capacitor card
+    carries `W`/`L` plus the measured `MMIN`/`MMAX`, and never
+    `feed`/`subblock`/`mm_ok` -- the remaining parameters of the upstream
+    `.subckt` its trailing class-name token binds onto (see
+    `_MOM_CAPACITOR_UNMEASURED_SUBCKT_PARAMS` above for the cited source and
+    each one's PDK default).
 
-    Those five are omitted deliberately, not accidentally:
+    Those three are omitted deliberately, not accidentally:
 
-    - Nothing in the geometry this device's recognition step reads encodes
-      them. `_build_mom_capacitor_extractor` (a transcription of upstream's
-      own `CapMomExtractor`) sees one recognition marker plus exactly two
-      pin-port polygons; `W`/`L` are that marker's own bounding box, and the
-      finger stack's metal range, feed variant, and `subblock`/`mm_ok`
-      switches are simply not in the drawn shapes. Upstream's own LVS
-      extractor does not capture them either.
-    - Writing the PDK defaults explicitly would simulate *identically* (they
-      are the defaults) while asserting a drawn metal range and feed variant
-      `klt extract` never measured -- turning a visible gap into an invisible
-      wrong answer for a design that drew, say, a Metal1-Metal3 `same`-feed
-      device.
-    - There is no deck-independent default set to hardcode anyway: `mmax=4`
-      is keyed to cmos5l's own Metal1..Metal4 thin-metal stack, while the
-      `sg13g2` deck declares the same two device names over Metal1..Metal5;
-      and `feed` exists on `cap_cmomi` only, so emitting it uniformly would
-      pass `cap_cmomf` a parameter its subcircuit does not declare.
+    - `feed` (`cap_cmomi` only) is only *partly* recoverable, and guessing
+      the rest would be exactly the invisible wrong answer #2408 rejected.
+      The PCell's `same` variant is distinguishable -- it stacks its two
+      pins on adjacent metals, so the two recognised ports carry different
+      metal indices -- but `double` and `none` both place two ports on the
+      top metal, told apart only by where those ports sit relative to the
+      core, which this recognition step does not know. `none` is upstream's
+      own documented *not a standalone 2-terminal device* configuration, so
+      writing `feed=double` for it would misreport a device that is not even
+      complete. Split out as issue #2445 rather than settled here.
+    - `subblock` is a PCell layout switch (substrate isolation block) with no
+      counterpart in the recognition geometry at all.
+    - `mm_ok` is a documented no-op in this release ("accepted for interface
+      parity ... but a NO-OP -- cap_cmom{i,f} has no characterised mismatch
+      model", same `.lib` headers), so omitting it costs nothing today.
 
-    So this is a *pin*, not an aspiration: if a future change starts writing
-    any of the five, that must be a deliberate decision (with the values
-    actually recovered from layout, not defaulted), and this test is the
-    place it gets re-argued. The gap itself is documented for consumers in
-    `docs/cli/extract.md`'s "MoM capacitor devices" section.
+    So this remains a *pin*, not an aspiration: if a future change starts
+    writing any of the three, that must be a deliberate decision with the
+    value actually recovered from layout -- the bar `mmin`/`mmax` cleared in
+    #2435 -- and this test is the place it gets re-argued. What is and is
+    not written is documented for consumers in `docs/cli/extract.md`'s "MoM
+    capacitor devices" section.
     """
     path = _write_gds(_make_sg13cmos5l_mom_layout(marker=marker), tmp_path / "mom.gds")
     report = run_extract(
@@ -1268,19 +1305,301 @@ def test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params(
             f"never measures -- see this test's docstring (issue #2408): {card}"
         )
 
-    # Positive half of the pin: exactly the two measured geometry parameters
-    # are written, so the loop above cannot pass by the card having lost its
-    # parameters altogether.
-    assert [token.split("=", 1)[0] for token in card.split() if "=" in token] == [
-        "W",
-        "L",
-    ]
+    # Positive half of the pin: exactly the measured parameters are written,
+    # so the loop above cannot pass by the card having lost its parameters
+    # altogether.
+    assert [token.split("=", 1)[0] for token in card.split() if "=" in token] == (
+        _MOM_CAPACITOR_WRITTEN_CARD_PARAMS
+    )
 
     # `--pdk` does not change this card: `cap_cmom*` has no curated model
     # binding to resolve (see `mom_capacitors`'s own docstring), so the
     # unbound-device writer owns it either way -- same #2355 shape as the
     # no-`--pdk` test above.
-    assert card.endswith(f" {name} W=3U L=8U")
+    assert card.endswith(f" {name} W=3U L=8U MMIN=1 MMAX=1")
+
+
+#: This deck's four MoM-reachable thin-metal levels: 1-based metal index ->
+#: (drawn `Metal<n>` layer, `Metal<n>.pin` layer). `TopMetal1` (index 5) is
+#: deliberately absent -- `mom_capacitors[].metal_pins` leaves it `None`, so
+#: it is neither a port level nor a finger level (see
+#: `test_..._ignores_routing_on_a_level_the_device_family_never_reaches`).
+_CMOS5L_MOM_METAL_LAYERS = {
+    1: ((8, 0), (8, 2)),
+    2: ((10, 0), (10, 2)),
+    3: ((30, 0), (30, 2)),
+    4: ((50, 0), (50, 2)),
+}
+
+
+def _make_sg13cmos5l_mom_finger_stack_layout(
+    *,
+    marker: tuple[int, int],
+    levels: tuple[int, ...],
+    port_level: int | None = None,
+) -> kdb.Layout:
+    """An 8x3um MoM-capacitor marker whose fingers are drawn on exactly the
+    metal `levels` given (1-based, e.g. `(2, 3)` for a Metal2..Metal3 stack),
+    with its two ports side by side on `port_level` (the topmost of them by
+    default, where the real PCell puts them).
+
+    Mirrors the real PCell's shape closely enough for the recovery under
+    test: every level in `mmin..mmax` carries the same bar/tooth pattern
+    (`cmomi_code.py`'s "Every metal layer mmin..mmax carries the same
+    pattern"), all of it enclosed by the recognition marker, and the two
+    `MkPin` ports sit on one of those levels.
+
+    Each port's net is carried out to its label by a routing stub on the
+    same metal, running from the port's own bar out past the marker edge --
+    so `port_level`'s bars merge with a shape that leaves the marker and are
+    (correctly) not counted as enclosed finger geometry. That level is still
+    measured, via the recognised ports themselves; it is exactly the real
+    case where the design routes to the capacitor's top-metal feed pad,
+    while the levels below reach it only through via stacks and so stay
+    wholly inside the marker."""
+    layout = kdb.Layout()
+    top = layout.create_cell("TOP")
+
+    def draw(layer: tuple[int, int], box: kdb.Box) -> None:
+        top.shapes(layout.layer(*layer)).insert(box)
+
+    def label(layer: tuple[int, int], text: str, x: float, y: float) -> None:
+        top.shapes(layout.layer(*layer)).insert(
+            kdb.Text(text, kdb.Trans(round(x / _DBU_UM), round(y / _DBU_UM)))
+        )
+
+    draw(marker, _box_um(0, 0, 8, 3))  # device marker, 8um x 3um
+
+    for level in levels:
+        drawn, _pin = _CMOS5L_MOM_METAL_LAYERS[level]
+        # Two opposite-polarity horizontal "bars", each with an interdigitated
+        # "tooth" reaching towards (but never touching) the other -- all
+        # strictly inside the 8x3um marker, and never bridging the two combs
+        # into one net, exactly like the real interdigitated PCell.
+        draw(drawn, _box_um(0.5, 0.4, 7.5, 0.8))  # PLUS bar
+        draw(drawn, _box_um(2.0, 0.8, 2.4, 1.8))  # PLUS tooth, upwards
+        draw(drawn, _box_um(0.5, 2.2, 7.5, 2.6))  # MINUS bar
+        draw(drawn, _box_um(5.0, 1.2, 5.4, 2.2))  # MINUS tooth, downwards
+
+    level_for_ports = max(levels) if port_level is None else port_level
+    port_drawn, port_pin = _CMOS5L_MOM_METAL_LAYERS[level_for_ports]
+    draw(port_pin, _box_um(0.5, 0.4, 1.5, 0.8))  # PLUS port
+    draw(port_pin, _box_um(6.5, 2.2, 7.5, 2.6))  # MINUS port
+    draw(port_drawn, _box_um(-2, 0.4, 0.5, 0.8))  # routing stub off PLUS
+    draw(port_drawn, _box_um(7.5, 2.2, 10, 2.6))  # routing stub off MINUS
+    # NB: this deck's `metal_labels` are the `.pin` layers themselves, so a
+    # text object and a port polygon share one layer without either reading
+    # the other (see `_make_sg13cmos5l_mom_layout` above).
+    label(port_pin, "PLUS_NET", -1, 0.6)
+    label(port_pin, "MINUS_NET", 9, 2.4)
+
+    return layout
+
+
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+@pytest.mark.parametrize(
+    "levels, mmin, mmax",
+    [
+        ((1, 2, 3, 4), 1, 4),
+        ((2, 3), 2, 3),
+        ((3,), 3, 3),
+    ],
+    ids=["full-stack", "metal2-metal3", "single-level"],
+)
+def test_golden_pair_sg13cmos5l_mom_capacitor_measures_drawn_finger_stack(
+    tmp_path: Path,
+    name: str,
+    marker: tuple[int, int],
+    levels: tuple[int, ...],
+    mmin: int,
+    mmax: int,
+):
+    """Issue #2435: `mmin`/`mmax` are the lowest/highest metal index actually
+    carrying drawn finger geometry inside the recognition marker -- measured,
+    never defaulted to the `.subckt`'s own `mmin=1 mmax=4`.
+
+    Three cases, all on the same fixture generator:
+
+    - **full-stack** `Metal1..Metal4` -- this deck's whole MoM-reachable
+      thin-metal stack (its `Metal5` is forbidden and its `TopMetal1` is not
+      a level this device family reaches), the case that used to be silently
+      *assumed* by the `.subckt` defaults and is now confirmed;
+    - **metal2-metal3** -- a non-default stack, the case a defaulted
+      `mmin=1 mmax=4` modelled at the wrong layer count `N = mmax - mmin + 1`
+      (4 instead of 2, i.e. ~1.09 vs ~0.55 fF/um² of area density on the
+      PCell's own coefficient table);
+    - **single-level** -- the `mmin == mmax` edge case (`N = 1`).
+    """
+    path = _write_gds(
+        _make_sg13cmos5l_mom_finger_stack_layout(marker=marker, levels=levels),
+        tmp_path / "mom.gds",
+    )
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "mom.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["class"] == name
+    assert device["params"] == {
+        "w_um": pytest.approx(3.0),
+        "l_um": pytest.approx(8.0),
+        "mmin": mmin,
+        "mmax": mmax,
+    }
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"PLUS_NET", "MINUS_NET"}
+    assert not [w for w in report["warnings"] if name in w]
+
+
+def test_sg13cmos5l_mom_capacitor_measures_levels_no_port_sits_on(tmp_path: Path):
+    """Issue #2435: the *drawn* finger geometry -- not the two recognised
+    ports -- is what sets the range when they disagree.
+
+    Fingers on `Metal1..Metal3` with both ports down on `Metal1`: the ports
+    alone would say `mmin = mmax = 1` (`N = 1`), the pre-#2435 `.subckt`
+    defaults would say `1..4` (`N = 4`), and only reading `Metal2`/`Metal3`'s
+    own enclosed geometry gives the drawn `1..3` (`N = 3`). This is the half
+    of the measurement the port union can never supply, so it is pinned
+    separately from the PCell-shaped cases above."""
+    path = _write_gds(
+        _make_sg13cmos5l_mom_finger_stack_layout(
+            marker=(99, 39), levels=(1, 2, 3), port_level=1
+        ),
+        tmp_path / "mom_ports_low.gds",
+    )
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "mom_ports_low.spice")
+    )
+
+    assert report["device_counts"] == {"cap_cmomi": 1}
+    (device,) = report["devices"]
+    assert device["params"]["mmin"] == 1
+    assert device["params"]["mmax"] == 3
+    assert {device["nets"]["a"], device["nets"]["b"]} == {"PLUS_NET", "MINUS_NET"}
+
+
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+def test_sg13cmos5l_mom_capacitor_card_writes_measured_metal_range(
+    tmp_path: Path, name: str, marker: tuple[int, int]
+):
+    """Issue #2435, the writer half: a `--pdk`-bound card for a device whose
+    fingers were drawn on `Metal2..Metal3` carries `MMIN=2 MMAX=3`, not the
+    upstream `.subckt`'s own `mmin=1 mmax=4` defaults it would otherwise
+    silently take (and not the `mmin`/`mmax`-less card #2408 pinned).
+
+    Uppercase to match the `W=`/`L=` already on the same card; SPICE
+    subcircuit parameter names are case-insensitive, so both bind onto the
+    lowercase `w`/`l`/`mmin`/`mmax` the `.subckt` declares."""
+    path = _write_gds(
+        _make_sg13cmos5l_mom_finger_stack_layout(marker=marker, levels=(2, 3)),
+        tmp_path / "mom.gds",
+    )
+    report = run_extract(
+        path,
+        "sg13cmos5l",
+        pdk_variant="ihp-sg13cmos5l",
+        pdk_root=_make_pdk_install(tmp_path),
+        output=str(tmp_path / "mom.spice"),
+    )
+
+    assert report["device_counts"] == {name: 1}
+    (card,) = [line for line in _device_cards(report) if f" {name} " in line]
+    assert card.endswith(f" {name} W=3U L=8U MMIN=2 MMAX=3")
+
+
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+def test_sg13cmos5l_mom_capacitor_ignores_routing_that_crosses_the_marker(
+    tmp_path: Path, name: str, marker: tuple[int, int]
+):
+    """Issue #2435: an unrelated `Metal4` route running *across* a
+    `Metal2..Metal3` MoM capacitor must not be counted as a finger level.
+
+    Routing over a capacitor is ordinary layout practice, and the marker is
+    painted over the device's full extent, so any crossing shape overlaps it.
+    Only conductor polygons lying **entirely inside** the marker count as
+    fingers (`extract.py`'s `inside()` narrowing) -- a crossing route leaves
+    the footprint on both sides, so it is excluded and `mmax` stays `3`.
+    Without that narrowing this device would be reported as a 3-layer
+    (`N = 3`) stack instead of the 2-layer one that was drawn."""
+    layout = _make_sg13cmos5l_mom_finger_stack_layout(marker=marker, levels=(2, 3))
+    top = layout.cell("TOP")
+    # Metal4 route crossing the whole 8x3um marker, plus its own net label.
+    top.shapes(layout.layer(50, 0)).insert(_box_um(-4, 1.2, 12, 1.6))
+    top.shapes(layout.layer(50, 2)).insert(
+        kdb.Text("FLYOVER", kdb.Trans(round(11 / _DBU_UM), round(1.4 / _DBU_UM)))
+    )
+
+    path = _write_gds(layout, tmp_path / "mom_flyover.gds")
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "mom_flyover.spice"))
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["params"]["mmin"] == 2
+    assert device["params"]["mmax"] == 3
+
+
+@pytest.mark.parametrize(
+    "name, marker", [("cap_cmomi", (99, 39)), ("cap_cmomf", (99, 40))]
+)
+def test_sg13cmos5l_mom_capacitor_ignores_metal_the_device_family_cannot_reach(
+    tmp_path: Path, name: str, marker: tuple[int, int]
+):
+    """Issue #2435: drawn geometry on a level this entry's `metal_pins`
+    leaves `None` -- cmos5l's `TopMetal1`, which no `cap_cmom*` instance ever
+    populates -- is never read as a finger level, even when it lies entirely
+    inside the marker.
+
+    `metal_pins` is the deck's own statement of which levels this device
+    family reaches, so a `TopMetal1` shape inside the marker is by
+    construction *not* a finger -- it is a landing pad, a shield, or a
+    stub of some other structure. Counting it would report a `Metal2..
+    TopMetal1` stack (`N = 4`) for a device drawn on two levels."""
+    layout = _make_sg13cmos5l_mom_finger_stack_layout(marker=marker, levels=(2, 3))
+    top = layout.cell("TOP")
+    # TopMetal1 pad wholly inside the 8x3um marker.
+    top.shapes(layout.layer(126, 0)).insert(_box_um(2, 1.0, 6, 1.8))
+
+    path = _write_gds(layout, tmp_path / "mom_topmetal.gds")
+    report = run_extract(
+        path, "sg13cmos5l", output=str(tmp_path / "mom_topmetal.spice")
+    )
+
+    assert report["device_counts"] == {name: 1}
+    (device,) = report["devices"]
+    assert device["params"]["mmin"] == 2
+    assert device["params"]["mmax"] == 3
+
+
+def test_sg13cmos5l_mom_capacitor_non_contiguous_stack_warns(tmp_path: Path):
+    """Issue #2435: a measured range with a *gap* in it is reported through
+    `warnings[]` rather than silently accepted.
+
+    A real finger stack is contiguous by construction (the PCell paints every
+    level in `mmin..mmax`), so `Metal1` + `Metal3` fingers with nothing on
+    `Metal2` means the marker encloses something this measurement cannot tell
+    from a finger -- most plausibly a routed shape that both begins and ends
+    inside the marker footprint. The range is still measured as the observed
+    min/max (`1`..`3`), never regressed to a PDK default; the warning is what
+    makes the ambiguity visible."""
+    path = _write_gds(
+        _make_sg13cmos5l_mom_finger_stack_layout(marker=(99, 39), levels=(1, 3)),
+        tmp_path / "mom_gap.gds",
+    )
+    report = run_extract(path, "sg13cmos5l", output=str(tmp_path / "mom_gap.spice"))
+
+    assert report["device_counts"] == {"cap_cmomi": 1}
+    (device,) = report["devices"]
+    assert device["params"]["mmin"] == 1
+    assert device["params"]["mmax"] == 3
+    assert [
+        w
+        for w in report["warnings"]
+        if "cap_cmomi" in w and "Metal2" in w and "contiguous" in w
+    ]
 
 
 def test_sg13cmos5l_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
@@ -1320,7 +1639,15 @@ def test_sg13cmos5l_mom_capacitor_stacked_ports_stay_on_separate_metal_nets(
     assert report["device_counts"] == {"cap_cmomf": 1}
     (device,) = report["devices"]
     assert {device["nets"]["a"], device["nets"]["b"]} == {"M3_NET", "M4_NET"}
-    assert device["params"] == {"w_um": pytest.approx(5.0), "l_um": pytest.approx(5.0)}
+    # `mmin`/`mmax` (issue #2435) follow the stacked ports' own levels: both
+    # routing stubs leave the marker, so no conductor is enclosed by it and
+    # the two `Metal3`/`Metal4` ports are the whole measurement.
+    assert device["params"] == {
+        "w_um": pytest.approx(5.0),
+        "l_um": pytest.approx(5.0),
+        "mmin": 3,
+        "mmax": 4,
+    }
 
 
 def test_sg13cmos5l_is_registered_for_parasitics_extraction(tmp_path: Path):

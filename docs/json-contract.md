@@ -104,6 +104,22 @@ capacitor-shaped device with no computed value at all. See
 `docs/cli/extract.md`'s "MoM capacitor devices" section for the full
 derivation.
 
+**And a new `params` key on an *existing* `devices[].class` is additive by
+the same reasoning**, provided it is a *new measurement* rather than a
+redefinition of an existing key: `devices[].params` is already a per-class
+key map that a consumer must read by name, so an unaware one that reads
+`w_um` keeps reading exactly the `w_um` it always did. The concrete
+precedent: issue #2435 adding `mmin`/`mmax` — the inclusive 1-based
+metal-index range a MoM capacitor's fingers are drawn on — to the
+`cap_cmomi`/`cap_cmomf` classes that had carried only `w_um`/`l_um` since
+#1466. No existing key changed name, type, or meaning; the new pair is
+measured from drawn geometry that was simply not read before, so **no
+`schema_version` bump**. The same limit as above applies: had #2435 instead
+*redefined* what an already-shipped key measures, that would have been
+breaking regardless of the key's name and type staying put. Recorded in
+`CHANGELOG.md` and documented in `docs/cli/extract.md`'s "MoM capacitor
+devices" section, as every additive change is.
+
 **A new opt-in flag adding `null`-by-default fields to an already-shipped
 per-entry shape is likewise additive** — the field exists on every entry
 regardless of whether the flag was given, but only carries a real value when

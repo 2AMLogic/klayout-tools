@@ -571,8 +571,9 @@ def _unbound_resistor_card(
 #: Terminal/parameter name shape :func:`~klayout_tools.extract
 #: .mom_capacitor_device_class` registers for every MoM-capacitor device
 #: class (``cap_cmomi``/``cap_cmomf``) -- two equivalent terminals named
-#: ``A``/``B``, geometry-only parameters named ``W``/``L`` (deliberately no
-#: ``C``/``R`` value parameter -- the real device's capacitance is supplied
+#: ``A``/``B``, geometry parameters named ``W``/``L`` and the finger stack's
+#: metal-index range ``MMIN``/``MMAX`` (deliberately no ``C``/``R`` value
+#: parameter -- the real device's capacitance is supplied
 #: by the model library, not computed here), on a non-empty class name that
 #: already equals the real upstream ``.subckt`` name. Verified unique among
 #: KLayout's own built-in ``kdb.DeviceClass*`` shapes (``DeviceClassResistor``
@@ -583,8 +584,16 @@ def _unbound_resistor_card(
 #: matches a device class against this shape structurally rather than via
 #: ``isinstance`` against a KLayout built-in class, because there is none
 #: for this shape (see that method's own docstring).
+#:
+#: ``MMIN``/``MMAX`` joined the set in issue #2435, when the recognition
+#: step started measuring the finger stack instead of leaving it to the
+#: ``.subckt`` defaults. This set must stay **exactly** what
+#: ``mom_capacitor_device_class`` registers: the match below is an equality
+#: test, so a parameter added on one side and not here silently stops every
+#: MoM-capacitor card being rewritten at all (it falls through to KLayout's
+#: own ``PARAMS:`` default writer -- the #2355 bug).
 _MOM_CAPACITOR_TERMINAL_NAMES = frozenset({"A", "B"})
-_MOM_CAPACITOR_PARAMETER_NAMES = frozenset({"W", "L"})
+_MOM_CAPACITOR_PARAMETER_NAMES = frozenset({"W", "L", "MMIN", "MMAX"})
 
 
 def _unbound_mom_capacitor_card(
@@ -593,11 +602,14 @@ def _unbound_mom_capacitor_card(
     class_name: str,
     width_um: float,
     length_um: float,
+    mmin: int | None = None,
+    mmax: int | None = None,
 ) -> str:
     """The plain-element ``X`` card for one *unbound* MoM-capacitor device
     (``cap_cmomi``/``cap_cmomf``), with its measured ``W``/``L`` geometry
     carried in the same unit-suffix style :func:`_unbound_resistor_card`
-    uses (issue #2355).
+    uses (issue #2355), plus its measured finger-stack metal range
+    ``MMIN``/``MMAX`` (issue #2435).
 
     KLayout's own default primitive writer emits this device's generic,
     two-terminal, no-computed-value ``kdb.DeviceClass()`` shape (see
@@ -617,9 +629,9 @@ def _unbound_mom_capacitor_card(
     cards, so both geometry parameters parse as microns regardless of the
     caller's ``.option scale``.
 
-    **``W``/``L`` are the only parameters written -- deliberately (issue
-    #2408).** The upstream subcircuit this card's trailing class-name token
-    binds onto declares more (``IHP-GmbH/ihp-sg13cmos5l`` at
+    **Four of the upstream subcircuit's parameters are written, three are
+    not.** The subcircuit this card's trailing class-name token binds onto
+    declares (``IHP-GmbH/ihp-sg13cmos5l`` at
     ``607e18d4bd9214a52575c194b4181ef449f9252f``,
     ``libs.tech/ngspice/models/cap_cmomi.lib:60`` /
     ``cap_cmomf.lib:53``)::
@@ -631,27 +643,55 @@ def _unbound_mom_capacitor_card(
 
     (each is one line in the source, soft-wrapped here for width.)
 
-    ``mmin``/``mmax``/``feed``/``subblock``/``mm_ok`` are left off, taking
-    those ``.subckt`` defaults, because none of them is recoverable from the
-    geometry this device's recognition step reads (one marker plus two pin
-    ports -- see ``_build_mom_capacitor_extractor`` in ``extract.py``;
-    upstream's own ``CapMomExtractor`` does not capture them either).
-    Writing the defaults out explicitly would simulate identically -- they
-    *are* the defaults -- while asserting a drawn metal range and feed
-    variant ``klt extract`` never measured, converting a visible gap into an
-    invisible wrong answer for any design that drew a non-default device.
-    ``mmax=4`` is keyed to cmos5l's own Metal1..Metal4 stack while the
-    ``sg13g2`` deck declares the same device names over Metal1..Metal5, and
-    ``feed`` exists on ``cap_cmomi`` only, so there is no deck-independent
-    set to hardcode in the first place. Documented as a known limitation for
-    consumers in ``docs/cli/extract.md``'s "MoM capacitor devices" section;
-    pinned by ``tests/test_sg13cmos5l_deck.py``'s own
+    ``mmin``/``mmax`` **are** written as of issue #2435, because they are
+    now measured: ``_build_mom_capacitor_extractor`` (``extract.py``) reads
+    the drawn per-metal conductor geometry enclosed by the recognition
+    marker and reports the inclusive 1-based index range it spans. That
+    closes the #2408 gap in the direction #2408 itself named as the real
+    fix -- measure them, never default them. They are written uppercase
+    (``MMIN=``/``MMAX=``) purely for consistency with the ``W=``/``L=``
+    already on this card; SPICE subcircuit parameter names are
+    case-insensitive, so they bind onto the lowercase ``mmin``/``mmax`` the
+    ``.subckt`` declares exactly as ``W=``/``L=`` already bind onto its
+    ``w``/``l``. ``mmin``/``mmax`` of ``None`` (or any non-positive value --
+    a device read back from a card that never carried them) omits both
+    tokens rather than writing a fabricated ``0``: the #2408 rule still
+    holds for a value that was not measured.
+
+    ``feed``/``subblock``/``mm_ok`` are still left off, taking those
+    ``.subckt`` defaults:
+
+    - ``feed`` (``cap_cmomi`` only -- ``none``/``same``/``double``) is only
+      *partly* recoverable and is tracked separately rather than guessed
+      at here. The PCell's ``same`` variant is distinguishable (it stacks
+      its two pins on adjacent metals, so the two recognised ports carry
+      different metal indices), but ``double`` and ``none`` both place two
+      ports on the top metal and are told apart only by where those ports
+      sit relative to the core -- which this recognition step, reading one
+      marker plus two port polygons, does not know. Emitting ``double`` for
+      a ``none`` layout would be exactly the invisible wrong answer #2408
+      rejected, and ``none`` is upstream's own documented *not a standalone
+      2-terminal device* configuration. Split out as issue #2445, which
+      settles the question against the PCell generator itself rather than
+      guessing here.
+    - ``subblock`` is a PCell layout switch (substrate isolation block) with
+      no counterpart in the recognition geometry at all.
+    - ``mm_ok`` is a documented no-op in this release ("accepted for
+      interface parity ... but a NO-OP", same ``.lib`` headers), so omitting
+      it costs nothing.
+
+    Documented for consumers in ``docs/cli/extract.md``'s "MoM capacitor
+    devices" section; pinned by ``tests/test_sg13cmos5l_deck.py``'s own
+    ``test_sg13cmos5l_mom_capacitor_card_writes_measured_metal_range`` and
     ``test_sg13cmos5l_mom_capacitor_card_omits_unmeasured_pdk_subckt_params``.
     """
-    return (
+    card = (
         f"X{name} {pins} {class_name} "
         f"W={_format_um(width_um)} L={_format_um(length_um)}"
     )
+    if mmin is not None and mmax is not None and mmin >= 1 and mmax >= 1:
+        card += f" MMIN={mmin} MMAX={mmax}"
+    return card
 
 
 class ModelBindingError(Exception):
@@ -1716,7 +1756,7 @@ def create_model_binding_delegate(
 
             Matches the device class structurally -- non-empty name,
             terminal names exactly ``{"A", "B"}``, parameter names exactly
-            ``{"W", "L"}`` -- rather than by ``isinstance`` against a
+            ``{"W", "L", "MMIN", "MMAX"}`` -- rather than by ``isinstance`` against a
             KLayout built-in class, because ``mom_capacitor_device_class``
             (``extract.py``) registers a plain ``kdb.DeviceClass()``, not a
             ``kdb.DeviceClassCapacitor``/``DeviceClassResistor`` subclass;
@@ -1753,11 +1793,26 @@ def create_model_binding_delegate(
             if width_um is None or length_um is None:
                 return False
 
+            # Issue #2435: the measured finger-stack metal range. Read
+            # through the same `_device_param` helper, and passed on as
+            # `None` when absent/non-positive so
+            # `_unbound_mom_capacitor_card` omits the tokens rather than
+            # writing a fabricated `0` (see its own docstring) -- the case
+            # for a device recovered from a pre-#2435 card.
+            mmin = self._device_param(device, "MMIN")
+            mmax = self._device_param(device, "MMAX")
+
             name = self.format_name(device.expanded_name())
             pins = " ".join(self.net_to_string(net) for net in nets)
             self.emit_line(
                 _unbound_mom_capacitor_card(
-                    name, pins, device_class.name, width_um, length_um
+                    name,
+                    pins,
+                    device_class.name,
+                    width_um,
+                    length_um,
+                    int(round(mmin)) if mmin is not None else None,
+                    int(round(mmax)) if mmax is not None else None,
                 )
             )
             return True

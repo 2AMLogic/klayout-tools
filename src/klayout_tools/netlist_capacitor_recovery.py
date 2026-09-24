@@ -448,13 +448,22 @@ def _recover_mom_x_card(
     path follows).
 
     The writer's own card contract is ``X<name> a b cap_cmomi W=<um>U
-    L=<um>U`` (issue #2355 -- unit-suffixed, no ``PARAMS:`` keyword). The
+    L=<um>U MMIN=<n> MMAX=<n>`` (issue #2355 -- unit-suffixed, no
+    ``PARAMS:`` keyword -- extended by issue #2435 with the measured
+    finger-stack metal range). The
     reader's parameter parsing delivers ``W``/``L`` SI-scaled (``10U`` ->
     ``1e-5``), so -- exactly like :func:`_recover_bulk_resistor_x_card`'s own
     ``L``/``W`` handling -- they are converted to the micrometre domain
     ``devices[].params``'s ``w_um``/``l_um`` and this
     ``mom_capacitor_device_class`` both use. Any other declared parameter
-    (there are none today) rides through unconverted.
+    rides through unconverted -- which is exactly right for ``MMIN``/
+    ``MMAX``: they are dimensionless 1-based metal indices carrying no unit
+    suffix, so the reader hands them over as the plain integers the card
+    spelled. A pre-#2435 card that carries neither simply leaves both at the
+    class's own ``0.0`` default; they are declared non-primary (see
+    :func:`klayout_tools.extract.mom_capacitor_device_class`), so that
+    absence can never turn into an ``klt lvs`` device-parameter mismatch
+    against a freshly extracted side that measured them.
     """
 
     from .extract import mom_capacitor_device_class

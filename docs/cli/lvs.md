@@ -509,8 +509,13 @@ use (a bare-micron `PARAMS: W=4 L=10` reads as 4/10 *metres* under
 `.option scale=1`, silently oversizing the device by `1e6`x):
 
 ```
-XD_$1 A B cap_cmomi W=4U L=10U
+XD_$1 A B cap_cmomi W=4U L=10U MMIN=1 MMAX=5
 ```
+
+(`MMIN`/`MMAX` — the measured finger-stack metal-index range — joined the
+card in issue #2435; they carry no unit suffix because a metal index is a
+dimensionless 1-based ordinal. A pre-#2435 card omitting them still reads
+back fine; see "Reference cards may omit `MMIN`/`MMAX`" below.)
 
 Reading that card back through a plain `kdb.NetlistSpiceReader()` (no
 delegate) does not error: an `X` card naming an undefined subcircuit
@@ -527,11 +532,12 @@ finding with no device/parameter/net name.
 naming one of that deck's own custom device classes (today: its
 `mom_capacitors` entries) and creates a real device of that class instead —
 the identical `kdb.DeviceClass` shape (`A`/`B` terminals, declared
-equivalent, `W`/`L` parameters) the layout-extraction side itself registers,
-built from one shared function (`klayout_tools.extract
-.mom_capacitor_device_class`) so both sides cannot drift apart. The device
-then participates in `klt lvs`'s ordinary device-level compare exactly like
-an `M`/`R`/`C`/`D` card already does:
+equivalent, `W`/`L` parameters plus the `MMIN`/`MMAX` finger-stack range
+issue #2435 added) the layout-extraction side itself registers, built from
+one shared function (`klayout_tools.extract.mom_capacitor_device_class`) so
+both sides cannot drift apart. The device then participates in `klt lvs`'s
+ordinary device-level compare exactly like an `M`/`R`/`C`/`D` card already
+does:
 
 - **Device census.** `counts.devices.layout`/`.reference`/`.matched` counts
   it like any other device — no longer silently absent.
@@ -542,6 +548,20 @@ an `M`/`R`/`C`/`D` card already does:
   reports the ordinary `device.property`/`device.unmatched` entry, naming
   the device instance and its class (`cap_cmomi`), instead of a generic,
   un-named `topology` finding.
+
+**Reference cards may omit `MMIN`/`MMAX`.** Both are declared *non-primary*
+(KLayout's "secondary parameter" flag) on the shared device class, so
+`kdb.NetlistComparer` never compares them and `klt lvs` never reports a
+`device.property` finding for them. That is deliberate: a hand-written or
+pre-#2435 reference card is free to leave `mmin`/`mmax` at the PDK
+`.subckt`'s own defaults, and such a card is not describing a *different
+device* from the drawn one — turning a modelling-parameter difference into a
+connectivity-style LVS failure would misreport it. `W`/`L` stay primary and
+are compared exactly as before. A card that does carry them recovers them as
+the plain 1-based integers it spelled (they are dimensionless, so the
+reader's SI-suffix conversion does not apply); one that does not leaves the
+recovered device at the class's own `0` default, which is why `0` is treated
+as "this side never stated it" rather than as a measurement.
 
 A hand- or tool-generated reference netlist for this family must emit an
 `X <name> <net> <net> cap_cmomi W=<value>U L=<value>U` card naming the same

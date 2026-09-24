@@ -43,6 +43,20 @@ if TYPE_CHECKING:
     import klayout.db as kdb
 
 
+#: KLayout MOS device-parameter name -> ``devices[].params`` key, for the four
+#: source/drain junction measurements (issue #695) that are all reported the
+#: same way: rounded to ``_PARAM_PRECISION_UM``, present regardless of
+#: ``--pdk``. Kept as a table rather than four identical ``elif`` branches in
+#: :func:`_describe_devices` -- see the branch that reads it for what each key
+#: means. No other device class registers these parameter names.
+_MOS_JUNCTION_PARAM_JSON_KEYS = {
+    "AS": "as_um2",
+    "AD": "ad_um2",
+    "PS": "ps_um",
+    "PD": "pd_um",
+}
+
+
 def _describe_devices(
     circuit: kdb.Circuit,
     device_instance_paths: Mapping[int, list[dict[str, Any]]] | None = None,
@@ -159,34 +173,41 @@ def _describe_devices(
                 params["r_ohm"] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_OHM
                 )
-            elif param.name == "AS":
-                # MOS source-diffusion junction area, square micrometres
-                # (issue #695). Present regardless of `--pdk`: this is the
-                # same value the unbound `M`-card form's `AS=...` already
-                # carries and, since #695, the same value a `--pdk`-bound `X`
-                # card's own `AS=...` carries -- so a caller reading this
-                # field never needs an unbound extraction just to recover it.
-                params["as_um2"] = round(
+            elif param.name in _MOS_JUNCTION_PARAM_JSON_KEYS:
+                # MOS source/drain junction geometry (issue #695), all four
+                # rounded to the same micrometre-domain precision, so one
+                # name->key table replaces four identical branches:
+                #
+                #   AS -> as_um2  source-diffusion area, square micrometres
+                #   AD -> ad_um2  drain-diffusion area, square micrometres
+                #   PS -> ps_um   source-diffusion perimeter, micrometres
+                #   PD -> pd_um   drain-diffusion perimeter, micrometres
+                #
+                # Present regardless of `--pdk`: these are the same values
+                # the unbound `M`-card form's `AS=`/`AD=`/`PS=`/`PD=` already
+                # carry and, since #695, the same values a `--pdk`-bound `X`
+                # card's own carry -- so a caller reading these fields never
+                # needs an unbound extraction just to recover them.
+                params[_MOS_JUNCTION_PARAM_JSON_KEYS[param.name]] = round(
                     device.parameter(param.id()), _PARAM_PRECISION_UM
                 )
-            elif param.name == "AD":
-                # MOS drain-diffusion junction area, square micrometres --
-                # see `AS` above (issue #695).
-                params["ad_um2"] = round(
-                    device.parameter(param.id()), _PARAM_PRECISION_UM
-                )
-            elif param.name == "PS":
-                # MOS source-diffusion junction perimeter, micrometres --
-                # see `AS` above (issue #695).
-                params["ps_um"] = round(
-                    device.parameter(param.id()), _PARAM_PRECISION_UM
-                )
-            elif param.name == "PD":
-                # MOS drain-diffusion junction perimeter, micrometres -- see
-                # `AS` above (issue #695).
-                params["pd_um"] = round(
-                    device.parameter(param.id()), _PARAM_PRECISION_UM
-                )
+            elif param.name in ("MMIN", "MMAX"):
+                # MoM-capacitor device classes only (issue #2435,
+                # `mom_capacitor_device_class` in `extract.py`): the
+                # inclusive, **1-based** metal-index range the device's
+                # fingers are drawn on -- the upstream `.subckt`'s own
+                # `mmin`/`mmax`, whose layer count `N = mmax - mmin + 1`
+                # keys the compact model's capacitance density.
+                #
+                # Reported under the PDK's own parameter spelling rather
+                # than a `_um`/`_ohm`-suffixed one: these are dimensionless
+                # layer indices, not a measurement in a physical unit, and
+                # the spelling a consumer diffs against its own `cap_cmom*`
+                # instantiation is `mmin`/`mmax`. Emitted as `int`, not
+                # `float`, for the same reason -- a metal index is only ever
+                # a whole number, and JSON's single `number` type carries
+                # both (see `docs/json-contract.md`).
+                params[param.name.lower()] = int(round(device.parameter(param.id())))
 
         devices.append(
             {

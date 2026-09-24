@@ -1179,12 +1179,13 @@ class MomCapacitorDevice:
     extractor computes at all -- unlike a MiM cap's plate-overlap
     ``area_cap_f_um2``/``perim_cap_f_um`` coefficients, there is no
     capacitance formula to transcribe here. This entry therefore reports
-    only the device's drawn dimensions (``W``/``L``, read off the marker's
-    own bounding box) as matched parameters, the same "dimension-matched,
-    not value-computed" shape a MOSFET already uses -- see
-    ``docs/json-contract.md``'s "MoM capacitor devices" note for the
+    the device's drawn dimensions (``W``/``L``, read off the marker's
+    own bounding box) and its finger stack's metal-index range
+    (``MMIN``/``MMAX``, issue #2435) as matched parameters, the same
+    "dimension-matched, not value-computed" shape a MOSFET already uses --
+    see ``docs/json-contract.md``'s "MoM capacitor devices" note for the
     resulting ``devices[].params`` shape (no ``c_f``/``area_um2``/
-    ``perimeter_um`` keys, only ``w_um``/``l_um``).
+    ``perimeter_um`` keys; ``w_um``/``l_um`` plus ``mmin``/``mmax``).
 
     ``marker`` is the PDK's dedicated MoM device-recognition mark layer
     (e.g. sg13g2's ``Recog.mom`` 99/39 for ``cap_cmomi``, ``Recog.momf``
@@ -1218,6 +1219,20 @@ class MomCapacitorDevice:
     once, which would bridge two ports the real device keeps electrically
     independent), so ordinary contact/via/metal routing to that metal
     reaches this device's matching terminal.
+
+    ``metal_pins`` additionally decides **which metal levels the finger-stack
+    measurement reads** (issue #2435). For each index it leaves non-``None``,
+    ``extract.py`` hands the extractor that level's own drawn conductor
+    geometry -- the owning deck's ``metals[i]`` layer, *not* a second
+    declared field, since ``MomCapacitorDevice`` already index-aligns with
+    it -- narrowed to the polygons lying entirely inside ``marker``, and
+    ``MMIN``/``MMAX`` become the lowest/highest such level (unioned with the
+    two recognised ports' own levels, which always lie inside the drawn
+    range). A level left ``None`` is therefore never read as a finger level:
+    that is what stops an ordinary route running across the capacitor on a
+    level this device family cannot reach (cmos5l's ``TopMetal1``, sg13g2's
+    ``TopMetal1``/``TopMetal2``) from being counted into the stack. No new
+    field is needed on this dataclass for the feature.
 
     ``name`` is the extracted device-class name (``devices[].class`` in the
     JSON response, and one of the values :attr:`ExtractionDeck.device_classes`
