@@ -14,6 +14,50 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2463, `klt erc` + `klt signoff`, additive — **no**
+  `schema_version` bump on either verb: one new optional `nets[]` key on the
+  request side and one new `erc_findings[].rule` value on the response side,
+  no output field added, removed, renamed, or retyped, and a spec that omits
+  the key grades byte-identically; both halves are the value-set growth
+  [`docs/json-contract.md`](docs/json-contract.md)'s "value sets within an
+  unchanged shape can grow" caveat covers, recorded here because that caveat
+  names this file as the source of truth for which rule ids exist as of a
+  given date): a `nets[]` entry may now name the other entry it is
+  **intentionally one electrical net** with —
+  `{"name": "SUB_VSS", "kind": "supply", "same_net_as": "VSS"}` — for a
+  layout that deliberately ties two labelled conductors together, typically
+  a sub-block labelling its ground terminal with its own port name while the
+  assembly that instantiates it labels the same node with the assembly's
+  name. Before this key there was no good option: declaring both names
+  reported a permanent false `erc.supply_short` on a correct layout (and any
+  signoff item gated on "no `erc.supply_short`" stayed red forever), while
+  declaring only one left the other name's conductor uncovered — it could be
+  cut with no finding at all. The declaration **adds a check rather than
+  suppressing one**: for the declared pair (and only that pair) the short
+  naming them both — `erc.supply_short` or `erc.multiply_driven_net` — is no
+  longer reported, because the tie is the design, and its *absence* is
+  reported instead as the new `erc_findings[].rule` value
+  **`erc.expected_short_missing`**, carrying the pair in `net`/`other_net`
+  exactly as `erc.supply_short` does. Drawn ⇒ clean, cut ⇒ a finding: the
+  same falsifiable shape `nets[].islands` gives the island count. The
+  relation is symmetric (write it on whichever entry reads more naturally;
+  writing it on both declares one tie, not two), may name an entry declared
+  earlier or later in the array, and is **transitive** — `B: same_net_as A`
+  plus `C: same_net_as A` asserts A, B and C are one net. Every *other* pair
+  is unaffected: a third declared name landing on the same conductor still
+  reports `erc.supply_short` against each member of the group. `null` is
+  identical to omitting the key; a value that is not the name of a declared
+  `nets[]` entry — a typo, or the entry's own name — is a spec error rather
+  than a silent no-op. `klt signoff`'s T1 item 11 grades the new rule under
+  the same declared-supply-name filter `erc.unconnected_net` uses (rather
+  than `erc.supply_short`'s unconditional one, since this rule can also name
+  two *signal* nets, which item 11 says nothing about): an
+  `erc.expected_short_missing` naming a declared supply blocks the item and
+  renders `supply_not_continuous`, so declaring a supply tie converts a
+  false blocking finding into a real check rather than into no evidence at
+  all. See [`docs/cli/erc.md`](docs/cli/erc.md)'s "Declaring a deliberate
+  tie", [`docs/cli/signoff.md`](docs/cli/signoff.md)'s item-11 tables, and
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md) item 11.
 - **Added** (#2461, `klt lvs`, additive — **no** `schema_version` bump: one
   new `mismatches[].category` value and one new top-level response field, no
   existing field renamed, retyped, or redefined): a resistor or capacitor
