@@ -260,7 +260,18 @@ written to every block.
    — a yield estimate with its confidence interval, sample-size verdict, and
    Cpk/sigma-to-spec against the row's own limits — is the machine-checkable
    evidence for this item (`klt signoff`'s tier-verdict mode grades it the
-   same way it grades the deterministic items above).
+   same way it grades the deterministic items above). **This item's evidence
+   verb needs a from-source toolchain.** Unlike every other T1 item's
+   evidence verb (`drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
+   `functional-verification`, `erc`, `place-and-route`), `klt yield`
+   requires the `klt_yield_native` Rust extension, which is not published as
+   a prebuilt wheel: neither `pip install klayout-tools`/`uv tool install
+   klayout-tools` nor the git-pinned form reaches it, so a consumer pinning
+   a published release cannot regenerate this item's evidence — or
+   re-derive a report already committed to their repo — from that pin
+   alone. Producing it needs a repo checkout with a Rust toolchain; see
+   `docs/cli/yield.md`'s "Not reachable from a single-package install"
+   callout for the full statement and the build steps.
 7. **Post-layout verification**
    - *Analog* — the spec suite re-run against the netlist extracted from
      the layout, not only the drawn schematic (#252). Parasitic extraction
