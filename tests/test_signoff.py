@@ -1438,6 +1438,38 @@ LVS_MATCH_SUPPLY_ALIAS_CORRESPONDENCE_ENVELOPE = {
     ],
 }
 
+#: Issue #2495: the shape a SPICE-reference compare takes when one device
+#: *parameter* differs and nothing about either rail does -- one MOSFET's
+#: `w_um` restated. Measured on a real block (klt 0.6.0), that perturbation
+#: reports `status: "mismatch"` with `category_counts["device.property"]`,
+#: and collapses the comparer's net pairing from 12 rows to 8, taking one of
+#: the two declared supplies out of `net_correspondence` with it -- even
+#: though the defect has no bearing on any supply net. `net_correspondence`
+#: lists only *matched* nets, so the supply-pairing predicate cannot tell
+#: this apart from a reference that never declared the supplies at all.
+LVS_DEVICE_PARAMETER_MISMATCH_ENVELOPE = {
+    **LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+    "status": "mismatch",
+    "mismatch_count": 1,
+    "category_counts": {"device.property": 1},
+    "mismatches": [
+        {
+            "category": "device.property",
+            "severity": "error",
+            "description": "matched device parameter 'w_um' differs",
+            "side": None,
+            "net": None,
+            "device": {"layout": "MN0", "reference": "MN0"},
+            "property": {"name": "w_um", "layout": 1.0, "reference": 1.5},
+        }
+    ],
+    "net_correspondence": [
+        {"layout": "A", "reference": "A", "pin": True},
+        {"layout": "VGND", "reference": "VGND", "pin": True},
+        {"layout": "VPWR", "reference": None, "pin": False},
+    ],
+}
+
 DRC_ERROR_ENVELOPE = {
     "schema_version": 1,
     "error": {"command": "drc", "message": "file not found: missing.gds"},
@@ -10209,6 +10241,13 @@ def test_item_11_rejects_an_unrelated_kind_in_the_cited_set(tmp_path):
 
 
 def test_item_11_unmet_when_the_cited_lvs_report_itself_fails(tmp_path):
+    """A failing LVS citation can never carry item 11 to `met`. Which *unmet*
+    reason it renders depends on the ERC half (issue #2495): this citation's
+    ERC run is a complete, continuous supply spec, so the report says the LVS
+    half is the one that is unavailable rather than collapsing both halves
+    into `check_failed` -- see
+    `test_item_11_lvs_failure_without_erc_supply_evidence_is_check_failed`
+    for the other side of that split."""
     result = build_tier_report(
         _manifest(
             kind="analog",
@@ -10222,7 +10261,141 @@ def test_item_11_unmet_when_the_cited_lvs_report_itself_fails(tmp_path):
 
     item = _item_11(result)
     assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_did_not_pass"
+
+
+def test_item_11_distinguishes_a_supply_irrelevant_lvs_defect(tmp_path):
+    """Issue #2495: `net_correspondence` lists only *matched* nets, so the
+    supply-pairing predicate is destroyed by any mismatch -- including one
+    with no bearing on a rail. A block whose ERC supply evidence is complete
+    and falsifiable, and whose LVS mismatch is a restated device parameter,
+    must therefore not be reported identically to a block whose reference
+    never carried the supplies at all (`lvs_supply_unproven`) or that cited
+    no ERC supply evidence (`check_failed`/`no_evidence`).
+
+    Still `unmet` -- an unavailable half is not a proven one -- but the
+    reason names which half is missing, and the detail names the supplies
+    the ERC half did prove so the claim stays falsifiable."""
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    lvs_envelope=LVS_DEVICE_PARAMETER_MISMATCH_ENVELOPE,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_did_not_pass"
+    assert item["citation"] is None
+    assert item["detail"]["power_delivery"] == {
+        "supply_nets": ["VPWR", "VGND"],
+        "lvs_status": "mismatch",
+        "power_connectivity_status": "unchecked",
+    }
+
+
+def test_item_11_lvs_failure_without_erc_supply_evidence_is_check_failed(tmp_path):
+    """The control for the test above (issue #2495): the new reason must be
+    earned by the ERC half, not handed out to every failing LVS citation. A
+    spec that never declared a supply net asked none of item 11's questions,
+    so a failing LVS beside it still renders plain `check_failed` -- the two
+    states stay distinguishable in the report, which is the whole point."""
+    spec = {**ERC_SUPPLY_SPEC, "nets": [{"name": "A", "kind": "signal"}]}
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_spec=spec,
+                    lvs_envelope=LVS_DEVICE_PARAMETER_MISMATCH_ENVELOPE,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
     assert item["reason"] == "check_failed"
+    assert "power_delivery" not in item.get("detail", {})
+
+
+def test_item_11_lvs_failure_beside_a_discontinuous_supply_is_check_failed(tmp_path):
+    """Issue #2495, the other half of the control above: an ERC run that
+    *did* ask and found a declared supply split across islands has not
+    proven power delivery either, so its failing LVS citation must not be
+    upgraded to `lvs_did_not_pass` -- that reason asserts the ERC half is
+    complete."""
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=ERC_SPLIT_SUPPLY_ENVELOPE,
+                    lvs_envelope=LVS_DEVICE_PARAMETER_MISMATCH_ENVELOPE,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "check_failed"
+
+
+def test_item_11_digital_lvs_failure_renders_the_same_distinct_reason(tmp_path):
+    """Issue #2495: the LVS pass gate is common to both of item 11's
+    branches, so an RTL-flow digital block with a complete ERC supply spec,
+    a real PDN, and a failing LVS report reads the same way -- the ERC half
+    is proven, the LVS half is unavailable."""
+    lvs = {**LVS_MATCH_POWER_MATCH_ENVELOPE, "status": "mismatch"}
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", lvs_envelope=lvs
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_did_not_pass"
+    assert item["detail"]["power_delivery"]["power_connectivity_status"] == "match"
+
+
+def test_item_11_lvs_critical_metric_blocker_still_names_the_blocker(tmp_path):
+    """Issue #2495 must not drop the LVS part's declared-critical-metric
+    detail (issue #2094) when it re-labels the reason: the blocking metric is
+    still the reader's only pointer to *why* the LVS half is unavailable."""
+    lvs = {
+        **LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE,
+        "metrics": {"drc__error__count": 3},
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={"11": _power_delivery_evidence(tmp_path, lvs_envelope=lvs)},
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "lvs_did_not_pass"
+    assert (
+        item["detail"]["critical_metric_blockers"][0]["metric"] == "drc__error__count"
+    )
 
 
 @pytest.mark.parametrize("value", [-1, True, "bad"], ids=["negative", "true", "string"])

@@ -1845,12 +1845,31 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   not satisfy item 11, unlike item 4); otherwise, its
 #:   ``net_correspondence`` does not pair every declared supply net to a
 #:   reference-side net, so the supplies were not part of the compare.
+#: - :data:`_REASON_LVS_DID_NOT_PASS` -- the ERC half of the item *is*
+#:   complete (every declared supply resolved to its declared island count,
+#:   every declared tie was computed and found, no supply-side finding), and
+#:   the cited LVS report did not pass on its own terms, so the LVS half is
+#:   **unavailable** rather than answered. Still ``"unmet"`` -- an
+#:   unavailable half is not a proven one -- but distinct from the plain
+#:   :data:`_REASON_CHECK_FAILED` a failing LVS citation renders when the ERC
+#:   half proves nothing either (issue #2495). The distinction is what the
+#:   item's own scope note asks for: ``net_correspondence`` lists only
+#:   *matched* nets, so the supply-pairing predicate
+#:   (:func:`_lvs_reference_carries_supplies`) is destroyed by **any**
+#:   mismatch -- including a device-parameter delta or a signal-net
+#:   reconnection that cannot make or break a supply connection. Without this
+#:   reason, "this block's rails are proven continuous and tied; its compare
+#:   has one disclosed, supply-irrelevant defect" and "this block cited no
+#:   supply evidence at all" render identically. Fix: the LVS defect (item 4
+#:   is blocked on it too) -- never the ERC spec, which already asked and
+#:   answered.
 _REASON_NO_PDN = "no_pdn"
 _REASON_SUPPLY_SPEC_INCOMPLETE = "supply_spec_incomplete"
 _REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE = "supply_spec_disclosed_unexpressible"
 _REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION = "supply_spec_disclosed_tool_limitation"
 _REASON_SUPPLY_NOT_CONTINUOUS = "supply_not_continuous"
 _REASON_LVS_SUPPLY_UNPROVEN = "lvs_supply_unproven"
+_REASON_LVS_DID_NOT_PASS = "lvs_did_not_pass"
 
 #: The three :func:`_classify` kinds T1 item 11's compound evidence list may
 #: cite (issue #2025). A cited part of any other recognised kind renders
@@ -4315,6 +4334,17 @@ def build_tier_report(
       of the item is unproven: ``power_connectivity.status`` is not
       ``"match"`` (with a PDN citation), or the reference netlist did not
       carry the supply nets (without one).
+    - ``"lvs_did_not_pass"`` (issue #2495, item 11 only) -- the ERC half of
+      the item *is* complete (every declared supply continuous, every
+      declared tie computed and found, no supply-side finding) and the cited
+      LVS report did not pass on its own terms, so the LVS half is
+      unavailable rather than answered. Still unmet, but distinct from the
+      plain ``"check_failed"`` a failing LVS citation renders beside an ERC
+      run that proved nothing either -- without the split, "this block's
+      rails are proven and its compare has one disclosed, supply-irrelevant
+      defect" and "this block cited no supply evidence at all" read
+      identically. Fix: the LVS defect (item 4 is blocked on it too), never
+      the ERC spec.
     - ``"ungradeable_by_build"`` (issue #2176) -- the manifest cited
       evidence for an item this build has no grading rules for at all
       (``graded_by_build: False``, see above). Not a statement about the
@@ -6181,6 +6211,61 @@ def _resolve_erc_supply_spec(
     return supply_spec, None, {}
 
 
+def _failed_lvs_verdict(
+    envelope: dict[str, Any], supply_spec: dict[str, Any] | None
+) -> tuple[str, dict[str, Any]]:
+    """The ``(reason, detail)`` T1 item 11 reports for a cited LVS report
+    that did not pass on its own terms (:func:`_check_passed`), given the
+    ERC half's already-resolved ``supply_spec`` (issue #2495).
+
+    A failing LVS citation can never carry item 11 to ``"met"`` -- both
+    branches' LVS half rests on the same compare, and an unavailable half is
+    not a proven one. What this decides is *which* ``"unmet"`` the report
+    states, because the two states behind it call for opposite actions:
+
+    - ``supply_spec is None`` -- the ERC half proved nothing about power
+      delivery either (no supply declared, no computed tie, or a supply-side
+      finding), so nothing here is established at all. Plain
+      :data:`_REASON_CHECK_FAILED`, exactly as before this split existed.
+    - a resolved ``supply_spec`` -- the ERC half *is* complete: every
+      declared supply resolved to its declared island count, every declared
+      tie was computed and found, and no supply-side finding was reported.
+      Only the LVS half is unavailable, which
+      :data:`_REASON_LVS_DID_NOT_PASS` says and ``check_failed`` cannot.
+
+    The distinction matters because item 11's analog branch reads its LVS
+    half out of ``net_correspondence``, which lists only *matched* nets
+    (``_build_net_correspondence`` in ``lvs_mismatch.py``) -- so the
+    supply-pairing predicate is destroyed by **any** mismatch, including a
+    restated device parameter or a moved signal-net connection that cannot
+    make or break a supply connection. Collapsing that into the same
+    ``check_failed`` a block with zero supply evidence renders would read as
+    "power delivery unverified" when the actual state is "power delivery
+    verified structurally; the item's second half is unavailable for an
+    unrelated reason".
+
+    The detail keeps the LVS part's declared-critical-metric blockers (issue
+    #2094) either way -- they are the reader's pointer to *why* the report
+    did not pass -- and, for the distinct reason, adds a ``power_delivery``
+    block naming what the ERC half actually proved (its supply nets) beside
+    the two verdict tokens that made the LVS half unavailable, so the claim
+    the reason makes stays falsifiable against the cited artifacts.
+    """
+    detail = _critical_metric_detail(envelope)
+    if supply_spec is None:
+        return _REASON_CHECK_FAILED, detail
+    return _REASON_LVS_DID_NOT_PASS, {
+        **detail,
+        "power_delivery": {
+            "supply_nets": list(supply_spec["supply_nets"]),
+            "lvs_status": envelope.get("status"),
+            "power_connectivity_status": (envelope.get("power_connectivity") or {}).get(
+                "status"
+            ),
+        },
+    }
+
+
 def _grade_power_delivery(
     specs: list[dict[str, Any]], *, partition_kind: str
 ) -> tuple[str, str | None, dict[str, Any] | None, dict[str, Any]]:
@@ -6224,6 +6309,15 @@ def _grade_power_delivery(
     ``gate-level-verilog`` reference cannot satisfy, so an RTL-flow digital
     block cannot reach ``"met"`` by simply omitting its P&R citation.
 
+    **A failing LVS citation blocks both branches, and the reason says which
+    half is missing** (issue #2495). The ERC half is therefore resolved
+    *before* the LVS pass gate rather than after it: a report that did not
+    pass renders :data:`_REASON_LVS_DID_NOT_PASS` when the ERC half is a
+    complete, continuous supply spec and plain :data:`_REASON_CHECK_FAILED`
+    when it is not -- see :func:`_failed_lvs_verdict` for why the two must
+    not collapse into one token. The item stays ``"unmet"`` either way; no
+    block reaches ``"met"`` on an LVS report that did not pass.
+
     ``partition_kind`` is accepted (and carried into the citation) so the
     report says which column's rule was applied, and so a future per-kind
     divergence has a place to land.
@@ -6241,7 +6335,8 @@ def _grade_power_delivery(
     :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE`,
     :data:`_REASON_SUPPLY_SPEC_DISCLOSED_TOOL_LIMITATION`,
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
-    :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
+    :data:`_REASON_LVS_SUPPLY_UNPROVEN`,
+    :data:`_REASON_LVS_DID_NOT_PASS`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
     Issue #2496: ``stale_evidence``/``unverifiable_provenance`` can also
     arise a second way for the ``erc`` part specifically -- not from the
@@ -6277,15 +6372,15 @@ def _grade_power_delivery(
         # `wrong_kind` means everywhere else in this module.
         return "unmet", _REASON_WRONG_KIND, None, {}
 
-    if not _check_passed("lvs", lvs["envelope"]):
-        return (
-            "unmet",
-            _REASON_CHECK_FAILED,
-            None,
-            _critical_metric_detail(lvs["envelope"]),
-        )
-
+    # Issue #2495: the ERC half is resolved *before* the LVS pass gate, not
+    # after it, so a failing LVS citation can say which of the two halves is
+    # actually missing (`_failed_lvs_verdict`). Resolution is a pure read of
+    # the already-resolved ERC part plus the spec document it names, so
+    # doing it unconditionally changes nothing but the reason rendered.
     supply_spec, reason, detail = _resolve_erc_supply_spec(erc)
+    if not _check_passed("lvs", lvs["envelope"]):
+        lvs_reason, lvs_detail = _failed_lvs_verdict(lvs["envelope"], supply_spec)
+        return "unmet", lvs_reason, None, lvs_detail
     if supply_spec is None:
         return "unmet", reason, None, detail
 

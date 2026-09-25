@@ -116,6 +116,30 @@ not `klt --version`, if you need to detect this kind of drift. See
   `inconclusive`/`monte_carlo.inconclusive` here, within the same unreleased
   window, so no released contract surface changes.
 
+- **Added** (#2495, `klt signoff --manifest` T1 item 11; additive — **no**
+  `schema_version` bump: one new `reason` token and one new `detail` key on
+  an already-`unmet` item, no existing field changed): item 11's LVS half is
+  a **participation** test, and `net_correspondence` lists only the nets the
+  comparer *matched* — so for a SPICE reference, whose supplies are declared
+  by construction, "every declared supply appears paired" is implied by any
+  `match` and destroyed by any `mismatch`, including one with no bearing on
+  a rail (a restated MOSFET `W`/`L`, a moved signal-net drain connection).
+  That coupling is real and stays: no block reaches `met` on item 11 while
+  its compare is mismatched. What changes is that the report now says
+  **which half is missing**. A failing `lvs` part beside a complete,
+  continuous ERC supply spec renders the new reason `lvs_did_not_pass`
+  instead of the plain `check_failed` a failing part beside an ERC half that
+  proves nothing renders — previously indistinguishable, so a block whose
+  rails *are* proven continuous and tied read as "power delivery
+  unverified". The item's `detail.power_delivery` names the supply nets the
+  ERC half proved, plus the cited report's `status` and
+  `power_connectivity.status`. The ERC half is now resolved before the LVS
+  pass gate to make that distinction possible; the `met` path, the #2405
+  alias-membership pairing, and the `lvs_supply_unproven` protection against
+  a signal-only `gate-level-verilog` reference are all unchanged. See
+  [`docs/cli/signoff.md`](docs/cli/signoff.md)'s "Item 11 is compound"
+  section and item 11 in
+  [`docs/design-evidence-tiers.md`](docs/design-evidence-tiers.md).
 - **Fixed** (#2485, `klt sim`'s `remote`/`batch` backends; additive — **no**
   `schema_version` bump, no request/response field changed): an off-host run
   staged only the request's *own* netlist file, so any netlist that
