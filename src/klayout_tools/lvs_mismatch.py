@@ -40,7 +40,33 @@ the test suite/callers used before this split.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from typing import Any, NamedTuple
+
+#: Issue #2461: the ``(device-class name, parameter name)`` pairs -- both
+#: lower-cased -- that a **request-side hook took out of this particular
+#: run's compare** before ``NetlistComparer`` was constructed:
+#:
+#: * ``lvs.py``'s ``_apply_reference_placeholder_values`` (issue #1907), which
+#:   ignores a converted reference class's literal ``0`` placeholder value via
+#:   ``EqualDeviceParameters.ignore``; and
+#: * ``lvs.py``'s ``_apply_compare_parameters`` (issue #1928), which disables
+#:   every parameter the caller did not name via
+#:   ``DeviceClass.enable_parameter(name, False)``.
+#:
+#: Both already disclose what they excluded (``device.placeholder_value`` /
+#: ``device.parameter_excluded``), so a parameter in this set must **not**
+#: also be reported as a ``device.property`` error, absorbed as a
+#: ``device.parameter_tolerated`` snap, or allowed to veto a
+#: ``parameter_tolerance`` snap for the rest of its device pair -- the same
+#: run would otherwise contradict its own disclosure (issue #2461, from
+#: #2462's fold-in measurement: a class scoped to ``["L", "W"]`` against a
+#: placeholder-excluded reference reported error-severity ``device.property``
+#: findings on the very ``R``/``A``/``P`` it disclosed as excluded).
+#:
+#: Deliberately *not* the same thing as "secondary" (``is_primary == False``):
+#: see :func:`_param_pair_is_comparable`.
+ExcludedParameters = AbstractSet[tuple[str, str]]
 
 
 class _SupplyPinUniverse(NamedTuple):
@@ -785,6 +811,7 @@ def _build_mismatches(
     reference_netlist: Any | None = None,
     *,
     same_nets_hints: list[tuple[str, str]] | None = None,
+    excluded_parameters: ExcludedParameters | None = None,
 ) -> list[dict[str, Any]]:
     from .lvs import (
         CATEGORY_DEVICE_CLASS,
@@ -804,7 +831,7 @@ def _build_mismatches(
     # reporting `device_mismatch` on each side (plus collateral net
     # mismatches) instead of the `match_devices_with_different_parameters`
     # event that yields `device.property`. Recover that here.
-    degraded = _degraded_param_pair(logger)
+    degraded = _degraded_param_pair(logger, excluded_parameters)
 
     # Issue #499/#1484: how the comparer answered each declared
     # `hints.same_nets` assertion -- needed twice below (to decide which
@@ -884,11 +911,15 @@ def _build_mismatches(
 
     if degraded is not None:
         mismatches.extend(
-            _classify_param_mismatch(degraded.layout_device, degraded.reference_device)
+            _classify_param_mismatch(
+                degraded.layout_device,
+                degraded.reference_device,
+                excluded_parameters,
+            )
         )
 
     for a, b in logger.param_mismatches:
-        mismatches.extend(_classify_param_mismatch(a, b))
+        mismatches.extend(_classify_param_mismatch(a, b, excluded_parameters))
 
     for a, b in logger.class_mismatches:
         a_class = a.device_class().name
@@ -1217,7 +1248,10 @@ def _net_is_explained_by_device(net: Any, device: Any) -> bool:
     )
 
 
-def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
+def _degraded_param_pair(
+    logger: Any,
+    excluded_parameters: ExcludedParameters | None = None,
+) -> _DegradedParamPair | None:
     """Detect the minimal-circuit degradation issue #282 describes and return
     the device pair behind it, or ``None``.
 
@@ -1245,7 +1279,10 @@ def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
       pin count and either the same name or no other device/subcircuit
       touching it (the collateral the device pair itself caused);
     * at least one parameter actually differs by more than this module's
-      floating-point epsilon.
+      floating-point epsilon -- counting only parameters that are a
+      comparison at all, so a difference on a parameter this run excluded
+      from the compare (``excluded_parameters``, issue #2461) can no longer
+      recover a pair on its own.
 
     Every *name* comparison above is case-insensitive (issue #2317): SPICE
     names are case-insensitive and ``NetlistSpiceReader`` normalises them to
@@ -1350,7 +1387,11 @@ def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
 
     if not any(
         _param_pair_is_comparable(
-            param.name, a.parameter(param.id()), b.parameter(param.id())
+            param.name,
+            a.parameter(param.id()),
+            b.parameter(param.id()),
+            class_name=class_a.name,
+            excluded_parameters=excluded_parameters,
         )
         and _values_differ(a.parameter(param.id()), b.parameter(param.id()))
         for param in params_a
@@ -1362,11 +1403,21 @@ def _degraded_param_pair(logger: Any) -> _DegradedParamPair | None:
     )
 
 
-def _classify_param_mismatch(a: Any, b: Any) -> list[dict[str, Any]]:
+def _classify_param_mismatch(
+    a: Any,
+    b: Any,
+    excluded_parameters: ExcludedParameters | None = None,
+) -> list[dict[str, Any]]:
     """Turn one ``match_devices_with_different_parameters`` event into one
     ``device.property`` mismatch entry per parameter that actually differs
     (see this module's docstring: the comparer flags the *device pair*, not
-    which specific parameter -- this module identifies that itself)."""
+    which specific parameter -- this module identifies that itself).
+
+    A parameter this run explicitly excluded from the compare
+    (``excluded_parameters``, issue #2461) is skipped: it is already
+    disclosed as ``device.placeholder_value``/``device.parameter_excluded``,
+    and the engine never compared it, so an error-severity finding on it
+    would contradict the same report's own disclosure."""
     from .lvs import _PARAM_DISPLAY_NAMES, CATEGORY_DEVICE_PROPERTY, _name_or_none
 
     class_name = a.device_class().name
@@ -1374,7 +1425,13 @@ def _classify_param_mismatch(a: Any, b: Any) -> list[dict[str, Any]]:
     for param in a.device_class().parameter_definitions():
         a_value = a.parameter(param.id())
         b_value = b.parameter(param.id())
-        if not _param_pair_is_comparable(param.name, a_value, b_value):
+        if not _param_pair_is_comparable(
+            param.name,
+            a_value,
+            b_value,
+            class_name=class_name,
+            excluded_parameters=excluded_parameters,
+        ):
             continue
         if _values_differ(a_value, b_value):
             display_name = _PARAM_DISPLAY_NAMES.get(param.name, param.name.lower())
@@ -1440,29 +1497,53 @@ def _values_differ(a_value: float, b_value: float) -> bool:
 _METAL_INDEX_PARAMETER_NAMES = frozenset({"MMIN", "MMAX"})
 
 
-def _param_pair_is_comparable(param_name: str, a_value: float, b_value: float) -> bool:
+def _param_pair_is_comparable(
+    param_name: str,
+    a_value: float,
+    b_value: float,
+    *,
+    class_name: str | None = None,
+    excluded_parameters: ExcludedParameters | None = None,
+) -> bool:
     """Whether one layout/reference parameter pair is a *comparison* at all
-    (issue #2435).
+    (issues #2435, #2461).
 
-    ``False`` only for a :data:`_METAL_INDEX_PARAMETER_NAMES` parameter that
-    one side left at ``0`` -- a metal index is 1-based, so ``0`` is never a
-    measurement; it means that side's card did not state the finger stack.
-    Reporting ``layout 1 vs reference 0`` as a ``device.property`` error (or
-    letting it veto an ``options.parameter_tolerance`` snap, which no finite
-    relative tolerance can ever absorb -- see :func:`_relative_delta`) would
-    manufacture a finding out of an omission, and would do it for *every*
-    ``cap_cmom*`` compare against an ordinary schematic netlist.
+    ``False`` in exactly two cases:
 
-    Two sides that both state a range are compared normally, so a genuinely
-    wrong finger stack is still caught. This is deliberately narrower than
-    skipping every KLayout "secondary" (``is_primary=False``) parameter:
-    several built-in classes mark real measurements secondary (a resistor's
-    ``W``/``L``), and those are reported today.
+    * **Issue #2435** -- a :data:`_METAL_INDEX_PARAMETER_NAMES` parameter that
+      one side left at ``0``. A metal index is 1-based, so ``0`` is never a
+      measurement; it means that side's card did not state the finger stack.
+      Reporting ``layout 1 vs reference 0`` as a ``device.property`` error (or
+      letting it veto an ``options.parameter_tolerance`` snap, which no finite
+      relative tolerance can ever absorb -- see :func:`_relative_delta`) would
+      manufacture a finding out of an omission, and would do it for *every*
+      ``cap_cmom*`` compare against an ordinary schematic netlist.
 
-    ``kdb.NetlistComparer`` itself never compares these two parameters --
-    they are declared non-primary -- so this only aligns *this module's* own
-    reporting and tolerance machinery with the engine's behaviour.
+      Two sides that both state a range are compared normally, so a genuinely
+      wrong finger stack is still caught.
+
+    * **Issue #2461** -- ``(class_name, param_name)`` (case-folded) is in
+      ``excluded_parameters``, i.e. a request-side hook explicitly took this
+      parameter out of *this run's* compare and already disclosed that it did
+      (see :data:`ExcludedParameters`). The engine is not comparing it, so
+      neither may this module: a ``device.property`` error on a parameter the
+      same report discloses as excluded is a self-contradiction, not a
+      finding.
+
+    **Not** ``False`` merely because KLayout declares the parameter
+    "secondary" (``is_primary=False``). Several built-in classes mark real
+    measurements secondary (a resistor's ``W``/``L``), and once *something
+    else* has already caused ``match_devices_with_different_parameters`` to
+    fire for a device pair, surfacing those diffs is useful and is relied
+    upon today -- issue #2461 disclosed that gap as its own
+    ``device.geometry_not_compared`` warning rather than by suppressing this
+    reporting. The distinction this function draws is therefore between
+    "secondary by the class's own built-in definition" (still reported) and
+    "explicitly excluded for this run" (never reported).
     """
+    if excluded_parameters and class_name is not None:
+        if (class_name.lower(), param_name.lower()) in excluded_parameters:
+            return False
     if param_name not in _METAL_INDEX_PARAMETER_NAMES:
         return True
     return a_value != 0.0 and b_value != 0.0
@@ -1560,7 +1641,10 @@ def _relative_delta(a_value: float, b_value: float) -> float:
 
 
 def _tolerated_device_pair(
-    a: Any, b: Any, tolerance: float
+    a: Any,
+    b: Any,
+    tolerance: float,
+    excluded_parameters: ExcludedParameters | None = None,
 ) -> list[_ToleratedParam] | None:
     """The snap records for one layout/reference device pair whose *every*
     differing parameter sits within ``tolerance``, or ``None``.
@@ -1599,9 +1683,21 @@ def _tolerated_device_pair(
         b_value = b.parameter(param.id())
         if a_value == b_value:
             continue
-        if not _param_pair_is_comparable(param.name, a_value, b_value):
+        if not _param_pair_is_comparable(
+            param.name,
+            a_value,
+            b_value,
+            class_name=device_class.name,
+            excluded_parameters=excluded_parameters,
+        ):
             # Not a difference to absorb -- and not one that may veto this
-            # pair's snap either (issue #2435; see the helper's docstring).
+            # pair's snap either (issues #2435/#2461; see the helper's
+            # docstring). Issue #2461 matters here for the same reason it
+            # does in `_classify_param_mismatch`: a placeholder-excluded `R`
+            # reading `0` against a real extracted value is a delta of 1.0
+            # that no tolerance can absorb, so before this it silently vetoed
+            # the whole pair's snap -- an excluded parameter deciding the
+            # outcome of a compare it is not part of.
             continue
         delta = _relative_delta(a_value, b_value)
         if delta > tolerance:
@@ -1623,7 +1719,11 @@ def _tolerated_device_pair(
     return records or None
 
 
-def _collect_tolerance_snaps(logger: Any, tolerance: float) -> list[_ToleratedParam]:
+def _collect_tolerance_snaps(
+    logger: Any,
+    tolerance: float,
+    excluded_parameters: ExcludedParameters | None = None,
+) -> list[_ToleratedParam]:
     """Every reference-side parameter one ``compare()`` pass showed to be
     within ``tolerance`` of its layout-side counterpart (issue #589).
 
@@ -1641,7 +1741,7 @@ def _collect_tolerance_snaps(logger: Any, tolerance: float) -> list[_ToleratedPa
       ``"match"`` however wide the tolerance.
     """
     pairs: list[tuple[Any, Any]] = list(getattr(logger, "param_mismatches", ()) or ())
-    degraded = _degraded_param_pair(logger)
+    degraded = _degraded_param_pair(logger, excluded_parameters)
     if degraded is not None:
         pairs.append((degraded.layout_device, degraded.reference_device))
 
@@ -1650,7 +1750,7 @@ def _collect_tolerance_snaps(logger: Any, tolerance: float) -> list[_ToleratedPa
     for a, b in pairs:
         if a is None or b is None:
             continue
-        records = _tolerated_device_pair(a, b, tolerance)
+        records = _tolerated_device_pair(a, b, tolerance, excluded_parameters)
         if records is None:
             continue
         for record in records:

@@ -122,6 +122,7 @@ import json
 import os
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Any
 
 from ._paths import _load_request_json, _resolve_relative
@@ -271,6 +272,21 @@ CATEGORY_DEVICE_PARAMETER_TOLERATED = "device.parameter_tolerated"
 #: on a caller-scoped subset of that class's parameters, not the full set the
 #: class declares (see `_apply_compare_parameters`).
 CATEGORY_DEVICE_PARAMETER_EXCLUDED = "device.parameter_excluded"
+#: Issue #2461: a resistor/capacitor device class took part in this compare
+#: with one or more of its own declared parameters *never compared* -- KLayout's
+#: `DeviceClassResistor` compares only its primary `R` (`L`/`W`/`A`/`P` are
+#: secondary), and `DeviceClassCapacitor` only its primary `C` (`A`/`P` are
+#: secondary), so the whole geometric sizing of such a class sits outside every
+#: default compare. Nothing said so before this category existed: a reader of a
+#: `subckt-call` report saw only `device.placeholder_value` (the *value* half)
+#: and reasonably concluded the geometry had been compared and only the value
+#: had not. Emitted once per participating class per run, never per instance,
+#: and never for a parameter some *other* disclosure already names as excluded
+#: for this run (`device.placeholder_value`/`device.parameter_excluded`) -- see
+#: `_device_parameter_coverage`. Machine-checkable counterpart: the response's
+#: `device_parameter_coverage` block, which is built from the same
+#: determination.
+CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED = "device.geometry_not_compared"
 CATEGORY_DEVICE_BODY_UNVERIFIED = "device.body_unverified"
 CATEGORY_DEVICE_COMBINE_INCOMPLETE = "device.combine_incomplete"
 #: Issues #1497/#2374: KLayout's native `Netlist.combine_devices()` can
@@ -805,6 +821,20 @@ def run_lvs(request: str) -> dict[str, Any]:
     ``device.parameter_excluded`` entry, so a ``"match"`` reached this way
     is never silently indistinguishable from a full parameter compare. See
     :func:`_parse_compare_parameters` and :func:`_apply_compare_parameters`.
+
+    ``device.geometry_not_compared`` (issue #2461) closes the last silent
+    gap in that family, and needs no option at all to reach: KLayout marks
+    only ``R`` primary on ``DeviceClassResistor`` and only ``C`` on
+    ``DeviceClassCapacitor``, so such a class's *entire geometry* is outside
+    every default compare -- a reference resistor whose ``W`` is an order of
+    magnitude off the layout's still reports ``status: "match"`` with
+    ``error_count: 0``. One ``severity: "warning"`` entry per participating
+    class per run says so, on every ``reference.form``; the top-level
+    ``device_parameter_coverage`` block is the gradeable counterpart, built
+    from the same determination (see :func:`_device_parameter_coverage`).
+    Under ``reference.form: "subckt-call"`` the two disclosures combine:
+    the primary is excluded as a placeholder *and* the geometry is
+    secondary, so nothing about the device is compared at all.
     """
     request, request_dir = load_request_arg(request)
 
@@ -1534,6 +1564,20 @@ def run_lvs(request: str) -> dict[str, Any]:
     placeholder_warnings: list[dict[str, Any]] = []
     tolerance_warnings: list[dict[str, Any]] = []
     compare_parameter_warnings: list[dict[str, Any]] = []
+    geometry_warnings: list[dict[str, Any]] = []
+    # Issue #2461: `null` for `engine: "netgen"` (KLayout device-class state
+    # is what this block reports, and that engine never builds one) -- the
+    # same always-present-but-nullable convention `hints_applied`/
+    # `device_classes` follow, never a spuriously empty `[]` that would read
+    # as "no resistor/capacitor class participated".
+    device_parameter_coverage: list[dict[str, Any]] | None = None
+    # Issue #2461: every `(class, parameter)` pair a request-side hook took
+    # out of *this* run's compare, so the classification pass downstream never
+    # reports one of them as a `device.property` error in the same report that
+    # discloses it as excluded. Kept as two sets so the coverage block can name
+    # which hook excluded each one.
+    placeholder_excluded: set[tuple[str, str]] = set()
+    compare_scoped_excluded: set[tuple[str, str]] = set()
     # Issue #1998: populated only for `engine == "klayout"` -- the `netgen`
     # branch below rejects any `request.hints` outright (no equivalent hook
     # in that engine's scope), so this stays empty for every netgen run.
@@ -1567,6 +1611,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             reference_placeholder_classes,
             layout_netlist,
             reference_netlist,
+            placeholder_excluded,
         )
 
         # Issue #1928: same placement rationale once more -- `enable_parameter`
@@ -1578,7 +1623,22 @@ def run_lvs(request: str) -> dict[str, Any]:
             compare_parameters,
             layout_netlist,
             reference_netlist,
+            compare_scoped_excluded,
         )
+
+        # Issue #2461: read the two netlists' device-class state *after* every
+        # hook above has had its say (`enable_parameter` flips `is_primary` in
+        # place, so this has to run downstream of `_apply_compare_parameters`
+        # to describe the compare that is actually about to happen) and
+        # *before* the comparer is built. Read-only -- it changes nothing
+        # about the compare, it only records what the compare will cover.
+        geometry_warnings, device_parameter_coverage = _device_parameter_coverage(
+            layout_netlist,
+            reference_netlist,
+            placeholder_excluded,
+            compare_scoped_excluded,
+        )
+        excluded_parameters = placeholder_excluded | compare_scoped_excluded
 
         logger = _make_compare_logger(layout_circuit, reference_circuit)
         comparer = kdb.NetlistComparer(logger)
@@ -1612,7 +1672,9 @@ def run_lvs(request: str) -> dict[str, Any]:
             # entirely when the option is omitted, so the default path is
             # byte-identical to before.
             for _pass in range(_MAX_TOLERANCE_PASSES):
-                snaps = _collect_tolerance_snaps(logger, parameter_tolerance)
+                snaps = _collect_tolerance_snaps(
+                    logger, parameter_tolerance, excluded_parameters
+                )
                 if not snaps:
                     break
                 _apply_tolerance_snaps(reference_netlist, snaps)
@@ -1642,6 +1704,7 @@ def run_lvs(request: str) -> dict[str, Any]:
             layout_netlist,
             reference_netlist,
             same_nets_hints=same_nets_hints,
+            excluded_parameters=excluded_parameters,
         )
         if not compare_result and not mismatches:
             # Safety net for the correctness invariant this module's docstring
@@ -1907,6 +1970,18 @@ def run_lvs(request: str) -> dict[str, Any]:
         # indistinguishable from one where every parameter actually agreed.
         mismatches.extend(compare_parameter_warnings)
 
+    # Issue #2461: same append-here rationale once more -- which parameters a
+    # device class declares primary is a property of the two netlists' classes
+    # as prepared for this run, not a `NetlistComparer` event, so it is
+    # appended here rather than folded into `_build_mismatches`. Always
+    # `severity: "warning"`: it never changes `status`, it only keeps a match
+    # reached without comparing a resistor/capacitor's geometry at all from
+    # being indistinguishable from one where the two sides' geometry actually
+    # agreed. Extended unconditionally (like `family_findings` below, unlike
+    # the `if`-guarded warnings above): the list is empty on every run with no
+    # resistor/capacitor class to report.
+    mismatches.extend(geometry_warnings)
+
     if flatten_warnings:
         # Issue #1085: same rationale as the disclosures above -- a
         # `flatten_reference`/`flatten_layout` structural flatten is a
@@ -2093,6 +2168,17 @@ def run_lvs(request: str) -> dict[str, Any]:
         # layout with unverified bodies still reports `status: "match"` when
         # the compare matched. See `_body_verification_report`.
         "body_verification": body_verification,
+        # Issue #2461: per participating resistor/capacitor device class,
+        # which of its declared parameters this compare actually covered and
+        # why each of the others did not -- the gradeable form of the
+        # `device.geometry_not_compared` warning (and of the
+        # `device.placeholder_value`/`device.parameter_excluded` warnings,
+        # whose exclusions are labelled with their own `reason`). Reported
+        # beside `status`, never folded into it: a class whose geometry was
+        # never compared still reports `status: "match"` when the compare
+        # matched -- that is precisely the disclosure gap this answers. `null`
+        # for `"engine": "netgen"`. See `_device_parameter_coverage`.
+        "device_parameter_coverage": device_parameter_coverage,
         "mismatch_count": len(mismatches),
         "error_count": sum(category_error_counts.values()),
         "category_counts": dict(sorted(category_counts.items())),
@@ -4666,6 +4752,7 @@ def _apply_reference_placeholder_values(
     spec: dict[str, str],
     layout_netlist: Any,
     reference_netlist: Any,
+    excluded_parameters: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Exclude a converted reference class's placeholder ``0`` value from the
     compare, so the class can still pair on topology (issue #1907).
@@ -4717,6 +4804,13 @@ def _apply_reference_placeholder_values(
     internally, so a class that does not resolve on both sides -- or whose
     reference instances are not all placeholders -- is simply left alone and
     diagnosed by the ordinary compare.
+
+    ``excluded_parameters`` (issue #2461), when given, collects every
+    ``(class name, parameter name)`` pair this function took out of the
+    compare, lower-cased, for both sides' class spellings -- see
+    :data:`~klayout_tools.lvs_mismatch.ExcludedParameters`. Nothing
+    downstream may then report that parameter as a ``device.property`` error
+    in the same run that discloses it as excluded here.
     """
     entries: list[dict[str, Any]] = []
     if not spec:
@@ -4765,6 +4859,14 @@ def _apply_reference_placeholder_values(
         layout_class.equal_parameters = kdb.EqualDeviceParameters.ignore(
             layout_parameter_id
         )
+
+        if excluded_parameters is not None:
+            # Issue #2461: record it under *both* sides' own class spelling
+            # (`NetlistSpiceReader` upper-cases a SPICE-read class name while
+            # a deck-declared one keeps its own casing, and the lookups
+            # downstream key off whichever object the comparer handed them).
+            excluded_parameters.add((reference_class.name.lower(), parameter.lower()))
+            excluded_parameters.add((layout_class.name.lower(), parameter.lower()))
 
         entries.append(
             _mismatch(
@@ -4895,10 +4997,30 @@ def _parse_compare_parameters(
     return result
 
 
+def _record_excluded_parameters(
+    device_class: Any,
+    wanted_lower: set[str],
+    excluded_parameters: set[tuple[str, str]] | None,
+) -> None:
+    """Note every parameter ``_apply_compare_parameters`` just disabled on
+    ``device_class`` in ``excluded_parameters`` (issue #2461), keyed by that
+    side's own class spelling -- the two sides' spellings can differ, see
+    :func:`_apply_reference_placeholder_values`. A no-op when the caller did
+    not ask for the set."""
+    if excluded_parameters is None:
+        return
+    excluded_parameters.update(
+        (device_class.name.lower(), param.name.lower())
+        for param in device_class.parameter_definitions()
+        if param.name.lower() not in wanted_lower
+    )
+
+
 def _apply_compare_parameters(
     spec: dict[str, list[str]] | None,
     layout_netlist: Any,
     reference_netlist: Any,
+    excluded_parameters: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Enable exactly the requested parameters on each named device class,
     disabling every other declared parameter on **both** sides via
@@ -4944,6 +5066,17 @@ def _apply_compare_parameters(
     same discipline as ``device.bulk_reconciled``/``device.placeholder_value``:
     a ``"match"`` reached with a parameter scoped out is never silently
     indistinguishable from one where every parameter actually agreed.
+
+    ``excluded_parameters`` (issue #2461), when given, collects every
+    ``(class name, parameter name)`` pair disabled here, lower-cased, under
+    each resolved side's own class spelling -- see
+    :data:`~klayout_tools.lvs_mismatch.ExcludedParameters`. Before that set
+    existed, the classification pass downstream still walked *every* declared
+    parameter and reported a ``device.property`` **error** for each one that
+    differed, including the very parameters disclosed as excluded right here
+    (issue #2462's measurement: a class scoped to ``["L", "W"]`` against a
+    placeholder-excluded reference reported error findings on ``R``/``A``/
+    ``P`` in the same report that said all three were excluded).
     """
     entries: list[dict[str, Any]] = []
     if not spec:
@@ -5001,6 +5134,7 @@ def _apply_compare_parameters(
                 device_class.enable_parameter(
                     param.name, param.name.lower() in wanted_lower
                 )
+            _record_excluded_parameters(device_class, wanted_lower, excluded_parameters)
 
         for param_lower, param_name in sorted(known_params.items()):
             if param_lower in wanted_lower:
@@ -5029,6 +5163,222 @@ def _apply_compare_parameters(
             )
 
     return entries
+
+
+# --------------------------------------------------------------------------- #
+# device.geometry_not_compared / device_parameter_coverage (issue #2461):
+# say which of a resistor/capacitor class's parameters the compare covered
+# --------------------------------------------------------------------------- #
+
+#: Issue #2461: the device-class families whose *geometry* sits entirely
+#: outside a default compare, keyed by the `klayout.db` class name (resolved
+#: lazily, the way :data:`_COMBINE_PARAMETER_CONSERVATION_RULES` is) to the
+#: `device_kind` label reported for them. Both are matched with `isinstance`,
+#: so each one's `*WithBulk` flavour -- a subclass declaring the identical
+#: parameter set -- is covered without being listed.
+#:
+#: Deliberately *only* these two. A MOS class's own geometry (`L`/`W`) is
+#: primary and therefore compared; its secondary `AS`/`AD`/`PS`/`PD` diffusion
+#: parameters are a genuinely narrower gap and reporting them here would add a
+#: warning to essentially every `klt lvs` run for no new information about
+#: whether the device was *sized* correctly. For a resistor/capacitor there is
+#: no such consolation: `R`/`C` is the only primary parameter, so no dimension
+#: of the drawn device is compared at all.
+_GEOMETRY_DISCLOSURE_CLASS_KINDS: tuple[tuple[str, str], ...] = (
+    ("DeviceClassResistor", "resistor"),
+    ("DeviceClassCapacitor", "capacitor"),
+)
+
+#: Issue #2461: the stable ``device_parameter_coverage[].not_compared[].reason``
+#: values -- why one declared parameter of a participating class took no part
+#: in the compare.
+#:
+#: * ``"secondary"`` -- the class's own built-in definition marks it
+#:   non-primary (``is_primary == False``) and nothing in the request changed
+#:   that, so ``kdb.NetlistComparer`` never compares it. This is the case
+#:   issue #2461 was filed about: it has no other disclosure anywhere in the
+#:   report, which is why it also yields a
+#:   :data:`CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED` warning.
+#: * ``"placeholder_value"`` -- excluded by
+#:   :func:`_apply_reference_placeholder_values` (issue #1907); already
+#:   disclosed as :data:`CATEGORY_DEVICE_PLACEHOLDER_VALUE`.
+#: * ``"compare_parameters"`` -- excluded by :func:`_apply_compare_parameters`
+#:   (issue #1928); already disclosed as
+#:   :data:`CATEGORY_DEVICE_PARAMETER_EXCLUDED`.
+PARAMETER_NOT_COMPARED_SECONDARY = "secondary"
+PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE = "placeholder_value"
+PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS = "compare_parameters"
+
+
+def _geometry_disclosure_kind(device_class: Any, kdb_module: Any) -> str | None:
+    """The :data:`_GEOMETRY_DISCLOSURE_CLASS_KINDS` label for ``device_class``
+    (``"resistor"``/``"capacitor"``), or ``None`` for every other class."""
+    for class_name, kind in _GEOMETRY_DISCLOSURE_CLASS_KINDS:
+        klayout_class = getattr(kdb_module, class_name, None)
+        if klayout_class is not None and isinstance(device_class, klayout_class):
+            return kind
+    return None
+
+
+def _participating_device_classes(netlist: Any) -> dict[str, tuple[Any, int]]:
+    """``{<lower-cased class name>: (<class object>, <instance count>)}`` for
+    every device class this netlist actually *instantiates*.
+
+    Keyed off the devices rather than ``Netlist.each_device_class()`` on
+    purpose: an extraction deck registers every class it knows about, so the
+    class list alone would claim a compare covered classes the design never
+    draws.
+    """
+    found: dict[str, tuple[Any, int]] = {}
+    for circuit in netlist.each_circuit():
+        for device in circuit.each_device():
+            device_class = device.device_class()
+            key = device_class.name.lower()
+            existing = found.get(key)
+            found[key] = (
+                device_class if existing is None else existing[0],
+                1 if existing is None else existing[1] + 1,
+            )
+    return found
+
+
+def _device_parameter_coverage(
+    layout_netlist: Any,
+    reference_netlist: Any,
+    placeholder_excluded: AbstractSet[tuple[str, str]],
+    compare_scoped_excluded: AbstractSet[tuple[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Which parameters of each participating resistor/capacitor class this
+    compare actually covered (issue #2461).
+
+    Returns ``(mismatch entries, coverage block)``:
+
+    * one ``severity: "warning"``
+      :data:`CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED` entry per class that has
+      at least one *secondary* parameter -- one nothing else in this report
+      already discloses as excluded -- so the human-readable half of the
+      report stops implying the geometry was checked;
+    * the machine-checkable ``device_parameter_coverage`` block, built from
+      the same determination so the two renderings cannot disagree (the same
+      one-source-of-truth discipline ``body_verification``/
+      ``device.body_unverified`` follow, issue #1983).
+
+    **The gap.** ``kdb.DeviceClassResistor`` declares ``R``, ``L``, ``W``,
+    ``A``, ``P`` and marks only ``R`` primary; ``kdb.DeviceClassCapacitor``
+    declares ``C``, ``A``, ``P`` and marks only ``C`` primary.
+    ``NetlistComparer`` compares primary parameters, so for either class the
+    drawn device's whole geometry is outside every default compare -- a
+    reference resistor whose ``W`` is an order of magnitude off the layout's
+    still reports ``status: "match"`` with ``error_count: 0`` (verified
+    against ``klayout 0.30.10``). Under ``reference.form: "subckt-call"`` the
+    primary is excluded too, so *nothing* about the device is compared and
+    the pairing rests on topology alone.
+
+    **Read at compare time, never from the class's static defaults.**
+    ``options.compare_parameters``' ``enable_parameter(name, wanted)`` flips
+    ``is_primary`` in place, so a class scoped to include ``W`` has a
+    *primary* ``W`` by the time this runs and is correctly reported as
+    comparing it.
+
+    **Never duplicates another disclosure.** A parameter in
+    ``placeholder_excluded``/``compare_scoped_excluded`` is already reported
+    as ``device.placeholder_value``/``device.parameter_excluded``; it appears
+    in the coverage block (with that ``reason``) but never in the warning,
+    which is reserved for the case that had no disclosure at all.
+
+    Never raises and never touches the verdict: this is a read-only pass over
+    two already-prepared netlists, run after every request-side hook has been
+    applied and before the comparer is built.
+    """
+    import klayout.db as kdb
+
+    layout_classes = _participating_device_classes(layout_netlist)
+    reference_classes = _participating_device_classes(reference_netlist)
+
+    entries: list[dict[str, Any]] = []
+    coverage: list[dict[str, Any]] = []
+
+    for key in sorted(set(layout_classes) | set(reference_classes)):
+        layout_entry = layout_classes.get(key)
+        reference_entry = reference_classes.get(key)
+        device_class = (layout_entry or reference_entry)[0]  # type: ignore[index]
+        kind = _geometry_disclosure_kind(device_class, kdb)
+        if kind is None:
+            continue
+
+        class_name = device_class.name
+        compared: list[str] = []
+        not_compared: list[dict[str, str]] = []
+        secondary: list[str] = []
+        for param in device_class.parameter_definitions():
+            pair = (key, param.name.lower())
+            if pair in placeholder_excluded:
+                reason = PARAMETER_NOT_COMPARED_PLACEHOLDER_VALUE
+            elif pair in compare_scoped_excluded:
+                reason = PARAMETER_NOT_COMPARED_COMPARE_PARAMETERS
+            elif param.is_primary:
+                compared.append(param.name)
+                continue
+            else:
+                reason = PARAMETER_NOT_COMPARED_SECONDARY
+                secondary.append(param.name)
+            not_compared.append({"parameter": param.name, "reason": reason})
+
+        coverage.append(
+            {
+                "class": class_name,
+                "device_kind": kind,
+                "layout_devices": layout_entry[1] if layout_entry else 0,
+                "reference_devices": reference_entry[1] if reference_entry else 0,
+                "compared": compared,
+                "not_compared": not_compared,
+            }
+        )
+
+        if not secondary:
+            # Every uncompared parameter of this class is already disclosed
+            # by its own, more specific warning -- nothing left to say.
+            continue
+
+        entries.append(
+            _mismatch(
+                CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED,
+                "warning",
+                f"device class '{class_name}' is a {kind} class, whose "
+                f"{sorted(secondary)} parameter(s) KLayout declares "
+                f"*secondary*: kdb.NetlistComparer compares primary "
+                f"parameters only, so none of them took part in this compare "
+                f"and each is NOT verified -- this {kind}'s geometry could "
+                f"differ between the two sides by any amount and this run "
+                f"would still report 'match'. "
+                + (
+                    f"The compared parameter(s) were {compared}. "
+                    if compared
+                    else "No parameter of this class was compared at all: "
+                    "the remaining parameter(s) were separately excluded "
+                    "from this run (see the device.placeholder_value/"
+                    "device.parameter_excluded entries), so the two sides "
+                    "were paired on topology alone. "
+                )
+                + "Name them in options.compare_parameters to compare them "
+                "(see docs/cli/lvs.md, 'device.geometry_not_compared')",
+                "both",
+                device={
+                    "layout": None,
+                    "reference": None,
+                    "class": class_name,
+                },
+                details={
+                    "device_kind": kind,
+                    "compared_parameters": compared,
+                    "not_compared_parameters": sorted(secondary),
+                    "layout_devices": layout_entry[1] if layout_entry else 0,
+                    "reference_devices": reference_entry[1] if reference_entry else 0,
+                },
+            )
+        )
+
+    return entries, coverage
 
 
 # --------------------------------------------------------------------------- #

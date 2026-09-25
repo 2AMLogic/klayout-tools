@@ -84,6 +84,26 @@ def _write_request(path: Path, request: dict) -> str:
     return str(path)
 
 
+def _without_geometry_disclosure(report: dict) -> list[dict]:
+    """``report["mismatches"]`` minus the issue #2461
+    ``device.geometry_not_compared`` entries.
+
+    That disclosure is emitted once per participating resistor/capacitor
+    device class on *every* run (KLayout declares those classes' `L`/`W`/
+    `A`/`P` secondary, so no default compare covers them), independently of
+    what the compare found. Tests whose subject is the compare itself -- "this
+    pairing produces no finding", "this hint removes the only warning" --
+    filter it out here rather than restating it, which keeps their intent
+    readable; the disclosure's own behaviour is pinned by the dedicated
+    `device.geometry_not_compared` tests further down.
+    """
+    return [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] != lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Synthetic SPICE fixtures (device-level, not layout-derived)
 # --------------------------------------------------------------------------- #
@@ -1685,8 +1705,17 @@ def test_parameter_tolerance_absorbs_a_rounded_resistor_value(tmp_path):
     )
 
     assert report["status"] == "match"
-    assert report["category_counts"] == {lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED: 1}
-    (entry,) = report["mismatches"]
+    assert report["category_counts"] == {
+        lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED: 1,
+        # Issue #2461: a resistor class took part in the compare, so the run
+        # also discloses that the class's `L`/`W`/`A`/`P` geometry never did.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
+    (entry,) = [
+        m
+        for m in report["mismatches"]
+        if m["category"] == lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED
+    ]
     assert entry["property"]["name"] == "r"
     assert entry["property"]["layout"] == pytest.approx(1234.5)
     assert entry["property"]["reference"] == pytest.approx(1235.0)
@@ -2078,7 +2107,15 @@ def test_composing_a_clean_unrelated_block_does_not_flip_status_or_severity(tmp_
         tmp_path, "alone", _ISLAND_D_PINS, _ISLAND_D_LAYOUT, _ISLAND_D_REFERENCE
     )
     assert alone["status"] == "match"
-    assert alone["category_counts"] == {"topology": 2}
+    # Issue #2461: both islands are built from resistors, so every run here
+    # also carries the one-per-class `device.geometry_not_compared`
+    # disclosure. It is a property of the device class, not of the pairing
+    # this test is about, so it is named explicitly and then filtered out of
+    # the entry-by-entry comparison below.
+    assert alone["category_counts"] == {
+        "topology": 2,
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
     assert all(m["severity"] == "warning" for m in alone["mismatches"])
 
     composed = _compare_islands(
@@ -2094,7 +2131,12 @@ def test_composing_a_clean_unrelated_block_does_not_flip_status_or_severity(tmp_
         for m in composed["mismatches"]
         if (m["net"] or {}).get("reference") in {"D_P1", "D_P2"}
     ]
-    assert composed_d == alone["mismatches"]
+    alone_d = [
+        m
+        for m in alone["mismatches"]
+        if (m["net"] or {}).get("reference") in {"D_P1", "D_P2"}
+    ]
+    assert composed_d == alone_d
 
 
 # --------------------------------------------------------------------------- #
@@ -2132,8 +2174,14 @@ R2 VDD $2 1k
     )
     no_hint = run_lvs(no_hint_path)
     assert no_hint["status"] == "match"
-    assert no_hint["mismatch_count"] == 2
-    assert no_hint["category_counts"] == {"topology": 2}
+    assert len(_without_geometry_disclosure(no_hint)) == 2
+    assert no_hint["category_counts"] == {
+        "topology": 2,
+        # Issue #2461: the cell is built from resistors, whose geometry no
+        # default compare covers -- disclosed once per class, unrelated to
+        # the ambiguous pairing this test is about.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
     assert all(m["severity"] == "warning" for m in no_hint["mismatches"])
 
     with_hint_path = _write_request(
@@ -2146,8 +2194,7 @@ R2 VDD $2 1k
     )
     with_hint = run_lvs(with_hint_path)
     assert with_hint["status"] == "match"
-    assert with_hint["mismatch_count"] == 0
-    assert with_hint["mismatches"] == []
+    assert _without_geometry_disclosure(with_hint) == []
 
 
 def test_recovered_def_net_names_remove_the_tie_cell_pairing_warning(tmp_path):
@@ -2223,17 +2270,21 @@ R4 net_hi_2 GND 2k
 
     anonymous = _compare(anonymous_path, "anonymous")
     assert anonymous["status"] == "match"
-    assert anonymous["category_counts"] == {"topology": 2}
+    assert anonymous["category_counts"] == {
+        "topology": 2,
+        # Issue #2461: one per participating resistor class, unrelated to
+        # the tie-cell pairing this test measures.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
     assert all(entry["severity"] == "warning" for entry in anonymous["mismatches"])
     assert all(
         "paired ambiguously" in entry["description"]
-        for entry in anonymous["mismatches"]
+        for entry in _without_geometry_disclosure(anonymous)
     )
 
     named = _compare(named_path, "named")
     assert named["status"] == "match"
-    assert named["mismatch_count"] == 0
-    assert named["mismatches"] == []
+    assert _without_geometry_disclosure(named) == []
 
 
 def test_same_nets_hint_rejected_pairing_is_reported(tmp_path):
@@ -2318,7 +2369,7 @@ R4 N3 VSS 1k
     # wired to another child's `fb` port" composition shape issue #1484
     # describes -- is a clean match, needing no hint at all.
     assert report["status"] == "match"
-    assert report["mismatches"] == []
+    assert _without_geometry_disclosure(report) == []
     assert ("OUT", "FB") in {
         (entry["layout"], entry["reference"]) for entry in report["net_correspondence"]
     }
@@ -2363,7 +2414,12 @@ R2 OUT VSS 2k
         )
     )
     assert no_hint["status"] == "mismatch"
-    assert no_hint["category_counts"] == {"device.property": 1, "topology": 1}
+    assert no_hint["category_counts"] == {
+        "device.property": 1,
+        "topology": 1,
+        # Issue #2461: one per participating resistor class.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
     (conflict,) = [m for m in no_hint["mismatches"] if m["category"] == "topology"]
     assert conflict["net"] == {"layout": "OUT", "reference": "FB"}
     assert "name/identity conflict" in conflict["description"]
@@ -2381,7 +2437,12 @@ R2 OUT VSS 2k
     # The `topology` duplicate is gone; the one, narrower `hints.rejected`
     # entry takes its place -- same mismatch count as without the hint, not
     # one more.
-    assert with_hint["category_counts"] == {"device.property": 1, "hints.rejected": 1}
+    assert with_hint["category_counts"] == {
+        "device.property": 1,
+        "hints.rejected": 1,
+        # Issue #2461: one per participating resistor class, on both runs.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
     assert with_hint["mismatch_count"] == no_hint["mismatch_count"]
     assert not [m for m in with_hint["mismatches"] if m["category"] == "topology"]
     (rejected,) = [
@@ -2600,9 +2661,15 @@ def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_p
     report = run_lvs(path)
 
     assert report["status"] == "mismatch"
-    assert report["category_counts"] == {"topology": 2}
+    assert report["category_counts"] == {
+        "topology": 2,
+        # Issue #2461: one per participating resistor class.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
     assert report["counts"]["devices"] == {"layout": 2, "reference": 0, "matched": 0}
-    assert all(m["category"] == "topology" for m in report["mismatches"])
+    assert all(
+        m["category"] == "topology" for m in _without_geometry_disclosure(report)
+    )
     assert "topology.flattened" not in report["category_counts"]
 
     # Issue #1132: `category_error_counts`/`error_count` split `error`
@@ -2617,7 +2684,7 @@ def test_flat_layout_against_hierarchical_reference_is_a_topology_mismatch(tmp_p
     # `topology` finding is attributable without a side-channel netlist
     # diff -- `instance`/`subcircuit` stay `null` (this is a whole-circuit
     # mismatch, not a subcircuit-instance one).
-    assert [m["circuit"] for m in report["mismatches"]] == [
+    assert [m["circuit"] for m in _without_geometry_disclosure(report)] == [
         {"layout": "TOP", "reference": "TOP"},
         {"layout": None, "reference": "LEAF"},
     ]
@@ -2755,8 +2822,12 @@ def test_flatten_reference_turns_the_topology_mismatch_into_a_match(tmp_path):
     # never indistinguishable from one reached against the original
     # hierarchy (mirrors `device.parameter_tolerated`/`device.bulk_reconciled`'s
     # own transparency precedent).
-    assert report["category_counts"] == {"topology.flattened": 1}
-    [flattened] = report["mismatches"]
+    assert report["category_counts"] == {
+        "topology.flattened": 1,
+        # Issue #2461: one per participating resistor class.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
+    [flattened] = _without_geometry_disclosure(report)
     assert flattened["category"] == "topology.flattened"
     assert flattened["severity"] == "warning"
     assert flattened["side"] == "reference"
@@ -2783,8 +2854,12 @@ def test_flatten_layout_turns_a_hierarchical_layout_netlist_into_a_match(tmp_pat
 
     assert report["status"] == "match"
     assert report["counts"]["devices"] == {"layout": 2, "reference": 2, "matched": 2}
-    assert report["category_counts"] == {"topology.flattened": 1}
-    [flattened] = report["mismatches"]
+    assert report["category_counts"] == {
+        "topology.flattened": 1,
+        # Issue #2461: one per participating resistor class.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
+    [flattened] = _without_geometry_disclosure(report)
     assert flattened["side"] == "layout"
     assert "options.flatten_layout" in flattened["description"]
 
@@ -2807,7 +2882,11 @@ def test_flatten_options_default_false_leaves_status_unchanged(tmp_path):
     report = run_lvs(path)
 
     assert report["status"] == "mismatch"
-    assert report["category_counts"] == {"topology": 2}
+    assert report["category_counts"] == {
+        "topology": 2,
+        # Issue #2461: one per participating resistor class.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
 
 
 def test_flatten_reference_is_a_silent_noop_on_an_already_flat_netlist(tmp_path):
@@ -2831,8 +2910,8 @@ def test_flatten_reference_is_a_silent_noop_on_an_already_flat_netlist(tmp_path)
     report = run_lvs(path)
 
     assert report["status"] == "match"
-    assert report["mismatches"] == []
-    assert report["mismatch_count"] == 0
+    assert _without_geometry_disclosure(report) == []
+    assert "topology.flattened" not in report["category_counts"]
 
 
 def _make_leaf_nmos_cell(layout, name: str = "LEAF"):
@@ -5253,7 +5332,7 @@ def test_combine_devices_purges_emptied_series_string_nets(tmp_path):
     assert report["counts"]["nets"]["reference"] == 2
     # No spurious net.unmatched findings for the emptied interior nodes.
     assert report["category_counts"].get("net.unmatched", 0) == 0
-    assert report["mismatch_count"] == 0
+    assert _without_geometry_disclosure(report) == []
 
 
 def test_series_string_nets_not_purged_without_combine_devices(tmp_path):
@@ -9442,7 +9521,10 @@ def test_reference_device_bulk_discloses_the_reconciliation(tmp_path):
     # Disclosed in-band without changing the verdict (`warning`), and
     # counted like any other category.
     assert report["category_counts"][lvs.CATEGORY_DEVICE_BULK_RECONCILED] == 1
-    assert report["mismatch_count"] == 1
+    # Issue #2461: plus the one-per-resistor-class geometry disclosure, which
+    # is about the class's own parameter definitions rather than this
+    # reconciliation.
+    assert len(_without_geometry_disclosure(report)) == 1
 
 
 def test_reference_device_bulk_matches_the_model_name_case_insensitively(tmp_path):
@@ -9548,7 +9630,11 @@ M2 A B VDD VDD pfet W=1.0U L=0.15U
     assert report["status"] == "match"
     assert report["counts"]["devices"] == {"layout": 3, "reference": 3, "matched": 3}
     assert report["counts"]["nets"]["matched"] == 5
-    assert report["category_counts"] == {lvs.CATEGORY_DEVICE_BULK_RECONCILED: 1}
+    assert report["category_counts"] == {
+        lvs.CATEGORY_DEVICE_BULK_RECONCILED: 1,
+        # Issue #2461: one per participating resistor class.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
 
 
 def test_reference_device_bulk_leaves_an_uncovered_class_diagnosed(tmp_path):
@@ -11325,8 +11411,10 @@ def test_run_lvs_subckt_call_placeholder_resistors_pair_on_topology(tmp_path):
         "layout_devices": 4,
         "layout_values": [15000.0, 30000.0, 60000.0, 120000.0],
     }
-    # Every other finding is gone: no leftover per-device or per-net cascade.
-    assert [entry["category"] for entry in report["mismatches"]] == [
+    # Every other finding is gone: no leftover per-device or per-net cascade
+    # (issue #2461's own one-per-class geometry disclosure aside -- it is
+    # emitted for every resistor class and says nothing about this pairing).
+    assert [entry["category"] for entry in _without_geometry_disclosure(report)] == [
         "device.placeholder_value"
     ]
 
@@ -11358,7 +11446,7 @@ def test_run_lvs_subckt_call_placeholder_resistors_equal_geometry_pair(tmp_path)
 
     assert report["status"] == "match"
     assert report["error_count"] == 0
-    assert [entry["category"] for entry in report["mismatches"]] == [
+    assert [entry["category"] for entry in _without_geometry_disclosure(report)] == [
         "device.placeholder_value"
     ]
 
@@ -11458,7 +11546,9 @@ def test_run_lvs_subckt_call_placeholder_mixed_reference_values_untouched(tmp_pa
         for entry in report["mismatches"]
         if entry["category"] == "device.placeholder_value"
     ]
-    assert [entry["category"] for entry in report["mismatches"]] == ["device.property"]
+    assert [entry["category"] for entry in _without_geometry_disclosure(report)] == [
+        "device.property"
+    ]
 
 
 def test_run_lvs_plain_element_reference_zero_value_still_compared(tmp_path):
@@ -11515,6 +11605,400 @@ def test_convert_reference_netlist_reports_placeholder_value_classes():
         "sky130_fd_pr__model__cap_mim": "capacitor",
     }
     assert "R1 A B 0 res_xhigh_po" in conversion.text
+
+
+# --------------------------------------------------------------------------- #
+# device.geometry_not_compared / device_parameter_coverage (issue #2461):
+# a resistor/capacitor class's geometry is never compared, and the report has
+# to say so -- plus: a parameter excluded from this run must not also be
+# reported as a `device.property` error by the same run
+# --------------------------------------------------------------------------- #
+
+#: A single resistor on a two-pin block. The layout side is the fixed
+#: reference point for every negative control below; each test perturbs only
+#: the reference.
+_GEOMETRY_RESISTOR_LAYOUT = ".subckt res_block A B\nR1 A B 1000 L=48.2U W=1U\n.ends\n"
+
+#: The negative control from the issue body: the *same* `R` (so the only
+#: compared parameter agrees) with a 10x-different `W`. Before #2461 this
+#: reported `match`, `error_count: 0`, and -- for a plain-element reference --
+#: no findings whatsoever, with nothing in the report saying the geometry had
+#: not been looked at.
+_GEOMETRY_RESISTOR_REFERENCE_WIDE = (
+    ".subckt res_block A B\nR1 A B 1000 L=48.2U W=10U\n.ends\n"
+)
+
+_GEOMETRY_CAPACITOR_LAYOUT = (
+    ".subckt cap_block A B\nC1 A B 1P A=9.24P P=44.84U\n.ends\n"
+)
+
+#: Same `C`, 10x-different `A` -- `DeviceClassCapacitor`'s `A`/`P` are
+#: secondary exactly the way a resistor's `L`/`W` are.
+_GEOMETRY_CAPACITOR_REFERENCE_WIDE = (
+    ".subckt cap_block A B\nC1 A B 1P A=92.4P P=448.4U\n.ends\n"
+)
+
+
+def _geometry_request(tmp_path, layout_text, reference_text, top, options=None):
+    request = {
+        "layout": {
+            "netlist": _write(tmp_path / "layout.spice", layout_text),
+            "top": top,
+        },
+        "reference": {
+            "netlist": _write(tmp_path / "ref.spice", reference_text),
+            "top": top,
+        },
+    }
+    if options is not None:
+        request["options"] = options
+    return _write_request(tmp_path / "request.json", request)
+
+
+def _geometry_entries(report):
+    return [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED
+    ]
+
+
+def test_resistor_geometry_difference_still_matches_but_is_now_disclosed(tmp_path):
+    """Issue #2461's negative control, plain-element on both sides (no
+    `subckt-call`, no placeholder exclusion): identical `R`, 10x-different
+    `W`.
+
+    The verdict is unchanged and correct -- `NetlistComparer` compares
+    `DeviceClassResistor`'s primary `R` only, so the two netlists really are
+    equivalent as far as this compare goes. What changes is that the report
+    now *says* the geometry took no part in it, where before it reported a
+    bare `match` with an empty `mismatches[]`.
+    """
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            _GEOMETRY_RESISTOR_LAYOUT,
+            _GEOMETRY_RESISTOR_REFERENCE_WIDE,
+            "res_block",
+        )
+    )
+
+    # Unchanged verdict: this is a disclosure fix, not a verdict fix.
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+
+    (entry,) = _geometry_entries(report)
+    assert entry["severity"] == "warning"
+    assert entry["side"] == "both"
+    assert entry["device"]["class"] == "RES"
+    assert entry["details"]["device_kind"] == "resistor"
+    assert entry["details"]["compared_parameters"] == ["R"]
+    # Every declared parameter that is *not* `R`, named explicitly -- this is
+    # the sentence the issue reports as missing.
+    assert entry["details"]["not_compared_parameters"] == ["A", "L", "P", "W"]
+    assert "W" in entry["description"]
+    assert "NOT verified" in entry["description"]
+
+
+def test_capacitor_geometry_difference_still_matches_but_is_now_disclosed(tmp_path):
+    """The capacitor half of the same gap: `DeviceClassCapacitor` compares
+    only `C`, so a 10x-different `A` is invisible to the compare."""
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            _GEOMETRY_CAPACITOR_LAYOUT,
+            _GEOMETRY_CAPACITOR_REFERENCE_WIDE,
+            "cap_block",
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+
+    (entry,) = _geometry_entries(report)
+    assert entry["device"]["class"] == "CAP"
+    assert entry["details"]["device_kind"] == "capacitor"
+    assert entry["details"]["compared_parameters"] == ["C"]
+    assert entry["details"]["not_compared_parameters"] == ["A", "P"]
+
+
+def test_geometry_disclosure_is_one_entry_per_class_not_per_instance(tmp_path):
+    """Emitted once per participating class per run -- a 4-resistor block
+    gets one entry, not four."""
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            ".subckt res_net A B C D E\n"
+            "R1 A B 1000 L=48.2U W=1U\n"
+            "R2 B C 2000 L=48.2U W=1U\n"
+            "R3 C D 3000 L=48.2U W=1U\n"
+            "R4 D E 4000 L=48.2U W=1U\n"
+            ".ends\n",
+            ".subckt res_net A B C D E\n"
+            "R1 A B 1000 L=48.2U W=9U\n"
+            "R2 B C 2000 L=48.2U W=9U\n"
+            "R3 C D 3000 L=48.2U W=9U\n"
+            "R4 D E 4000 L=48.2U W=9U\n"
+            ".ends\n",
+            "res_net",
+        )
+    )
+
+    assert report["status"] == "match"
+    (entry,) = _geometry_entries(report)
+    assert entry["details"]["layout_devices"] == 4
+    assert entry["details"]["reference_devices"] == 4
+
+
+def test_geometry_disclosure_reflects_compare_parameters_not_class_defaults(tmp_path):
+    """`options.compare_parameters`' `enable_parameter` flips `is_primary`
+    *in place*, so the disclosure has to be read at compare time: a class
+    scoped to include `W` must not claim `W` is never compared -- and the
+    same run must now actually catch the width difference."""
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            _GEOMETRY_RESISTOR_LAYOUT,
+            _GEOMETRY_RESISTOR_REFERENCE_WIDE,
+            "res_block",
+            options={"compare_parameters": {"RES": ["R", "W"]}},
+        )
+    )
+
+    # Scoping `W` in turns the silent negative control into a real finding.
+    assert report["status"] == "mismatch"
+    assert [
+        entry["property"]["name"]
+        for entry in report["mismatches"]
+        if entry["category"] == "device.property"
+    ] == ["w_um"]
+
+    # And nothing claims `W` went uncompared.
+    assert _geometry_entries(report) == []
+    (coverage,) = report["device_parameter_coverage"]
+    assert coverage["compared"] == ["R", "W"]
+    assert coverage["not_compared"] == [
+        {"parameter": "L", "reason": "compare_parameters"},
+        {"parameter": "A", "reason": "compare_parameters"},
+        {"parameter": "P", "reason": "compare_parameters"},
+    ]
+
+
+def test_device_parameter_coverage_is_the_gradeable_form_of_the_disclosure(tmp_path):
+    """The machine-checkable counterpart: "was this class's sizing verified?"
+    is answerable without string-matching inside `mismatches[]` (the same
+    reason `body_verification` (#1983) and `power_connectivity` (#1952) exist
+    beside their own warnings)."""
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            _GEOMETRY_RESISTOR_LAYOUT,
+            _GEOMETRY_RESISTOR_REFERENCE_WIDE,
+            "res_block",
+        )
+    )
+
+    assert report["device_parameter_coverage"] == [
+        {
+            "class": "RES",
+            "device_kind": "resistor",
+            "layout_devices": 1,
+            "reference_devices": 1,
+            "compared": ["R"],
+            "not_compared": [
+                {"parameter": "L", "reason": "secondary"},
+                {"parameter": "W", "reason": "secondary"},
+                {"parameter": "A", "reason": "secondary"},
+                {"parameter": "P", "reason": "secondary"},
+            ],
+        }
+    ]
+
+
+def test_device_parameter_coverage_is_empty_without_a_resistor_or_capacitor(tmp_path):
+    """Scoped to the two classes whose *whole* geometry is secondary. A MOS
+    class's own `L`/`W` are primary and compared, so an all-MOS compare
+    reports neither the warning nor a coverage entry -- the disclosure would
+    be noise, not information."""
+    layout_path = _write(tmp_path / "layout.spice", _INVERTER_SPICE)
+    reference_path = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_path, "top": "inv"},
+                "reference": {"netlist": reference_path, "top": "inv"},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert report["device_parameter_coverage"] == []
+    assert _geometry_entries(report) == []
+
+
+def test_subckt_call_placeholder_class_discloses_that_nothing_was_compared(tmp_path):
+    """The shape the issue was filed from: under `reference.form:
+    "subckt-call"` the primary `R` is excluded as a placeholder *and* the
+    geometry is secondary, so no dimension of the device is compared at all.
+
+    The pre-existing `device.placeholder_value` warning covers only the value
+    half; a reader was free to conclude the geometry had been compared. Both
+    halves are now stated, and the coverage block says `compared: []`
+    outright.
+    """
+    report = run_lvs(
+        json.dumps(
+            _placeholder_request(
+                tmp_path,
+                ".subckt res_block A B\n"
+                "R1 A B 17394.465547 res_generic_po L=48.2U W=0.42U\n"
+                ".ends\n",
+                ".subckt res_block A B\n"
+                "XR1 A B sky130_fd_pr__res_generic_po l=48.2u w=0.35u\n"
+                ".ends\n",
+                "res_block",
+            )
+        )
+    )
+
+    # A 20% width difference, and still a (correct, but very narrow) match.
+    assert report["status"] == "match"
+    assert report["error_count"] == 0
+
+    (entry,) = _geometry_entries(report)
+    assert entry["details"]["compared_parameters"] == []
+    assert entry["details"]["not_compared_parameters"] == ["A", "L", "P", "W"]
+    assert "No parameter of this class was compared at all" in entry["description"]
+
+    (coverage,) = report["device_parameter_coverage"]
+    assert coverage["compared"] == []
+    assert coverage["not_compared"] == [
+        {"parameter": "R", "reason": "placeholder_value"},
+        {"parameter": "L", "reason": "secondary"},
+        {"parameter": "W", "reason": "secondary"},
+        {"parameter": "A", "reason": "secondary"},
+        {"parameter": "P", "reason": "secondary"},
+    ]
+
+
+def test_scoping_a_placeholder_excluded_class_does_not_contradict_itself(tmp_path):
+    """Issue #2462's measurement, folded into #2461: scoping a
+    placeholder-excluded class to `["L", "W"]` used to report error-severity
+    `device.property` findings on `R`/`A`/`P` -- the very three parameters
+    the same report disclosed as `device.parameter_excluded`.
+
+    Only the genuinely-compared `W` may be reported now.
+    """
+    report = run_lvs(
+        json.dumps(
+            dict(
+                _placeholder_request(
+                    tmp_path,
+                    ".subckt res_block A B\n"
+                    "R1 A B 17394.465547 res_generic_po L=48.2U W=0.42U A=9.24P "
+                    "P=44.84U\n"
+                    ".ends\n",
+                    ".subckt res_block A B\n"
+                    "XR1 A B sky130_fd_pr__res_generic_po l=48.2u w=0.35u\n"
+                    ".ends\n",
+                    "res_block",
+                ),
+                options={"compare_parameters": {"RES_GENERIC_PO": ["L", "W"]}},
+            )
+        )
+    )
+
+    assert report["status"] == "mismatch"
+
+    excluded = {
+        entry["details"]["parameter"]
+        for entry in report["mismatches"]
+        if entry["category"] == "device.parameter_excluded"
+    }
+    assert excluded == {"R", "A", "P"}
+
+    properties = [
+        entry["property"]["name"]
+        for entry in report["mismatches"]
+        if entry["category"] == "device.property"
+    ]
+    # Exactly the scoped-in parameter that genuinely differs -- no `r`, `a`
+    # or `p` finding contradicting the three disclosures above.
+    assert properties == ["w_um"]
+
+
+def test_excluded_parameter_no_longer_vetoes_a_tolerance_snap(tmp_path):
+    """The same contradiction on the `options.parameter_tolerance` side: the
+    snap is all-or-nothing per device pair, so a placeholder-excluded `R`
+    reading `0` against a real extracted value (a relative delta of `1.0`
+    that no tolerance can absorb) silently vetoed the snap for the whole
+    pair.
+
+    This *does* move the verdict -- deliberately: the only parameter the
+    caller asked to compare is inside the tolerance they set, and the
+    parameter that blocked the snap is one this run does not compare at all.
+    """
+    report = run_lvs(
+        json.dumps(
+            dict(
+                _placeholder_request(
+                    tmp_path,
+                    ".subckt res_block A B\n"
+                    "R1 A B 17394.465547 res_generic_po L=48.2U W=1U\n"
+                    ".ends\n",
+                    ".subckt res_block A B\n"
+                    "XR1 A B sky130_fd_pr__res_generic_po l=48.2u w=1.0005u\n"
+                    ".ends\n",
+                    "res_block",
+                ),
+                options={
+                    "compare_parameters": {"RES_GENERIC_PO": ["L", "W"]},
+                    "parameter_tolerance": 0.001,
+                },
+            )
+        )
+    )
+
+    assert report["status"] == "match"
+    (tolerated,) = [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == lvs.CATEGORY_DEVICE_PARAMETER_TOLERATED
+    ]
+    assert tolerated["property"]["name"] == "w_um"
+    assert not [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == "device.property"
+    ]
+
+
+def test_an_unscoped_secondary_parameter_is_still_reported(tmp_path):
+    """The regression guard the fix must not break: a *genuinely* secondary
+    parameter that no request-side hook excluded keeps being reported once
+    something else makes the comparer flag the device pair.
+
+    Here the primary `R` differs, which surfaces the pair; the secondary `W`
+    difference is then reported alongside it, exactly as before #2461. The
+    fix suppresses only parameters an explicit hook took out of this run --
+    never `is_primary == False` as such (see `_param_pair_is_comparable`).
+    """
+    report = run_lvs(
+        _geometry_request(
+            tmp_path,
+            _GEOMETRY_RESISTOR_LAYOUT,
+            ".subckt res_block A B\nR1 A B 2000 L=48.2U W=10U\n.ends\n",
+            "res_block",
+        )
+    )
+
+    assert report["status"] == "mismatch"
+    assert sorted(
+        entry["property"]["name"]
+        for entry in report["mismatches"]
+        if entry["category"] == "device.property"
+    ) == ["r", "w_um"]
 
 
 # --------------------------------------------------------------------------- #
@@ -17029,8 +17513,20 @@ def test_subckt_call_reference_carries_a_custom_device_class_card(tmp_path):
     # The converted resistor's placeholder `R` is still disclosed by the
     # subckt-call path itself (issue #1907) -- the caller does not have to
     # re-derive it, which the splice workaround did.
-    assert report["category_counts"] == {"device.placeholder_value": 1}
-    (placeholder,) = report["mismatches"]
+    assert report["category_counts"] == {
+        "device.placeholder_value": 1,
+        # Issue #2461: one for the converted `rppd` resistor
+        # (`kdb.DeviceClassResistor`, whose `L`/`W` are secondary). The MoM
+        # capacitor is deliberately *not* disclosed: it is a custom
+        # `kdb.DeviceClass` (`extract.mom_capacitor_device_class`) whose
+        # `W`/`L` are primary, so its geometry really is compared.
+        lvs.CATEGORY_DEVICE_GEOMETRY_NOT_COMPARED: 1,
+    }
+    (placeholder,) = [
+        entry
+        for entry in report["mismatches"]
+        if entry["category"] == "device.placeholder_value"
+    ]
     assert placeholder["device"]["class"] == "RPPD"
     assert placeholder["severity"] == "warning"
 
