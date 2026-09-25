@@ -268,6 +268,18 @@ the container too — falling back to `klt pdk find`'s own resolved root when
 place-and-route` will actually reference (issue #1868) — see the script's
 own header comment for why that matters.
 
+The image is **pinned by digest** (`ORFS_IMAGE_DIGEST` near the top of the
+script), not by the moving `:latest` tag: both the `docker pull` and the
+generated wrapper's `docker run` reference `openroad/orfs@sha256:…`, so every
+host and CI run executes the same OpenROAD build. Upstream publishes only a
+moving `:latest` tag, and before this pin two identically-provisioned fleet
+workers held different images under it (issue #2465). Bump the digest
+deliberately — with a `CHANGELOG.md` line, as with the pinned
+version + checksum in `install-yosys.sh`/`install-verilator.sh`/
+`install-magic.sh`/`install-icarus-verilog.sh`/`install-xyce.sh` — and record
+the new `openroad -version` string alongside it; the script's header comment
+carries the exact re-pin commands.
+
 `place-and-route-smoke.sh` runs the pipeline for `gcd`/`mult8` (the only
 two designs with a committed `regenerate.sh` recipe — no `modexp` fixture
 exists) and asserts `klt lvs`'s/`klt drc`'s own JSON `status`/
