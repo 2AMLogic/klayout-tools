@@ -150,8 +150,10 @@ pinned and verified for this repo, so there is no equivalent
 synth→place-and-route→GDS→`klt lvs`→`klt drc` pipeline on the `gcd`/`mult8`
 corpus designs. It installs `openroad` via
 [`scripts/install-openroad-docker.sh`](../../scripts/install-openroad-docker.sh)
-— the Docker recipe above, scripted: pulls `openroad/orfs:latest` and writes
-a wrapper onto `$PATH` that shells out to it per invocation, additionally
+— the Docker recipe above, scripted: pulls the pinned `openroad/orfs` image
+digest (`ORFS_IMAGE_DIGEST` in that script, deliberately **not** the moving
+`:latest` tag the bare snippet above uses — issue #2465) and writes a wrapper
+onto `$PATH` that shells out to that same digest per invocation, additionally
 mounting `$PDK_ROOT` (read-only, at the identical host path) alongside
 `$PWD` — see that script's own header comment for why the bare `-v
 "$PWD":"$PWD"`-only recipe above is not sufficient once a real PDK is

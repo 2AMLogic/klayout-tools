@@ -17,10 +17,10 @@
 #              Verilator/SymbiYosys steps in .github/workflows/ci.yml rather
 #              than writing straight into /usr/local/bin).
 #
-# Requires `docker` on $PATH with a running, reachable daemon. Pulls
-# `openroad/orfs:latest` -- a large image bundling the whole
-# OpenROAD-flow-scripts (ORFS) tree, not just the `openroad` binary -- so the
-# first pull can take several minutes.
+# Requires `docker` on $PATH with a running, reachable daemon. Pulls the
+# pinned `openroad/orfs` image digest below -- a large image bundling the
+# whole OpenROAD-flow-scripts (ORFS) tree, not just the `openroad` binary --
+# so the first pull can take several minutes.
 #
 # Beyond docs/cli/place-and-route.md's own bare wrapper snippet, the wrapper
 # this script writes ALSO mounts $PDK_ROOT (read-only) into the container
@@ -60,7 +60,31 @@
 set -euo pipefail
 
 DEST_DIR="${1:-/usr/local/bin}"
-IMAGE="openroad/orfs:latest"
+
+# Pinned image -- bump the digest and CHANGELOG.md together in the same change
+# if this is ever refreshed, exactly as install-yosys.sh/install-verilator.sh/
+# install-magic.sh/install-icarus-verilog.sh/install-xyce.sh bump a pinned
+# version + asset checksum together. `openroad/orfs` publishes ONLY a moving
+# `:latest` tag (no versioned tags), so the digest is the only pin available --
+# and without it "the same installer" resolves to whatever image the upstream
+# tag happened to point at on the day a given host ran it. That is not
+# hypothetical: on 2026-09-24 two identically-provisioned fleet workers held
+# different images under the same `:latest` tag -- `sha256:bb7f3169...`
+# (openroad 26Q3-1510-g6cb3f2b704) vs `sha256:0586b21f...`
+# (26Q3-1278-g4421880472) -- so a `place-and-route`/`equiv` result could not be
+# attributed to a specific OpenROAD build (issue #2465).
+#
+# Pulling by digest is resolved deterministically by the registry without
+# consulting the `:latest` tag at all. Re-pin with:
+#   docker pull --platform linux/amd64 openroad/orfs:latest
+#   docker image inspect openroad/orfs:latest --format '{{index .RepoDigests 0}}'
+# then record the resulting `openroad -version` string below and in CHANGELOG.md.
+ORFS_IMAGE_REPO="openroad/orfs"
+# Pinned 2026-09-25: the `:latest` image created 2026-08-24, whose bundled
+# binary reports `openroad -version` == 26Q3-1510-g6cb3f2b704. Multi-platform
+# index; its linux/amd64 manifest is sha256:bda67bf258143f83893811d0aec0a4a304767d0b033027c90ac350e645a32337.
+ORFS_IMAGE_DIGEST="sha256:bb7f31697fb8466ab61852fc796376cc16d9df38f762ccb733218b8a5e55824b"
+IMAGE="${ORFS_IMAGE_REPO}@${ORFS_IMAGE_DIGEST}"
 IN_IMAGE_BINARY="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin/openroad"
 
 command -v docker >/dev/null 2>&1 || {
@@ -81,6 +105,12 @@ cat >"$WRAPPER" <<WRAPPER_EOF
 # "Docker: extract the binary onto \$PATH" recipe, plus a \$PDK_ROOT mount
 # (falling back to \`klt pdk find\` when \$PDK_ROOT is unset -- issue #1868,
 # see this generator's own header comment for why) and a \$TMPDIR mount.
+#
+# Runs the image by PINNED DIGEST, never by the moving \`:latest\` tag, so this
+# wrapper keeps executing the exact OpenROAD build it was installed against
+# even after upstream republishes \`:latest\` (issue #2465):
+#   $IMAGE
+#   openroad -version == 26Q3-1510-g6cb3f2b704
 set -euo pipefail
 MOUNTS=(-v "\$PWD:\$PWD" -w "\$PWD")
 if [[ -n "\${PDK_ROOT:-}" ]]; then

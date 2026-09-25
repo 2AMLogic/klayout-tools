@@ -14,6 +14,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Changed** (#2465, `scripts/install-openroad-docker.sh` — provisioning
+  only, no `klt` runtime behaviour or JSON shape change): the `openroad/orfs`
+  Docker image is now **pinned by digest** rather than pulled as `:latest`.
+  `ORFS_IMAGE_DIGEST="sha256:bb7f31697fb8466ab61852fc796376cc16d9df38f762ccb733218b8a5e55824b"`
+  (the image created 2026-08-24; `openroad -version` ==
+  `26Q3-1510-g6cb3f2b704`) is used by both the `docker pull` and the generated
+  wrapper's `docker run`, so an installed wrapper keeps executing the exact
+  build it was provisioned against even after upstream republishes the tag.
+  Upstream publishes only a moving `:latest` tag, which made "the same
+  installer" resolve to whatever image a host happened to pull on a given day:
+  on 2026-09-24 two identically-provisioned fleet workers held different
+  images under that one tag — `sha256:bb7f3169…` (`26Q3-1510-g6cb3f2b704`)
+  versus `sha256:0586b21f…` (`26Q3-1278-g4421880472`) — so a
+  `klt place-and-route`/`klt equiv` result run through this wrapper could not
+  be attributed to a specific OpenROAD build, and the two CI jobs that
+  provision via this script (`place-and-route-smoke.yml`, `equiv-canary.yml`)
+  were not reproducible across runners. This brings the installer in line with
+  the pinned-and-verified convention every other tool installer in `scripts/`
+  already follows (`install-yosys.sh`, `install-verilator.sh`,
+  `install-magic.sh`, `install-icarus-verilog.sh`, `install-xyce.sh`): the
+  digest is bumped deliberately, in the same change as a CHANGELOG line
+  recording the new `openroad -version` string, exactly as those bump a pinned
+  version plus asset checksum. Historical `openroad/orfs:latest` references
+  elsewhere in this file and in `docs/` are unchanged — they record which
+  build a past measurement was taken against, not what gets installed today.
+  Re-pin commands: the script's own header comment.
 - **Added** (#2463, `klt erc` + `klt signoff`, additive — **no**
   `schema_version` bump on either verb: one new optional `nets[]` key on the
   request side and one new `erc_findings[].rule` value on the response side,
