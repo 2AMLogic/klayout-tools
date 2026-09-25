@@ -523,6 +523,94 @@ YIELD_FAIL_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "fail"}
 #: count as a passing check, distinct from `"fail"`.
 YIELD_REPORTED_ENVELOPE = {**YIELD_PASS_ENVELOPE, "status": "reported"}
 
+
+def _yield_measurement(
+    name: str = "vref",
+    *,
+    sample_size_verdict: str | None = "sufficient",
+    negative_control: str | None = None,
+) -> dict:
+    """One `klt yield` measurement entry, derived from
+    `YIELD_PASS_ENVELOPE`'s (issue #2467).
+
+    `sample_size_verdict` is written into the measurement's own
+    `sample_size.verdict` -- `None` drops the whole `sample_size` block, the
+    shape a report predating that field has. `negative_control` is the
+    declared control's `verdict` (`"detected"`/`"not_detected"`); `None`
+    leaves the key `null`, exactly as `klt yield` emits it for a measurement
+    that declared no control (docs/cli/yield.md's "Negative control").
+    """
+    measurement = {**YIELD_PASS_ENVELOPE["measurements"][0], "name": name}
+    if sample_size_verdict is None:
+        measurement.pop("sample_size", None)
+    else:
+        measurement["sample_size"] = {
+            **measurement["sample_size"],
+            "verdict": sample_size_verdict,
+            # An undersized campaign's own numbers: `required_n` far above
+            # the `n` actually drawn, which is what the verdict summarises.
+            **(
+                {"required_n": 18000, "required_n_for_target": 20000}
+                if sample_size_verdict == "insufficient"
+                else {}
+            ),
+        }
+    measurement["negative_control"] = (
+        None
+        if negative_control is None
+        else {
+            "description": "vos forced to 0.6 V",
+            "n": 300,
+            "errored": 0,
+            "failed_unmeasurable": 0,
+            "yield": {
+                "empirical": {
+                    "method": "clopper-pearson",
+                    "estimate": 0.1,
+                    "confidence": 0.95,
+                    "confidence_interval": {"low": 0.07, "high": 0.14},
+                    "n": 300,
+                }
+            },
+            "nominal_empirical_estimate": 1.0,
+            "degradation_detected": negative_control == "detected",
+            "verdict": negative_control,
+        }
+    )
+    return measurement
+
+
+def _yield_envelope(*measurements: dict, status: str = "pass") -> dict:
+    """A `klt yield` report carrying exactly ``measurements`` (issue #2467)."""
+    return {
+        **YIELD_PASS_ENVELOPE,
+        "status": status,
+        "measurement_count": len(measurements),
+        "measurements": list(measurements),
+    }
+
+
+#: Issue #2467: the same passing campaign, but the report's own sample-size
+#: verdict says its estimate is not sized for the claim (`required_n` far
+#: above the `n` drawn). `status` is still `"pass"` -- the campaign met every
+#: `target_yield` it declared -- so the pre-#2467 grader rendered this a
+#: clean `"met"`.
+YIELD_INSUFFICIENT_SAMPLE_ENVELOPE = _yield_envelope(
+    _yield_measurement(sample_size_verdict="insufficient")
+)
+
+#: Issue #2467: a campaign whose seeded known-bad variant was **not**
+#: distinguishable from the nominal draw -- the self-check ran and failed.
+YIELD_NEGATIVE_CONTROL_NOT_DETECTED_ENVELOPE = _yield_envelope(
+    _yield_measurement(negative_control="not_detected")
+)
+
+#: Issue #2467: the fully-disciplined shape -- sized sample *and* a negative
+#: control that showed the expected degradation.
+YIELD_NEGATIVE_CONTROL_DETECTED_ENVELOPE = _yield_envelope(
+    _yield_measurement(negative_control="detected")
+)
+
 #: `klt pex` (Epic #709) JSON report shape -- hand-built here exactly like
 #: every other kind's fixture. This is the **Curator-proposed, provisional**
 #: shape issue #871 introduced ahead of `klt pex` itself existing (its
@@ -4522,6 +4610,202 @@ def test_yield_fail_status_renders_unmet_check_failed(tmp_path):
     assert item_6["status"] == "unmet"
     assert item_6["reason"] == "check_failed"
     assert item_6["citation"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Campaign-discipline gate on item 6 (issue #2467): the cited report's own
+# `sample_size.verdict` and `negative_control` state, read as grading inputs
+# rather than dropped with the run-level `warnings` array.
+# --------------------------------------------------------------------------- #
+
+
+def test_yield_insufficient_sample_size_renders_unmet_undersized_sample(tmp_path):
+    """Issue #2467: the report's own `sample_size.verdict` says its estimate
+    is not sized for the claim; a `"pass"` status must not overrule that."""
+    yield_path = _write(tmp_path, "yield.json", YIELD_INSUFFICIENT_SAMPLE_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "undersized_sample"
+    assert item_6["citation"] is None
+    campaign = item_6["detail"]["yield_campaign"]
+    assert campaign["sample_size"] == "insufficient"
+    assert campaign["undersized_measurements"] == ["vref"]
+
+
+def test_yield_negative_control_not_detected_renders_unmet(tmp_path):
+    """Issue #2467: the campaign ran its own self-check and the self-check
+    failed -- the seeded known-bad variant was not distinguishable."""
+    yield_path = _write(
+        tmp_path, "yield.json", YIELD_NEGATIVE_CONTROL_NOT_DETECTED_ENVELOPE
+    )
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "negative_control_not_detected"
+    assert item_6["citation"] is None
+    campaign = item_6["detail"]["yield_campaign"]
+    assert campaign["negative_control"] == "not_detected"
+    assert campaign["undetected_negative_controls"] == ["vref"]
+
+
+def test_yield_undersized_sample_outranks_an_undetected_negative_control(tmp_path):
+    """Both defects on one report: the sample-size verdict is reported, since
+    an unsized estimate is the more fundamental of the two."""
+    envelope = _yield_envelope(
+        _yield_measurement(
+            sample_size_verdict="insufficient", negative_control="not_detected"
+        )
+    )
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["reason"] == "undersized_sample"
+
+
+def test_yield_no_negative_control_declared_renders_met_with_disclosure(tmp_path):
+    """Issue #2467: `klt yield` itself treats an undeclared negative control
+    as a run-level *warning*, not a failing status (docs/cli/yield.md: "there
+    is no exit-code change for this"), so `klt signoff` surfaces it on the
+    citation rather than retroactively failing every campaign predating
+    #817's self-check discipline. `YIELD_PASS_ENVELOPE` is exactly that
+    shape, and stays a clean `"met"`."""
+    yield_path = _write(tmp_path, "yield.json", YIELD_PASS_ENVELOPE)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["reason"] is None
+    campaign = item_6["citation"]["yield_campaign"]
+    assert campaign["sample_size"] == "sufficient"
+    assert campaign["undersized_measurements"] == []
+    assert campaign["negative_control"] == "not_declared"
+    assert campaign["measurements_without_negative_control"] == ["vref"]
+
+
+def test_yield_detected_negative_control_renders_met_with_disclosure(tmp_path):
+    yield_path = _write(
+        tmp_path, "yield.json", YIELD_NEGATIVE_CONTROL_DETECTED_ENVELOPE
+    )
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    campaign = item_6["citation"]["yield_campaign"]
+    assert campaign["negative_control"] == "detected"
+    assert campaign["measurements_without_negative_control"] == []
+    assert campaign["undetected_negative_controls"] == []
+
+
+def test_yield_one_undersized_measurement_of_several_renders_unmet(tmp_path):
+    """Multi-measurement aggregation: *any* undersized measurement refuses
+    the item -- the row rests on the whole cited campaign, not on its
+    best-sized member."""
+    envelope = _yield_envelope(
+        _yield_measurement("vref", sample_size_verdict="sufficient"),
+        _yield_measurement("vos", sample_size_verdict="insufficient"),
+        _yield_measurement("iq", sample_size_verdict="sufficient"),
+    )
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "undersized_sample"
+    assert item_6["detail"]["yield_campaign"]["undersized_measurements"] == ["vos"]
+
+
+def test_yield_negative_control_on_one_measurement_of_several_renders_met(tmp_path):
+    """Multi-measurement aggregation, the other axis: one declared, detected
+    control is a campaign self-check, so the campaign rolls up `"detected"`
+    while the measurements that declared none are still named."""
+    envelope = _yield_envelope(
+        _yield_measurement("vref", negative_control="detected"),
+        _yield_measurement("vos"),
+    )
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    campaign = item_6["citation"]["yield_campaign"]
+    assert campaign["negative_control"] == "detected"
+    assert campaign["measurements_without_negative_control"] == ["vos"]
+
+
+def test_yield_one_undetected_control_of_several_renders_unmet(tmp_path):
+    envelope = _yield_envelope(
+        _yield_measurement("vref", negative_control="detected"),
+        _yield_measurement("vos", negative_control="not_detected"),
+    )
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "negative_control_not_detected"
+    assert item_6["detail"]["yield_campaign"]["undetected_negative_controls"] == ["vos"]
+
+
+def test_yield_fail_status_is_unaffected_by_the_campaign_gate(tmp_path):
+    """The `"pass"`/`"reported"` status check stays the *first* gate: a
+    failing campaign still reports `check_failed`, not the new reasons, even
+    when it is also undersized with an undetected control."""
+    envelope = _yield_envelope(
+        _yield_measurement(
+            sample_size_verdict="insufficient", negative_control="not_detected"
+        ),
+        status="fail",
+    )
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "unmet"
+    assert item_6["reason"] == "check_failed"
+    assert item_6["citation"] is None
+
+
+def test_yield_report_with_no_sample_size_block_still_renders_met(tmp_path):
+    """Back-compat: a report predating the `sample_size` block makes no
+    statement about its own sizing, and a missing statement is never read as
+    an insufficient one (the same rule `_drc_coverage_disclosure` applies to
+    a missing `coverage` block)."""
+    envelope = _yield_envelope(_yield_measurement(sample_size_verdict=None))
+    yield_path = _write(tmp_path, "yield.json", envelope)
+
+    result = build_tier_report(_manifest(evidence={"6": yield_path}))
+
+    item_6 = next(item for item in result["items"] if item["id"] == 6)
+    assert item_6["status"] == "met"
+    assert item_6["citation"]["yield_campaign"]["sample_size"] is None
+
+
+def test_yield_campaign_state_is_surfaced_in_envelope_aggregation_mode(tmp_path):
+    """Issue #2467: `build_signoff`'s own `checks[].detail` carries the same
+    disclosure, so aggregation mode and `--manifest` grading cannot disagree
+    about what the cited campaign said. The check's `passed` is untouched --
+    this gate narrows what *item 6* accepts, not what `klt yield` calls a
+    passing campaign."""
+    path = _write(tmp_path, "yield.json", YIELD_INSUFFICIENT_SAMPLE_ENVELOPE)
+
+    result = build_signoff([path])
+
+    check = result["checks"][0]
+    assert check["passed"] is True
+    assert check["detail"]["yield_campaign"]["sample_size"] == "insufficient"
 
 
 def test_no_backing_yield_campaign_renders_unmet_never_assumed_met():

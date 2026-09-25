@@ -260,7 +260,20 @@ written to every block.
    — a yield estimate with its confidence interval, sample-size verdict, and
    Cpk/sigma-to-spec against the row's own limits — is the machine-checkable
    evidence for this item (`klt signoff`'s tier-verdict mode grades it the
-   same way it grades the deterministic items above). **This item's evidence
+   same way it grades the deterministic items above). **The campaign's own
+   self-report is a grading input, not just a footnote** (issue #2467): a
+   cited report whose `sample_size.verdict` is `insufficient` on any
+   measurement renders `unmet` with `reason: "undersized_sample"`, and one
+   whose declared negative control did not show the seeded degradation
+   renders `unmet` with `reason: "negative_control_not_detected"` — the
+   report's passing `status` answers only "did every declared `target_yield`
+   hold", which a campaign declaring none can never fail. A campaign that
+   declared **no** negative control at all is still `met`, but says so:
+   `citation.yield_campaign.negative_control` reads `"not_declared"`, since
+   `klt yield` itself treats that as a warning rather than a failure and
+   whether it is acceptable for a given spec row is the claimant's call. See
+   [`cli/signoff.md`](cli/signoff.md)'s "Campaign discipline on item 6".
+   **This item's evidence
    verb needs a from-source toolchain.** Unlike every other T1 item's
    evidence verb (`drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
    `functional-verification`, `erc`, `place-and-route`), `klt yield`
