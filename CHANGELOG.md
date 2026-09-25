@@ -14,6 +14,22 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2496, `klt signoff`; additive — **no** `schema_version` bump,
+  no field changed): T1 item 11's ERC half (`_erc_supply_spec`) re-reads the
+  spec document a cited `klt erc` run names off disk, to recover the
+  declared `nets[]`/`ties[]`/`stackup` the envelope itself does not echo —
+  but did not check that read against the envelope's own
+  `provenance.spec.content_hash` (issue #2049), so editing the spec document
+  *after* the cited run — adding a supply net, flipping a `kind`, editing a
+  `ties[]` entry — silently widened what item 11 was graded on while the
+  cited `erc_findings`/`erc_coverage` still described the old declarations.
+  The re-read is now hashed and compared against that pin: a mismatch
+  renders `"stale_evidence"`, and an ERC envelope predating #2049 (no
+  `provenance.spec` block at all) renders `"unverifiable_provenance"` —
+  never a false `"met"`. Both reasons already existed for item 11's
+  manifest-pinned layout hash; this closes the same class of gap for the
+  compound citation's second document. See "T1 item 11" in
+  [`docs/cli/signoff.md`](docs/cli/signoff.md).
 - **Added** (#2493, `klt sim`; additive — **no** `schema_version` bump): a
   numerically valid but physically implausible ngspice solve (a compact
   model evaluated far outside its fitted range) produces no distinguishing
