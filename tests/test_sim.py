@@ -5412,6 +5412,15 @@ def test_run_sim_stubbed_recovered_singular_matrix_reports_pass(tmp_path, monkey
     codes = {d["code"]: d["severity"] for d in corner["diagnostics"]}
     assert codes["singular_matrix"] == "warning"
     assert codes.get("nonconvergence") == "warning"
+    # Issue #2491: the top-level rollup must still count a recovered
+    # warning-severity diagnostic on this otherwise-`pass`ed corner -- the
+    # whole point of the rollup is that a caller reading only `passed`/
+    # `failed`/`errored` cannot see this without it.
+    diagnostic_counts = report["diagnostic_counts"]
+    assert diagnostic_counts["by_code"]["singular_matrix"] == 1
+    assert diagnostic_counts["by_code"]["nonconvergence"] == 1
+    assert diagnostic_counts["by_severity"] == {"warning": 2}
+    assert diagnostic_counts["corners_with_diagnostics"] == 1
 
 
 def test_run_sim_stubbed_unrecovered_singular_matrix_still_errors(
@@ -5449,6 +5458,87 @@ def test_run_sim_stubbed_unrecovered_singular_matrix_still_errors(
     assert corner["status"] == "error"
     codes = {d["code"]: d["severity"] for d in corner["diagnostics"]}
     assert codes["singular_matrix"] == "error"
+
+
+def test_run_sim_stubbed_diagnostic_counts_absent_for_clean_grid(tmp_path, monkeypatch):
+    # Issue #2491: a diagnostic-free grid must still report the
+    # `diagnostic_counts` field -- present-but-zero, never omitted, so a
+    # caller can always read it unconditionally rather than checking for
+    # its presence first.
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "limits": {"min": 0.0, "max": 2.0},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "  Measurements for Transient Analysis\n\n"
+            "vout                =  1.00000e+00\n"
+        ),
+    )
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    assert report["diagnostic_counts"] == {
+        "by_code": {},
+        "by_severity": {},
+        "corners_with_diagnostics": 0,
+    }
+
+
+def test_run_sim_stubbed_diagnostic_counts_every_corner(tmp_path, monkeypatch):
+    # Issue #2491: the rollup counts diagnostics from *all* corners
+    # regardless of each corner's final `status` -- here every corner in a
+    # two-corner process sweep recovers from the same `singular_matrix`/
+    # `nonconvergence` warning and still ends up `status: "pass"`, so the
+    # rollup must show both corners contributing, not just the ones that
+    # ultimately failed/errored.
+    _write_body(tmp_path)
+    _write_corner_lib(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "models": {"lib": "corner.lib"},
+            "corners": {"process": ["tt", "ss"]},
+            "analysis": {"kind": "tran", "args": "1n 1n"},
+            "measurements": [
+                {
+                    "name": "vout_meas",
+                    "spice": ".meas tran vout_meas find v(vout_node) at=1n",
+                    "limits": {"min": 0.9, "max": 1.1},
+                },
+                {
+                    "name": "tail_meas",
+                    "spice": ".meas tran tail_meas find v(tail_node) at=1n",
+                    "limits": {"min": 0.4, "max": 0.6},
+                },
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    assert report["corner_count"] == 2
+    assert all(c["status"] == "pass" for c in report["corners"])
+    diagnostic_counts = report["diagnostic_counts"]
+    assert diagnostic_counts["by_code"]["singular_matrix"] == 2
+    assert diagnostic_counts["by_code"]["nonconvergence"] == 2
+    assert diagnostic_counts["by_severity"] == {"warning": 4}
+    assert diagnostic_counts["corners_with_diagnostics"] == 2
 
 
 def test_run_sim_keep_artifacts_writes_log(tmp_path, monkeypatch):
@@ -6424,6 +6514,9 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "passed",
         "failed",
         "errored",
+        # Issue #2491: rollup of `corners[].diagnostics[]` across the whole
+        # grid -- always present, purely additive.
+        "diagnostic_counts",
         "metrics",
         "environment",
         # Issue #1996: the shared vacuous-verdict convention
