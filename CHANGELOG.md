@@ -14,6 +14,32 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2485, `klt sim`'s `remote`/`batch` backends; additive — **no**
+  `schema_version` bump, no request/response field changed): an off-host run
+  staged only the request's *own* netlist file, so any netlist that
+  `.include`/`.inc`-ed a separate DUT file — `klt pex`'s entire testbench
+  contract, and the shape every `examples/design-pipeline/` testbench uses —
+  resolved that include on the **executing** host, where the submitting
+  host's path does not exist. It failed silently: ngspice's `Could not find
+  include file` surfaced only as `unavailable_measurement` rows and a full
+  set of `"error"` corners indistinguishable from a real post-layout
+  regression (and, downstream, from `klt pex` `delta[]` rows that read like a
+  measured one). Both backends now resolve the netlist's `.include`/`.inc`
+  closure **recursively**, stage every resolvable target alongside
+  `netlist.cir` in the job, and rewrite each directive to its staged,
+  job-relative name — via one shared helper (`sim_staging.py`) both job
+  builders call, so the two transports cannot drift. An include that
+  resolves nowhere on the submitting host now **fails the submit** with a
+  named error (exit `1`, before any instance is provisioned or any S3 object
+  written) instead of shipping a deck that cannot run. Includes the
+  executing host owns are left verbatim: environment-variable targets
+  (`$PDK_ROOT/...`) and targets under the forwarded PDK root
+  (`models.pdk_root`/`$PDK_ROOT`); `.lib` model-library cards are unchanged.
+  Independently, ngspice's own missing-include line is now classified as a
+  dedicated `missing_include` diagnostic `code` (all backends, `local`
+  included) rather than only as downstream measurement failures. See
+  [`docs/cli/sim.md`](docs/cli/sim.md) → "Off-host backends stage the
+  netlist's `.include` closure".
 - **Fixed** (#2473, `klt place-and-route` + `klt extract`; the `klt extract`
   half is additive — **no** `schema_version` bump: one new top-level
   `def_pin_promotion` field, `null` unless `--def-pins`/`def_pins` was given,

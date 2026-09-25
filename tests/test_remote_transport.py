@@ -240,6 +240,45 @@ def test_push_job_creates_dir_and_pushes_netlist_and_request(tmp_path):
     assert not os.path.exists(local_request_tmp)
 
 
+def test_push_job_pushes_every_staged_include_into_the_job_directory(tmp_path):
+    """Issue #2485: the `klt sim` job description now carries the netlist's
+    resolved `.include`/`.inc` closure as additional inputs -- each must
+    land flat in the job directory, beside `netlist.cir`, which is where the
+    rewritten relative directives resolve on the remote host."""
+    runner = _FakeRunner()
+    dut_path = tmp_path / "07-reference.spice"
+    dut_path.write_text(".subckt dut a b\nR1 a b 1k\n.ends\n")
+
+    rt.push_job(
+        host="h",
+        remote_job_dir="/home/ubuntu/job-1",
+        job=_sim_job(
+            inputs=(
+                rt.JobInput(
+                    remote_name="netlist.cir",
+                    label="netlist",
+                    content='* tb\n.include "07-reference.spice"\n',
+                ),
+                rt.JobInput(
+                    remote_name="07-reference.spice",
+                    label="include 07-reference.spice",
+                    local_path=str(dut_path),
+                ),
+                rt.JobInput(remote_name="request.json", label="request", content="{}"),
+            )
+        ),
+        runner=runner,
+    )
+
+    scp_calls = [c for c in runner.calls if c[0] == "scp"]
+    assert len(scp_calls) == 3
+    destinations = [call[-1] for call in scp_calls]
+    assert destinations[1].endswith(":/home/ubuntu/job-1/07-reference.spice")
+    assert scp_calls[1][-2] == str(dut_path)
+    assert destinations[0].endswith(":/home/ubuntu/job-1/netlist.cir")
+    assert destinations[2].endswith(":/home/ubuntu/job-1/request.json")
+
+
 def test_push_job_mkdir_failure_raises(tmp_path):
     runner = _FakeRunner()
     runner.queue("ssh", _FakeResult(returncode=1, stderr="permission denied"))
@@ -437,6 +476,17 @@ def test_job_input_requires_exactly_one_of_local_path_or_content():
 def test_job_input_rejects_both_local_path_and_content():
     with pytest.raises(ValueError, match="exactly one of local_path or content"):
         rt.JobInput(remote_name="x", label="x", local_path="/a", content="b")
+
+
+def test_job_input_rejects_a_name_that_escapes_the_job_directory():
+    """Issue #2485: `push_job` interpolates `remote_name` into
+    `<remote_job_dir>/<remote_name>`, and inputs are now derived from
+    netlist-declared `.include`/`.inc` targets rather than only from
+    hardcoded constants -- so an absolute or `..`-bearing name is rejected
+    at construction, before any `scp` argv is built."""
+    for bad in ("/etc/passwd", "../escape.cir", "sub/../../escape.cir", "~/x.cir", ""):
+        with pytest.raises(ValueError, match="JobInput.remote_name"):
+            rt.JobInput(remote_name=bad, label="x", content="c")
 
 
 def test_job_description_defaults_match_generic_conventions():

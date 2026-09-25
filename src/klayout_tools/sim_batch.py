@@ -87,7 +87,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from . import remote_transport
+from . import remote_transport, sim_staging
 from .remote_launcher import ASSUMED_THREADS_PER_CORNER
 from .sim_remote import (
     _build_remote_request,
@@ -265,6 +265,12 @@ class BatchJobInput:
     Exactly one of ``local_path`` (an existing file) or ``content`` (a
     string written to a temp file first) must be given. ``label`` is a short
     human-readable name used only in an upload failure's message.
+
+    ``name`` must be a relative name that stays inside ``inputs/`` -- the
+    same rule (and the same validator)
+    ``remote_transport.JobInput.remote_name`` applies, since the same
+    netlist-declared ``.include``/``.inc`` closure feeds both transports
+    (issue #2485).
     """
 
     name: str
@@ -278,6 +284,9 @@ class BatchJobInput:
                 "BatchJobInput requires exactly one of local_path or content "
                 f"(name={self.name!r})"
             )
+        remote_transport._validate_job_relative_name(
+            self.name, field="BatchJobInput.name"
+        )
 
 
 @dataclass(frozen=True)
@@ -348,8 +357,27 @@ def _build_batch_job_spec(
     the harness's ``$EDA_JOB_CONCURRENCY`` = physical cores / cores-per-job
     lands on the same "how many corners fit at once" answer the `remote`
     backend sizes an instance for.
+
+    ``inputs`` carries the netlist's resolved ``.include``/``.inc`` closure
+    alongside the netlist itself (issue #2485), via the *same*
+    :func:`sim_staging.stage_sim_netlist` call
+    :func:`sim_remote._build_remote_job_description` makes -- every staged
+    file lands flat under ``inputs/`` (hence side by side in
+    ``$EDA_INPUT_DIR``, the same property :data:`BATCH_NETLIST_FILENAME`
+    already relies on), with the directives naming it rewritten to its
+    staged name. An include that resolves nowhere on the submitting host
+    raises ``SimError`` from here -- before :func:`submit_job`'s first S3
+    write, mirroring :func:`_resolve_provision_script`'s own
+    "raise before any partial upload" discipline.
     """
     models = remote_request.get("models") or {}
+    staged = sim_staging.stage_sim_netlist(
+        remote_request,
+        netlist_path,
+        netlist_staged_name=BATCH_NETLIST_FILENAME,
+        reserved_names=(BATCH_REQUEST_FILENAME,),
+        backend="batch",
+    )
     command = (
         f'klt sim "$EDA_INPUT_DIR/{BATCH_REQUEST_FILENAME}" '
         "--backend local-parallel --format json"
@@ -378,8 +406,14 @@ def _build_batch_job_spec(
             math.ceil(_default_batch_job_timeout_s(corner_count, timeout_s))
         ),
         inputs=(
-            BatchJobInput(
-                name=BATCH_NETLIST_FILENAME, label="netlist", local_path=netlist_path
+            *(
+                BatchJobInput(
+                    name=item.staged_name,
+                    label=item.label,
+                    local_path=item.local_path,
+                    content=item.content,
+                )
+                for item in staged.files
             ),
             BatchJobInput(
                 name=BATCH_REQUEST_FILENAME,

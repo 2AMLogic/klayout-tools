@@ -737,25 +737,32 @@ applies to its `.include` target
 — so a parameter/corner file named by mistake is a clean error rather than a
 vacuous pass.
 
-### Pitfall: build the harness's decks **self-contained**
+### Portability note: `.include`d files travel off-host
 
-Because deck construction is now the harness's job, one portability rule is
-worth stating outright: if your harness generates a `klt sim` request of its
-own, **inline the netlist it was handed rather than `.include`-ing it**.
-`klt sim`'s off-host backends (`remote`/`batch`, which a multi-unit request
-reaches by default on any host that sets `$KLT_SIM_BACKEND` — see
-[`sim.md`](sim.md)) stage only the *request's own* netlist file into the job,
-so an `.include` naming a path on the submitting host resolves nowhere on the
-executing one. That failure is quiet in the worst way: every corner comes back
-`"unavailable_measurement"`, the harness still exits `0`, and `klt pex`
-renders a full set of `"error"` delta rows that read like a real, failed
-comparison. `examples/design-pipeline/12-pex-external.probe.py` inlines for
-exactly this reason.
+Because deck construction is the harness's job in this mode, one
+portability property is worth stating outright: if your harness generates a
+`klt sim` request of its own, an `.include`/`.inc` in that request's netlist
+**does** survive the trip to an off-host backend. `klt sim`'s `remote`/`batch`
+backends — which a multi-unit request reaches by default on any host that sets
+`$KLT_SIM_BACKEND` — stage the netlist's whole resolved include closure
+alongside it and rewrite each directive to the staged, job-relative name
+([issue #2485](https://github.com/2AMLogic/klayout-tools/issues/2485); see
+[`sim.md`](sim.md) → "Off-host backends stage the netlist's `.include`
+closure" for the exact rules, including which includes are deliberately left
+for the executing host to resolve).
 
-The same trap catches **testbench mode** — whose contract mandates an
-`.include`d DUT — on any off-host-defaulted host, which is a transport bug
-rather than a property of this mode; tracked separately in
-[issue #2485](https://github.com/2AMLogic/klayout-tools/issues/2485).
+Before that fix, only the request's *own* netlist file was staged, so an
+`.include` naming a path on the submitting host resolved nowhere on the
+executing one — and failed in the quietest possible way: every corner came
+back `"unavailable_measurement"`, the harness still exited `0`, and `klt pex`
+rendered a full set of `"error"` delta rows that read like a real, failed
+comparison. The same trap caught **testbench mode**, whose contract mandates
+an `.include`d DUT, on any off-host-defaulted host. Both are fixed at the
+transport, so neither mode needs a workaround now; an include that resolves
+nowhere on the submitting host is refused at submit time with a named error
+instead. (`examples/design-pipeline/12-pex-external.probe.py` inlines the
+netlist it is handed — that still works, and is still the simplest thing a
+harness can do.)
 
 ## Scope-mismatch note (resolved by this issue, #801)
 

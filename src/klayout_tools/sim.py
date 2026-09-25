@@ -568,6 +568,23 @@ _DIAGNOSTIC_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         ),
     ),
     (
+        # ngspice's own text when a `.include`/`.inc` target does not
+        # resolve, e.g. `Error: Could not find include file 07-reference.spice`
+        # (verified against ngspice 46). Its own line is the whole diagnosis,
+        # but everything that follows it -- every device the missing file
+        # would have defined, then every `.meas` that found no vector -- reads
+        # like a broken circuit rather than a missing file, so without its own
+        # code the corner surfaces only as `measurement`/`unavailable_
+        # measurement` rows indistinguishable from a real regression (issue
+        # #2485). Classified ahead of the generic `netlist` code below: this
+        # is the more specific reading of the same class of failure.
+        "missing_include",
+        re.compile(
+            r"^\s*Error:\s*Could not find include file",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    ),
+    (
         "netlist",
         re.compile(
             r"^Error:\s*.*\b(syntax|unknown|undefined|parse|subckt)\b",

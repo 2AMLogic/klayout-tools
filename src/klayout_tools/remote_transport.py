@@ -110,6 +110,27 @@ class RemoteTransportError(Exception):
 # contract a future extract/lvs/DRC remote backend implements against.
 
 
+def _validate_job_relative_name(name: str, *, field: str) -> None:
+    """Raise :class:`ValueError` unless ``name`` is a relative path that
+    cannot escape the job directory it is joined onto.
+
+    Shared by :class:`JobInput` and ``sim_batch.BatchJobInput`` (which joins
+    its own ``name`` onto an S3 key the same way) so both transports apply
+    one rule, not two.
+    """
+    if not name:
+        raise ValueError(f"{field} must be a non-empty job-relative filename")
+    if os.path.isabs(name) or name.startswith("~"):
+        raise ValueError(
+            f"{field} must be job-relative, not an absolute/home path: {name!r}"
+        )
+    parts = name.replace("\\", "/").split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise ValueError(
+            f"{field} must not contain empty or '..'/'.' path segments: {name!r}"
+        )
+
+
 @dataclass(frozen=True)
 class JobInput:
     """One local file (or inline text payload) :func:`push_job` uploads into
@@ -121,6 +142,15 @@ class JobInput:
     then removed -- see :func:`push_job`) must be given. ``label`` is a
     short human-readable name used only in a push failure's error message
     (e.g. ``"scp <label> push failed"``) -- it never reaches the remote host.
+
+    ``remote_name`` must be a *relative* name that stays inside the job
+    directory: :func:`push_job` interpolates it into
+    ``<remote_job_dir>/<remote_name>``, so an absolute or ``..``-bearing
+    name would write outside the directory the transport created and later
+    cleans up. Enforced here rather than at each caller, since job inputs
+    are increasingly derived from netlist-declared paths (the
+    ``.include``/``.inc`` closure ``sim_staging`` stages, issue #2485)
+    rather than hardcoded constants.
     """
 
     remote_name: str
@@ -134,6 +164,7 @@ class JobInput:
                 "JobInput requires exactly one of local_path or content "
                 f"(remote_name={self.remote_name!r})"
             )
+        _validate_job_relative_name(self.remote_name, field="JobInput.remote_name")
 
 
 @dataclass(frozen=True)

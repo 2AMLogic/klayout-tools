@@ -60,7 +60,19 @@ job = JobDescription(
   `remote_job_dir` and uploads each `job.inputs` entry to
   `<remote_job_dir>/<JobInput.remote_name>` — `local_path` inputs upload
   directly; `content` inputs are written to a local temp file first (removed
-  once the upload completes or fails).
+  once the upload completes or fails). `remote_name` must be a job-relative
+  filename that cannot escape `remote_job_dir` (no absolute path, no `..`
+  segment) — validated by `JobInput` itself, since inputs are no longer only
+  hardcoded constants (issue #2485 derives some from a netlist's own
+  `.include`/`.inc` targets).
+
+> The `klt sim` job above shows the two *fixed* inputs. Since issue #2485
+> it also carries one additional `JobInput` per file in the netlist's
+> resolved `.include`/`.inc` closure (`sim_staging.stage_sim_netlist`), with
+> the netlist itself supplied as rewritten `content` when any of its
+> directives were re-pointed at a staged name. That is a `klt sim` job
+> description detail, not a contract change: `push_job` sees an
+> `inputs` tuple of some length, exactly as before.
 - **`run_remote_job(host=..., remote_job_dir=..., job=job, timeout_s=..., ...)`**
   SSHes in, `cd`s into `remote_job_dir`, and runs `job.command`. An exit code
   in `job.success_exit_codes` is success; anything else raises

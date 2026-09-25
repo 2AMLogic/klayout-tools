@@ -525,21 +525,20 @@ class of degradation item 7 exists to make visible — on a row that could not
 be expressed as a `klt sim` measurement at all.
 
 **The probe's decks are self-contained on purpose.** It inlines whichever
-netlist `klt pex` hands it rather than `.include`-ing it, because a
-`--measure-command` harness builds each leg's deck itself and `klt sim`'s
-off-host backends (`remote`/`batch` — where a 21-point grid goes by default on
-any host that sets `$KLT_SIM_BACKEND`) stage only the *request's own* netlist
-file into the job. An `.include` naming a path on the submitting host would
-resolve nowhere on the executing one, and every corner would come back
-`"unavailable_measurement"`; inlining keeps the row reproducible on a laptop
-and on a batch fleet alike. Last-digit differences between backends are
-expected (the −40 °C extracted value lands on `−0.275661`/`−0.275662`
-depending on the ngspice build); `delta_pct` is stable at the reported
-precision. The same trap catches the `.include`-based testbenches above
-(`09-sim`/`10-pex`/`11-pex-mom`) on an off-host-defaulted host — a transport
-bug, tracked in
-[#2485](https://github.com/2AMLogic/klayout-tools/issues/2485); run those
-with `--backend local` until it lands.
+netlist `klt pex` hands it rather than `.include`-ing it — a
+`--measure-command` harness builds each leg's deck itself, and a
+self-contained deck is the simplest portable form. Last-digit differences
+between backends are expected (the −40 °C extracted value lands on
+`−0.275661`/`−0.275662` depending on the ngspice build); `delta_pct` is
+stable at the reported precision. Inlining is no longer *required* for
+portability: `klt sim`'s off-host backends (`remote`/`batch` — where a
+21-point grid goes by default on any host that sets `$KLT_SIM_BACKEND`) now
+stage the netlist's whole `.include`/`.inc` closure and rewrite each
+directive to the staged name
+([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)), so the
+`.include`-based testbenches above (`09-sim`/`10-pex`/`11-pex-mom`) run
+correctly off-host too — they previously came back as a full set of
+`"unavailable_measurement"` corners there and needed `--backend local`.
 
 Item 7 grades it with **no change to the kind restriction and no new envelope
 kind** ([`12-pex-external.result.json`](12-pex-external.result.json) cited as

@@ -422,6 +422,115 @@ def test_batch_job_input_requires_exactly_one_source():
         sb.BatchJobInput(name="x", label="x", local_path="/a", content="b")
 
 
+def test_batch_job_input_name_must_stay_inside_the_inputs_directory():
+    """Issue #2485: inputs are now derived from netlist-declared
+    `.include`/`.inc` targets, not only from hardcoded constants, so the
+    name that gets joined onto the job's S3 prefix is validated."""
+    for bad in ("/etc/passwd", "../escape.spice", "a/../../b.spice", ""):
+        with pytest.raises(ValueError, match="BatchJobInput.name"):
+            sb.BatchJobInput(name=bad, label="x", content="c")
+
+
+# --------------------------------------------------------------------------- #
+# `.include`/`.inc` closure staging (issue #2485)
+# --------------------------------------------------------------------------- #
+
+
+def _write_body_including_dut(tmp_path: Path) -> Path:
+    """A testbench shaped like `examples/design-pipeline/`'s own: a thin
+    deck that `.include`s a separate schematic DUT file (`klt pex`'s
+    testbench contract, `docs/cli/pex.md`)."""
+    (tmp_path / "07-reference.spice").write_text(".subckt dut a b\nR1 a b 1k\n.ends\n")
+    path = tmp_path / "testbench.spice"
+    path.write_text('* tb\n.include "07-reference.spice"\nXd a b dut\n')
+    return path
+
+
+def test_build_batch_job_spec_stages_the_netlists_include_closure(tmp_path):
+    spec = sb._build_batch_job_spec(
+        {"models": {"pdk": "sky130A"}, "netlist": "netlist.cir"},
+        str(_write_body_including_dut(tmp_path)),
+        corner_count=5,
+        timeout_s=120.0,
+        keep_artifacts=False,
+    )
+
+    by_name = {item.name: item for item in spec.inputs}
+    assert set(by_name) == {"netlist.cir", "request.json", "07-reference.spice"}
+    # The DUT is uploaded from its own path, alongside netlist.cir under
+    # inputs/ -- which the harness copies into $EDA_INPUT_DIR, where the
+    # rewritten relative directive resolves.
+    assert by_name["07-reference.spice"].local_path == str(
+        tmp_path / "07-reference.spice"
+    )
+    netlist_payload = by_name["netlist.cir"].content
+    assert '.include "07-reference.spice"' in netlist_payload
+    assert str(tmp_path) not in netlist_payload
+    # job.json's own contract is untouched by the extra input.
+    assert "inputs" not in spec.to_job_json()
+
+
+def test_build_batch_job_spec_refuses_an_unresolvable_include(tmp_path):
+    netlist = tmp_path / "testbench.spice"
+    netlist.write_text('* tb\n.include "no-such-dut.spice"\n')
+
+    with pytest.raises(sim.SimError) as excinfo:
+        sb._build_batch_job_spec(
+            {"models": {"pdk": "sky130A"}},
+            str(netlist),
+            corner_count=5,
+            timeout_s=120.0,
+            keep_artifacts=False,
+        )
+    message = str(excinfo.value)
+    assert "backend 'batch'" in message
+    assert "no-such-dut.spice" in message
+
+
+def test_build_batch_job_spec_leaves_pdk_rooted_includes_to_the_job_instance(tmp_path):
+    """A model file under the PDK root `job.json` already forwards is
+    provisioned on the job instance -- staging it would push a PDK's whole
+    model closure through S3 on every submit."""
+    models = tmp_path / "pdks" / "sky130A" / "models.spice"
+    models.parent.mkdir(parents=True)
+    models.write_text("* models\n")
+    netlist = tmp_path / "testbench.spice"
+    netlist.write_text(f'.include "{models}"\nR1 a b 1k\n')
+
+    spec = sb._build_batch_job_spec(
+        {"models": {"pdk": "sky130A", "pdk_root": str(tmp_path / "pdks")}},
+        str(netlist),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+
+    assert [item.name for item in spec.inputs] == ["netlist.cir", "request.json"]
+    # Untouched: uploaded byte-for-byte, directive intact.
+    assert spec.inputs[0].local_path == str(netlist)
+
+
+def test_submit_uploads_every_staged_include_under_inputs(tmp_path):
+    runner = _FakeRunner()
+    config = _config(tmp_path)
+    spec = sb._build_batch_job_spec(
+        {"models": {"pdk": "sky130A"}},
+        str(_write_body_including_dut(tmp_path)),
+        corner_count=1,
+        timeout_s=30.0,
+        keep_artifacts=False,
+    )
+
+    sb.submit_job(config, "job-include", spec, runner=runner)
+
+    destinations = [call[-2] for call in runner.calls if "cp" in call]
+    assert any(d.endswith("/job-include/inputs/netlist.cir") for d in destinations)
+    assert any(
+        d.endswith("/job-include/inputs/07-reference.spice") for d in destinations
+    )
+    assert any(d.endswith("/job-include/job.json") for d in destinations)
+
+
 # --------------------------------------------------------------------------- #
 # Submit / launch / poll / collect (recorded-argv assertions)
 # --------------------------------------------------------------------------- #
