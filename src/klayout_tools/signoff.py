@@ -90,6 +90,47 @@ the same `_REASON_NO_EVIDENCE`/`_REASON_UNREADABLE_EVIDENCE`/etc. machinery
 every other item already uses -- there is no separate "statistical" code
 path to fabricate a `"met"` for, by construction.
 
+### Campaign discipline is graded, not just the status (issue #2467)
+
+`status` alone was the whole item-6 rule until #2467, and it answers a
+narrower question than the checklist asks. `klt yield` never publishes a
+bare point estimate: every measurement carries its own `sample_size` block
+with a `verdict`, and a declared `negative_control` (a seeded, known-bad
+variant) is checked to actually show up as degraded yield. Item 6's own
+text requires both -- "MC runs need a recorded seed, sample count, a
+deterministic negative control". But a campaign that declared no
+`target_yield` reports `status: "reported"` ("it can never fail",
+`docs/cli/yield.md`), so a report whose own `sample_size.verdict` was
+`"insufficient"` and whose run-level `warnings` said no negative control was
+declared still graded an unqualified `"met"` -- the grader publishing the
+opposite reading of a scrupulously honest report.
+
+Three states, three different treatments, decided by what the *report*
+claims rather than by how bad it looks:
+
+- `sample_size.verdict: "insufficient"` on any measurement ->
+  `"unmet"`/:data:`_REASON_UNDERSIZED_SAMPLE`. This is the report stating,
+  about itself, that its published draw is not sized for the claim. Nothing
+  is re-derived here; the refusal is the artifact's own verdict, applied.
+- A declared `negative_control` whose `verdict` is `"not_detected"` ->
+  `"unmet"`/:data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED`. The self-check
+  ran and failed.
+- **No** measurement declared a control -> still `"met"`, with the state
+  disclosed on the citation (`yield_campaign.negative_control:
+  "not_declared"`). `klt yield` deliberately treats this as a run-level
+  warning with no exit-code change "so existing automation is not broken by
+  adopting this discipline", and hard-failing it here would retroactively
+  void every campaign committed before issue #817 -- a claimant's weighing,
+  not this module's. What #2467 removes is that the state was *silent*, not
+  that it was tolerated.
+
+The gate lives beside :func:`_check_passed`, in
+:func:`_yield_campaign_refusal` via :func:`_kind_gated_refusal`, never
+inside it -- so it narrows what *item 6* accepts without changing what
+`klt yield` (or :func:`build_signoff`'s envelope aggregation) calls a
+passing campaign. The `"pass"`/`"reported"` status check stays the first
+gate; a failing campaign still reports `check_failed`.
+
 ## Post-layout binding: item 7 <- `klt pex` (issue #871, Phase 2b of epic #706)
 
 Item 7 ("Post-layout verification") is the T1 checklist's schematic-vs-
@@ -1617,6 +1658,53 @@ _REASON_NOT_POST_LAYOUT = "not_post_layout"
 #: fix is to re-run it with something to check, not to fix a defect it found.
 _REASON_NOTHING_CHECKED = "nothing_checked"
 
+#: Issue #2467: the evidence resolved to a readable, recognised, *passing*
+#: `klt yield` envelope, but at least one of its own measurements reports
+#: ``sample_size.verdict == "insufficient"`` -- the report stating, about
+#: itself, that the draw it published is not sized for the claim being made
+#: (``required_n``/``required_n_for_target`` above the ``n`` actually drawn;
+#: see ``docs/cli/yield.md``'s "Sample-size verdict"). The ``status`` is
+#: still ``"pass"``/``"reported"``, because that token answers a different
+#: question -- "did every declared ``target_yield`` hold at the stated
+#: confidence" -- and ``"reported"`` in particular is what a campaign that
+#: declared no ``target_yield`` at all produces, which can never fail.
+#:
+#: Grouped with the "no runnable check proves this item" reasons
+#: (:data:`_REASON_WRONG_KIND`, :data:`_REASON_NOT_POST_LAYOUT`,
+#: :data:`_REASON_NOTHING_CHECKED`) rather than with
+#: :data:`_REASON_CHECK_FAILED`, per issue #826's invariant: the cited check
+#: did not fail on its own terms, and the fix is to draw more samples and
+#: re-run *this* campaign -- not to go looking for a design defect it
+#: reported. Deliberately distinct from :data:`_REASON_WRONG_KIND` for the
+#: same reason :data:`_REASON_NOT_POST_LAYOUT` is: the artifact *is* the one
+#: item 6 asks for.
+_REASON_UNDERSIZED_SAMPLE = "undersized_sample"
+
+#: Issue #2467: the evidence resolved to a readable, recognised, *passing*
+#: `klt yield` envelope whose campaign **did** declare a ``negative_control``
+#: -- a seeded, known-bad variant's own samples -- and that self-check
+#: **failed**: ``negative_control.verdict`` is ``"not_detected"``, i.e. the
+#: deliberate defect did not show up as a statistically distinguishable
+#: degradation (``docs/cli/yield.md``'s "Negative control"). The campaign has
+#: therefore demonstrated that its statistics cannot detect a degraded
+#: design, which is the opposite of what
+#: ``docs/design-evidence-tiers.md`` item 6's "deterministic negative
+#: control" requirement asks the citation to establish.
+#:
+#: Named for the state it actually refuses, **not** for the absent-control
+#: case: a campaign where *no* measurement declared a control at all is a
+#: disclosure, not a refusal (``citation.yield_campaign.negative_control:
+#: "not_declared"``, see :func:`_yield_campaign_disclosure`). `klt yield`
+#: itself draws exactly that line -- an undeclared control is a run-level
+#: warning with "no exit-code change ... so existing automation is not broken
+#: by adopting this discipline" (``docs/cli/yield.md``) -- and hard-failing it
+#: here would retroactively void every campaign committed before issue #817
+#: added the self-check, which is a claimant's weighing to make, not this
+#: module's. A control that ran and did not detect is a different thing
+#: entirely: a mechanically-observed negative result, like a failing
+#: registered ``critical: true`` metric.
+_REASON_NEGATIVE_CONTROL_NOT_DETECTED = "negative_control_not_detected"
+
 #: Issue #2109: the evidence resolved to a readable, recognised envelope of a
 #: kind this item accepts, whose producer applied the common rollup rule
 #: (:func:`~klayout_tools.coverage.coverage_rollup`) and reported its
@@ -2749,7 +2837,18 @@ def _check_passed(kind: str, envelope: _EvidenceEnvelope) -> bool:
       confidence) or ``status == "reported"`` (no measurement declared one,
       so nothing could fail -- docs/cli/yield.md's ``status`` field). A
       ``"fail"`` status (a declared ``target_yield`` was not supported) does
-      not pass.
+      not pass. Its per-measurement ``sample_size`` and ``negative_control``
+      blocks are **not** consulted here (issue #2467): this function answers
+      "what does this envelope's own verdict say", which is what its other
+      callers (envelope aggregation, :func:`build_signoff`) ask it, and
+      those two blocks answer a different question -- whether the campaign
+      behind that verdict can support a *signoff claim*. That question is
+      item 6's, and is applied beside this function by
+      :func:`_yield_campaign_refusal`, so a `klt yield` report grades in
+      aggregation mode exactly as it did before #2467 while `--manifest`
+      item 6 narrows. Both blocks are surfaced either way, in
+      :func:`_detail` and on a ``"met"`` citation -- see
+      :func:`_yield_campaign_disclosure`.
     - ``extract`` has no independent pass/fail: ``klt extract`` either
       produces a ``status: "extracted"`` envelope or raises (which surfaces
       here as the ``error`` kind, not a JSON envelope at all) -- so a
@@ -3059,12 +3158,20 @@ def _kind_gated_refusal(
       ``status`` was measured over nothing at all.
     - :data:`_REASON_NOT_POST_LAYOUT` -- the run is not the post-layout run
       the item requires.
+    - :data:`_REASON_UNDERSIZED_SAMPLE` /
+      :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED` (issue #2467) -- the
+      cited `klt yield` campaign's own ``sample_size.verdict`` says its
+      estimate is not sized, or its own declared negative control did not
+      detect the seeded degradation. See :func:`_yield_campaign_refusal`.
 
     ``nothing_checked`` is checked first: an empty report is not post-layout
     evidence either, and "this measured nothing" names the more fundamental
-    of the two problems. Both are ordered *after* :func:`_check_passed` in
-    the caller, so a run that both failed and measured nothing is reported as
-    the failure it is.
+    of the problems. The `klt yield` campaign-discipline gate is checked
+    last, since it is the narrowest -- it applies to one kind, and only once
+    the report has been established to have measured something and to be the
+    right kind of run. All are ordered *after* :func:`_check_passed` in the
+    caller, so a run that both failed and measured nothing is reported as the
+    failure it is.
     """
     if not _kind_is_accepted(check_kind, allowed_kinds):
         return None
@@ -3073,7 +3180,7 @@ def _kind_gated_refusal(
         return refusal
     if require_post_layout and not _is_post_layout_evidence(check_kind, envelope):
         return _REASON_NOT_POST_LAYOUT
-    return None
+    return _yield_campaign_refusal(check_kind, envelope)
 
 
 def _pex_body_bias_disclosure(
@@ -3119,6 +3226,179 @@ def _pex_body_bias_disclosure(
         "unbiased_device_count": body_bias.get("unbiased_device_count"),
         "unbiased_nets": list(nets) if isinstance(nets, list) else [],
     }
+
+
+def _yield_campaign_disclosure(
+    kind: str, envelope: dict[str, Any]
+) -> dict[str, Any] | None:
+    """The cited `klt yield` campaign's own two statements about whether its
+    numbers can support a claim at all (issue #2467) -- its per-measurement
+    ``sample_size.verdict`` and its ``negative_control`` state, rolled up
+    across ``measurements[]`` -- or ``None`` when there is nothing to quote.
+
+    Quoted verbatim off the envelope, never re-derived: `klt yield` computes
+    both (``docs/cli/yield.md``'s "Sample-size verdict" and "Negative
+    control"), and re-deriving either here would let this module and the
+    producer disagree about the same campaign.
+
+    ``None`` in exactly two cases, and they mean the same thing to a reader
+    ("this artifact makes no campaign-discipline statement"), never "the
+    campaign was disciplined":
+
+    - ``kind != "yield"``. No other envelope kind carries ``measurements[]``
+      of this shape, and item 6 is the only item that accepts this kind.
+    - The envelope reports no measurements at all (an empty or non-list
+      ``measurements``). There is then nothing whose sizing or self-check
+      could be stated.
+
+    The rolled-up fields, and the aggregation rule each uses -- stated here
+    because a campaign is a *set* of measurements and "the campaign's
+    verdict" is not a field any of them carries:
+
+    - ``sample_size`` -- ``"insufficient"`` when **any** measurement says so,
+      ``"sufficient"`` when at least one says so and none says otherwise,
+      and ``None`` when no measurement states a verdict at all (a report
+      written before the block existed). "Any" rather than "all": the item is
+      graded against the whole cited campaign, so one unsized measurement
+      leaves part of the claim unsized, and a missing statement is never read
+      as an insufficient one (the same back-compat rule
+      :func:`_drc_coverage_disclosure` applies to a missing ``coverage``
+      block).
+    - ``undersized_measurements`` -- the names behind that verdict, in the
+      report's own measurement order.
+    - ``negative_control`` -- ``"not_detected"`` when **any** declared
+      control failed to show the seeded degradation, ``"detected"`` when at
+      least one was declared and every declared one detected, and
+      ``"not_declared"`` when no measurement declared one. "Any failed" and
+      "at least one declared" are deliberately asymmetric, and match the two
+      run-level warnings `klt yield` itself emits (``native/yield/src/
+      estimate.rs``): one working self-check demonstrates the campaign's
+      statistics *can* discriminate, while one failed self-check
+      demonstrates they cannot.
+    - ``measurements_without_negative_control`` / ``undetected_negative_controls``
+      -- the names behind that verdict, likewise in report order, so a reader
+      who sees ``"detected"`` beside a non-empty first list can tell a
+      fully-controlled campaign from a partly-controlled one.
+    """
+    if kind != "yield":
+        return None
+    raw = envelope.get("measurements")
+    measurements = (
+        [m for m in raw if isinstance(m, dict)] if isinstance(raw, list) else []
+    )
+    if not measurements:
+        return None
+
+    sample_size_verdict, undersized = _yield_sample_size_rollup(measurements)
+    control_verdict, without_control, undetected = _yield_negative_control_rollup(
+        measurements
+    )
+    return {
+        "sample_size": sample_size_verdict,
+        "undersized_measurements": undersized,
+        "negative_control": control_verdict,
+        "measurements_without_negative_control": without_control,
+        "undetected_negative_controls": undetected,
+    }
+
+
+def _yield_sample_size_rollup(
+    measurements: list[dict[str, Any]],
+) -> tuple[str | None, list[Any]]:
+    """:func:`_yield_campaign_disclosure`'s ``sample_size`` /
+    ``undersized_measurements`` pair (issue #2467) -- see that function's
+    docstring for the aggregation rule this applies.
+
+    Split out rather than inlined because the two axes a campaign is rolled
+    up along (sizing, self-check) have *different* aggregation rules, and
+    reading them in one loop obscured which "any"/"at least one" belonged to
+    which axis.
+    """
+    undersized: list[Any] = []
+    sized = False
+    for measurement in measurements:
+        sample_size = measurement.get("sample_size")
+        if not isinstance(sample_size, dict):
+            continue
+        verdict = sample_size.get("verdict")
+        if verdict == "insufficient":
+            undersized.append(measurement.get("name"))
+        elif verdict == "sufficient":
+            sized = True
+    if undersized:
+        return "insufficient", undersized
+    return ("sufficient" if sized else None), undersized
+
+
+def _yield_negative_control_rollup(
+    measurements: list[dict[str, Any]],
+) -> tuple[str, list[Any], list[Any]]:
+    """:func:`_yield_campaign_disclosure`'s ``negative_control`` /
+    ``measurements_without_negative_control`` /
+    ``undetected_negative_controls`` triple (issue #2467) -- see that
+    function's docstring for the aggregation rule this applies.
+
+    A measurement whose ``negative_control`` is ``null``/absent declared
+    none; a declared one whose ``verdict`` is anything other than
+    ``"detected"`` (``"not_detected"`` today) did not show the seeded
+    degradation. A declared-but-unrecognised verdict is counted with the
+    latter deliberately: an unknown self-check result is not a passing one.
+    """
+    without_control: list[Any] = []
+    undetected: list[Any] = []
+    detected = False
+    for measurement in measurements:
+        control = measurement.get("negative_control")
+        if not isinstance(control, dict):
+            without_control.append(measurement.get("name"))
+        elif control.get("verdict") == "detected":
+            detected = True
+        else:
+            undetected.append(measurement.get("name"))
+    if undetected:
+        return "not_detected", without_control, undetected
+    if detected:
+        return "detected", without_control, undetected
+    return "not_declared", without_control, undetected
+
+
+def _yield_campaign_refusal(kind: str, envelope: dict[str, Any]) -> str | None:
+    """The reason :func:`_grade_evidence` must refuse this *passing* `klt
+    yield` envelope on its own campaign-discipline self-report (issue #2467)
+    -- or ``None`` when it has no such reason.
+
+    Reads :func:`_yield_campaign_disclosure`, so the reason rendered and the
+    disclosure carried beside it can never describe different states of the
+    same report.
+
+    Two of the three states that disclosure can report are refusals:
+
+    - :data:`_REASON_UNDERSIZED_SAMPLE` -- ``sample_size: "insufficient"``.
+    - :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED` -- ``negative_control:
+      "not_detected"``.
+
+    The third, ``negative_control: "not_declared"``, is deliberately *not* a
+    refusal -- see that second constant's own docstring for why `klt yield`'s
+    own warning-not-failure treatment of an undeclared control is the right
+    line to hold here too.
+
+    Sample size is checked first when both fire: an estimate that is not
+    sized is the more fundamental problem (no self-check makes an unsized
+    interval support a claim), so that is the one the report names. Both are
+    ordered *after* :func:`_check_passed` in the caller, so a campaign that
+    both failed its declared ``target_yield`` and was undersized is reported
+    as the failure it is -- the existing ``"pass"``/``"reported"`` status
+    check stays the first gate, and this only narrows what already-passing
+    evidence counts as ``"met"``.
+    """
+    disclosure = _yield_campaign_disclosure(kind, envelope)
+    if disclosure is None:
+        return None
+    if disclosure["sample_size"] == "insufficient":
+        return _REASON_UNDERSIZED_SAMPLE
+    if disclosure["negative_control"] == "not_detected":
+        return _REASON_NEGATIVE_CONTROL_NOT_DETECTED
+    return None
 
 
 def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
@@ -3195,6 +3475,17 @@ def _detail(kind: str, envelope: _EvidenceEnvelope) -> dict[str, Any]:
             "source_kind": source.get("kind"),
             "sample_count": source.get("sample_count"),
         }
+        # Issue #2467: whether the campaign these numbers came from was
+        # sized for the claim, and whether it carried a working self-check.
+        # Surfaced here so envelope-aggregation mode and `--manifest`
+        # grading read the same statement off the same report -- `passed` is
+        # untouched (that gate belongs to item 6, see
+        # `_yield_campaign_refusal`). Omitted for a report with no
+        # measurements at all, so an envelope that states nothing renders
+        # exactly as it did before.
+        campaign = _yield_campaign_disclosure(kind, envelope)
+        if campaign is not None:
+            detail["yield_campaign"] = campaign
     elif kind == "extract":
         detail = {
             "file": envelope.get("file"),
@@ -3939,6 +4230,27 @@ def build_tier_report(
       ``"wrong_kind"`` per issue #826's invariant: ``"wrong_kind"`` means
       "cite a different artifact"; ``"not_post_layout"`` means "re-run
       *this* artifact against the layout".
+    - ``"undersized_sample"`` (issue #2467, item 6 only today) -- the
+      evidence resolved to a recognised, *passing* `klt yield` envelope, but
+      at least one of its own measurements reports
+      ``sample_size.verdict: "insufficient"``: the report saying, about
+      itself, that the draw it published is not sized for the claim. Its
+      ``status`` says only that every *declared* ``target_yield`` held (and
+      ``"reported"`` says none was declared at all), so the two never
+      contradict each other. Fix: draw the ``required_n`` the report names
+      and re-run the campaign. The item's ``detail.yield_campaign`` names
+      which measurements are undersized.
+    - ``"negative_control_not_detected"`` (issue #2467, item 6 only today)
+      -- the cited campaign *did* declare a negative control -- a seeded,
+      known-bad variant -- and that self-check failed
+      (``negative_control.verdict: "not_detected"``): the deliberate defect
+      did not show up as a statistically distinguishable degradation, so the
+      campaign has demonstrated its statistics cannot detect a degraded
+      design. Deliberately **not** rendered for a campaign that declared no
+      control at all: that state is disclosed on the ``"met"`` citation
+      (``citation.yield_campaign.negative_control: "not_declared"``) rather
+      than refused, matching `klt yield`'s own warning-not-failure treatment
+      of it -- see :data:`_REASON_NEGATIVE_CONTROL_NOT_DETECTED`.
     - ``"no_pdn"`` (issue #2025, item 11 only) -- the cited `klt
       place-and-route` response says no power grid was built at all
       (``power.pdn`` is not ``true``, or no ``power.tapcell_master`` was
@@ -4964,7 +5276,21 @@ def _grade_evidence(
         require_post_layout=require_post_layout,
     )
     if kind_gated is not None:
-        return "unmet", kind_gated, None, {}
+        # Issue #2467: the two `yield` refusals name a state the reader
+        # cannot see from the reason alone -- *which* measurements are
+        # undersized, or whose negative control did not detect -- so the
+        # same disclosure the `"met"` path carries on the citation is
+        # carried here as the item's `detail` instead. `{}` (no `detail`
+        # key at all) for every other refusal, exactly as before.
+        campaign = _yield_campaign_disclosure(check_kind, envelope)
+        failure_detail = (
+            {"yield_campaign": campaign}
+            if campaign is not None
+            and kind_gated
+            in (_REASON_UNDERSIZED_SAMPLE, _REASON_NEGATIVE_CONTROL_NOT_DETECTED)
+            else {}
+        )
+        return "unmet", kind_gated, None, failure_detail
 
     expected_hash = spec.get("content_hash")
     if expected_hash is not None and resolution["content_hash"] != expected_hash:
@@ -5187,6 +5513,18 @@ def _citation(resolution: dict[str, Any]) -> dict[str, Any]:
     content_hash_unresolved = resolution.get("content_hash_unresolved")
     if content_hash_unresolved is not None:
         citation["content_hash_unresolved"] = content_hash_unresolved
+    # Issue #2467: a `yield` citation also carries the cited campaign's own
+    # sample-size and negative-control state -- the two things item 6's
+    # checklist text names ("sample count, a deterministic negative
+    # control") that `status` alone does not answer. The refusing halves of
+    # that state (`"insufficient"`, `"not_detected"`) never reach here --
+    # `_yield_campaign_refusal` has already rendered them `"unmet"` -- so
+    # what this key carries on a `"met"` item is the state the claim rests
+    # on, including the `"not_declared"` case the grader deliberately does
+    # not refuse. Never consulted by any grading rule.
+    campaign = _yield_campaign_disclosure(resolution["kind"], resolution["envelope"])
+    if campaign is not None:
+        citation["yield_campaign"] = campaign
     return citation
 
 
