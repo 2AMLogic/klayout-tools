@@ -711,12 +711,12 @@
     {
       "file": "src/klayout_tools/sim.py",
       "function": "_rollup_measurements",
-      "complexity": 13
+      "complexity": 15
     },
     {
       "file": "src/klayout_tools/sim.py",
       "function": "_run_corner",
-      "complexity": 20
+      "complexity": 21
     },
     {
       "file": "src/klayout_tools/sim.py",
@@ -731,7 +731,7 @@
     {
       "file": "src/klayout_tools/sim.py",
       "function": "run_sim",
-      "complexity": 51
+      "complexity": 52
     },
     {
       "file": "src/klayout_tools/sim_plot.py",

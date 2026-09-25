@@ -980,6 +980,10 @@ def run_sim(
             )
 
     options = request.get("options") or {}
+    # Issue #2493: validates and resolves both plausibility declarations into
+    # `measurements_spec` in place, before any corner is dispatched -- see
+    # `_resolve_plausible_ranges`.
+    _resolve_plausible_ranges(measurements_spec, options)
     # Issue #2423: resolve *which* ngspice binary to run before dispatching
     # any corner (`options.ngspice_binary` > `$KLT_NGSPICE_BINARY` >
     # `ngspice` on PATH), rather than hardcoding the name `ngspice` -- the
@@ -1466,6 +1470,14 @@ def run_sim(
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
     errored = sum(1 for c in corners if c["status"] == "error")
+    # Issue #2493: counted separately from `failed`/`passed` -- a corner
+    # with at least one measurement outside its declared plausibility bound
+    # is neither, per `_run_corner`'s own `error > implausible_solution >
+    # fail > pass` precedence. Always `0` when no request declares
+    # `options.node_voltage_bounds`/`measurements[].plausible_range`, so an
+    # unmodified request's `passed + failed + errored == corner_count`
+    # invariant is unchanged.
+    implausible = sum(1 for c in corners if c["status"] == "implausible_solution")
     # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
     # design failure even when every individual sample passed -- it is only
     # reachable via a declared sigma window, since every other rollup `fail`
@@ -1491,6 +1503,17 @@ def run_sim(
         errored=bool(errored),
     )
     status = rollup_status(rollup, success="pass", failure="fail", errored="error")
+    # Issue #2493: `implausible` outranks every non-`error` verdict token
+    # (`"fail"`, `"pass"`, `"pass_partial"`, `"not_checked"` -- the common
+    # rollup rule above has no vocabulary for "at least one result cannot
+    # be trusted enough to grade", so it is applied here as a final,
+    # narrowly-scoped override rather than folded into `coverage_rollup`
+    # itself). `"error"` still wins: a corner that never produced a
+    # trustworthy result at all outranks one that produced an implausible
+    # one. Never fires unless the request opted in, so an unmodified
+    # request's `status` is byte-identical to before this issue.
+    if status != "error" and implausible:
+        status = "implausible_solution"
 
     environment: dict[str, Any] = {
         "engine": engine,
@@ -1581,6 +1604,13 @@ def run_sim(
         "passed": passed,
         "failed": failed,
         "errored": errored,
+        # Issue #2493: always present (default `0`), alongside its three
+        # siblings above -- not yet re-keyed into `metrics` below, since
+        # that block is a fixed re-keying of the pre-existing three counts
+        # (issue #1849's declared-namespace registry) and adding a fourth
+        # entry there is a separate registration decision this issue does
+        # not make.
+        "implausible": implausible,
         # Issue #2491: rollup of `corners[].diagnostics[]` across the whole
         # grid, counted regardless of each corner's final `status` -- see
         # the `diagnostic_counts` computation above.
@@ -2016,6 +2046,121 @@ def _validate_k_sigma(value: Any, field: str) -> float:
     if value < 0:
         raise SimError(f"{field} must be a non-negative number (got {value!r})")
     return float(value)
+
+
+def _validate_plausible_range(value: Any, field: str) -> dict[str, float]:
+    """Validate a plausibility-range field (``min``/``max``, either optional
+    but at least one required) and return it as a normalised
+    ``{"min": float, ...}``/``{"max": float, ...}`` dict.
+
+    Shared by ``request.options.node_voltage_bounds`` (the run-wide,
+    voltage-scoped default) and ``request.measurements[].plausible_range``
+    (the per-measurement, unscoped declaration) -- issue #2493 -- so both
+    reject the same malformed shapes with the same message style, mirroring
+    :func:`_validate_k_sigma`'s shared-validator pattern for ``k_sigma``.
+
+    Unlike ``limits`` (which ``_evaluate_limits`` reads defensively via
+    ``.get`` and never rejects), a plausibility bound is validated eagerly
+    here: it exists specifically to *reclassify* an otherwise-graded value,
+    so a malformed declaration should fail the whole request up front
+    rather than silently never firing.
+    """
+    if not isinstance(value, dict):
+        raise SimError(
+            f"{field} must be an object with 'min' and/or 'max' (got {value!r})"
+        )
+    result: dict[str, float] = {}
+    for key in ("min", "max"):
+        if key not in value:
+            continue
+        entry = value[key]
+        if isinstance(entry, bool) or not isinstance(entry, (int, float)):
+            raise SimError(f"{field}.{key} must be a number (got {entry!r})")
+        result[key] = float(entry)
+    if not result:
+        raise SimError(f"{field} must declare at least one of 'min'/'max'")
+    if "min" in result and "max" in result and result["min"] > result["max"]:
+        raise SimError(
+            f"{field}.min must be <= {field}.max "
+            f"(got min={result['min']!r}, max={result['max']!r})"
+        )
+    return result
+
+
+def _resolve_plausible_ranges(
+    measurements_spec: list[dict[str, Any]], options: dict[str, Any]
+) -> None:
+    """Validate and resolve issue #2493's two plausibility declarations into
+    each measurement spec, **in place**, before any corner is dispatched.
+
+    Two declarations, one resolved field:
+
+    - ``request.measurements[].plausible_range`` -- per-measurement and
+      **unscoped**: it applies to whatever measurement it is attached to
+      regardless of ``unit``, because an explicit per-measurement
+      declaration is always the caller's deliberate act.
+    - ``request.options.node_voltage_bounds`` -- a run-wide default that is
+      **voltage-scoped**: it only auto-applies to a measurement declaring
+      ``unit: "V"``. There is no measurement "kind" tag in the request
+      schema to gate on otherwise, so ``unit`` is the caller's only
+      declared signal that a measurement reads a node voltage; one with any
+      other ``unit`` (``dB``, ``A``, ``s``, ...) or none never inherits it,
+      though it can still opt in explicitly. A measurement's own
+      ``plausible_range`` always wins over the inherited default.
+
+    Both are normalised in place (bools rejected, bounds coerced to float,
+    ``min <= max`` enforced) so :func:`_run_corner`'s plausibility pre-check
+    never has to re-validate -- the same "validate once during request
+    parsing" discipline ``k_sigma`` follows. A malformed declaration raises
+    :class:`SimError` here, before the first corner runs, rather than
+    silently never firing.
+
+    Resolving the default into each spec *here* rather than at each
+    measurement's call site is also what makes ``options.resume`` correct
+    for free: :func:`_checkpoint_fingerprint` hashes ``measurements_spec``,
+    so changing a declared bound between runs invalidates the checkpoint
+    instead of silently reusing corner verdicts graded under the old one.
+
+    See ``docs/cli/sim.md``'s "Plausibility bounds" section.
+    """
+    for spec in measurements_spec:
+        declared = spec.get("plausible_range")
+        if declared is not None:
+            spec["plausible_range"] = _validate_plausible_range(
+                declared, f"request.measurements[{spec['name']!r}].plausible_range"
+            )
+
+    node_voltage_bounds = options.get("node_voltage_bounds")
+    if node_voltage_bounds is None:
+        return
+    node_voltage_bounds = _validate_plausible_range(
+        node_voltage_bounds, "request.options.node_voltage_bounds"
+    )
+    for spec in measurements_spec:
+        if spec.get("plausible_range") is None and spec.get("unit") == "V":
+            spec["plausible_range"] = node_voltage_bounds
+
+
+def _within_plausible_range(value: float, plausible_range: dict[str, float]) -> bool:
+    """Whether ``value`` sits inside a declared plausibility bound.
+
+    The numeric-range pre-check for ``options.node_voltage_bounds``/
+    ``measurements[].plausible_range`` (issue #2493) -- run by
+    :func:`_grade_measurement_value`, *before* the ordinary ``limits``
+    comparison (:func:`_evaluate_limits`). Deliberately not a
+    log-text classification: an implausible-but-numerically-valid solve
+    (a compact model evaluated far outside its fitted range) produces no
+    distinguishing ngspice log line for ``_classify_diagnostics`` to catch
+    -- this is a purely numeric check the tool performs on the measured
+    value itself.
+    """
+    min_bound = plausible_range.get("min")
+    max_bound = plausible_range.get("max")
+    if min_bound is not None and value < min_bound:
+        return False
+    if max_bound is not None and value > max_bound:
+        return False
+    return True
 
 
 def _validate_mc_statistics_spec(
@@ -2946,7 +3091,6 @@ def _run_corner(
         name = spec["name"]
         value = measurement_values.get(name.lower() if is_xyce else name)
         unit = spec.get("unit")
-        limits = spec.get("limits")
         if value is None:
             measurement_results.append(
                 {
@@ -2965,7 +3109,12 @@ def _run_corner(
                 }
             )
         else:
-            m_status, margin = _evaluate_limits(value, limits)
+            # `_grade_measurement_value` owns the plausibility-pre-check ->
+            # `limits` ordering (issue #2493) in one place, so there is no
+            # second grading path where the pre-check could be skipped.
+            m_status, margin, grading_diagnostics = _grade_measurement_value(
+                spec, value
+            )
             measurement_results.append(
                 {
                     "name": name,
@@ -2975,6 +3124,7 @@ def _run_corner(
                     "margin": margin,
                 }
             )
+            diagnostics.extend(grading_diagnostics)
 
     # A recovered `singular_matrix`/`nonconvergence` classification (the
     # engine's own stepping-recovery narration -- routine noise on the way
@@ -2997,15 +3147,23 @@ def _run_corner(
             if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
                 diagnostic["severity"] = "warning"
 
-    # error > fail > pass, mirroring the response's own aggregate precedence:
-    # any engine-level diagnostic still at severity "error" (timeout, an
-    # unrecovered singular matrix/nonconvergence, netlist, unresolvable
-    # measurement, unknown) means no trustworthy result exists for this
-    # corner, which always outranks a clean limit violation.
+    # error > implausible_solution > fail > pass, mirroring the response's
+    # own aggregate precedence: any engine-level diagnostic still at
+    # severity "error" (timeout, an unrecovered singular matrix/
+    # nonconvergence, netlist, unresolvable measurement, unknown) means no
+    # trustworthy result exists for this corner, which always outranks
+    # everything else. `implausible_solution` (issue #2493) outranks a
+    # clean limit violation in turn: a corner with at least one measurement
+    # outside its declared plausibility bound is not known to be a real
+    # spec miss (or a real pass) -- grading it `"fail"` is exactly the
+    # false-fail artifact this status exists to avoid, so it is reported
+    # distinctly instead.
     if any(d["severity"] == "error" for d in diagnostics) or any(
         m["status"] == "error" for m in measurement_results
     ):
         status = "error"
+    elif any(m["status"] == "implausible_solution" for m in measurement_results):
+        status = "implausible_solution"
     elif any(m["status"] == "fail" for m in measurement_results):
         status = "fail"
     else:
@@ -4078,10 +4236,16 @@ def _measurement_coverage(
     measurement = next(
         (m for m in corner.get("measurements", []) if m["name"] == name), {}
     )
-    measured = measurement.get("value") is not None and measurement.get("status") in {
-        "pass",
-        "fail",
-    }
+    has_value = measurement.get("value") is not None
+    # Issue #2493: `"implausible_solution"` is a real observation (a value
+    # was produced) that the plausibility pre-check deliberately kept out of
+    # the `limits` comparison -- distinct from `measured` below, which is
+    # specifically "produced a value *and* was actually graded against
+    # `limits`". An implausible observation still counts for the
+    # `/observation` row (something was measured), but never for a
+    # `/limit/...` row (that bound was never applied to it).
+    implausible = measurement.get("status") == "implausible_solution"
+    measured = has_value and measurement.get("status") in {"pass", "fail"}
     checked = []
     skipped = []
     inapplicable = []
@@ -4089,7 +4253,7 @@ def _measurement_coverage(
         inapplicable.append(
             {"id": identity + "/limits", "reason": "characterization_without_limits"}
         )
-        if measured:
+        if measured or implausible:
             checked.append(identity + "/observation")
         else:
             skipped.append(
@@ -4101,6 +4265,8 @@ def _measurement_coverage(
             skipped.append({"id": bound_id, "reason": "unrecognized_limit_key"})
         elif value is None:
             skipped.append({"id": bound_id, "reason": "missing_limit_value"})
+        elif implausible:
+            skipped.append({"id": bound_id, "reason": "implausible_solution"})
         elif not measured:
             skipped.append({"id": bound_id, "reason": "unavailable_measurement"})
         else:
@@ -4204,6 +4370,64 @@ def _evaluate_limits(
     return "pass", margin
 
 
+def _grade_measurement_value(
+    spec: dict[str, Any], value: float
+) -> tuple[str, float | None, list[dict[str, Any]]]:
+    """Grade one extracted measurement ``value`` against its ``spec``.
+
+    Returns ``(status, margin, diagnostics)`` -- ``diagnostics`` is empty
+    except on the ``"implausible_solution"`` path, where it carries the
+    ``severity: "warning"`` entry the caller extends the corner's own
+    ``diagnostics`` with.
+
+    **This function owns the grading order**, which is the whole point of
+    issue #2493: a declared plausibility bound
+    (``measurements[].plausible_range``, or an inherited
+    ``options.node_voltage_bounds`` -- both already resolved into ``spec``
+    by :func:`_resolve_plausible_ranges`) is checked **first**, and an
+    out-of-range value short-circuits :func:`_evaluate_limits` entirely
+    rather than being graded against ``limits`` as if it were a real
+    result. ``margin`` stays ``None`` there: margin is defined relative to
+    ``limits``, which never ran.
+
+    The reason the ordering lives in one named function rather than inline
+    at the call site is that the failure mode this closes is *silent*. An
+    ngspice Newton solve can converge onto a numerically valid but
+    physically implausible operating point (a compact model evaluated far
+    outside its fitted range) without emitting any distinguishing log line
+    for :func:`_classify_diagnostics` to match -- so the only thing standing
+    between that solve and an ordinary-looking ``pass``/``fail`` verdict is
+    this check running before :func:`_evaluate_limits`. A second grading
+    path that reached ``_evaluate_limits`` without passing through here
+    would silently reopen the gap.
+
+    Never fires for a request that declares no plausibility bound: with
+    ``spec["plausible_range"]`` absent, this is exactly
+    :func:`_evaluate_limits` plus an empty diagnostic list.
+    """
+    plausible_range = spec.get("plausible_range")
+    if plausible_range is not None and not _within_plausible_range(
+        value, plausible_range
+    ):
+        return (
+            "implausible_solution",
+            None,
+            [
+                {
+                    "severity": "warning",
+                    "code": "implausible_solution",
+                    "message": (
+                        f"measurement {spec['name']!r} = {value!r} is outside its "
+                        f"declared plausible range {plausible_range!r} -- graded "
+                        "implausible_solution rather than pass/fail"
+                    ),
+                }
+            ],
+        )
+    status, margin = _evaluate_limits(value, spec.get("limits"))
+    return status, margin, []
+
+
 def _quantile_key(percentile: float) -> str:
     """Response key for a percentile: ``5 -> "p5"``, ``2.5 -> "p2.5"``."""
     return f"p{percentile:g}"
@@ -4270,14 +4494,22 @@ def _sample_statistics(
     quantiles: tuple[float, ...],
     k_sigma: float | None,
     limits: dict[str, float] | None,
+    implausible: int = 0,
 ) -> dict[str, Any]:
     """Reduce one measurement's Monte Carlo sample ``values`` to the reported
-    statistics block: ``{n, errored, mean, stddev, min, max, quantiles,
-    sigma_window}``.
+    statistics block: ``{n, errored, implausible, mean, stddev, min, max,
+    quantiles, sigma_window}``.
 
-    ``n`` counts only samples that produced a number; ``errored`` counts the
-    samples whose value was unextractable (``null``) and were therefore
-    excluded from every statistic -- a sample set is never silently
+    ``n`` counts only samples that produced a number *and* were graded
+    (neither unextractable nor implausible); ``errored`` counts the samples
+    whose value was unextractable (``null``); ``implausible`` (issue #2493)
+    counts the samples that did produce a number but fell outside a declared
+    ``node_voltage_bounds``/``plausible_range`` -- both are excluded from
+    every statistic below, for the same reason: an unextractable or
+    physically implausible sample would otherwise silently skew ``mean``/
+    ``stddev``/the quantiles/``sigma_window`` (exactly the false-fail
+    artifact this issue exists to close, reproduced at the pooled-statistics
+    level rather than a single corner's). A sample set is never silently
     reduced without saying so.
 
     ``stddev`` is the **sample** standard deviation (Bessel-corrected,
@@ -4299,6 +4531,7 @@ def _sample_statistics(
     return {
         "n": n,
         "errored": errored,
+        "implausible": implausible,
         "mean": mean,
         "stddev": stddev,
         "min": ordered[0] if n else None,
@@ -4354,10 +4587,25 @@ def _monte_carlo_rollup(
     k_sigma = default_k_sigma if override is None else float(override)
 
     def _stats(pairs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
-        values = [m["value"] for _, m in pairs if m["value"] is not None]
+        # Issue #2493: an `implausible_solution` sample has a real
+        # (non-null) `value` -- unlike an errored sample -- so it needs its
+        # own exclusion, not just the pre-existing `value is not None`
+        # filter, or a physically implausible outlier would silently skew
+        # `mean`/`stddev`/the quantiles/`sigma_window` exactly as an
+        # ungated `limits` comparison would have skewed a single corner's
+        # `pass`/`fail`.
+        values = [
+            m["value"]
+            for _, m in pairs
+            if m["value"] is not None and m["status"] != "implausible_solution"
+        ]
+        implausible_count = sum(
+            1 for _, m in pairs if m["status"] == "implausible_solution"
+        )
         return _sample_statistics(
             values,
-            errored=len(pairs) - len(values),
+            errored=len(pairs) - len(values) - implausible_count,
+            implausible=implausible_count,
             quantiles=quantiles,
             k_sigma=k_sigma,
             limits=limits,
@@ -4382,7 +4630,13 @@ def _rollup_measurements(
 ) -> list[dict[str, Any]]:
     """Per-measurement rollup across all corners: aggregate status and the
     worst-case corner (smallest/most-negative margin; ``None`` margins --
-    unextractable values -- are treated as worst of all).
+    unextractable values, and issue #2493's implausible ones, whose
+    ``limits`` comparison never ran -- are treated as worst of all).
+
+    Aggregate status follows the same ``error > implausible_solution > fail
+    > pass`` precedence :func:`_run_corner` applies per corner (issue
+    #2493); ``implausible_solution`` is unreachable unless the request
+    declared a plausibility bound.
 
     ``monte_carlo`` (the validated ``{quantiles, k_sigma}`` statistics config,
     ``None`` when the request declared no ``monte_carlo`` block) additively
@@ -4390,8 +4644,9 @@ def _rollup_measurements(
     sampled corners -- see :func:`_monte_carlo_rollup`. A declared sigma
     window that the sample set violates makes the entry's aggregate
     ``status`` ``"fail"``, exactly as a single corner missing its limits
-    does; without a declared ``k_sigma`` nothing about the existing rollup
-    changes.
+    does (except when the entry is already ``"error"``/
+    ``"implausible_solution"``, both of which outrank it); without a
+    declared ``k_sigma`` nothing about the existing rollup changes.
     """
     rollup: list[dict[str, Any]] = []
     for spec in measurements_spec:
@@ -4406,6 +4661,12 @@ def _rollup_measurements(
         statuses = {m["status"] for _, m in entries}
         if "error" in statuses:
             agg_status = "error"
+        elif "implausible_solution" in statuses:
+            # Issue #2493: same precedence as the per-corner aggregate in
+            # `_run_corner` -- a measurement with at least one implausible
+            # sample is not known to be a real fail (or a real pass), so it
+            # outranks a clean `"fail"` here too.
+            agg_status = "implausible_solution"
         elif "fail" in statuses:
             agg_status = "fail"
         else:
@@ -4431,6 +4692,15 @@ def _rollup_measurements(
             "status": agg_status,
             "worst_case": worst_case,
         }
+        plausible_range = spec.get("plausible_range")
+        if plausible_range is not None:
+            # Additive/optional (issue #2493): only present when this
+            # measurement declared (or inherited from
+            # `options.node_voltage_bounds`) a plausibility bound -- echoes
+            # the resolved, normalised bound so a caller can see why an
+            # entry graded `"implausible_solution"` without re-deriving the
+            # default-vs-override resolution itself.
+            entry["plausible_range"] = plausible_range
 
         if monte_carlo is not None:
             mc_stats = _monte_carlo_rollup(
@@ -4446,9 +4716,14 @@ def _rollup_measurements(
                 entry["monte_carlo"] = mc_stats
                 window = mc_stats["sigma_window"]
                 if window is not None and window["status"] == "fail":
-                    # `error` still outranks a limit violation, per the
-                    # response's aggregate precedence.
-                    if entry["status"] != "error":
+                    # `error` and `implausible_solution` (issue #2493) both
+                    # still outrank a sigma-window limit violation, per the
+                    # response's own aggregate precedence -- the window is
+                    # computed only from this measurement's plausible
+                    # samples (see `_monte_carlo_rollup`'s `_stats`), but a
+                    # measurement that also had at least one implausible
+                    # sample is still not a clean, fully-trustworthy `fail`.
+                    if entry["status"] not in ("error", "implausible_solution"):
                         entry["status"] = "fail"
 
         rollup.append(entry)

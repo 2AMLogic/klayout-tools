@@ -1441,6 +1441,156 @@ def test_evaluate_limits_pass_min_only():
 
 
 # --------------------------------------------------------------------------- #
+# Plausibility bounds (issue #2493): `_validate_plausible_range` /
+# `_within_plausible_range` unit coverage.
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_plausible_range_normalises_min_and_max():
+    result = sim._validate_plausible_range({"min": -1, "max": 2}, "field")
+    assert result == {"min": -1.0, "max": 2.0}
+    assert all(isinstance(v, float) for v in result.values())
+
+
+def test_validate_plausible_range_allows_min_only():
+    assert sim._validate_plausible_range({"min": 0}, "field") == {"min": 0.0}
+
+
+def test_validate_plausible_range_allows_max_only():
+    assert sim._validate_plausible_range({"max": 5}, "field") == {"max": 5.0}
+
+
+def test_validate_plausible_range_rejects_non_object():
+    with pytest.raises(sim.SimError, match="field must be an object"):
+        sim._validate_plausible_range([1, 2], "field")
+
+
+def test_validate_plausible_range_rejects_empty_object():
+    with pytest.raises(sim.SimError, match="at least one of"):
+        sim._validate_plausible_range({}, "field")
+
+
+def test_validate_plausible_range_rejects_non_numeric_bound():
+    with pytest.raises(sim.SimError, match="must be a number"):
+        sim._validate_plausible_range({"min": "low"}, "field")
+
+
+def test_validate_plausible_range_rejects_bool_bound():
+    with pytest.raises(sim.SimError, match="must be a number"):
+        sim._validate_plausible_range({"min": True}, "field")
+
+
+def test_validate_plausible_range_rejects_min_above_max():
+    with pytest.raises(sim.SimError, match=r"min must be <= .*max"):
+        sim._validate_plausible_range({"min": 5, "max": 1}, "field")
+
+
+def test_within_plausible_range_inside_bounds():
+    assert sim._within_plausible_range(1.0, {"min": 0.0, "max": 2.0}) is True
+
+
+def test_within_plausible_range_below_min():
+    assert sim._within_plausible_range(-0.5, {"min": 0.0, "max": 2.0}) is False
+
+
+def test_within_plausible_range_above_max():
+    assert sim._within_plausible_range(142.7, {"min": -0.5, "max": 2.5}) is False
+
+
+def test_within_plausible_range_min_only():
+    assert sim._within_plausible_range(-1.0, {"min": 0.0}) is False
+    assert sim._within_plausible_range(10.0, {"min": 0.0}) is True
+
+
+def test_resolve_plausible_ranges_normalises_and_inherits_voltage_default():
+    """`options.node_voltage_bounds` is voltage-scoped: only a `unit: "V"`
+    measurement with no `plausible_range` of its own inherits it."""
+    specs = [
+        {"name": "vout", "unit": "V"},
+        {"name": "iout", "unit": "A"},
+        {"name": "untyped"},
+        {"name": "vref", "unit": "V", "plausible_range": {"min": -1, "max": 200}},
+    ]
+
+    sim._resolve_plausible_ranges(
+        specs, {"node_voltage_bounds": {"min": -0.5, "max": 2.5}}
+    )
+
+    assert specs[0]["plausible_range"] == {"min": -0.5, "max": 2.5}
+    assert "plausible_range" not in specs[1]
+    assert "plausible_range" not in specs[2]
+    # The measurement's own declaration wins, normalised to floats.
+    assert specs[3]["plausible_range"] == {"min": -1.0, "max": 200.0}
+
+
+def test_resolve_plausible_ranges_is_a_no_op_without_any_declaration():
+    """Backward-compatibility guard: with neither declaration present, no
+    spec grows a `plausible_range` key -- the grading path below is then
+    byte-identical to `_evaluate_limits` alone."""
+    specs = [{"name": "vout", "unit": "V", "limits": {"max": 1.9}}]
+
+    sim._resolve_plausible_ranges(specs, {})
+
+    assert specs == [{"name": "vout", "unit": "V", "limits": {"max": 1.9}}]
+
+
+def test_grade_measurement_value_checks_plausibility_before_limits():
+    """Issue #2493's load-bearing ordering: an out-of-range value is never
+    handed to `_evaluate_limits`, so `margin` (defined relative to `limits`)
+    stays `None` and the verdict is neither `pass` nor `fail`."""
+    status, margin, diagnostics = sim._grade_measurement_value(
+        {
+            "name": "vout",
+            "limits": {"min": 0.0, "max": 1.9},
+            "plausible_range": {"min": -0.5, "max": 2.5},
+        },
+        142.7,
+    )
+
+    assert status == "implausible_solution"
+    assert margin is None
+    assert [d["code"] for d in diagnostics] == ["implausible_solution"]
+    assert diagnostics[0]["severity"] == "warning"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_status"),
+    [(1.0, "pass"), (5.0, "fail")],
+)
+def test_grade_measurement_value_without_a_bound_is_plain_evaluate_limits(
+    value, expected_status
+):
+    """The opt-out path: with no `plausible_range` resolved onto the spec,
+    grading is exactly `_evaluate_limits` -- same status, same margin, and
+    no diagnostic -- for both verdicts it can produce."""
+    spec = {"name": "vout", "limits": {"min": 0.0, "max": 1.9}}
+
+    status, margin, diagnostics = sim._grade_measurement_value(spec, value)
+
+    assert (status, margin) == sim._evaluate_limits(value, spec["limits"])
+    assert status == expected_status
+    assert diagnostics == []
+
+
+def test_grade_measurement_value_inside_the_bound_still_grades_limits():
+    """A declared bound that the value satisfies changes nothing: the
+    ordinary `limits` verdict (here a real `fail`) passes through with its
+    margin intact."""
+    status, margin, diagnostics = sim._grade_measurement_value(
+        {
+            "name": "vout",
+            "limits": {"max": 1.9},
+            "plausible_range": {"min": -1000.0, "max": 1000.0},
+        },
+        2.4,
+    )
+
+    assert status == "fail"
+    assert margin == pytest.approx(-0.5)
+    assert diagnostics == []
+
+
+# --------------------------------------------------------------------------- #
 # `coverage` / `nothing_checked` (issue #1996)
 # --------------------------------------------------------------------------- #
 
@@ -1521,6 +1671,63 @@ def test_build_coverage_a_characterisation_sweep_is_not_flagged():
     assert coverage["unrecognized_limit_keys"] == []
     assert coverage["nothing_checked"] is False
     assert coverage["nothing_checked_reasons"] == []
+
+
+def test_build_coverage_implausible_measurement_skips_its_limit_bound():
+    """Issue #2493: an `"implausible_solution"` measurement produced a value,
+    but its `limits` comparison never ran -- so the `/limit/...` coverage row
+    is *skipped* (reason `implausible_solution`), never counted as checked.
+    An implausible value silently counted as a graded bound would let the
+    very solve this status exists to flag sneak back into `coverage` as
+    evidence the bound held."""
+    coverage = sim._build_coverage(
+        [{"name": "vout", "limits": {"max": 1.9}}],
+        [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [
+                    {
+                        "name": "vout",
+                        "value": 142.7,
+                        "status": "implausible_solution",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert coverage["checked"] == []
+    assert [entry["reason"] for entry in coverage["skipped"]] == [
+        "implausible_solution"
+    ]
+    assert coverage["skipped"][0]["id"].endswith('"vout","max"]')
+    assert coverage["nothing_checked"] is True
+
+
+def test_build_coverage_implausible_characterisation_still_counts_as_observed():
+    """Issue #2493 counterpart: a *characterisation* measurement (no `limits`)
+    has only an `/observation` row, and an implausible value is still a real
+    observation -- it is the `limits` comparison, not the measurement, that
+    the plausibility pre-check suppresses."""
+    coverage = sim._build_coverage(
+        [{"name": "vout"}],
+        [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [
+                    {
+                        "name": "vout",
+                        "value": 142.7,
+                        "status": "implausible_solution",
+                    }
+                ],
+            }
+        ],
+    )
+
+    assert len(coverage["checked"]) == 1
+    assert coverage["checked"][0].endswith("/observation")
+    assert coverage["nothing_checked"] is False
 
 
 def test_build_coverage_both_reasons_can_apply_to_one_run():
@@ -3394,6 +3601,103 @@ def test_rollup_measurements_counts_unextractable_samples_separately():
     assert entry["monte_carlo"]["n"] == 2  # only the samples that produced a number
     assert entry["monte_carlo"]["errored"] == 1
     assert entry["monte_carlo"]["mean"] == pytest.approx(2.0)
+
+
+def _sampled_implausible_corner(base: str, sample_index: int, value: float) -> dict:
+    return {
+        "corner_id": f"{base}/mc{sample_index}",
+        "monte_carlo": {"sample_index": sample_index, "seed": 1},
+        "measurements": [
+            {
+                "name": "vref",
+                "value": value,
+                "margin": None,
+                "status": "implausible_solution",
+            }
+        ],
+    }
+
+
+def test_rollup_measurements_excludes_implausible_samples_from_statistics():
+    """Issue #2493: an implausible sample has a real (non-null) value, so it
+    needs its own exclusion from Monte Carlo statistics -- not just the
+    errored/`value is None` filter -- or a physically implausible outlier
+    would silently skew `mean`/`stddev`/the quantiles exactly as an ungated
+    `limits` comparison would have skewed a single corner's `pass`/`fail`.
+    """
+    corners = [
+        _sampled_corner("tt/1.800V/27C", 0, 1.0),
+        _sampled_corner("tt/1.800V/27C", 1, 3.0),
+        _sampled_implausible_corner("tt/1.800V/27C", 2, 1e12),
+    ]
+
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref"}],
+        corners,
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": None},
+    )
+
+    assert entry["status"] == "implausible_solution"
+    assert entry["monte_carlo"]["n"] == 2
+    assert entry["monte_carlo"]["errored"] == 0
+    assert entry["monte_carlo"]["implausible"] == 1
+    assert entry["monte_carlo"]["mean"] == pytest.approx(2.0)
+    assert entry["monte_carlo"]["max"] == pytest.approx(3.0)  # not 1e12
+
+
+def test_rollup_measurements_sigma_window_never_downgrades_implausible_to_fail():
+    """Issue #2493, the subtlest of the grading paths: the `mean ± k*sigma`
+    window is a *second* `_evaluate_limits` call site, reached after the
+    per-measurement aggregate is already set. A violated window normally
+    forces the entry to `"fail"` -- it must not do so over an
+    `"implausible_solution"` aggregate, or the false-fail artifact would
+    reappear one layer up, on a path the per-corner pre-check never sees.
+    """
+    corners = [
+        _sampled_corner("tt/1.800V/27C", 0, 1.0),
+        _sampled_corner("tt/1.800V/27C", 1, 3.0),
+        _sampled_implausible_corner("tt/1.800V/27C", 2, 1e12),
+    ]
+
+    (entry,) = sim._rollup_measurements(
+        [{"name": "vref", "limits": {"max": 1.5}}],
+        corners,
+        {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": 3.0},
+    )
+
+    # The window itself is computed over the two plausible samples only and
+    # does violate the `max: 1.5` bound ...
+    assert entry["monte_carlo"]["sigma_window"]["status"] == "fail"
+    # ... but it never overwrites the stronger `implausible_solution` verdict.
+    assert entry["status"] == "implausible_solution"
+
+
+def test_rollup_measurements_implausible_outranks_fail():
+    """Issue #2493: the per-measurement aggregate mirrors `_run_corner`'s own
+    `error > implausible_solution > fail > pass` precedence."""
+    corners = [
+        {
+            "corner_id": "a",
+            "measurements": [
+                {"name": "vref", "value": 5.0, "margin": -1.0, "status": "fail"}
+            ],
+        },
+        {
+            "corner_id": "b",
+            "measurements": [
+                {
+                    "name": "vref",
+                    "value": 1e9,
+                    "margin": None,
+                    "status": "implausible_solution",
+                }
+            ],
+        },
+    ]
+
+    (entry,) = sim._rollup_measurements([{"name": "vref"}], corners)
+
+    assert entry["status"] == "implausible_solution"
 
 
 def test_rollup_measurements_by_corner_splits_per_originating_corner():
@@ -5322,6 +5626,317 @@ def test_run_sim_stubbed_fail(tmp_path, monkeypatch):
     assert report["metrics"]["sim__corner__failed_count"] == 1
 
 
+# --------------------------------------------------------------------------- #
+# Plausibility bounds (issue #2493): `options.node_voltage_bounds` /
+# `measurements[].plausible_range`, end to end through `run_sim`.
+#
+# Every fixture below shares one `log_text`: an ngspice `.meas` reading of
+# `142.7` on a measurement whose declared `limits` is `{min: 0, max: 1.9}`
+# (a 1.8V-rail-shaped bound) -- a numerically valid but physically
+# impossible solve. The whole point of this block is demonstrating that the
+# *same* out-of-range value grades differently depending on whether a
+# plausibility bound was declared (the false-fail scenario from the issue's
+# Problem Statement).
+# --------------------------------------------------------------------------- #
+
+_IMPLAUSIBLE_LOG_TEXT = (
+    "  Measurements for Transient Analysis\n\nvout                =  1.42700e+02\n"
+)
+
+
+def test_run_sim_stubbed_out_of_range_value_without_bound_grades_fail(
+    tmp_path, monkeypatch
+):
+    """Control case: no plausibility bound declared -> the ordinary `limits`
+    path grades the implausible 142.7 reading `"fail"`, exactly as it does
+    today -- reproducing the false-fail artifact the issue exists to fix."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "unit": "V",
+                    "limits": {"min": 0.0, "max": 1.9},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_IMPLAUSIBLE_LOG_TEXT)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "fail"
+    assert report["failed"] == 1
+    assert report["implausible"] == 0
+    (corner,) = report["corners"]
+    assert corner["status"] == "fail"
+    assert corner["measurements"][0]["status"] == "fail"
+
+
+def test_run_sim_stubbed_measurement_plausible_range_grades_implausible(
+    tmp_path, monkeypatch
+):
+    """Same 142.7 reading, same `limits` -- but this measurement also
+    declares `plausible_range`, so it grades `"implausible_solution"`
+    instead of `"fail"`, and the check never reaches `_evaluate_limits`
+    (`margin` stays `null`)."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "unit": "V",
+                    "limits": {"min": 0.0, "max": 1.9},
+                    "plausible_range": {"min": -0.5, "max": 2.5},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_IMPLAUSIBLE_LOG_TEXT)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "implausible_solution"
+    assert report["failed"] == 0
+    assert report["passed"] == 0
+    assert report["errored"] == 0
+    assert report["implausible"] == 1
+    (corner,) = report["corners"]
+    assert corner["status"] == "implausible_solution"
+    measurement = corner["measurements"][0]
+    assert measurement["status"] == "implausible_solution"
+    assert measurement["value"] == pytest.approx(142.7)
+    assert measurement["margin"] is None
+    codes = [d["code"] for d in corner["diagnostics"]]
+    assert "implausible_solution" in codes
+    diag = next(d for d in corner["diagnostics"] if d["code"] == "implausible_solution")
+    assert diag["severity"] == "warning"  # never "error" -- status carries the grade
+    (rollup_entry,) = report["measurements"]
+    assert rollup_entry["status"] == "implausible_solution"
+    assert rollup_entry["plausible_range"] == {"min": -0.5, "max": 2.5}
+
+
+def test_run_sim_stubbed_node_voltage_bounds_applies_to_voltage_unit(
+    tmp_path, monkeypatch
+):
+    """`options.node_voltage_bounds` is a run-wide default that auto-applies
+    to a measurement declaring `unit: "V"` with no own `plausible_range`."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "unit": "V",
+                    "limits": {"min": 0.0, "max": 1.9},
+                }
+            ],
+            "options": {"node_voltage_bounds": {"min": -0.5, "max": 2.5}},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_IMPLAUSIBLE_LOG_TEXT)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "implausible_solution"
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "implausible_solution"
+
+
+def test_run_sim_stubbed_node_voltage_bounds_does_not_apply_to_non_voltage_unit(
+    tmp_path, monkeypatch
+):
+    """Issue #2493 scoping decision: `options.node_voltage_bounds` is
+    voltage-scoped -- a measurement with any other `unit` (or none) never
+    inherits it, and grades via the ordinary `limits` path unchanged."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "unit": "A",
+                    "limits": {"min": 0.0, "max": 1.9},
+                }
+            ],
+            "options": {"node_voltage_bounds": {"min": -0.5, "max": 2.5}},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_IMPLAUSIBLE_LOG_TEXT)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "fail"
+    assert report["implausible"] == 0
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "fail"
+
+
+def test_run_sim_stubbed_measurement_plausible_range_overrides_node_voltage_bounds(
+    tmp_path, monkeypatch
+):
+    """A measurement's own `plausible_range` always wins over the inherited
+    `options.node_voltage_bounds` default when both are declared."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "unit": "V",
+                    "limits": {"min": 0.0, "max": 200.0},
+                    # Wider than options.node_voltage_bounds -- 142.7 is
+                    # plausible under this measurement's own declaration.
+                    "plausible_range": {"min": -1.0, "max": 200.0},
+                }
+            ],
+            # Narrower run-wide default that WOULD flag 142.7 if it applied.
+            "options": {"node_voltage_bounds": {"min": -0.5, "max": 2.5}},
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_IMPLAUSIBLE_LOG_TEXT)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    assert report["implausible"] == 0
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "pass"
+
+
+def test_run_sim_stubbed_plausible_range_bracketing_limits_never_triggers(
+    tmp_path, monkeypatch
+):
+    """Edge case: a plausibility bound wide enough to bracket the entire
+    declared `limits` range never reclassifies anything -- the ordinary
+    `limits` verdict (here, a clean fail) passes through unchanged."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "unit": "V",
+                    "limits": {"min": 0.0, "max": 1.9},
+                    "plausible_range": {"min": -1000.0, "max": 1000.0},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_IMPLAUSIBLE_LOG_TEXT)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "fail"  # not implausible_solution
+    assert report["implausible"] == 0
+    (corner,) = report["corners"]
+    assert corner["measurements"][0]["status"] == "fail"
+
+
+def test_run_sim_rejects_malformed_node_voltage_bounds_before_any_corner_runs(
+    tmp_path, monkeypatch
+):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "options": {"node_voltage_bounds": {"min": 5, "max": 1}},
+        },
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("no corner should have been dispatched")
+
+    monkeypatch.setattr(sim.subprocess, "run", fail_if_called)
+
+    with pytest.raises(sim.SimError, match="node_voltage_bounds"):
+        sim.run_sim(str(request))
+
+
+def test_run_sim_rejects_malformed_measurement_plausible_range(tmp_path, monkeypatch):
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "plausible_range": {},
+                }
+            ],
+        },
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("no corner should have been dispatched")
+
+    monkeypatch.setattr(sim.subprocess, "run", fail_if_called)
+
+    with pytest.raises(sim.SimError, match="plausible_range"):
+        sim.run_sim(str(request))
+
+
+def test_cli_implausible_solution_exits_4(tmp_path, monkeypatch, capsys):
+    """Issue #2493: `"implausible_solution"` joins `"error"`/`"not_checked"`
+    at CLI exit code 4 -- never the `EXIT_PASS` a status matching neither of
+    the CLI's other two branches would otherwise fall through to."""
+    _write_body(tmp_path)
+    request = _write_request(
+        tmp_path,
+        {
+            "netlist": "body.spice",
+            "analysis": {"kind": "tran", "args": "1n 1u"},
+            "measurements": [
+                {
+                    "name": "vout",
+                    "spice": ".meas tran vout FIND v(out) AT=1u",
+                    "unit": "V",
+                    "limits": {"min": 0.0, "max": 1.9},
+                    "plausible_range": {"min": -0.5, "max": 2.5},
+                }
+            ],
+        },
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_IMPLAUSIBLE_LOG_TEXT)
+
+    exit_code = main(["sim", str(request), "--format", "json"])
+
+    assert exit_code == 4
+    data = json.loads(capsys.readouterr().out)
+    assert data["status"] == "implausible_solution"
+
+
 def test_run_sim_stubbed_missing_measurement_is_error(tmp_path, monkeypatch):
     _write_body(tmp_path)
     request = _write_request(
@@ -6514,6 +7129,9 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "passed",
         "failed",
         "errored",
+        # Issue #2493: always present (default `0`), alongside its three
+        # siblings above -- see `run_sim`'s own comment on this field.
+        "implausible",
         # Issue #2491: rollup of `corners[].diagnostics[]` across the whole
         # grid -- always present, purely additive.
         "diagnostic_counts",

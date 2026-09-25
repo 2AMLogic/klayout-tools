@@ -1172,6 +1172,7 @@ block — the block is present only for a measurement that actually ran under
   "monte_carlo": {
     "n": 300,
     "errored": 0,
+    "implausible": 0,
     "mean": 1.20117,
     "stddev": 0.01342,
     "min": 1.16204,
@@ -1193,8 +1194,9 @@ block — the block is present only for a measurement that actually ran under
 
 | Field           | Type                | Description                                                                                                                          |
 | --------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `n`             | integer             | Samples that produced a usable number — the population every statistic below is computed over.                                        |
-| `errored`       | integer             | Samples whose value was unextractable (`null`) and were therefore excluded. `n + errored` is the total sample count for this measurement. |
+| `n`             | integer             | Samples that produced a usable number **and** were graded — the population every statistic below is computed over.                    |
+| `errored`       | integer             | Samples whose value was unextractable (`null`) and were therefore excluded. `n + errored + implausible` is the total sample count for this measurement. |
+| `implausible`   | integer             | Samples whose value fell outside a declared `options.node_voltage_bounds`/`plausible_range` (issue #2493) and were therefore excluded from every statistic below, for the same reason `errored` samples are — see "Plausibility bounds" below. `0` for any request that never declares one. |
 | `mean`          | number \| null      | Arithmetic mean. `null` when `n == 0`.                                                                                                |
 | `stddev`        | number \| null      | **Sample** standard deviation (Bessel-corrected, `n - 1`) — the estimator for a finite draw from a population. `null` when `n < 2` (undefined, never faked as `0.0`). |
 | `min`/`max`     | number \| null      | Extremes of the sample set. `null` when `n == 0`.                                                                                     |
@@ -1270,6 +1272,109 @@ identity** rather than by location: its SHA-256 is in
 `provenance.deck`, so a stored result can be checked against the exact model
 file that produced it.
 
+## Plausibility bounds (`options.node_voltage_bounds` / `measurements[].plausible_range`)
+
+Issue #2493. ngspice's Newton solve can converge onto a numerically valid but
+physically implausible operating point — a compact model evaluated far
+outside its fitted range, or an extrapolation branch — without emitting any
+log-level diagnostic: this is a *silent* failure mode, distinct from
+everything "Failure classification" below catches, because there is no
+distinguishing log text for `_classify_diagnostics` to match. A `.meas` card
+sampling that node still returns an ordinary-looking numeric value (observed:
+orders of magnitude outside the deck's own declared supply rails), which the
+ordinary `limits` comparison then grades exactly as it would a legitimate
+result — turning a non-physical solve into an ordinary-looking `pass` or
+`fail`, purely depending on which way the declared `limits` bound happens to
+face.
+
+Two **optional, opt-in** declarations close this gap by giving `klt sim` a
+plausibility range to check a measured value against, *before* the ordinary
+`limits` comparison ever runs:
+
+- `measurements[].plausible_range: {min, max}` — per-measurement, either
+  bound optional but at least one required. **Unscoped**: applies to
+  whatever measurement it is attached to, regardless of `unit` — an explicit
+  per-measurement declaration is always the caller's deliberate act.
+- `options.node_voltage_bounds: {min, max}` — a run-wide default. **Voltage-
+  scoped**: it only auto-applies to a measurement that declared `unit: "V"`
+  (there is no measurement "kind" tag elsewhere in the request schema to
+  gate on otherwise) — a measurement with any other `unit` (or none) never
+  inherits it, though it can still opt in explicitly via its own
+  `plausible_range`. A measurement's own `plausible_range` always wins over
+  the inherited default when both are declared.
+
+A value outside its resolved plausible range is graded
+`"implausible_solution"` — a status distinct from both `"pass"` and
+`"fail"` — rather than being handed to the ordinary `limits` comparison at
+all (`margin` is `null`: it is defined relative to `limits`, which never
+ran). This is deliberately **not** the same thing as a `"fail"`: a `"fail"`
+means the simulator produced a trustworthy number and the design missed a
+declared limit; `"implausible_solution"` means the number itself cannot be
+trusted enough to say either. It outranks `"fail"` in every aggregate
+(`corners[].status`, `measurements[].status`, the top-level `status`), the
+same way `"error"` outranks both — see "Failure classification" below for
+the full precedence table. The top-level response also gets a new
+`implausible` count (alongside `passed`/`failed`/`errored`, always present,
+`0` for any request that never declares a plausibility bound) and,
+correspondingly, `klt sim`'s CLI exit code `4` (the same code as
+`"error"`/`"not_checked"` — see "Exit codes" below): an implausible solve is
+exactly as untrustworthy for grading as a corner that errored outright, so
+it must never exit clean.
+
+A `monte_carlo` sample set excludes implausible samples from every pooled
+statistic (`mean`/`stddev`/`min`/`max`/quantiles/`sigma_window`) the same
+way it already excludes unextractable (`errored`) ones — see "Monte Carlo
+statistics" above — so a single implausible outlier cannot silently skew the
+sigma window's verdict for the rest of the (trustworthy) sample.
+
+A `klt eval` gate citing such a report reports `exit_code: 4` too, not `3` —
+see [`eval.md`](eval.md)'s `gates[].exit_code` row.
+
+Both declarations are **validated up front**, before the first corner is
+dispatched: each must be an object declaring at least one of `min`/`max`,
+each bound must be a number (a JSON boolean is rejected), and `min <= max`.
+Unlike `limits` — which is read defensively and silently scores a typo'd key
+as no bound at all (see "`coverage`" below) — a malformed plausibility bound
+fails the whole request with exit `1`. A bound exists specifically to
+*reclassify* an otherwise-graded value, so one that silently never fired
+would reintroduce the exact gap it was declared to close.
+
+**Fully backward compatible**: neither field has a default, so a request
+that declares neither behaves byte-for-byte as it did before this issue —
+every measurement is graded via the ordinary `limits` comparison exactly as
+today.
+
+Example — a supply-rail-derived bound catching the false-fail scenario above
+(a 1.8 V rail whose internal node reads `142.7` V, a numerically valid but
+physically impossible solve, on a `limits` bound that would otherwise have
+graded it `"fail"`):
+
+```json
+{
+  "measurements": [
+    {
+      "name": "vinternal",
+      "spice": ".meas tran vinternal FIND v(internal_node) AT=5u",
+      "unit": "V",
+      "limits": { "min": 0.0, "max": 1.9 }
+    }
+  ],
+  "options": {
+    "node_voltage_bounds": { "min": -0.5, "max": 2.5 }
+  }
+}
+```
+
+```json
+{ "name": "vinternal", "value": 142.7, "unit": "V", "status": "implausible_solution", "margin": null }
+```
+
+Without `options.node_voltage_bounds` (or a per-measurement
+`plausible_range`) declared, the identical `142.7` reading grades
+`"fail"` — a real accuracy-bound miss on its face, but actually an artifact
+of grading a non-physical solution as if it were real. Declaring the bound
+is what tells `klt sim` the difference.
+
 ## Failure classification: from the log, never the exit code
 
 `ngspice -b` reliably exits `0` even when a `.meas` fails or the matrix is
@@ -1294,13 +1399,20 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal. The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
+| `implausible_solution` | Not an engine diagnostic — `severity: "warning"`, never `"error"`. A measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. Recorded for visibility alongside the measurement's own `status: "implausible_solution"`. |
 
 **A `diagnostics` entry at `severity: "error"` makes that corner
-`status: "error"`**, which always outranks a clean limit violation
-(`"fail"`) — `error` means no trustworthy number exists; `fail` means the
-simulator produced a trustworthy number and the design missed a limit.
-Conflating the two is the specific defect this command exists to avoid (see
-the spike's "Semantics and guarantees").
+`status: "error"`**, which always outranks everything else — `error` means
+no trustworthy number exists; `fail` means the simulator produced a
+trustworthy number and the design missed a limit; `implausible_solution`
+(issue #2493 — see "Plausibility bounds" above) means the simulator
+produced a number but it cannot be trusted enough to grade against `limits`
+at all. `error` > `implausible_solution` > `fail` > `pass` is the full
+precedence, at both the per-corner `status` and the per-measurement
+`status` inside it. Conflating `error`/`fail` is the specific defect this
+command exists to avoid (see the spike's "Semantics and guarantees");
+conflating `implausible_solution` with either is issue #2493's addition to
+the same discipline.
 
 `singular_matrix`/`nonconvergence` are a documented exception, downgraded to
 `severity: "warning"` (recorded, but non-fatal) rather than `"error"` when
@@ -1722,7 +1834,8 @@ the *response* echoes back.
 | `monte_carlo.quantiles`  | array\<number\>   | Percentiles in `[0, 100]` reported per measurement. Defaults to `[5, 50, 95]`. See "Monte Carlo statistics" above.                                                      |
 | `monte_carlo.k_sigma`    | number            | Run-wide sigma multiple `k` for the `mean ± k*stddev` limit-window check. Omit for no window check. Must be a non-negative number.                                      |
 | `analysis`               | object, required  | `kind` (e.g. `"op"`, `"dc"`, `"ac"`, `"tran"`) and `args`, the engine-syntax analysis-card arguments. One analysis per request. `"op"` is a valid `kind`, but see `measurements[]` below — it cannot be paired with a `.meas op` card. |
-| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit`, `limits` (`min`/`max`, either optional), and `k_sigma` (per-measurement override of `monte_carlo.k_sigma`). No `limits` -> reported, never fails. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
+| `measurements[]`         | array\<object\>   | `name` (stable response key) and `spice` (a verbatim `.meas` card), plus optional `unit`, `limits` (`min`/`max`, either optional), `k_sigma` (per-measurement override of `monte_carlo.k_sigma`), and `plausible_range` (issue #2493 — `min`/`max`, either optional but at least one required; per-measurement plausibility bound, unscoped by `unit`; overrides `options.node_voltage_bounds` when both apply). No `limits` -> reported, never fails; no `plausible_range` (and no applicable `options.node_voltage_bounds`) -> plausibility check never runs, exactly as before this issue. `spice`'s declared analysis type must be one ngspice's own `.MEASURE` implements (`dc`/`ac`/`tran`/`sp`) — there is no `.MEASURE OP`; a `.meas op` card is rejected up front (`SimError`), regardless of the request's own `analysis.kind`. |
+| `options.node_voltage_bounds` | object       | Issue #2493. Run-wide plausibility default (`min`/`max`, either optional but at least one required) — see "Plausibility bounds" above. **Voltage-scoped**: only auto-applies to a measurement declaring `unit: "V"` that has no own `plausible_range`. Omit for no default (today's behaviour, unchanged). |
 | `options.timeout_s`      | number            | Per-corner wall-clock budget. Defaults to `120`. Exceeding it kills the process and yields an `error`-status corner.                                                    |
 | `options.keep_artifacts` | boolean           | Retain per-corner logs/rawfiles on disk under `--outdir` (or its default) and reference them from the response. Defaults to `false`.                                   |
 | `options.waveforms`      | boolean           | Capture the optional waveform artifact (see above). Defaults to `false`.                                                                                               |
@@ -1839,15 +1952,16 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | --------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | `schema_version`| integer         | Version of this command's JSON shape (`3` as of issue #1274, which extended issue #1261's `{path, scope}` path-normalization to `environment.models_lib`; per-command, per `docs/json-contract.md`).                 |
 | `netlist`       | object          | `{path, scope}` — the resolved `netlist` path, normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when it sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
-| `status`        | string          | Aggregate: `"pass"`, `"pass_partial"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence (issue #2109's common rollup rule): `error` > `fail` > `not_checked` > `pass_partial` > `pass`. `pass_partial` is a real, exit-`0` result — every executed check passed — that also has a nonempty `coverage.skipped` (a typo'd `limits` key beside a recognised one, a corner with no requested measurements, …); it is never reported as the unconditional `pass`. See "`coverage`" below. |
+| `status`        | string          | Aggregate: `"pass"`, `"pass_partial"`, `"fail"`, `"implausible_solution"`, `"error"`, or `"not_checked"`. Precedence (issue #2109's common rollup rule, extended by issue #2493): `error` > `implausible_solution` > `fail` > `not_checked` > `pass_partial` > `pass`. `pass_partial` is a real, exit-`0` result — every executed check passed — that also has a nonempty `coverage.skipped` (a typo'd `limits` key beside a recognised one, a corner with no requested measurements, …); it is never reported as the unconditional `pass`. `implausible_solution` is reachable only when the request declares `options.node_voltage_bounds`/`measurements[].plausible_range` and at least one measured value fell outside it — see "Plausibility bounds" above; `klt sim`'s CLI exit code `4` for this status, same as `error`/`not_checked`. See "`coverage`" below. |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. See "Failure classification" below for the `code`/`severity` vocabulary. |
-| `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. |
+| `implausible`   | integer         | Issue #2493. Corner count with `status: "implausible_solution"`. Always present, `0` for any request that never declares a plausibility bound — `passed + failed + errored + implausible == corner_count`. |
+| `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. Includes issue #2493's `implausible_solution` code when a plausibility bound reclassified a measurement. See "Failure classification" below for the `code`/`severity` vocabulary. |
+| `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. `implausible` is not yet part of this registry (a separate registration decision) — read it from the top-level field above. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
-| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status`, and `worst_case` (the worst corner and its margin). A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
+| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`/`"implausible_solution"`), and `worst_case` (the worst corner and its margin). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, implausible, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |
 
@@ -1889,10 +2003,10 @@ corner-sweep rollup fields above are declared.
 | `process`        | string \| null   | Process-corner section used, or `null` when the request declares no process axis.                                              |
 | `supply_v`       | object           | Supply values for this corner, keyed by source/`.param` name (`{}` when the request declares no supply axis).                  |
 | `temperature_c`  | number           | Temperature for this corner.                                                                                                  |
-| `status`         | string           | `"pass"`, `"fail"`, or `"error"`.                                                                                              |
+| `status`         | string           | `"pass"`, `"fail"`, `"error"`, or `"implausible_solution"` (issue #2493 — see "Plausibility bounds" above; only reachable when the request declares `options.node_voltage_bounds`/`measurements[].plausible_range`). |
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
-| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`), `margin`.               |
-| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` only occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`); every other code is always `"error"`. Empty for a clean run.       |
+| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`/`"implausible_solution"`), `margin` (`null` for an `"implausible_solution"` value — `limits` never ran).               |
+| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` and for `implausible_solution` (issue #2493) — neither affects `status` by itself the way an `"error"`-severity diagnostic does, though a corner with an `implausible_solution` *measurement* still reports `status: "implausible_solution"` via the measurement's own status, not this diagnostic's severity. Every other code is always `"error"`. Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
 
@@ -1936,17 +2050,27 @@ section.
 Carried over from the spike's proposed contract (see the spike document for
 the full reasoning):
 
-- **`fail` and `error` are always different.** `error` means no trustworthy
-  number exists (nonconvergence, singular matrix, timeout, netlist error, an
-  unextractable measurement); `fail` means the simulator produced a
-  trustworthy number and the design missed a limit.
-- **Aggregate precedence: `error` > `fail` > `pass`**, at both the corner
-  level (any diagnostic forces `error`, regardless of measurement outcomes)
-  and the response level (any errored corner makes the whole run `error`).
-  A declared Monte Carlo sigma window that falls outside the limits is the
-  one way the response can be `fail` with every *corner* passing — it is a
-  statement about the sampled population, not about any single run (see
-  "Monte Carlo statistics" above). It never overrides `error`.
+- **`fail`, `error`, and `implausible_solution` are always different.**
+  `error` means no trustworthy number exists (nonconvergence, singular
+  matrix, timeout, netlist error, an unextractable measurement); `fail`
+  means the simulator produced a trustworthy number and the design missed a
+  limit; `implausible_solution` (issue #2493) means the simulator produced a
+  number, but it fell outside a declared plausibility bound and so is not
+  known to be trustworthy enough to say either — see "Plausibility bounds"
+  above.
+- **Aggregate precedence: `error` > `implausible_solution` > `fail` >
+  `pass`**, at both the corner level (any diagnostic forces `error`,
+  regardless of measurement outcomes) and the response level (any errored
+  corner makes the whole run `error`). `implausible_solution` (issue #2493)
+  is reachable only when the request declares
+  `options.node_voltage_bounds`/`measurements[].plausible_range` and some
+  measured value fell outside it — see "Plausibility bounds" above; it is
+  never reached otherwise, so this extension does not change the precedence
+  for any pre-existing request. A declared Monte Carlo sigma window that
+  falls outside the limits is the one way the response can be `fail` with
+  every *corner* passing — it is a statement about the sampled population,
+  not about any single run (see "Monte Carlo statistics" above). It never
+  overrides `error` or `implausible_solution`.
 - **Deterministic expansion and ordering** — `corners` is the full cross
   product of the declared axes minus `exclude`, in axis-declaration order
   (process outermost, temperature innermost), so output is byte-stable
@@ -1985,7 +2109,7 @@ the full reasoning):
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), or at least one corner errored (aggregate `status: "error"`) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
+| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), at least one corner errored (aggregate `status: "error"`), or at least one measurement graded `"implausible_solution"` (issue #2493 — aggregate `status: "implausible_solution"`, reachable only when the request declared `options.node_voltage_bounds`/`measurements[].plausible_range`; see "Plausibility bounds" above) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
 
 Under `--op-lint` the same four codes keep the same *meanings* against that
 mode's own verdict: `0` ran with no `error`-severity finding (a
