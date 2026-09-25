@@ -858,6 +858,81 @@ _ROUTING_LAYER_RANGE: dict[str, str] = {
     "sg13g2_stdcell": "Metal2-TopMetal2",
 }
 
+#: Per-cell-library **routing-layer stack**, bottom-up -- every layer the
+#: platform's own tech LEF declares ``TYPE ROUTING``, in stack order (issue
+#: #2473). :data:`_ROUTING_LAYER_RANGE` above names only the two endpoints of
+#: the *signal* range ``set_routing_layers -signal`` opens; this table is what
+#: lets :func:`_signal_routing_layers` expand that range into the concrete
+#: layer set, and therefore what lets :func:`_validate_io` reject an
+#: ``io.layer_h``/``io.layer_v`` naming a real routing layer the router is
+#: nevertheless never allowed to route signals on.
+#:
+#: Why that matters (issue #2473's own root cause): a top-level pin is only
+#: reachable if the router can draw *conductor of that layer* up to it.
+#: ``place_pins`` will happily place a port on a below-range layer, and
+#: OpenROAD then writes the port rectangle to that layer's LEF ``PIN``/
+#: ``LEFPIN`` purpose -- for sky130's ``li1`` that is GDS ``67/16``, not the
+#: ``67/20`` conductor an extraction deck reads -- while the actual routing
+#: reaches the cell pin from above through ``mcon``. The result is a DRC-clean
+#: GDS whose top-level pins do not electrically exist in ``klt extract``'s
+#: output, with `klt lvs` still reporting ``"match"`` because its structural
+#: comparer does not need pins. Rejecting the request is two minutes of
+#: routing cheaper than discovering that downstream.
+#:
+#: Same verified-not-guessed posture as every other reference table in this
+#: module, one source per entry:
+#:
+#: - ``sky130_fd_sc_hd`` -> ``li1``, ``met1``..``met5``. Verified live
+#:   against a real sky130A install (volare,
+#:   ``libs.ref/sky130_fd_sc_hd/techlef/sky130_fd_sc_hd__nom.tlef``): its
+#:   six ``TYPE ROUTING`` layers are ``li1``, ``met1``, ``met2``, ``met3``,
+#:   ``met4``, ``met5``, declared in that order. ``li1`` sitting *below*
+#:   this library's own ``MIN_ROUTING_LAYER ?= met1`` is exactly what
+#:   :data:`_ROUTING_LAYER_RANGE`'s own docstring already records ("its
+#:   cells pin out on ``li1``, below ``met1`` entirely").
+#: - ``gf180mcu_fd_sc_mcu9t5v0``/``gf180mcu_fd_sc_mcu7t5v0`` -> ``Metal1``..
+#:   ``Metal5``, from the same platform tech LEF
+#:   (``lef/gf180mcu_5LM_1TM_9K_9t_tech.lef``) :data:`_ROUTING_LAYER_RANGE`
+#:   already cites for declaring "``Metal1``..``Metal5`` as its five ``TYPE
+#:   ROUTING`` layers", with ``Metal1`` deliberately left out of the signal
+#:   range for pin access.
+#: - ``sg13g2_stdcell`` -> ``Metal1``..``Metal5``, ``TopMetal1``,
+#:   ``TopMetal2``, from the same ``libs.ref/sg13g2_stdcell/lef/
+#:   sg13g2_tech.lef`` :data:`_ROUTING_LAYER_RANGE` already cites for
+#:   declaring "exactly seven routing layers", again with ``Metal1``
+#:   reserved for pin access.
+#:
+#: A ``cell_library`` absent from this table (or whose
+#: :data:`_ROUTING_LAYER_RANGE` endpoints are not both in its stack) simply
+#: skips the check -- an unverified library keeps the pre-#2473 behaviour
+#: rather than being rejected on a guess.
+_ROUTING_LAYER_STACK: dict[str, tuple[str, ...]] = {
+    "sky130_fd_sc_hd": ("li1", "met1", "met2", "met3", "met4", "met5"),
+    "gf180mcu_fd_sc_mcu9t5v0": (
+        "Metal1",
+        "Metal2",
+        "Metal3",
+        "Metal4",
+        "Metal5",
+    ),
+    "gf180mcu_fd_sc_mcu7t5v0": (
+        "Metal1",
+        "Metal2",
+        "Metal3",
+        "Metal4",
+        "Metal5",
+    ),
+    "sg13g2_stdcell": (
+        "Metal1",
+        "Metal2",
+        "Metal3",
+        "Metal4",
+        "Metal5",
+        "TopMetal1",
+        "TopMetal2",
+    ),
+}
+
 #: Per-cell-library fallback "row rail" ``-followpins`` PDN stripe, emitted
 #: unconditionally at the start of the ``"route"`` stage whenever
 #: ``request.power`` was *not* given (issue #1442) -- **not** gated behind
@@ -1832,7 +1907,7 @@ def run_place_and_route(
     sweep_corners = _validate_sweep_corners(pdk_spec.get("sweep_corners"))
 
     floorplan = _validate_floorplan(request["floorplan"])
-    io_spec = _validate_io(request.get("io"))
+    io_spec = _validate_io(request.get("io"), cell_library)
     macros = _validate_macros(request.get("macros"), request_dir, netlist_path)
     power = _validate_power(request.get("power"), cell_library)
     (
@@ -2607,7 +2682,34 @@ def _validate_floorplan(floorplan: Any) -> dict[str, Any]:
     return dict(floorplan)
 
 
-def _validate_io(io_spec: Any) -> dict[str, str] | None:
+def _signal_routing_layers(cell_library: str) -> tuple[str, ...] | None:
+    """Expand :data:`_ROUTING_LAYER_RANGE`'s ``"<low>-<high>"`` endpoints for
+    ``cell_library`` into the concrete, ordered set of layers
+    ``set_routing_layers -signal`` actually opens for signal routing (issue
+    #2473), using :data:`_ROUTING_LAYER_STACK` for the stack order.
+
+    ``None`` -- meaning "no opinion, skip any check built on this" -- when
+    either table has no entry for this library, or when the range's own
+    endpoints are not both present in the stack (a table drift this function
+    refuses to paper over by guessing). Never raises: this is a *narrowing*
+    guard's input, and an unverified library must keep behaving exactly as it
+    did before the guard existed.
+    """
+    stack = _ROUTING_LAYER_STACK.get(cell_library)
+    layer_range = _ROUTING_LAYER_RANGE.get(cell_library)
+    if stack is None or layer_range is None:
+        return None
+    low, _, high = layer_range.partition("-")
+    if low not in stack or high not in stack:
+        return None
+    low_index = stack.index(low)
+    high_index = stack.index(high)
+    if low_index > high_index:
+        return None
+    return stack[low_index : high_index + 1]
+
+
+def _validate_io(io_spec: Any, cell_library: str) -> dict[str, str] | None:
     if io_spec is None:
         return None
     if not isinstance(io_spec, dict):
@@ -2620,6 +2722,44 @@ def _validate_io(io_spec: Any) -> dict[str, str] | None:
         raise PlaceAndRouteError(
             "request.io.layer_h/layer_v must both be non-empty strings"
         )
+
+    # Issue #2473: a top-level pin placed on a layer the router is never
+    # allowed to route signals on is only *geometrically* placed -- OpenROAD
+    # writes the DEF `PINS` port rectangle to that layer's LEF `PIN`/`LEFPIN`
+    # purpose and reaches the cell pin from above through a via, leaving no
+    # conductor of that layer under the port. The run still succeeds, the GDS
+    # is DRC-clean, and `klt lvs` still reports "match" (its structural
+    # comparer does not need pins) -- but `klt extract` sees no net there, so
+    # most declared top-level pins silently do not exist in the extracted
+    # netlist. Rejected here, at request time, rather than after a full
+    # route: this is the cheapest point in the whole chain at which the
+    # mistake is knowable.
+    #
+    # Deliberately narrow: only a layer this library's own routing stack
+    # declares but its signal-routing *range* excludes is rejected. A name
+    # the stack does not know at all (a typo, a layer from another PDK) is
+    # left to OpenROAD's own loud error, and an unverified `cell_library`
+    # (absent from either reference table) skips the check entirely -- so no
+    # request that worked before can be rejected on a guess.
+    routable = _signal_routing_layers(cell_library)
+    if routable is not None:
+        stack = _ROUTING_LAYER_STACK[cell_library]
+        for field, value in (("layer_h", layer_h), ("layer_v", layer_v)):
+            if value in routable or value not in stack:
+                continue
+            raise PlaceAndRouteError(
+                f"request.io.{field} '{value}' is outside the signal routing "
+                f"range for cell_library '{cell_library}' "
+                f"({_ROUTING_LAYER_RANGE[cell_library]}): the router never "
+                f"draws signal conductor on '{value}', so a top-level pin "
+                f"placed there gets only a DEF PINS port rectangle on that "
+                f"layer's LEF PIN/LEFPIN purpose with no conductor under it "
+                f"-- the routed design is DRC-clean and `klt lvs` still "
+                f"reports 'match', but `klt extract` promotes no top-level "
+                f"pin for it (issue #2473). Use one of: "
+                f"{', '.join(routable)}"
+            )
+
     return {"layer_h": layer_h, "layer_v": layer_v}
 
 

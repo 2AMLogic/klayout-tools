@@ -14,6 +14,53 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Fixed** (#2473, `klt place-and-route` + `klt extract`; the `klt extract`
+  half is additive — **no** `schema_version` bump: one new top-level
+  `def_pin_promotion` field, `null` unless `--def-pins`/`def_pins` was given,
+  with every other field byte-identical to before): a `place-and-route`
+  request whose `io.layer_h`/`io.layer_v` named a layer the router never
+  draws signal conductor on — sky130's `li1` is the reported case — produced
+  a DRC-clean GDS and a `klt lvs` `"match"` verdict while most declared
+  top-level pins did not electrically exist in `klt extract`'s output
+  (`pin_count: 2` for a DEF whose `PINS` section declared 48). OpenROAD
+  places such a port by writing its DEF `PINS` rectangle to that layer's LEF
+  `PIN`/`LEFPIN` purpose (li1 → GDS `67/16`) and reaching the cell pin from
+  above through `mcon`, so the pin-name text on `67/5` sits over no `67/20`
+  conductor, names no net, and never promotes — invisible to every check in
+  the chain (`klt drc` has no rule against a label over no conductor; `klt
+  lvs`'s structural comparer reports `"match"` without needing pins). Two
+  narrow guards, neither changing LVS pass/fail semantics or the sky130
+  deck's connectivity graph:
+  - `klt place-and-route` now **rejects the request** when `io.layer_h`/
+    `io.layer_v` names a layer inside the library's own routing stack but
+    outside the signal-routing range `set_routing_layers -signal` opens
+    (`met1-met5` for `sky130_fd_sc_hd`, so `li1` is rejected; `Metal1` for
+    both gf180mcu libraries and for `sg13g2_stdcell`), naming the usable
+    layers. This fires before any OpenROAD stage runs. A layer name the
+    stack does not declare at all, and an unverified `cell_library` absent
+    from the reference tables, are both left exactly as they behaved before.
+  - `klt extract --def-pins` now reports an `error`-severity finding under
+    the new `def_pin_promotion` field —
+    `{"declared", "promoted", "unmatched", "findings": [{"severity":
+    "error", "code": "def_pin_geometry_outside_connectivity_graph", "layer",
+    "datatype", "pins", "declared_pin_count", "promoted_pin_count",
+    "message"}]}` — for each declared DEF `PINS` port whose pin-name label
+    is *measured* (by `LayoutToNetlist.probe_net` at the label's own
+    position) to name no net while geometry sits under it on a layer the
+    deck's connectivity graph never reads. Each finding is mirrored into
+    `warnings[]` prefixed `ERROR:`. An ordinary unmatched-name miss (a DEF
+    typo, a port renamed by synthesis) keeps only its long-standing prose
+    warning and raises no finding, and the candidate geometry is restricted
+    to a *different purpose of a layer number the deck does read* (`67/16`
+    against `67/20`/`67/5`) so the full-die `DIEAREA ALL 235 4` marker every
+    real DEF→GDS merge carries cannot add a second, misleading finding.
+  `klt lvs` is deliberately unchanged: its `status` still comes solely from
+  `NetlistComparer.compare()`, since gating it on a layout-vs-reference
+  pin-count disparity would report `"mismatch"` on legitimate designs whose
+  counts differ for other reasons (tie-offs, post-synthesis power pins, a
+  `declared_pins` scoping). That behaviour is now pinned by a regression
+  test. See `docs/cli/place-and-route.md`'s "IO pin layers" section and
+  `docs/cli/extract.md`'s "DEF-derived declared pins" section.
 - **Changed** (#2465, `scripts/install-openroad-docker.sh` — provisioning
   only, no `klt` runtime behaviour or JSON shape change): the `openroad/orfs`
   Docker image is now **pinned by digest** rather than pulled as `:latest`.

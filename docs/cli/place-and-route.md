@@ -1828,12 +1828,55 @@ live re-measurement above.
 | `post_route_spef` | boolean \| omitted | Default `false`. Opts in to the real-parasitics A/B pass described in "Post-route SPEF STA" above — populates the response's `spef_sta` field. Off by default (real added wall-clock cost); has no effect unless `target_stage` reaches `"route"` (issue #948). |
 | `post_route_sdf` | boolean \| omitted | Default `false`. **Requires `post_route_spef: true`** (exit 1 otherwise). Adds one `write_sdf` call to that same post-`read_spef` OpenSTA session and reports the written file as `spef_sta.sdf_path` — see "SDF export" above (issue #1002). |
 
+### IO pin layers must be inside the signal-routing range (#2473)
+
+`io.layer_h`/`io.layer_v` are rejected at **request time** — before any
+OpenROAD stage runs — when they name a layer that is part of the
+`cell_library`'s own routing stack but sits **outside** the signal-routing
+range this command opens with `set_routing_layers -signal` (see "Routing
+layers" / `_ROUTING_LAYER_RANGE`):
+
+| `cell_library` | Signal range | Usable `io.layer_*` | Rejected |
+|---|---|---|---|
+| `sky130_fd_sc_hd` | `met1-met5` | `met1`…`met5` | `li1` |
+| `gf180mcu_fd_sc_mcu9t5v0` / `…mcu7t5v0` | `Metal2-Metal5` | `Metal2`…`Metal5` | `Metal1` |
+| `sg13g2_stdcell` | `Metal2-TopMetal2` | `Metal2`…`TopMetal2` | `Metal1` |
+
+Each rejected layer is a real routing layer the *library's own cells pin out
+on* — which is exactly why it is reserved for pin access rather than opened
+up to free signal routing. A top-level pin placed there is only
+*geometrically* placed: OpenROAD writes the DEF `PINS` port rectangle to
+that layer's LEF `PIN`/`LEFPIN` purpose (for sky130's `li1`, GDS `67/16` via
+open_pdks' own `li1 LEFPIN,PIN 67 16` layer-map row — **not** the `67/20`
+`NET` row an extraction deck reads as li1 conductor) and reaches the cell pin
+from *above* through `mcon`, leaving no conductor of that layer under the
+port. The run still succeeds, the merged GDS is DRC-clean, and `klt lvs`
+still reports `"match"` — but `klt extract` promotes no top-level pin for
+that port, because its pin-name text on `67/5` sits over nothing the
+connectivity graph reads. The reported case (#2473) reached `pin_count: 2`
+for a DEF declaring 48 pins, with no error anywhere in the chain.
+
+The check is deliberately narrow:
+
+- A layer name the library's routing stack does not declare at all (a typo, a
+  layer from another PDK) is **not** rejected here — OpenROAD's own error for
+  an unknown layer is already loud and specific.
+- A `cell_library` absent from this module's routing-stack/range reference
+  tables skips the check entirely, so an unverified library behaves exactly
+  as it did before this validation existed.
+
+For a layout that *already* exists in this state, `klt extract --def-pins`
+reports it as an `error`-severity `def_pin_promotion` finding naming the
+offending layer/datatype — see
+[`docs/cli/extract.md`](extract.md)'s "DEF-derived declared pins" section.
+
 ### `io.layer_h`/`io.layer_v` and downstream `klt extract`/`klt lvs` (#1385)
 
-`io.layer_h`/`io.layer_v` are passed straight through to OpenROAD's
-`place_pins -hor_layers`/`-ver_layers` (and to `set_wire_rc -layer`) — this
-command does not itself validate them against anything beyond "non-empty
-string", and there is no cross-check here against which GDS layers a
+`io.layer_h`/`io.layer_v` are otherwise passed straight through to OpenROAD's
+`place_pins -hor_layers`/`-ver_layers` (and to `set_wire_rc -layer`): beyond
+the signal-routing-range check above (#2473) and "non-empty string", this
+command does not validate them, and there is no cross-check here against
+which GDS layers a
 downstream `klt extract --deck <name>` run will actually scan for pin-name
 text. Choosing a layer the target deck does not treat as a label layer (e.g.
 sky130's own `metal_labels` covers `li1`–`met5`; see
@@ -1847,10 +1890,9 @@ cause-agnostic entry whenever zero top-level pins end up promoted for any
 reason) — see [`docs/cli/extract.md`](extract.md)'s "DEF→GDS-merged (`klt
 place-and-route`) layouts" section for the full writeup, including why
 `--top-cell-pins` cannot fix a DEF-merged layout's promoted-pin set on its
-own. Until this command validates `io.layer_h`/`io.layer_v` itself, choose a
-layer known to be within the target `--deck`'s own label-layer coverage
-(cross-check with `klt layers` against the merged GDS after the fact if
-unsure).
+own. Beyond the signal-routing-range rejection above, choose a layer known to
+be within the target `--deck`'s own label-layer coverage (cross-check with
+`klt layers` against the merged GDS after the fact if unsure).
 
 ## Response
 

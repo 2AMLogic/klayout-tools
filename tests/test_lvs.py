@@ -3471,6 +3471,52 @@ def _write_flat_inverter_gds(path: Path) -> str:
     return str(path)
 
 
+def test_missing_top_level_pin_alone_still_reports_match(tmp_path):
+    """Issue #2473, the "and a 'match' LVS to cover for it" half: `status`
+    comes solely from `NetlistComparer.compare()` (see this module's own
+    docstring -- it never re-derives the verdict), so a layout netlist that
+    declares *fewer top-level pins* than the reference still pairs
+    structurally and reports `"match"`. Here the layout keeps `A` as an
+    internal net instead of a port -- exactly what a `klt place-and-route`
+    run whose `io.layer_*` named an unroutable layer produces -- and the
+    compare finds nothing at all.
+
+    This is pinned deliberately, not accepted reluctantly: gating `status`
+    on a layout-vs-reference pin-count disparity would report `"mismatch"`
+    on every legitimate design whose two sides' pin counts differ for other
+    reasons (tie-offs, power pins added post-synthesis, a declared-pin
+    scoping like the test below). That is why #2473's machine-checkable
+    guard lives in `klt extract`'s `--def-pins` reconciliation --
+    `def_pin_promotion.findings[].severity == "error"`, where the *declared*
+    port set is known exactly -- and why `counts.pins` here stays a
+    reported number rather than a verdict input."""
+    layout_netlist = _write(
+        tmp_path / "layout.spice",
+        """
+.subckt inv Y VPWR VGND
+M1 Y A VGND VGND nfet W=0.65U L=0.15U
+M2 Y A VPWR VPWR pfet W=1.0U L=0.15U
+.ends
+""",
+    )
+    reference_netlist = _write(tmp_path / "ref.spice", _INVERTER_SPICE)
+    report = run_lvs(
+        _write_request(
+            tmp_path / "request.json",
+            {
+                "layout": {"netlist": layout_netlist, "top": "inv"},
+                "reference": {"netlist": reference_netlist, "top": "inv"},
+            },
+        )
+    )
+
+    assert report["status"] == "match"
+    assert _without_geometry_disclosure(report) == []
+    # The disparity is visible in the report -- it just is not a verdict.
+    assert report["counts"]["pins"]["layout"] == 3
+    assert report["counts"]["pins"]["reference"] == 4
+
+
 def test_declared_pins_request_field_keeps_undeclared_label_internal(tmp_path):
     """Issue #514: `layout.declared_pins` threads through inline extraction so
     a net named by a label drawn directly in the top cell -- not below any
