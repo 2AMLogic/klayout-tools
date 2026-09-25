@@ -285,9 +285,9 @@ micrometre-unit-suffixed literal for gf180mcu (whose ``r_length``/
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from .pdk_families import pdk_variant_family
 
@@ -869,6 +869,84 @@ class DeviceLookup:
     fixed_width_um: float | None = None
 
 
+_BindingValue = TypeVar("_BindingValue")
+
+
+def _setdefault_bindings(
+    target: dict[str, _BindingValue],
+    bindings: Mapping[str, _BindingValue],
+) -> None:
+    """:meth:`dict.setdefault` every ``bindings`` entry into ``target``.
+
+    The whole-mapping form of the precedence rule both ingestion entry points
+    (:func:`known_device_subckt_names`, :func:`build_device_binding_map`)
+    follow: an entry ``target`` already holds always wins, so an earlier
+    curated binding is never overwritten by a later -- or derived -- one.
+    """
+    for subckt, value in bindings.items():
+        target.setdefault(subckt, value)
+
+
+def _tagged_bindings(
+    deck_name: str, bindings: Mapping[str, DeviceLookup]
+) -> dict[str, tuple[str, DeviceLookup]]:
+    """``bindings`` with every value paired with the deck it came from -- the
+    ``(deck_name, DeviceLookup)`` value shape
+    :func:`known_device_subckt_names` returns, built from the deck-scoped
+    ``<subckt-name> -> DeviceLookup`` maps the per-family helpers produce."""
+    return {subckt: (deck_name, lookup) for subckt, lookup in bindings.items()}
+
+
+def _fixed_width_resistor_bindings(
+    deck_name: str, family: str
+) -> dict[str, DeviceLookup]:
+    """``<subckt-name> -> DeviceLookup`` for every fixed-width resistor wrapper
+    :data:`_RESISTOR_FIXED_WIDTH_TABLE` curates for one ``(deck_name, family)``
+    pair (issue #2459); empty for a pair the table does not cover.
+
+    Such a wrapper encodes its width in the cell name and takes only a length
+    at the call site, so each lookup keeps the family's normal length/width
+    parameter names *and* pins ``fixed_width_um`` -- no caller re-derives that
+    width from the subcircuit name. Extracted so this two-level
+    class-then-variant walk exists once, shared by the whole-table
+    (:func:`known_device_subckt_names`) and single-deck
+    (:func:`build_device_binding_map`) ingestion entry points.
+    """
+    length_param, width_param = _RESISTOR_PARAM_STYLE.get(family, ("l", "w"))
+    return {
+        subckt: DeviceLookup(
+            "resistor",
+            device_class,
+            length_param,
+            width_param,
+            fixed_width_um=fixed_width_um,
+        )
+        for device_class, variants in _RESISTOR_FIXED_WIDTH_TABLE.get(
+            (deck_name, family), {}
+        ).items()
+        for fixed_width_um, subckt in variants
+    }
+
+
+def _bipolar_bindings(deck_name: str, family: str) -> dict[str, DeviceLookup]:
+    """``<subckt-name> -> DeviceLookup`` for every fixed-geometry bipolar
+    :data:`_BIPOLAR_MODEL_TABLE` curates for one ``(deck_name, family)`` pair;
+    empty for a pair the table does not cover.
+
+    The same class-then-variant walk as :func:`_fixed_width_resistor_bindings`,
+    keyed by nominal emitter area rather than width, and carrying no
+    length/width parameter at all -- such a cell takes none, which is why it is
+    resolved purely by name (see :func:`known_device_subckt_names`).
+    """
+    return {
+        subckt: DeviceLookup("bipolar", device_class, emitter_area_um2=nominal_ae)
+        for device_class, variants in _BIPOLAR_MODEL_TABLE.get(
+            (deck_name, family), {}
+        ).items()
+        for nominal_ae, subckt in variants
+    }
+
+
 def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
     """Every curated device subcircuit name across *all* decks and *all*
     device families (MOS, resistor, capacitor, bipolar), mapped to the
@@ -897,23 +975,13 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
                     DeviceLookup("resistor", device_class, length_param, width_param),
                 ),
             )
-    for (deck_name, family), fixed_table in _RESISTOR_FIXED_WIDTH_TABLE.items():
-        length_param, width_param = _RESISTOR_PARAM_STYLE.get(family, ("l", "w"))
-        for device_class, variants in fixed_table.items():
-            for fixed_width_um, subckt in variants:
-                result.setdefault(
-                    subckt,
-                    (
-                        deck_name,
-                        DeviceLookup(
-                            "resistor",
-                            device_class,
-                            length_param,
-                            width_param,
-                            fixed_width_um=fixed_width_um,
-                        ),
-                    ),
-                )
+    for deck_name, family in _RESISTOR_FIXED_WIDTH_TABLE:
+        _setdefault_bindings(
+            result,
+            _tagged_bindings(
+                deck_name, _fixed_width_resistor_bindings(deck_name, family)
+            ),
+        )
     for (deck_name, family), table in _CAPACITOR_MODEL_TABLE.items():
         length_param, width_param = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
         for device_class, subckt in table.items():
@@ -924,18 +992,10 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
                     DeviceLookup("capacitor", device_class, length_param, width_param),
                 ),
             )
-    for (deck_name, _family), table in _BIPOLAR_MODEL_TABLE.items():
-        for device_class, variants in table.items():
-            for nominal_ae, subckt in variants:
-                result.setdefault(
-                    subckt,
-                    (
-                        deck_name,
-                        DeviceLookup(
-                            "bipolar", device_class, emitter_area_um2=nominal_ae
-                        ),
-                    ),
-                )
+    for deck_name, family in _BIPOLAR_MODEL_TABLE:
+        _setdefault_bindings(
+            result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
+        )
     return result
 
 
@@ -1059,34 +1119,14 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
         result.setdefault(
             subckt, DeviceLookup("resistor", device_class, res_len, res_wid)
         )
-    for device_class, variants in _RESISTOR_FIXED_WIDTH_TABLE.get(
-        (deck_name, family), {}
-    ).items():
-        for fixed_width_um, subckt in variants:
-            result.setdefault(
-                subckt,
-                DeviceLookup(
-                    "resistor",
-                    device_class,
-                    res_len,
-                    res_wid,
-                    fixed_width_um=fixed_width_um,
-                ),
-            )
+    _setdefault_bindings(result, _fixed_width_resistor_bindings(deck_name, family))
     cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
     cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family))
     for device_class, subckt in (cap_table or {}).items():
         result.setdefault(
             subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
         )
-    for device_class, variants in _BIPOLAR_MODEL_TABLE.get(
-        (deck_name, family), {}
-    ).items():
-        for nominal_ae, subckt in variants:
-            result.setdefault(
-                subckt,
-                DeviceLookup("bipolar", device_class, emitter_area_um2=nominal_ae),
-            )
+    _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:
