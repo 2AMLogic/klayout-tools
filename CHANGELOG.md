@@ -14,6 +14,46 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2461, `klt lvs`, additive — **no** `schema_version` bump: one
+  new `mismatches[].category` value and one new top-level response field, no
+  existing field renamed, retyped, or redefined): a resistor or capacitor
+  device class taking part in a compare is now disclosed as
+  **`device.geometry_not_compared`** (`severity: "warning"`, one entry per
+  participating class per run, every `reference.form`), and summarised in a
+  new top-level **`device_parameter_coverage`** block. KLayout's
+  `DeviceClassResistor` marks only `R` primary (`L`/`W`/`A`/`P` are
+  secondary) and `DeviceClassCapacitor` only `C` (`A`/`P` secondary), so
+  `NetlistComparer` never compares such a class's geometry at all: a
+  reference resistor whose `W` was an order of magnitude off the layout's
+  reported `status: "match"` with `error_count: 0` and — on a plain-element
+  reference — no findings whatsoever. Under `reference.form: "subckt-call"`
+  the primary is excluded too (the `0` placeholder, #1907), so *nothing*
+  about the device was compared and only the value half of that was
+  disclosed, which a reader could reasonably take to mean the geometry had
+  been checked. Verdicts are unchanged — this is a disclosure, not a
+  finding; `device_parameter_coverage` is the gradeable counterpart (per
+  class: `compared`, and `not_compared` with a `reason` of `"secondary"` /
+  `"placeholder_value"` / `"compare_parameters"`), the same one-source-of-
+  truth shape `body_verification` (#1983) and `power_connectivity` (#1952)
+  use. See [`docs/cli/lvs.md`](docs/cli/lvs.md)'s
+  "`device.geometry_not_compared`" section.
+- **Fixed** (#2461/#2462, `klt lvs`): a parameter excluded from a run by
+  `options.compare_parameters` or by the `subckt-call` placeholder-value
+  path no longer produces an error-severity `device.property` finding in the
+  same report that discloses it as excluded. Scoping a placeholder-excluded
+  resistor class to `["L", "W"]` previously emitted `device.property` errors
+  on the very `R`/`A`/`P` the same run reported as
+  `device.parameter_excluded` (`reference` values of `0.0`, the placeholder
+  the default path correctly excludes, re-entering through the scoped path).
+  The same excluded parameters also no longer veto an
+  `options.parameter_tolerance` snap for the rest of their device pair —
+  a placeholder `R` of `0` against a real extracted value is a relative
+  delta of `1.0` that no tolerance can absorb, which silently blocked
+  absorbing an in-tolerance difference on a parameter the caller *did* scope
+  in (that case's verdict does move, from `"mismatch"` to `"match"`, which
+  is the answer the requested compare warrants). A genuinely secondary
+  parameter that no hook excluded is still reported exactly as before, once
+  something else makes the comparer flag the device pair.
 - **Added** (#2459, `klt lvs` `reference.form: "subckt-call"` conversion,
   additive — **no** `schema_version` bump: one new optional
   `reference.device_map` object-entry field pair, no existing field

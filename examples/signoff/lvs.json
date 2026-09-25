@@ -45,6 +45,7 @@
     "findings": [],
     "finding_count": 0
   },
+  "device_parameter_coverage": [],
   "mismatch_count": 0,
   "error_count": 0,
   "category_counts": {},
