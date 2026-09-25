@@ -138,6 +138,25 @@ def _failed_unmeasurable_from(raw: Any, name: str, where: str) -> int:
     return raw
 
 
+def _censored_from(raw: Any, name: str, where: str) -> int:
+    """Normalise a ``censored`` count -- draws whose measurement precondition
+    (a conditioning event, e.g. reaching a settled/converged/acquired state)
+    was never satisfied inside the analysis window, so no value was produced
+    (issue #2468). Unlike ``failed_unmeasurable``, this gets ``errored``'s
+    denominator treatment: excluded from both the numerator and denominator
+    of the empirical yield (see ``native/yield/src/estimate.rs``), while
+    still being excluded from the distribution fit and Cp/Cpk like both
+    existing no-value categories.
+    """
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise YieldError(
+            f"{where}: measurement '{name}' censored must be a non-negative integer"
+        )
+    return raw
+
+
 def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | None:
     """Normalise one measurement's ``negative_control`` object (issue #817's
     seeded, known-bad-variant self-check), or ``None`` when absent.
@@ -173,6 +192,11 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
     failed_unmeasurable = _failed_unmeasurable_from(
         raw.get("failed_unmeasurable"), name, where
     )
+    # Issue #2468: the negative control's own `censored` count -- excluded
+    # from both the numerator and denominator of its own empirical yield,
+    # exactly like `errored` (the opposite polarity from
+    # `failed_unmeasurable` above).
+    censored = _censored_from(raw.get("censored"), name, where)
     description = raw.get("description")
     if description is not None and not isinstance(description, str):
         raise YieldError(
@@ -183,6 +207,7 @@ def _negative_control_from(raw: Any, name: str, where: str) -> dict[str, Any] | 
         "samples": samples,
         "errored": errored,
         "failed_unmeasurable": failed_unmeasurable,
+        "censored": censored,
         "description": description,
     }
 
@@ -374,6 +399,12 @@ def _measurements_from_sim_report(report: dict[str, Any]) -> list[dict[str, Any]
                 "failed_unmeasurable": _failed_unmeasurable_from(
                     entry.get("failed_unmeasurable"), name, "sim report"
                 ),
+                # Issue #2468: same provenance story as `failed_unmeasurable`
+                # above -- a sim report's per-corner value has no way to
+                # distinguish an unmet measurement precondition from either
+                # a tooling failure or a design failure, so the caller
+                # supplies the count directly on the rollup entry.
+                "censored": _censored_from(entry.get("censored"), name, "sim report"),
                 "limits": _limits_from(entry.get("limits"), name, "sim report"),
                 "source_corners": source_corners,
                 # A sim report's own corners are the nominal draw; a
@@ -439,6 +470,10 @@ def _measurements_from_sample_set(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 "failed_unmeasurable": _failed_unmeasurable_from(
                     entry.get("failed_unmeasurable"), name, "sample set"
                 ),
+                # Issue #2468: a draw whose measurement precondition was
+                # never satisfied -- nothing failed and no value-defining
+                # event was violated, the row is simply undefined.
+                "censored": _censored_from(entry.get("censored"), name, "sample set"),
                 "limits": _limits_from(entry.get("limits"), name, "sample set"),
                 "source_corners": [str(c) for c in source_corners],
                 "negative_control": _negative_control_from(

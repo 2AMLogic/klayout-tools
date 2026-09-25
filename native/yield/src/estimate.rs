@@ -126,6 +126,23 @@ pub fn analyze(request: &YieldRequest) -> Result<YieldResponse, String> {
                 .to_string(),
         );
     }
+    // Issue #2468: `censored` gets `errored`'s denominator treatment
+    // (excluded from both the numerator and denominator of the empirical
+    // yield), but must not be mistaken for a tooling failure -- a censored
+    // draw's measurement precondition (a conditioning event, e.g. reaching a
+    // settled/converged/acquired state) was simply never satisfied inside
+    // the analysis window, so flag it separately from the `errored` warning
+    // above with its own wording.
+    if reports.iter().any(|r| r.censored > 0) {
+        warnings.push(
+            "at least one measurement excluded censored draws from its denominator -- their \
+             measurement precondition was never satisfied inside the analysis window, which is \
+             not a tooling failure, so its empirical yield is conditional on the draws that \
+             reached that precondition -- see that measurement's own warnings, and \
+             docs/cli/yield.md#errored-samples-and-conditional-yield"
+                .to_string(),
+        );
+    }
 
     Ok(YieldResponse {
         schema_version: SCHEMA_VERSION,
@@ -192,38 +209,47 @@ fn analyze_measurement(
 
     let n = m.samples.len();
     if n < min_samples {
-        // Issue #1082 / #1095: at the 100%-no-value end (every draw is
-        // either `errored` or `failed_unmeasurable`) there is no report to
-        // carry the conditional-yield / failed_unmeasurable warnings below,
-        // so this error has to name both counts itself -- otherwise a draw
-        // of 100 samples that all failed to produce a value is
-        // indistinguishable from a draw of nothing. Note that a
-        // `failed_unmeasurable` count alone cannot substitute for the
-        // shortfall here even though it *does* enter the yield below once
-        // the floor is met: `distribution`/`capability` still need a numeric
-        // sample to fit, and there is none to give them.
-        let no_value_note = if m.errored > 0 || m.failed_unmeasurable > 0 {
+        // Issue #1082 / #1095 / #2468: at the 100%-no-value end (every draw
+        // is `errored`, `failed_unmeasurable`, or `censored`) there is no
+        // report to carry the conditional-yield / failed_unmeasurable /
+        // censored warnings below, so this error has to name all three
+        // counts itself -- otherwise a draw of 100 samples that all failed
+        // to produce a value is indistinguishable from a draw of nothing.
+        // Note that neither `failed_unmeasurable` nor `censored` can
+        // substitute for the shortfall here even though `failed_unmeasurable`
+        // *does* enter the yield below once the floor is met:
+        // `distribution`/`capability` still need a numeric sample to fit,
+        // and there is none to give them.
+        let no_value_note = if m.errored > 0 || m.failed_unmeasurable > 0 || m.censored > 0 {
             // Errored-only keeps the exact pre-#1095 wording (a bare count,
             // no qualifier) for backward compatibility with existing
             // callers scraping this message; the qualifiers only appear
-            // once `failed_unmeasurable` is part of the shortfall.
-            let breakdown = match (m.errored > 0, m.failed_unmeasurable > 0) {
-                (true, true) => format!(
-                    "{} tooling-errored and {} failed_unmeasurable",
-                    m.errored, m.failed_unmeasurable
-                ),
-                (true, false) => format!("{}", m.errored),
-                (false, true) => format!("{} failed_unmeasurable", m.failed_unmeasurable),
-                (false, false) => unreachable!("guarded by the outer if"),
+            // once `failed_unmeasurable` and/or `censored` are part of the
+            // shortfall.
+            let breakdown = if m.errored > 0 && m.failed_unmeasurable == 0 && m.censored == 0 {
+                format!("{}", m.errored)
+            } else {
+                let mut parts = Vec::new();
+                if m.errored > 0 {
+                    parts.push(format!("{} tooling-errored", m.errored));
+                }
+                if m.failed_unmeasurable > 0 {
+                    parts.push(format!("{} failed_unmeasurable", m.failed_unmeasurable));
+                }
+                if m.censored > 0 {
+                    parts.push(format!("{} censored", m.censored));
+                }
+                parts.join(" and ")
             };
             format!(
                 " -- {breakdown} of the {} sample(s) drawn produced no usable value and were \
                  excluded, so this is a draw that mostly failed to *measure*, not a small draw; \
                  if a missing value is itself a failure for this measurement, use \
-                 failed_unmeasurable to count it as one directly, or map it onto a sentinel \
-                 outside the limits before analysis (see \
+                 failed_unmeasurable to count it as one directly; if it instead means the \
+                 measurement's own precondition was never satisfied, use censored instead; or \
+                 map it onto a sentinel outside the limits before analysis (see \
                  docs/cli/yield.md#errored-samples-and-conditional-yield)",
-                n as u64 + m.errored + m.failed_unmeasurable
+                n as u64 + m.errored + m.failed_unmeasurable + m.censored
             )
         } else {
             String::new()
@@ -454,6 +480,31 @@ fn analyze_measurement(
             m.failed_unmeasurable as f64 / yield_drawn as f64 * 100.0
         ));
     }
+    // Issue #2468: `censored` draws are the counterpart of both blocks
+    // above, but with a third, distinct treatment -- like `errored`, they
+    // are excluded from both the numerator and denominator of
+    // `yield.empirical` (so `yield_drawn` above is unaffected by
+    // `m.censored`), but unlike `errored` they are not a tooling failure:
+    // the measurement's own precondition (a conditioning event, e.g.
+    // reaching a settled/converged/acquired state) was simply never
+    // satisfied inside the analysis window. The rate is reported here
+    // (against the full draw, including `errored`/`failed_unmeasurable`) so
+    // a campaign's conditioning rate is visible even though there is no
+    // dedicated rate field on the payload.
+    if m.censored > 0 {
+        let total_drawn = n_u + m.errored + m.failed_unmeasurable + m.censored;
+        warnings.push(format!(
+            "measurement '{name}': {} of the {total_drawn} sample(s) drawn ({:.1}%) are \
+             censored -- their measurement precondition was never satisfied inside the analysis \
+             window, so nothing failed and no value-defining event was violated, the row is \
+             simply undefined for these draws; they are excluded from both the numerator and \
+             denominator of the empirical yield below (the `errored` treatment, not \
+             `failed_unmeasurable`'s), and from `distribution`/`capability` since there is no \
+             value to fit; see docs/cli/yield.md#errored-samples-and-conditional-yield",
+            m.censored,
+            m.censored as f64 / total_drawn as f64 * 100.0
+        ));
+    }
     if m.source_corners.len() > 1 {
         warnings.push(format!(
             "measurement '{name}': samples were pooled across {} originating corners; each \
@@ -514,6 +565,7 @@ fn analyze_measurement(
         n: n_u,
         errored: m.errored,
         failed_unmeasurable: m.failed_unmeasurable,
+        censored: m.censored,
         limits: m.limits,
         source_corners: m.source_corners.clone(),
         distribution,
@@ -1141,14 +1193,28 @@ fn negative_control_report(
     // checkable report: its empirical yield is 0 numeric passes out of
     // `failed_unmeasurable` draws, exactly the degradation the self-check
     // exists to require.
+    //
+    // Issue #2468: `censored` is deliberately *excluded* from `yield_drawn`,
+    // the opposite of `failed_unmeasurable` -- a censored draw carries no
+    // information about a failure either way, so it cannot substitute for
+    // the negative control's own floor. This gives the negative control the
+    // opposite-polarity behaviour a seeded defect that only ever produces
+    // `censored` draws needs: with no numeric samples and no countable
+    // failure, there is nothing to report a `"detected"` verdict from, so a
+    // negative control seeded entirely with `censored` draws falls through
+    // to the same floor error below (naming the `censored` count, but never
+    // counting it toward `yield_drawn`) rather than reusing
+    // `failed_unmeasurable`'s all-failure handling.
     let yield_drawn = n_u + nc.failed_unmeasurable;
     if yield_drawn < min_samples as u64 {
         return Err(format!(
-            "measurement '{name}' negative_control has {n} usable sample(s) and {} \
-             failed_unmeasurable draw(s) ({yield_drawn} total), below the minimum of \
-             {min_samples}: it needs its own confidence interval to be checkable, exactly \
-             like the nominal measurement (see docs/cli/yield.md, 'Never a bare point estimate')",
-            nc.failed_unmeasurable
+            "measurement '{name}' negative_control has {n} usable sample(s), {} \
+             failed_unmeasurable draw(s), and {} censored draw(s) ({yield_drawn} counted toward \
+             the floor -- censored draws are excluded from it, exactly like errored), below the \
+             minimum of {min_samples}: it needs its own confidence interval to be checkable, \
+             exactly like the nominal measurement (see docs/cli/yield.md, 'Never a bare point \
+             estimate')",
+            nc.failed_unmeasurable, nc.censored
         ));
     }
     let (mean, stddev, sorted) = if n >= 2 {
@@ -1221,6 +1287,7 @@ fn negative_control_report(
             n: n_u,
             errored: nc.errored,
             failed_unmeasurable: nc.failed_unmeasurable,
+            censored: nc.censored,
             // A negative control's own samples never declare a sampling
             // strategy in this phase -- it is always analysed as a plain
             // draw against the nominal measurement's limits.
@@ -1386,6 +1453,7 @@ mod tests {
                 samples,
                 errored: 0,
                 failed_unmeasurable: 0,
+                censored: 0,
                 limits,
                 source_corners: vec![],
                 negative_control: None,
@@ -1412,6 +1480,7 @@ mod tests {
                 samples,
                 errored: 0,
                 failed_unmeasurable: 0,
+                censored: 0,
                 limits,
                 source_corners: vec![],
                 negative_control: None,
@@ -2164,6 +2233,193 @@ mod tests {
     }
 
     // ----------------------------------------------------------------- //
+    // `censored` -- a draw whose measurement precondition was never met
+    // (issue #2468)
+    // ----------------------------------------------------------------- //
+
+    /// Same shape as [`request`], but with a non-zero `censored` count --
+    /// draws whose measurement precondition (a conditioning event) was
+    /// never satisfied inside the analysis window.
+    fn request_with_censored(samples: Vec<f64>, limits: Limits, censored: u64) -> YieldRequest {
+        let mut req = request(samples, limits);
+        req.measurements[0].censored = censored;
+        req
+    }
+
+    #[test]
+    fn censored_draws_are_excluded_from_both_the_numerator_and_denominator_of_the_empirical_yield()
+    {
+        // 20 in-spec numeric samples, 5 censored draws: unlike
+        // `failed_unmeasurable`, the censored draws must NOT enter the
+        // empirical yield's numerator or denominator -- this is the
+        // field's entire reason to exist (issue #2468).
+        let req = request_with_censored(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            5,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.censored, 5);
+        assert_eq!(m.n, 20);
+        // The empirical yield's own `n` stays 20, not 25 -- `errored`'s
+        // denominator treatment, not `failed_unmeasurable`'s.
+        assert_eq!(m.yield_.empirical.n, 20);
+        close(m.yield_.empirical.estimate, 1.0, 1e-12);
+    }
+
+    #[test]
+    fn censored_draws_are_excluded_from_distribution_fit_and_capability() {
+        let samples = normal_grid(300, 1.0, 0.01);
+        let with_censored = request_with_censored(
+            samples.clone(),
+            Limits {
+                min: Some(0.9),
+                max: Some(1.1),
+                target_yield: None,
+                ..Default::default()
+            },
+            50,
+        );
+        let without_censored = request(
+            samples,
+            Limits {
+                min: Some(0.9),
+                max: Some(1.1),
+                target_yield: None,
+                ..Default::default()
+            },
+        );
+        let with_resp = analyze(&with_censored).unwrap();
+        let without_resp = analyze(&without_censored).unwrap();
+        let with_m = &with_resp.measurements[0];
+        let without_m = &without_resp.measurements[0];
+        // The distribution fit and Cp/Cpk are computed purely from the
+        // numeric samples -- identical whether or not censored draws are
+        // present.
+        close(with_m.distribution.mean, without_m.distribution.mean, 1e-15);
+        close(
+            with_m.distribution.stddev,
+            without_m.distribution.stddev,
+            1e-15,
+        );
+        close(
+            with_m.capability.cpk.unwrap(),
+            without_m.capability.cpk.unwrap(),
+            1e-15,
+        );
+        // And, unlike `failed_unmeasurable`, the empirical yield itself is
+        // also unaffected -- censored draws never touch the denominator.
+        close(
+            with_m.yield_.empirical.estimate,
+            without_m.yield_.empirical.estimate,
+            1e-15,
+        );
+        assert_eq!(with_m.yield_.empirical.n, without_m.yield_.empirical.n);
+    }
+
+    #[test]
+    fn censored_draws_are_surfaced_in_the_payload_with_their_own_distinct_warning() {
+        let mut req = request_with_censored(
+            vec![1.0; 20],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            5,
+        );
+        req.measurements[0].errored = 3;
+        req.measurements[0].failed_unmeasurable = 2;
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.errored, 3);
+        assert_eq!(m.failed_unmeasurable, 2);
+        assert_eq!(m.censored, 5);
+        // The censored warning names "precondition", not "tooling failed"
+        // or "counted as failing" (failed_unmeasurable's wording) --
+        // distinct text is part of the acceptance criteria.
+        assert!(
+            m.warnings
+                .iter()
+                .any(|w| w.contains("censored") && w.contains("precondition")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            !m.warnings
+                .iter()
+                .any(|w| w.contains("censored") && w.contains("tooling failure")),
+            "{:?}",
+            m.warnings
+        );
+        assert!(
+            resp.warnings
+                .iter()
+                .any(|w| w.contains("excluded censored draws") && w.contains("precondition")),
+            "{:?}",
+            resp.warnings
+        );
+    }
+
+    #[test]
+    fn an_entirely_censored_measurement_does_not_crash_and_names_the_count() {
+        // 100% censored, no numeric samples at all -- like the equivalent
+        // failed_unmeasurable case, this is a clean error naming the count,
+        // not a panic.
+        let req = request_with_censored(
+            vec![],
+            Limits {
+                min: Some(0.0),
+                max: Some(2.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            100,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("0 usable sample(s)"), "{err}");
+        assert!(err.contains("100 censored"), "{err}");
+        assert!(
+            err.contains("#errored-samples-and-conditional-yield"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_measurement_mixing_numeric_errored_failed_unmeasurable_and_censored_draws_analyzes_cleanly(
+    ) {
+        let mut req = request_with_censored(
+            normal_grid(50, 1.0, 0.01),
+            Limits {
+                min: Some(0.9),
+                max: Some(1.1),
+                target_yield: None,
+                ..Default::default()
+            },
+            8,
+        );
+        req.measurements[0].errored = 7;
+        req.measurements[0].failed_unmeasurable = 10;
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        assert_eq!(m.n, 50);
+        assert_eq!(m.errored, 7);
+        assert_eq!(m.failed_unmeasurable, 10);
+        assert_eq!(m.censored, 8);
+        // Empirical yield's denominator is 50 numeric + 10
+        // failed_unmeasurable = 60 -- `errored` and `censored` both stay
+        // excluded entirely.
+        assert_eq!(m.yield_.empirical.n, 60);
+    }
+
+    // ----------------------------------------------------------------- //
     // Negative control (issue #817)
     // ----------------------------------------------------------------- //
 
@@ -2187,6 +2443,7 @@ mod tests {
                 samples,
                 errored: 0,
                 failed_unmeasurable: 0,
+                censored: 0,
                 limits,
                 source_corners: vec![],
                 negative_control,
@@ -2216,6 +2473,7 @@ mod tests {
                 samples: bad,
                 errored: 0,
                 failed_unmeasurable: 0,
+                censored: 0,
                 description: Some("vos forced to 0.6 (12x the 0.05 spec sigma)".to_string()),
             }),
             None,
@@ -2259,6 +2517,7 @@ mod tests {
                 samples: not_actually_bad,
                 errored: 0,
                 failed_unmeasurable: 0,
+                censored: 0,
                 description: None,
             }),
             None,
@@ -2311,6 +2570,7 @@ mod tests {
                 samples: vec![9.0],
                 errored: 0,
                 failed_unmeasurable: 0,
+                censored: 0,
                 description: None,
             }),
             None,
@@ -2340,6 +2600,7 @@ mod tests {
                 samples: vec![],
                 errored: 0,
                 failed_unmeasurable: 20,
+                censored: 0,
                 description: Some(
                     "the deliberate defect drives every draw out of the measurable regime"
                         .to_string(),
@@ -2378,6 +2639,7 @@ mod tests {
                 samples: vec![],
                 errored: 0,
                 failed_unmeasurable: 1,
+                censored: 0,
                 description: None,
             }),
             None,
@@ -2386,6 +2648,112 @@ mod tests {
         assert!(err.contains("negative_control"), "{err}");
         assert!(err.contains("failed_unmeasurable"), "{err}");
         assert!(err.contains("confidence interval"), "{err}");
+    }
+
+    #[test]
+    fn a_negative_control_seeded_entirely_with_censored_is_not_detected_and_errors_at_the_floor() {
+        // Design question #2 from issue #2468's Curator enhancement: this is
+        // the opposite polarity from a negative control seeded entirely with
+        // `failed_unmeasurable` above. A deliberate defect that only ever
+        // drives draws into `censored` (rather than a real, countable
+        // failure) carries no information about a degradation either way --
+        // `n == 0` numeric samples and no failure counted, so there is
+        // nothing to report `verdict: "detected"` from. Since `censored` is
+        // deliberately excluded from `yield_drawn`, this falls through to
+        // the same floor error the nominal measurement would hit, rather
+        // than reusing `failed_unmeasurable`'s all-failure handling.
+        let nominal = normal_grid(300, 0.0, 0.05);
+        let req = request_with_self_checks(
+            nominal,
+            Limits {
+                min: Some(-0.5),
+                max: Some(0.5),
+                target_yield: None,
+                ..Default::default()
+            },
+            Some(NegativeControlRequest {
+                samples: vec![],
+                errored: 0,
+                failed_unmeasurable: 0,
+                censored: 20,
+                description: Some(
+                    "the deliberate defect drives every draw out of the measurable regime, but \
+                     only ever fails to meet its own precondition, never a real failure"
+                        .to_string(),
+                ),
+            }),
+            None,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("negative_control"), "{err}");
+        assert!(err.contains("20 censored"), "{err}");
+        assert!(err.contains("confidence interval"), "{err}");
+    }
+
+    #[test]
+    fn a_negative_control_below_the_sample_floor_still_errors_with_censored_counted_but_excluded() {
+        // The floor is checked against numeric samples plus
+        // failed_unmeasurable *only* -- censored draws are named in the
+        // error for diagnosis but never counted toward the floor, exactly
+        // like errored.
+        let req = request_with_self_checks(
+            normal_grid(50, 0.0, 1.0),
+            Limits {
+                min: Some(-3.0),
+                max: Some(3.0),
+                target_yield: None,
+                ..Default::default()
+            },
+            Some(NegativeControlRequest {
+                samples: vec![],
+                errored: 0,
+                failed_unmeasurable: 1,
+                censored: 100,
+                description: None,
+            }),
+            None,
+        );
+        let err = analyze(&req).unwrap_err();
+        assert!(err.contains("negative_control"), "{err}");
+        assert!(err.contains("failed_unmeasurable"), "{err}");
+        assert!(err.contains("100 censored"), "{err}");
+        assert!(err.contains("confidence interval"), "{err}");
+    }
+
+    #[test]
+    fn a_negative_control_with_some_censored_draws_still_detects_a_real_degradation() {
+        // A negative control's own censored draws are excluded from its
+        // empirical yield exactly like the nominal measurement's -- a mix
+        // of a real degradation and some censored draws still detects.
+        let nominal = normal_grid(300, 0.0, 0.05);
+        let bad = normal_grid(300, 0.6, 0.05);
+        let req = request_with_self_checks(
+            nominal,
+            Limits {
+                min: Some(-0.5),
+                max: Some(0.5),
+                target_yield: None,
+                ..Default::default()
+            },
+            Some(NegativeControlRequest {
+                samples: bad,
+                errored: 0,
+                failed_unmeasurable: 0,
+                censored: 10,
+                description: Some("vos forced to 0.6, with some draws censored".to_string()),
+            }),
+            None,
+        );
+        let resp = analyze(&req).unwrap();
+        let m = &resp.measurements[0];
+        let nc = m.negative_control.as_ref().unwrap();
+        assert_eq!(nc.censored, 10);
+        // n stays 300 -- the censored count never enters the numeric
+        // sample count or the empirical yield's own n.
+        assert_eq!(nc.n, 300);
+        assert_eq!(nc.yield_.empirical.n, 300);
+        assert_eq!(nc.verdict, "detected");
+        assert!(nc.degradation_detected);
     }
 
     // ----------------------------------------------------------------- //

@@ -67,6 +67,19 @@ pub struct MeasurementRequest {
     /// the distribution fit and Cp/Cpk (there is no value to fit).
     #[serde(default)]
     pub failed_unmeasurable: u64,
+    /// Draws whose measurement precondition (a conditioning event -- e.g.
+    /// reaching a settled/converged/acquired state) was never satisfied
+    /// inside the analysis window, so no value was produced -- as distinct
+    /// from both a tooling failure (`errored`) and a design failure whose
+    /// failure mode *is* the absence of a value (`failed_unmeasurable`).
+    /// Additive (issue #2468): nothing failed and no value-defining event
+    /// was violated, the row is simply undefined for this draw, so unlike
+    /// `failed_unmeasurable` these get `errored`'s denominator treatment --
+    /// excluded from both the numerator and denominator of `yield.empirical`
+    /// -- while still being excluded from the distribution fit and Cp/Cpk,
+    /// exactly like both existing categories (there is no value to fit).
+    #[serde(default)]
+    pub censored: u64,
     pub limits: Limits,
     /// Originating (pre-sampling) corner ids this measurement's samples were
     /// pooled from -- informational, echoed back so a pooled multi-corner
@@ -106,6 +119,12 @@ pub struct NegativeControlRequest {
     /// `errored`.
     #[serde(default)]
     pub failed_unmeasurable: u64,
+    /// The negative control's own `censored` count -- same treatment as the
+    /// nominal measurement's (issue #2468): excluded from both the
+    /// numerator and denominator of the negative control's own empirical
+    /// yield, exactly like `errored`.
+    #[serde(default)]
+    pub censored: u64,
     /// Human description of what was deliberately broken, echoed back so the
     /// report is self-documenting (e.g. "vos forced to 3x spec via a fixed
     /// device offset").
@@ -256,6 +275,11 @@ pub struct MeasurementReport {
     /// `distribution`/`capability` like `errored`, but unlike `errored`
     /// *not* excluded from the yield itself.
     pub failed_unmeasurable: u64,
+    /// Echoes the request's `censored` (issue #2468) -- draws excluded
+    /// from `yield.empirical` and from `distribution`/`capability`, exactly
+    /// like `errored`, but with its own label/warning text distinguishing
+    /// "measurement precondition not met" from "tooling failed".
+    pub censored: u64,
     pub limits: Limits,
     pub source_corners: Vec<String>,
     pub distribution: Distribution,
@@ -310,6 +334,9 @@ pub struct NegativeControlReport {
     /// Echoes the negative control's own `failed_unmeasurable` (issue
     /// #1095) -- see [`MeasurementReport::failed_unmeasurable`].
     pub failed_unmeasurable: u64,
+    /// Echoes the negative control's own `censored` (issue #2468) -- see
+    /// [`MeasurementReport::censored`].
+    pub censored: u64,
     #[serde(rename = "yield")]
     pub yield_: YieldBlock,
     /// The nominal measurement's empirical yield estimate, echoed here so

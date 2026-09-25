@@ -514,6 +514,100 @@ def test_a_non_integer_failed_unmeasurable_is_an_error(tmp_path):
         _read_samples(path)
 
 
+# --------------------------------------------------------------------------- #
+# `censored` parsing (issue #2468, no native extension needed -- these are
+# input-reader-tier checks across all three normalizers).
+# --------------------------------------------------------------------------- #
+
+
+def test_censored_is_parsed_from_a_sample_set(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "errored": 2,
+        "censored": 13,
+        "limits": {"max": 5.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["errored"] == 2
+    assert measurements[0]["censored"] == 13
+
+
+def test_censored_defaults_to_zero_on_a_sample_set(tmp_path):
+    path = _sample_set(tmp_path, [1.0, 2.0], limits={"max": 5.0})
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["censored"] == 0
+
+
+def test_censored_is_parsed_from_a_sim_report_rollup_entry(tmp_path):
+    """Like `failed_unmeasurable`, `censored` is metadata on the rollup
+    entry, not derivable from a corner's `value`."""
+    path = _sim_report(tmp_path, [1.0, 2.0, 3.0], limits={"min": 0.5, "max": 3.5})
+    report = json.loads(open(path).read())
+    report["measurements"][0]["censored"] = 6
+    (tmp_path / "sim.json").write_text(json.dumps(report))
+    _kind, measurements, _source = _read_samples(str(tmp_path / "sim.json"))
+    assert measurements[0]["censored"] == 6
+
+
+def test_censored_is_parsed_from_a_negative_control(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "negative_control": {
+            "samples": [9.0],
+            "censored": 12,
+            "description": "some draws never reached the settled state",
+        },
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    nc = measurements[0]["negative_control"]
+    assert nc["censored"] == 12
+
+
+def test_censored_defaults_to_zero_on_a_negative_control(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "limits": {"max": 5.0},
+        "negative_control": {"samples": [9.0]},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["negative_control"]["censored"] == 0
+
+
+def test_a_negative_censored_is_an_error(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "censored": -1,
+        },
+    )
+    with pytest.raises(YieldError, match="censored must be a"):
+        _read_samples(path)
+
+
+def test_a_non_integer_censored_is_an_error(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "censored": "lots",
+        },
+    )
+    with pytest.raises(YieldError, match="censored must be a"):
+        _read_samples(path)
+
+
 def test_analytic_cross_check_is_parsed_from_a_sample_set(tmp_path):
     entry = {
         "name": "m",
@@ -1008,6 +1102,71 @@ def test_an_entirely_failed_unmeasurable_draw_does_not_crash_and_names_the_count
 
 
 # --------------------------------------------------------------------------- #
+# `censored` -- a draw whose measurement precondition was never met
+# (issue #2468)
+# --------------------------------------------------------------------------- #
+
+
+@requires_native
+def test_censored_draws_are_excluded_from_the_empirical_yield(tmp_path):
+    """Unlike `failed_unmeasurable`, `censored` draws get `errored`'s
+    denominator treatment -- excluded from both the numerator and
+    denominator of the empirical yield."""
+    entry = {
+        "name": "m",
+        "samples": [1.0] * 20,
+        "censored": 5,
+        "limits": {"min": 0.0, "max": 2.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    report = run_yield(path)
+    m = report["measurements"][0]
+
+    assert m["n"] == 20
+    assert m["censored"] == 5
+    assert m["distribution"]["mean"] == 1.0
+    # The empirical yield's own `n` stays 20 -- unlike failed_unmeasurable,
+    # the censored draws never enter the denominator.
+    assert m["yield"]["empirical"]["n"] == 20
+    assert m["yield"]["empirical"]["estimate"] == 1.0
+
+    assert any("censored" in w and "precondition" in w for w in m["warnings"])
+    assert any(
+        "excluded censored draws" in w and "precondition" in w
+        for w in report["warnings"]
+    )
+    # The censored warning must not be mistaken for a tooling-failure one.
+    assert not any("censored" in w and "tooling failure" in w for w in m["warnings"])
+
+
+@requires_native
+def test_a_draw_with_no_censored_gets_no_extra_warning(tmp_path):
+    path = _sample_set(
+        tmp_path, _normal_grid(200, 0.0, 1.0), limits={"min": -2.0, "max": 2.0}
+    )
+    report = run_yield(path)
+    assert report["measurements"][0]["censored"] == 0
+    assert not [w for w in report["measurements"][0]["warnings"] if "censored" in w]
+    assert not [w for w in report["warnings"] if "excluded censored draws" in w]
+
+
+@requires_native
+def test_an_entirely_censored_draw_does_not_crash_and_names_the_count(tmp_path):
+    """100% censored, no numeric samples: like the equivalent
+    failed_unmeasurable case, this still errors at the sample floor -- a
+    clean error naming the count, not a crash."""
+    entry = {
+        "name": "m",
+        "samples": [],
+        "censored": 40,
+        "limits": {"min": 0.0, "max": 2.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    with pytest.raises(YieldError, match="40 censored"):
+        run_yield(path)
+
+
+# --------------------------------------------------------------------------- #
 # negative_control / analytic_cross_check (issue #817)
 # --------------------------------------------------------------------------- #
 
@@ -1070,6 +1229,32 @@ def test_a_negative_control_seeded_entirely_with_failed_unmeasurable_is_detected
     assert nc["yield"]["normal"] is None
     assert nc["verdict"] == "detected"
     assert not any("not statistically" in w for w in report["warnings"])
+
+
+@requires_native
+def test_a_negative_control_seeded_entirely_with_censored_errors_at_the_floor(
+    tmp_path,
+):
+    """Issue #2468's opposite-polarity case from #1095's above: a deliberate
+    defect that only ever drives negative-control draws into `censored`
+    carries no information about a failure either way, so there is no
+    `"detected"` verdict to report -- `censored` is deliberately excluded
+    from the floor check, so this falls through to the same
+    below-minimum-samples error the nominal measurement would raise."""
+    entry = {
+        "name": "vos",
+        "samples": _normal_grid(300, 0.0, 0.05),
+        "limits": {"min": -0.5, "max": 0.5},
+        "negative_control": {
+            "samples": [],
+            "censored": 20,
+            "description": "the deliberate defect only ever fails its own "
+            "precondition, never a real failure",
+        },
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    with pytest.raises(YieldError, match="20 censored"):
+        run_yield(path)
 
 
 @requires_native

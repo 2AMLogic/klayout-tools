@@ -40,6 +40,42 @@ not `klt --version`, if you need to detect this kind of drift. See
   elsewhere in this file and in `docs/` are unchanged — they record which
   build a past measurement was taken against, not what gets installed today.
   Re-pin commands: the script's own header comment.
+- **Added** (#2468, `klt yield`, additive — **no** `schema_version` bump:
+  one new optional `censored: u64` field on a measurement's request (both
+  the sample-set and `klt sim` report input paths, plus `negative_control`)
+  and echoed back in the response, defaulting to `0` and byte-identical to
+  prior behavior when omitted): a third declared count for a Monte Carlo
+  draw that produced no measurement value, alongside `errored` (a tooling
+  failure) and `failed_unmeasurable` (a design failure, added by #1095/PR
+  #1124). `censored` covers a draw whose measurement precondition — a
+  conditioning event the spec row assumes, e.g. reaching a settled/
+  converged/acquired state — was never satisfied inside the analysis
+  window: nothing failed in the tooling, and no value-defining event was
+  violated for the row being graded (any failure belongs to a *different*
+  spec row, the one that bounds reaching the state at all), so the row is
+  simply undefined for that draw. Before this field, a caller had to pick
+  between `errored` (understates the denominator) and `failed_unmeasurable`
+  (charges a failure to a row that does not define one) — both defensible,
+  neither correct. `censored` gets **`errored`'s denominator treatment**,
+  not `failed_unmeasurable`'s: excluded from both the numerator and
+  denominator of `yield.empirical` (`n`, not `n + censored`, is the yield
+  denominator), while staying excluded from `distribution`/`capability`
+  like both existing categories, since there is still no value to fit. It
+  gets its own distinct per-measurement and run-level warning text stating
+  the precondition was not met — never reusing `errored`'s or
+  `failed_unmeasurable`'s wording — and its own rate is visible in that
+  warning text (against the full draw, so a campaign's conditioning rate is
+  a checkable finding in its own right). `negative_control` gets the
+  opposite-polarity treatment from `failed_unmeasurable`'s (#1095's
+  headline case: a negative control seeded entirely with
+  `failed_unmeasurable` correctly reports `detected`): a negative control
+  seeded entirely with `censored` carries no information about a failure
+  either way, so `censored` is deliberately excluded from its own floor
+  check and such a control falls through to the same below-`min_samples`
+  error the nominal measurement would raise, rather than ever reporting
+  `detected` from draws that never violated anything. See
+  `docs/cli/yield.md#errored-samples-and-conditional-yield` and
+  `docs/cli/yield.md#negative-control`.
 - **Added** (#2463, `klt erc` + `klt signoff`, additive — **no**
   `schema_version` bump on either verb: one new optional `nets[]` key on the
   request side and one new `erc_findings[].rule` value on the response side,
