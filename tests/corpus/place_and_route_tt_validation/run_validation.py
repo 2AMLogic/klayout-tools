@@ -83,7 +83,18 @@ CELLS_V = CELL_VERILOG_DIR / "sky130_fd_sc_hd.v"
 # tests/corpus/place_and_route/regenerate.sh and tests/corpus/legalize's own
 # convention -- see docs/cli/place-and-route.md's "Installing OpenROAD" for
 # why this is the only broadly reproducible install path today.
-DOCKER_IMAGE = "openroad/orfs:latest"
+# Pinned image -- mirrors scripts/install-openroad-docker.sh's own pin (issue
+# #2465/#2477): `openroad/orfs` publishes only a moving `:latest` tag, so the
+# digest is the only reproducible pin available. Re-pin with:
+#   docker pull --platform linux/amd64 openroad/orfs:latest
+#   docker image inspect openroad/orfs:latest --format '{{index .RepoDigests 0}}'
+# then update both constants (and scripts/install-openroad-docker.sh's own
+# pin, if refreshing that too) together.
+ORFS_IMAGE_REPO = "openroad/orfs"
+ORFS_IMAGE_DIGEST = (
+    "sha256:bb7f31697fb8466ab61852fc796376cc16d9df38f762ccb733218b8a5e55824b"
+)
+DOCKER_IMAGE = f"{ORFS_IMAGE_REPO}@{ORFS_IMAGE_DIGEST}"
 CONTAINER_OPENROAD_BIN = (
     "/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/usr/local/sbin:"
     "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
