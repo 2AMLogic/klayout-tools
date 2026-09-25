@@ -525,6 +525,32 @@ def test_tm9k_r_matches_native_deck_with_5lm_metal_level(tmp_path: Path) -> None
 # deck at the same stack the compiled deck models
 # --------------------------------------------------------------------------- #
 
+# The native deck's *device-class name* for the 2.0 fF/um^2 MiM capacitor is
+# not stable across open_pdks revisions, while the coefficient this module
+# actually cross-checks (`2.0e-15` F/um^2) is (issue #2484). Both spellings
+# below were measured on a real `gf180mcu.lvs`, in
+# `libs.tech/klayout/.../rule_decks/mimcap_extraction.lvs`:
+#
+# - open_pdks `c6d73a35` (a `volare`-fetched gf180mcuD):
+#   `capacitor('cap_mim_2f0_m4m5_noshield', 2.0e-15, MIMCap)` -- *stack*-keyed,
+#   one class per `$metal_level` branch (`m2m3`/`m4m5`/`m5m6`/...).
+# - open_pdks `f6eeac7d` (a `ciel`-fetched gf180mcuD):
+#   `capacitor('cap_mim_2f0fF', 2.0e-15, MIMCap)` -- *density*-keyed, one class
+#   per fF/um^2 flavour, stack-independent. There
+#   `cap_mim_2f0_m4m5_noshield` survives only as a cell/subckt name, i.e. the
+#   two names are distinct concepts upstream.
+#
+# Both name the same device at the same coefficient, so the cross-check accepts
+# either rather than pinning one vintage's vendor string -- the numeric
+# agreement assertions below are what this test exists to make. A class name
+# outside this set still fails loudly (it would mean the native deck recognised
+# a *different* device), and the fix for a further upstream rename is to add
+# that spelling here, with its open_pdks revision.
+#
+# Entries are compared lowercased (`cap_mim_2f0fF` -> `cap_mim_2f0ff`), since
+# the extracted class name's case is itself a vendor detail.
+_NATIVE_CAP_MIM_2F0_CLASSES = frozenset({"cap_mim_2f0_m4m5_noshield", "cap_mim_2f0ff"})
+
 
 @_SKIP_NO_GF180MCU_LVS_CROSS_CHECK
 def test_cap_mim_c_disagrees_with_native_deck_by_a_documented_refinement(
@@ -535,9 +561,11 @@ def test_cap_mim_c_disagrees_with_native_deck_by_a_documented_refinement(
     engines, but the two `C` values genuinely disagree: the native deck's
     raw single-term area coefficient (`2.0e-15` F/um^2, verified against a
     real `gf180mcu.lvs`: `capacitor('cap_mim_2f0_m4m5_noshield', 2.0e-15,
-    ...)`) vs. the compiled deck's own refined two-term fit
-    (`area_cap_f_um2=1.99e-15`, `perim_cap_f_um=2.383e-16`, issue #512) --
-    the gf180mcu counterpart of issue #869's own sky130 `cap_mim`/
+    ...)`, spelled `capacitor('cap_mim_2f0fF', 2.0e-15, ...)` on a newer
+    open_pdks -- see `_NATIVE_CAP_MIM_2F0_CLASSES`) vs. the compiled deck's
+    own refined two-term fit (`area_cap_f_um2=1.99e-15`,
+    `perim_cap_f_um=2.383e-16`, issue #512) -- the gf180mcu counterpart of
+    issue #869's own sky130 `cap_mim`/
     `cap_mim_m4` finding. Needs `extra_rd={"metal_level": "5LM"}`: the
     native deck's own `$metal_level` global defaults to `'6LM'`
     (`topmin1_metal` = `Metal5`), which would not recognise a `Metal4`
@@ -565,7 +593,14 @@ def test_cap_mim_c_disagrees_with_native_deck_by_a_documented_refinement(
     native_device = _one_native_device(
         _run_native(path, extra_rd={"metal_level": "5LM"})
     )
-    assert native_device["class"].lower() == "cap_mim_2f0_m4m5_noshield"
+    assert native_device["class"].lower() in _NATIVE_CAP_MIM_2F0_CLASSES, (
+        f"native deck extracted device class {native_device['class']!r}, which "
+        f"is none of the known 2.0 fF/um^2 MiM spellings "
+        f"{sorted(_NATIVE_CAP_MIM_2F0_CLASSES)} -- if this is a further "
+        f"upstream rename (issue #2484), add the new spelling to "
+        f"`_NATIVE_CAP_MIM_2F0_CLASSES` with its open_pdks revision; deck: "
+        f"{_GF180MCU_NATIVE_LVS_DECK_FILE}"
+    )
     native_c_f = native_device["params"]["C"]
 
     area_um2 = 100.0
