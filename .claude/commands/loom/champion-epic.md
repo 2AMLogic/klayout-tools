@@ -284,6 +284,14 @@ if [ "$OPERATOR_OVERRIDE" = "no" ] && printf '%s\n' "$EPIC_JSON" | jq -e --arg m
 fi
 ```
 
+**Whichever of the three outcomes below applies, run "Step 0: Completion-First
+Check" and then "Step 0.5: Tracking-Umbrella Stand-Down" (both under "Epic
+Approval Workflow") FIRST, before acting on it.** An epic's children can close,
+or get decomposed by someone other than this file's own Step 3, while its
+rejected title/body stay byte-identical — so a marker match here must never
+block Step 0's autonomous close (#6516) or Step 0.5's stand-down (#7666). Only
+after both decline to act do the outcomes below take effect:
+
 If `OPERATOR_OVERRIDE=yes`, the marker-match block above never runs (its `if`
 is gated on `OPERATOR_OVERRIDE=no`) regardless of whether the marker matches —
 **do not stop here**: continue to Step 2 and run a full, fresh evaluation of
@@ -362,10 +370,152 @@ epic still escalates on schedule; both paths stay bounded.
 
 ## Epic Approval Workflow
 
+**Run the re-approval guard and the rejection idempotency check from
+"Re-approval Guard and Rejection Idempotency" above FIRST, once per epic.**
+Whatever it decides — evaluate fresh, skip silently, or escalate — **Step 0**
+and then **Step 0.5** below must still run before that decision takes effect
+(see the note above the idempotency check's outcome paragraph): completion
+and prior-decomposition are facts about the epic's *children*, not its text,
+so they can change under a byte-identical, already-rejected body.
+
+### Step 0: Completion-First Check — ask "is this already done?" before "is this well-shaped?" (#6516)
+
+The 6 criteria above describe an epic **awaiting decomposition**. Run against
+an epic whose work is already decomposed, executed, and merged, they are a
+**permanent deadlock**: nobody retrofits a Phase 1/2/3 skeleton onto finished
+work, so the finding never clears and the epic stays open forever, blocking
+every dependent that cites it. So: **completion is checked first, and a
+completion candidate never reaches Step 2's structural criteria on that
+pass.**
+
+#### Step 0a. Discover the children (marker-independent — this is the load-bearing part)
+
+```bash
+# Read champion-common.md -> "Step 1.5 -- discover an epic's children" if not
+# already loaded this pass, then:
+# owner/repo this Champion is running in, derived with zero API calls.
+THIS_REPO=$(git remote get-url origin 2>/dev/null \
+  | sed -E 's#^(git@[^:]+:|https?://[^/]+/)##; s#\.git$##')
+discover_epic_children "$THIS_REPO" "$EPIC_NUMBER"
+EPIC_BODY=$(printf '%s\n' "$EPIC_JSON" | jq -r '.body // ""')   # fetched by the rejection idempotency check above
+```
+
+**Do NOT substitute "Detecting Phase Completion" below for this.** That query
+matches `<!-- loom:epic:N:phase:M -->`, so it sees only children Step 3
+created — exactly what an epic decomposed some other way lacks. Depending on
+the marker here would reproduce the blind spot this step exists to close.
+
+| Discovery result | Outcome |
+|---|---|
+| `EPIC_CHILD_STRONG_CLOSED == 0` and `EPIC_CHILD_WEAK_CLOSED == 0` — no children found by any source | **Not a completion candidate.** An epic that was never decomposed is exactly what the 6 criteria are for → continue to Step 0.5, then Step 1 |
+| `EPIC_CHILD_STRONG_OPEN > 0` — containment children still open | Not complete → continue to **Step 0.5**, which stands the epic down if those children were created by someone other than Step 3 (#7666); an epic Champion decomposed itself falls through Step 0.5 to Step 1, and "Phase Progression" handles its next phase |
+| `EPIC_CHILD_STRONG_OPEN == 0` and `EPIC_CHILD_STRONG_CLOSED > 0` | **Completion candidate** → Step 0b |
+| No strong children at all, but `EPIC_CHILD_WEAK_OPEN == 0` and `EPIC_CHILD_WEAK_CLOSED > 0` | **Low-confidence candidate**: prose references only, containment never established → Step 0c's operator ask, **never** an autonomous close |
+
+#### Step 0b. Verify the deliverables the epic itself names
+
+An epic that says it delivers `path/to/thing` is not complete until that
+thing is on the default branch, however many children closed.
+
+```bash
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || echo main)
+git fetch origin --quiet   # the check reads the remote's tip, not a stale local ref
+# Path-shaped backticked tokens in the epic body. The required directory
+# component keeps `loom:epic-phase`, `cargo check`, and a prose "see
+# README.md" out of the deliverable set, at the cost of missing a top-level
+# file -- precision matters more here, because a false "missing" only
+# downgrades to an ask while a false "present" would close live work.
+DELIVERABLES=$(printf '%s\n' "$EPIC_BODY" \
+  | grep -Eo '`[A-Za-z0-9._/-]+/[A-Za-z0-9._-]+\.[A-Za-z0-9]+`' | tr -d '`' | sort -u)
+MISSING=""
+for P in $DELIVERABLES; do
+  git cat-file -e "origin/${DEFAULT_BRANCH:-main}:$P" 2>/dev/null || MISSING="$MISSING $P"
+done
+```
+
+An epic naming no path-shaped deliverable satisfies this vacuously — the same
+evidence standard "Epic Completion" below closes on. A **non-empty**
+`$MISSING` downgrades the candidate to Step 0c's operator ask, which must name
+the missing path and must **not** assert completion.
+
+#### Step 0c. Close, or ask the operator to
+
+Close autonomously only when **all four** hold:
+
+1. `EPIC_CHILD_STRONG_OPEN == 0` and `EPIC_CHILD_STRONG_CLOSED > 0` (Step 0a's completion candidate — containment, not prose).
+2. `$MISSING` is empty (Step 0b).
+3. `ALREADY_ROUTED` (computed by the rejection idempotency check above) is `no` — the epic does not already carry `loom:operator-only`.
+4. No comment on the epic raises outstanding **content** work dated after the last child closed. Champion's own structural verdicts (`$VERDICT_MARKER` / "Epic Needs Revision") explicitly do **not** count — those are the format gate this step supersedes, and treating them as objections would restore the deadlock through the back door.
+
+```bash
+CLOSE_DIRECTLY=yes   # only when all four hold; any doubt at all makes it "no"
+
+if [ "$CLOSE_DIRECTLY" = "yes" ]; then
+  # Same close as "Epic Completion" below, reached without a phase marker.
+  gh issue close "$EPIC_NUMBER" --comment "<!-- champion:epic-completion-close -->
+**Champion: Epic Complete — Closing**
+
+All $EPIC_CHILD_STRONG_CLOSED linked children are closed (discovered via: $EPIC_CHILD_SOURCES) and every deliverable this epic names is present on \`${DEFAULT_BRANCH:-main}\`. Closing as delivered rather than re-evaluating pre-decomposition structure against finished work.
+
+---
+*Automated by Champion role*"
+else
+  # Not confident enough to close unilaterally -- one mechanical ask, then hands off.
+  ASK_MARKER="<!-- champion:epic-completion-ask -->"
+  printf '%s\n' "$EPIC_JSON" | jq -e --arg m "$ASK_MARKER" \
+    '.comments[] | select(.body | contains($m))' >/dev/null || {
+    gh issue comment "$EPIC_NUMBER" --body "$ASK_MARKER
+**Champion: This Epic Looks Complete — Close?**
+
+Every child found for this epic is closed (via: $EPIC_CHILD_SOURCES), so its structural Phase 1/2/3 criteria are no longer meaningful to re-run. $UNCERTAINTY
+
+Close it, or say what is outstanding.
+
+---
+*Automated by Champion role*" \
+      && gh issue edit "$EPIC_NUMBER" --add-label "loom:operator-only"
+  }
+fi
+```
+
+`$UNCERTAINTY` is the one specific reason this is an ask rather than a close —
+Step 0b's missing path, "containment was never established (prose references
+only)", or criterion 4's outstanding-content comment. A bare "not confident"
+does not satisfy it.
+
+Either branch **ends the pass for this epic**: do not fall through to Step 1.
+Neither counts against "Epic Rate Limiting" below.
+
+**Invariants a future edit must preserve:**
+
+- **Completion is evaluated before structure, never after.** Reordering these
+  so Step 2 can reject first reinstates the exact deadlock this step exists to
+  close.
+- **Discovery stays marker-independent.** Narrowing Step 0a back to the
+  phase-marker query re-blinds the check to every epic Champion did not
+  decompose itself.
+- **Nothing closes on prose alone.** Weak (`Epic #N` mention) evidence may
+  only reach the operator ask; autonomous closure requires containment.
+- **Absence of children is undecomposed, not done.** All-zero counts must
+  route to Step 0.5 (which declines) and on to Step 1, never to Step 0c.
+
+### Step 0.5: Tracking-Umbrella Stand-Down — an already-decomposed epic is not awaiting decomposition (#7666)
+
+Step 0 asks "is this epic **finished**?"; this step asks "has it already been
+**decomposed** by someone other than Step 3?" — a Curator pass, native
+sub-issues, or a hand-written task list, none of which carry the phase
+marker, so a literal Step 3 re-run would create a duplicate Phase 1 set.
+**Read and follow instructions in
+`.claude/commands/loom/champion-epic-standdown.md`**: it reuses Step 0a's
+discovery, stands such an epic down with its own
+`champion:epic-tracking-umbrella:body-*` marker (once per body hash, no
+counter, no operator routing), and ends the pass. An epic Champion decomposed
+itself (`phase-marker` source) or an undecomposed one falls through to Step 1.
+
 ### Step 1: Read the Epic
 
-**First run the re-approval guard and the rejection idempotency check** from
-"Re-approval Guard and Rejection Idempotency" above, in that order:
+If Step 0 and Step 0.5 above did not end the pass for this epic, apply the
+rejection idempotency check's own outcome:
 
 - If the re-approval guard finds existing `loom:epic:<N>:phase:1` markers,
   **skip Step 3** for this epic no matter how Step 2 scores it (Phase Progression
