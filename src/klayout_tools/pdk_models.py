@@ -285,9 +285,9 @@ micrometre-unit-suffixed literal for gf180mcu (whose ``r_length``/
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from .pdk_families import pdk_variant_family
 
@@ -839,6 +839,25 @@ class DeviceLookup:
     ``DeviceClassBJT3Transistor``'s default full-parameter compare.
     ``None`` for every non-bipolar kind, and for a bipolar binding whose
     geometry is not curated (a caller-supplied ``device_map`` override).
+
+    ``fixed_length_um``/``fixed_width_um`` (issue #2459) are the
+    resistor/capacitor counterpart of ``emitter_area_um2`` for a *partially*
+    fixed-geometry wrapper: a subcircuit whose name bakes in one dimension
+    (typically width) while the other (typically length) is still a genuine
+    call-site parameter -- sky130's ``sky130_fd_pr__res_high_po_2p85``
+    (``w=2.85`` fixed by the wrapper, ``l`` still passed through from the
+    call, confirmed against a real fetched sky130A install:
+    ``libs.tech/combined/rescap/sky130_fd_pr__model__res.model.spice``'s
+    ``.subckt sky130_fd_pr__res_high_po_2p85 r0 r1 sub mult=1 l=1`` / ``x0 r0
+    r1 sub sky130_fd_pr__res_high_po l=l w=2.85 mult=mult``) is the verified
+    case; the symmetric fixed-length shape is supported for the same
+    reason even though no curated table below currently needs it. When set,
+    :mod:`klayout_tools.netlist_normalize` uses the fixed value only for the
+    dimension the call itself omits -- a call-site value always wins over
+    it, matching a real override's precedence over a subcircuit default.
+    ``None`` (the default) for a binding with no fixed dimension, meaning
+    both ``length_param`` and ``width_param`` must come from the call site
+    exactly as before this issue.
     """
 
     kind: str
@@ -846,6 +865,86 @@ class DeviceLookup:
     length_param: str | None = None
     width_param: str | None = None
     emitter_area_um2: float | None = None
+    fixed_length_um: float | None = None
+    fixed_width_um: float | None = None
+
+
+_BindingValue = TypeVar("_BindingValue")
+
+
+def _setdefault_bindings(
+    target: dict[str, _BindingValue],
+    bindings: Mapping[str, _BindingValue],
+) -> None:
+    """:meth:`dict.setdefault` every ``bindings`` entry into ``target``.
+
+    The whole-mapping form of the precedence rule both ingestion entry points
+    (:func:`known_device_subckt_names`, :func:`build_device_binding_map`)
+    follow: an entry ``target`` already holds always wins, so an earlier
+    curated binding is never overwritten by a later -- or derived -- one.
+    """
+    for subckt, value in bindings.items():
+        target.setdefault(subckt, value)
+
+
+def _tagged_bindings(
+    deck_name: str, bindings: Mapping[str, DeviceLookup]
+) -> dict[str, tuple[str, DeviceLookup]]:
+    """``bindings`` with every value paired with the deck it came from -- the
+    ``(deck_name, DeviceLookup)`` value shape
+    :func:`known_device_subckt_names` returns, built from the deck-scoped
+    ``<subckt-name> -> DeviceLookup`` maps the per-family helpers produce."""
+    return {subckt: (deck_name, lookup) for subckt, lookup in bindings.items()}
+
+
+def _fixed_width_resistor_bindings(
+    deck_name: str, family: str
+) -> dict[str, DeviceLookup]:
+    """``<subckt-name> -> DeviceLookup`` for every fixed-width resistor wrapper
+    :data:`_RESISTOR_FIXED_WIDTH_TABLE` curates for one ``(deck_name, family)``
+    pair (issue #2459); empty for a pair the table does not cover.
+
+    Such a wrapper encodes its width in the cell name and takes only a length
+    at the call site, so each lookup keeps the family's normal length/width
+    parameter names *and* pins ``fixed_width_um`` -- no caller re-derives that
+    width from the subcircuit name. Extracted so this two-level
+    class-then-variant walk exists once, shared by the whole-table
+    (:func:`known_device_subckt_names`) and single-deck
+    (:func:`build_device_binding_map`) ingestion entry points.
+    """
+    length_param, width_param = _RESISTOR_PARAM_STYLE.get(family, ("l", "w"))
+    return {
+        subckt: DeviceLookup(
+            "resistor",
+            device_class,
+            length_param,
+            width_param,
+            fixed_width_um=fixed_width_um,
+        )
+        for device_class, variants in _RESISTOR_FIXED_WIDTH_TABLE.get(
+            (deck_name, family), {}
+        ).items()
+        for fixed_width_um, subckt in variants
+    }
+
+
+def _bipolar_bindings(deck_name: str, family: str) -> dict[str, DeviceLookup]:
+    """``<subckt-name> -> DeviceLookup`` for every fixed-geometry bipolar
+    :data:`_BIPOLAR_MODEL_TABLE` curates for one ``(deck_name, family)`` pair;
+    empty for a pair the table does not cover.
+
+    The same class-then-variant walk as :func:`_fixed_width_resistor_bindings`,
+    keyed by nominal emitter area rather than width, and carrying no
+    length/width parameter at all -- such a cell takes none, which is why it is
+    resolved purely by name (see :func:`known_device_subckt_names`).
+    """
+    return {
+        subckt: DeviceLookup("bipolar", device_class, emitter_area_um2=nominal_ae)
+        for device_class, variants in _BIPOLAR_MODEL_TABLE.get(
+            (deck_name, family), {}
+        ).items()
+        for nominal_ae, subckt in variants
+    }
 
 
 def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
@@ -876,6 +975,13 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
                     DeviceLookup("resistor", device_class, length_param, width_param),
                 ),
             )
+    for deck_name, family in _RESISTOR_FIXED_WIDTH_TABLE:
+        _setdefault_bindings(
+            result,
+            _tagged_bindings(
+                deck_name, _fixed_width_resistor_bindings(deck_name, family)
+            ),
+        )
     for (deck_name, family), table in _CAPACITOR_MODEL_TABLE.items():
         length_param, width_param = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
         for device_class, subckt in table.items():
@@ -886,18 +992,10 @@ def known_device_subckt_names() -> dict[str, tuple[str, DeviceLookup]]:
                     DeviceLookup("capacitor", device_class, length_param, width_param),
                 ),
             )
-    for (deck_name, _family), table in _BIPOLAR_MODEL_TABLE.items():
-        for device_class, variants in table.items():
-            for nominal_ae, subckt in variants:
-                result.setdefault(
-                    subckt,
-                    (
-                        deck_name,
-                        DeviceLookup(
-                            "bipolar", device_class, emitter_area_um2=nominal_ae
-                        ),
-                    ),
-                )
+    for deck_name, family in _BIPOLAR_MODEL_TABLE:
+        _setdefault_bindings(
+            result, _tagged_bindings(deck_name, _bipolar_bindings(deck_name, family))
+        )
     return result
 
 
@@ -1021,20 +1119,14 @@ def build_device_binding_map(deck_name: str) -> dict[str, DeviceLookup]:
         result.setdefault(
             subckt, DeviceLookup("resistor", device_class, res_len, res_wid)
         )
+    _setdefault_bindings(result, _fixed_width_resistor_bindings(deck_name, family))
     cap_len, cap_wid = _CAPACITOR_PARAM_STYLE.get(family, ("l", "w"))
     cap_table = _CAPACITOR_MODEL_TABLE.get((deck_name, family))
     for device_class, subckt in (cap_table or {}).items():
         result.setdefault(
             subckt, DeviceLookup("capacitor", device_class, cap_len, cap_wid)
         )
-    for device_class, variants in _BIPOLAR_MODEL_TABLE.get(
-        (deck_name, family), {}
-    ).items():
-        for nominal_ae, subckt in variants:
-            result.setdefault(
-                subckt,
-                DeviceLookup("bipolar", device_class, emitter_area_um2=nominal_ae),
-            )
+    _setdefault_bindings(result, _bipolar_bindings(deck_name, family))
     if res_table is None or cap_table is None:
         declared_resistors, declared_capacitors = _declared_non_mos_classes(deck_name)
         if res_table is None:
@@ -1291,6 +1383,59 @@ _RESISTOR_MODEL_TABLE: dict[tuple[str, str], dict[str, str]] = {
         "rsil": "rsil",
         "rppd": "rppd",
         "rhigh": "rhigh",
+    },
+}
+
+#: (deck_name, pdk_variant_family) -> {deck ResistorDevice.name -> ((fixed
+#: width in um, subckt name), ...)}. The **fixed-width wrapper** family
+#: sitting on top of ``_RESISTOR_MODEL_TABLE``'s generic ``res_high_po``/
+#: ``res_xhigh_po`` entries above (issue #2459): each of these is its own
+#: separately-named ``.subckt`` that bakes one fixed width into the *name*
+#: rather than accepting it as a call-site parameter -- a real xschem/
+#: ngspice schematic-flow reference netlist instantiates the wrapper name
+#: directly (``XR_LP ... sky130_fd_pr__res_high_po_0p35 L=22 mult=1``, an
+#: ``X`` card carrying only ``l``), not the generic parent, so
+#: :func:`known_device_subckt_names`/:func:`build_device_binding_map` must
+#: resolve the wrapper name itself, not just the parent.
+#:
+#: Confirmed against a real fetched sky130A install, both the coarse
+#: subcircuit-of-a-subcircuit form (``libs.tech/combined/rescap/
+#: sky130_fd_pr__model__res.model.spice``: ``.subckt
+#: sky130_fd_pr__res_high_po_2p85 r0 r1 sub mult=1 l=1`` / ``x0 r0 r1 sub
+#: sky130_fd_pr__res_high_po l=l w=2.85 mult=mult``) and the monolithic
+#: transistor-level form (``libs.ref/sky130_fd_pr/spice/
+#: sky130_fd_pr__res_high_po_2p85.model.spice``: ``.subckt
+#: sky130_fd_pr__res_high_po_2p85 r0 r1 b`` / ``.param w = 2.850 l = 5 mult
+#: = 1.0``) -- both bake in the identical ``w`` per wrapper name. All five
+#: widths (``0p35``/``0p69``/``1p41``/``2p85``/``5p73`` -> ``0.35``/``0.69``/
+#: ``1.41``/``2.85``/``5.73`` um) exist for *both* ``res_high_po`` and
+#: ``res_xhigh_po``, same naming convention, same fetched install.
+#:
+#: The ``device_class`` each wrapper resolves to is the *generic* class
+#: name (``res_high_po``/``res_xhigh_po``), matching
+#: ``decks/sky130.py``'s own "five-length-variant merge" -- extraction
+#: reports one LVS device class per family regardless of which fixed-width
+#: cell was drawn, so the reference side must land on that same class name
+#: for the compare to pair them, exactly like the generic-parent entries in
+#: ``_RESISTOR_MODEL_TABLE`` above.
+_RESISTOR_FIXED_WIDTH_TABLE: dict[
+    tuple[str, str], dict[str, tuple[tuple[float, str], ...]]
+] = {
+    ("sky130", "sky130"): {
+        "res_high_po": (
+            (0.35, "sky130_fd_pr__res_high_po_0p35"),
+            (0.69, "sky130_fd_pr__res_high_po_0p69"),
+            (1.41, "sky130_fd_pr__res_high_po_1p41"),
+            (2.85, "sky130_fd_pr__res_high_po_2p85"),
+            (5.73, "sky130_fd_pr__res_high_po_5p73"),
+        ),
+        "res_xhigh_po": (
+            (0.35, "sky130_fd_pr__res_xhigh_po_0p35"),
+            (0.69, "sky130_fd_pr__res_xhigh_po_0p69"),
+            (1.41, "sky130_fd_pr__res_xhigh_po_1p41"),
+            (2.85, "sky130_fd_pr__res_xhigh_po_2p85"),
+            (5.73, "sky130_fd_pr__res_xhigh_po_5p73"),
+        ),
     },
 }
 

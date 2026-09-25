@@ -104,6 +104,22 @@ plausible netlist that compares clean when it shouldn't). So:
   is still rejected exactly like resistor/capacitor's -- expanding it would
   need the same per-finger-width verification ``nf`` just received, and
   nothing here has done that yet.
+- **A resistor/capacitor call supplying only one of its two geometry
+  parameters is not automatically an error (issue #2459).** Some PDKs ship
+  a *fixed-geometry device-flavour wrapper* -- its own separately-named
+  ``.subckt`` that bakes one dimension (typically width) into the name
+  itself, accepting only the other at the call site (sky130's
+  ``sky130_fd_pr__res_high_po_2p85``, ``w=2.85`` fixed, ``l`` still a real
+  call-site parameter). When :class:`~klayout_tools.pdk_models.DeviceLookup`
+  carries a fixed constant for the omitted dimension -- curated (see
+  ``pdk_models.py``'s ``_RESISTOR_FIXED_WIDTH_TABLE``) or from an explicit
+  ``reference.device_map`` object entry's ``"length_um"``/``"width_um"`` --
+  that constant fills the gap; a call-site value for the same dimension
+  still wins when the netlist happens to supply one. Genuinely missing
+  geometry (no call-site value **and** no fixed constant for the same
+  dimension) is still the original hard error, now naming the
+  ``device_map`` escape hatch instead of leaving a caller to invent a
+  sentinel unused parameter name. See :func:`_resolve_geometry_dimension`.
 
 Text-level (not KLayout-object-level) on purpose: the input is *not* readable
 by ``NetlistSpiceReader`` in the first place (that is the whole problem), so
@@ -721,23 +737,29 @@ def _convert_capacitor_card(
         )
     _reject_multiplicity(instance, subckt_name, params)
 
-    has_length = lookup.length_param in params
-    has_width = lookup.width_param in params
+    has_length_param = lookup.length_param in params
+    has_width_param = lookup.width_param in params
     extra = ""
-    if has_length or has_width:
-        _require_both(instance, subckt_name, lookup, has_length, has_width)
-        l_um = _parse_um(
-            params[lookup.length_param],
-            device=instance,
-            param=lookup.length_param,
+    if has_length_param or has_width_param:
+        l_um = _resolve_geometry_dimension(
+            instance,
+            subckt_name,
+            lookup.length_param,
+            params,
+            has_length_param,
+            lookup.fixed_length_um,
             geometry_style=geometry_style,
         )
-        w_um = _parse_um(
-            params[lookup.width_param],
-            device=instance,
-            param=lookup.width_param,
+        w_um = _resolve_geometry_dimension(
+            instance,
+            subckt_name,
+            lookup.width_param,
+            params,
+            has_width_param,
+            lookup.fixed_width_um,
             geometry_style=geometry_style,
         )
+        _require_both(instance, subckt_name, lookup, l_um is not None, w_um is not None)
         area_um2 = l_um * w_um
         perimeter_um = 2.0 * (l_um + w_um)
         extra = f" A={_format_um2(area_um2)} P={_format_um(perimeter_um)}"
@@ -826,25 +848,71 @@ def _geometry_suffix(
 ) -> str:
     """The ``" L=...U W=...U"`` suffix carried from ``lookup``'s own
     length/width call-site parameters, or ``""`` when the call supplies
-    neither (the subcircuit's own default geometry then applies)."""
-    has_length = lookup.length_param in params
-    has_width = lookup.width_param in params
-    if not (has_length or has_width):
+    neither (the subcircuit's own default geometry then applies).
+
+    A dimension the call omits still resolves when ``lookup`` carries a
+    fixed constant for it (``fixed_length_um``/``fixed_width_um``, issue
+    #2459's fixed-geometry-wrapper support -- see
+    :func:`_resolve_geometry_dimension`) -- e.g. a call supplying only ``L``
+    against a subcircuit whose *name* fixes ``W`` (sky130's
+    ``res_high_po_2p85``) still emits both.
+    """
+    has_length_param = lookup.length_param in params
+    has_width_param = lookup.width_param in params
+    if not (has_length_param or has_width_param):
         return ""
-    _require_both(instance, subckt_name, lookup, has_length, has_width)
-    l_um = _parse_um(
-        params[lookup.length_param],
-        device=instance,
-        param=lookup.length_param,
+    l_um = _resolve_geometry_dimension(
+        instance,
+        subckt_name,
+        lookup.length_param,
+        params,
+        has_length_param,
+        lookup.fixed_length_um,
         geometry_style=geometry_style,
     )
-    w_um = _parse_um(
-        params[lookup.width_param],
-        device=instance,
-        param=lookup.width_param,
+    w_um = _resolve_geometry_dimension(
+        instance,
+        subckt_name,
+        lookup.width_param,
+        params,
+        has_width_param,
+        lookup.fixed_width_um,
         geometry_style=geometry_style,
     )
+    _require_both(instance, subckt_name, lookup, l_um is not None, w_um is not None)
     return f" L={_format_um(l_um)} W={_format_um(w_um)}"
+
+
+def _resolve_geometry_dimension(
+    instance: str,
+    subckt_name: str,
+    param: str | None,
+    params: dict[str, str],
+    has_param: bool,
+    fixed_um: float | None,
+    *,
+    geometry_style: str | None = None,
+) -> float | None:
+    """Resolve one geometry dimension (length or width) for a device call
+    (issue #2459): the call-site value when the call actually supplies
+    ``param``; otherwise ``fixed_um`` -- the constant a fixed-geometry
+    wrapper subcircuit bakes into its *name* rather than exposing as a
+    call-site parameter (from a curated table entry or an explicit
+    ``reference.device_map`` override, see
+    :class:`~klayout_tools.pdk_models.DeviceLookup`); otherwise ``None``
+    (the dimension is not resolvable at all). A call-site value always wins
+    over a fixed constant when both are present -- matching a real override's
+    precedence over a subcircuit default.
+    """
+    if has_param:
+        assert param is not None  # has_param can only be True when it isn't
+        return _parse_um(
+            params[param],
+            device=instance,
+            param=param,
+            geometry_style=geometry_style,
+        )
+    return fixed_um
 
 
 def _require_both(
@@ -856,10 +924,19 @@ def _require_both(
 ) -> None:
     if has_length and has_width:
         return
+    hint = ""
+    if lookup.kind in ("resistor", "capacitor"):
+        hint = (
+            " -- if this subcircuit's name bakes in a fixed length or width "
+            "instead of taking it as a call-site parameter (a PDK "
+            "fixed-geometry wrapper, e.g. sky130's 'res_high_po_2p85'), pass "
+            "reference.device_map's 'length_um'/'width_um' to state the "
+            "constant dimension"
+        )
     raise NormalizeError(
         f"device '{instance}' (subcircuit '{subckt_name}'): both "
         f"'{(lookup.length_param or '').upper()}' and "
-        f"'{(lookup.width_param or '').upper()}' must be given together"
+        f"'{(lookup.width_param or '').upper()}' must be given together{hint}"
     )
 
 
@@ -1019,18 +1096,31 @@ def _device_lookup_from_override(name: str, value: object) -> DeviceLookup:
       issue, for full backward compatibility with every existing caller's
       ``device_map``.
     - An object (``{"kind": ..., "class": ..., "length_param": ...,
-      "width_param": ...}``) opts into an explicit, non-MOS-only binding.
-      ``kind`` (one of :data:`_DEVICE_MAP_KINDS`) and ``class`` (the
-      plain-element device-class label, e.g. ``"res_generic_po"``) are
-      required. ``length_param``/``width_param`` (the real subcircuit's own
-      call-site geometry parameter spellings, e.g. gf180mcu's
-      ``"r_length"``/``"r_width"``) default to ``"l"``/``"w"`` and are
-      ignored for ``kind: "bipolar"`` (no geometry call-site parameter at
-      all -- see ``pdk_models.py``'s bipolar section); for ``kind: "mos"``
-      they are likewise ignored, since :func:`_convert_mos_card` always
-      reads the literal ``l``/``w`` parameter keys regardless of the
-      resolved binding's own ``length_param``/``width_param`` (matching
-      every curated MOS binding, which also always carries ``"l"``/``"w"``).
+      "width_param": ..., "length_um": ..., "width_um": ...}``) opts into an
+      explicit, non-MOS-only binding. ``kind`` (one of
+      :data:`_DEVICE_MAP_KINDS`) and ``class`` (the plain-element
+      device-class label, e.g. ``"res_generic_po"``) are required.
+      ``length_param``/``width_param`` (the real subcircuit's own call-site
+      geometry parameter spellings, e.g. gf180mcu's ``"r_length"``/
+      ``"r_width"``) default to ``"l"``/``"w"`` and are ignored for
+      ``kind: "bipolar"`` (no geometry call-site parameter at all -- see
+      ``pdk_models.py``'s bipolar section); for ``kind: "mos"`` they are
+      likewise ignored, since :func:`_convert_mos_card` always reads the
+      literal ``l``/``w`` parameter keys regardless of the resolved
+      binding's own ``length_param``/``width_param`` (matching every
+      curated MOS binding, which also always carries ``"l"``/``"w"``).
+
+    ``length_um``/``width_um`` (issue #2459, ``kind: "resistor"``/
+    ``"capacitor"`` only) name the constant micrometre value a
+    fixed-geometry wrapper subcircuit bakes into its *name* rather than
+    exposing as a call-site parameter -- e.g. sky130's
+    ``sky130_fd_pr__res_high_po_0p35`` fixes ``w=0.35`` and only accepts
+    ``l`` at the call site: ``{"kind": "resistor", "class": "res_high_po",
+    "width_um": 0.35}``. A call-site value for that same dimension still
+    wins when the reference netlist happens to supply one (see
+    :func:`_resolve_geometry_dimension`) -- the fixed value only fills the
+    dimension the call omits. Omitted (the default, ``None``) means both
+    dimensions must come from the call site exactly as before this issue.
 
     Raises :class:`NormalizeError` (never a bare ``KeyError``/``TypeError``)
     for a malformed object entry -- this feeds a sign-off tool, so a
@@ -1057,6 +1147,13 @@ def _device_lookup_from_override(name: str, value: object) -> DeviceLookup:
             "'class' (the plain-element device-class label)"
         )
     if kind in ("mos", "bipolar"):
+        if "length_um" in value or "width_um" in value:
+            raise NormalizeError(
+                f"device_map entry '{name}': 'length_um'/'width_um' are only "
+                f"supported for kind 'resistor'/'capacitor' -- '{kind}' has "
+                "no call-site length/width parameter for a fixed constant "
+                "to fill in for"
+            )
         # mos: `_convert_mos_card` always reads literal `l`/`w`, so a custom
         # spelling here would be silently ignored -- not accepted, to avoid
         # that trap. bipolar: no geometry call-site parameter exists at all.
@@ -1071,7 +1168,42 @@ def _device_lookup_from_override(name: str, value: object) -> DeviceLookup:
         raise NormalizeError(
             f"device_map entry '{name}': 'width_param' must be a non-empty string"
         )
-    return DeviceLookup(kind, device_class, length_param, width_param)
+    fixed_length_um = _parse_device_map_fixed_um(name, value, "length_um")
+    fixed_width_um = _parse_device_map_fixed_um(name, value, "width_um")
+    return DeviceLookup(
+        kind,
+        device_class,
+        length_param,
+        width_param,
+        fixed_length_um=fixed_length_um,
+        fixed_width_um=fixed_width_um,
+    )
+
+
+def _parse_device_map_fixed_um(
+    name: str, value: dict[str, object], key: str
+) -> float | None:
+    """Parse one ``device_map`` object entry's optional ``"length_um"``/
+    ``"width_um"`` field (issue #2459) into a positive micrometre float, or
+    ``None`` when the key is absent (the common case -- no fixed dimension).
+    Rejects a non-numeric or non-positive value with a named error, the same
+    discipline as every other object-entry field here.
+    """
+    if key not in value:
+        return None
+    raw = value[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise NormalizeError(
+            f"device_map entry '{name}': '{key}' must be a number (the "
+            "fixed dimension in micrometres this subcircuit's name bakes "
+            f"in), found {type(raw).__name__}"
+        )
+    if raw <= 0:
+        raise NormalizeError(
+            f"device_map entry '{name}': '{key}' must be a positive number, "
+            f"found {raw!r}"
+        )
+    return float(raw)
 
 
 def _build_subckt_map(

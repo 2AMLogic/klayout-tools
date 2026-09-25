@@ -14,6 +14,27 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2459, `klt lvs` `reference.form: "subckt-call"` conversion,
+  additive — **no** `schema_version` bump: one new optional
+  `reference.device_map` object-entry field pair, no existing field
+  renamed, retyped, or redefined): a fixed-geometry PDK device-flavour
+  wrapper — a `.subckt` whose width (or length) is fixed by the
+  subcircuit *name* rather than accepted as a call-site parameter, e.g.
+  sky130's `sky130_fd_pr__res_high_po_0p35`..`_5p73`/
+  `res_xhigh_po_0p35`..`_5p73` — can now be converted without rewriting
+  the reference netlist or naming a nonexistent call-site parameter as a
+  sentinel. All ten sky130 wrapper names above are now curated (resolve
+  via `reference.deck: "sky130"` alone, to the same `res_high_po`/
+  `res_xhigh_po` class the generic parent binds to); for any other PDK's
+  fixed-geometry wrapper, `reference.device_map`'s object form gained
+  `"length_um"`/`"width_um"` (resistor/capacitor `kind` only) to state
+  the constant micrometre dimension the wrapper's name bakes in — a
+  call-site value for that same dimension still wins when the reference
+  netlist happens to supply one. Previously, a card supplying only one of
+  `L`/`W` against such a wrapper was rejected outright
+  (`"both 'L' and 'W' must be given together"`), and that error now also
+  names the `length_um`/`width_um` escape hatch instead of leaving a
+  caller to invent a sentinel parameter name.
 - **Added** (#2435, `klt extract`, additive — **no** `schema_version` bump:
   two new `devices[].params` keys on one already-shipped device class, no
   existing key renamed, retyped, or redefined; see
