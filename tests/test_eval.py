@@ -612,31 +612,33 @@ def test_lvs_gate_inconclusive_reports_exit_code_4(tmp_path, monkeypatch):
     assert report["valid"] is False
 
 
-def test_status_sim_implausible_solution_reports_exit_code_4():
-    """Issue #2493: a `klt sim` report with `status: "implausible_solution"`
+def test_status_sim_inconclusive_reports_exit_code_4():
+    """Issues #2492 + #2493: a `klt sim` report with `status: "inconclusive"`
     gates as `fail` (the candidate has not cleared it) but carries **exit
-    code `4`**, not `3` -- the same split `_status_lvs` applies to
+    code `4`**, not `3` -- the same split `_status_lvs` applies to its own
     `"inconclusive"`. `3` would tell a human the design missed a limit, when
-    in fact the measured value was never graded against `limits` at all.
+    in fact the numbers were either never graded against `limits` at all or
+    came off a solve the run does not trust.
     """
     from klayout_tools.eval import _status_sim
 
     status, exit_code, detail = _status_sim(
         {
-            "status": "implausible_solution",
+            "status": "inconclusive",
             "passed": 0,
             "failed": 0,
             "errored": 0,
-            "implausible": 2,
+            "inconclusive": 2,
         }
     )
     assert (status, exit_code, detail) == ("fail", 4, 2)
 
 
-def test_status_sim_ordinary_statuses_unchanged_by_implausible_branch():
+def test_status_sim_ordinary_statuses_unchanged_by_inconclusive_branch():
     """Backward-compatibility guard for the branch above: a report that never
-    declares a plausibility bound can only carry the three pre-existing
-    statuses, and each still maps exactly as it did before issue #2493."""
+    declares `options.fail_on_diagnostic` or a plausibility bound can only
+    carry the three pre-existing statuses, and each still maps exactly as it
+    did before issues #2492/#2493."""
     from klayout_tools.eval import _status_sim
 
     assert _status_sim({"status": "pass"}) == ("pass", 0, 0)
@@ -647,6 +649,28 @@ def test_status_sim_ordinary_statuses_unchanged_by_implausible_branch():
 # --------------------------------------------------------------------------- #
 # sim gate (real ngspice, gated -- and the 4-gate composition test)
 # --------------------------------------------------------------------------- #
+
+
+def test_status_sim_counts_inconclusive_corners_beside_errored():
+    """The exit-`4` branch's headline `count` covers both untrustworthy
+    kinds (issue #2492).
+
+    A sweep whose only untrustworthy corners were graded `inconclusive` by
+    `options.fail_on_diagnostic` has `errored == 0`, so citing `errored`
+    alone would report a failing gate with a headline count of zero.
+    """
+    from klayout_tools.eval import _status_sim
+
+    assert _status_sim(
+        {"status": "error", "errored": 0, "failed": 0, "inconclusive": 2}
+    ) == ("fail", 4, 2)
+    assert _status_sim(
+        {"status": "error", "errored": 1, "failed": 0, "inconclusive": 2}
+    ) == ("fail", 4, 3)
+    # Unchanged for the runs that existed before the new field.
+    assert _status_sim({"status": "error", "errored": 3, "failed": 0}) == ("fail", 4, 3)
+    assert _status_sim({"status": "fail", "errored": 0, "failed": 2}) == ("fail", 3, 2)
+    assert _status_sim({"status": "pass", "errored": 0, "failed": 0}) == ("pass", 0, 0)
 
 
 @_SKIP_NO_NGSPICE

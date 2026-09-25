@@ -395,28 +395,43 @@ def _status_lvs(report: dict[str, Any]) -> tuple[str, int, Any]:
 
 
 def _status_sim(report: dict[str, Any]) -> tuple[str, int, Any]:
-    """``klt sim``'s three-outcome split, mirrored into an `eval` gate.
+    """``klt sim``'s outcome split, mirrored into an `eval` gate:
+    ``"pass"`` -> ``pass``/``0``, ``"error"``/``"inconclusive"`` ->
+    ``fail``/``4``, anything else -> ``fail``/``3``.
 
-    ``"implausible_solution"`` (issue #2493) gates as ``fail`` like every
-    non-``"pass"`` status -- an `eval` gate asks "may this candidate
-    proceed?", and a run whose measured value fell outside its declared
-    ``options.node_voltage_bounds``/``measurements[].plausible_range`` has
-    not cleared it. But it carries **exit code 4**, not ``3``, for the same
-    reason ``"error"`` does and the same reason :func:`_status_lvs` reports
-    ``4`` for ``"inconclusive"``: ``exit_code`` is documented as "the exit
-    code the cited check would itself have returned for this report"
-    (``docs/cli/eval.md``), and ``klt sim`` itself exits ``4`` there.
-    Reporting ``3`` would tell a human debugging a ``valid: false`` run that
-    the design missed a limit, when in fact the measured value was never
-    graded against ``limits`` at all -- exactly the false-fail conflation
-    issue #2493 exists to close, reproduced one layer up.
+    ``"inconclusive"`` (issues #2492 + #2493 -- a corner whose solve emitted
+    a diagnostic code the request's ``options.fail_on_diagnostic`` declared
+    untrustworthy, or a measurement outside its declared
+    ``options.node_voltage_bounds``/``measurements[].plausible_range``) gates
+    as ``fail`` like every non-``"pass"`` status: an `eval` gate asks "may
+    this candidate proceed?", and a run that will not vouch for its own
+    numbers has not cleared it. But it carries **exit code 4**, not ``3``,
+    for the same reason ``"error"`` does and the same reason
+    :func:`_status_lvs` reports ``4`` for its own ``"inconclusive"``:
+    ``exit_code`` is documented as "the exit code the cited check would
+    itself have returned for this report" (``docs/cli/eval.md``), and
+    ``klt sim`` itself exits ``4`` there. Reporting ``3`` would tell a human
+    debugging a ``valid: false`` run that the design missed a limit, when in
+    fact the numbers were either never graded against ``limits`` at all or
+    graded off a solve nobody trusts.
+
+    The headline ``count`` on that exit-``4`` branch is the number of corners
+    that produced no trustworthy result -- ``errored`` **plus**
+    ``inconclusive``. A run whose only untrustworthy corners are
+    inconclusive ones has ``errored == 0``, so citing ``errored`` alone would
+    report a failing exit-``4`` gate with a headline count of zero -- exactly
+    the silent miscount the parallel ``inconclusive`` field exists to
+    prevent. ``.get`` keeps this readable against a report predating either
+    field.
     """
     if report["status"] == "pass":
         return "pass", 0, 0
-    if report["status"] == "error":
-        return "fail", 4, report.get("errored")
-    if report["status"] == "implausible_solution":
-        return "fail", 4, report.get("implausible")
+    if report["status"] in ("error", "inconclusive"):
+        return (
+            "fail",
+            4,
+            (report.get("errored") or 0) + (report.get("inconclusive") or 0),
+        )
     return "fail", 3, report.get("failed")
 
 

@@ -177,11 +177,96 @@ _CORNER_COUNT_METRIC_NAME = "sim__corner__count"
 _CORNER_PASSED_COUNT_METRIC_NAME = "sim__corner__passed_count"
 _CORNER_FAILED_COUNT_METRIC_NAME = "sim__corner__failed_count"
 _CORNER_ERRORED_COUNT_METRIC_NAME = "sim__corner__errored_count"
+_CORNER_INCONCLUSIVE_COUNT_METRIC_NAME = "sim__corner__inconclusive_count"
 
 assert is_registered(_CORNER_COUNT_METRIC_NAME)
 assert is_registered(_CORNER_PASSED_COUNT_METRIC_NAME)
 assert is_registered(_CORNER_FAILED_COUNT_METRIC_NAME)
 assert is_registered(_CORNER_ERRORED_COUNT_METRIC_NAME)
+assert is_registered(_CORNER_INCONCLUSIVE_COUNT_METRIC_NAME)
+
+#: Every ``diagnostics[].code`` this command can emit -- the authoritative
+#: vocabulary ``options.fail_on_diagnostic`` is validated against (issue
+#: #2492), and the same table ``docs/cli/sim.md``'s "Failure classification"
+#: section documents. Kept as an explicit literal (rather than derived) so
+#: the accepted option vocabulary is readable in one place and stable
+#: independent of which engine/backend module happens to define a pattern;
+#: ``test_sim.py`` asserts it stays a superset of every code the classifier
+#: tables and the unrun-report paths can actually produce, so it cannot
+#: silently drift -- including a code emitted only through a named constant
+#: or an ``_unrun_corner_report`` call, which it resolves rather than
+#: restates (see :data:`_GRADING_MARKER_CODES`).
+DIAGNOSTIC_CODES: frozenset[str] = frozenset(
+    {
+        # ngspice/Xyce log classifiers (`_DIAGNOSTIC_PATTERNS`,
+        # `_XYCE_DIAGNOSTIC_PATTERNS`).
+        "singular_matrix",
+        "nonconvergence",
+        "missing_include",
+        "netlist",
+        "model_bin_range",
+        # Per-corner run outcomes synthesized by `_run_corner` itself.
+        "timeout",
+        "measurement",
+        "unknown",
+        # Units that never ran (`_unrun_corner_report` and friends).
+        "budget_exceeded",
+        "orphaned",
+        "lost_shard",
+        "timeout_budget_unreachable",
+        "batch_job_failed",
+        "batch_job_timeout",
+        "batch_poll_timeout",
+    }
+)
+
+#: The marker diagnostic :func:`_grade_corner` attaches to a corner it graded
+#: ``inconclusive``, naming the ``options.fail_on_diagnostic`` code(s) that
+#: disqualified it (issue #2492) -- so the report says *why* a corner that
+#: produced perfectly good-looking numbers is not being reported as a pass.
+INCONCLUSIVE_DIAGNOSTIC_CODE = "inconclusive"
+
+#: The marker diagnostic :func:`_grade_measurement_value` attaches to a
+#: measurement whose value fell outside its declared
+#: ``measurements[].plausible_range``/``options.node_voltage_bounds``
+#: (issue #2493) -- the *other* reason a corner can grade
+#: :data:`_INCONCLUSIVE_STATUS`, and how a consumer tells the two apart.
+IMPLAUSIBLE_DIAGNOSTIC_CODE = "implausible_solution"
+
+#: The codes above: emitted by the **grading** step rather than by a log
+#: classifier or an unrun-corner path, and therefore deliberately **not**
+#: members of :data:`DIAGNOSTIC_CODES`. Both are produced downstream of
+#: ``options.fail_on_diagnostic``'s code match on an already-inconclusive
+#: corner, so listing either there could not change any verdict; accepting
+#: them would only invite the misreading that it could. ``test_sim.py``'s
+#: drift guard derives this distinction rather than restating it.
+_GRADING_MARKER_CODES: frozenset[str] = frozenset(
+    {INCONCLUSIVE_DIAGNOSTIC_CODE, IMPLAUSIBLE_DIAGNOSTIC_CODE}
+)
+
+#: The corner/measurement/report status token issues #2492 and #2493 add
+#: beside ``pass``/``fail``/``error``: the run produced numbers, but it will
+#: not vouch for them. Ranked ``error > inconclusive > fail > pass`` at every
+#: level (:func:`_grade_corner`, :func:`_aggregate_measurement_status`, and
+#: ``run_sim``'s top-level rollup override).
+#:
+#: **Recorded decision -- one status, two reason codes.** The two increments
+#: of split #2489 independently invented the same concept: #2492's
+#: ``options.fail_on_diagnostic`` ("the solve narrated trouble I do not
+#: trust") and #2493's plausibility bounds ("the solve converged somewhere
+#: physically impossible"). Both assert *exactly* the same thing about the
+#: report -- a number exists and must not be graded against ``limits`` as if
+#: it were a result -- and both justified outranking ``fail`` with the same
+#: argument, which is why neither could break the tie against the other.
+#: Shipping them as two status tokens would have put two near-synonyms in
+#: the JSON contract, forced a five-term sum invariant, two parallel counts,
+#: two Monte Carlo exclusion fields and an arbitrary precedence between
+#: them. They are therefore **one** status whose *reason* is carried by the
+#: marker diagnostic's ``code`` (:data:`_GRADING_MARKER_CODES`) -- which
+#: issue #2491's ``diagnostic_counts`` already rolls up per code, so the
+#: per-reason breakdown a caller might want from two counts is still in the
+#: report, derived rather than duplicated.
+_INCONCLUSIVE_STATUS = "inconclusive"
 
 #: Implemented engines. ``ngspice`` is the reference path (see the spike's
 #: engine survey). ``xyce`` (issue #2016, pairing #5 of oracle-tracking
@@ -720,6 +805,50 @@ def _validate_meas_card(name: str, spice: str) -> None:
         )
 
 
+def _validate_fail_on_diagnostic(value: Any) -> tuple[str, ...]:
+    """Validate and normalise ``options.fail_on_diagnostic`` (issue #2492).
+
+    Returns the requested codes as a de-duplicated tuple in the caller's own
+    order; ``None``/absent (the house convention for an undeclared optional
+    field) and ``[]`` both normalise to ``()`` -- "no code is
+    disqualifying", today's behaviour exactly.
+
+    **An unrecognised code is an application error** (``SimError``, exit
+    ``1``), not a silent no-op. The whole point of this option is to make a
+    caller's distrust of a *recovered* convergence diagnostic mechanically
+    binding; a typo (``"singular-matrix"``, ``"singular_matrx"``) that
+    quietly matched nothing would hand that caller a report full of
+    confident ``pass`` corners while they believed they had opted into
+    stricter grading -- the exact silent-miscount failure mode this option
+    exists to remove. Listing a *valid* code that simply never occurs in
+    this run is fine and stays a no-op: that is a legitimate standing
+    policy, not a mistake.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str) or not isinstance(value, (list, tuple)):
+        raise SimError(
+            "options.fail_on_diagnostic must be an array of diagnostic code "
+            'strings (e.g. ["singular_matrix", "nonconvergence"])'
+        )
+    codes: list[str] = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise SimError(
+                "options.fail_on_diagnostic entries must be non-empty "
+                "diagnostic code strings"
+            )
+        code = entry.strip()
+        if code not in DIAGNOSTIC_CODES:
+            raise SimError(
+                f"options.fail_on_diagnostic names an unknown diagnostic code "
+                f"{code!r} (known codes: {', '.join(sorted(DIAGNOSTIC_CODES))})"
+            )
+        if code not in codes:
+            codes.append(code)
+    return tuple(codes)
+
+
 def run_sim(
     request_path: str,
     *,
@@ -731,6 +860,7 @@ def run_sim(
     resume: bool | None = None,
     plot_dir: str | None = None,
     fail_fast_probe: bool | None = None,
+    fail_on_diagnostic: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Run the PVT corner matrix declared by the request at ``request_path``.
 
@@ -874,13 +1004,36 @@ def run_sim(
     on them) and only when ``analysis.kind == "tran"``; ``None``/``False``
     (the default) runs no probe at all, exactly today's behaviour.
 
+    ``fail_on_diagnostic`` (issue #2492) lists ``diagnostics[].code`` values
+    the caller refuses to trust a result from, overriding the request's own
+    ``options.fail_on_diagnostic`` when given (the
+    ``--fail-on-diagnostic`` CLI flag path). A corner that emitted any
+    listed code is graded ``status: "inconclusive"`` -- "the solve did not
+    convincingly converge", a distinct claim from ``"fail"`` ("the circuit
+    missed its spec") -- **regardless of whether that diagnostic was
+    downgraded to ``severity: "warning"`` by the recovered-stepping rule**
+    (:func:`_recovered_from_stepping`), which is the entire point: it lets a
+    caller opt back into treating ngspice's own "recovered" convergence
+    narration as untrustworthy. Precedence is
+    ``error > inconclusive > fail > pass``; the corners are counted in the
+    top-level ``inconclusive`` field and, unless some corner also errored,
+    make the aggregate ``status`` ``"inconclusive"`` (exit ``4`` -- "the
+    sweep is incomplete or untrustworthy"). This is the **same** status a
+    measurement outside its declared ``plausible_range``/
+    ``node_voltage_bounds`` produces (issue #2493) -- one status, two reason
+    codes; see :data:`_INCONCLUSIVE_STATUS`. Unset/empty (the default) is
+    today's behaviour exactly, for every field. An unrecognised code is an
+    application error -- see :func:`_validate_fail_on_diagnostic`.
+
     ``metrics`` (issue #1849, adopting the declared metric namespace
     registry from #247 beyond its ``klt layout-metrics``/``klt drc`` (#1847)
     precedent) is a **parallel, additive** object re-keying
-    ``corner_count``/``passed``/``failed``/``errored`` under their declared
+    ``corner_count``/``passed``/``failed``/``errored``/``inconclusive``
+    under their declared
     METRICS2.1-style names from :mod:`klayout_tools.metrics`'s registry --
     ``sim__corner__count``/``sim__corner__passed_count``/
-    ``sim__corner__failed_count``/``sim__corner__errored_count``. It never
+    ``sim__corner__failed_count``/``sim__corner__errored_count``/
+    ``sim__corner__inconclusive_count``. It never
     replaces or changes those existing fields, which stay exactly as
     documented; ``metrics`` is always present, purely additive to the JSON
     contract (no ``schema_version`` bump).
@@ -1042,6 +1195,14 @@ def run_sim(
         fail_fast_probe
         if fail_fast_probe is not None
         else bool(options.get("fail_fast_probe", False))
+    )
+    # Issue #2492: validated up front, like every other option above, so a
+    # typo'd code fails the sweep with a clean application error before any
+    # corner is dispatched rather than silently grading nothing.
+    fail_on_diagnostic_codes = _validate_fail_on_diagnostic(
+        fail_on_diagnostic
+        if fail_on_diagnostic is not None
+        else options.get("fail_on_diagnostic")
     )
 
     # Timeout budget preflight (issue #1686): a coarse, pre-grid sanity
@@ -1253,8 +1414,20 @@ def run_sim(
     # which resolves its own `options.ngspice_binary`/`$KLT_NGSPICE_BINARY`
     # fresh against its own PATH from the forwarded request document --
     # this process's own resolution describes only this host.
+    # `fail_on_diagnostic` (issue #2492) rides along on exactly the same
+    # terms and for the same reason: an off-host shard re-invokes `klt sim`
+    # on another host *from the forwarded request document*, so it reads
+    # `options.fail_on_diagnostic` itself and grades its own corners
+    # inconclusive there -- passing this process's resolved value too would
+    # either be dead weight or, worse, double-grade. (A `--fail-on-diagnostic`
+    # CLI override is therefore local-backend-only, exactly like
+    # `--fail-fast-probe`; see docs/cli/sim.md.)
     local_engine_kwargs = (
-        {"engine": engine, "ngspice_binary": ngspice_binary}
+        {
+            "engine": engine,
+            "ngspice_binary": ngspice_binary,
+            "fail_on_diagnostic": fail_on_diagnostic_codes,
+        }
         if backend not in _OFFHOST_BACKENDS
         else {}
     )
@@ -1470,14 +1643,21 @@ def run_sim(
     passed = sum(1 for c in corners if c["status"] == "pass")
     failed = sum(1 for c in corners if c["status"] == "fail")
     errored = sum(1 for c in corners if c["status"] == "error")
-    # Issue #2493: counted separately from `failed`/`passed` -- a corner
-    # with at least one measurement outside its declared plausibility bound
-    # is neither, per `_run_corner`'s own `error > implausible_solution >
-    # fail > pass` precedence. Always `0` when no request declares
-    # `options.node_voltage_bounds`/`measurements[].plausible_range`, so an
-    # unmodified request's `passed + failed + errored == corner_count`
-    # invariant is unchanged.
-    implausible = sum(1 for c in corners if c["status"] == "implausible_solution")
+    # Issues #2492 + #2493: ONE count for the single "this corner produced
+    # numbers, but they are not trustworthy enough to grade" status -- see
+    # :data:`_INCONCLUSIVE_STATUS` for why the two increments' originally
+    # separate `inconclusive`/`implausible_solution` statuses are one token
+    # with two *reason codes* rather than two parallel statuses and two
+    # parallel counts. Counted separately from `passed`/`failed`/`errored`
+    # (a distrusted corner is none of the three), always present, and always
+    # `0` for a request that declares neither `options.fail_on_diagnostic`
+    # nor a plausibility bound -- so
+    # `passed + failed + errored + inconclusive == corner_count` holds and a
+    # caller scanning only the original three cannot silently miscount the
+    # corners that moved to the new status. *Which* reason applied is read
+    # off `diagnostic_counts` (issue #2491), which already counts the
+    # `inconclusive`/`implausible_solution` marker diagnostics by code.
+    inconclusive = sum(1 for c in corners if c["status"] == _INCONCLUSIVE_STATUS)
     # A `mean +/- k*sigma` Monte Carlo window outside the limits is a real
     # design failure even when every individual sample passed -- it is only
     # reachable via a declared sigma window, since every other rollup `fail`
@@ -1503,17 +1683,31 @@ def run_sim(
         errored=bool(errored),
     )
     status = rollup_status(rollup, success="pass", failure="fail", errored="error")
-    # Issue #2493: `implausible` outranks every non-`error` verdict token
-    # (`"fail"`, `"pass"`, `"pass_partial"`, `"not_checked"` -- the common
-    # rollup rule above has no vocabulary for "at least one result cannot
-    # be trusted enough to grade", so it is applied here as a final,
-    # narrowly-scoped override rather than folded into `coverage_rollup`
-    # itself). `"error"` still wins: a corner that never produced a
-    # trustworthy result at all outranks one that produced an implausible
-    # one. Never fires unless the request opted in, so an unmodified
-    # request's `status` is byte-identical to before this issue.
-    if status != "error" and implausible:
-        status = "implausible_solution"
+    # Issues #2492 + #2493: `inconclusive` outranks every non-`"error"`
+    # verdict token (`"fail"`, `"pass"`, `"pass_partial"`, `"not_checked"`).
+    # The common rollup rule has no vocabulary for "at least one result
+    # cannot be trusted enough to grade", so this is applied here as a
+    # final, narrowly-scoped override rather than folded into
+    # `coverage_rollup` itself -- `rollup`/`coverage` keep describing what
+    # was *covered*, which is a separate question from whether the covered
+    # results are trustworthy. `"error"` still wins: a corner that produced
+    # no number at all is strictly less information than a number the run
+    # declines to trust.
+    #
+    # This mints a top-level `status: "inconclusive"` rather than folding
+    # into `"error"`. `docs/json-contract.md` frames status/exit codes as
+    # *additive per verb* ("a command may ship a new code above 2 in a later
+    # release ... the new code is a new verdict"), and `klt lvs` already
+    # ships exactly this token at exactly this exit code
+    # (`lvs.py`'s `STATUS_INCONCLUSIVE`, issue #1370) -- so `klt sim`
+    # reporting `"inconclusive"`/exit `4` for "ran fine, cannot vouch for
+    # the numbers" is the established house spelling, not a new invention,
+    # and it keeps "the simulator broke" (`"error"`) distinguishable from
+    # "I do not trust this solve" at the top level and not only in the
+    # counts. Never fires unless the request opted in, so an unmodified
+    # request's `status` is byte-identical to before either issue.
+    if status != "error" and inconclusive:
+        status = _INCONCLUSIVE_STATUS
 
     environment: dict[str, Any] = {
         "engine": engine,
@@ -1604,13 +1798,9 @@ def run_sim(
         "passed": passed,
         "failed": failed,
         "errored": errored,
-        # Issue #2493: always present (default `0`), alongside its three
-        # siblings above -- not yet re-keyed into `metrics` below, since
-        # that block is a fixed re-keying of the pre-existing three counts
-        # (issue #1849's declared-namespace registry) and adding a fourth
-        # entry there is a separate registration decision this issue does
-        # not make.
-        "implausible": implausible,
+        # Issues #2492 + #2493: always present (default `0`), alongside its
+        # three siblings above, and re-keyed into `metrics` below like them.
+        "inconclusive": inconclusive,
         # Issue #2491: rollup of `corners[].diagnostics[]` across the whole
         # grid, counted regardless of each corner's final `status` -- see
         # the `diagnostic_counts` computation above.
@@ -1620,6 +1810,7 @@ def run_sim(
             _CORNER_PASSED_COUNT_METRIC_NAME: passed,
             _CORNER_FAILED_COUNT_METRIC_NAME: failed,
             _CORNER_ERRORED_COUNT_METRIC_NAME: errored,
+            _CORNER_INCONCLUSIVE_COUNT_METRIC_NAME: inconclusive,
         },
         "environment": environment,
         # Issue #1996/#2109: what this verdict was actually graded over --
@@ -2520,6 +2711,7 @@ def _run_local(
     probe_abort: dict[str, Any] | None = None,
     engine: str = "ngspice",
     ngspice_binary: str | None = None,
+    fail_on_diagnostic: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local`` backend: run each expanded corner sequentially in-process.
 
@@ -2597,6 +2789,7 @@ def _run_local(
             artifacts_dir=artifacts_dir,
             engine=engine,
             ngspice_binary=ngspice_binary,
+            fail_on_diagnostic=fail_on_diagnostic,
         )
         corners.append(result)
         if version is not None:
@@ -2736,6 +2929,7 @@ def _run_local_parallel(
     probe_abort: dict[str, Any] | None = None,
     engine: str = "ngspice",
     ngspice_binary: str | None = None,
+    fail_on_diagnostic: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], str | None, dict[str, Any] | None]:
     """The ``local-parallel`` backend: fan the expanded corner list across a
     bounded local worker pool.
@@ -2842,6 +3036,7 @@ def _run_local_parallel(
                     artifacts_dir=artifacts_dir,
                     engine=engine,
                     ngspice_binary=ngspice_binary,
+                    fail_on_diagnostic=fail_on_diagnostic,
                 )
                 in_flight[future] = next_index
                 next_index += 1
@@ -2981,6 +3176,67 @@ def _classify_engine_diagnostics(
     return _classify_diagnostics(log_text, netlist_path)
 
 
+def _grade_corner(
+    diagnostics: list[dict[str, str]],
+    measurement_results: list[dict[str, Any]],
+    disqualifying: list[str],
+) -> str:
+    """One corner's aggregate ``status``: ``error > inconclusive > fail > pass``.
+
+    Mirrors the response's own aggregate precedence. Any engine-level
+    diagnostic still at severity ``"error"`` (timeout, an *unrecovered*
+    singular matrix/nonconvergence, netlist, unresolvable measurement,
+    unknown) means no trustworthy result exists for this corner, which
+    always outranks a clean limit violation.
+
+    ``disqualifying`` (issue #2492) is the sorted set of this corner's
+    diagnostic codes the caller listed in ``options.fail_on_diagnostic``,
+    sampled by :func:`_run_corner` **before** the recovered-stepping
+    severity downgrade. When nonempty the corner grades ``inconclusive``
+    and gains an :data:`INCONCLUSIVE_DIAGNOSTIC_CODE` marker diagnostic
+    naming those codes -- appended here (mutating ``diagnostics`` in place)
+    so the report always says *why* a corner whose numbers look fine is not
+    a pass.
+
+    The *other* route to ``inconclusive`` (issue #2493) is a measurement
+    whose value fell outside its declared plausibility bound: that is graded
+    onto the measurement itself by :func:`_grade_measurement_value`, which
+    has already run by the time this is called, so it arrives here as a
+    ``measurement_results`` entry already carrying
+    :data:`_INCONCLUSIVE_STATUS` and needs no separate branch. Both reasons
+    land on the same status by design -- see :data:`_INCONCLUSIVE_STATUS`.
+
+    ``inconclusive`` is ranked directly under ``error`` and *above* ``fail``
+    for the same reason ``error`` outranks ``fail``: this corner's numbers
+    are not trusted, and a limit miss computed from untrusted numbers is not
+    a defensible claim about the design -- reporting "the circuit missed its
+    spec" would assert more than the run can support. It stays *below*
+    ``error`` because an errored corner produced no number at all, which is
+    strictly less information than a number the run declines to trust.
+    """
+    if any(d["severity"] == "error" for d in diagnostics) or any(
+        m["status"] == "error" for m in measurement_results
+    ):
+        return "error"
+    if disqualifying:
+        diagnostics.append(
+            {
+                "severity": "warning",
+                "code": INCONCLUSIVE_DIAGNOSTIC_CODE,
+                "message": (
+                    "graded inconclusive: options.fail_on_diagnostic lists "
+                    + ", ".join(disqualifying)
+                ),
+            }
+        )
+        return _INCONCLUSIVE_STATUS
+    if any(m["status"] == _INCONCLUSIVE_STATUS for m in measurement_results):
+        return _INCONCLUSIVE_STATUS
+    if any(m["status"] == "fail" for m in measurement_results):
+        return "fail"
+    return "pass"
+
+
 def _run_corner(
     *,
     point: CornerPoint,
@@ -2994,6 +3250,7 @@ def _run_corner(
     artifacts_dir: str,
     engine: str = "ngspice",
     ngspice_binary: str | None = None,
+    fail_on_diagnostic: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any], str | None]:
     """Run one corner point through the selected engine's batch binary and
     classify the result.
@@ -3013,6 +3270,18 @@ def _run_corner(
     engine-shaped, not engine-specific, and the two engines are kept
     byte-comparable for the cross-validation oracle
     (tests/test_sim_xyce_oracle.py).
+
+    ``fail_on_diagnostic`` (issue #2492, the already-validated
+    ``options.fail_on_diagnostic`` codes -- see
+    :func:`_validate_fail_on_diagnostic`) grades this corner
+    ``status: "inconclusive"`` when it emitted any listed code. The match is
+    taken on the diagnostic's ``code`` **before** the recovered-stepping
+    severity downgrade below, so a ``singular_matrix`` that ngspice's own
+    gmin/source stepping recovered from -- and which is therefore about to
+    be demoted to ``severity: "warning"`` and would otherwise grade
+    ``pass`` -- still counts. That is the whole point of the option: it is
+    how a caller says "I do not trust a solve that needed stepping to
+    converge". Empty (the default) leaves grading byte-identical to before.
     """
     is_xyce = engine == "xyce"
     engine_name = XYCE_BINARY if is_xyce else "ngspice"
@@ -3137,6 +3406,16 @@ def _run_corner(
     # its Amesos "numerically singular matrix, returning zero" warnings can
     # narrate intermediate solver trouble on a run that ultimately produced
     # every requested measurement.
+    # Issue #2492: sampled *before* the downgrade immediately below, on the
+    # diagnostic's `code` rather than its severity. A caller who listed
+    # `singular_matrix` is saying they distrust exactly the case the
+    # downgrade exists to forgive, so reading this after the downgrade (or
+    # reading `severity` instead of `code`) would make the option a no-op
+    # for its single most important use.
+    disqualifying = sorted(
+        {d["code"] for d in diagnostics if d["code"] in fail_on_diagnostic}
+    )
+
     if _recovered_from_stepping(
         measurements_spec,
         measurement_results,
@@ -3147,27 +3426,7 @@ def _run_corner(
             if diagnostic["code"] in ("singular_matrix", "nonconvergence"):
                 diagnostic["severity"] = "warning"
 
-    # error > implausible_solution > fail > pass, mirroring the response's
-    # own aggregate precedence: any engine-level diagnostic still at
-    # severity "error" (timeout, an unrecovered singular matrix/
-    # nonconvergence, netlist, unresolvable measurement, unknown) means no
-    # trustworthy result exists for this corner, which always outranks
-    # everything else. `implausible_solution` (issue #2493) outranks a
-    # clean limit violation in turn: a corner with at least one measurement
-    # outside its declared plausibility bound is not known to be a real
-    # spec miss (or a real pass) -- grading it `"fail"` is exactly the
-    # false-fail artifact this status exists to avoid, so it is reported
-    # distinctly instead.
-    if any(d["severity"] == "error" for d in diagnostics) or any(
-        m["status"] == "error" for m in measurement_results
-    ):
-        status = "error"
-    elif any(m["status"] == "implausible_solution" for m in measurement_results):
-        status = "implausible_solution"
-    elif any(m["status"] == "fail" for m in measurement_results):
-        status = "fail"
-    else:
-        status = "pass"
+    status = _grade_corner(diagnostics, measurement_results, disqualifying)
 
     artifacts: dict[str, str | None] = {
         "log": None,
@@ -3192,6 +3451,13 @@ def _run_corner(
                 # raises", and a corner that ran its analysis successfully
                 # should not have its `status` invalidated just because one
                 # *optional* artifact could not be parsed.
+                #
+                # Which is also why this one `"unknown"` lands *after*
+                # `_grade_corner` and so escapes `options.fail_on_diagnostic`
+                # (issue #2492): a corner whose analysis and every
+                # measurement succeeded is not made untrustworthy by an
+                # unparseable optional waveform dump, so it is deliberately
+                # outside the grading window rather than an oversight.
                 diagnostics.append(
                     {
                         "severity": "warning",
@@ -4237,14 +4503,22 @@ def _measurement_coverage(
         (m for m in corner.get("measurements", []) if m["name"] == name), {}
     )
     has_value = measurement.get("value") is not None
-    # Issue #2493: `"implausible_solution"` is a real observation (a value
-    # was produced) that the plausibility pre-check deliberately kept out of
-    # the `limits` comparison -- distinct from `measured` below, which is
-    # specifically "produced a value *and* was actually graded against
-    # `limits`". An implausible observation still counts for the
-    # `/observation` row (something was measured), but never for a
+    # Issue #2493: a measurement graded `_INCONCLUSIVE_STATUS` is a real
+    # observation (a value was produced) that the plausibility pre-check
+    # deliberately kept out of the `limits` comparison -- distinct from
+    # `measured` below, which is specifically "produced a value *and* was
+    # actually graded against `limits`". Such an observation still counts
+    # for the `/observation` row (something was measured), but never for a
     # `/limit/...` row (that bound was never applied to it).
-    implausible = measurement.get("status") == "implausible_solution"
+    #
+    # Only the plausibility route reaches this: issue #2492's
+    # `options.fail_on_diagnostic` disqualifies the *corner*, leaving each
+    # measurement's own `pass`/`fail` (and so its coverage rows) intact --
+    # correctly, since coverage answers "was this bound evaluated?", which
+    # it was. Whether the evaluated result is trustworthy is what `status`
+    # and the top-level `inconclusive` count report, and conflating the two
+    # would make a distrusted corner look uncovered instead.
+    implausible = measurement.get("status") == _INCONCLUSIVE_STATUS
     measured = has_value and measurement.get("status") in {"pass", "fail"}
     checked = []
     skipped = []
@@ -4266,7 +4540,11 @@ def _measurement_coverage(
         elif value is None:
             skipped.append({"id": bound_id, "reason": "missing_limit_value"})
         elif implausible:
-            skipped.append({"id": bound_id, "reason": "implausible_solution"})
+            # The skip *reason* keeps naming the plausibility violation
+            # specifically (not the merged `inconclusive` status), because
+            # that is the question a coverage reader is asking: which bound
+            # was never applied, and why.
+            skipped.append({"id": bound_id, "reason": IMPLAUSIBLE_DIAGNOSTIC_CODE})
         elif not measured:
             skipped.append({"id": bound_id, "reason": "unavailable_measurement"})
         else:
@@ -4376,9 +4654,12 @@ def _grade_measurement_value(
     """Grade one extracted measurement ``value`` against its ``spec``.
 
     Returns ``(status, margin, diagnostics)`` -- ``diagnostics`` is empty
-    except on the ``"implausible_solution"`` path, where it carries the
-    ``severity: "warning"`` entry the caller extends the corner's own
-    ``diagnostics`` with.
+    except on the plausibility-violation path, where it carries the
+    ``severity: "warning"``, ``code: "implausible_solution"`` entry the
+    caller extends the corner's own ``diagnostics`` with. That code is the
+    *reason* half of the status; the status itself is the shared
+    :data:`_INCONCLUSIVE_STATUS` (see its note on why the two "produced a
+    number I will not vouch for" routes are one token).
 
     **This function owns the grading order**, which is the whole point of
     issue #2493: a declared plausibility bound
@@ -4410,16 +4691,16 @@ def _grade_measurement_value(
         value, plausible_range
     ):
         return (
-            "implausible_solution",
+            _INCONCLUSIVE_STATUS,
             None,
             [
                 {
                     "severity": "warning",
-                    "code": "implausible_solution",
+                    "code": IMPLAUSIBLE_DIAGNOSTIC_CODE,
                     "message": (
                         f"measurement {spec['name']!r} = {value!r} is outside its "
                         f"declared plausible range {plausible_range!r} -- graded "
-                        "implausible_solution rather than pass/fail"
+                        f"{_INCONCLUSIVE_STATUS} rather than pass/fail"
                     ),
                 }
             ],
@@ -4472,6 +4753,15 @@ def _evaluate_sigma_window(
     nearest binding limit when passing, the worst violation when failing. No
     ``limits`` -> ``pass`` with a ``null`` margin, exactly as for a single
     value.
+
+    This function deliberately has no ``inconclusive`` branch (issues #2492
+    + #2493): it scores a window, and by the time it is called the
+    ``mean``/``stddev`` it is handed were already computed over the
+    *trusted* samples only -- distrusted samples are excluded upstream, in
+    :func:`_monte_carlo_rollup`/
+    :func:`_sample_statistics`, and counted there. Grading here would
+    double-count the same fact and leave the window's own endpoints
+    describing a population the verdict then disowned.
     """
     low = mean - k_sigma * stddev
     high = mean + k_sigma * stddev
@@ -4491,26 +4781,33 @@ def _sample_statistics(
     values: list[float],
     *,
     errored: int,
+    inconclusive: int = 0,
     quantiles: tuple[float, ...],
     k_sigma: float | None,
     limits: dict[str, float] | None,
-    implausible: int = 0,
 ) -> dict[str, Any]:
     """Reduce one measurement's Monte Carlo sample ``values`` to the reported
-    statistics block: ``{n, errored, implausible, mean, stddev, min, max,
+    statistics block: ``{n, errored, inconclusive, mean, stddev, min, max,
     quantiles, sigma_window}``.
 
-    ``n`` counts only samples that produced a number *and* were graded
-    (neither unextractable nor implausible); ``errored`` counts the samples
-    whose value was unextractable (``null``); ``implausible`` (issue #2493)
-    counts the samples that did produce a number but fell outside a declared
-    ``node_voltage_bounds``/``plausible_range`` -- both are excluded from
-    every statistic below, for the same reason: an unextractable or
-    physically implausible sample would otherwise silently skew ``mean``/
-    ``stddev``/the quantiles/``sigma_window`` (exactly the false-fail
-    artifact this issue exists to close, reproduced at the pooled-statistics
-    level rather than a single corner's). A sample set is never silently
-    reduced without saying so.
+    ``n`` counts only samples that produced a number *and* were trusted
+    enough to grade; ``errored`` counts the samples whose value was
+    unextractable (``null``) and were therefore excluded from every
+    statistic -- a sample set is never silently reduced without saying so.
+
+    ``inconclusive`` (issues #2492 + #2493) counts the samples that *did*
+    produce a number the run declines to trust -- either the sample's corner
+    emitted a diagnostic code the request listed in
+    ``options.fail_on_diagnostic``, or the sampled value fell outside a
+    declared ``options.node_voltage_bounds``/``measurements[].plausible_range``.
+    Those samples are excluded from
+    ``mean``/``stddev``/``min``/``max``/``quantiles`` and therefore from the
+    ``sigma_window`` derived from them, and counted here instead: keeping
+    them would let a sample the run has explicitly disowned move the very
+    mean and sigma the window verdict is computed from, which is strictly
+    worse than reporting the window over the trusted subset and saying how
+    many samples were set aside. ``n + errored + inconclusive`` always
+    equals the number of samples drawn for this measurement.
 
     ``stddev`` is the **sample** standard deviation (Bessel-corrected,
     ``n - 1``), the estimator appropriate for a finite Monte Carlo draw from
@@ -4531,7 +4828,7 @@ def _sample_statistics(
     return {
         "n": n,
         "errored": errored,
-        "implausible": implausible,
+        "inconclusive": inconclusive,
         "mean": mean,
         "stddev": stddev,
         "min": ordered[0] if n else None,
@@ -4587,25 +4884,29 @@ def _monte_carlo_rollup(
     k_sigma = default_k_sigma if override is None else float(override)
 
     def _stats(pairs: list[tuple[dict[str, Any], dict[str, Any]]]) -> dict[str, Any]:
-        # Issue #2493: an `implausible_solution` sample has a real
-        # (non-null) `value` -- unlike an errored sample -- so it needs its
-        # own exclusion, not just the pre-existing `value is not None`
-        # filter, or a physically implausible outlier would silently skew
-        # `mean`/`stddev`/the quantiles/`sigma_window` exactly as an
-        # ungated `limits` comparison would have skewed a single corner's
-        # `pass`/`fail`.
-        values = [
-            m["value"]
-            for _, m in pairs
-            if m["value"] is not None and m["status"] != "implausible_solution"
+        # Issues #2492 + #2493: a distrusted sample is set aside *before*
+        # any statistic is computed (see `_sample_statistics`), not merely
+        # reported alongside one -- an untrusted number must not be allowed
+        # to move the mean/sigma the window verdict rests on. Both reasons
+        # are screened here, and they need screening at two different
+        # levels: `options.fail_on_diagnostic` disqualifies the sample's
+        # whole *corner* (its measurement can still read `pass`/`fail`,
+        # graded against `limits` before the corner was disqualified), while
+        # a plausibility-bound violation is graded onto the *measurement*
+        # itself. Neither is caught by the pre-existing `value is not None`
+        # filter, since a distrusted sample has a real, non-null value --
+        # that is exactly what makes it dangerous to the pooled statistics.
+        trusted = [
+            (c, m)
+            for c, m in pairs
+            if c.get("status") != _INCONCLUSIVE_STATUS
+            and m["status"] != _INCONCLUSIVE_STATUS
         ]
-        implausible_count = sum(
-            1 for _, m in pairs if m["status"] == "implausible_solution"
-        )
+        values = [m["value"] for _, m in trusted if m["value"] is not None]
         return _sample_statistics(
             values,
-            errored=len(pairs) - len(values) - implausible_count,
-            implausible=implausible_count,
+            errored=len(trusted) - len(values),
+            inconclusive=len(pairs) - len(trusted),
             quantiles=quantiles,
             k_sigma=k_sigma,
             limits=limits,
@@ -4623,6 +4924,45 @@ def _monte_carlo_rollup(
     return rollup
 
 
+def _aggregate_measurement_status(
+    entries: list[tuple[dict[str, Any], dict[str, Any]]],
+) -> str:
+    """One measurement's aggregate status across every corner that reported
+    it: ``error > inconclusive > fail > pass``.
+
+    On the plausibility route (issue #2493) a measurement carries
+    ``inconclusive`` on its own, so the plain ``m["status"]`` scan already
+    catches it. On the ``options.fail_on_diagnostic`` route (issue #2492) it
+    does not: the disqualification applies to the whole corner, while the
+    measurement's own status is still whatever ``limits`` said -- so the
+    corner's status is substituted for it here. Without that, a measurement
+    whose only data came from distrusted corners would roll up as a confident
+    ``pass``, or as a ``fail`` asserting a spec miss the run cannot actually
+    vouch for.
+
+    The substitution is deliberately asymmetric: only ``inconclusive`` is
+    pulled down from the corner, not ``error``. An errored corner's
+    measurements are themselves ``error`` (``_run_corner`` writes that status
+    on every measurement it could not extract), so ``error`` already
+    propagates through ``m["status"]`` and a second path would be redundant.
+    """
+    statuses = {
+        (
+            _INCONCLUSIVE_STATUS
+            if corner.get("status") == _INCONCLUSIVE_STATUS
+            else m["status"]
+        )
+        for corner, m in entries
+    }
+    if "error" in statuses:
+        return "error"
+    if _INCONCLUSIVE_STATUS in statuses:
+        return _INCONCLUSIVE_STATUS
+    if "fail" in statuses:
+        return "fail"
+    return "pass"
+
+
 def _rollup_measurements(
     measurements_spec: list[dict[str, Any]],
     corners: list[dict[str, Any]],
@@ -4630,13 +4970,14 @@ def _rollup_measurements(
 ) -> list[dict[str, Any]]:
     """Per-measurement rollup across all corners: aggregate status and the
     worst-case corner (smallest/most-negative margin; ``None`` margins --
-    unextractable values, and issue #2493's implausible ones, whose
-    ``limits`` comparison never ran -- are treated as worst of all).
+    unextractable values, and plausibility-disqualified ones whose ``limits``
+    comparison never ran -- are treated as worst of all).
 
-    Aggregate status follows the same ``error > implausible_solution > fail
-    > pass`` precedence :func:`_run_corner` applies per corner (issue
-    #2493); ``implausible_solution`` is unreachable unless the request
-    declared a plausibility bound.
+    Aggregate status follows the same ``error > inconclusive > fail > pass``
+    precedence :func:`_run_corner` applies per corner (issues #2492 +
+    #2493) -- see :func:`_aggregate_measurement_status`;
+    ``inconclusive`` is unreachable unless the request declared
+    ``options.fail_on_diagnostic`` or a plausibility bound.
 
     ``monte_carlo`` (the validated ``{quantiles, k_sigma}`` statistics config,
     ``None`` when the request declared no ``monte_carlo`` block) additively
@@ -4644,9 +4985,21 @@ def _rollup_measurements(
     sampled corners -- see :func:`_monte_carlo_rollup`. A declared sigma
     window that the sample set violates makes the entry's aggregate
     ``status`` ``"fail"``, exactly as a single corner missing its limits
-    does (except when the entry is already ``"error"``/
-    ``"implausible_solution"``, both of which outrank it); without a
-    declared ``k_sigma`` nothing about the existing rollup changes.
+    does (except when the entry is already ``"error"``/``"inconclusive"``,
+    both of which outrank it); without a declared ``k_sigma`` nothing about
+    the existing rollup changes.
+
+    A corner graded ``inconclusive`` contributes ``inconclusive`` to the
+    aggregate regardless of what its own measurement-vs-``limits``
+    comparison said -- so one distrusted corner masks a concurrent clean
+    ``fail`` at *this* aggregate, exactly as one errored corner already
+    does. That is deliberate (the aggregate reports the strongest claim
+    about trustworthiness, not the union of every corner's verdict);
+    ``corners[]`` and the top-level ``failed``/``inconclusive`` counts retain
+    the per-corner detail. ``worst_case`` still scans every corner,
+    distrusted ones included: it is a pointer to the corner worth looking
+    at, and hiding the worst margin would make an inconclusive rollup harder
+    to debug, not easier.
     """
     rollup: list[dict[str, Any]] = []
     for spec in measurements_spec:
@@ -4658,19 +5011,7 @@ def _rollup_measurements(
                     entries.append((corner, m))
                     break
 
-        statuses = {m["status"] for _, m in entries}
-        if "error" in statuses:
-            agg_status = "error"
-        elif "implausible_solution" in statuses:
-            # Issue #2493: same precedence as the per-corner aggregate in
-            # `_run_corner` -- a measurement with at least one implausible
-            # sample is not known to be a real fail (or a real pass), so it
-            # outranks a clean `"fail"` here too.
-            agg_status = "implausible_solution"
-        elif "fail" in statuses:
-            agg_status = "fail"
-        else:
-            agg_status = "pass"
+        agg_status = _aggregate_measurement_status(entries)
 
         worst_case = None
         worst_margin = None
@@ -4698,8 +5039,9 @@ def _rollup_measurements(
             # measurement declared (or inherited from
             # `options.node_voltage_bounds`) a plausibility bound -- echoes
             # the resolved, normalised bound so a caller can see why an
-            # entry graded `"implausible_solution"` without re-deriving the
-            # default-vs-override resolution itself.
+            # entry graded `"inconclusive"` with an `implausible_solution`
+            # diagnostic, without re-deriving the default-vs-override
+            # resolution itself.
             entry["plausible_range"] = plausible_range
 
         if monte_carlo is not None:
@@ -4716,14 +5058,16 @@ def _rollup_measurements(
                 entry["monte_carlo"] = mc_stats
                 window = mc_stats["sigma_window"]
                 if window is not None and window["status"] == "fail":
-                    # `error` and `implausible_solution` (issue #2493) both
-                    # still outrank a sigma-window limit violation, per the
-                    # response's own aggregate precedence -- the window is
-                    # computed only from this measurement's plausible
-                    # samples (see `_monte_carlo_rollup`'s `_stats`), but a
-                    # measurement that also had at least one implausible
-                    # sample is still not a clean, fully-trustworthy `fail`.
-                    if entry["status"] not in ("error", "implausible_solution"):
+                    # `error` still outranks a limit violation, per the
+                    # response's aggregate precedence -- and so does
+                    # `inconclusive` (issues #2492 + #2493), for the same
+                    # reason: the window is computed only over this
+                    # measurement's *trusted* samples (see
+                    # `_monte_carlo_rollup`'s `_stats`), so a measurement
+                    # that also had a distrusted sample is still not a clean,
+                    # fully-trustworthy `fail` and the window verdict must
+                    # not overwrite that stronger claim.
+                    if entry["status"] not in ("error", _INCONCLUSIVE_STATUS):
                         entry["status"] = "fail"
 
         rollup.append(entry)

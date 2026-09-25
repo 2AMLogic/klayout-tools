@@ -4,7 +4,7 @@ Run a SPICE process/voltage/temperature (PVT) corner matrix headlessly and
 report per-corner measurement pass/fail as structured data.
 
 ```
-klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
+klt sim <request.json> [-o|--outdir <dir>] [--backend <name>] [--max-workers <n>] [--hosts <n>] [--budget-s <seconds>] [--resume] [--fail-fast-probe] [--fail-on-diagnostic <code>] [--plot <dir>] [--op-lint [--op-lint-corner <corner_id>]] [--format text|json]
 ```
 
 This is the build carried by the accepted spike,
@@ -44,6 +44,14 @@ this document (and the code) win.
   cannot plausibly cover the full analysis window, overriding the
   request's own `options.fail_fast_probe` when given. See "Timeout-budget
   preflight" below.
+- `--fail-on-diagnostic` — grade any corner that emitted this diagnostic
+  `code` as `status: "inconclusive"` rather than `pass`/`fail` ("the solve
+  did not convincingly converge", reported as a distinct claim from "the
+  circuit missed its spec"), overriding the request's own
+  `options.fail_on_diagnostic` when given. Repeatable. Matches on the code
+  even when the recovered-stepping rule downgraded that diagnostic to
+  `severity: "warning"` — which is the point. See "Grading a recovered
+  diagnostic as inconclusive" below.
 - `--plot` — write one self-contained, dependency-free waveform SVG per
   non-sweep signal per corner to this directory, forcing
   `options.waveforms`/`keep_artifacts` on for this run. See "Waveform
@@ -1172,7 +1180,7 @@ block — the block is present only for a measurement that actually ran under
   "monte_carlo": {
     "n": 300,
     "errored": 0,
-    "implausible": 0,
+    "inconclusive": 0,
     "mean": 1.20117,
     "stddev": 0.01342,
     "min": 1.16204,
@@ -1186,7 +1194,7 @@ block — the block is present only for a measurement that actually ran under
       "margin": 0.00857
     },
     "by_corner": [
-      { "corner_id": "tt/1.800V/27C", "n": 300, "errored": 0, "mean": 1.20117, "...": "..." }
+      { "corner_id": "tt/1.800V/27C", "n": 300, "errored": 0, "inconclusive": 0, "mean": 1.20117, "...": "..." }
     ]
   }
 }
@@ -1194,9 +1202,9 @@ block — the block is present only for a measurement that actually ran under
 
 | Field           | Type                | Description                                                                                                                          |
 | --------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `n`             | integer             | Samples that produced a usable number **and** were graded — the population every statistic below is computed over.                    |
-| `errored`       | integer             | Samples whose value was unextractable (`null`) and were therefore excluded. `n + errored + implausible` is the total sample count for this measurement. |
-| `implausible`   | integer             | Samples whose value fell outside a declared `options.node_voltage_bounds`/`plausible_range` (issue #2493) and were therefore excluded from every statistic below, for the same reason `errored` samples are — see "Plausibility bounds" below. `0` for any request that never declares one. |
+| `n`             | integer             | Samples that produced a usable number **and** were trusted enough to grade — the population every statistic below is computed over.    |
+| `errored`       | integer             | Samples whose value was unextractable (`null`) and were therefore excluded. |
+| `inconclusive`  | integer             | Issues #2492/#2493. Samples the run produced a number for but will not vouch for — drawn from a corner graded `"inconclusive"` by `options.fail_on_diagnostic`, or with a value outside a declared `options.node_voltage_bounds`/`plausible_range`. Excluded from every statistic in this block (including `sigma_window`) and counted here instead — the same treatment `errored` gets, for the analogous reason. Always `0` for a request that opts into neither. `n + errored + inconclusive` is the total sample count for this measurement. |
 | `mean`          | number \| null      | Arithmetic mean. `null` when `n == 0`.                                                                                                |
 | `stddev`        | number \| null      | **Sample** standard deviation (Bessel-corrected, `n - 1`) — the estimator for a finite draw from a population. `null` when `n < 2` (undefined, never faked as `0.0`). |
 | `min`/`max`     | number \| null      | Extremes of the sample set. `null` when `n == 0`.                                                                                     |
@@ -1303,19 +1311,21 @@ plausibility range to check a measured value against, *before* the ordinary
   `plausible_range`. A measurement's own `plausible_range` always wins over
   the inherited default when both are declared.
 
-A value outside its resolved plausible range is graded
-`"implausible_solution"` — a status distinct from both `"pass"` and
-`"fail"` — rather than being handed to the ordinary `limits` comparison at
-all (`margin` is `null`: it is defined relative to `limits`, which never
-ran). This is deliberately **not** the same thing as a `"fail"`: a `"fail"`
-means the simulator produced a trustworthy number and the design missed a
-declared limit; `"implausible_solution"` means the number itself cannot be
-trusted enough to say either. It outranks `"fail"` in every aggregate
-(`corners[].status`, `measurements[].status`, the top-level `status`), the
-same way `"error"` outranks both — see "Failure classification" below for
-the full precedence table. The top-level response also gets a new
-`implausible` count (alongside `passed`/`failed`/`errored`, always present,
-`0` for any request that never declares a plausibility bound) and,
+A value outside its resolved plausible range is graded `"inconclusive"` — a
+status distinct from both `"pass"` and `"fail"` — rather than being handed to
+the ordinary `limits` comparison at all (`margin` is `null`: it is defined
+relative to `limits`, which never ran), and the corner gains a
+`severity: "warning"` diagnostic with `code: "implausible_solution"` naming
+the bound it violated. This is deliberately **not** the same thing as a
+`"fail"`: a `"fail"` means the simulator produced a trustworthy number and
+the design missed a declared limit; `"inconclusive"` means the number itself
+cannot be trusted enough to say either. It outranks `"fail"` in every
+aggregate (`corners[].status`, `measurements[].status`, the top-level
+`status`), the same way `"error"` outranks both — see "Failure
+classification" below for the full precedence table. The top-level response
+also counts the corner in `inconclusive` (alongside
+`passed`/`failed`/`errored`, always present, `0` for any request that
+declares neither a plausibility bound nor `options.fail_on_diagnostic`) and,
 correspondingly, `klt sim`'s CLI exit code `4` (the same code as
 `"error"`/`"not_checked"` — see "Exit codes" below): an implausible solve is
 exactly as untrustworthy for grading as a corner that errored outright, so
@@ -1325,7 +1335,28 @@ A `monte_carlo` sample set excludes implausible samples from every pooled
 statistic (`mean`/`stddev`/`min`/`max`/quantiles/`sigma_window`) the same
 way it already excludes unextractable (`errored`) ones — see "Monte Carlo
 statistics" above — so a single implausible outlier cannot silently skew the
-sigma window's verdict for the rest of the (trustworthy) sample.
+sigma window's verdict for the rest of the (trustworthy) sample. They are
+counted in that block's `inconclusive` field.
+
+#### One status, two reasons
+
+`"inconclusive"` is **one** status with two ways in, not two statuses:
+
+| Reason | Declared by | Diagnostic `code` | Graded onto |
+| --- | --- | --- | --- |
+| The solve narrated trouble the caller does not trust | `options.fail_on_diagnostic` (issue #2492) | `inconclusive` | the whole corner (each measurement keeps its own `pass`/`fail`) |
+| The solve converged somewhere physically impossible | `measurements[].plausible_range` / `options.node_voltage_bounds` (issue #2493) | `implausible_solution` | the measurement (and so, by precedence, its corner) |
+
+Both say exactly the same thing about the report — *a number exists and must
+not be graded against `limits` as if it were a result* — so they share one
+status token, one top-level count, one Monte Carlo exclusion field and one
+slot in the `error > inconclusive > fail > pass` precedence. Two
+near-synonymous status tokens would have forced consumers to learn both, a
+five-term sum invariant, and an arbitrary precedence between two claims
+neither of which is stronger than the other. The *reason* is not lost: it is
+in the marker diagnostic's `code`, which `diagnostic_counts.by_code` (issue
+#2491) already rolls up per code, so the per-reason breakdown is derived
+rather than duplicated.
 
 A `klt eval` gate citing such a report reports `exit_code: 4` too, not `3` —
 see [`eval.md`](eval.md)'s `gates[].exit_code` row.
@@ -1366,7 +1397,7 @@ graded it `"fail"`):
 ```
 
 ```json
-{ "name": "vinternal", "value": 142.7, "unit": "V", "status": "implausible_solution", "margin": null }
+{ "name": "vinternal", "value": 142.7, "unit": "V", "status": "inconclusive", "margin": null }
 ```
 
 Without `options.node_voltage_bounds` (or a per-measurement
@@ -1399,20 +1430,30 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | `batch_job_timeout` | The corner never completed: the `batch` job exceeded its own `timeout_seconds` on the fleet instance and was killed by 2am's harness. |
 | `batch_poll_timeout` | The corner's result was never observed: `batch.poll_timeout_s` elapsed with the job still non-terminal. The job may still be running on the fleet — this is what the client knows, not a claim the run failed. |
 | `timeout_budget_unreachable` | The corner never started: `options.fail_fast_probe`'s calibration probe measured a rate implying `options.timeout_s` cannot plausibly cover the full analysis window, so the whole grid was aborted before dispatch (issue #1694). Carries additional `reached_s`/`fraction` fields — an *estimate* of how far this corner would have gotten, derived from the measured rate, not a real per-corner recovery. See "Timeout-budget preflight" above. |
-| `implausible_solution` | Not an engine diagnostic — `severity: "warning"`, never `"error"`. A measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. Recorded for visibility alongside the measurement's own `status: "implausible_solution"`. |
+| `inconclusive` | **Emitted, never selectable.** The marker this command attaches to a corner it graded `status: "inconclusive"` because `options.fail_on_diagnostic` named a code the corner emitted (issue #2492) — the message names those code(s), so the report says *why* a corner whose numbers look fine is not being reported as a pass. `severity: "warning"`. See "Grading a recovered diagnostic as inconclusive" below. |
+| `implausible_solution` | **Emitted, never selectable.** The marker for the *other* route to `status: "inconclusive"`: a measurement's value fell outside its declared `options.node_voltage_bounds`/`measurements[].plausible_range` (issue #2493); see "Plausibility bounds" above. `severity: "warning"`, never `"error"`. |
+
+The last two rows are the only ones produced by the **grading** step itself
+rather than by a log classifier or a never-ran-corner path. Both are emitted
+on a corner that is already being graded `inconclusive`, downstream of
+`options.fail_on_diagnostic`'s code match, so listing either there could not
+change any verdict — they are deliberately **not** accepted in that option,
+and every other code in the table above is. They are also what tells the two
+reasons apart in `diagnostic_counts.by_code` (issue #2491) once both land on
+the same `status`.
 
 **A `diagnostics` entry at `severity: "error"` makes that corner
 `status: "error"`**, which always outranks everything else — `error` means
 no trustworthy number exists; `fail` means the simulator produced a
-trustworthy number and the design missed a limit; `implausible_solution`
-(issue #2493 — see "Plausibility bounds" above) means the simulator
-produced a number but it cannot be trusted enough to grade against `limits`
-at all. `error` > `implausible_solution` > `fail` > `pass` is the full
-precedence, at both the per-corner `status` and the per-measurement
-`status` inside it. Conflating `error`/`fail` is the specific defect this
-command exists to avoid (see the spike's "Semantics and guarantees");
-conflating `implausible_solution` with either is issue #2493's addition to
-the same discipline.
+trustworthy number and the design missed a limit; `inconclusive` (issues
+#2492/#2493 — see "Grading a recovered diagnostic as inconclusive" and
+"Plausibility bounds") means the simulator produced a number but the run
+will not vouch for it, so it is not graded against `limits` as if it were a
+result. `error` > `inconclusive` > `fail` > `pass` is the full precedence, at
+both the per-corner `status` and the per-measurement `status` inside it.
+Conflating `error`/`fail` is the specific defect this command exists to avoid
+(see the spike's "Semantics and guarantees"); conflating `inconclusive` with
+either is issues #2492/#2493's addition to the same discipline.
 
 `singular_matrix`/`nonconvergence` are a documented exception, downgraded to
 `severity: "warning"` (recorded, but non-fatal) rather than `"error"` when
@@ -1431,8 +1472,9 @@ value, or that trailer keeps `singular_matrix`/`nonconvergence` at
 A downgraded diagnostic still counts: `diagnostic_counts` (issue #2491, see
 the top-level fields table above) rolls up every `corners[].diagnostics[]`
 entry across the whole grid — by `code` and by `severity` — regardless of
-whether the corner it came from ended up `pass`, `fail`, or `error`. A
-`pass`ed corner with a recovered `singular_matrix`/`nonconvergence` warning
+whether the corner it came from ended up `pass`, `fail`, `error`, or
+`inconclusive`. A `pass`ed corner with a recovered
+`singular_matrix`/`nonconvergence` warning
 still increments `diagnostic_counts.by_severity.warning` and
 `diagnostic_counts.corners_with_diagnostics`, so a caller reading only the
 top-level report — never `corners[]` itself — can still see that a
@@ -1446,6 +1488,82 @@ measurement to search over the way DC/AC/TRAN/SP do — so a `.meas op` card
 an actionable `SimError` instead of failing deep inside an ngspice parse
 error. Use `analysis.kind: "tran"` with a short single-step transient and
 `.meas tran ... at=<t>` to read back an operating-point-like value instead.
+
+### Grading a recovered diagnostic as inconclusive (`options.fail_on_diagnostic`)
+
+The downgrade above is the right default — a recovered solve usually *is* a
+good solve — but it is a judgement call the caller may not share. A corner
+whose operating point only converged after gmin/source stepping is graded
+exactly like a corner that converged on the first Newton pass: the
+diagnostic becomes a `warning` and `status` comes purely from the
+measurement-vs-`limits` comparison.
+
+`options.fail_on_diagnostic` (issue #2492) is how a caller opts out of that
+default for specific codes:
+
+```json
+{ "options": { "fail_on_diagnostic": ["singular_matrix", "nonconvergence"] } }
+```
+
+Any corner that emitted a listed `diagnostics[].code` is graded
+**`status: "inconclusive"`** instead of `pass`/`fail`. The match is taken on
+the `code` **before** the recovered-stepping downgrade runs, which is the
+entire point: the "recovered" case is precisely the one this option exists
+to let you distrust. `inconclusive` says *the solve did not convincingly
+converge* — a distinct claim from `fail` (*the circuit missed its spec*) and
+from `error` (*no number was produced at all*).
+
+- **Precedence is `error > inconclusive > fail > pass`**, at the corner
+  level and in the per-measurement rollup alike. `inconclusive` outranks
+  `fail` for the same reason `error` already does: a limit miss computed
+  from numbers the caller has declared untrustworthy is not a defensible
+  claim about the design, so it is not reported as one. It sits *below*
+  `error` because an errored corner produced no number at all — strictly
+  less information than a number you decline to trust. (Like `error`, one
+  inconclusive corner therefore masks a concurrent clean `fail` in the
+  *aggregate* `measurements[].status`; `corners[]` and the top-level
+  `failed`/`inconclusive` counts keep the per-corner detail.)
+- **Top level**: the corners are counted in the `inconclusive` field (and
+  `sim__corner__inconclusive_count`), and the aggregate `status` becomes
+  `"inconclusive"` at exit `4` — whose documented meaning is already "the
+  sweep is incomplete or **untrustworthy**" — unless some corner also
+  errored, in which case `"error"` wins. This is a real top-level token, not
+  a remapping onto `"error"`:
+  [`docs/json-contract.md`](../json-contract.md) frames status/exit codes as
+  *additive per verb* ("a command may ship a new code above `2` in a later
+  release … the new code is a *new verdict*"), and `klt lvs` already ships
+  this exact token at this exact exit code (issue #1370). Keeping it distinct
+  is what lets a consumer tell "the simulator broke" (`"error"`) from "I do
+  not trust these numbers" (`"inconclusive"`) without having to read the
+  counts — and it keeps this option symmetric with the plausibility bounds
+  above, which reach the same status by the other route. Gate on `status`,
+  not the exit code (see "Exit codes" below).
+- **Monte Carlo**: a sample drawn from an inconclusive corner is **excluded
+  from that measurement's statistics entirely** — `mean`, `stddev`,
+  `min`/`max`, `quantiles`, and therefore the `sigma_window` computed from
+  them — and counted in the statistics block's own new `inconclusive` field,
+  exactly the way an unextractable sample is counted in `errored`.
+  `n + errored + inconclusive` always equals the number of samples drawn.
+  Keeping distrusted samples in would let a draw the caller has explicitly
+  disowned move the very mean and sigma the window verdict rests on. The same
+  field also counts samples excluded by a plausibility bound — see "One
+  status, two reasons" above.
+- **Opt-in only.** Unset or `[]` (the default) is today's behaviour exactly:
+  every count, status, and statistic is unchanged for a request that does
+  not declare it. The new `inconclusive` fields are always present and `0`.
+- **An unrecognised code is an application error** (exit `1`), not a silent
+  no-op: a typo like `"singular-matrix"` that quietly matched nothing would
+  hand you a report full of confident `pass` corners while you believed you
+  had opted into stricter grading. Listing a *valid* code that this
+  particular run never emits is fine and stays a no-op — that is a standing
+  policy, not a mistake. The accepted vocabulary is the `code` column of the
+  classification table above, minus the two emitted-only grading markers
+  (`inconclusive`, `implausible_solution`).
+- The `--fail-on-diagnostic <code>` CLI flag (repeatable) overrides the
+  request field, and — like `--fail-fast-probe` — applies to the
+  `local`/`local-parallel` backends; an off-host (`remote`/`batch`) shard
+  re-invokes `klt sim` from the forwarded request document and reads
+  `options.fail_on_diagnostic` there itself.
 
 ### Model bin-range diagnostic (`model_bin_range`)
 
@@ -1843,6 +1961,7 @@ the *response* echoes back.
 | `options.wall_clock_budget_s` | number       | Overall wall-clock budget in seconds for the whole sweep. Must be a positive number. Defaults to unbounded (today's behaviour). Overridable with the `--budget-s` CLI flag. See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.resume`         | boolean           | Resume from a matching on-disk checkpoint under `--outdir`, skipping corners already completed by a prior interrupted run of this same request. Defaults to `false`. Overridable with the `--resume` CLI flag. Not supported with `backend: "remote"` (application error, exit 1). See "Wall-clock budget, orphan safety, and resume" above. |
 | `options.fail_fast_probe` | boolean          | Two-pass fail-fast probe (issue #1694): run a bounded calibration `tran` slice on the grid's first corner before dispatching any real corner, and abort the whole grid if the measured rate implies `options.timeout_s` cannot plausibly cover the full analysis window. Defaults to `false`. Overridable with the `--fail-fast-probe` CLI flag. Only applies to `kind: "tran"` analyses on the `local`/`local-parallel` backends. See "Timeout-budget preflight" above. |
+| `options.fail_on_diagnostic` | array\<string\> | Issue #2492. Diagnostic `code`s whose presence makes a corner `status: "inconclusive"` rather than `pass`/`fail` — matched on the code *before* the recovered-stepping severity downgrade, so it is how a caller says they do not trust a solve that needed gmin/source stepping to converge. Defaults to unset/`[]` (no behavior change: every count, status and statistic is exactly as before). An unrecognized code is an application error (exit 1); a valid code this run never emits is a no-op. Repeatable `--fail-on-diagnostic <code>` CLI flag overrides it. See "Grading a recovered diagnostic as inconclusive" above. |
 | `options.ngspice_binary` | string            | Issue #2423. Explicit `ngspice` binary name or path, overriding `$KLT_NGSPICE_BINARY` and the bare `ngspice` name on `$PATH`. A path containing a separator resolves relative to the request file's own directory. Only read for `engine: "ngspice"` (the default) — see "Which ngspice binary is run" above. |
 | *(CLI-only)* `--plot <dir>` | string         | No request-document equivalent (like `trajectory --plot`) — writes one waveform SVG per non-sweep signal per corner to `<dir>`, forcing `options.waveforms`/`keep_artifacts` on for this run. See "Waveform plots" above. |
 | `netlist_source`         | string            | Optional caller-declared provenance of `netlist`: `"schematic"` (pre-layout, e.g. an S6 sizing netlist) or `"extracted"` (post-layout, from `klt extract`). Omit for unchanged behavior — the field is purely additive. An unrecognized value is an application error (exit 1). See "Post-layout verification" below. |
@@ -1858,6 +1977,7 @@ the *response* echoes back.
   "passed": 8,
   "failed": 0,
   "errored": 0,
+  "inconclusive": 0,
   "diagnostic_counts": {
     "by_code": { "singular_matrix": 1 },
     "by_severity": { "warning": 1 },
@@ -1867,7 +1987,8 @@ the *response* echoes back.
     "sim__corner__count": 8,
     "sim__corner__passed_count": 8,
     "sim__corner__failed_count": 0,
-    "sim__corner__errored_count": 0
+    "sim__corner__errored_count": 0,
+    "sim__corner__inconclusive_count": 0
   },
   "environment": {
     "engine": "ngspice",
@@ -1952,16 +2073,16 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | --------------- | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | `schema_version`| integer         | Version of this command's JSON shape (`3` as of issue #1274, which extended issue #1261's `{path, scope}` path-normalization to `environment.models_lib`; per-command, per `docs/json-contract.md`).                 |
 | `netlist`       | object          | `{path, scope}` — the resolved `netlist` path, normalised via `env_provenance.repo_relative_path` (issue #1261): `scope: "repo"` with a repo-relative `path` when it sits inside the invocation's repo, else `{"path": null, "scope": "external"}`. The absolute path is never echoed. |
-| `status`        | string          | Aggregate: `"pass"`, `"pass_partial"`, `"fail"`, `"implausible_solution"`, `"error"`, or `"not_checked"`. Precedence (issue #2109's common rollup rule, extended by issue #2493): `error` > `implausible_solution` > `fail` > `not_checked` > `pass_partial` > `pass`. `pass_partial` is a real, exit-`0` result — every executed check passed — that also has a nonempty `coverage.skipped` (a typo'd `limits` key beside a recognised one, a corner with no requested measurements, …); it is never reported as the unconditional `pass`. `implausible_solution` is reachable only when the request declares `options.node_voltage_bounds`/`measurements[].plausible_range` and at least one measured value fell outside it — see "Plausibility bounds" above; `klt sim`'s CLI exit code `4` for this status, same as `error`/`not_checked`. See "`coverage`" below. |
+| `status`        | string          | Aggregate: `"pass"`, `"pass_partial"`, `"fail"`, `"inconclusive"`, `"error"`, or `"not_checked"`. Precedence (issue #2109's common rollup rule, extended by issues #2492/#2493): `error` > `inconclusive` > `fail` > `not_checked` > `pass_partial` > `pass`. `pass_partial` is a real, exit-`0` result — every executed check passed — that also has a nonempty `coverage.skipped` (a typo'd `limits` key beside a recognised one, a corner with no requested measurements, …); it is never reported as the unconditional `pass`. `inconclusive` is reachable only when the request declares `options.fail_on_diagnostic` and a corner emitted a listed code, or declares `options.node_voltage_bounds`/`measurements[].plausible_range` and a measured value fell outside it — see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above. It is the same token/exit-code pair `klt lvs` already ships (`status: "inconclusive"`, exit `4`, issue #1370): `klt sim`'s CLI exit code is `4` here, same as `error`/`not_checked`, but the token stays distinct from `"error"` — `error` means the simulator broke, `inconclusive` means it produced numbers the run will not vouch for. See "`coverage`" below. |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
-| `implausible`   | integer         | Issue #2493. Corner count with `status: "implausible_solution"`. Always present, `0` for any request that never declares a plausibility bound — `passed + failed + errored + implausible == corner_count`. |
-| `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. Includes issue #2493's `implausible_solution` code when a plausibility bound reclassified a measurement. See "Failure classification" below for the `code`/`severity` vocabulary. |
-| `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. `implausible` is not yet part of this registry (a separate registration decision) — read it from the top-level field above. |
+| `inconclusive`  | integer         | Issues #2492/#2493. Corners graded `"inconclusive"` — because `options.fail_on_diagnostic` named a code the corner emitted, or because a measurement fell outside its declared plausibility bound. **One count for both reasons** (they are one status; see "One status, two reasons" above): always present, `0` for a request that declares neither, so `passed + failed + errored + inconclusive == corner_count` always holds and a consumer scanning only the original three cannot silently miscount. A nonzero value makes the aggregate `status` `"inconclusive"` (exit `4`) unless some corner also errored. The per-reason breakdown is in `diagnostic_counts.by_code` (`inconclusive` vs. `implausible_solution`). |
+| `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted, as are the `inconclusive`/`implausible_solution` grading markers (issues #2492/#2493), which is how the two reasons for an `inconclusive` corner stay distinguishable. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. See "Failure classification" below for the `code`/`severity` vocabulary. |
+| `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored`/`inconclusive` (issues #1849, #2492). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
 | `provenance`    | object          | Shared reproducibility block (`klt_version`, `klayout_version`, `pdk`, `deck`, `input`) defined once in [`docs/json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk` (else `null`); `deck` pins the resolved model library (`name` = its filename, `content_hash` = `sha256:` digest) when a process axis resolved one, else `null`. `input` (issue #2039) pins the netlist under test — `{content_hash, role: "netlist"}` — always present, deliberately duplicating `environment.netlist_sha256` so `klt signoff --manifest`'s generic `provenance.input.content_hash` staleness gate and role-scoped cross-check can see a `klt sim` report the same way it already sees `klt lvs` (issue #1969 precedent); the `netlist` role means signoff never compares it against a `layout`-role hash from a `drc`/`lvs` report in the same bundle — but `klt lvs`'s pre-extracted (`layout.netlist`) request shape, `klt place-and-route`, and `klt sta`'s `verilog` request are *also* `netlist`-role (see [`docs/json-contract.md`](../json-contract.md)'s `role` table), so a bundle pairing `klt sim` with one of those **is** compared, and is refused unless both pin the same netlist file. That is the intended binding for a post-layout simulation of an extracted netlist; a schematic-level `klt sim` (this verb's usual mode) should not be bundled with a `netlist`-role `lvs`/`place-and-route`/`sta` citation of a different design stage. Complements the sim-specific `environment` block, which hashes the same library alongside the netlist. |
-| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`/`"implausible_solution"`), and `worst_case` (the worst corner and its margin). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, implausible, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
+| `measurements`  | array\<object\> | Per-measurement rollup across all corners: `name`, `unit`, `limits`, aggregate `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when one of the contributing corners was graded so, or when this measurement's own value fell outside its plausibility bound — issues #2492/#2493, precedence `error > inconclusive > fail > pass`), and `worst_case` (the worst corner and its margin; still scanned over every corner, distrusted ones included, so an inconclusive rollup stays debuggable). Additive/optional (issue #2493): also carries `plausible_range` when this measurement declared (or inherited from `options.node_voltage_bounds`) one. A measurement that ran under `monte_carlo` additionally carries a `monte_carlo` statistics block (`{n, errored, inconclusive, mean, stddev, min, max, quantiles, sigma_window, by_corner}`) — see "Monte Carlo statistics" above. Additive/optional (issue #1723): only present when `--plot` was used, each entry also carries `plot` — the SVG path for that measurement's own signal at its `worst_case` corner, or `null` if no rendered plot matches. See "Waveform plots" above. |
 | `corners`       | array\<object\> | One entry per expanded corner, always `corner_count` entries, in the deterministic expansion order.             |
 | `plots`         | array\<object\> | Additive/optional (issue #1723): only present when `--plot` was used — every SVG actually written, as `{corner_id, signal, path}`, in corner/signal order. See "Waveform plots" above. |
 
@@ -1973,7 +2094,8 @@ metric namespace registry (issue #247 — see
 [`../json-contract.md`](../json-contract.md)'s "Declared metric namespace"
 section) into `klt sim`'s own top-level payload, following `klt drc`'s own
 adoption (issue #1847). **Purely additive**: a re-keying of
-`corner_count`/`passed`/`failed`/`errored` under their declared,
+`corner_count`/`passed`/`failed`/`errored` (plus `inconclusive`, issue
+#2492) under their declared,
 METRICS2.1-style hierarchical names — it never replaces or changes those
 fields, which stay exactly as documented above. Always present.
 
@@ -1983,6 +2105,7 @@ fields, which stay exactly as documented above. Always present.
 | `sim__corner__passed_count`     | `passed`       | Number of corners that passed; `aggregator: "sum"`, `higher_is_better: true` in the registry.                  |
 | `sim__corner__failed_count`     | `failed`       | Number of corners that failed; `aggregator: "sum"`, `higher_is_better: false`, `critical: true` in the registry. |
 | `sim__corner__errored_count`    | `errored`      | Number of corners that errored; `aggregator: "sum"`, `higher_is_better: false`, `critical: true` in the registry. |
+| `sim__corner__inconclusive_count` | `inconclusive` | Issue #2492. Number of corners graded inconclusive by `options.fail_on_diagnostic`; `aggregator: "sum"`, `higher_is_better: false`, `critical: true` in the registry — for the same reason `errored` is critical: no trustworthy result exists for those corners. Always `0` for a request that does not opt in, so an existing `klt signoff` bundle is unaffected. |
 
 **`measurements[].name` stays permanently out of scope for this registry.**
 Each measurement's `name` (e.g. `"vout"`, `"gain_db"`) is defined by the
@@ -2003,10 +2126,10 @@ corner-sweep rollup fields above are declared.
 | `process`        | string \| null   | Process-corner section used, or `null` when the request declares no process axis.                                              |
 | `supply_v`       | object           | Supply values for this corner, keyed by source/`.param` name (`{}` when the request declares no supply axis).                  |
 | `temperature_c`  | number           | Temperature for this corner.                                                                                                  |
-| `status`         | string           | `"pass"`, `"fail"`, `"error"`, or `"implausible_solution"` (issue #2493 — see "Plausibility bounds" above; only reachable when the request declares `options.node_voltage_bounds`/`measurements[].plausible_range`). |
+| `status`         | string           | `"pass"`, `"fail"`, `"error"`, or `"inconclusive"` (issues #2492/#2493 — only reachable when the request declares `options.fail_on_diagnostic` or a plausibility bound; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above). Precedence `error > inconclusive > fail > pass`. |
 | `runtime_s`      | number           | Engine wall-clock time for this corner (or time-to-timeout, on a killed run).                                                  |
-| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`/`"implausible_solution"`), `margin` (`null` for an `"implausible_solution"` value — `limits` never ran).               |
-| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` and for `implausible_solution` (issue #2493) — neither affects `status` by itself the way an `"error"`-severity diagnostic does, though a corner with an `implausible_solution` *measurement* still reports `status: "implausible_solution"` via the measurement's own status, not this diagnostic's severity. Every other code is always `"error"`. Empty for a clean run. |
+| `measurements[]` | array\<object\>  | `name`, `value` (number, or `null` when unextractable), `unit`, `status` (`"pass"`/`"fail"`/`"error"`, plus `"inconclusive"` when this value fell outside its declared plausibility bound — issue #2493), `margin` (`null` on that `"inconclusive"` path — `limits` never ran). An `options.fail_on_diagnostic` disqualification (issue #2492) leaves each measurement's own `status` alone — it applies to the whole corner — so a `pass` measurement inside an `inconclusive` corner is expected, and is exactly what the corner's marker diagnostic explains. |
+| `diagnostics`    | array\<object\>  | `{ "severity": "error"\|"warning", "code": "...", "message": "..." }` — see the classification table above. `"warning"` occurs for a recovered `singular_matrix`/`nonconvergence` (does not affect `status`) and for the two grading markers, `inconclusive` and `implausible_solution` (issues #2492/#2493) — neither marker *causes* the status by itself; each records which of the two reasons graded this corner `inconclusive`. Every other code is always `"error"`. Empty for a clean run. |
 | `artifacts`      | object           | `{"log": ..., "raw": ..., "waveform": ..., "deck": ...}`, each an absolute path or `null`. All `null` unless `options.keep_artifacts` is true; `raw`/`waveform` additionally require `options.waveforms`. `deck` is the exact per-corner ngspice deck synthesized for this corner (`.lib`/`.temp`/`alter` lines included) -- the file ngspice actually consumed, not a hash of the unexpanded source netlist (see `environment.netlist_sha256` for that). Raw log text is **never** inlined into the JSON. Additive/optional (issue #1723): also carries `plots` (array of `{signal, path}`) when `--plot` was used and this corner's waveform rendered at least one signal. |
 | `monte_carlo`    | object \| null   | `null` unless this corner is a Monte Carlo sample, else `{sample_index, seed, process_seed, mismatch_seed}` — this sample's index and its derived seed components (`seed` is the combined value written as `.options seed=` in the generated deck). See "Monte Carlo sampling" above for the seed contract and negative-control guarantee. |
 
@@ -2050,27 +2173,31 @@ section.
 Carried over from the spike's proposed contract (see the spike document for
 the full reasoning):
 
-- **`fail`, `error`, and `implausible_solution` are always different.**
-  `error` means no trustworthy number exists (nonconvergence, singular
-  matrix, timeout, netlist error, an unextractable measurement); `fail`
-  means the simulator produced a trustworthy number and the design missed a
-  limit; `implausible_solution` (issue #2493) means the simulator produced a
-  number, but it fell outside a declared plausibility bound and so is not
-  known to be trustworthy enough to say either — see "Plausibility bounds"
-  above.
-- **Aggregate precedence: `error` > `implausible_solution` > `fail` >
-  `pass`**, at both the corner level (any diagnostic forces `error`,
+- **`fail`, `error`, and `inconclusive` are always different.** `error`
+  means no trustworthy number exists (nonconvergence, singular matrix,
+  timeout, netlist error, an unextractable measurement); `fail` means the
+  simulator produced a trustworthy number and the design missed a limit;
+  `inconclusive` (issues #2492/#2493) means the simulator produced a number
+  the run will not vouch for — either its solve emitted a diagnostic code the
+  request listed in `options.fail_on_diagnostic`, or it fell outside a
+  declared plausibility bound — and so is not known to be trustworthy enough
+  to say either. See "Grading a recovered diagnostic as inconclusive" and
+  "Plausibility bounds" above, and "One status, two reasons" for why both
+  reasons share the one token.
+- **Aggregate precedence: `error` > `inconclusive` > `fail` > `pass`**, at
+  both the corner level (any `error`-severity diagnostic forces `error`,
   regardless of measurement outcomes) and the response level (any errored
-  corner makes the whole run `error`). `implausible_solution` (issue #2493)
-  is reachable only when the request declares
+  corner makes the whole run `error`). `inconclusive` is reachable only when
+  the request declares `options.fail_on_diagnostic` and a corner emitted a
+  listed code, or declares
   `options.node_voltage_bounds`/`measurements[].plausible_range` and some
-  measured value fell outside it — see "Plausibility bounds" above; it is
-  never reached otherwise, so this extension does not change the precedence
-  for any pre-existing request. A declared Monte Carlo sigma window that
-  falls outside the limits is the one way the response can be `fail` with
-  every *corner* passing — it is a statement about the sampled population,
-  not about any single run (see "Monte Carlo statistics" above). It never
-  overrides `error` or `implausible_solution`.
+  measured value fell outside it; it is never reached otherwise, so this
+  extension does not change the precedence for any pre-existing request. A
+  declared Monte Carlo sigma window that falls outside the limits is the one
+  way the response can be `fail` with every *corner* passing — it is a
+  statement about the sampled population, not about any single run (see
+  "Monte Carlo statistics" above). It never overrides `error` or
+  `inconclusive`.
 - **Deterministic expansion and ordering** — `corners` is the full cross
   product of the declared axes minus `exclude`, in axis-declaration order
   (process outermost, temperature innermost), so output is byte-stable
@@ -2088,7 +2215,9 @@ the full reasoning):
 - **`errored == corner_count` means zero measurements, not `corner_count`
   rows of evidence.** `passed`/`failed` corners are the ones that actually
   produced a trustworthy result; `errored` corners (timeout, nonconvergence,
-  a never-dispatched `budget_exceeded`/`orphaned` corner, …) did not (issue
+  a never-dispatched `budget_exceeded`/`orphaned` corner, …) and
+  `inconclusive` ones (issue #2492 — a number the caller declared
+  untrustworthy) did not (issue
   [#1686](https://github.com/2AMLogic/klayout-tools/issues/1686)). A
   response where every corner errored — the exact shape an unmeetable
   `options.timeout_s` budget produces — is a record with **no** measurement
@@ -2109,7 +2238,7 @@ the full reasoning):
 | `1`  | Failed to run at all — bad/malformed request, unresolvable netlist or model library, unsupported engine, unknown backend. |
 | `2`  | Usage error (missing argument, bad `--format` value) — from argparse.        |
 | `3`  | Ran successfully; at least one measurement failed a limit (aggregate `status: "fail"`), every corner produced a usable result. Includes a declared Monte Carlo `mean ± k*sigma` window falling outside the limits, even when every individual sample passed. |
-| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), at least one corner errored (aggregate `status: "error"`), or at least one measurement graded `"implausible_solution"` (issue #2493 — aggregate `status: "implausible_solution"`, reachable only when the request declared `options.node_voltage_bounds`/`measurements[].plausible_range`; see "Plausibility bounds" above) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
+| `4`  | No actual measurement/bound was checked (`status: "not_checked"`), at least one corner errored (aggregate `status: "error"`), or at least one corner was graded `"inconclusive"` (aggregate `status: "inconclusive"` — `options.fail_on_diagnostic` named a code the solve emitted, issue #2492, or a measured value fell outside a declared `options.node_voltage_bounds`/`measurements[].plausible_range`, issue #2493; see "Grading a recovered diagnostic as inconclusive" and "Plausibility bounds" above) — the sweep is incomplete or untrustworthy. Also covers a corner that never ran because `options.wall_clock_budget_s` was exceeded, the launching process exited, or `options.fail_fast_probe` aborted the grid (`budget_exceeded`/`orphaned`/`timeout_budget_unreachable` diagnostics) — those corners are `"error"` too, not silently omitted; see "Wall-clock budget, orphan safety, and resume" and "Timeout-budget preflight" above. |
 
 Under `--op-lint` the same four codes keep the same *meanings* against that
 mode's own verdict: `0` ran with no `error`-severity finding (a
