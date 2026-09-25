@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
+import sys
 from pathlib import Path
 
 import klayout.db as kdb
@@ -43,6 +45,7 @@ from klayout_tools.pex import (
     _find_dut_include,
     _flat_dut_mismatch,
     _model_mismatch,
+    _normalize_measurement_document,
     _pin_count_mismatch,
     _pin_count_mismatch_from_report,
     _prepare_extracted_request,
@@ -3351,3 +3354,741 @@ def test_cli_pex_blank_pins_is_a_clean_error(tmp_path, capsys):
     err = json.loads(capsys.readouterr().err)
     assert err["error"]["command"] == "pex"
     assert "no non-empty name" in err["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# `--measure-command`: measuring both legs with a caller-supplied command
+# (issue #2478)
+# --------------------------------------------------------------------------- #
+
+
+#: A measurement harness that needs no ngspice: it reports one spec row whose
+#: value depends only on which side it was invoked for, so every assertion
+#: below is about `klt pex`'s own plumbing (argv/env/document handling, delta
+#: computation, disclosure) rather than about a simulator's numbers. It also
+#: asserts, in-process, the three environment guarantees the contract makes.
+_MEASURE_HARNESS = """\
+import json, os, sys
+
+netlist = sys.argv[-1]
+side = os.environ["KLT_PEX_SIDE"]
+assert os.environ["KLT_PEX_NETLIST"] == netlist, "netlist must match env"
+assert os.path.isdir(os.environ["KLT_PEX_ARTIFACTS_DIR"]), "artifacts dir must exist"
+assert os.path.isfile(netlist), "the netlist handed in must exist"
+
+# Deliberately *not* expressible as one `.meas` card: a first-crossing search
+# whose located value differs per side. The schematic leg crosses earlier
+# (no parasitics); the extracted leg crosses later.
+base = 1.0 if side == "schematic" else 1.1
+print(
+    json.dumps(
+        {
+            "corners": [
+                {
+                    "corner_id": "tt/1.800V/27C",
+                    "measurements": [
+                        {"name": "t_cross", "value": base, "status": "pass"}
+                    ],
+                },
+                {
+                    "corner_id": "tt/1.800V/125C",
+                    "measurements": [
+                        {"name": "t_cross", "value": base * 2, "status": "pass"}
+                    ],
+                },
+            ]
+        }
+    )
+)
+"""
+
+
+def _write_harness(tmp_path, body: str = _MEASURE_HARNESS) -> list[str]:
+    """Write ``body`` as a script and return the argv list that runs it with
+    *this* interpreter (never a bare `python3`, which need not be the venv's)."""
+    script = tmp_path / "harness.py"
+    script.write_text(body)
+    return [sys.executable, str(script)]
+
+
+@pytest.fixture
+def measure_reference(tmp_path):
+    """The same 2-pin schematic DUT the testbench-mode fixtures use, named
+    directly as `--reference-netlist` instead of via a testbench `.include`."""
+    return str(_write_schematic_dut(tmp_path / "measure-dut.spice"))
+
+
+def test_run_pex_measure_command_produces_delta_rows(
+    tmp_path, resistor_layout, measure_reference
+):
+    """The whole point of issue #2478: a block whose spec row no `.meas` card
+    can express still produces a real, per-corner schematic-vs-extracted
+    `delta[]` -- and therefore a `pex` envelope item 7 can grade."""
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["status"] == "pass"
+    assert report["corner_count"] == 2
+    assert [row["spec_row"] for row in report["delta"]] == ["t_cross", "t_cross"]
+    assert [row["corner_id"] for row in report["delta"]] == [
+        "tt/1.800V/27C",
+        "tt/1.800V/125C",
+    ]
+    assert [row["schematic_value"] for row in report["delta"]] == [1.0, 2.0]
+    assert [row["extracted_value"] for row in report["delta"]] == [1.1, 2.2]
+    # The delta is computed by `klt pex`, not supplied by the caller.
+    assert [row["delta_pct"] for row in report["delta"]] == [10.0, 10.0]
+    assert report["passed"] == 2
+    assert report["failed"] == 0
+    assert report["errored"] == 0
+
+
+def test_run_pex_measure_command_keeps_extraction_disclosures(
+    tmp_path, resistor_layout, measure_reference
+):
+    """Issue #2478's own acceptance bar: the envelope this mode emits carries
+    the *same* `extraction.model`/`body_bias`/`provenance` disclosures the
+    testbench-driven one does -- the fields that give item 7 its teeth (issue
+    #1983). A new measurement path must not silently lose them."""
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["extraction"]["deck"] == "sky130"
+    assert report["extraction"]["device_count"] >= 1
+    assert report["extraction"]["netlist_sha256"]
+    # `PARASITIC_MODEL_SCOPE`, verbatim -- the same four keys testbench mode
+    # reports, not a reduced stand-in.
+    assert set(report["extraction"]["model"]) == {
+        "capacitance",
+        "coupling",
+        "resistance",
+        "frequency",
+    }
+    assert report["body_bias"]["status"] in (BODY_BIAS_BIASED, BODY_BIAS_UNBIASED)
+    assert "unbiased_pmos_body_nets" in report["body_bias"]
+    assert report["provenance"]["deck"]["name"] == "sky130"
+    assert report["reference_netlist"]["path"] is not None or (
+        report["reference_netlist"]["scope"] == "external"
+    )
+
+
+def test_run_pex_measure_command_discloses_the_mode_and_both_sides(
+    tmp_path, resistor_layout, measure_reference
+):
+    """`measurement` is the disclosure that lets a reader of a committed
+    record tell an externally-measured post-layout comparison from a `klt
+    sim`-measured one -- and re-run it."""
+    command = _write_harness(tmp_path)
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=command,
+        reference_netlist=measure_reference,
+        measure_timeout_s=123.0,
+    )
+
+    measurement = report["measurement"]
+    assert measurement["mode"] == "command"
+    assert measurement["command"] == command
+    assert measurement["timeout_s"] == 123.0
+    assert set(measurement["sides"]) == {"schematic", "extracted"}
+    for side in ("schematic", "extracted"):
+        entry = measurement["sides"][side]
+        assert entry["exit_status"] == 0
+        assert entry["corner_count"] == 2
+        assert entry["measurement_names"] == ["t_cross"]
+        assert set(entry["netlist"]) == {"path", "scope"}
+    # No testbench was involved, and the report says so rather than inventing
+    # a synthetic entry.
+    assert report["testbenches"] == []
+    assert report["coverage"]["testbenches"] == 0
+
+
+def test_run_pex_testbench_mode_reports_measurement_mode_testbench(
+    tmp_path, resistor_layout, monkeypatch
+):
+    """The additive `measurement` block is present on the *default* path too,
+    so a consumer never has to infer the mode from the absence of a field."""
+    import klayout_tools.pex as pex_module
+
+    def _fake_run_sim(request_path, **_kwargs):
+        return {
+            "corner_count": 1,
+            "measurements": [{"name": "vout"}],
+            "corners": [
+                {
+                    "corner_id": "tt/1.800V/27C",
+                    "measurements": [{"name": "vout", "value": 1.0, "status": "pass"}],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(pex_module, "run_sim", _fake_run_sim)
+
+    dut = _write_schematic_dut(tmp_path / "dut.spice")
+    tb = _write_testbench(tmp_path / "testbench.spice", dut)
+    request = _write_request(tmp_path / "request.json", tb)
+
+    report = run_pex(
+        resistor_layout,
+        [str(request)],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+    )
+
+    assert report["measurement"] == {
+        "mode": "testbench",
+        "command": None,
+        "timeout_s": None,
+        "sides": None,
+    }
+
+
+def test_run_pex_measure_command_null_value_is_an_error_row_not_a_pass(
+    tmp_path, resistor_layout, measure_reference
+):
+    """ "Unresolved" is a first-class outcome (issue #2478's own wording): a
+    `null` value renders an `"error"` delta row, never a fabricated pass."""
+    harness = """\
+import json, os
+side = os.environ["KLT_PEX_SIDE"]
+print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
+    {"name": "t_cross", "value": None if side == "extracted" else 1.0}
+]}]}))
+"""
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, harness),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["status"] == "error"
+    assert report["delta"][0]["status"] == "error"
+    assert report["delta"][0]["extracted_value"] is None
+    assert report["errored"] == 1
+
+
+def test_run_pex_measure_command_failing_row_status_is_a_fail(
+    tmp_path, resistor_layout, measure_reference
+):
+    """A caller that owns its own limits states them, and `klt pex` grades on
+    the extracted side's own verdict exactly as it does for `klt sim`."""
+    harness = """\
+import json, os
+side = os.environ["KLT_PEX_SIDE"]
+print(json.dumps({"corners": [{"corner_id": "tt", "measurements": [
+    {"name": "t_cross", "value": 1.0,
+     "status": "pass" if side == "schematic" else "fail"}
+]}]}))
+"""
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path, harness),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["status"] == "fail"
+    assert report["failed"] == 1
+
+
+def test_run_pex_measure_command_skips_testbench_only_diagnostics(
+    tmp_path, resistor_layout_promoted_taps, measure_reference
+):
+    """`pin_count_mismatch`/`flat_dut_mismatch` diagnose the testbench
+    `X...`-line-reuse contract, which this mode does not use -- so a layout
+    whose extraction promotes pins the schematic DUT never declares (the
+    exact issue #1030 fixture) is measured, not refused."""
+    report = run_pex(
+        resistor_layout_promoted_taps,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=measure_reference,
+    )
+
+    assert report["pin_count_mismatch"] is None
+    assert report["flat_dut_mismatch"] is None
+    assert report["status"] == "pass"
+
+
+def test_run_pex_measure_command_still_reports_model_mismatch(
+    tmp_path, resistor_layout, measure_reference
+):
+    """`model_mismatch` compares what the two netlists *contain*, which is
+    independent of how either side was measured -- so it is computed here
+    exactly as in testbench mode (issue #2402 x #2478)."""
+    reference = tmp_path / "wrong-flavour.spice"
+    reference.write_text(
+        ".SUBCKT RES RA RB\nXR1 RA RB res_generic_nonexistent\n.ENDS RES\n"
+    )
+
+    report = run_pex(
+        resistor_layout,
+        [],
+        "sky130",
+        output=str(tmp_path / "res.spice"),
+        artifacts_dir=str(tmp_path / "art"),
+        measure_command=_write_harness(tmp_path),
+        reference_netlist=str(reference),
+    )
+
+    assert report["model_mismatch"] is not None
+    assert "res_generic_nonexistent" in report["model_mismatch"]["reference_only"]
+
+
+# --- input-contract errors ------------------------------------------------- #
+
+
+def test_run_pex_measure_command_rejects_testbenches(
+    tmp_path, resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="replaces the testbench set"):
+        run_pex(
+            resistor_layout,
+            ["some-request.json"],
+            "sky130",
+            measure_command=_write_harness(tmp_path),
+            reference_netlist=measure_reference,
+        )
+
+
+def test_run_pex_measure_command_requires_a_reference_netlist(
+    tmp_path, resistor_layout
+):
+    with pytest.raises(PexError, match="requires --reference-netlist"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            measure_command=_write_harness(tmp_path),
+        )
+
+
+def test_run_pex_measure_command_rejects_an_empty_argv(
+    resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="must name a command"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            measure_command=[],
+            reference_netlist=measure_reference,
+        )
+
+
+def test_run_pex_reference_netlist_without_measure_command_raises(
+    resistor_layout, measure_reference
+):
+    """In testbench mode `reference_netlist` is an *observation* (whatever
+    every testbench `.include`s), never a caller's claim."""
+    with pytest.raises(PexError, match="only meaningful with --measure-command"):
+        run_pex(
+            resistor_layout,
+            ["some-request.json"],
+            "sky130",
+            reference_netlist=measure_reference,
+        )
+
+
+def test_run_pex_measure_timeout_without_measure_command_raises(resistor_layout):
+    with pytest.raises(PexError, match="only meaningful with --measure-command"):
+        run_pex(
+            resistor_layout,
+            ["some-request.json"],
+            "sky130",
+            measure_timeout_s=30.0,
+        )
+
+
+def test_run_pex_measure_command_reference_netlist_must_be_a_circuit(
+    tmp_path, resistor_layout
+):
+    """The same Gap 1 (issue #1255) rule testbench mode applies to its
+    `.include` target: a parameter/corner file is not a DUT."""
+    reference = tmp_path / "corners.spice"
+    reference.write_text(".param sw_stat_mismatch=0\n.model res_generic_po r\n")
+
+    with pytest.raises(PexError, match="declares no `.SUBCKT`"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path),
+            reference_netlist=str(reference),
+        )
+
+
+def test_run_pex_measure_command_missing_reference_netlist_raises(
+    tmp_path, resistor_layout
+):
+    with pytest.raises(PexError, match="could not be read"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path),
+            reference_netlist=str(tmp_path / "nope.spice"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("harness_body", "expected"),
+    [
+        ("import sys; sys.exit(7)", r"exited 7"),
+        ("print('not json')", "not valid JSON"),
+        ("import json; print(json.dumps([1, 2]))", "must be a JSON object"),
+        ("import json; print(json.dumps({}))", "`corners` must be a non-empty list"),
+        (
+            "import json; print(json.dumps({'corners': []}))",
+            "`corners` must be a non-empty list",
+        ),
+        (
+            "import json; print(json.dumps({'corners': [{'measurements': []}]}))",
+            "corner_id must be a non-empty string",
+        ),
+        (
+            "import json; print(json.dumps({'corners': ["
+            "{'corner_id': 'tt', 'measurements': []}]}))",
+            "measurements must be a non-empty list",
+        ),
+        (
+            "import json; print(json.dumps({'corners': [{'corner_id': 'tt',"
+            " 'measurements': [{'value': 1.0}]}]}))",
+            "name must be a non-empty string",
+        ),
+        (
+            "import json; print(json.dumps({'corners': [{'corner_id': 'tt',"
+            " 'measurements': [{'name': 'a', 'value': 'x'}]}]}))",
+            "must be a number or null",
+        ),
+        (
+            "import json; print(json.dumps({'corners': [{'corner_id': 'tt',"
+            " 'measurements': [{'name': 'a', 'value': True}]}]}))",
+            "must be a number or null",
+        ),
+        (
+            'print(\'{"corners": [{"corner_id": "tt", "measurements":'
+            ' [{"name": "a", "value": NaN}]}]}\')',
+            "must be a finite number",
+        ),
+        (
+            "import json; print(json.dumps({'corners': [{'corner_id': 'tt',"
+            " 'measurements': [{'name': 'a', 'value': 1.0, 'status': 'ok'}]}]}))",
+            "status must be one of",
+        ),
+        (
+            "import json; print(json.dumps({'corners': ["
+            "{'corner_id': 'tt', 'measurements': [{'name': 'a', 'value': 1.0}]},"
+            "{'corner_id': 'tt', 'measurements': [{'name': 'a', 'value': 1.0}]}]}))",
+            "is declared twice",
+        ),
+        (
+            "import json; print(json.dumps({'corners': [{'corner_id': 'tt',"
+            " 'measurements': [{'name': 'a', 'value': 1.0},"
+            " {'name': 'a', 'value': 2.0}]}]}))",
+            "is declared twice",
+        ),
+    ],
+)
+def test_run_pex_measure_command_malformed_output_is_a_clean_error(
+    tmp_path, resistor_layout, measure_reference, harness_body, expected
+):
+    """A broken harness is a hard error, never a report full of ordinary
+    `"error"` rows that reads like a real (failed) comparison."""
+    with pytest.raises(PexError, match=expected):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path, harness_body + "\n"),
+            reference_netlist=measure_reference,
+        )
+
+
+def test_run_pex_measure_command_timeout_is_a_clean_error(
+    tmp_path, resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="did not finish within"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(tmp_path, "import time; time.sleep(30)\n"),
+            reference_netlist=measure_reference,
+            measure_timeout_s=0.5,
+        )
+
+
+def test_run_pex_measure_command_unrunnable_is_a_clean_error(
+    tmp_path, resistor_layout, measure_reference
+):
+    with pytest.raises(PexError, match="could not be executed"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=[str(tmp_path / "definitely-not-a-program")],
+            reference_netlist=measure_reference,
+        )
+
+
+def test_run_pex_measure_command_error_carries_the_harness_stderr(
+    tmp_path, resistor_layout, measure_reference
+):
+    """A harness that dies mid-run gets its own diagnosis into the error
+    envelope -- bounded to a tail, not the whole log."""
+    with pytest.raises(PexError, match="ngspice refused the deck"):
+        run_pex(
+            resistor_layout,
+            [],
+            "sky130",
+            output=str(tmp_path / "res.spice"),
+            artifacts_dir=str(tmp_path / "art"),
+            measure_command=_write_harness(
+                tmp_path,
+                "import sys\nsys.stderr.write('ngspice refused the deck\\n')\n"
+                "sys.exit(2)\n",
+            ),
+            reference_netlist=measure_reference,
+        )
+
+
+def test_measure_command_accepts_a_klt_sim_shaped_response():
+    """The document shape is a *subset* of `klt sim`'s own response, so a real
+    `klt sim` envelope (extra keys and all) validates unchanged -- a harness
+    that can already produce its rows with `klt sim` pipes it straight
+    through."""
+    sim_shaped = {
+        "schema_version": 4,
+        "status": "pass",
+        "corner_count": 1,
+        "measurements": [{"name": "gain_db"}],
+        "provenance": {"klt_version": "0.6.0"},
+        "corners": [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "process": "tt",
+                "artifacts": {"log": None},
+                "measurements": [
+                    {
+                        "name": "gain_db",
+                        "value": 42.1,
+                        "status": "pass",
+                        "unit": "dB",
+                        "limits": {"min": 40},
+                    }
+                ],
+            }
+        ],
+    }
+
+    normalized = _normalize_measurement_document(
+        sim_shaped, side="schematic", command_label="klt sim"
+    )
+
+    assert normalized == {
+        "corners": [
+            {
+                "corner_id": "tt/1.800V/27C",
+                "measurements": [{"name": "gain_db", "value": 42.1, "status": "pass"}],
+            }
+        ],
+        "corner_count": 1,
+        "measurement_names": ["gain_db"],
+    }
+
+
+def test_measure_command_status_defaults_from_the_value():
+    normalized = _normalize_measurement_document(
+        {
+            "corners": [
+                {
+                    "corner_id": "tt",
+                    "measurements": [
+                        {"name": "measured", "value": 1.0},
+                        {"name": "unresolved", "value": None},
+                    ],
+                }
+            ]
+        },
+        side="extracted",
+        command_label="harness",
+    )
+
+    assert [row["status"] for row in normalized["corners"][0]["measurements"]] == [
+        "pass",
+        "error",
+    ]
+
+
+# --- CLI ------------------------------------------------------------------- #
+
+
+def test_cli_pex_measure_command_end_to_end(tmp_path, resistor_layout, capsys):
+    command = " ".join(shlex.quote(part) for part in _write_harness(tmp_path))
+    reference = _write_schematic_dut(tmp_path / "dut.spice")
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--measure-command",
+            command,
+            "--reference-netlist",
+            str(reference),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "pass"
+    assert report["measurement"]["mode"] == "command"
+    assert len(report["delta"]) == 2
+
+
+def test_cli_pex_measure_command_text_output_names_both_sides(
+    tmp_path, resistor_layout, capsys
+):
+    command = " ".join(shlex.quote(part) for part in _write_harness(tmp_path))
+    reference = _write_schematic_dut(tmp_path / "dut.spice")
+
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--outdir",
+            str(tmp_path / "art"),
+            "--measure-command",
+            command,
+            "--reference-netlist",
+            str(reference),
+        ]
+    )
+
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "measurement: command" in out
+    assert "schematic:" in out
+    assert "extracted:" in out
+
+
+def test_cli_pex_without_testbenches_or_measure_command_is_a_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    """`testbenches` became `nargs="*"` so `--measure-command` can stand
+    alone -- naming neither is still refused, as this command's own exit-1
+    error envelope rather than an argparse usage error."""
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "-o",
+            str(tmp_path / "res.spice"),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["command"] == "pex"
+    assert "at least one testbench request is required" in err["error"]["message"]
+
+
+def test_cli_pex_empty_measure_command_is_a_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--measure-command",
+            "   ",
+            "--reference-netlist",
+            str(_write_schematic_dut(tmp_path / "dut.spice")),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "--measure-command is empty" in err["error"]["message"]
+
+
+def test_cli_pex_unbalanced_quotes_in_measure_command_is_a_clean_error(
+    tmp_path, resistor_layout, capsys
+):
+    exit_code = main(
+        [
+            "pex",
+            resistor_layout,
+            "--deck",
+            "sky130",
+            "--measure-command",
+            "harness 'unterminated",
+            "--reference-netlist",
+            str(_write_schematic_dut(tmp_path / "dut.spice")),
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 1
+    err = json.loads(capsys.readouterr().err)
+    assert "could not be parsed" in err["error"]["message"]

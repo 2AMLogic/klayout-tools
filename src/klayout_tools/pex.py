@@ -111,6 +111,79 @@ netlists someone else already produced and simulated. This module follows
 the AC (layout + testbenches in), per the issue's explicit resolution of
 that discrepancy -- see the issue's PR description for the full note.
 
+## Measuring with a caller-supplied command instead of a `klt sim` request
+
+Everything above describes this module's original (and still default) input
+contract: a routed layout plus one or more `klt sim` request JSON
+testbenches. That contract composes badly with one specific, real class of
+block (issue #2478). A `klt sim` request's ``measurements[]`` entries are
+*verbatim `.meas` cards* (``docs/cli/sim.md``), so a spec row whose figure
+is not expressible as a single `.meas` card cannot be driven through
+:func:`run_pex` at all. Measurement shapes that are generic to analog
+blocks, not to any one design, and that `.meas` cannot express:
+
+- a threshold crossing that has to be *located* by a rule the caller
+  applies across sample points or across separate runs (first crossing
+  after a named edge, sign-corrected per sweep point, "unresolved" as a
+  first-class outcome) rather than by one `.meas ... WHEN` card;
+- a statistic computed **across** a Monte Carlo family and then rescaled by
+  a gain fitted from a calibration sweep run alongside it;
+- a measurement taken on a **derived** netlist -- e.g. a loop-broken
+  sub-model assembled from a subset of the DUT's own device lines to make a
+  small-signal analysis well-posed. This one is doubly blocked by the
+  testbench contract: the derived file does not exist until the harness
+  builds it, so no `.include` swap can re-point at it;
+- an injection-based measurement whose stimulus sources are placed at nodes
+  derived from the DUT's own device lines, then inverted by an estimator
+  the caller owns.
+
+Because ``docs/cli/signoff.md``'s T1 item 7 ("Post-layout verification")
+accepts only a ``pex``-kind envelope for an analog partition (issue #871),
+such a block could not cite item 7 *at all* -- no matter how much real,
+committed, reproducible post-layout evidence it had. The invariant issue
+#871 established is "item 7 requires a real, disclosed
+schematic-vs-extracted comparison", not "item 7 requires that the
+comparison was measured by `klt sim`".
+
+``measure_command`` (``klt pex --measure-command``) closes that without
+weakening the invariant. Instead of a testbench set, the caller supplies
+**one command**, which this module runs **twice** -- once against the
+schematic reference netlist (``reference_netlist``, then required
+explicitly, since there is no testbench `.include` to derive it from) and
+once against the netlist this command extracted itself. Each invocation
+receives the netlist path as its final argument, plus ``KLT_PEX_SIDE`` /
+``KLT_PEX_NETLIST`` / ``KLT_PEX_ARTIFACTS_DIR`` in its environment, and
+prints a *measurement document* on stdout (see
+:func:`_normalize_measurement_document` for the shape and its validation
+rules). Everything else is unchanged: this command still drives extraction
+itself, still owns both legs of the comparison, still computes every
+``delta[]`` row by the same :func:`_build_delta_rows`, and still emits the
+same envelope with the ``extraction.model``/``body_bias`` disclosures that
+give item 7 its teeth.
+
+What is deliberately **not** weakened:
+
+- The caller supplies the *measurement*, never the comparison. `klt pex`
+  picks both netlists, runs the command against each, and diffs the two
+  results itself -- a caller cannot hand it a finished ``delta[]``.
+- Extraction is still this command's own (:func:`~klayout_tools.extract.run_extract`
+  with ``parasitics=True``), so ``extraction``/``body_bias``/``provenance``
+  are derived from a real extraction of the caller's real layout, exactly as
+  in testbench mode.
+- The mode is **disclosed** in the envelope: ``measurement.mode`` is
+  ``"command"``, ``measurement.command`` echoes the argv verbatim, and
+  ``measurement.sides`` records each leg's netlist, exit status and
+  measured rows -- so a reader of the evidence can tell a `klt sim`-measured
+  record from an externally-measured one, and reproduce the latter.
+
+Two testbench-swap diagnostics are inapplicable here and are reported as
+``null``: ``pin_count_mismatch`` and ``flat_dut_mismatch`` both exist
+because testbench mode reuses the testbench's own unmodified ``X...``
+instantiation line against both netlists, which a caller-supplied command
+does not do (it builds each side's deck itself). ``model_mismatch`` is
+computed exactly as in testbench mode -- it compares the two netlists' own
+device cards and is independent of how either side was measured.
+
 ## What ``--parasitics`` does and does not model, inherited unchanged
 
 ``klt pex`` always extracts with ``parasitics=True`` (first-order lumped
@@ -134,8 +207,11 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
+import shlex
+import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -151,7 +227,13 @@ from .coverage import (
 from .extract import ExtractError, run_extract
 from .sim import SimError, load_request, run_sim
 
-__all__ = ["PexError", "run_pex"]
+__all__ = [
+    "MEASURE_COMMAND_TIMEOUT_S",
+    "MEASUREMENT_MODE_COMMAND",
+    "MEASUREMENT_MODE_TESTBENCH",
+    "PexError",
+    "run_pex",
+]
 
 #: Bumped only on a non-additive (breaking) change to this command's own
 #: JSON shape -- see docs/json-contract.md.
@@ -208,6 +290,37 @@ _SUBCKT_RE = re.compile(r"^\s*\.subckt\s+(?P<body>\S.*?)\s*$", re.IGNORECASE)
 #: ``delta[]`` row met its tolerance). See :func:`_body_bias_report`.
 BODY_BIAS_BIASED = "biased"
 BODY_BIAS_UNBIASED = "unbiased"
+
+#: Issue #2478: ``measurement.mode`` values -- how this run's two legs were
+#: measured.
+#:
+#: - ``"testbench"``: the original (and default) contract -- one or more `klt
+#:   sim` request JSON testbenches, re-run schematic-side unmodified and
+#:   extracted-side with only their `.include`/`.inc` DUT line re-pointed.
+#: - ``"command"``: a caller-supplied command, run once per side with that
+#:   side's netlist path, printing a measurement document on stdout. See this
+#:   module's "Measuring with a caller-supplied command" docstring section.
+MEASUREMENT_MODE_TESTBENCH = "testbench"
+MEASUREMENT_MODE_COMMAND = "command"
+
+#: Default wall-clock cap on **one** ``--measure-command`` invocation (there
+#: are exactly two per run, one per side), in seconds. Deliberately the same
+#: generous-but-finite 30 minutes `klt signoff` caps a command-backed
+#: evidence entry at (``signoff.py``'s ``_COMMAND_EVIDENCE_TIMEOUT_S``): a
+#: caller-side harness that drives a Monte Carlo family or a multi-corner
+#: sweep is genuinely slow, but a hung one must not hang `klt pex` forever.
+#: Override per run with ``measure_timeout_s`` (``klt pex
+#: --measure-timeout-s``).
+MEASURE_COMMAND_TIMEOUT_S = 1800.0
+
+#: The two sides a ``--measure-command`` is invoked for, in invocation order
+#: -- also the two keys of the report's ``measurement.sides`` object.
+_MEASURE_SIDES = ("schematic", "extracted")
+
+#: A measurement document row's permitted ``status`` values -- the same three
+#: a ``delta[]`` row itself uses, and the same three `klt sim` reports per
+#: measurement, so :func:`_row_status` needs no command-mode special case.
+_MEASUREMENT_STATUSES = ("pass", "fail", "error")
 
 
 class PexError(Exception):
@@ -1120,6 +1233,451 @@ def _status_from_coverage(
     return rollup_status(rollup, success="pass", failure="fail", errored="error")
 
 
+def _measurement_number(raw: Any) -> float | None:
+    """``raw`` as a finite float, or ``None`` when it is JSON ``null`` --
+    :class:`ValueError` for anything else (a bool, a string, a NaN/Infinity a
+    lenient JSON parser let through).
+
+    ``bool`` is rejected explicitly: it is an ``int`` subclass in Python, so
+    ``{"value": true}`` would otherwise silently become ``1.0`` and be diffed
+    as a real measured number.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError("must be a number or null")
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("must be a finite number (not NaN or Infinity)")
+    return value
+
+
+def _normalize_measurement_document(
+    document: Any, *, side: str, command_label: str
+) -> dict[str, Any]:
+    """Validate one side's **measurement document** (issue #2478 --
+    ``--measure-command``'s stdout) and reduce it to the same per-corner
+    shape :func:`_build_delta_rows` already consumes from a `klt sim`
+    response.
+
+    The document is a JSON object with one required key:
+
+    .. code-block:: json
+
+       {
+         "corners": [
+           {
+             "corner_id": "tt/1.800V/27C",
+             "measurements": [
+               {"name": "t_cross", "value": 1.24e-9, "status": "pass", "unit": "s"}
+             ]
+           }
+         ]
+       }
+
+    That is deliberately a **subset of `klt sim`'s own response shape**
+    (``corners[].corner_id``, ``corners[].measurements[].name``/``value``/
+    ``status``), not a new vocabulary: a harness that can already produce the
+    rows with `klt sim` can pipe that response straight through, and a
+    harness that cannot still only has to emit the four fields a delta row is
+    computed from. Every other key -- at any level -- is ignored, so a real
+    `klt sim` response (with its ``schema_version``, ``provenance``,
+    ``artifacts`` and the rest) validates unchanged.
+
+    Rules, all of them hard errors (:class:`PexError`) rather than a silently
+    degraded row, because a malformed document from *one* side would
+    otherwise render as ordinary ``"error"`` delta rows indistinguishable
+    from a real measurement failure:
+
+    - ``corners`` must be a non-empty list of objects.
+    - ``corner_id`` must be a non-empty string, unique within the document.
+    - ``measurements`` must be a non-empty list of objects.
+    - ``name`` must be a non-empty string, unique within its corner.
+    - ``value`` must be a finite number, or ``null`` for "this row produced no
+      trustworthy value" (the caller's own "unresolved" outcome -- see this
+      module's docstring). ``null`` renders an ``"error"`` delta row, never a
+      fabricated pass.
+    - ``status``, when present, must be one of ``"pass"``/``"fail"``/
+      ``"error"``. When absent it is derived: ``"error"`` for a ``null``
+      value, ``"pass"`` otherwise. A caller that owns its own limits states
+      them; a caller that has none gets the same "measured, therefore
+      comparable" default `klt sim` gives an unlimited measurement.
+
+    Returns ``{"corners": [...], "corner_count": int, "measurement_names":
+    [...]}`` -- ``corners`` carrying exactly the normalised ``corner_id``/
+    ``measurements`` keys, so every downstream consumer here is shared with
+    testbench mode rather than forked.
+    """
+
+    def fail(detail: str) -> PexError:
+        return PexError(
+            f"--measure-command `{command_label}` ({side} side): its stdout "
+            f"is not a valid measurement document -- {detail}. See "
+            'docs/cli/pex.md\'s "Measuring with a caller-supplied command" '
+            "section for the required shape"
+        )
+
+    if not isinstance(document, dict):
+        raise fail("the document must be a JSON object")
+    corners = document.get("corners")
+    if not isinstance(corners, list) or not corners:
+        raise fail("`corners` must be a non-empty list")
+
+    normalized: list[dict[str, Any]] = []
+    seen_corners: set[str] = set()
+    measurement_names: list[str] = []
+    for corner_index, corner in enumerate(corners):
+        corner_id, rows = _normalize_measurement_corner(
+            corner, where=f"corners[{corner_index}]", fail=fail
+        )
+        if corner_id in seen_corners:
+            raise fail(
+                f"corners[{corner_index}].corner_id {corner_id!r} is declared twice"
+            )
+        seen_corners.add(corner_id)
+        for row in rows:
+            if row["name"] not in measurement_names:
+                measurement_names.append(row["name"])
+        normalized.append({"corner_id": corner_id, "measurements": rows})
+
+    return {
+        "corners": normalized,
+        "corner_count": len(normalized),
+        "measurement_names": measurement_names,
+    }
+
+
+def _normalize_measurement_corner(
+    corner: Any, *, where: str, fail: Any
+) -> tuple[str, list[dict[str, Any]]]:
+    """One ``corners[]`` entry of a measurement document, validated and
+    reduced to ``(corner_id, [normalised measurement row, ...])`` -- the
+    per-corner half of :func:`_normalize_measurement_document`, split out
+    only so each half stays independently readable.
+
+    ``fail`` is that function's own error factory, so every message here
+    carries the same "which command, which side" prefix.
+    """
+    if not isinstance(corner, dict):
+        raise fail(f"{where} must be an object")
+    corner_id = corner.get("corner_id")
+    if not isinstance(corner_id, str) or not corner_id.strip():
+        raise fail(f"{where}.corner_id must be a non-empty string")
+
+    measurements = corner.get("measurements")
+    if not isinstance(measurements, list) or not measurements:
+        raise fail(f"{where}.measurements must be a non-empty list")
+
+    rows: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for row_index, row in enumerate(measurements):
+        normalized_row = _normalize_measurement_row(
+            row, where=f"{where}.measurements[{row_index}]", fail=fail
+        )
+        name = normalized_row["name"]
+        if name in seen_names:
+            raise fail(
+                f"{where}.measurements[{row_index}].name {name!r} is "
+                f"declared twice in {corner_id}"
+            )
+        seen_names.add(name)
+        rows.append(normalized_row)
+    return corner_id, rows
+
+
+def _normalize_measurement_row(row: Any, *, where: str, fail: Any) -> dict[str, Any]:
+    """One ``measurements[]`` entry of a measurement document, validated and
+    reduced to ``{"name", "value", "status"}`` -- see
+    :func:`_normalize_measurement_document` for the rules this enforces."""
+    if not isinstance(row, dict):
+        raise fail(f"{where} must be an object")
+    name = row.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise fail(f"{where}.name must be a non-empty string")
+
+    try:
+        value = _measurement_number(row.get("value"))
+    except ValueError as exc:
+        raise fail(f"{where}.value {exc}") from exc
+
+    status = row.get("status")
+    if status is None:
+        status = "error" if value is None else "pass"
+    elif status not in _MEASUREMENT_STATUSES:
+        raise fail(
+            f"{where}.status must be one of "
+            f"{', '.join(_MEASUREMENT_STATUSES)} (got {status!r})"
+        )
+    return {"name": name, "value": value, "status": status}
+
+
+def _run_measure_command(
+    command: Sequence[str],
+    *,
+    side: str,
+    netlist_path: str,
+    artifacts_dir: str,
+    timeout_s: float,
+) -> tuple[dict[str, Any], int]:
+    """Run the caller-supplied measurement command (issue #2478) once, for
+    one side, and return ``(normalized measurement document, exit status)``.
+
+    The netlist under measurement is passed **two ways**, so a harness can
+    read it whichever is more convenient and neither spelling is load-bearing
+    on the other:
+
+    - as the command's **final positional argument**, appended to the argv
+      the caller gave (``--measure-command``'s own words are never rewritten
+      -- no placeholder substitution, no shell);
+    - as ``$KLT_PEX_NETLIST`` in the child's environment, alongside
+      ``$KLT_PEX_SIDE`` (``"schematic"`` or ``"extracted"``) and
+      ``$KLT_PEX_ARTIFACTS_DIR`` (a per-side directory under this run's own
+      ``--outdir``, created before the command runs, for whatever decks/logs/
+      raw files the harness wants to keep).
+
+    Run with :func:`subprocess.run` and an argv **list** -- never
+    ``shell=True`` -- the same way `klt signoff` runs a command-backed
+    evidence entry (``signoff.py``'s :func:`_resolve_evidence`), so no shell
+    metacharacter in a netlist path can change what executes.
+
+    A non-zero exit, a command that cannot be executed at all, a timeout, or
+    stdout that does not parse as JSON is a :class:`PexError` (exit 1), never
+    a silently-empty side: an unmeasured side would otherwise render as
+    ordinary ``"error"`` delta rows, hiding a broken harness inside a report
+    that still looks like a real comparison.
+    """
+    argv = [*command, netlist_path]
+    command_label = shlex.join(command)
+    os.makedirs(artifacts_dir, exist_ok=True)
+    env = dict(os.environ)
+    env["KLT_PEX_SIDE"] = side
+    env["KLT_PEX_NETLIST"] = netlist_path
+    env["KLT_PEX_ARTIFACTS_DIR"] = artifacts_dir
+
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PexError(
+            f"--measure-command `{command_label}` ({side} side) did not "
+            f"finish within {timeout_s:g}s -- raise the cap with "
+            "`--measure-timeout-s` if the harness is genuinely this slow"
+        ) from exc
+    except OSError as exc:
+        raise PexError(
+            f"--measure-command `{command_label}` ({side} side) could not be "
+            f"executed: {exc}"
+        ) from exc
+
+    if completed.returncode != 0:
+        raise PexError(
+            f"--measure-command `{command_label}` ({side} side) exited "
+            f"{completed.returncode}{_stderr_tail(completed.stderr)}"
+        )
+
+    try:
+        document = json.loads(completed.stdout)
+    except ValueError as exc:
+        raise PexError(
+            f"--measure-command `{command_label}` ({side} side) exited 0 but "
+            f"its stdout is not valid JSON: {exc}"
+            f"{_stderr_tail(completed.stderr)}"
+        ) from exc
+
+    return (
+        _normalize_measurement_document(
+            document, side=side, command_label=command_label
+        ),
+        completed.returncode,
+    )
+
+
+def _validate_measure_mode(
+    measure_command: Sequence[str] | None,
+    testbench_paths: Sequence[str],
+    reference_netlist: str | None,
+    measure_timeout_s: float | None,
+) -> list[str] | None:
+    """Resolve and validate which of :func:`run_pex`'s two input contracts
+    this call uses (issue #2478) -- returning the measurement command's argv
+    when it is ``--measure-command`` mode, and ``None`` when it is the
+    default testbench mode.
+
+    One place, one set of messages, so the library and the CLI can never
+    disagree about what "exactly one of the two" means (the CLI deliberately
+    does *not* express the exclusion with an argparse mutually-exclusive
+    group -- `<testbench>` is a positional, and argparse's own message for
+    that case says much less than these do).
+    """
+    if measure_command is None:
+        if reference_netlist is not None:
+            raise PexError(
+                "--reference-netlist is only meaningful with "
+                "--measure-command: in testbench mode the schematic DUT is "
+                "the file every testbench `.include`s, and reporting a "
+                "different one would make `reference_netlist` a claim rather "
+                "than an observation"
+            )
+        if measure_timeout_s is not None:
+            raise PexError(
+                "--measure-timeout-s is only meaningful with --measure-command"
+            )
+        if not testbench_paths:
+            raise PexError("at least one testbench request is required")
+        return None
+
+    command = list(measure_command)
+    if not command:
+        raise PexError(
+            "--measure-command must name a command to run (got an empty argument list)"
+        )
+    if testbench_paths:
+        raise PexError(
+            "--measure-command replaces the testbench set: it drives the "
+            "measurement itself, once per side, so no `klt sim` request "
+            f"testbench may be given alongside it (got "
+            f"{len(list(testbench_paths))})"
+        )
+    if reference_netlist is None:
+        raise PexError(
+            "--measure-command requires --reference-netlist: with no "
+            "testbench to read a `.include`/`.inc` DUT reference from, the "
+            "schematic-side netlist to measure against cannot be inferred, "
+            "and `reference_netlist` is a mandatory disclosure of this "
+            "command's report (see docs/cli/pex.md)"
+        )
+    return command
+
+
+def _resolve_measured_reference(reference_netlist: str) -> str:
+    """``--reference-netlist``'s absolute path, after the same "does this
+    file plausibly *be* a DUT" check testbench mode applies to its
+    `.include` target (Gap 1, issue #1255).
+
+    A `reference_netlist` naming a parameter/model/corner file with no
+    circuit of its own would make the schematic leg -- and therefore every
+    ``delta[]`` row diffed against it -- meaningless, while the report still
+    looked like a real comparison. Refused up front instead.
+    """
+    path = os.path.abspath(reference_netlist)
+    text = _read_text(path)
+    if text is None:
+        raise PexError(f"--reference-netlist could not be read: {path}")
+    if not _dut_declares_a_circuit(text):
+        raise PexError(
+            f"--reference-netlist {path!r} declares no `.SUBCKT` and no "
+            "circuit element of its own -- it parses as parameter/model/"
+            "corner-file content only, so it cannot be the schematic DUT the "
+            "schematic-side measurement is taken on (the same check klt pex "
+            "applies to a testbench's `.include` target, issue #1255)"
+        )
+    return path
+
+
+def _measure_timeout(measure_timeout_s: float | None) -> float:
+    """The per-invocation cap in force -- the caller's own, or
+    :data:`MEASURE_COMMAND_TIMEOUT_S`."""
+    return MEASURE_COMMAND_TIMEOUT_S if measure_timeout_s is None else measure_timeout_s
+
+
+def _measure_both_sides(
+    command: Sequence[str],
+    *,
+    reference_netlist: str,
+    extracted_netlist: str,
+    work_dir: str,
+    timeout_s: float,
+    repo_root: str | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Run ``command`` once per side and return ``(delta rows, the report's
+    ``measurement.sides`` block)`` (issue #2478).
+
+    The *diff* is still :func:`_build_delta_rows`, byte-for-byte the function
+    testbench mode uses -- the caller-supplied command replaces the two `klt
+    sim` calls, nothing else. ``spec_row_prefix`` is ``None`` because there
+    is exactly one measurement pair in this mode (and no testbench file to
+    name), so a row's ``spec_row`` is the measurement name the caller's own
+    document declared, bare -- the same as a single-testbench run's.
+    """
+    side_reports: dict[str, dict[str, Any]] = {}
+    sides: dict[str, Any] = {}
+    for side, side_netlist in (
+        ("schematic", reference_netlist),
+        ("extracted", extracted_netlist),
+    ):
+        side_report, exit_status = _run_measure_command(
+            command,
+            side=side,
+            netlist_path=side_netlist,
+            artifacts_dir=os.path.join(work_dir, "measure", side),
+            timeout_s=timeout_s,
+        )
+        side_reports[side] = side_report
+        sides[side] = {
+            "netlist": _report_path(side_netlist, repo_root=repo_root),
+            "exit_status": exit_status,
+            "corner_count": side_report["corner_count"],
+            "measurement_names": side_report["measurement_names"],
+        }
+
+    rows = _build_delta_rows(
+        spec_row_prefix=None,
+        schematic_report=side_reports["schematic"],
+        extracted_report=side_reports["extracted"],
+    )
+    return rows, sides
+
+
+def _measurement_block(
+    command: Sequence[str] | None,
+    measure_timeout_s: float | None,
+    sides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The report's additive ``measurement`` block (issue #2478) -- always
+    present, so a reader of a committed record never has to infer how a run's
+    two legs were measured from the presence/absence of ``testbenches[]``.
+
+    ``command is None`` is testbench mode, and every other field is ``null``
+    there: exactly the information a pre-#2478 report carried, stated rather
+    than implied.
+    """
+    if command is None:
+        return {
+            "mode": MEASUREMENT_MODE_TESTBENCH,
+            "command": None,
+            "timeout_s": None,
+            "sides": None,
+        }
+    return {
+        "mode": MEASUREMENT_MODE_COMMAND,
+        "command": list(command),
+        "timeout_s": _measure_timeout(measure_timeout_s),
+        "sides": sides,
+    }
+
+
+def _stderr_tail(stderr: str | None, *, lines: int = 10) -> str:
+    """The last ``lines`` non-blank lines of a failed measurement command's
+    stderr, formatted for appending to a :class:`PexError` message -- or the
+    empty string when it wrote nothing.
+
+    Bounded on purpose: a harness that dies mid-simulation can emit megabytes
+    of engine chatter, and the error envelope this ends up in
+    (``docs/json-contract.md``) is meant to be read, not to carry a log.
+    """
+    if not stderr:
+        return ""
+    tail = [line for line in stderr.splitlines() if line.strip()][-lines:]
+    if not tail:
+        return ""
+    return " -- stderr tail:\n" + "\n".join(tail)
+
+
 def _prepare_extracted_request(
     *,
     testbench_path: str,
@@ -1210,6 +1768,9 @@ def run_pex(
     mom_rlc_resistance_ohm: float | None = None,
     mom_rlc_capacitance_ff: float | None = None,
     mom_rlc_inductance_nh: float | None = None,
+    measure_command: Sequence[str] | None = None,
+    reference_netlist: str | None = None,
+    measure_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     """Extract ``layout_path`` (with lumped-RC parasitics) and re-run every
     testbench in ``testbench_paths`` against both the schematic DUT it
@@ -1335,9 +1896,35 @@ def run_pex(
     actual checks produces ``not_checked`` unless a real failure/error wins.
     See :func:`_build_coverage` and ``docs/coverage-contract.md``.
 
+    **``measure_command`` (issue #2478) replaces the testbench set, not the
+    comparison.** When it is given (``klt pex --measure-command``),
+    ``testbench_paths`` must be empty and ``reference_netlist`` is required:
+    there is no testbench `.include` line to derive the schematic DUT from,
+    so the caller names it. The command is then run **twice** -- once with
+    ``reference_netlist``, once with the netlist this call extracted -- and
+    each invocation's stdout is parsed as a *measurement document*
+    (:func:`_normalize_measurement_document`). Every ``delta[]`` row is still
+    computed here, by the same :func:`_build_delta_rows`, from the two
+    documents; the caller supplies measurements, never a finished
+    comparison. ``measure_timeout_s`` caps one invocation
+    (:data:`MEASURE_COMMAND_TIMEOUT_S` by default). The whole mode is
+    disclosed in the report's ``measurement`` block. ``pin_count_mismatch``
+    and ``flat_dut_mismatch`` are always ``null`` in this mode -- both
+    diagnose the testbench-`X...`-line-reuse contract, which a
+    caller-supplied command does not use -- while ``model_mismatch``,
+    ``extraction``, ``body_bias`` and ``provenance`` are computed exactly as
+    in testbench mode. See this module's "Measuring with a caller-supplied
+    command" docstring section.
+
     """
-    if not testbench_paths:
-        raise PexError("at least one testbench request is required")
+    # Issue #2478: exactly one of `testbench_paths` / `measure_command`.
+    # `command` is the measurement command's argv in `--measure-command`
+    # mode and `None` in the default testbench mode -- the single flag every
+    # branch below reads.
+    command = _validate_measure_mode(
+        measure_command, testbench_paths, reference_netlist, measure_timeout_s
+    )
+    command_mode = command is not None
 
     # Issue #1261: every input-path field this run's own JSON response
     # echoes (`layout`/`netlist`/`reference_netlist`, each `testbenches[]`
@@ -1415,6 +2002,22 @@ def run_pex(
     labels: list[str] = []
     dut_paths: list[str] = []
 
+    # Issue #2478: in `--measure-command` mode there is no testbench at all,
+    # so the loop below is a no-op (`testbench_paths` is validated empty
+    # above) and the schematic DUT is the caller's own `--reference-netlist`
+    # instead of a `.include` target. It still has to *be* a DUT: the same
+    # `_dut_declares_a_circuit` check testbench mode applies to its
+    # `.include` target (Gap 1, issue #1255) applies here for the same
+    # reason -- a `reference_netlist` naming a parameter/corner file with no
+    # circuit of its own would make the schematic leg (and therefore every
+    # `delta[]` row) meaningless while the report still looked like a real
+    # comparison.
+    measured_reference_netlist = (
+        _resolve_measured_reference(reference_netlist)
+        if command is not None and reference_netlist is not None
+        else None
+    )
+
     # First pass: resolve every testbench's `.include`d DUT reference and
     # validate them *before* running any simulation at all (extraction has
     # already run above, but every `klt sim` call is comparatively
@@ -1457,7 +2060,14 @@ def run_pex(
             "testbench in one run to `.include` the same block's schematic "
             "netlist, so a single reference_netlist can be reported"
         )
-    reference_netlist = dut_paths[0]
+    # One `reference_netlist` for the whole run either way: every testbench's
+    # single `.include` target in testbench mode, the caller's own
+    # `--reference-netlist` in `--measure-command` mode (issue #2478).
+    reference_netlist_path = (
+        measured_reference_netlist
+        if measured_reference_netlist is not None
+        else dut_paths[0]
+    )
 
     # Gap 2 (issue #1255): a schematic DUT netlisted flat (no `.SUBCKT`
     # wrapper at all) against `klt extract`'s always-`.SUBCKT`-wrapped
@@ -1468,10 +2078,24 @@ def run_pex(
     # `.ic` card might otherwise just simulate a disconnected fixture and
     # report a spurious passing number rather than an error at all (see
     # `_flat_dut_mismatch`'s own docstring).
-    flat_dut_mismatch = _flat_dut_mismatch(
-        reference_netlist=reference_netlist,
-        extracted_netlist=extracted_netlist_path,
-        top_cell=extract_report["top"],
+    #
+    # Issue #2478: inapplicable in `--measure-command` mode, and therefore
+    # always `None` there. This diagnostic exists because testbench mode
+    # re-runs the testbench's own unmodified `X...` instantiation line
+    # against both netlists, so a flat schematic DUT leaves every
+    # source/probe disconnected on the extracted side. A caller-supplied
+    # command builds each side's deck itself from the netlist path it is
+    # handed, so neither the premise nor the consequence holds -- reporting
+    # it anyway would be a false alarm, and (worse) would skip the
+    # extracted-side measurement the harness is perfectly able to take.
+    flat_dut_mismatch = (
+        None
+        if command_mode
+        else _flat_dut_mismatch(
+            reference_netlist=reference_netlist_path,
+            extracted_netlist=extracted_netlist_path,
+            top_cell=extract_report["top"],
+        )
     )
 
     # Issue #2402: a device model/`.subckt` divergence (e.g. a MOS
@@ -1479,9 +2103,12 @@ def run_pex(
     # it can fire (or not) independently of whether the top-level pin lists
     # agree -- so it is computed unconditionally, once, from the same two
     # netlists' own text, before either side simulates. See
-    # `_model_mismatch`'s own docstring.
+    # `_model_mismatch`'s own docstring. Computed in `--measure-command` mode
+    # too (issue #2478): unlike the two pin-list diagnostics, it compares
+    # what the two netlists *contain*, which is independent of how either
+    # side was measured.
     model_mismatch = _model_mismatch(
-        reference_netlist=reference_netlist,
+        reference_netlist=reference_netlist_path,
         extracted_netlist=extracted_netlist_path,
     )
 
@@ -1519,13 +2146,36 @@ def run_pex(
     # header comparison cannot see -- e.g. a subcircuit name only one side
     # declares, or an unreadable header -- and are only ever consulted when
     # this pre-flight check did not already find one.
+    #
+    # Issue #2478: like `flat_dut_mismatch` above, inapplicable (and always
+    # `None`) in `--measure-command` mode -- the testbench `X...`-line reuse
+    # that makes a pin-count difference fatal is exactly what that mode does
+    # not do.
     pin_count_mismatch: dict[str, Any] | None = None
-    if flat_dut_mismatch is None:
+    if not command_mode and flat_dut_mismatch is None:
         pin_count_mismatch = _pin_count_mismatch(
-            reference_netlist=reference_netlist,
+            reference_netlist=reference_netlist_path,
             extracted_netlist=extracted_netlist_path,
             subcircuit=extract_report["top"],
         )
+
+    # `--measure-command` mode (issue #2478): `testbench_paths` is empty (it
+    # is validated so above), so the per-testbench loop below is a no-op and
+    # the two legs are measured here instead -- once per side, by the
+    # caller's own command, against the two netlists *this* command chose.
+    # The diff itself is still computed here, by the same
+    # `_build_delta_rows` testbench mode uses.
+    measurement_sides: dict[str, Any] | None = None
+    if command is not None:
+        command_rows, measurement_sides = _measure_both_sides(
+            command,
+            reference_netlist=reference_netlist_path,
+            extracted_netlist=extracted_netlist_path,
+            work_dir=work_dir,
+            timeout_s=_measure_timeout(measure_timeout_s),
+            repo_root=repo_root,
+        )
+        delta.extend(command_rows)
 
     for index, testbench_path in enumerate(testbench_paths):
         label = labels[index]
@@ -1578,7 +2228,7 @@ def run_pex(
                 # SimError still aborts, unchanged.
                 mismatch = _pin_count_mismatch_from_message(
                     str(exc),
-                    reference_netlist=reference_netlist,
+                    reference_netlist=reference_netlist_path,
                     extracted_netlist=extracted_netlist_path,
                 )
                 if mismatch is None:
@@ -1625,7 +2275,7 @@ def run_pex(
         if pin_count_mismatch is None:
             pin_count_mismatch = _pin_count_mismatch_from_report(
                 extracted_report,
-                reference_netlist=reference_netlist,
+                reference_netlist=reference_netlist_path,
                 extracted_netlist=extracted_netlist_path,
             )
 
@@ -1664,7 +2314,7 @@ def run_pex(
         "status": status,
         "layout": _report_path(layout_path, repo_root=repo_root),
         "netlist": _report_path(extracted_netlist_path, repo_root=repo_root),
-        "reference_netlist": _report_path(reference_netlist, repo_root=repo_root),
+        "reference_netlist": _report_path(reference_netlist_path, repo_root=repo_root),
         "extraction": {
             "deck": deck_name,
             "device_count": extract_report["device_count"],
@@ -1693,6 +2343,24 @@ def run_pex(
         # `_body_bias_report` for why an item-7 citation needs this in the
         # artifact it cites, and why this command does not grade on it.
         "body_bias": _body_bias_report(extract_report),
+        # Additive field (issue #2478): how this run's two legs were
+        # measured, always present so a reader of a committed record never
+        # has to infer it from the presence/absence of `testbenches[]`.
+        # `mode: "testbench"` (the default) means the legs came from `klt
+        # sim` requests, and `command`/`timeout_s`/`sides` are all `null` --
+        # byte-identical information to before this field existed.
+        # `mode: "command"` means a caller-supplied measurement command
+        # produced both legs: `command` echoes its argv verbatim (never a
+        # shell string -- it is never run through a shell), `timeout_s` the
+        # per-invocation cap in force, and `sides` records, per side, the
+        # exact netlist that side was measured on, the command's exit status
+        # there, and how many corners/rows it reported. That is the
+        # disclosure `klt signoff`'s item-7 reader needs to tell an
+        # externally-measured post-layout comparison from a `klt
+        # sim`-measured one -- and to re-run it.
+        "measurement": _measurement_block(
+            command, measure_timeout_s, measurement_sides
+        ),
         "testbenches": testbenches_summary,
         "corner_count": corner_count,
         "delta": delta,

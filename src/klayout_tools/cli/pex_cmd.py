@@ -25,6 +25,7 @@ docs/cli/sim.md's "Exit codes" section.)
 """
 
 import argparse
+import shlex
 
 from ..env_provenance import render_path_field
 from ..pex import PexError, run_pex
@@ -44,6 +45,12 @@ def run(args: argparse.Namespace) -> int:
         # clean exit-1 error envelope rather than a traceback.
         deck_options = parse_deck_options(args.deck_options, PexError)
         declared_pins = parse_declared_pins(args.pins, PexError)
+        # `--measure-command` (issue #2478): one shell-quoted string on the
+        # command line, an argv *list* everywhere below -- `shlex.split`
+        # here is the only place the string form exists. The command is
+        # never handed to a shell, so quoting is resolved once, visibly,
+        # rather than by whatever `/bin/sh` the host happens to have.
+        measure_command = _parse_measure_command(args.measure_command)
         report = run_pex(
             args.layout,
             args.testbenches,
@@ -85,6 +92,14 @@ def run(args: argparse.Namespace) -> int:
             mom_rlc_resistance_ohm=args.mom_rlc_resistance_ohm,
             mom_rlc_capacitance_ff=args.mom_rlc_capacitance_ff,
             mom_rlc_inductance_nh=args.mom_rlc_inductance_nh,
+            # `--measure-command`/`--reference-netlist`/
+            # `--measure-timeout-s` (issue #2478): measure both legs with a
+            # caller-supplied command instead of `klt sim` testbenches.
+            # `None` for all three when the flags were never given, which is
+            # the exact `run_pex` call every site that predates them makes.
+            measure_command=measure_command,
+            reference_netlist=args.reference_netlist,
+            measure_timeout_s=args.measure_timeout_s,
         )
     except PexError as exc:
         return emit_error("pex", str(exc), args.format)
@@ -96,6 +111,26 @@ def run(args: argparse.Namespace) -> int:
     if report["status"] == "fail":
         return EXIT_ROW_FAILED
     return EXIT_PASS
+
+
+def _parse_measure_command(raw: str | None) -> list[str] | None:
+    """``--measure-command``'s shell-quoted string as an argv list (issue
+    #2478), or ``None`` when the flag was never given.
+
+    A string that splits to nothing (empty, or only whitespace/quotes) is a
+    clean :class:`~klayout_tools.pex.PexError` -- the same exit-1 error
+    envelope every other malformed `klt pex` flag produces -- rather than an
+    argv list that would fail much later inside :func:`subprocess.run`.
+    """
+    if raw is None:
+        return None
+    try:
+        argv = shlex.split(raw)
+    except ValueError as exc:
+        raise PexError(f"--measure-command could not be parsed: {exc}") from exc
+    if not argv:
+        raise PexError("--measure-command is empty -- name the command to run")
+    return argv
 
 
 def _print_mismatch(mismatch: dict | None, name: str) -> None:
@@ -160,6 +195,20 @@ def _print_text(report: dict) -> None:
             f"c_ff={mom_rlc_override['capacitance_ff']}  "
             f"l_nh={mom_rlc_override['inductance_nh']}"
         )
+
+    # Additive (issue #2478): only printed for a `--measure-command` run --
+    # a testbench-mode report's `measurement` block carries no information
+    # the `testbenches:` section below does not already show.
+    measurement = report.get("measurement") or {}
+    if measurement.get("mode") == "command":
+        print(f"measurement: command  {shlex.join(measurement['command'])}")
+        for side, entry in (measurement.get("sides") or {}).items():
+            print(
+                f"  {side}: {render_path_field(entry['netlist'])}  "
+                f"exit={entry['exit_status']}  "
+                f"corners={entry['corner_count']}  "
+                f"measurements={', '.join(entry['measurement_names'])}"
+            )
 
     # Additive (issue #1030): only printed when the extracted-side deck was
     # rejected for a schematic/extracted top-level pin-list mismatch.

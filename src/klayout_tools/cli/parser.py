@@ -8,7 +8,7 @@ defaulting to ``text``. New subcommands register themselves here and point their
 import argparse
 import sys
 
-from .. import arith_gen, pdk_stackup
+from .. import arith_gen, pdk_stackup, pex
 from ..equiv import SUPPORTED_SIM_BACKENDS
 from ..render import DEFAULT_HEIGHT, DEFAULT_WIDTH
 from . import (
@@ -2270,19 +2270,81 @@ def _add_pex_parser(subparsers: argparse._SubParsersAction) -> None:
             "netlist convention' documents); the extracted-side run "
             "re-points only that one line at the freshly-extracted "
             "netlist, reusing `klt sim`'s existing `netlist_source` field. "
+            "For a spec row no single `.meas` card can express, "
+            "--measure-command replaces the testbench set with a "
+            "caller-supplied command run once per side (issue #2478). "
             "See docs/cli/pex.md for the request/response contract."
         ),
     )
     pex_parser.add_argument("layout", help="path to a GDSII or OASIS layout file")
     pex_parser.add_argument(
         "testbenches",
-        nargs="+",
+        # `*`, not `+` (issue #2478): `--measure-command` replaces the
+        # testbench set entirely, so a run in that mode legitimately names
+        # none. "Exactly one of the two" is enforced in `run_pex` itself
+        # (one rule, one error message, library and CLI alike) rather than
+        # by argparse.
+        nargs="*",
         help=(
             "one or more `klt sim` request JSON files, each `.include`ing "
             "the same schematic DUT netlist -- reused completely "
             "unmodified for the schematic-side run, and with only their "
             "`.include`/`.inc` DUT reference re-pointed for the "
-            "extracted-side run"
+            "extracted-side run. Required unless --measure-command is given "
+            "(the two are mutually exclusive)."
+        ),
+    )
+    pex_parser.add_argument(
+        "--measure-command",
+        dest="measure_command",
+        default=None,
+        metavar="COMMAND",
+        help=(
+            "measure both legs with this command instead of with `klt sim` "
+            "testbenches (issue #2478). Split into an argv list with shell "
+            "quoting rules and run TWICE -- once with --reference-netlist, "
+            "once with the netlist this run extracted -- never through a "
+            "shell. Each invocation gets the netlist path as its final "
+            "argument plus $KLT_PEX_SIDE/$KLT_PEX_NETLIST/"
+            "$KLT_PEX_ARTIFACTS_DIR in its environment, and must print a "
+            'measurement document on stdout: {"corners": [{"corner_id": '
+            '..., "measurements": [{"name": ..., "value": ..., "status": '
+            "...}]}]}. Use it for a spec row no single `.meas` card can "
+            "express (a threshold-crossing search, a cross-Monte-Carlo "
+            "statistic, a measurement on a derived/loop-broken netlist, an "
+            "injection-based estimator). klt pex still drives extraction, "
+            "still picks both netlists, and still computes every delta[] row "
+            "itself. Requires --reference-netlist. Mutually exclusive with "
+            "<testbench>. See docs/cli/pex.md's \"Measuring with a "
+            'caller-supplied command" section.'
+        ),
+    )
+    pex_parser.add_argument(
+        "--reference-netlist",
+        dest="reference_netlist",
+        default=None,
+        metavar="PATH",
+        help=(
+            "the schematic DUT netlist the schematic-side measurement is "
+            "taken on, and the `reference_netlist` this run reports (issue "
+            "#2478). Required with --measure-command, and rejected without "
+            "it -- in testbench mode the schematic DUT is whatever every "
+            "testbench `.include`s, which is an observation rather than a "
+            "caller's claim."
+        ),
+    )
+    pex_parser.add_argument(
+        "--measure-timeout-s",
+        dest="measure_timeout_s",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "wall-clock cap on ONE --measure-command invocation (there are "
+            "two per run, one per side) -- default "
+            f"{pex.MEASURE_COMMAND_TIMEOUT_S:g}s, the same cap `klt signoff` "
+            "puts on a command-backed evidence entry. Requires "
+            "--measure-command."
         ),
     )
     pex_parser.add_argument(

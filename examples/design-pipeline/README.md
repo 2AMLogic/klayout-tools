@@ -36,6 +36,7 @@ they are hand-authored stage records per the skills' own framing.
 | S10 simulation across corners (operating point / supply current) | [`sim-op.request.json`](sim-op.request.json) / [`sim-op.result.json`](sim-op.result.json) | `klt sim` (shipped) |
 | S10 **post-extraction** corner sweep | [`09-sim.testbench.spice`](09-sim.testbench.spice), [`09-sim.request.json`](09-sim.request.json) → [`09-sim.result.json`](09-sim.result.json) | `klt sim`, `.include`ing [`07-extract.spice`](07-extract.spice) unmodified |
 | S10 **pex** schematic-vs-extracted delta (Epic #709 Phase 1c, [#803](https://github.com/2AMLogic/klayout-tools/issues/803)) | [`10-pex.testbench.spice`](10-pex.testbench.spice), [`10-pex.request.json`](10-pex.request.json) → [`10-pex.result.json`](10-pex.result.json) (+ [`10-pex-extracted.spice`](10-pex-extracted.spice), companion schematic-side [`10-pex.schematic.result.json`](10-pex.schematic.result.json)) | `klt pex` (shipped, `docs/cli/pex.md`) against `06-layout.gds`, stored via the append-only `sim/` evidence convention under [`../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/`](../../evidence/sim/sky130-ota-5t/post-extraction-bias-probe/) |
+| S10 **externally-measured pex** threshold-crossing delta ([#2478](https://github.com/2AMLogic/klayout-tools/issues/2478)) | [`12-pex-external.probe.py`](12-pex-external.probe.py) → [`12-pex-external.result.json`](12-pex-external.result.json) (+ [`12-pex-external-extracted.spice`](12-pex-external-extracted.spice)) | `klt pex --measure-command` (shipped, [`pex.md`](../../docs/cli/pex.md)) against `06-layout.gds`, measuring a spec row no single `.meas` card can express — see "S10 externally-measured pex delta proof" below |
 | S10 **mom-fed pex** current-carrying delta (Epic #709 Phase 3b, [#989](https://github.com/2AMLogic/klayout-tools/issues/989)) | [`11-pex-mom.testbench.spice`](11-pex-mom.testbench.spice), [`11-pex-mom.request.json`](11-pex-mom.request.json) → [`11-pex-mom.result.json`](11-pex-mom.result.json) (+ [`11-pex-mom-extracted.spice`](11-pex-mom-extracted.spice), companion schematic-side [`11-pex-mom.schematic.result.json`](11-pex-mom.schematic.result.json), the `TAIL_A\|TAIL_B` segment geometry/`klt mom` result [`11-mom-tail-segment.gds`](11-mom-tail-segment.gds)/[`.spec.json`](11-mom-tail-segment.spec.json)/[`.result.json`](11-mom-tail-segment.result.json)) | [`mom_current_carrying_probe.py`](mom_current_carrying_probe.py), driving `klt pex`/`klt sim`/`klt mom` (shipped) against `06-layout.gds`, stored via the append-only `sim/` evidence convention under [`../../evidence/sim/sky130-ota-5t/mom-fed-current-probe/`](../../evidence/sim/sky130-ota-5t/mom-fed-current-probe/) |
 
 Regenerate the schematic-level netlist and request JSON with:
@@ -101,6 +102,16 @@ uv run klt sim 10-pex.request.json --format json > 10-pex.schematic.result.json
 # Requires the `mom` dependency group (uv sync --extra dev --group mom,
 # docs/cli/mom.md's "Building the native extension").
 uv run python3 mom_current_carrying_probe.py
+
+# S10 (externally-measured pex, issue #2478): the same layout, but the spec
+# row is a threshold-crossing search no single `.meas` card can express, so
+# klt pex drives a caller-supplied measurement command once per side instead
+# of a klt sim testbench -- see "S10 externally-measured pex delta proof".
+uv run klt pex 06-layout.gds --deck sky130 \
+    --measure-command 'uv run python3 12-pex-external.probe.py' \
+    --reference-netlist 07-reference.spice \
+    -o 12-pex-external-extracted.spice --format json \
+    > 12-pex-external.result.json
 ```
 
 ## Stage-by-stage status
@@ -466,6 +477,105 @@ schematic-only `klt sim` companion, and the MoM-comparison record above),
 pinning `extraction_pin.method` and the deck's content hash exactly like
 `post-extraction-bias-probe/` does — a **new sibling scope**, per the
 append-only convention (S10's own record is untouched).
+
+## S10 externally-measured pex delta proof (issue #2478)
+
+Both `klt pex` runs above drive their legs from a `klt sim` request, whose
+`measurements[]` entries are *verbatim `.meas` cards*. A spec row whose figure
+is not expressible as one `.meas` card therefore had no path to a `pex`
+envelope at all — and, because [`signoff.md`](../../docs/cli/signoff.md)'s T1
+item 7 accepts only a `pex` envelope for an analog block, no path to citing
+item 7 either, however much real post-layout evidence the block had. That is
+the tool gap [issue #2478](https://github.com/2AMLogic/klayout-tools/issues/2478)
+reported, and
+[`--measure-command`](../../docs/cli/pex.md#measuring-with-a-caller-supplied-command---measure-command)
+closes it.
+
+**The spec row: `tail_turn_on_v`, a threshold-crossing search.**
+[`12-pex-external.probe.py`](12-pex-external.probe.py) reuses the
+current-carrying negative-tail bias network the mom-fed proof above derives
+(the one that turns two of the five composed devices on and completes a real
+DC loop through the tail net's own star-arm resistors), sweeps the tail bias
+over a 7-point grid at each of three temperatures, and then — **in the
+caller, not in `.meas`** — walks that grid in sweep order, takes the *first
+adjacent pair* bracketing a 20 µA tail current, and linearly interpolates the
+crossing bias. `null` ("unresolved") is a first-class outcome when no pair
+brackets. `.meas ... WHEN` cannot express this: the crossing lives *across
+separate simulation runs at different parameter values*, and "first bracketing
+pair, else unresolved" is a caller-side decision about which crossing counts.
+
+**What `klt pex` still owns.** Everything except the measurement: it drives
+the `--parasitics` extraction, hands the probe `07-reference.spice` for the
+schematic leg and its own freshly-extracted netlist for the extracted leg,
+and computes every `delta[]` row itself from the two documents the probe
+printed. The resulting envelope is an ordinary `pex` envelope —
+`extraction.model`, `body_bias`, `provenance` and all.
+
+| Corner | Schematic `tail_turn_on_v` | Extracted | `delta_pct` |
+| --- | --- | --- | --- |
+| `default/-40C` | −0.270489 V | −0.275662 V | −1.912 % |
+| `default/27C` | −0.249996 V | −0.254691 V | −1.878 % |
+| `default/125C` | −0.200464 V | −0.203996 V | −1.762 % |
+
+A real, measured, **non-zero** delta in the same direction at every corner:
+the extracted netlist's series star-arm resistance drops part of the applied
+tail bias before it reaches the devices' source terminals, so the same 20 µA
+turn-on needs a slightly more negative applied bias post-layout. Exactly the
+class of degradation item 7 exists to make visible — on a row that could not
+be expressed as a `klt sim` measurement at all.
+
+**The probe's decks are self-contained on purpose.** It inlines whichever
+netlist `klt pex` hands it rather than `.include`-ing it, because a
+`--measure-command` harness builds each leg's deck itself and `klt sim`'s
+off-host backends (`remote`/`batch` — where a 21-point grid goes by default on
+any host that sets `$KLT_SIM_BACKEND`) stage only the *request's own* netlist
+file into the job. An `.include` naming a path on the submitting host would
+resolve nowhere on the executing one, and every corner would come back
+`"unavailable_measurement"`; inlining keeps the row reproducible on a laptop
+and on a batch fleet alike. Last-digit differences between backends are
+expected (the −40 °C extracted value lands on `−0.275661`/`−0.275662`
+depending on the ngspice build); `delta_pct` is stable at the reported
+precision. The same trap catches the `.include`-based testbenches above
+(`09-sim`/`10-pex`/`11-pex-mom`) on an off-host-defaulted host — a transport
+bug, tracked in
+[#2485](https://github.com/2AMLogic/klayout-tools/issues/2485); run those
+with `--backend local` until it lands.
+
+Item 7 grades it with **no change to the kind restriction and no new envelope
+kind** ([`12-pex-external.result.json`](12-pex-external.result.json) cited as
+an ordinary file-backed item-7 entry):
+
+```json
+{
+  "id": 7, "status": "met", "reason": null,
+  "citation": {
+    "kind": "pex", "check_status": "pass", "input_verified": true,
+    "body_bias": { "status": "biased", "unbiased_device_count": 0, "unbiased_nets": [] }
+  }
+}
+```
+
+and the envelope discloses that the measurement was external, so a reader of
+the record can tell the two apart and re-run it:
+
+```json
+"measurement": {
+  "mode": "command",
+  "command": ["uv", "run", "python3", "12-pex-external.probe.py"],
+  "timeout_s": 1800.0,
+  "sides": {
+    "schematic": { "netlist": {"path": "examples/design-pipeline/07-reference.spice", "scope": "repo"},
+                   "exit_status": 0, "corner_count": 3, "measurement_names": ["tail_turn_on_v"] },
+    "extracted":  { "…": "the same, for klt pex's own extracted netlist" }
+  }
+}
+```
+
+`pin_count_mismatch`/`flat_dut_mismatch` are `null` here by construction —
+they diagnose the testbench-`X…`-line-reuse contract this mode does not use;
+the probe builds each leg's deck itself. `model_mismatch` is still computed
+and still `null`. See
+[`pex.md`](../../docs/cli/pex.md#two-diagnostics-are-inapplicable-here).
 
 ## Provisional pre-layout signoff comparison (not S11's real artifact)
 

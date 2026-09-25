@@ -5115,6 +5115,107 @@ def test_pex_evidence_satisfies_item_7(tmp_path):
     }
 
 
+def test_externally_measured_pex_evidence_satisfies_item_7(tmp_path):
+    """Issue #2478: a block whose spec rows cannot be expressed as `.meas`
+    cards measures both legs with `klt pex --measure-command` instead of a
+    `klt sim` testbench set. The envelope that produces is still a `klt pex`
+    envelope -- same `delta[]`, same `reference_netlist`, same
+    `extraction`/`body_bias` disclosures -- so item 7 grades it `"met"` for
+    an analog partition with no change to the kind restriction issue #871
+    established. The invariant is "item 7 requires a real, disclosed
+    schematic-vs-extracted comparison", not "item 7 requires `klt sim`."""
+    pex_path = _write(
+        tmp_path,
+        "pex.json",
+        {
+            **PEX_PASS_BODY_BIASED_ENVELOPE,
+            "testbenches": [],
+            "measurement": {
+                "mode": "command",
+                "command": ["./harness/threshold-crossing.py"],
+                "timeout_s": 1800.0,
+                "sides": {
+                    "schematic": {
+                        "netlist": {"path": "schematic.spice", "scope": "repo"},
+                        "exit_status": 0,
+                        "corner_count": 3,
+                        "measurement_names": ["t_cross"],
+                    },
+                    "extracted": {
+                        "netlist": {"path": "extracted.spice", "scope": "repo"},
+                        "exit_status": 0,
+                        "corner_count": 3,
+                        "measurement_names": ["t_cross"],
+                    },
+                },
+            },
+        },
+    )
+
+    result = build_tier_report(_manifest(evidence={"7": pex_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "met"
+    assert item_7["reason"] is None
+    assert item_7["citation"]["kind"] == "pex"
+    assert item_7["citation"]["check_status"] == "pass"
+    # The body-bias disclosure issue #1983 added survives the new
+    # measurement path -- it comes from the extraction `klt pex` drove
+    # itself, which `--measure-command` does not touch.
+    assert item_7["citation"]["body_bias"]["status"] == "biased"
+
+
+def test_externally_measured_pex_fail_still_renders_unmet(tmp_path):
+    """The new measurement path is not a bypass: a `--measure-command` run
+    whose extracted leg failed its own limits is still `"unmet"`."""
+    pex_path = _write(
+        tmp_path,
+        "pex.json",
+        {
+            **PEX_FAIL_ENVELOPE,
+            "measurement": {
+                "mode": "command",
+                "command": ["./harness/threshold-crossing.py"],
+                "timeout_s": 1800.0,
+                "sides": None,
+            },
+        },
+    )
+
+    result = build_tier_report(_manifest(evidence={"7": pex_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "check_failed"
+
+
+def test_a_generic_envelope_claiming_an_external_measurement_is_still_wrong_kind(
+    tmp_path,
+):
+    """Issue #871's invariant, re-asserted against issue #2478's own
+    tempting shortcut: the way to cite an externally-measured post-layout
+    comparison is a real `klt pex --measure-command` run, never a hand-rolled
+    `"kind": "generic"` envelope that merely asserts one happened. The
+    generic opt-in is still item 8 only."""
+    generic_path = _write(
+        tmp_path,
+        "generic.json",
+        {
+            "schema_version": 1,
+            "kind": "generic",
+            "status": "pass",
+            "summary": "post-layout threshold-crossing deltas all within 5%",
+        },
+    )
+
+    result = build_tier_report(_manifest(evidence={"7": generic_path}))
+
+    item_7 = next(item for item in result["items"] if item["id"] == 7)
+    assert item_7["status"] == "unmet"
+    assert item_7["reason"] == "wrong_kind"
+    assert item_7["citation"] is None
+
+
 def test_pex_fail_status_renders_unmet_check_failed(tmp_path):
     pex_path = _write(tmp_path, "pex.json", PEX_FAIL_ENVELOPE)
 
