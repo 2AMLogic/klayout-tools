@@ -374,7 +374,15 @@ written to every block.
       supply (one library PG pin name on independent islands) can satisfy
       this item instead of being unreachable by construction — with no
       `erc.unconnected_net` and no
-      `erc.supply_short` naming it — and the run must report zero
+      `erc.supply_short` naming it. A spec whose supplies include a
+      **deliberate tie between two names** (a sub-block port name and the
+      assembly's name for one node) declares it with
+      `nets[].same_net_as` (issue #2463): the tie then grades as a pass
+      instead of a permanent `erc.supply_short`, and its *absence* —
+      `erc.expected_short_missing` naming a declared supply — blocks this
+      item in the short's place, so declaring the tie converts a false
+      blocking finding into a real check rather than into no evidence.
+      The run must also report zero
       `erc.missing_tie`, from a tie the run actually *checked*: a `ties[]`
       entry `klt erc` reports as degenerate (`erc_coverage.skipped[]`,
       reason `degenerate_tap_declaration`, issue #2199,

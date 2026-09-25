@@ -273,8 +273,41 @@ draws that the spec never declared" below.
     detection are unaffected by the declaration — a declared-multi-domain
     name still shorts against any other name that lands on one of its
     islands.
+  - `same_net_as` (string, optional, default absent, issue #2463) — the
+    `name` of another `nets[]` entry this one is *intentionally* the same
+    electrical net as. Declare it when the layout deliberately ties two
+    labelled conductors together — a sub-block labelling its ground
+    terminal with its own port name while the assembly that instantiates it
+    labels the same node with the assembly's name, or any case where a
+    hierarchical name and an assembly name meet on one deliberate
+    conductor. Without it there was no good option: declaring both names
+    reported `erc.supply_short` forever on a correct layout (and any
+    signoff item gated on "no `erc.supply_short`" was permanently red),
+    while declaring only one left the other name's conductor uncovered —
+    it could be cut with no finding at all.
+
+    The declaration **adds a check rather than suppressing one.** For the
+    declared pair (and only that pair):
+    - the short that names them both — `erc.supply_short` or
+      `erc.multiply_driven_net` — is not reported: the tie is the design;
+    - its **absence** is reported instead, as
+      **`erc.expected_short_missing`** (see "ERC finding checks" below).
+      The tie becomes a graded assertion: drawn ⇒ clean, cut ⇒ a finding,
+      the same falsifiable shape `islands` gives the island count.
+
+    The key may name an entry declared earlier or later in the array (the
+    relation is symmetric, so write it on whichever entry reads more
+    naturally; writing it on both is redundant but legal and still declares
+    one tie). It is **transitive**: declaring `B: same_net_as A` and
+    `C: same_net_as A` asserts A, B and C are all one net, so a drawn B–C
+    short is expected too. Every *other* pair is unaffected — a third
+    declared name landing on the same conductor still reports
+    `erc.supply_short` against each member of the group. `null` means "no
+    tie declared", identical to omitting the key; a value that is not the
+    name of a declared `nets[]` entry (a typo, or the entry's own name) is
+    a spec error rather than a silent no-op.
   - Omitted entirely -> `erc.unconnected_net`/`erc.multiply_driven_net`/
-    `erc.supply_short` are never computed.
+    `erc.supply_short`/`erc.expected_short_missing` are never computed.
 
   **A `"supply"` (or signal) connectivity spec must declare every metal
   layer the design's real PDN straps use.** The worked `stackup`/`vias`
@@ -495,7 +528,8 @@ string) and for the `devices[]` declaration that fixes it.
 
 `gates[]`, every antenna ratio derived from it, and the `nets[]`-driven
 findings (`erc.unconnected_net` / `erc.multiply_driven_net` /
-`erc.supply_short`) all come from that one graph. Since issue #2169 the
+`erc.supply_short` / `erc.expected_short_missing`) all come from that one
+graph. Since issue #2169 the
 `ties[]` declarations are **not** part of it — see "Well/tap connectivity"
 below.
 
@@ -1315,6 +1349,23 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   produces this finding too**, since the body is a conductor in this graph
   — declare it in `devices[]` (see "Device bodies are not wires" above), or
   read the finding as unreliable for that block.
+
+  **A pair the spec declared as intentionally one net is exempt** — and
+  checked the other way round instead, see `erc.expected_short_missing`
+  below (`nets[].same_net_as`, issue #2463).
+- **`erc.expected_short_missing`** (issue #2463) — a declared
+  `nets[].same_net_as` tie whose two names do **not** share an electrical
+  island in this layout: the spec says they are one net, and the layout
+  does not draw the tie. Reported once per declared pair, carrying the pair
+  in `net`/`other_net` exactly as `erc.supply_short` does. When one of the
+  two names matches no labelled geometry at all, the description names it
+  (that name also reports its own `erc.unconnected_net`; the tie is
+  unsatisfied either way, and a reader grading the *pair* should not have
+  to infer that from a finding about a different rule). This is the rule
+  that makes a deliberate tie gradeable rather than merely suppressible:
+  without it, declaring the tie would only remove a finding, leaving the
+  tied conductor no better covered than not declaring the second name at
+  all.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
   the shapes its `well_requires`/`well_excludes` class selection keeps,
@@ -1387,6 +1438,37 @@ for a declared 2 whose layout carries 3), and a declared 2 that later
 *merges* to 1 reports `"… resolves to 1 disconnected electrical island
 (expected exactly 2)"` with `islands[]` locating the survivor. A declared
 count that matches the actual islands produces no finding at all.
+
+### Declaring a deliberate tie (`nets[].same_net_as`, issue #2463)
+
+`klt erc` is the one verb that can answer "are these two labelled
+conductors joined **in metal**?" — the extraction deck's own globals would
+join two supply names regardless. That makes "these two labels are one net"
+a *measurement*, not a defect; but until this key the only way to obtain it
+was to keep a second, ungraded copy of the spec with the extra name added
+and read its `erc.supply_short` as a positive result.
+
+A spec states the intent instead:
+
+```json
+"nets": [
+  { "name": "VSS", "kind": "supply" },
+  { "name": "SUB_VSS", "kind": "supply", "same_net_as": "VSS" }
+]
+```
+
+and gets a graded assertion in the same report the rest of signoff reads:
+
+| Layout | Finding |
+| ------ | ------- |
+| `VSS` and `SUB_VSS` land on one conductor (the tie is drawn) | none — this pair is the design |
+| they land on separate conductors | `erc.expected_short_missing` naming the pair |
+| `SUB_VSS` is not labelled anywhere | `erc.expected_short_missing` (naming the absent side) **and** that name's own `erc.unconnected_net` |
+| a third declared name (`VDD`) lands on the tied conductor | `erc.supply_short` for `VDD`/`VSS` **and** `VDD`/`SUB_VSS`, unchanged |
+
+Both directions are graded, so the one spec can be the report of record:
+the tie can no longer be silently cut (that is a finding), and a correct
+layout is no longer permanently red (that is a pass).
 
 ## Antenna-ratio verdict (Phase 1b, issue #860)
 
@@ -1531,7 +1613,7 @@ issue #2179 each carries its own roll-up:
 | Field | Question it answers | Needs a PDK antenna table? |
 | ----- | ------------------- | -------------------------- |
 | `status` | Both signals together: did every *graded* antenna level pass **and** are there no `erc_findings`? | Yes — it is `not_checked` when no level could be graded |
-| `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.floating_gate`, `erc.missing_tie` | No |
+| `erc_status` | The `erc_findings` rules alone: `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.supply_short`, `erc.expected_short_missing`, `erc.floating_gate`, `erc.missing_tie` | No |
 
 The distinction is not academic. `--pdk` resolves against a limit table
 **this command carries for sky130 only** (see "Sky130 antenna-ratio limits"
@@ -1865,14 +1947,14 @@ forward regardless (a `diode_insertion` remedy):
 | `remedy.layer`   | string          | The violating `levels[].layer` value — identical to the entry this remedy is attached to.        |
 | `remedy.target_layer` | string \| null | For `"layer_jumping"`, the adjacent `stackup` role name to route through instead; `null` for `"diode_insertion"`. |
 | `remedy.justification` | string    | Human-readable explanation citing the specific ratio/limit values and (for `"layer_jumping"`) the target layer's own margin.     |
-| `erc_findings`   | array\<object\> | One entry per ERC violation found by the four checks in "ERC finding checks" above (issue #861) — empty when clean, or when no `nets`/`ties` spec sections were provided (the `erc.floating_gate` check still always runs). |
-| `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short` — matching `klt drc`'s `violations[].rule` convention. |
+| `erc_findings`   | array\<object\> | One entry per ERC violation found by the checks in "ERC finding checks" above (issue #861) — empty when clean, or when no `nets`/`ties` spec sections were provided (the `erc.floating_gate` check still always runs). |
+| `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short`, `erc.expected_short_missing` (issue #2463) — matching `klt drc`'s `violations[].rule` convention. A new rule id is an additive value-set change (`docs/json-contract.md`), not a `schema_version` bump. |
 | `erc_findings[].description` | string | Human-readable explanation of this specific finding.                                       |
 | `erc_findings[].net` | string \| null | The primary net name implicated (a `nets[].name`/`ties[].net` value, or a gate's own `gates[].net`). |
-| `erc_findings[].other_net` | string \| null | The second net name implicated, for `erc.multiply_driven_net`/`erc.supply_short` only; `null` otherwise. |
+| `erc_findings[].other_net` | string \| null | The second net name implicated, for `erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing` only; `null` otherwise. The pair is always sorted, so `net` < `other_net` for those rules. |
 | `erc_findings[].gate_id` | string \| null | The `gates[].gate_id` implicated, for `erc.floating_gate` only; `null` otherwise.           |
 | `erc_findings[].layer` | string \| null | The `stackup`/`ties[].name` role implicated (`erc.floating_gate`'s gate role, or a tie's own `name`); `null` for the two net-connectivity rules. |
-| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. |
+| `erc_findings[].bbox` | object \| null | Raw-database-unit `{"left", "bottom", "right", "top"}`, matching `klt drc`'s `violations[].bbox` convention; `null` when no single location applies (`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`, and the *zero*-match `erc.unconnected_net`, which have no one place to point at). For a **multi-island** `erc.unconnected_net` (issue #2194) this is the box spanning every island — see `islands[]` below for the per-island boxes. |
 | `erc_findings[].islands` | array\<object\> \| null | (issue #2194) One entry per disconnected electrical island, populated **only** for a multi-island `erc.unconnected_net`; `null` for every other finding (including the zero-match one). Entries are in ascending KLayout cluster-id order — deterministic for a given layout+spec. See "Locating the islands of a multi-island `erc.unconnected_net`" above. |
 | `erc_findings[].islands[].bbox` | object \| null | That island's whole extent, unioned across every `stackup` role it has geometry on, in the same raw-database-unit convention as `erc_findings[].bbox`. Populated for every island of a net that resolved to geometry (a labelled net always has `stackup` geometry by construction). |
 | `erc_findings[].islands[].layer` | string \| null | The `stackup` role carrying the most of this island's area (ties broken by stackup order) — the most useful layer to open a viewer on, not an exhaustive list of the roles it touches. |
@@ -1902,8 +1984,8 @@ declined the accumulation, the same shape of caller-side skip as omitting
 which need no `--pdk` at all. One checked ID per subject actually checked:
 per discovered gate (`erc.floating_gate`), per declared `nets[]` entry
 (`erc.net_connectivity` — the `erc.unconnected_net`/
-`erc.multiply_driven_net`/`erc.supply_short` rules all key off the same
-declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
+`erc.multiply_driven_net`/`erc.supply_short`/`erc.expected_short_missing`
+rules all key off the same declaration), and per declared `ties[]` entry (`erc.missing_tie`). A spec
 that declares no `nets`/`ties` asked for none of that work, so those rules
 are recorded as **inapplicable** (`no_nets_declared`/`no_ties_declared`,
 or — when the spec's top-level `ties_disclosure` was given — one of

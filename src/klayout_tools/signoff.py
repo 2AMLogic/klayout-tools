@@ -5314,7 +5314,7 @@ def _erc_supply_findings(
     """Every ``erc_findings[]`` entry that contradicts T1 item 11's own
     supply-continuity rule -- ``[]`` when the run reports none.
 
-    Exactly three of `klt erc`'s five rules are graded here
+    Exactly four of `klt erc`'s six rules are graded here
     (``docs/cli/erc.md`` → "ERC finding checks"), and only for the *declared
     supply* nets:
 
@@ -5324,6 +5324,13 @@ def _erc_supply_findings(
       one island per declared supply" the item requires.
     - ``erc.supply_short`` -- two declared supplies resolved to the *same*
       island, which is likewise not one island per supply.
+    - ``erc.expected_short_missing`` naming a declared supply (issue #2463)
+      -- the spec declared two names as intentionally one net
+      (``nets[].same_net_as``) and the layout does not draw the tie, so that
+      supply is delivered to only part of what the spec says it feeds. Graded
+      under the same declared-name filter ``erc.unconnected_net`` uses, since
+      unlike ``erc.supply_short`` this rule can also name two *signal* nets,
+      which item 11 says nothing about.
     - ``erc.missing_tie`` -- a well/tub with no tap drawn inside it, or a tap
       wired to the wrong net.
 
@@ -5344,7 +5351,7 @@ def _erc_supply_findings(
         if rule == "erc.missing_tie" or rule == "erc.supply_short":
             offending.append(finding)
             continue
-        if rule != "erc.unconnected_net":
+        if rule not in ("erc.unconnected_net", "erc.expected_short_missing"):
             continue
         for field in ("net", "other_net"):
             value = finding.get(field)
