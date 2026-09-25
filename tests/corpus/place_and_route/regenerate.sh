@@ -32,6 +32,17 @@
 
 set -euo pipefail
 
+# Pinned image -- mirrors scripts/install-openroad-docker.sh's own pin (issue
+# #2465/#2477): `openroad/orfs` publishes only a moving `:latest` tag, so the
+# digest is the only reproducible pin available. Re-pin with:
+#   docker pull --platform linux/amd64 openroad/orfs:latest
+#   docker image inspect openroad/orfs:latest --format '{{index .RepoDigests 0}}'
+# then update this digest (and scripts/install-openroad-docker.sh's own pin,
+# if refreshing that too) together.
+ORFS_IMAGE_REPO="openroad/orfs"
+ORFS_IMAGE_DIGEST="sha256:bb7f31697fb8466ab61852fc796376cc16d9df38f762ccb733218b8a5e55824b"
+IMAGE="${ORFS_IMAGE_REPO}@${ORFS_IMAGE_DIGEST}"
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 # `mult8` (`tests/corpus/statime/mult8.v`, issue #809's STA-spike source) is
@@ -219,7 +230,7 @@ JSON
       -e PDK=sky130A \
       -e PDK_ROOT=/workdir/volare \
       -e PATH="/OpenROAD-flow-scripts/tools/install/OpenROAD/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-      openroad/orfs:latest \
+      "$IMAGE" \
       bash -c '
         pip3 install -q /workdir/repo &&
         python3 -c "
