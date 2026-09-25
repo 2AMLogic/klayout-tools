@@ -1380,6 +1380,36 @@ def run_sim(
         )
     )
 
+    # Issue #2491: a top-level rollup of every `corners[].diagnostics[]`
+    # entry -- including one downgraded to `severity: "warning"` by
+    # `_recovered_from_stepping` on an otherwise-`pass`ed corner (issue
+    # #205). Pure visibility: counted across *all* corners regardless of
+    # that corner's final `status`, so a caller reading only the top-level
+    # report can see a fifth of a 100%-`pass` grid recovered from a
+    # convergence warning along the way, without walking every corner's own
+    # `diagnostics` list. Always present, even when empty (a zero-
+    # diagnostic grid reports empty dicts and a zero count, never omits the
+    # field) -- see docs/cli/sim.md's report schema.
+    diagnostic_counts_by_code: dict[str, int] = {}
+    diagnostic_counts_by_severity: dict[str, int] = {}
+    corners_with_diagnostics = 0
+    for corner in corners:
+        corner_diagnostics = corner["diagnostics"]
+        if corner_diagnostics:
+            corners_with_diagnostics += 1
+        for diag in corner_diagnostics:
+            diagnostic_counts_by_code[diag["code"]] = (
+                diagnostic_counts_by_code.get(diag["code"], 0) + 1
+            )
+            diagnostic_counts_by_severity[diag["severity"]] = (
+                diagnostic_counts_by_severity.get(diag["severity"], 0) + 1
+            )
+    diagnostic_counts = {
+        "by_code": diagnostic_counts_by_code,
+        "by_severity": diagnostic_counts_by_severity,
+        "corners_with_diagnostics": corners_with_diagnostics,
+    }
+
     if checkpoint is not None:
         if corners_skipped == 0:
             # Nothing left to resume -- remove the checkpoint rather than
@@ -1551,6 +1581,10 @@ def run_sim(
         "passed": passed,
         "failed": failed,
         "errored": errored,
+        # Issue #2491: rollup of `corners[].diagnostics[]` across the whole
+        # grid, counted regardless of each corner's final `status` -- see
+        # the `diagnostic_counts` computation above.
+        "diagnostic_counts": diagnostic_counts,
         "metrics": {
             _CORNER_COUNT_METRIC_NAME: len(corners),
             _CORNER_PASSED_COUNT_METRIC_NAME: passed,

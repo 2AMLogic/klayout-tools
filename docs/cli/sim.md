@@ -1316,6 +1316,16 @@ value, or that trailer keeps `singular_matrix`/`nonconvergence` at
 `severity: "error"` and the corner at `status: "error"`, exactly as before.
 `netlist`/`timeout`/`measurement`/`unknown` are never downgraded.
 
+A downgraded diagnostic still counts: `diagnostic_counts` (issue #2491, see
+the top-level fields table above) rolls up every `corners[].diagnostics[]`
+entry across the whole grid — by `code` and by `severity` — regardless of
+whether the corner it came from ended up `pass`, `fail`, or `error`. A
+`pass`ed corner with a recovered `singular_matrix`/`nonconvergence` warning
+still increments `diagnostic_counts.by_severity.warning` and
+`diagnostic_counts.corners_with_diagnostics`, so a caller reading only the
+top-level report — never `corners[]` itself — can still see that a
+100%-`pass` grid recovered from engine trouble along the way.
+
 `.meas` cards are also validated against ngspice's own supported analysis
 types (`dc`/`ac`/`tran`/`sp`) before a request ever reaches ngspice: ngspice
 has no `.MEASURE OP` — an operating point has no sweep variable for a
@@ -1735,6 +1745,11 @@ the *response* echoes back.
   "passed": 8,
   "failed": 0,
   "errored": 0,
+  "diagnostic_counts": {
+    "by_code": { "singular_matrix": 1 },
+    "by_severity": { "warning": 1 },
+    "corners_with_diagnostics": 1
+  },
   "metrics": {
     "sim__corner__count": 8,
     "sim__corner__passed_count": 8,
@@ -1827,6 +1842,7 @@ carries a non-null `monte_carlo` block and a `/mc<sample_index>`-suffixed
 | `status`        | string          | Aggregate: `"pass"`, `"pass_partial"`, `"fail"`, `"error"`, or `"not_checked"`. Precedence (issue #2109's common rollup rule): `error` > `fail` > `not_checked` > `pass_partial` > `pass`. `pass_partial` is a real, exit-`0` result — every executed check passed — that also has a nonempty `coverage.skipped` (a typo'd `limits` key beside a recognised one, a corner with no requested measurements, …); it is never reported as the unconditional `pass`. See "`coverage`" below. |
 | `corner_count`  | integer         | Number of entries in `corners` after expansion and `exclude` — always `== len(corners)`.                        |
 | `passed`/`failed`/`errored` | integer | Corner counts by status.                                                                                  |
+| `diagnostic_counts` | object      | Rollup of every `corners[].diagnostics[]` entry across the whole grid (issue #2491), counted regardless of each corner's final `status` — a `pass`ed corner with a recovered `severity: "warning"` diagnostic is still counted. `{by_code: {<code>: N, ...}, by_severity: {<severity>: N, ...}, corners_with_diagnostics: N}`. Always present; `by_code`/`by_severity` are `{}` and `corners_with_diagnostics` is `0` for a diagnostic-free grid, never omitted. See "Failure classification" below for the `code`/`severity` vocabulary. |
 | `metrics`       | object          | Declared-namespace re-keying of `corner_count`/`passed`/`failed`/`errored` (issue #1849). See below. |
 | `coverage`      | object          | What this `status` was actually graded over (issue #1996) — always present, purely additive. See "`coverage`" below. |
 | `environment`   | object          | Reproducibility block: engine name/version, `ngspice_binary` (issue #2423 — the absolute path of the `ngspice` executable that produced this sweep's corners, as resolved from `options.ngspice_binary` / `$KLT_NGSPICE_BINARY` / `ngspice` on `$PATH`; always present-but-nullable, `null` for `engine: "xyce"` — see "Which ngspice binary is run" above), `models_lib` (the resolved model library as `{path, scope}`, issue #1274 — `{"path": null, "scope": "external"}` for the usual out-of-repo PDK, `"absent"` when no process axis made one necessary; never an absolute path) + its SHA-256, netlist SHA-256, and (when the request declares them) `netlist_source`/`monte_carlo` (`{n, seed, vary}` echoed from the request, plus `quantiles`/`k_sigma` when declared and `family_mismatch` when `vary` includes `"mismatch"` — see "Monte Carlo sampling" above), `budget` (when `options.wall_clock_budget_s` was declared), `orphaned: true` (only when the always-on parent-death check actually fired), and `resume` (when `options.resume` was requested — `resume.checkpoint_path` is the same `{path, scope}` shape as `netlist`, issue #1261) — see "Wall-clock budget, orphan safety, and resume" above. Also carries `timeout_preflight_warning` (string, issue #1686) when the coarse pre-grid `options.timeout_s` sanity check has something to say about a `tran` analysis's declared step/window — advisory only, never blocks the sweep, and absent for the common case — and `fail_fast_probe` (object, issue #1694) when `options.fail_fast_probe`/`--fail-fast-probe` opted in and the calibration probe ran and came back conclusive (present whether or not it aborted the grid); see "Timeout-budget preflight" above for both fields' shapes. |
