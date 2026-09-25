@@ -81,6 +81,21 @@ dependency -- purely geometric/connectivity, matching this module's Phase
   declared net names that resolve to the same electrical island are
   "multiply-driven" (shorted together) -- or, when both are declared
   ``"kind": "supply"``, a **supply short** (``erc.supply_short``) instead.
+- **Expected short missing** (``erc.expected_short_missing``, issue
+  #2463): the same ``nets`` section, read the other way round. A layout
+  that deliberately ties two labelled conductors together -- a sub-block's
+  port name and the assembly's name for one physical node -- had no way to
+  say so: declaring both names reported a permanent false
+  ``erc.supply_short`` on a correct layout, and declaring one lost all
+  coverage of the other. An entry's optional ``same_net_as`` names the
+  other entry it is *intentionally* one net with, which turns that pair's
+  short into the pass condition and its **absence** into this finding. It
+  adds a check rather than suppressing one: before it, the tool could only
+  report that the tie is *present* (as a fault); it could not assert the
+  tie is *required* and grade that it is still drawn. The declaration is
+  transitive across entries and scoped to exactly the declared group --
+  every other pair still shorts exactly as before. See
+  :func:`_expected_short_findings`.
 - **Missing substrate/well tie** (``erc.missing_tie``): driven by the new
   optional ``ties`` spec section (each entry names a well/tub layer, a tap
   layer -- optionally narrowed to a boolean by ``tap_requires``, issue
@@ -385,6 +400,19 @@ from .extract import (
 #: the layout and the spec this run already read, it is not an input to
 #: either roll-up, and no existing field's value changes for any input --
 #: a consumer that does not read it sees a byte-identical report. No bump.
+#: Issue #2463 adds one optional *sub*-key, ``nets[].same_net_as`` (the
+#: name of another ``nets[]`` entry this one is intentionally the same
+#: electrical net as -- see :func:`_parse_same_net_as`), and one new
+#: ``erc_findings[].rule`` value, ``erc.expected_short_missing`` (see
+#: :func:`_expected_short_findings`). No output *field* is added, removed,
+#: or renamed: the new rule reuses the uniform finding shape, populating
+#: ``net``/``other_net`` exactly as ``erc.supply_short`` does. A spec that
+#: omits the key grades byte-identically to before -- the new rule can only
+#: be emitted for a pair that declared it, and the short suppression is
+#: scoped to that declared group. A new value in an already-shipped
+#: enum-like field is additive under ``docs/json-contract.md``'s own
+#: "growing value set" rule (the same latitude ``klt drc``'s new rule ids
+#: take), so, as with every prior additive change above, no bump.
 SCHEMA_VERSION = 1
 
 
@@ -741,7 +769,10 @@ def _connectivity_coverage(
       for each one.
     - ``erc.net_connectivity`` -- one per declared ``nets[]`` entry (the
       ``erc.unconnected_net``/``erc.multiply_driven_net``/
-      ``erc.supply_short`` rules all key off the same declaration).
+      ``erc.supply_short`` rules all key off the same declaration, as does
+      issue #2463's ``erc.expected_short_missing`` -- a declared
+      ``same_net_as`` tie is graded as part of the work its own two
+      ``nets[]`` entries already name, not as a separate identity).
     - ``erc.missing_tie`` -- one per declared ``ties[]`` entry, *except*
       the degenerate ones (``degenerate_ties``, issue #2199): a tie whose
       declared tap region cannot be told apart from an ordinary
@@ -1086,16 +1117,56 @@ def _validate_vias(
     ]
 
 
+def _parse_same_net_as(
+    entry: dict[str, Any], spec_path: str, index: int, name: str
+) -> str | None:
+    """``nets[].same_net_as`` (optional, issue #2463): the name of another
+    ``nets[]`` entry this one is *intentionally* the same electrical net as
+    -- a sub-block's own port name and the assembly's name for the same
+    deliberate conductor, the shape that otherwise had no expressible form
+    (declare both names and ``erc.supply_short`` fires forever on a correct
+    layout; declare one and the other name's conductor is uncovered).
+
+    Omitted or ``null`` -> ``None``, the undeclared form, so a generator
+    that emits the key unconditionally grades exactly as before. Anything
+    but a string naming a *different* declared entry is rejected rather
+    than ignored: a typo'd partner name that silently did nothing would
+    suppress no false positive, check no tie, and still read as a
+    declaration that was honoured -- the unfalsifiable pass shape this
+    module refuses everywhere else. The cross-reference itself ("names an
+    entry that exists") is checked by :func:`_validate_nets` once every
+    name is known, so the key may name an entry declared later in the
+    array as well as an earlier one (the relation is symmetric; it belongs
+    on whichever entry reads more naturally)."""
+    raw = entry.get("same_net_as")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].same_net_as must be the "
+            f"non-empty name of another declared nets[] entry (got {raw!r})"
+        )
+    other = raw.strip()
+    if other == name:
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].same_net_as must name a "
+            f"different nets[] entry (got {other!r}, its own name)"
+        )
+    return other
+
+
 def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]:
     """Validate the optional ``nets`` array (issue #861): named nets to
     check for connectivity findings (``erc.unconnected_net``,
     ``erc.multiply_driven_net``, ``erc.supply_short``). Mirrors ``klt
     power``'s ``power_nets`` name-matching convention, plus a ``kind`` used
     to classify a two-net short as a plain multiply-driven net vs. a supply
-    short, and (issue #2400) an ``islands`` expected electrical-island
+    short, (issue #2400) an ``islands`` expected electrical-island
     count the ``erc.unconnected_net`` check grades against instead of the
-    implicit 1 -- see :func:`_net_connectivity_findings` for why a
-    declared count is the falsifiable form. Omitted or empty -> no
+    implicit 1, and (issue #2463) a ``same_net_as`` naming another entry
+    this one is intentionally one net with -- see
+    :func:`_net_connectivity_findings` for why a declared count and a
+    declared tie are the falsifiable forms. Omitted or empty -> no
     net-connectivity findings are computed
     (a caller who only wants the floating-gate check need not declare
     this)."""
@@ -1126,21 +1197,53 @@ def _validate_nets(spec: dict[str, Any], spec_path: str) -> list[dict[str, Any]]
                 f"'supply' (got {kind!r})"
             )
 
-        # Issue #2400: the declared expected island count. Default 1 is the
-        # pre-#2400 model (one label string == one electrical net); a
-        # stream whose library PG pin names legitimately land on N separate
-        # domains declares N so `erc.unconnected_net` grades the count
-        # instead of silently failing every such name. ``islands: 1`` must
-        # behave exactly like the omitted form.
-        islands = entry.get("islands", 1)
-        if isinstance(islands, bool) or not isinstance(islands, int) or islands < 1:
-            raise ErcError(
-                f"spec '{spec_path}': nets[{i}].islands must be an integer "
-                f">= 1 (got {entry.get('islands')!r})"
-            )
+        entries.append(
+            {
+                "name": name,
+                "kind": kind,
+                "islands": _parse_net_islands(entry, spec_path, i),
+                # Issue #2463: the declared intentional tie, cross-checked
+                # against the declared names below (once they are all known).
+                "same_net_as": _parse_same_net_as(entry, spec_path, i, name),
+            }
+        )
 
-        entries.append({"name": name, "kind": kind, "islands": islands})
+    _validate_same_net_refs(entries, names, spec_path)
     return entries
+
+
+def _parse_net_islands(entry: dict[str, Any], spec_path: str, index: int) -> int:
+    """``nets[].islands`` (optional, issue #2400): the declared expected
+    island count. Default 1 is the pre-#2400 model (one label string == one
+    electrical net); a stream whose library PG pin names legitimately land
+    on N separate domains declares N so ``erc.unconnected_net`` grades the
+    count instead of silently failing every such name. ``islands: 1`` must
+    behave exactly like the omitted form.
+
+    Split out of :func:`_validate_nets` to keep that function under the
+    repo's C901 complexity ratchet, as :func:`_parse_same_net_as` is."""
+    islands = entry.get("islands", 1)
+    if isinstance(islands, bool) or not isinstance(islands, int) or islands < 1:
+        raise ErcError(
+            f"spec '{spec_path}': nets[{index}].islands must be an integer "
+            f">= 1 (got {entry.get('islands')!r})"
+        )
+    return islands
+
+
+def _validate_same_net_refs(
+    entries: list[dict[str, Any]], names: list[str], spec_path: str
+) -> None:
+    """Every declared ``nets[].same_net_as`` (issue #2463) must name an
+    entry that exists -- checked after the whole array is read, so the key
+    may reference a name declared later as well as an earlier one."""
+    for i, decl in enumerate(entries):
+        other = decl["same_net_as"]
+        if other is not None and other not in names:
+            raise ErcError(
+                f"spec '{spec_path}': nets[{i}].same_net_as names {other!r}, "
+                "which is not a declared nets[] entry"
+            )
 
 
 def _parse_tie_layer_list(
@@ -1788,7 +1891,8 @@ def _finding(
     module's docstring "ERC finding checks"): the 8-key dict shared
     verbatim by every rule id (``erc.floating_gate``,
     ``erc.unconnected_net``, ``erc.multiply_driven_net``,
-    ``erc.supply_short``, ``erc.missing_tie``) -- only which of
+    ``erc.supply_short``, ``erc.missing_tie``, and issue #2463's
+    ``erc.expected_short_missing``) -- only which of
     ``net``/``other_net``/``gate_id``/``layer``/``bbox``/``islands`` are
     populated vs. left ``None`` varies per call site. Mirrors
     ``ring_check.py``'s own keyword-only ``_violation()`` helper for the
@@ -2204,6 +2308,140 @@ def _union_bbox(boxes: list[dict[str, int] | None]) -> dict[str, int] | None:
     }
 
 
+def _declared_same_net_pairs(
+    nets_decl: list[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """Every intentional tie the spec declared (issue #2463), as unordered
+    ``(a, b)`` name pairs sorted within the pair and deduplicated -- so a
+    spec that writes the relation on both entries (``A: same_net_as B`` and
+    ``B: same_net_as A``, redundant but not ambiguous) declares one tie, not
+    two, and reports at most one finding for it."""
+    pairs: list[tuple[str, str]] = []
+    for decl in nets_decl:
+        other = decl["same_net_as"]
+        if other is None:
+            continue
+        pair = (min(decl["name"], other), max(decl["name"], other))
+        if pair not in pairs:
+            pairs.append(pair)
+    return pairs
+
+
+def _same_net_group_ids(
+    nets_decl: list[dict[str, Any]], pairs: list[tuple[str, str]]
+) -> dict[str, int]:
+    """Which declared names are in the same *intended* net, as a group id
+    per name (issue #2463) -- the transitive closure of
+    :func:`_declared_same_net_pairs`.
+
+    ``same_net_as`` is a pairwise key, but the relation it states is not:
+    declaring ``B ~ A`` and ``C ~ A`` asserts that A, B and C are all one
+    electrical net, so a drawn B-C short is equally the design and must not
+    report. Closing over the declarations is what keeps the suppression
+    consistent with what the spec actually claimed -- reporting B-C while
+    accepting A-B and A-C would be the same "the tool can only read the tie
+    as a fault" friction this key exists to remove. Undeclared names keep a
+    group of their own, so they short against everything exactly as before.
+    """
+    group = {decl["name"]: i for i, decl in enumerate(nets_decl)}
+    for a, b in pairs:
+        keep, drop = sorted((group[a], group[b]))
+        if keep == drop:
+            continue
+        for name, gid in group.items():
+            if gid == drop:
+                group[name] = keep
+    return group
+
+
+def _expected_short_findings(
+    pairs: list[tuple[str, str]], clusters_by_name: dict[str, set[int]]
+) -> list[dict[str, Any]]:
+    """``erc.expected_short_missing`` findings (issue #2463): a declared tie
+    (``nets[].same_net_as``) whose two names do **not** share an electrical
+    cluster in this layout.
+
+    This is the half of the declaration that makes it a grading rather than
+    a waiver. Declaring the tie removes the ``erc.supply_short`` /
+    ``erc.multiply_driven_net`` the drawn tie would otherwise report -- but
+    on its own that would only *suppress* a check, leaving a deliberately
+    tied net no better covered than the "declare one name and lose the
+    other" workaround it replaces. With this rule the spec instead asserts
+    the tie is *required*: drawn -> clean, cut -> reported, in the same
+    falsifiable shape ``nets[].islands`` (issue #2400) gave the island
+    count.
+
+    A partner name that matches no labelled geometry at all is named in the
+    description: it already reports its own ``erc.unconnected_net``, but the
+    tie is equally unsatisfied and a reader grading this pair must not have
+    to infer that from a finding about a different rule."""
+    findings: list[dict[str, Any]] = []
+    for a, b in pairs:
+        if clusters_by_name[a] & clusters_by_name[b]:
+            continue
+        absent = [name for name in (a, b) if not clusters_by_name[name]]
+        if absent:
+            names = " and ".join(repr(name) for name in absent)
+            detail = f"{names} matches no labelled geometry in this layout"
+        else:
+            detail = "they resolve to separate electrical nets"
+        findings.append(
+            _finding(
+                "erc.expected_short_missing",
+                (
+                    f"declared nets {a!r} and {b!r} are declared one net "
+                    f'("same_net_as") but the tie is not drawn: {detail}'
+                ),
+                net=a,
+                other_net=b,
+            )
+        )
+    return findings
+
+
+def _cross_name_short_findings(
+    cluster_to_names: dict[int, list[str]],
+    kind_by_name: dict[str, str],
+    group_by_name: dict[str, int],
+) -> list[dict[str, Any]]:
+    """``erc.supply_short`` / ``erc.multiply_driven_net`` findings: two
+    *different* declared net names whose matched nets share a
+    ``cluster_id`` are electrically the very same net regardless of their
+    separate labels. Reported per unordered pair (deterministic, sorted):
+    ``erc.supply_short`` when both are declared ``"kind": "supply"``, else
+    the more general ``erc.multiply_driven_net``.
+
+    A pair the spec declared as one net (``nets[].same_net_as``, issue
+    #2463 -- ``group_by_name``) is skipped: the short *is* the design, and
+    its **absence** is what gets reported instead, by
+    :func:`_expected_short_findings`. Every undeclared pair reports exactly
+    as it did before that key existed."""
+    findings: list[dict[str, Any]] = []
+    for names in cluster_to_names.values():
+        distinct = sorted(set(names))
+        for i in range(len(distinct)):
+            for j in range(i + 1, len(distinct)):
+                a, b = distinct[i], distinct[j]
+                if group_by_name[a] == group_by_name[b]:
+                    continue
+                both_supply = (
+                    kind_by_name[a] == "supply" and kind_by_name[b] == "supply"
+                )
+                rule = "erc.supply_short" if both_supply else "erc.multiply_driven_net"
+                findings.append(
+                    _finding(
+                        rule,
+                        (
+                            f"declared nets {a!r} and {b!r} are electrically "
+                            "the same net (shorted together)"
+                        ),
+                        net=a,
+                        other_net=b,
+                    )
+                )
+    return findings
+
+
 def _net_connectivity_findings(
     l2n: Any,
     circuit: Any,
@@ -2235,18 +2473,33 @@ def _net_connectivity_findings(
 
     Two *different* declared net names whose matched nets share a
     ``cluster_id`` are electrically the very same net regardless of their
-    separate labels -- a short. Reported per unordered pair (deterministic,
-    sorted): ``erc.supply_short`` when both are declared
-    ``"kind": "supply"``, else the more general ``erc.multiply_driven_net``.
+    separate labels -- a short (:func:`_cross_name_short_findings`).
+    Reported per unordered pair (deterministic, sorted):
+    ``erc.supply_short`` when both are declared ``"kind": "supply"``, else
+    the more general ``erc.multiply_driven_net``.
+
+    Unless the spec declared that pair as *intentionally* one net
+    (``nets[].same_net_as``, issue #2463): a sub-block port name and an
+    assembly name meeting on one deliberate conductor is a measurement, not
+    a defect, and before this key the only two options were a permanent
+    false ``erc.supply_short`` (declare both names) or no coverage of the
+    second name at all (declare one). A declared pair therefore reports no
+    short -- and, so the declaration adds a check instead of removing one,
+    its *absence* becomes ``erc.expected_short_missing``
+    (:func:`_expected_short_findings`): the tie is asserted to be drawn and
+    graded both ways, exactly as ``nets[].islands`` made the island count
+    falsifiable rather than silenceable.
     """
     if not nets_decl:
         return []
 
     findings: list[dict[str, Any]] = []
     matches: dict[str, list[Any]] = {}
+    clusters_by_name: dict[str, set[int]] = {}
     for decl in nets_decl:
         matched = _match_net_clusters(circuit, decl["name"])
         matches[decl["name"]] = matched
+        clusters_by_name[decl["name"]] = {net.cluster_id for net in matched}
         # The expected island count is the declared one (issue #2400;
         # ``nets[].islands``, default 1 -- the pre-#2400 "one label string
         # == one electrical net" model). Grading the count against the
@@ -2290,29 +2543,15 @@ def _net_connectivity_findings(
         for net in matches[decl["name"]]:
             cluster_to_names.setdefault(net.cluster_id, []).append(decl["name"])
 
-    kind_by_name = {decl["name"]: decl["kind"] for decl in nets_decl}
-    for names in cluster_to_names.values():
-        distinct = sorted(set(names))
-        if len(distinct) < 2:
-            continue
-        for i in range(len(distinct)):
-            for j in range(i + 1, len(distinct)):
-                a, b = distinct[i], distinct[j]
-                both_supply = (
-                    kind_by_name[a] == "supply" and kind_by_name[b] == "supply"
-                )
-                rule = "erc.supply_short" if both_supply else "erc.multiply_driven_net"
-                findings.append(
-                    _finding(
-                        rule,
-                        (
-                            f"declared nets {a!r} and {b!r} are electrically "
-                            "the same net (shorted together)"
-                        ),
-                        net=a,
-                        other_net=b,
-                    )
-                )
+    pairs = _declared_same_net_pairs(nets_decl)
+    findings.extend(
+        _cross_name_short_findings(
+            cluster_to_names,
+            {decl["name"]: decl["kind"] for decl in nets_decl},
+            _same_net_group_ids(nets_decl, pairs),
+        )
+    )
+    findings.extend(_expected_short_findings(pairs, clusters_by_name))
     return findings
 
 

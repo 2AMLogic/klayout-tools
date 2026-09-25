@@ -1777,6 +1777,275 @@ def test_supply_short_does_not_flag_separate_supplies(tmp_path):
     )
 
 
+# --- erc_findings: declared same-net tie (issue #2463) -----------------------
+
+
+def _bar(top, li1, label, x0, x1, names):
+    """One ``li1`` conductor from ``x0`` to ``x1`` micrometres carrying every
+    label in ``names`` -- two names on one bar is a drawn tie/short, one name
+    per bar is two separate nets."""
+    top.shapes(li1).insert(kdb.Box.new(_um(x0), _um(0), _um(x1), _um(1)))
+    for i, name in enumerate(names):
+        top.shapes(label).insert(kdb.Text(name, kdb.Trans(_um(x0 + 0.5 + i), _um(0.5))))
+
+
+def _same_net_as_report(tmp_path, name, nets, bars):
+    """Run `klt erc` over a layout whose ``li1`` bars are ``bars``
+    (``(x0, x1, [label, ...])`` triples) against a ``nets[]`` declaration.
+
+    The fixture gate is contacted through a ``licon`` via here (unlike the
+    bare :func:`_nets_fixture_layout`), so a clean run really does report an
+    empty ``erc_findings`` -- these tests assert on the whole findings list
+    rather than filtering one rule out of it."""
+    layout, top, poly, li1, label = _nets_fixture_layout()
+    licon = layout.layer(2, 0)
+    top.shapes(licon).insert(kdb.Box.new(_um(0.2), _um(0.2), _um(0.4), _um(0.4)))
+    for x0, x1, names in bars:
+        _bar(top, li1, label, x0, x1, names)
+    gds = tmp_path / f"{name}.gds"
+    layout.write(str(gds))
+    spec = tmp_path / f"{name}.erc.json"
+    spec_dict = _nets_spec(nets=nets)
+    spec_dict["vias"] = [{"name": "licon", "layer": "2/0", "between": ["poly", "li1"]}]
+    _write_spec(spec, spec_dict)
+    return run_erc(str(gds), str(spec))
+
+
+def test_same_net_as_grades_a_drawn_supply_tie_as_clean(tmp_path):
+    """Issue #2463: two declared names the spec says are intentionally one
+    net, drawn as one conductor, are the design -- not an `erc.supply_short`.
+    Pre-#2463 the only options were a permanent false positive (declare both)
+    or losing all coverage of the second name (declare one)."""
+    report = _same_net_as_report(
+        tmp_path,
+        "tie_drawn",
+        nets=[
+            {"name": "VSS", "kind": "supply"},
+            {"name": "VSS_SUB", "kind": "supply", "same_net_as": "VSS"},
+        ],
+        bars=[(10, 12, ["VSS", "VSS_SUB"])],
+    )
+
+    assert report["erc_findings"] == []
+    assert report["erc_finding_count"] == 0
+    assert report["erc_status"] == "clean"
+
+
+def test_same_net_as_reports_expected_short_missing_when_the_tie_is_absent(tmp_path):
+    """Issue #2463: the declaration adds a check rather than suppressing one
+    -- a declared tie that is *not* drawn is its own finding, so the spec
+    that grades signoff can assert the tie is still there."""
+    report = _same_net_as_report(
+        tmp_path,
+        "tie_absent",
+        nets=[
+            {"name": "VSS", "kind": "supply"},
+            {"name": "VSS_SUB", "kind": "supply", "same_net_as": "VSS"},
+        ],
+        bars=[(10, 11, ["VSS"]), (15, 16, ["VSS_SUB"])],
+    )
+
+    findings = [
+        f for f in report["erc_findings"] if f["rule"] == "erc.expected_short_missing"
+    ]
+    assert len(findings) == 1
+    assert findings[0]["net"] == "VSS"
+    assert findings[0]["other_net"] == "VSS_SUB"
+    assert "same_net_as" in findings[0]["description"]
+    assert "separate electrical nets" in findings[0]["description"]
+    # The uniform 8-key finding shape (issue #2194) holds for the new rule.
+    assert set(findings[0]) == {
+        "rule",
+        "description",
+        "net",
+        "other_net",
+        "gate_id",
+        "layer",
+        "bbox",
+        "islands",
+    }
+    assert findings[0]["islands"] is None
+    # The missing tie is a finding, so the connectivity roll-up is red.
+    assert report["erc_status"] == "violations"
+    # ... and the per-name island counts are each still satisfied, which is
+    # exactly why the absence needed its own rule.
+    assert not any(f["rule"] == "erc.unconnected_net" for f in report["erc_findings"])
+
+
+def test_same_net_as_grades_a_drawn_signal_tie_as_clean(tmp_path):
+    """Issue #2463 edge case: the declaration is about the *pairing*, not the
+    `kind` -- two tied ``"signal"`` names suppress `erc.multiply_driven_net`
+    the same way two supplies suppress `erc.supply_short`."""
+    report = _same_net_as_report(
+        tmp_path,
+        "signal_tie",
+        nets=[
+            {"name": "A", "kind": "signal"},
+            {"name": "B", "kind": "signal", "same_net_as": "A"},
+        ],
+        bars=[(10, 12, ["A", "B"])],
+    )
+
+    assert report["erc_findings"] == []
+
+
+def test_same_net_as_is_scoped_to_exactly_the_declared_pair(tmp_path):
+    """Issue #2463 regression guard: declaring one tie must not loosen the
+    short detection for any *other* pair. ``VSS``/``VSS_SUB`` are declared
+    one net and drawn as one; ``VDD`` landing on that same conductor is
+    still an `erc.supply_short` against both of them."""
+    report = _same_net_as_report(
+        tmp_path,
+        "third_net_short",
+        nets=[
+            {"name": "VSS", "kind": "supply"},
+            {"name": "VSS_SUB", "kind": "supply", "same_net_as": "VSS"},
+            {"name": "VDD", "kind": "supply"},
+        ],
+        bars=[(10, 14, ["VSS", "VSS_SUB", "VDD"])],
+    )
+
+    shorts = [f for f in report["erc_findings"] if f["rule"] == "erc.supply_short"]
+    assert {(f["net"], f["other_net"]) for f in shorts} == {
+        ("VDD", "VSS"),
+        ("VDD", "VSS_SUB"),
+    }
+    assert not any(
+        f["rule"] == "erc.expected_short_missing" for f in report["erc_findings"]
+    )
+
+
+def test_same_net_as_may_name_an_entry_declared_later(tmp_path):
+    """Issue #2463: the relation is symmetric, so the key may sit on either
+    entry of the pair -- a forward reference to a name declared further down
+    the array resolves the same way a backward one does."""
+    report = _same_net_as_report(
+        tmp_path,
+        "forward_ref",
+        nets=[
+            {"name": "VSS", "kind": "supply", "same_net_as": "VSS_SUB"},
+            {"name": "VSS_SUB", "kind": "supply"},
+        ],
+        bars=[(10, 12, ["VSS", "VSS_SUB"])],
+    )
+
+    assert report["erc_findings"] == []
+
+
+def test_same_net_as_chains_into_one_declared_group(tmp_path):
+    """Issue #2463: ``same_net_as`` is a pairwise key, and declaring A~B and
+    C~B necessarily asserts A, B and C are one net -- so every pair inside
+    the resulting group is expected, not just the two written down."""
+    report = _same_net_as_report(
+        tmp_path,
+        "chain",
+        nets=[
+            {"name": "VSS", "kind": "supply"},
+            {"name": "VSS_SUB", "kind": "supply", "same_net_as": "VSS"},
+            {"name": "VSS_GUARD", "kind": "supply", "same_net_as": "VSS_SUB"},
+        ],
+        bars=[(10, 14, ["VSS", "VSS_SUB", "VSS_GUARD"])],
+    )
+
+    assert report["erc_findings"] == []
+
+
+def test_same_net_as_reports_a_declared_partner_that_matches_no_geometry(tmp_path):
+    """Issue #2463: a tie whose partner name is not in the layout at all
+    cannot be satisfied either -- reported alongside the `erc.unconnected_net`
+    for the absent name rather than silently passing."""
+    report = _same_net_as_report(
+        tmp_path,
+        "absent_partner",
+        nets=[
+            {"name": "VSS", "kind": "supply"},
+            {"name": "VSS_SUB", "kind": "supply", "same_net_as": "VSS"},
+        ],
+        bars=[(10, 11, ["VSS"])],
+    )
+
+    missing = [
+        f for f in report["erc_findings"] if f["rule"] == "erc.expected_short_missing"
+    ]
+    assert len(missing) == 1
+    assert "matches no labelled geometry" in missing[0]["description"]
+    assert "VSS_SUB" in missing[0]["description"]
+    assert any(
+        f["rule"] == "erc.unconnected_net" and f["net"] == "VSS_SUB"
+        for f in report["erc_findings"]
+    )
+
+
+def test_same_net_as_does_not_change_the_connectivity_coverage_ids(tmp_path):
+    """Issue #2463: the new rule keys off the same `nets[]` declaration the
+    existing ones do, so `erc_coverage` still records one
+    `erc.net_connectivity` identity per declared entry -- no new work id."""
+    report = _same_net_as_report(
+        tmp_path,
+        "coverage",
+        nets=[
+            {"name": "VSS", "kind": "supply"},
+            {"name": "VSS_SUB", "kind": "supply", "same_net_as": "VSS"},
+        ],
+        bars=[(10, 12, ["VSS", "VSS_SUB"])],
+    )
+
+    checked = report["erc_coverage"]["checked"]
+    assert 'erc.net_connectivity:["VSS"]' in checked
+    assert 'erc.net_connectivity:["VSS_SUB"]' in checked
+    assert not any(entry.startswith("erc.expected_short_missing") for entry in checked)
+
+
+@pytest.mark.parametrize(
+    ("bad", "match"),
+    [
+        ("VGND", r"nets\[1\]\.same_net_as"),
+        ("VSS_SUB", r"nets\[1\]\.same_net_as"),
+        (7, r"nets\[1\]\.same_net_as"),
+        ("  ", r"nets\[1\]\.same_net_as"),
+    ],
+    ids=["undeclared-name", "self-reference", "not-a-string", "blank"],
+)
+def test_same_net_as_rejects_an_unusable_declaration(tmp_path, bad, match):
+    """Issue #2463: a `same_net_as` that cannot name a declared partner is a
+    spec error, not a silent no-op -- a typo'd partner would otherwise
+    suppress nothing, check nothing, and read as a passing tie declaration."""
+    layout, *_ = _nets_fixture_layout()
+    gds = tmp_path / "bad_same_net_as.gds"
+    layout.write(str(gds))
+    spec = tmp_path / "bad_same_net_as.erc.json"
+    _write_spec(
+        spec,
+        _nets_spec(
+            nets=[
+                {"name": "VSS", "kind": "supply"},
+                {"name": "VSS_SUB", "kind": "supply", "same_net_as": bad},
+            ]
+        ),
+    )
+    with pytest.raises(ErcError, match=match):
+        run_erc(str(gds), str(spec))
+
+
+def test_same_net_as_null_is_the_undeclared_form(tmp_path):
+    """Issue #2463: an explicit JSON ``null`` means "no tie declared", the
+    same as omitting the key -- so a spec generator emitting the key
+    unconditionally still gets today's `erc.supply_short` behaviour."""
+    report = _same_net_as_report(
+        tmp_path,
+        "null_tie",
+        nets=[
+            {"name": "VDD", "kind": "supply", "same_net_as": None},
+            {"name": "VSS", "kind": "supply", "same_net_as": None},
+        ],
+        bars=[(10, 12, ["VDD", "VSS"])],
+    )
+
+    shorts = [f for f in report["erc_findings"] if f["rule"] == "erc.supply_short"]
+    assert len(shorts) == 1
+    assert {shorts[0]["net"], shorts[0]["other_net"]} == {"VDD", "VSS"}
+
+
 # --- erc_findings: missing substrate/well tie (issue #861) -------------------
 
 

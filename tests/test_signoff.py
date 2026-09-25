@@ -9204,6 +9204,83 @@ def test_item_11_unmet_when_two_declared_supplies_are_shorted(tmp_path):
     assert _item_11(result)["reason"] == "supply_not_continuous"
 
 
+def test_item_11_unmet_when_a_declared_supply_tie_is_not_drawn(tmp_path):
+    """Issue #2463: a spec that declares two names as intentionally one net
+    (`nets[].same_net_as`) no longer reports `erc.supply_short` for that
+    pair -- so the *absence* of the tie, `erc.expected_short_missing`, is
+    what item 11 must grade instead. Otherwise declaring the tie would
+    convert a (false) blocking finding into no evidence at all."""
+    erc = {
+        **ERC_CLEAN_ENVELOPE,
+        "status": "violations",
+        "erc_findings": [
+            {
+                "rule": "erc.expected_short_missing",
+                "description": (
+                    "declared nets 'VGND' and 'VGND_SUB' are declared one net "
+                    '("same_net_as") but the tie is not drawn: they resolve to '
+                    "separate electrical nets"
+                ),
+                "net": "VGND",
+                "other_net": "VGND_SUB",
+                "gate_id": None,
+                "layer": None,
+                "bbox": None,
+                "islands": None,
+            }
+        ],
+        "erc_finding_count": 1,
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=erc
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["reason"] == "supply_not_continuous"
+
+
+def test_item_11_is_not_blocked_by_a_signal_side_expected_short_missing(tmp_path):
+    """Issue #2463: `erc.expected_short_missing` can name two *signal* nets
+    too (the declaration is about the pairing, not the `kind`), and item 11
+    grades power delivery only -- so a signal-side one is filtered out by the
+    same declared-supply-name test `erc.unconnected_net` already uses."""
+    erc = {
+        **ERC_CLEAN_ENVELOPE,
+        "status": "violations",
+        "erc_findings": [
+            {
+                "rule": "erc.expected_short_missing",
+                "description": "declared nets 'A' and 'A_ALIAS' ... not drawn",
+                "net": "A",
+                "other_net": "A_ALIAS",
+                "gate_id": None,
+                "layer": None,
+                "bbox": None,
+                "islands": None,
+            }
+        ],
+        "erc_finding_count": 1,
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_envelope=erc
+                )
+            },
+        )
+    )
+
+    assert _item_11(result)["status"] == "met"
+
+
 @pytest.mark.parametrize(
     "envelope",
     [ERC_ANTENNA_VIOLATION_ENVELOPE, ERC_FLOATING_GATE_ENVELOPE],
