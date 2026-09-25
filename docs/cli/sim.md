@@ -232,7 +232,9 @@ and runs the corner matrix on it, per Epic #253 Phase 2
 ([#265](https://github.com/2AMLogic/klayout-tools/issues/265),
 [`docs/design/remote-sim-backend-spike.md`](../design/remote-sim-backend-spike.md)).
 It is **the same code path as `local-parallel`, run on a different box**: the
-launcher pushes the netlist and a request-specific copy of the request over
+launcher pushes the netlist (plus its `.include`/`.inc` closure — see
+"Off-host backends stage the netlist's `.include` closure" below) and a
+request-specific copy of the request over
 SSH/SCP, then invokes `klt sim ... --backend local-parallel` directly on the
 provisioned instance (which the AMI build pipeline,
 `scripts/aws/build-remote-sim-ami.sh`, bakes `klt` itself into) and pulls the
@@ -433,7 +435,9 @@ What differs from `remote` is *who acquires the machine*:
 **The seam is 2am's, verbatim** (`infra/aws/batch-fleet.md` §"The seam: what
 a consumer-repo wrapper does"), and `klt` implements exactly its four steps:
 
-1. **write** `inputs/netlist.cir` + `inputs/request.json`, then
+1. **write** `inputs/netlist.cir` + `inputs/request.json` (plus one
+   `inputs/<name>` per staged `.include`/`.inc` target — see "Off-host
+   backends stage the netlist's `.include` closure" below), then
    `job.json` — uploaded last, so a launch can never observe a job spec
    whose inputs are still uploading.
 2. **launch** `batch-fleet-provision.sh launch --job <job-id> --apply
@@ -857,6 +861,49 @@ carries its own `.end` (a full deck exported as-is, e.g. straight off some
 schematic tools) is not supported in this version — strip the top-level
 control/end cards before pointing a request at it.
 
+## Off-host backends stage the netlist's `.include` closure
+
+A netlist may `.include`/`.inc` other files — that is `klt pex`'s whole
+testbench contract (a thin testbench that `.include`s its DUT, see
+[`pex.md`](pex.md)), and the repo's own worked examples are written that
+way. The off-host backends (`remote`, `batch`) therefore stage **the
+netlist's resolved include closure**, not just the netlist file
+([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)):
+
+- Every `.include`/`.inc` target that resolves to a readable file on the
+  submitting host is uploaded into the job directory (`inputs/` for
+  `batch`) alongside `netlist.cir`, **recursively** — an included file's own
+  includes are staged too, resolved against *its* directory, which is
+  ngspice's own rule.
+- The directive naming each staged file is rewritten to the flat,
+  job-relative name it was staged under, so nothing off-host ever depends on
+  a path that only exists on the submitting host. Staged names are generated
+  from the basename (sanitized, de-duplicated on collision), never taken
+  from the netlist's own text.
+- **An include that resolves nowhere on this host fails the submit** with a
+  named error (exit `1`) naming the file, line, target, and where it was
+  looked for — before any instance is provisioned or any object is written
+  to S3. Previously such a deck was shipped anyway and came back as a full
+  set of `error`/`unavailable_measurement` corners indistinguishable from a
+  real regression.
+- Two classes of include are deliberately **left verbatim**, because the
+  *executing* host owns their resolution: a target naming an environment
+  variable (`$PDK_ROOT/...`), and a target resolving under the PDK root the
+  request already forwards (`models.pdk_root`, else this host's `$PDK_ROOT`)
+  — the model library is baked into the fleet image and is never pushed per
+  job (see "Remote backend" above).
+- `.lib` cards are not followed: `.lib` is the model-library channel, which
+  `models`/`models.pdk` already resolve on the executing host (see "Model
+  library resolution" below).
+
+A closure larger than 64 files or 32 MiB is refused with the same named
+error rather than silently pushed — a closure that big is a host-resident
+library tree, which belongs under the PDK root or behind an environment
+variable.
+
+`local`/`local-parallel` are unaffected: they run on the host that resolved
+the paths in the first place.
+
 ## Corner axes
 
 - **`corners.process`** (`array<string | {"name": string, "sections":
@@ -1234,6 +1281,7 @@ command — see the spike's "Failure signalling" survey row). Every corner's
 | ------------------ | --------------------------------------------------------------------------- |
 | `singular_matrix`  | A `Warning: singular matrix` line.                                          |
 | `nonconvergence`   | Iteration-limit / gmin-stepping / source-stepping / time-step-too-small text. |
+| `missing_include`  | ngspice's own `Error: Could not find include file ...` — a `.include`/`.inc` target that did not resolve. Everything downstream of it (missing devices, then `.meas` cards finding no vector) reads like a broken circuit, so it gets its own code rather than surfacing only as measurement failures ([#2485](https://github.com/2AMLogic/klayout-tools/issues/2485)). For an off-host backend this is now unreachable by construction — the include closure is staged, or the submit is refused (see "Off-host backends stage the netlist's `.include` closure" above). |
 | `netlist`          | A top-level `Error:` line naming a syntax/unknown/undefined/parse/subckt problem. |
 | `model_bin_range`  | ngspice's own `Error: could not find a valid modelname` — undiagnostic on its own; enriched with the netlist's likely culprit instance (largest `w`, or `w * nf` when fingered, without `m=`) when one is found. See "Model bin-range diagnostic" below. |
 | `timeout`          | The per-corner `options.timeout_s` budget was exceeded; the process is killed. |

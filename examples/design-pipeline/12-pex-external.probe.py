@@ -106,16 +106,15 @@ def _sweep(netlist: str, side: str, work_dir: Path) -> list[dict]:
     The DUT is **inlined verbatim** into the generated deck rather than
     `.include`d. A `--measure-command` harness builds each leg's deck itself
     (that is exactly the contract `docs/cli/pex.md` describes), and a
-    self-contained deck is the only portable way to do it: `klt sim`'s
-    off-host backends (`remote`/`batch`, and therefore any host that sets
-    `$KLT_SIM_BACKEND` -- multi-unit requests like this 21-point grid route
-    there by default) stage only the *request's own* netlist file into the
-    job, so an `.include` naming a path on the submitting host resolves
-    nowhere on the executing one and every corner comes back
-    `"unavailable_measurement"`. Inlining keeps this example reproducible on
-    a laptop and on a batch fleet alike. Both netlists this is handed
-    (`07-reference.spice` and `klt pex`'s own extracted output) are
-    themselves `.include`-free, so one substitution is the whole DUT.
+    self-contained deck is the simplest portable way to do it -- it needs
+    nothing from the transport at all. Since issue #2485 an `.include` would
+    also work: `klt sim`'s off-host backends (`remote`/`batch`, where a
+    multi-unit request like this 21-point grid routes by default on any host
+    that sets `$KLT_SIM_BACKEND`) stage the netlist's whole include closure
+    and rewrite each directive to its staged, job-relative name. Both
+    netlists this is handed (`07-reference.spice` and `klt pex`'s own
+    extracted output) are themselves `.include`-free, so one substitution is
+    the whole DUT either way.
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     testbench = work_dir / "tail-sweep.testbench.spice"

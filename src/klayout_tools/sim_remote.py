@@ -62,7 +62,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any
 
-from . import remote_fleet, remote_transport
+from . import remote_fleet, remote_transport, sim_staging
 from .remote_launcher import RemoteLaunchError
 
 if TYPE_CHECKING:
@@ -449,6 +449,7 @@ def _run_remote(
             "into the provisioned instance)"
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
+    _preflight_include_closure(request, netlist_path)
 
     job_id = f"klt-sim-{uuid.uuid4().hex[:12]}"
     launcher = RemoteLauncher(
@@ -744,6 +745,7 @@ def _run_remote_fleet(
             "into every provisioned instance)"
         )
     ssh_user = remote_spec.get("ssh_user") or remote_transport.DEFAULT_SSH_USER
+    _preflight_include_closure(request, netlist_path)
 
     shards = _shard_corner_points(corner_points, hosts)
     job_id_prefix = f"klt-sim-fleet-{uuid.uuid4().hex[:8]}"
@@ -845,16 +847,48 @@ def _run_remote_fleet(
 _REMOTE_SIM_SUCCESS_EXIT_CODES: tuple[int, ...] = (0, 3, 4)
 
 
+def _preflight_include_closure(request: dict[str, Any], netlist_path: str) -> None:
+    """Resolve (and discard) the netlist's ``.include``/``.inc`` closure
+    before anything billable is provisioned, so an unstageable include is a
+    submit-time ``SimError`` rather than an EC2 instance launched, SSH'd
+    into, and torn down for a job that could never have run (issue #2485).
+
+    The same check the job description itself performs later, hoisted to the
+    same place :func:`_run_remote`/:func:`_run_remote_fleet` already validate
+    ``models.pdk``/``remote.ssh_key_path`` -- the "raise before any billable
+    AWS API call" discipline ``remote_launcher.require_cost_config`` applies
+    to cost-relevant fields. It reads only local text files, so running it
+    twice is cheap.
+    """
+    sim_staging.stage_sim_netlist(
+        request,
+        netlist_path,
+        netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
+        reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
+        backend="remote",
+    )
+
+
 def _build_remote_job_description(
     remote_request: dict[str, Any], netlist_path: str
 ) -> remote_transport.JobDescription:
     """Build the `klt sim` corner-fan-out job as a generic
     :class:`remote_transport.JobDescription` (issue #278, Epic #253 Phase
-    3): the netlist and the generated ``remote_request`` document are the
-    pushed inputs, ``klt sim ... --backend local-parallel --format json`` is
-    the remote command, and ``.klt/sim`` (``sim.run_sim``'s own
-    ``keep_artifacts`` default, since the remote invocation is never given
-    an explicit ``--outdir``) is the collected artifacts directory.
+    3): the netlist (plus its resolved ``.include``/``.inc`` closure) and the
+    generated ``remote_request`` document are the pushed inputs, ``klt sim
+    ... --backend local-parallel --format json`` is the remote command, and
+    ``.klt/sim`` (``sim.run_sim``'s own ``keep_artifacts`` default, since the
+    remote invocation is never given an explicit ``--outdir``) is the
+    collected artifacts directory.
+
+    The include closure (issue #2485) is resolved by
+    :func:`sim_staging.stage_sim_netlist` -- the *same* call
+    ``sim_batch._build_batch_job_spec`` makes, so the two independently
+    built input lists cannot drift apart on include handling. Each staged
+    file lands beside ``netlist.cir`` in the job directory under a flat
+    job-relative name, with the directives naming it rewritten to that name;
+    an include that resolves nowhere on this host raises ``SimError`` here,
+    before anything is pushed.
 
     This is the one and only place `klt sim`'s remote job shape is
     constructed -- :mod:`klayout_tools.remote_transport`'s push/run/collect
@@ -863,13 +897,24 @@ def _build_remote_job_description(
     :class:`remote_transport.JobDescription` here instead (see
     ``docs/design/remote-job-description.md``).
     """
+    staged = sim_staging.stage_sim_netlist(
+        remote_request,
+        netlist_path,
+        netlist_staged_name=remote_transport.REMOTE_NETLIST_FILENAME,
+        reserved_names=(remote_transport.REMOTE_REQUEST_FILENAME,),
+        backend="remote",
+    )
     return remote_transport.JobDescription(
         label="klt sim",
         inputs=(
-            remote_transport.JobInput(
-                remote_name=remote_transport.REMOTE_NETLIST_FILENAME,
-                label="netlist",
-                local_path=netlist_path,
+            *(
+                remote_transport.JobInput(
+                    remote_name=item.staged_name,
+                    label=item.label,
+                    local_path=item.local_path,
+                    content=item.content,
+                )
+                for item in staged.files
             ),
             remote_transport.JobInput(
                 remote_name=remote_transport.REMOTE_REQUEST_FILENAME,

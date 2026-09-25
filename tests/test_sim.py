@@ -1195,6 +1195,25 @@ def test_classify_diagnostics_netlist_error():
     assert "netlist" in codes
 
 
+def test_classify_diagnostics_missing_include():
+    """Issue #2485: ngspice's own `Could not find include file` line gets a
+    dedicated code. Everything it causes downstream (missing devices, then
+    `.meas` cards finding no vector) reads like a broken circuit, so without
+    this the corner surfaces only as measurement failures indistinguishable
+    from a real regression."""
+    log = (
+        "Error: Could not find include file 07-reference.spice\n"
+        "    While reading /home/ubuntu/job/netlist.cir\n"
+        "Error: no such device or model name vtail\n"
+    )
+    diagnostics = sim._classify_diagnostics(log)
+    codes = [d["code"] for d in diagnostics]
+    assert "missing_include" in codes
+    (diag,) = [d for d in diagnostics if d["code"] == "missing_include"]
+    assert diag["severity"] == "error"
+    assert "07-reference.spice" in diag["message"]
+
+
 def test_classify_diagnostics_clean_log_is_empty():
     log = "Note: Transient op finished successfully\nngspice-46 done\n"
     assert sim._classify_diagnostics(log) == []
@@ -5771,6 +5790,56 @@ def test_run_sim_remote_backend_pushes_local_parallel_request(tmp_path, monkeypa
     assert state["local_netlist_path"].endswith("body.spice")
     assert state["push_job_calls"] == 1
     assert state["cleanup_calls"] == 1
+
+
+def test_run_sim_remote_backend_stages_the_netlists_include_closure(
+    tmp_path, monkeypatch
+):
+    """Issue #2485: a testbench that `.include`s a separate DUT file (`klt
+    pex`'s whole testbench contract) must arrive off-host *with* that file.
+    Before this, only the netlist itself was pushed and the include resolved
+    against the executing host -- silently, as `unavailable_measurement`
+    rows."""
+    (tmp_path / "dut.spice").write_text(".subckt dut a b\nR1 a b 1k\n.ends\n")
+    (tmp_path / "body.spice").write_text(
+        '.param vdd=1.0\n.include "dut.spice"\nVdd vdd 0 DC {vdd}\nXd vdd 0 dut\n'
+    )
+    request = _write_request(
+        tmp_path, _base_remote_request(corners={"temperature_c": [10, 40]})
+    )
+    state = _install_fake_remote_transport(monkeypatch)
+
+    sim.run_sim(str(request))
+
+    job = state["job"]
+    by_name = {item.remote_name: item for item in job.inputs}
+    # netlist.cir + request.json (as before) + the staged DUT.
+    assert set(by_name) == {"netlist.cir", "request.json", "dut.spice"}
+    assert by_name["dut.spice"].local_path == str(tmp_path / "dut.spice")
+    # The pushed netlist points at the staged, job-relative name -- never at
+    # a path that only exists on the submitting host.
+    pushed_netlist = by_name["netlist.cir"].content
+    assert '.include "dut.spice"' in pushed_netlist
+    assert str(tmp_path) not in pushed_netlist
+
+
+def test_run_sim_remote_backend_refuses_an_unresolvable_include(tmp_path, monkeypatch):
+    """The other half of #2485: an include that resolves nowhere on this
+    host fails the submit with a named error instead of shipping a deck that
+    cannot run."""
+    (tmp_path / "body.spice").write_text('.include "no-such-dut.spice"\nR1 a b 1k\n')
+    request = _write_request(tmp_path, _base_remote_request())
+    state = _install_fake_remote_transport(monkeypatch)
+
+    _FakeRemoteLauncher.last_instance = None
+
+    with pytest.raises(sim.SimError, match="no-such-dut.spice"):
+        sim.run_sim(str(request))
+
+    # Refused before anything was pushed -- and before anything billable was
+    # provisioned (`_preflight_include_closure`).
+    assert state["push_job_calls"] == 0
+    assert _FakeRemoteLauncher.last_instance is None
 
 
 def test_run_sim_remote_backend_provisioning_failure_raises_simerror_and_tears_down(
