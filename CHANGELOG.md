@@ -14,6 +14,34 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2493, `klt sim`; additive — **no** `schema_version` bump): a
+  numerically valid but physically implausible ngspice solve (a compact
+  model evaluated far outside its fitted range) produces no distinguishing
+  log line for `_classify_diagnostics` to catch, so a `.meas` card sampling
+  that node was graded by the ordinary `limits` comparison exactly like a
+  legitimate result — turning a non-physical solve into an ordinary-looking
+  `pass` or `fail`. Two new **opt-in** declarations close the gap:
+  `options.node_voltage_bounds` (run-wide, voltage-scoped — only
+  auto-applies to a measurement with `unit: "V"`) and
+  `measurements[].plausible_range` (per-measurement, unscoped, overrides the
+  default). When either resolves for a measurement, that plausibility check
+  runs *before* `limits` and reclassifies an out-of-range value as
+  `status: "implausible_solution"` — a new status distinct from `pass`/
+  `fail`/`error`, outranking `fail` but not `error` in every aggregate
+  (`corners[].status`, `measurements[].status`, top-level `status`). New
+  top-level `implausible` count (alongside `passed`/`failed`/`errored`,
+  `0` by default) and CLI exit code `4` for it (same as `error`/
+  `not_checked`). `monte_carlo` statistics exclude implausible samples from
+  every pooled statistic, the same way they already exclude unextractable
+  ones (new `monte_carlo.implausible` count alongside `monte_carlo.errored`).
+  A `klt eval` gate on such a report likewise reports `exit_code: 4`, not
+  `3` — the same split `klt eval` already applies to an `lvs`
+  `"inconclusive"` (#1370), since `3` would claim the design missed a limit
+  when the value was never graded against one. Fully backward compatible:
+  neither field has a default, so an unmodified request behaves
+  byte-for-byte as before. See "Plausibility bounds" in
+  [`docs/cli/sim.md`](docs/cli/sim.md).
+
 - **Fixed** (#2485, `klt sim`'s `remote`/`batch` backends; additive — **no**
   `schema_version` bump, no request/response field changed): an off-host run
   staged only the request's *own* netlist file, so any netlist that

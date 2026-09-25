@@ -612,6 +612,38 @@ def test_lvs_gate_inconclusive_reports_exit_code_4(tmp_path, monkeypatch):
     assert report["valid"] is False
 
 
+def test_status_sim_implausible_solution_reports_exit_code_4():
+    """Issue #2493: a `klt sim` report with `status: "implausible_solution"`
+    gates as `fail` (the candidate has not cleared it) but carries **exit
+    code `4`**, not `3` -- the same split `_status_lvs` applies to
+    `"inconclusive"`. `3` would tell a human the design missed a limit, when
+    in fact the measured value was never graded against `limits` at all.
+    """
+    from klayout_tools.eval import _status_sim
+
+    status, exit_code, detail = _status_sim(
+        {
+            "status": "implausible_solution",
+            "passed": 0,
+            "failed": 0,
+            "errored": 0,
+            "implausible": 2,
+        }
+    )
+    assert (status, exit_code, detail) == ("fail", 4, 2)
+
+
+def test_status_sim_ordinary_statuses_unchanged_by_implausible_branch():
+    """Backward-compatibility guard for the branch above: a report that never
+    declares a plausibility bound can only carry the three pre-existing
+    statuses, and each still maps exactly as it did before issue #2493."""
+    from klayout_tools.eval import _status_sim
+
+    assert _status_sim({"status": "pass"}) == ("pass", 0, 0)
+    assert _status_sim({"status": "error", "errored": 1}) == ("fail", 4, 1)
+    assert _status_sim({"status": "fail", "failed": 3}) == ("fail", 3, 3)
+
+
 # --------------------------------------------------------------------------- #
 # sim gate (real ngspice, gated -- and the 4-gate composition test)
 # --------------------------------------------------------------------------- #

@@ -395,10 +395,28 @@ def _status_lvs(report: dict[str, Any]) -> tuple[str, int, Any]:
 
 
 def _status_sim(report: dict[str, Any]) -> tuple[str, int, Any]:
+    """``klt sim``'s three-outcome split, mirrored into an `eval` gate.
+
+    ``"implausible_solution"`` (issue #2493) gates as ``fail`` like every
+    non-``"pass"`` status -- an `eval` gate asks "may this candidate
+    proceed?", and a run whose measured value fell outside its declared
+    ``options.node_voltage_bounds``/``measurements[].plausible_range`` has
+    not cleared it. But it carries **exit code 4**, not ``3``, for the same
+    reason ``"error"`` does and the same reason :func:`_status_lvs` reports
+    ``4`` for ``"inconclusive"``: ``exit_code`` is documented as "the exit
+    code the cited check would itself have returned for this report"
+    (``docs/cli/eval.md``), and ``klt sim`` itself exits ``4`` there.
+    Reporting ``3`` would tell a human debugging a ``valid: false`` run that
+    the design missed a limit, when in fact the measured value was never
+    graded against ``limits`` at all -- exactly the false-fail conflation
+    issue #2493 exists to close, reproduced one layer up.
+    """
     if report["status"] == "pass":
         return "pass", 0, 0
     if report["status"] == "error":
         return "fail", 4, report.get("errored")
+    if report["status"] == "implausible_solution":
+        return "fail", 4, report.get("implausible")
     return "fail", 3, report.get("failed")
 
 
