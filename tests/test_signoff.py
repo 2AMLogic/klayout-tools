@@ -1450,12 +1450,19 @@ def _write(tmp_path, name: str, payload: dict) -> str:
     return str(path)
 
 
+#: Sentinel default for `_erc_evidence`'s `spec_content_hash` -- "compute
+#: the spec document's real digest", distinct from `None`, which means
+#: "record no `provenance.spec` block at all" (issue #2496).
+_AUTO_SPEC_HASH = object()
+
+
 def _erc_evidence(
     tmp_path,
     envelope: dict = ERC_CLEAN_ENVELOPE,
     spec: dict = ERC_SUPPLY_SPEC,
     *,
     prefix: str = "erc",
+    spec_content_hash: str | None | object = _AUTO_SPEC_HASH,
 ) -> str:
     """Write a `klt erc` envelope plus the spec document it names (issue
     #2025) and return the envelope's path.
@@ -1464,9 +1471,31 @@ def _erc_evidence(
     that document to learn which supplies were declared -- so the two can
     never be written independently in a test, or the grading would be
     reading a spec that does not exist.
+
+    Also pins `provenance.spec.content_hash` (issue #2049) to the spec
+    document's own real digest by default: `_erc_supply_spec` now verifies
+    its re-read of that document against this hash before trusting any
+    declaration in it (issue #2496), so every item-11 fixture routed
+    through this helper needs a hash that genuinely matches what it wrote,
+    or every such test would render `"unverifiable_provenance"` regardless
+    of what it actually means to exercise. Pass `spec_content_hash=None` to
+    simulate an envelope produced before #2049 (no `provenance.spec` block
+    at all); pass a specific string to simulate one recorded against a
+    different revision than the spec document actually written here.
     """
     spec_path = _write(tmp_path, f"{prefix}-spec.json", spec)
-    return _write(tmp_path, f"{prefix}.json", {**envelope, "spec": spec_path})
+    provenance = dict(envelope.get("provenance") or {})
+    if spec_content_hash is _AUTO_SPEC_HASH:
+        provenance["spec"] = {"content_hash": _hash_of(spec_path)}
+    elif spec_content_hash is None:
+        provenance.pop("spec", None)
+    else:
+        provenance["spec"] = {"content_hash": spec_content_hash}
+    return _write(
+        tmp_path,
+        f"{prefix}.json",
+        {**envelope, "spec": spec_path, "provenance": provenance},
+    )
 
 
 def _power_delivery_evidence(
@@ -1475,6 +1504,7 @@ def _power_delivery_evidence(
     kind: str = "analog",
     erc_envelope: dict = ERC_CLEAN_ENVELOPE,
     erc_spec: dict = ERC_SUPPLY_SPEC,
+    erc_spec_content_hash: str | None | object = _AUTO_SPEC_HASH,
     lvs_envelope: dict | None = None,
     par_envelope: dict | None = PLACE_AND_ROUTE_ENVELOPE,
     prefix: str = "pd",
@@ -1489,6 +1519,11 @@ def _power_delivery_evidence(
     branch (the same ERC run, a gate-level LVS report whose
     `power_connectivity` matched, and the `klt place-and-route` response
     proving a PDN was built).
+
+    `erc_spec_content_hash` forwards to `_erc_evidence` (issue #2496): the
+    default computes the real digest of `erc_spec` as written, `None`
+    simulates a pre-#2049 envelope with no `provenance.spec` block, and any
+    other string simulates one pinned against a different revision.
     """
     if lvs_envelope is None:
         lvs_envelope = (
@@ -1497,7 +1532,13 @@ def _power_delivery_evidence(
             else LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE
         )
     parts = [
-        _erc_evidence(tmp_path, erc_envelope, erc_spec, prefix=f"{prefix}-erc"),
+        _erc_evidence(
+            tmp_path,
+            erc_envelope,
+            erc_spec,
+            prefix=f"{prefix}-erc",
+            spec_content_hash=erc_spec_content_hash,
+        ),
         _write(tmp_path, f"{prefix}-lvs.json", lvs_envelope),
     ]
     if kind == "digital" and par_envelope is not None:
@@ -10068,6 +10109,82 @@ def test_item_11_unmet_when_the_erc_spec_document_cannot_be_read(tmp_path):
     assert _item_11(result)["reason"] == "supply_spec_incomplete"
 
 
+# --------------------------------------------------------------------------- #
+# Spec re-read verification (issue #2496): `_erc_supply_spec` re-reads the
+# spec document off disk to recover declarations the envelope itself does
+# not echo -- so, without checking that read against the envelope's own
+# `provenance.spec.content_hash` (issue #2049), editing the spec document
+# after the cited `klt erc` run silently changes what item 11 grades while
+# the envelope's own `erc_findings`/`erc_coverage` still describe the old
+# declarations.
+# --------------------------------------------------------------------------- #
+
+
+def test_item_11_met_when_the_erc_spec_content_hash_matches(tmp_path):
+    """The passing control: an honest, unmodified spec document whose
+    content still matches the citing envelope's own
+    `provenance.spec.content_hash` grades exactly as it always has."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={"11": _power_delivery_evidence(tmp_path, kind="digital")},
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["citation"]["power_delivery"]["supply_nets"] == ["VPWR", "VGND"]
+
+
+def test_item_11_unmet_when_the_erc_spec_was_edited_after_the_run(tmp_path):
+    """Editing the spec document after the cited `klt erc` run -- here,
+    declaring an extra supply net -- must never silently widen what item 11
+    is graded on. The envelope's own recorded `provenance.spec.content_hash`
+    no longer matches what is now on disk, so this renders `stale_evidence`,
+    never a `met` grown from a declaration the cited run never actually
+    checked."""
+    parts = _power_delivery_evidence(tmp_path, kind="digital")
+    spec_path = str(tmp_path / "pd-erc-spec.json")
+    assert os.path.exists(spec_path)
+
+    edited_spec = {
+        **ERC_SUPPLY_SPEC,
+        "nets": [*ERC_SUPPLY_SPEC["nets"], {"name": "VPWR2", "kind": "supply"}],
+    }
+    Path(spec_path).write_text(json.dumps(edited_spec))
+
+    result = build_tier_report(_manifest(kind="digital", evidence={"11": parts}))
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "stale_evidence"
+    assert item["citation"] is None
+
+
+def test_item_11_unmet_when_the_erc_envelope_predates_content_hash_provenance(
+    tmp_path,
+):
+    """An ERC envelope produced before issue #2049 carries no
+    `provenance.spec.content_hash` at all -- there is nothing to verify the
+    re-read spec document against, so this must render
+    `unverifiable_provenance`, never trust the disk read on faith."""
+    result = build_tier_report(
+        _manifest(
+            kind="digital",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path, kind="digital", erc_spec_content_hash=None
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "unverifiable_provenance"
+    assert item["citation"] is None
+
+
 def test_item_11_requires_both_an_erc_and_an_lvs_citation(tmp_path):
     """An ERC run alone proves supply continuity but says nothing about
     whether the supplies were part of the LVS compare -- "cite a different
@@ -10231,7 +10348,16 @@ def test_item_11_accepts_a_command_backed_part(tmp_path, monkeypatch):
     single citation does, so a gate-bound (command-backed) `klt erc` run
     works with no separate wiring."""
     spec_path = _write(tmp_path, "erc-spec.json", ERC_SUPPLY_SPEC)
-    erc_envelope = {**ERC_CLEAN_ENVELOPE, "spec": spec_path}
+    erc_envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "spec": spec_path,
+        # Issue #2496: `_erc_supply_spec` verifies its re-read of the spec
+        # document against this hash before trusting any declaration in it.
+        "provenance": {
+            **ERC_CLEAN_ENVELOPE["provenance"],
+            "spec": {"content_hash": _hash_of(spec_path)},
+        },
+    }
     lvs_path = _write(tmp_path, "lvs.json", LVS_MATCH_SUPPLY_CORRESPONDENCE_ENVELOPE)
 
     def fake_run(command, **kwargs):

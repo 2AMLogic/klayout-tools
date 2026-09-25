@@ -1557,6 +1557,18 @@ _REASON_ENVELOPE_VERSION_SKEW = "envelope_version_skew"
 #: ``resolution["content_hash_unresolved"]``, which then names what was
 #: named and where this looked, so that case stays distinguishable from an
 #: envelope that recorded no samples document at all).
+#:
+#: Issue #2496 adds a third route to both of these two reasons, item 11
+#: only: :func:`_erc_supply_spec_hash_reason` re-hashes the **spec**
+#: document a cited `klt erc` envelope names (not the layout
+#: ``resolution["content_hash"]`` above covers) and compares it to that
+#: envelope's own ``provenance.spec.content_hash`` (issue #2049) -- a
+#: mismatch renders
+#: :data:`_REASON_STALE_EVIDENCE`, no recorded hash at all (an envelope
+#: produced before #2049) renders this reason. Same two reasons, same
+#: "the remedy differs" distinction, applied to the second document a
+#: compound item-11 citation depends on instead of the manifest's pinned
+#: ``content_hash``.
 _REASON_UNVERIFIABLE_PROVENANCE = "unverifiable_provenance"
 
 #: Issue #2342: the evidence entry carried a ``"pointer"`` (an RFC 6901 JSON
@@ -1786,6 +1798,14 @@ _PARTIAL_STATUS_BY_KIND: dict[str, str] = {
 #:   :func:`_erc_missing_tie_skipped` -- a check that could not tell a tap
 #:   from a source/drain contact is likewise not a clean one), or its
 #:   stackup does not cover every strap layer the P&R response reports.
+#:   Deliberately distinct from :data:`_REASON_STALE_EVIDENCE`/
+#:   :data:`_REASON_UNVERIFIABLE_PROVENANCE` (issue #2496): a spec document
+#:   that could be read *and* still matches the envelope's own
+#:   ``provenance.spec.content_hash``, but simply declares an incomplete
+#:   set, is a layout-authoring gap (fix the spec); a spec whose content no
+#:   longer matches what the envelope pins, or that pins nothing at all, is
+#:   a provenance gap (re-run `klt erc`, or upgrade past #2049) -- see
+#:   :func:`_erc_supply_spec_hash_reason`.
 #:   Fix: widen the spec and re-run `klt erc`.
 #: - :data:`_REASON_SUPPLY_SPEC_DISCLOSED_UNEXPRESSIBLE` -- the cited `klt
 #:   erc` run declares zero ``ties[]``, exactly as
@@ -4200,7 +4220,13 @@ def build_tier_report(
       envelope. Distinct from ``"stale_evidence"``: no revision was ever
       recorded to compare against, so the remedy is to re-produce the
       evidence with a producer that records provenance, not to re-run the
-      same one again.
+      same one again. Item 11 only (issue #2496): both of these two reasons
+      can also come from the cited ``erc`` part's own **spec** document --
+      the second document item 11 reads, not the manifest-pinned layout
+      hash above -- no longer matching (or, for an envelope predating
+      #2049, never having recorded) that run's own
+      ``provenance.spec.content_hash``. See
+      :func:`_erc_supply_spec_hash_reason`.
     - ``"nothing_checked"`` (issue #1996) -- the evidence resolved to a
       recognised, *passing* envelope whose own ``coverage`` block states that
       the run checked nothing at all (``coverage.nothing_checked: true``,
@@ -4261,7 +4287,12 @@ def build_tier_report(
       declared with no disclosure of why (see
       ``"supply_spec_disclosed_unexpressible"`` below for the disclosed
       case) so ``erc.missing_tie`` was never computed, or a stackup that
-      does not cover every strap layer the P&R response reports.
+      does not cover every strap layer the P&R response reports. A spec
+      document that could not be *verified* against the envelope's own
+      ``provenance.spec.content_hash`` -- edited since the run, or the
+      envelope predates it (issue #2496) -- renders ``"stale_evidence"``/
+      ``"unverifiable_provenance"`` above instead, never this reason: an
+      unverified spec is a provenance gap, not a declaration gap.
     - ``"supply_spec_disclosed_unexpressible"`` (issue #2234, item 11 only)
       -- the cited `klt erc` run declares zero ``ties[]``, exactly as
       ``"supply_spec_incomplete"``'s "no ``ties[]``" case, but its spec
@@ -5551,13 +5582,72 @@ def _resolve_relative_to_spec(path: str, spec: dict[str, Any]) -> str:
     return path
 
 
-def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
+def _erc_supply_spec_hash_reason(
+    envelope: dict[str, Any], resolved_path: str
+) -> str | None:
+    """Verify the spec document :func:`_erc_supply_spec` just read against
+    the envelope's own ``provenance.spec.content_hash`` (issue #2049) --
+    ``None`` when they agree (or there is nothing to check against), else
+    the ``_REASON_*`` :func:`_erc_supply_spec` should fail with (issue
+    #2496).
+
+    `klt erc`'s envelope pins the spec document's content at the time it
+    ran, the same ``sha256:``-prefixed way ``provenance.input.content_hash``
+    pins the layout (``erc.py``, issue #2036). :func:`_erc_supply_spec`
+    re-reads that document off disk to recover the declarations the
+    envelope itself does not echo -- so, without this check, editing the
+    spec *after* the run (adding a supply net, flipping a ``kind``, editing
+    a ``ties[]`` entry) silently changes what item 11 is graded on while
+    the cited ``erc_findings``/``erc_coverage`` still describe the old
+    declarations. This re-hashes the document at ``resolved_path`` --
+    exactly the file `klt erc` hashed to produce
+    ``provenance.spec.content_hash`` in the first place -- and compares.
+
+    Returns :data:`_REASON_STALE_EVIDENCE` when the document *can* be
+    hashed but disagrees with the recorded pin -- the same reason a
+    manifest-pinned ``content_hash`` mismatch on any other item renders,
+    since both describe "this evidence no longer matches the revision it
+    was recorded against". Returns :data:`_REASON_UNVERIFIABLE_PROVENANCE`
+    when there is nothing to compare against: no ``provenance.spec`` block
+    at all (every `klt erc` envelope produced before #2049), or the
+    document could no longer be hashed at all (it existed a moment ago, for
+    :func:`_erc_supply_spec`'s own read, but this second read failed --
+    treated the same "nothing to compare against" way rather than as a
+    confirmed mismatch, since no comparison was actually made). Returns
+    ``None`` -- proceed -- only when a recorded hash is present and matches.
+    """
+    provenance = envelope.get("provenance")
+    spec_provenance = provenance.get("spec") if isinstance(provenance, dict) else None
+    recorded_hash = (
+        spec_provenance.get("content_hash")
+        if isinstance(spec_provenance, dict)
+        else None
+    )
+    if not isinstance(recorded_hash, str) or not recorded_hash:
+        return _REASON_UNVERIFIABLE_PROVENANCE
+    digest = sha256_file(resolved_path)
+    actual_hash = f"sha256:{digest}" if digest is not None else None
+    if actual_hash is None:
+        return _REASON_UNVERIFIABLE_PROVENANCE
+    if actual_hash != recorded_hash:
+        return _REASON_STALE_EVIDENCE
+    return None
+
+
+def _erc_supply_spec(
+    resolution: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
     """Read the **spec document** a resolved `klt erc` citation names
     (``envelope["spec"]``), and reduce it to the facts T1 item 11 grades
-    against -- or ``None`` when it cannot be read or parsed.
+    against -- or ``(None, <reason>)`` when it cannot be read or parsed
+    (``reason`` is ``None``), or when it can be read but no longer matches
+    the envelope's own recorded ``provenance.spec.content_hash`` (``reason``
+    is :data:`_REASON_STALE_EVIDENCE` or :data:`_REASON_UNVERIFIABLE_PROVENANCE`
+    -- see :func:`_erc_supply_spec_hash_reason`, issue #2496).
 
-    Returns ``{"supply_nets": [<name>, ...], "stackup": {<name/layer>, ...},
-    "tie_count": <int>, "ties_disclosure_reason": <str> | None}``:
+    Returns ``({"supply_nets": [<name>, ...], "stackup": {<name/layer>,
+    ...}, "tie_count": <int>, "ties_disclosure_reason": <str> | None}, None)``
+    on success:
 
     - ``supply_nets`` -- every ``nets[]`` entry declared ``"kind":
       "supply"``, by name. Item 11 requires at least one: `klt erc` computes
@@ -5590,24 +5680,37 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
     fabricate a verdict from its absence. ``klt signoff`` stays a pure
     *consumer* either way -- it changes no verb's own output.
 
+    **Verified against the envelope's own hash of it** (issue #2496). A
+    second document read off disk is only as trustworthy as its freshness:
+    without a check, editing the spec after the ERC run silently changes
+    what item 11 grades while the cited findings still describe the old
+    declarations. :func:`_erc_supply_spec_hash_reason` re-hashes the same
+    file and compares against ``provenance.spec.content_hash`` (issue
+    #2049) before any declaration below is trusted.
+
     Follow-up reconciliation, exactly as for `klt yield`: if `klt erc` later
     echoes its resolved ``nets``/``ties``/``stackup`` declarations in its own
     envelope, this function should prefer that echo and the disk read
-    becomes the fallback -- no change needed at any call site.
+    becomes the fallback -- no change needed at any call site (and the hash
+    check above becomes unnecessary for the same reason: the declarations
+    would then live *inside* the hash-pinned envelope itself).
     """
     envelope = resolution["envelope"]
     spec_path = envelope.get("spec")
     if not isinstance(spec_path, str):
-        return None
+        return None, None
 
+    resolved_path = _resolve_relative_to_spec(spec_path, resolution["spec"])
     try:
-        document = _read_json_source(
-            _resolve_relative_to_spec(spec_path, resolution["spec"]), "erc spec"
-        )
+        document = _read_json_source(resolved_path, "erc spec")
     except SignoffError:
-        return None
+        return None, None
     if not isinstance(document, dict):
-        return None
+        return None, None
+
+    hash_reason = _erc_supply_spec_hash_reason(envelope, resolved_path)
+    if hash_reason is not None:
+        return None, hash_reason
 
     ties = document.get("ties")
     disclosure = document.get("ties_disclosure")
@@ -5643,7 +5746,7 @@ def _erc_supply_spec(resolution: dict[str, Any]) -> dict[str, Any] | None:
         # disclosure was made is decided by the envelope's own recorded
         # coverage reason, never by re-reading the spec.
         "ties_disclosure_reason": disclosure_reason,
-    }
+    }, None
 
 
 def _erc_supply_findings(
@@ -6037,12 +6140,22 @@ def _resolve_erc_supply_spec(
     failure, ``supply_spec`` is ``None`` and ``reason``/``detail`` are the
     values :func:`_grade_power_delivery` should return directly (with status
     ``"unmet"`` and no citation).
+
+    Issue #2496: when :func:`_erc_supply_spec` itself reports a reason (the
+    document it re-read no longer matches the envelope's own
+    ``provenance.spec.content_hash``, or that envelope predates #2049 and
+    carries no such hash at all), that reason is returned directly rather
+    than collapsed into :data:`_REASON_SUPPLY_SPEC_INCOMPLETE` -- a stale or
+    unverifiable spec is a different failure than one that was faithfully
+    read and simply declares no supply.
     """
     erc_metric_detail = _critical_metric_detail(erc["envelope"])
     if erc_metric_detail:
         return None, _REASON_CHECK_FAILED, erc_metric_detail
 
-    supply_spec = _erc_supply_spec(erc)
+    supply_spec, supply_spec_reason = _erc_supply_spec(erc)
+    if supply_spec_reason is not None:
+        return None, supply_spec_reason, {}
     if supply_spec is None or not supply_spec["supply_nets"]:
         return None, _REASON_SUPPLY_SPEC_INCOMPLETE, {}
     if supply_spec["tie_count"] == 0:
@@ -6130,6 +6243,17 @@ def _grade_power_delivery(
     :data:`_REASON_SUPPLY_NOT_CONTINUOUS`,
     :data:`_REASON_LVS_SUPPLY_UNPROVEN`) are reserved for a cited set that
     resolved cleanly and still does not prove power delivery.
+    Issue #2496: ``stale_evidence``/``unverifiable_provenance`` can also
+    arise a second way for the ``erc`` part specifically -- not from the
+    manifest's pinned ``content_hash`` above, but from
+    :func:`_erc_supply_spec` re-verifying the *second* document it reads
+    (the spec named by ``envelope["spec"]``, which the envelope only
+    points at, never echoes) against that envelope's own
+    ``provenance.spec.content_hash`` before trusting any declaration read
+    from it. Both routes render the same two reasons for the same reason:
+    a citation whose input can no longer be confirmed against what was
+    pinned is not evidence, regardless of which of the part's two
+    documents drifted.
 
     The declared-critical-metric gate (issue #2094) applies to **both** the
     LVS and ERC parts, independent of everything else this function checks.
