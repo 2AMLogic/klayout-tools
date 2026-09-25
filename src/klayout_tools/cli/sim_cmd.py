@@ -12,12 +12,15 @@ Exit codes (see ``docs/cli/sim.md`` for the full table):
         library, unsupported engine, unknown backend) -- returned by ``emit_error`` as
         ``output.ERROR_EXIT_CODE``
     3 - ran successfully, at least one measurement failed a limit
-    4 - at least one corner errored, at least one measurement graded
-        ``"implausible_solution"`` (issue #2493 -- a value outside a
-        declared ``options.node_voltage_bounds``/``measurements[].
-        plausible_range``, never a real pass or fail), or zero
-        measurements/bounds were actually checked (``status:
-        "not_checked"``) -- the sweep is incomplete/untrustworthy
+    4 - at least one corner errored (``status: "error"``), at least one
+        corner was graded ``inconclusive`` (``status: "inconclusive"`` --
+        ``options.fail_on_diagnostic`` named a code the solve emitted, issue
+        #2492, or a value fell outside a declared
+        ``options.node_voltage_bounds``/``measurements[].plausible_range``,
+        issue #2493; either way a number exists but is not a real pass or
+        fail), or zero measurements/bounds were actually checked
+        (``status: "not_checked"``) -- the sweep is
+        incomplete/untrustworthy
 (2 is reserved for argparse usage errors, as with every other ``klt`` subcommand.)
 
 Exit codes 3/4 extend drc's precedent (0/1/2/3) rather than reusing 2, per
@@ -63,18 +66,19 @@ def run(args: argparse.Namespace) -> int:
             resume=args.resume,
             plot_dir=args.plot,
             fail_fast_probe=args.fail_fast_probe,
+            fail_on_diagnostic=args.fail_on_diagnostic,
         )
     except SimError as exc:
         return emit_error("sim", str(exc), args.format)
 
     emit_success(report, args.format, _print_text)
 
-    # Issue #2493: `"implausible_solution"` joins `"error"`/`"not_checked"`
+    # Issues #2492 + #2493: `"inconclusive"` joins `"error"`/`"not_checked"`
     # at exit 4, not the `EXIT_PASS` a status matching neither branch below
-    # would otherwise fall through to -- an implausible-but-numerically-
-    # valid solve is exactly as untrustworthy for grading purposes as a
-    # corner that errored outright, and must not exit clean.
-    if report["status"] in {"error", "not_checked", "implausible_solution"}:
+    # would otherwise fall through to -- a solve this run will not vouch for
+    # is exactly as untrustworthy for grading purposes as a corner that
+    # errored outright, and must not exit clean.
+    if report["status"] in {"error", "not_checked", "inconclusive"}:
         return EXIT_CORNER_ERRORED
     if report["status"] == "fail":
         return EXIT_MEASUREMENT_FAILED
@@ -158,9 +162,11 @@ def _print_text(report: dict) -> None:
         f"passed: {report['passed']}  "
         f"failed: {report['failed']}  "
         f"errored: {report['errored']}  "
-        # Issue #2493: always printed alongside its three siblings, `0`
-        # for any request that never declares a plausibility bound.
-        f"implausible: {report['implausible']}"
+        # Issues #2492 + #2493: always shown (`0` unless the request declared
+        # `options.fail_on_diagnostic` or a plausibility bound) so the four
+        # counts on this line always add up to `corners:` -- a reader must
+        # never have to work out which corners the summary silently dropped.
+        f"inconclusive: {report['inconclusive']}"
     )
 
     env = report["environment"]

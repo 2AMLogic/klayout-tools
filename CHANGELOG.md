@@ -30,33 +30,74 @@ not `klt --version`, if you need to detect this kind of drift. See
   manifest-pinned layout hash; this closes the same class of gap for the
   compound citation's second document. See "T1 item 11" in
   [`docs/cli/signoff.md`](docs/cli/signoff.md).
-- **Added** (#2493, `klt sim`; additive — **no** `schema_version` bump): a
-  numerically valid but physically implausible ngspice solve (a compact
-  model evaluated far outside its fitted range) produces no distinguishing
-  log line for `_classify_diagnostics` to catch, so a `.meas` card sampling
-  that node was graded by the ordinary `limits` comparison exactly like a
-  legitimate result — turning a non-physical solve into an ordinary-looking
-  `pass` or `fail`. Two new **opt-in** declarations close the gap:
-  `options.node_voltage_bounds` (run-wide, voltage-scoped — only
-  auto-applies to a measurement with `unit: "V"`) and
-  `measurements[].plausible_range` (per-measurement, unscoped, overrides the
-  default). When either resolves for a measurement, that plausibility check
-  runs *before* `limits` and reclassifies an out-of-range value as
-  `status: "implausible_solution"` — a new status distinct from `pass`/
-  `fail`/`error`, outranking `fail` but not `error` in every aggregate
-  (`corners[].status`, `measurements[].status`, top-level `status`). New
-  top-level `implausible` count (alongside `passed`/`failed`/`errored`,
-  `0` by default) and CLI exit code `4` for it (same as `error`/
-  `not_checked`). `monte_carlo` statistics exclude implausible samples from
-  every pooled statistic, the same way they already exclude unextractable
-  ones (new `monte_carlo.implausible` count alongside `monte_carlo.errored`).
-  A `klt eval` gate on such a report likewise reports `exit_code: 4`, not
-  `3` — the same split `klt eval` already applies to an `lvs`
-  `"inconclusive"` (#1370), since `3` would claim the design missed a limit
-  when the value was never graded against one. Fully backward compatible:
-  neither field has a default, so an unmodified request behaves
-  byte-for-byte as before. See "Plausibility bounds" in
-  [`docs/cli/sim.md`](docs/cli/sim.md).
+- **Added** (#2492 + #2493, `klt sim`; additive — **no** `schema_version`
+  bump, and **no** behavior change for a request that opts into neither):
+  one new status, `"inconclusive"`, for *the run produced a number but will
+  not vouch for it*, with **two opt-in ways to reach it**.
+
+  1. `options.fail_on_diagnostic: ["<code>", ...]` (#2492; plus a repeatable
+     `--fail-on-diagnostic <code>` CLI flag) grades any corner that emitted
+     one of the listed `diagnostics[].code` values `inconclusive` rather than
+     `pass`/`fail`. The match is taken on the code **before** the
+     recovered-stepping severity downgrade, which is the point: a
+     `singular_matrix`/`nonconvergence` that ngspice's own gmin/source
+     stepping recovered from is graded exactly like a clean corner today, and
+     this is how a caller says they do not trust a solve that needed stepping
+     to converge. An unrecognized code is an application error (exit `1`), not
+     a silent no-op. The corner gains an `inconclusive` marker diagnostic
+     naming the code(s) that disqualified it.
+  2. `options.node_voltage_bounds` (run-wide, voltage-scoped — only
+     auto-applies to a measurement with `unit: "V"`) and
+     `measurements[].plausible_range` (per-measurement, unscoped, overrides
+     the default) (#2493). A numerically valid but physically implausible
+     ngspice solve (a compact model evaluated far outside its fitted range)
+     produces no distinguishing log line for `_classify_diagnostics` to
+     catch, so a `.meas` card sampling that node was graded by the ordinary
+     `limits` comparison exactly like a legitimate result — turning a
+     non-physical solve into an ordinary-looking `pass` or `fail`. When
+     either declaration resolves for a measurement, that plausibility check
+     runs *before* `limits` and grades an out-of-range value `inconclusive`
+     with `margin: null` (`limits` never ran) and an `implausible_solution`
+     marker diagnostic. `coverage` skips the `/limit/...` row that bound was
+     never applied to while still counting its `/observation`.
+
+  **One status, two reason codes — not two statuses.** Both declarations
+  assert exactly the same thing about the report (a number exists and must
+  not be graded against `limits` as if it were a result), so they share one
+  status token, one count, one Monte Carlo field and one precedence slot;
+  which reason applied is read off the marker diagnostic's `code`
+  (`inconclusive` vs. `implausible_solution`), which `diagnostic_counts`
+  (#2491) already rolls up per code. Precedence is
+  `error > inconclusive > fail > pass` at the corner level, in the
+  per-measurement rollup, and at the top level. The always-present top-level
+  `inconclusive` count (and `sim__corner__inconclusive_count` metric,
+  registered `critical: true`) keeps
+  `passed + failed + errored + inconclusive == corner_count`, so a consumer
+  scanning only the original three cannot silently miscount. A nonzero value
+  makes the aggregate `status` `"inconclusive"` at exit `4` (already
+  documented as "incomplete or **untrustworthy**") unless a corner also
+  errored — the same top-level token/exit-code pair `klt lvs` already ships
+  (#1370), kept distinct from `"error"` so "the simulator broke" stays
+  distinguishable from "I do not trust these numbers". Monte Carlo samples
+  the run will not vouch for (either reason) are **excluded** from that
+  measurement's statistics — mean/stddev/min/max/quantiles and the
+  `sigma_window` derived from them — and counted in the statistics block's
+  new `inconclusive` field (`n + errored + inconclusive` is the full draw),
+  so a disowned sample cannot move the very mean and sigma a window verdict
+  rests on. `klt eval`'s own `sim` gate reports `exit_code: 4` (not `3`) for
+  an `inconclusive` report — the same split it already applies to an `lvs`
+  `"inconclusive"` (#1370) — and cites `errored + inconclusive` as that
+  branch's headline `count`, so a sweep whose only untrustworthy corners were
+  graded this way is no longer reported as a failing gate with a count of
+  zero. See [`docs/cli/sim.md`](docs/cli/sim.md)'s "Grading a recovered
+  diagnostic as inconclusive", "Plausibility bounds", and "One status, two
+  reasons".
+
+  *Reconciliation note:* #2493 shipped first and briefly used a separate
+  `status: "implausible_solution"` token with its own top-level `implausible`
+  count and `monte_carlo.implausible` field. Both are folded into
+  `inconclusive`/`monte_carlo.inconclusive` here, within the same unreleased
+  window, so no released contract surface changes.
 
 - **Fixed** (#2485, `klt sim`'s `remote`/`batch` backends; additive — **no**
   `schema_version` bump, no request/response field changed): an off-host run

@@ -378,6 +378,22 @@ register(
         "errored). Critical: any nonzero value is a signoff blocker."
     ),
 )
+register(
+    "sim__corner__inconclusive_count",
+    aggregator="sum",
+    higher_is_better=False,
+    critical=True,
+    domain="nonnegative_integer",
+    description=(
+        "Number of corners graded inconclusive (issue #2492): the corner "
+        "produced numbers, but a diagnostic the caller listed in "
+        "`options.fail_on_diagnostic` says its solve did not convincingly "
+        "converge, so those numbers are not trusted. Always 0 unless the "
+        "request opts in. Critical: any nonzero value is a signoff blocker, "
+        "for the same reason `sim__corner__errored_count` is -- no "
+        "trustworthy result exists for that corner."
+    ),
+)
 
 # --------------------------------------------------------------------------
 # `klt extract` adoption (issue #1848, extending #247's registry beyond its

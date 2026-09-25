@@ -528,6 +528,28 @@ def _add_sim_parser(subparsers: argparse._SubParsersAction) -> None:
         ),
     )
     sim_parser.add_argument(
+        "--fail-on-diagnostic",
+        dest="fail_on_diagnostic",
+        action="append",
+        metavar="CODE",
+        default=None,
+        help=(
+            "grade any corner that emitted this diagnostic code "
+            "`inconclusive` rather than pass/fail -- 'the solve did not "
+            "convincingly converge' reported as a distinct claim from 'the "
+            "circuit missed its spec' (issue #2492). Repeatable. Matches on "
+            "the code even when the recovered-stepping rule downgraded that "
+            "diagnostic to severity `warning`, which is the point: it is how "
+            "a caller says they do not trust a solve that needed "
+            "gmin/source stepping to converge (`--fail-on-diagnostic "
+            "singular_matrix`). Overrides the request's own "
+            "`options.fail_on_diagnostic` when given; an unknown code is an "
+            "error. Applies to the `local`/`local-parallel` backends -- an "
+            "off-host shard reads the request's own option instead. See "
+            "docs/cli/sim.md."
+        ),
+    )
+    sim_parser.add_argument(
         "--plot",
         dest="plot",
         default=None,

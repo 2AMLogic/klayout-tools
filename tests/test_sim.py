@@ -22,6 +22,8 @@ Two tiers, per the issue's testing requirement (#91):
 
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import os
 import re
@@ -34,7 +36,7 @@ import pytest
 
 from helpers.subprocess_fakes import fake_completed
 from klayout_tools import _paths as paths_module
-from klayout_tools import pdk, remote_transport, sim
+from klayout_tools import pdk, remote_transport, sim, sim_batch, sim_remote
 from klayout_tools import remote_launcher as rl
 from klayout_tools.cli import main
 
@@ -1547,7 +1549,9 @@ def test_grade_measurement_value_checks_plausibility_before_limits():
         142.7,
     )
 
-    assert status == "implausible_solution"
+    # One status shared with issue #2492's `options.fail_on_diagnostic`; the
+    # `implausible_solution` diagnostic code is what names *this* reason.
+    assert status == "inconclusive"
     assert margin is None
     assert [d["code"] for d in diagnostics] == ["implausible_solution"]
     assert diagnostics[0]["severity"] == "warning"
@@ -1674,9 +1678,10 @@ def test_build_coverage_a_characterisation_sweep_is_not_flagged():
 
 
 def test_build_coverage_implausible_measurement_skips_its_limit_bound():
-    """Issue #2493: an `"implausible_solution"` measurement produced a value,
-    but its `limits` comparison never ran -- so the `/limit/...` coverage row
-    is *skipped* (reason `implausible_solution`), never counted as checked.
+    """Issue #2493: a measurement graded `"inconclusive"` by the plausibility
+    pre-check produced a value, but its `limits` comparison never ran -- so
+    the `/limit/...` coverage row is *skipped*, with the reason still naming
+    the specific cause (`implausible_solution`), never counted as checked.
     An implausible value silently counted as a graded bound would let the
     very solve this status exists to flag sneak back into `coverage` as
     evidence the bound held."""
@@ -1689,7 +1694,7 @@ def test_build_coverage_implausible_measurement_skips_its_limit_bound():
                     {
                         "name": "vout",
                         "value": 142.7,
-                        "status": "implausible_solution",
+                        "status": "inconclusive",
                     }
                 ],
             }
@@ -1718,7 +1723,7 @@ def test_build_coverage_implausible_characterisation_still_counts_as_observed():
                     {
                         "name": "vout",
                         "value": 142.7,
-                        "status": "implausible_solution",
+                        "status": "inconclusive",
                     }
                 ],
             }
@@ -2965,18 +2970,22 @@ def test_run_sim_stubbed_pass(tmp_path, monkeypatch):
     assert corner["measurements"][0]["status"] == "pass"
     # Issue #1849: `metrics` re-keys the corner_count/passed/failed/errored
     # rollup under its declared METRICS2.1-style names, additive alongside
-    # the existing fields.
+    # the existing fields. Issue #2492 adds the parallel `inconclusive`
+    # count/metric -- always present, `0` for a request that declares no
+    # `options.fail_on_diagnostic`.
     assert report["metrics"] == {
         "sim__corner__count": report["corner_count"],
         "sim__corner__passed_count": report["passed"],
         "sim__corner__failed_count": report["failed"],
         "sim__corner__errored_count": report["errored"],
+        "sim__corner__inconclusive_count": report["inconclusive"],
     }
     assert report["metrics"] == {
         "sim__corner__count": 1,
         "sim__corner__passed_count": 1,
         "sim__corner__failed_count": 0,
         "sim__corner__errored_count": 0,
+        "sim__corner__inconclusive_count": 0,
     }
 
 
@@ -3612,7 +3621,7 @@ def _sampled_implausible_corner(base: str, sample_index: int, value: float) -> d
                 "name": "vref",
                 "value": value,
                 "margin": None,
-                "status": "implausible_solution",
+                "status": "inconclusive",
             }
         ],
     }
@@ -3637,10 +3646,10 @@ def test_rollup_measurements_excludes_implausible_samples_from_statistics():
         {"quantiles": sim.DEFAULT_MC_QUANTILES, "k_sigma": None},
     )
 
-    assert entry["status"] == "implausible_solution"
+    assert entry["status"] == "inconclusive"
     assert entry["monte_carlo"]["n"] == 2
     assert entry["monte_carlo"]["errored"] == 0
-    assert entry["monte_carlo"]["implausible"] == 1
+    assert entry["monte_carlo"]["inconclusive"] == 1
     assert entry["monte_carlo"]["mean"] == pytest.approx(2.0)
     assert entry["monte_carlo"]["max"] == pytest.approx(3.0)  # not 1e12
 
@@ -3650,7 +3659,7 @@ def test_rollup_measurements_sigma_window_never_downgrades_implausible_to_fail()
     window is a *second* `_evaluate_limits` call site, reached after the
     per-measurement aggregate is already set. A violated window normally
     forces the entry to `"fail"` -- it must not do so over an
-    `"implausible_solution"` aggregate, or the false-fail artifact would
+    `"inconclusive"` aggregate, or the false-fail artifact would
     reappear one layer up, on a path the per-corner pre-check never sees.
     """
     corners = [
@@ -3668,13 +3677,13 @@ def test_rollup_measurements_sigma_window_never_downgrades_implausible_to_fail()
     # The window itself is computed over the two plausible samples only and
     # does violate the `max: 1.5` bound ...
     assert entry["monte_carlo"]["sigma_window"]["status"] == "fail"
-    # ... but it never overwrites the stronger `implausible_solution` verdict.
-    assert entry["status"] == "implausible_solution"
+    # ... but it never overwrites the stronger `inconclusive` verdict.
+    assert entry["status"] == "inconclusive"
 
 
 def test_rollup_measurements_implausible_outranks_fail():
     """Issue #2493: the per-measurement aggregate mirrors `_run_corner`'s own
-    `error > implausible_solution > fail > pass` precedence."""
+    `error > inconclusive > fail > pass` precedence."""
     corners = [
         {
             "corner_id": "a",
@@ -3689,7 +3698,7 @@ def test_rollup_measurements_implausible_outranks_fail():
                     "name": "vref",
                     "value": 1e9,
                     "margin": None,
-                    "status": "implausible_solution",
+                    "status": "inconclusive",
                 }
             ],
         },
@@ -3697,7 +3706,7 @@ def test_rollup_measurements_implausible_outranks_fail():
 
     (entry,) = sim._rollup_measurements([{"name": "vref"}], corners)
 
-    assert entry["status"] == "implausible_solution"
+    assert entry["status"] == "inconclusive"
 
 
 def test_rollup_measurements_by_corner_splits_per_originating_corner():
@@ -5622,6 +5631,7 @@ def test_run_sim_stubbed_fail(tmp_path, monkeypatch):
         "sim__corner__passed_count": report["passed"],
         "sim__corner__failed_count": report["failed"],
         "sim__corner__errored_count": report["errored"],
+        "sim__corner__inconclusive_count": report["inconclusive"],
     }
     assert report["metrics"]["sim__corner__failed_count"] == 1
 
@@ -5672,7 +5682,7 @@ def test_run_sim_stubbed_out_of_range_value_without_bound_grades_fail(
 
     assert report["status"] == "fail"
     assert report["failed"] == 1
-    assert report["implausible"] == 0
+    assert report["inconclusive"] == 0
     (corner,) = report["corners"]
     assert corner["status"] == "fail"
     assert corner["measurements"][0]["status"] == "fail"
@@ -5682,9 +5692,10 @@ def test_run_sim_stubbed_measurement_plausible_range_grades_implausible(
     tmp_path, monkeypatch
 ):
     """Same 142.7 reading, same `limits` -- but this measurement also
-    declares `plausible_range`, so it grades `"implausible_solution"`
-    instead of `"fail"`, and the check never reaches `_evaluate_limits`
-    (`margin` stays `null`)."""
+    declares `plausible_range`, so it grades `"inconclusive"` (with an
+    `implausible_solution` diagnostic naming the reason) instead of
+    `"fail"`, and the check never reaches `_evaluate_limits` (`margin` stays
+    `null`)."""
     _write_body(tmp_path)
     request = _write_request(
         tmp_path,
@@ -5706,23 +5717,31 @@ def test_run_sim_stubbed_measurement_plausible_range_grades_implausible(
 
     report = sim.run_sim(str(request))
 
-    assert report["status"] == "implausible_solution"
+    assert report["status"] == "inconclusive"
     assert report["failed"] == 0
     assert report["passed"] == 0
     assert report["errored"] == 0
-    assert report["implausible"] == 1
+    assert report["inconclusive"] == 1
+    # The four counts still sum to `corner_count` (the merged invariant).
+    assert (
+        report["passed"] + report["failed"] + report["errored"] + report["inconclusive"]
+        == report["corner_count"]
+    )
     (corner,) = report["corners"]
-    assert corner["status"] == "implausible_solution"
+    assert corner["status"] == "inconclusive"
     measurement = corner["measurements"][0]
-    assert measurement["status"] == "implausible_solution"
+    assert measurement["status"] == "inconclusive"
     assert measurement["value"] == pytest.approx(142.7)
     assert measurement["margin"] is None
+    # The *reason* stays distinguishable in the diagnostic code -- and so in
+    # `diagnostic_counts` -- even though the status is shared with #2492.
     codes = [d["code"] for d in corner["diagnostics"]]
     assert "implausible_solution" in codes
+    assert report["diagnostic_counts"]["by_code"]["implausible_solution"] == 1
     diag = next(d for d in corner["diagnostics"] if d["code"] == "implausible_solution")
     assert diag["severity"] == "warning"  # never "error" -- status carries the grade
     (rollup_entry,) = report["measurements"]
-    assert rollup_entry["status"] == "implausible_solution"
+    assert rollup_entry["status"] == "inconclusive"
     assert rollup_entry["plausible_range"] == {"min": -0.5, "max": 2.5}
 
 
@@ -5752,9 +5771,9 @@ def test_run_sim_stubbed_node_voltage_bounds_applies_to_voltage_unit(
 
     report = sim.run_sim(str(request))
 
-    assert report["status"] == "implausible_solution"
+    assert report["status"] == "inconclusive"
     (corner,) = report["corners"]
-    assert corner["measurements"][0]["status"] == "implausible_solution"
+    assert corner["measurements"][0]["status"] == "inconclusive"
 
 
 def test_run_sim_stubbed_node_voltage_bounds_does_not_apply_to_non_voltage_unit(
@@ -5785,7 +5804,7 @@ def test_run_sim_stubbed_node_voltage_bounds_does_not_apply_to_non_voltage_unit(
     report = sim.run_sim(str(request))
 
     assert report["status"] == "fail"
-    assert report["implausible"] == 0
+    assert report["inconclusive"] == 0
     (corner,) = report["corners"]
     assert corner["measurements"][0]["status"] == "fail"
 
@@ -5821,7 +5840,7 @@ def test_run_sim_stubbed_measurement_plausible_range_overrides_node_voltage_boun
     report = sim.run_sim(str(request))
 
     assert report["status"] == "pass"
-    assert report["implausible"] == 0
+    assert report["inconclusive"] == 0
     (corner,) = report["corners"]
     assert corner["measurements"][0]["status"] == "pass"
 
@@ -5853,8 +5872,8 @@ def test_run_sim_stubbed_plausible_range_bracketing_limits_never_triggers(
 
     report = sim.run_sim(str(request))
 
-    assert report["status"] == "fail"  # not implausible_solution
-    assert report["implausible"] == 0
+    assert report["status"] == "fail"  # not inconclusive
+    assert report["inconclusive"] == 0
     (corner,) = report["corners"]
     assert corner["measurements"][0]["status"] == "fail"
 
@@ -5907,8 +5926,8 @@ def test_run_sim_rejects_malformed_measurement_plausible_range(tmp_path, monkeyp
         sim.run_sim(str(request))
 
 
-def test_cli_implausible_solution_exits_4(tmp_path, monkeypatch, capsys):
-    """Issue #2493: `"implausible_solution"` joins `"error"`/`"not_checked"`
+def test_cli_inconclusive_exits_4(tmp_path, monkeypatch, capsys):
+    """Issues #2492 + #2493: `"inconclusive"` joins `"error"`/`"not_checked"`
     at CLI exit code 4 -- never the `EXIT_PASS` a status matching neither of
     the CLI's other two branches would otherwise fall through to."""
     _write_body(tmp_path)
@@ -5934,7 +5953,7 @@ def test_cli_implausible_solution_exits_4(tmp_path, monkeypatch, capsys):
 
     assert exit_code == 4
     data = json.loads(capsys.readouterr().out)
-    assert data["status"] == "implausible_solution"
+    assert data["status"] == "inconclusive"
 
 
 def test_run_sim_stubbed_missing_measurement_is_error(tmp_path, monkeypatch):
@@ -7129,9 +7148,11 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "passed",
         "failed",
         "errored",
-        # Issue #2493: always present (default `0`), alongside its three
-        # siblings above -- see `run_sim`'s own comment on this field.
-        "implausible",
+        # Issues #2492 + #2493: the single parallel count for corners graded
+        # `inconclusive` (by `options.fail_on_diagnostic` or by a
+        # plausibility bound) -- always present, purely additive, `0` for a
+        # request that opts into neither.
+        "inconclusive",
         # Issue #2491: rollup of `corners[].diagnostics[]` across the whole
         # grid -- always present, purely additive.
         "diagnostic_counts",
@@ -7168,6 +7189,7 @@ def test_cli_stubbed_json_contract(tmp_path, monkeypatch, capsys):
         "sim__corner__passed_count": data["passed"],
         "sim__corner__failed_count": data["failed"],
         "sim__corner__errored_count": data["errored"],
+        "sim__corner__inconclusive_count": data["inconclusive"],
     }
     prov = data["provenance"]
     assert set(prov.keys()) == {
@@ -8109,3 +8131,688 @@ def test_examples_sim_remote_reference_reports_agree_across_backends():
 
     # ... and the same rollup verdicts on top of them.
     assert local["measurements"] == remote["measurements"]
+
+
+# --------------------------------------------------------------------------- #
+# options.fail_on_diagnostic -> status: "inconclusive" (issue #2492)
+# --------------------------------------------------------------------------- #
+
+
+#: The modules that can put a `diagnostics[].code` into a `klt sim` report.
+_DIAGNOSTIC_SOURCE_MODULES = (sim, sim_remote, sim_batch)
+
+#: Emission sites where the code is supplied by the site's *caller* or by a
+#: table it iterates, so the literal cannot be read off the site itself --
+#: each is a fan-in whose vocabulary this test derives by a separate rule
+#: (the pattern tables; the `_unrun_corner_report` call-site scan).
+#:
+#: This is a list of **mechanisms**, not of codes: adding a new diagnostic
+#: code never changes it, which is the whole point. Adding a new *way* to
+#: emit one does, and then `_emittable_diagnostic_codes` fails with the new
+#: site's location rather than silently skipping it.
+_EXPECTED_INDIRECT_CODE_SITES = {
+    # `for code, pattern in _DIAGNOSTIC_PATTERNS` / `_XYCE_DIAGNOSTIC_PATTERNS`
+    # -- the loop variable; the tables themselves are rule 1.
+    ("klayout_tools.sim", "_classify_xyce_diagnostics", "code"),
+    ("klayout_tools.sim", "_classify_diagnostics", "code"),
+    # `code` is this function's own parameter; its call sites are rule 3.
+    ("klayout_tools.sim_remote", "_unrun_corner_report", "code"),
+    # `stop_reason = probe_abort["code"]` -- forwards a code the fail-fast
+    # probe's own abort diagnostic already carries as a literal (rule 3).
+    ("klayout_tools.sim", "_run_local", "stop_reason"),
+    ("klayout_tools.sim", "_run_local_parallel", "stop_reason"),
+}
+
+
+def _resolve_string_expr(expr: ast.AST) -> set[str] | None:
+    """The set of `str` values `expr` can statically evaluate to, or `None`
+    when it cannot be resolved without running the program.
+
+    Deliberately strict: only literals and literal-only `IfExp`/sequence
+    shapes resolve. A `Subscript`/`Call`/`Attribute` returns `None` so the
+    site is reported as a fan-in instead of silently contributing whatever
+    unrelated string literals happen to appear inside it (e.g.
+    `probe_abort["code"]` must not contribute the key `"code"`).
+    """
+    if isinstance(expr, ast.Constant):
+        return {expr.value} if isinstance(expr.value, str) else None
+    if isinstance(expr, ast.IfExp):
+        body = _resolve_string_expr(expr.body)
+        orelse = _resolve_string_expr(expr.orelse)
+        return None if body is None or orelse is None else body | orelse
+    if isinstance(expr, (ast.Tuple, ast.List, ast.Set)):
+        resolved: set[str] = set()
+        for element in expr.elts:
+            part = _resolve_string_expr(element)
+            if part is None:
+                return None
+            resolved |= part
+        return resolved
+    return None
+
+
+def _unrun_code_argument(node: ast.Call) -> ast.AST | None:
+    """The `code` argument expression of an `_unrun_corner_report(...)` call
+    (bound through the real signature, so positional and keyword forms are
+    handled alike), or `None` for any other call."""
+    called = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+    if called != "_unrun_corner_report":
+        return None
+    try:
+        bound = inspect.signature(sim_remote._unrun_corner_report).bind_partial(
+            *node.args, **{kw.arg: kw.value for kw in node.keywords if kw.arg}
+        )
+    except TypeError:  # pragma: no cover - a malformed call
+        return None
+    return bound.arguments.get("code")
+
+
+def _code_expressions_at(node: ast.AST) -> list[ast.AST]:
+    """Every expression `node` itself places in a `diagnostics[].code` slot:
+    a `"code": <expr>` dict entry, or an `_unrun_corner_report` `code`
+    argument."""
+    if isinstance(node, ast.Dict):
+        return [
+            value
+            for key, value in zip(node.keys, node.values, strict=True)
+            if isinstance(key, ast.Constant) and key.value == "code"
+        ]
+    if isinstance(node, ast.Call):
+        argument = _unrun_code_argument(node)
+        return [] if argument is None else [argument]
+    return []
+
+
+def _code_expression_sites(mod) -> list[tuple[str, ast.AST]]:
+    """Every code-slot expression in `mod`, paired with the name of its
+    enclosing function."""
+    sites: list[tuple[str, ast.AST]] = []
+
+    def visit(node: ast.AST, func: str) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            func = node.name
+        sites.extend((func, expr) for expr in _code_expressions_at(node))
+        for child in ast.iter_child_nodes(node):
+            visit(child, func)
+
+    visit(ast.parse(inspect.getsource(mod)), "<module>")
+    return sites
+
+
+def _local_string_assignments(mod) -> dict[str, set[str] | None]:
+    """`"<enclosing function>.<local name>" -> the strings assigned to it`,
+    or `None` for a local with at least one statically unresolvable
+    assignment."""
+    assignments: dict[str, set[str] | None] = {}
+    for node in ast.walk(ast.parse(inspect.getsource(mod))):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for assign in ast.walk(node):
+            if not isinstance(assign, (ast.Assign, ast.AnnAssign)):
+                continue
+            if assign.value is None:
+                continue
+            targets = (
+                assign.targets if isinstance(assign, ast.Assign) else [assign.target]
+            )
+            resolved = _resolve_string_expr(assign.value)
+            for target in targets:
+                if not isinstance(target, ast.Name):
+                    continue
+                key = f"{node.name}.{target.id}"
+                previous = assignments.get(key, set())
+                assignments[key] = (
+                    None
+                    if resolved is None or previous is None
+                    else previous | resolved
+                )
+    return assignments
+
+
+def _resolve_code_site(
+    expr: ast.AST,
+    func: str,
+    module_strings: dict[str, str],
+    local_strings: dict[str, set[str] | None],
+) -> set[str] | None:
+    """The codes one code-slot expression can carry: a literal directly, a
+    module-level `str` constant by name, or a local variable through the
+    strings assigned to it in the same function. `None` for a fan-in."""
+    resolved = _resolve_string_expr(expr)
+    if resolved is not None:
+        return resolved
+    if not isinstance(expr, ast.Name):
+        return None
+    if expr.id in module_strings:
+        return {module_strings[expr.id]}
+    return local_strings.get(f"{func}.{expr.id}") or None
+
+
+def _emittable_diagnostic_codes() -> set[str]:
+    """Every `diagnostics[].code` `klt sim` can actually emit, **derived**
+    from the source rather than restated.
+
+    Three rules, in order of directness:
+
+    1. the classifier pattern tables (`code, pattern` pairs);
+    2. `sim_remote._UNRUN_MESSAGES`, the never-ran-corner message table;
+    3. an AST scan of every `"code": <expr>` dict entry and every
+       `_unrun_corner_report(..., code=<expr>)` argument in the emitting
+       modules -- see `_resolve_code_site` for what it can resolve (which is
+       how the batch paths' one
+       `"batch_job_timeout" if ... else "batch_job_failed"` resolves).
+
+    Anything rule 3 cannot reduce to a literal must be a declared fan-in
+    (`_EXPECTED_INDIRECT_CODE_SITES`); an unexpected one fails, so a new
+    emission mechanism cannot slip past this guard either.
+    """
+    codes: set[str] = {code for code, _ in sim._DIAGNOSTIC_PATTERNS}
+    codes |= {code for code, _ in sim._XYCE_DIAGNOSTIC_PATTERNS}
+    codes |= set(sim_remote._UNRUN_MESSAGES)
+
+    indirect: set[tuple[str, str, str]] = set()
+    for mod in _DIAGNOSTIC_SOURCE_MODULES:
+        module_strings = {
+            name: value for name, value in vars(mod).items() if isinstance(value, str)
+        }
+        local_strings = _local_string_assignments(mod)
+        for func, expr in _code_expression_sites(mod):
+            resolved = _resolve_code_site(expr, func, module_strings, local_strings)
+            if resolved is None:
+                indirect.add((mod.__name__, func, ast.unparse(expr)))
+            else:
+                codes |= resolved
+
+    assert indirect == _EXPECTED_INDIRECT_CODE_SITES, (
+        "a `diagnostics[].code` emission site changed shape; teach "
+        "`_emittable_diagnostic_codes` how to resolve it (or declare it as a "
+        f"fan-in) before its code can silently escape DIAGNOSTIC_CODES: {indirect}"
+    )
+    return codes
+
+
+def test_diagnostic_codes_is_a_superset_of_every_emittable_code():
+    """The `options.fail_on_diagnostic` vocabulary cannot silently drift.
+
+    `sim.DIAGNOSTIC_CODES` is written out as a literal (so the accepted
+    option vocabulary is readable in one place); this asserts it still covers
+    every code the emitting modules can actually produce, with `emittable`
+    **derived from the source** -- see `_emittable_diagnostic_codes`.
+
+    Deriving both halves is the point (issue #2493's `implausible_solution`
+    is why): the earlier version of this guard derived the pattern-table
+    half but hand-wrote the synthesized half, so a newly-synthesized code
+    was missing from *both* `DIAGNOSTIC_CODES` and the hand-written
+    `emittable` set and the guard passed anyway -- exactly the silent drift
+    it exists to prevent.
+    """
+    emittable = _emittable_diagnostic_codes()
+
+    # Sanity-check the derivation itself: the codes we know are synthesized
+    # outside any pattern table must actually be found by it, or the scan has
+    # silently stopped seeing anything and the assertion below is vacuous.
+    assert {"timeout", "measurement", "unknown", "lost_shard"} <= emittable
+    assert {"batch_job_failed", "batch_job_timeout", "batch_poll_timeout"} <= emittable
+
+    assert emittable - sim._GRADING_MARKER_CODES <= sim.DIAGNOSTIC_CODES
+    # The two marker diagnostics the grading step itself attaches are
+    # deliberately NOT selectable: both are emitted on a corner already being
+    # graded `inconclusive`, downstream of the `options.fail_on_diagnostic`
+    # code match, so listing either could never change a verdict.
+    assert sim._GRADING_MARKER_CODES <= emittable
+    assert not (sim._GRADING_MARKER_CODES & sim.DIAGNOSTIC_CODES)
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, ()),
+        ([], ()),
+        (["singular_matrix"], ("singular_matrix",)),
+        (
+            ["nonconvergence", "singular_matrix"],
+            ("nonconvergence", "singular_matrix"),
+        ),
+        # De-duplicated, caller's order preserved; surrounding whitespace is
+        # tolerated the same way every other string option is read.
+        (
+            ["singular_matrix", " singular_matrix ", "timeout"],
+            ("singular_matrix", "timeout"),
+        ),
+    ],
+)
+def test_validate_fail_on_diagnostic_normalises_accepted_values(value, expected):
+    assert sim._validate_fail_on_diagnostic(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value,match",
+    [
+        ("singular_matrix", "must be an array"),
+        ({"code": "singular_matrix"}, "must be an array"),
+        ([1], "non-empty diagnostic code strings"),
+        ([""], "non-empty diagnostic code strings"),
+        (["singular-matrix"], "unknown diagnostic code"),
+        (["Singular_Matrix"], "unknown diagnostic code"),
+        (["inconclusive"], "unknown diagnostic code"),
+    ],
+)
+def test_validate_fail_on_diagnostic_rejects_bad_values(value, match):
+    with pytest.raises(sim.SimError, match=match):
+        sim._validate_fail_on_diagnostic(value)
+
+
+def _recovered_request(tmp_path: Path, *, limits: dict | None = None, **overrides):
+    """A one-corner request whose stubbed log is the recovered
+    singular-matrix capture -- the corner that grades `pass` today."""
+    _write_body(tmp_path)
+    request: dict[str, object] = {
+        "netlist": "body.spice",
+        "analysis": {"kind": "tran", "args": "1n 1n"},
+        "measurements": [
+            {
+                "name": "vout_meas",
+                "spice": ".meas tran vout_meas find v(vout_node) at=1n",
+                "limits": limits if limits is not None else {"min": 0.9, "max": 1.1},
+            },
+            {
+                "name": "tail_meas",
+                "spice": ".meas tran tail_meas find v(tail_node) at=1n",
+                "limits": {"min": 0.4, "max": 0.6},
+            },
+        ],
+    }
+    request.update(overrides)
+    return _write_request(tmp_path, request)
+
+
+def test_fail_on_diagnostic_unset_leaves_recovered_corner_passing(
+    tmp_path, monkeypatch
+):
+    """The no-opt-in baseline: byte-identical to before issue #2492."""
+    request = _recovered_request(tmp_path)
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    assert (report["passed"], report["inconclusive"]) == (1, 0)
+    (corner,) = report["corners"]
+    assert corner["status"] == "pass"
+    assert sim.INCONCLUSIVE_DIAGNOSTIC_CODE not in {
+        d["code"] for d in corner["diagnostics"]
+    }
+
+
+def test_fail_on_diagnostic_grades_recovered_corner_inconclusive(tmp_path, monkeypatch):
+    """The issue's headline case: the same corner, same log, opted in."""
+    request = _recovered_request(
+        tmp_path, options={"fail_on_diagnostic": ["singular_matrix"]}
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "inconclusive"
+    # The measurements themselves are untouched -- they came back fine; it
+    # is the *trust* in them that changed.
+    assert [m["status"] for m in corner["measurements"]] == ["pass", "pass"]
+    # ... and the corner says why it was graded that way.
+    marker = [
+        d
+        for d in corner["diagnostics"]
+        if d["code"] == sim.INCONCLUSIVE_DIAGNOSTIC_CODE
+    ]
+    assert len(marker) == 1
+    assert "singular_matrix" in marker[0]["message"]
+
+    # Top-level counts: the corner is in `inconclusive`, not silently
+    # dropped from the other three.
+    assert (report["passed"], report["failed"], report["errored"]) == (0, 0, 0)
+    assert report["inconclusive"] == 1
+    assert (
+        report["passed"] + report["failed"] + report["errored"] + report["inconclusive"]
+        == report["corner_count"]
+    )
+    assert report["metrics"]["sim__corner__inconclusive_count"] == 1
+    # An untrustworthy sweep is not a pass: the top-level status is its own
+    # `"inconclusive"` verdict token at exit 4 ("incomplete or
+    # untrustworthy"), the same token/exit pair `klt lvs` already ships --
+    # distinct from `"error"`, which still means the simulator broke.
+    assert report["status"] == "inconclusive"
+    # The per-measurement rollup carries the same claim.
+    assert {m["status"] for m in report["measurements"]} == {"inconclusive"}
+
+
+def test_fail_on_diagnostic_outranks_a_failing_measurement(tmp_path, monkeypatch):
+    """Precedence: `inconclusive` beats `fail` (recorded decision, #2492).
+
+    A limit miss computed from numbers the caller has declared untrustworthy
+    is not a defensible claim about the design, so it must not be reported
+    as one -- exactly the rationale `error` already has for outranking
+    `fail`.
+    """
+    request = _recovered_request(
+        tmp_path,
+        limits={"max": 0.5},  # the stubbed vout_meas is 1.0 -> a real miss
+        options={"fail_on_diagnostic": ["singular_matrix"]},
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    # The measurement still records its own limit miss ...
+    assert corner["measurements"][0]["status"] == "fail"
+    # ... but the corner's verdict is that no trustworthy result exists.
+    assert corner["status"] == "inconclusive"
+    assert (report["failed"], report["inconclusive"]) == (0, 1)
+
+
+def test_fail_on_diagnostic_does_not_outrank_an_errored_corner(tmp_path, monkeypatch):
+    """Precedence: `error` still beats `inconclusive`.
+
+    An unrecovered singular matrix (ngspice's own abort trailer, no
+    measurement values) produced no number at all -- strictly less
+    information than a number the caller declines to trust.
+    """
+    request = _recovered_request(
+        tmp_path, options={"fail_on_diagnostic": ["singular_matrix"]}
+    )
+    _stub_subprocess_run(
+        monkeypatch,
+        log_text=(
+            "Warning: singular matrix:  check node b\n"
+            "Error: Transient op failed, timestep too small\n"
+            "run simulation(s) aborted\n"
+        ),
+    )
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "error"
+    assert (report["errored"], report["inconclusive"]) == (1, 0)
+
+
+def test_fail_on_diagnostic_code_that_never_occurs_is_a_no_op(tmp_path, monkeypatch):
+    """A valid code that this run never emits changes nothing.
+
+    Listing one is a legitimate standing policy, not a mistake -- unlike an
+    unknown code, which is rejected up front.
+    """
+    request = _recovered_request(tmp_path, options={"fail_on_diagnostic": ["timeout"]})
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    assert report["status"] == "pass"
+    assert (report["passed"], report["inconclusive"]) == (1, 0)
+
+
+def test_fail_on_diagnostic_unknown_code_is_an_application_error(tmp_path, monkeypatch):
+    request = _recovered_request(
+        tmp_path, options={"fail_on_diagnostic": ["singular_matrixx"]}
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    with pytest.raises(sim.SimError, match="unknown diagnostic code"):
+        sim.run_sim(str(request))
+
+
+def test_fail_on_diagnostic_matches_an_error_severity_diagnostic_too(
+    tmp_path, monkeypatch
+):
+    """Listing a code that was never downgraded still behaves sanely.
+
+    `nonconvergence` here is recovered (so `warning`); `timeout` never is.
+    A timed-out corner is already `error`, which outranks `inconclusive` --
+    the option can only ever *tighten* a corner's grade, never loosen it.
+    """
+    request = _recovered_request(
+        tmp_path, options={"fail_on_diagnostic": ["nonconvergence"]}
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    (corner,) = report["corners"]
+    assert corner["status"] == "inconclusive"
+    # The downgrade itself is untouched -- this option changes grading, not
+    # classification.
+    severities = {d["code"]: d["severity"] for d in corner["diagnostics"]}
+    assert severities["singular_matrix"] == "warning"
+    assert severities["nonconvergence"] == "warning"
+
+
+def test_fail_on_diagnostic_honoured_by_the_local_parallel_backend(
+    tmp_path, monkeypatch
+):
+    request = _recovered_request(
+        tmp_path,
+        backend="local-parallel",
+        options={"fail_on_diagnostic": ["singular_matrix"], "max_workers": 2},
+    )
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request))
+
+    assert [c["status"] for c in report["corners"]] == ["inconclusive"]
+    assert report["inconclusive"] == 1
+
+
+def test_fail_on_diagnostic_argument_overrides_the_request_option(
+    tmp_path, monkeypatch
+):
+    request = _recovered_request(tmp_path, options={"fail_on_diagnostic": []})
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    report = sim.run_sim(str(request), fail_on_diagnostic=["singular_matrix"])
+
+    assert report["inconclusive"] == 1
+
+
+def test_cli_fail_on_diagnostic_flag_reports_inconclusive_and_exit_4(
+    tmp_path, monkeypatch, capsys
+):
+    request = _recovered_request(tmp_path)
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    exit_code = main(
+        [
+            "sim",
+            str(request),
+            "--fail-on-diagnostic",
+            "singular_matrix",
+            "--format",
+            "json",
+        ]
+    )
+
+    assert exit_code == 4
+    data = json.loads(capsys.readouterr().out)
+    assert data["inconclusive"] == 1
+    assert data["corners"][0]["status"] == "inconclusive"
+
+
+def test_cli_text_output_always_reports_the_inconclusive_count(
+    tmp_path, monkeypatch, capsys
+):
+    request = _recovered_request(tmp_path)
+    _stub_subprocess_run(monkeypatch, log_text=_RECOVERED_SINGULAR_MATRIX_LOG)
+
+    assert main(["sim", str(request)]) == 0
+
+    # Present (as 0) even without the option, so the counts on this line
+    # always add up to `corners:`.
+    assert "inconclusive: 0" in capsys.readouterr().out
+
+
+# --- Monte Carlo rollup treatment (issue #2492) ----------------------------- #
+
+
+def _stub_subprocess_values_with_logs(
+    monkeypatch, name: str, values: list[float], *, noisy_indices: set[int]
+) -> None:
+    """Like `_stub_subprocess_values`, but the samples in ``noisy_indices``
+    additionally get the recovered singular-matrix narration in their log.
+    """
+    state = {"index": 0}
+
+    def fake_run(cmd, capture_output, text, timeout):
+        log_path = cmd[cmd.index("-o") + 1]
+        index = state["index"]
+        state["index"] += 1
+        preamble = (
+            "Warning: singular matrix:  check node xota.g1\n"
+            "Note: Starting dynamic gmin stepping\n"
+            "Warning: Dynamic gmin stepping failed\n"
+            "Note: Transient op finished successfully\n"
+            if index in noisy_indices
+            else ""
+        )
+        with open(log_path, "w", encoding="utf-8") as handle:
+            handle.write(f"{preamble}{name} = {values[index]!r}\n")
+        return fake_completed("** ngspice-99\n")
+
+    monkeypatch.setattr(sim.subprocess, "run", fake_run)
+
+
+def test_monte_carlo_inconclusive_samples_are_excluded_and_counted(
+    tmp_path, monkeypatch
+):
+    """Documented decision: excluded from the statistics, counted separately.
+
+    An untrusted sample must not be allowed to move the very mean/sigma the
+    window verdict is computed from -- so it is set aside like an
+    unextractable one, and `n + errored + inconclusive` still accounts for
+    every sample drawn.
+    """
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch"},
+        measurements=[_VOUT_MEAS],
+        options={"fail_on_diagnostic": ["singular_matrix"]},
+    )
+    # Sample 2 (value 5.0) is the distrusted one; the trusted four are
+    # 3.0/1.0/2.0/4.0, mean 2.5 -- distinctly different from the
+    # all-five mean of 3.0, so an accidental inclusion cannot pass silently.
+    _stub_subprocess_values_with_logs(
+        monkeypatch, "vout", _KNOWN_SAMPLES, noisy_indices={2}
+    )
+
+    report = sim.run_sim(str(request))
+
+    (entry,) = report["measurements"]
+    mc = entry["monte_carlo"]
+    assert mc["n"] == 4
+    assert mc["errored"] == 0
+    assert mc["inconclusive"] == 1
+    assert mc["n"] + mc["errored"] + mc["inconclusive"] == 5
+    assert mc["mean"] == pytest.approx(2.5)
+    assert mc["max"] == 4.0  # the excluded 5.0 is not the reported maximum
+    # ... and the same accounting holds in the per-corner breakdown.
+    (by_corner,) = mc["by_corner"]
+    assert (by_corner["n"], by_corner["inconclusive"]) == (4, 1)
+    # The corner counts and the aggregate agree with the sample accounting.
+    assert report["inconclusive"] == 1
+    assert report["status"] == "inconclusive"
+
+
+def test_monte_carlo_statistics_block_always_carries_inconclusive(
+    tmp_path, monkeypatch
+):
+    """Additive and always present -- `0` for a run that never opted in."""
+    request = _mc_request(
+        tmp_path, {"n": 5, "seed": 1, "vary": "mismatch"}, measurements=[_VOUT_MEAS]
+    )
+    _stub_subprocess_values(monkeypatch, "vout", _KNOWN_SAMPLES)
+
+    report = sim.run_sim(str(request))
+
+    mc = report["measurements"][0]["monte_carlo"]
+    assert mc["inconclusive"] == 0
+    assert mc["n"] == 5
+    assert mc["mean"] == pytest.approx(3.0)
+
+
+def test_monte_carlo_sigma_window_is_computed_over_trusted_samples_only(
+    tmp_path, monkeypatch
+):
+    """The window verdict never rests on a sample the caller disowned."""
+    request = _mc_request(
+        tmp_path,
+        {"n": 5, "seed": 1, "vary": "mismatch", "k_sigma": 1.0},
+        measurements=[dict(_VOUT_MEAS, limits={"min": 0.0, "max": 4.5})],
+        options={"fail_on_diagnostic": ["singular_matrix"]},
+    )
+    # Untrusted sample 2 is the 5.0 outlier: including it would push the
+    # window's upper endpoint past max=4.5 and report a spec miss on a
+    # number the caller has declared untrustworthy.
+    _stub_subprocess_values_with_logs(
+        monkeypatch, "vout", _KNOWN_SAMPLES, noisy_indices={2}
+    )
+
+    report = sim.run_sim(str(request))
+
+    (entry,) = report["measurements"]
+    window = entry["monte_carlo"]["sigma_window"]
+    assert window["high"] == pytest.approx(2.5 + (5.0 / 3.0) ** 0.5)
+    assert window["status"] == "pass"
+    # The entry itself is still `inconclusive` -- one of its corners is.
+    assert entry["status"] == "inconclusive"
+
+
+def test_rollup_measurements_inconclusive_corner_outranks_a_failing_one():
+    """Unit-level precedence for the aggregate: error > inconclusive > fail."""
+    corners = [
+        {
+            "corner_id": "tt/1.800V/27C",
+            "status": "fail",
+            "monte_carlo": None,
+            "measurements": [
+                {"name": "vref", "value": 2.0, "margin": -0.8, "status": "fail"}
+            ],
+        },
+        {
+            "corner_id": "ss/1.800V/27C",
+            "status": "inconclusive",
+            "monte_carlo": None,
+            "measurements": [
+                {"name": "vref", "value": 1.2, "margin": 0.0, "status": "pass"}
+            ],
+        },
+    ]
+
+    (entry,) = sim._rollup_measurements([{"name": "vref"}], corners)
+
+    assert entry["status"] == "inconclusive"
+    # `worst_case` still points at the worst margin across every corner --
+    # an inconclusive rollup must stay debuggable.
+    assert entry["worst_case"]["corner_id"] == "tt/1.800V/27C"
+
+
+def test_rollup_measurements_errored_corner_still_outranks_inconclusive():
+    corners = [
+        {
+            "corner_id": "tt/1.800V/27C",
+            "status": "error",
+            "monte_carlo": None,
+            "measurements": [
+                {"name": "vref", "value": None, "margin": None, "status": "error"}
+            ],
+        },
+        {
+            "corner_id": "ss/1.800V/27C",
+            "status": "inconclusive",
+            "monte_carlo": None,
+            "measurements": [
+                {"name": "vref", "value": 1.2, "margin": 0.0, "status": "pass"}
+            ],
+        },
+    ]
+
+    (entry,) = sim._rollup_measurements([{"name": "vref"}], corners)
+
+    assert entry["status"] == "error"

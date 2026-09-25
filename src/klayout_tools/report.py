@@ -322,11 +322,17 @@ def _section_layout_metrics(envelope: dict[str, Any], source: str) -> dict[str, 
         info_lines.append(f"Renders: {', '.join(sorted(renders))}")
     signals = envelope.get("signals")
     if isinstance(signals, dict):
+        # `inconclusive` (issues #2492 + #2493) is printed alongside its three
+        # siblings for the same reason `klt sim`'s own text summary prints it:
+        # these counts sum to `corners=`, and a reader must never have to work
+        # out which corners the summary dropped. `.get(..., 0) or 0` keeps the
+        # line readable for a `signals.json` captured before the field existed.
         info_lines.append(
             f"Signals: status={signals.get('status')} "
             f"corners={signals.get('corner_count')} "
             f"passed={signals.get('passed')} failed={signals.get('failed')} "
-            f"errored={signals.get('errored')}"
+            f"errored={signals.get('errored')} "
+            f"inconclusive={signals.get('inconclusive') or 0}"
         )
 
     return {
