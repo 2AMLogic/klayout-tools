@@ -1549,6 +1549,32 @@ change. `klt pex` takes a **routed layout plus a testbench set** as input
 [`pex.md`](pex.md#scope-mismatch-note-resolved-by-this-issue-801) for that
 resolved discrepancy.
 
+**The restriction is on the *kind*, not on how the comparison was measured**
+(issue #2478). `klt pex`'s own testbenches are `klt sim` requests, whose
+`measurements[]` are verbatim `.meas` cards — so a block whose spec rows need
+caller-side post-processing (a threshold-crossing search, a cross-Monte-Carlo
+statistic with a fitted rescale, a measurement on a derived/loop-broken
+netlist, an injection-based estimator) could not produce a `pex` envelope at
+all, and therefore could not cite item 7 however much real post-layout
+evidence it had. `klt pex --measure-command`
+([`pex.md`](pex.md#measuring-with-a-caller-supplied-command---measure-command))
+closes that: the caller supplies a command that `klt pex` runs **once per
+side**, against the two netlists `klt pex` itself chose, and `klt pex` still
+drives extraction and still computes every `delta[]` row. The envelope is a
+`pex` envelope like any other — same `delta[]`, same `reference_netlist`,
+same `extraction.model`/`body_bias` disclosures — so it grades here with **no
+change to this restriction and no new envelope kind**, and the
+externally-measured mode is disclosed in the envelope's own `measurement`
+block (`mode`, the argv verbatim, and each side's netlist/exit status) for a
+reader of the citation.
+
+What has *not* changed: a hand-rolled `"kind": "generic"` envelope asserting
+that a post-layout comparison happened is still `"unmet"`/`"wrong_kind"` for
+item 7 (`generic` remains item 8 only — see "Generic evidence (opt-in,
+non-`klt`-native)" below), and so is a `drc`/`lvs`/`sim`/`extract`/`yield`/
+`sta` citation. Item 7 still requires a real, disclosed
+schematic-vs-extracted comparison.
+
 ```json
 {
   "schema_version": 1,

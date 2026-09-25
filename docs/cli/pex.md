@@ -9,6 +9,7 @@ Phase 1a of [Epic #709](https://github.com/2AMLogic/klayout-tools/issues/709)
 
 ```
 klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netlist.spice>] [--top <cell>] [--pdk <variant>] [--pdk-root <root>] [--outdir <dir>] [--backend <backend>] [--deck-option <key>=<value>]... [--pins <a,b,...>] [--critical-net <net>]... [--distributed-rc] [--mom-rlc-net <net>] [--mom-rlc-resistance-ohm <r>] [--mom-rlc-capacitance-ff <c>] [--mom-rlc-inductance-nh <l>] [--format text|json]
+klt pex <layout> --deck <deck> --measure-command <command> --reference-netlist <schematic.spice> [--measure-timeout-s <seconds>] [<every flag above>]
 ```
 
 - `<layout>` — path to a GDSII (`.gds`) or OASIS (`.oas`) routed layout
@@ -21,7 +22,22 @@ klt pex <layout> <testbench>... --deck sky130|gf180mcu|sg13g2 [-o|--output <netl
   Every testbench body must carry **exactly one** `.include`/`.inc` directive
   (none and more than one are both hard errors), and every testbench must
   include the *same* schematic DUT file — `klt pex` reports one
-  `reference_netlist` for the whole run.
+  `reference_netlist` for the whole run. **Required unless
+  `--measure-command` is given**; the two are mutually exclusive.
+- `--measure-command` — measure both legs with a caller-supplied command
+  instead of with `klt sim` testbenches (issue #2478). For a spec row no
+  single `.meas` card can express. Requires `--reference-netlist`; mutually
+  exclusive with `<testbench>`. See "Measuring with a caller-supplied
+  command" below for the full contract.
+- `--reference-netlist` — the schematic DUT netlist the schematic-side
+  measurement is taken on, and the `reference_netlist` this run reports.
+  **Required with `--measure-command`, and rejected without it**: in
+  testbench mode the schematic DUT is whatever every testbench `.include`s,
+  which is an observation rather than a caller's claim.
+- `--measure-timeout-s` — wall-clock cap on **one** `--measure-command`
+  invocation (there are two per run, one per side). Default `1800`, the same
+  cap [`signoff.md`](signoff.md) puts on a command-backed evidence entry.
+  Requires `--measure-command`.
 - `--deck` — required, passed through to `klt extract --parasitics`.
 - `--output` / `-o` — path to write the extracted SPICE netlist. Same default
   as `klt extract`: `<layout>` with its extension replaced by `.spice`, next
@@ -556,6 +572,191 @@ whenever the reference netlist is hierarchical; treat a hierarchical-shaped
 `detail` as inconclusive on its own and verify against a flattened
 reference before discarding the run's `delta[]` evidence.
 
+## Measuring with a caller-supplied command (`--measure-command`)
+
+Everything above describes this command's original (and still default) input
+contract: a routed layout plus one or more `klt sim` request JSON
+testbenches. That contract composes badly with one specific, real class of
+block ([issue #2478](https://github.com/2AMLogic/klayout-tools/issues/2478)).
+A `klt sim` request's `measurements[]` entries are *verbatim `.meas` cards*
+([`sim.md`](sim.md)) — there is no caller-side post-processing hook — so a
+spec row whose figure is not expressible as one `.meas` card cannot be driven
+through `klt pex` at all.
+
+Measurement shapes that are generic to analog blocks, not to any one design,
+and that `.meas` cannot express:
+
+- a **threshold crossing** that has to be *located* by a rule the caller
+  applies across sample points or across separate runs (first crossing after
+  a named edge, sign-corrected per sweep point, "unresolved" as a
+  first-class outcome) rather than by one `.meas ... WHEN` card;
+- a statistic computed **across a Monte Carlo family** and then rescaled by a
+  gain fitted from a calibration sweep run alongside it;
+- a measurement taken on a **derived netlist** — e.g. a loop-broken
+  sub-model assembled from a subset of the DUT's own device lines to make a
+  small-signal analysis well-posed. This one is doubly blocked by the
+  testbench contract: the derived file does not exist until the harness
+  builds it, so no `.include` swap can re-point at it;
+- an **injection-based** measurement whose stimulus sources are placed at
+  nodes derived from the DUT's own device lines, then inverted by an
+  estimator the caller owns.
+
+Because [`signoff.md`](signoff.md#item-7-is-kind-restricted-per-block-kind)'s
+T1 item 7 ("Post-layout verification") accepts only a `pex`-kind envelope for
+an analog partition, such a block could not cite item 7 **at all** — however
+much real, committed, reproducible post-layout evidence it had. The invariant
+issue #871 established is *"item 7 requires a real, disclosed
+schematic-vs-extracted comparison"*, not *"item 7 requires that the
+comparison was measured by `klt sim`"*.
+
+`--measure-command` closes that without weakening the invariant. Instead of a
+testbench set you supply **one command**, and `klt pex` runs it **twice**:
+
+```sh
+klt pex 06-layout.gds --deck sky130 \
+  --measure-command 'uv run python3 threshold_crossing_probe.py' \
+  --reference-netlist 07-reference.spice \
+  --format json
+```
+
+1. **Extract** — unchanged: `klt extract --parasitics` on `<layout>`, driven
+   by this command, with every `--deck-option`/`--pins`/`--critical-net`/
+   `--distributed-rc`/`--mom-rlc-*` flag working exactly as above.
+2. **Measure the schematic leg** — run the command with
+   `--reference-netlist`'s path.
+3. **Measure the extracted leg** — run the *same* command with the
+   freshly-extracted netlist's path.
+4. **Diff** — every `(corner_id, name)` pair the extracted leg reported is
+   matched against the schematic leg's and emitted as one `delta[]` row, by
+   exactly the same rules testbench mode uses.
+
+### How the command is invoked
+
+- **Argv, never a shell.** The string is split with shell *quoting* rules
+  (`shlex.split`) once, up front, and then executed directly — no shell, no
+  glob expansion, no metacharacter interpretation. An unbalanced quote is a
+  clean exit-1 error, not a surprise at run time.
+- **The netlist is the final argument.** `klt pex` appends the path of the
+  netlist under measurement to the argv you gave. Your own words are never
+  rewritten (there is no placeholder token to remember).
+- **…and is in the environment too**, so a harness can read it whichever way
+  suits it:
+
+  | Variable | Value |
+  |---|---|
+  | `KLT_PEX_SIDE` | `schematic` or `extracted` |
+  | `KLT_PEX_NETLIST` | the same path passed as the final argument |
+  | `KLT_PEX_ARTIFACTS_DIR` | a per-side directory under this run's `--outdir` (`<outdir>/measure/<side>/`), created before the command runs — for whatever decks/logs/raw files the harness wants to keep |
+
+- **A non-zero exit, an unrunnable command, a timeout, or stdout that is not
+  valid JSON is a hard error** (exit `1`), with a bounded tail of the
+  command's own stderr in the message. An unmeasured leg is never quietly
+  turned into `"error"` delta rows that would read like a real, failed
+  comparison.
+
+### The measurement document (the command's stdout)
+
+Each invocation prints one JSON object on stdout:
+
+```json
+{
+  "corners": [
+    {
+      "corner_id": "tt/1.800V/27C",
+      "measurements": [
+        { "name": "t_cross", "value": 1.24e-9, "status": "pass" }
+      ]
+    }
+  ]
+}
+```
+
+That is deliberately a **subset of `klt sim`'s own response shape**, not a
+new vocabulary: every other key, at any level, is ignored, so a real `klt
+sim` response (`schema_version`, `provenance`, per-corner `artifacts` and
+all) validates unchanged and can be piped straight through by a harness that
+only needs post-processing on *some* of its rows.
+
+| Field | Type | Rule |
+|---|---|---|
+| `corners` | array\<object\> | Required, non-empty. |
+| `corners[].corner_id` | string | Required, non-empty, unique in the document. Any string — it is matched between the two legs, never parsed. |
+| `corners[].measurements` | array\<object\> | Required, non-empty. |
+| `…measurements[].name` | string | Required, non-empty, unique within its corner. Becomes the `delta[]` row's `spec_row`. |
+| `…measurements[].value` | number \| null | Required. A finite number, or `null` for the caller's own **"unresolved"** outcome. `null` renders an `"error"` delta row — never a fabricated pass. `NaN`/`Infinity`, booleans and strings are refused. |
+| `…measurements[].status` | string | Optional, one of `"pass"`/`"fail"`/`"error"`. Omitted ⇒ `"error"` for a `null` value, `"pass"` otherwise. A caller that owns its own limits states them; a caller with none gets the same "measured, therefore comparable" default `klt sim` gives an unlimited measurement. |
+
+Any violation of the table is a hard error (exit `1`) naming the offending
+path (e.g. `corners[0].measurements[2].value`), for the same reason a failed
+invocation is: a malformed document from one leg would otherwise be
+indistinguishable from a real measurement failure.
+
+### What this mode does *not* loosen
+
+- **The caller supplies the measurement, never the comparison.** `klt pex`
+  picks both netlists, runs the command against each, and computes every
+  `delta[]` row itself. There is no way to hand it a finished delta set.
+- **Extraction is still this command's own**, so `extraction` (including
+  `extraction.model`), `body_bias` and `provenance` are derived from a real
+  `--parasitics` extraction of your real layout, exactly as in testbench
+  mode. The disclosures that give item 7 its teeth
+  ([issue #1983](https://github.com/2AMLogic/klayout-tools/issues/1983)) are
+  not weakened by a byte.
+- **The mode is disclosed**, in the `measurement` block of the response (see
+  the schema below): `mode`, the argv verbatim, the timeout in force, and —
+  per side — the exact netlist measured, the command's exit status there, and
+  how many corners/rows it reported. A reader of a committed record can tell
+  an externally-measured post-layout comparison from a `klt sim`-measured
+  one, and re-run it.
+- **A hand-rolled envelope is still not evidence.** The opt-in `generic`
+  envelope remains item 8 only ([`signoff.md`](signoff.md)); a `"kind":
+  "generic"` document asserting that a post-layout comparison happened still
+  renders `"unmet"`/`"wrong_kind"` for item 7.
+
+### Two diagnostics are inapplicable here
+
+`pin_count_mismatch` and `flat_dut_mismatch` are always `null` in this mode.
+Both exist because testbench mode re-runs the testbench's **own unmodified
+`X...` instantiation line** against both netlists, so a pin-list or
+flat-vs-wrapped difference silently breaks the extracted-side deck. A
+caller-supplied command builds each side's deck itself from the path it is
+handed, so neither the premise nor the consequence holds — reporting them
+anyway would be a false alarm, and (worse) would skip an extracted-side
+measurement the harness is perfectly able to take. This is the flip side of
+the contract: in this mode, keeping the two sides' decks comparable is the
+harness's responsibility, not this command's.
+
+`model_mismatch` **is** still computed: it compares what the two netlists
+*contain* (their `M`/`X`/`Q`/`D` device cards), which is independent of how
+either side was measured.
+
+The `--reference-netlist` file must itself plausibly *be* a DUT — the same
+"declares a `.SUBCKT` or a circuit element of its own" check testbench mode
+applies to its `.include` target
+([issue #1255](https://github.com/2AMLogic/klayout-tools/issues/1255), Gap 1)
+— so a parameter/corner file named by mistake is a clean error rather than a
+vacuous pass.
+
+### Pitfall: build the harness's decks **self-contained**
+
+Because deck construction is now the harness's job, one portability rule is
+worth stating outright: if your harness generates a `klt sim` request of its
+own, **inline the netlist it was handed rather than `.include`-ing it**.
+`klt sim`'s off-host backends (`remote`/`batch`, which a multi-unit request
+reaches by default on any host that sets `$KLT_SIM_BACKEND` — see
+[`sim.md`](sim.md)) stage only the *request's own* netlist file into the job,
+so an `.include` naming a path on the submitting host resolves nowhere on the
+executing one. That failure is quiet in the worst way: every corner comes back
+`"unavailable_measurement"`, the harness still exits `0`, and `klt pex`
+renders a full set of `"error"` delta rows that read like a real, failed
+comparison. `examples/design-pipeline/12-pex-external.probe.py` inlines for
+exactly this reason.
+
+The same trap catches **testbench mode** — whose contract mandates an
+`.include`d DUT — on any off-host-defaulted host, which is a transport bug
+rather than a property of this mode; tracked separately in
+[issue #2485](https://github.com/2AMLogic/klayout-tools/issues/2485).
+
 ## Scope-mismatch note (resolved by this issue, #801)
 
 Issue #871 (Phase 2b of epic #706, merged before this command existed) taught
@@ -616,6 +817,12 @@ full `repo`/`external`/`absent` scope meanings.
     "distributed_rc": false,
     "mom_rlc_override": null
   },
+  "measurement": {
+    "mode": "testbench",
+    "command": null,
+    "timeout_s": null,
+    "sides": null
+  },
   "testbenches": [
     {
       "request": { "path": "gain-tb.json", "scope": "repo" },
@@ -669,7 +876,8 @@ full `repo`/`external`/`absent` scope meanings.
 | `reference_netlist`  | object            | `{path, scope}` — the schematic DUT file every testbench `.include`d (see "The DUT `.include` swap" above), normalised the same way as `layout`. |
 | `extraction`         | object            | `deck`, `device_count`, `net_count`, `netlist_sha256` (echoed from `klt extract`'s own report), `model` (`extract.py`'s `PARASITIC_MODEL_SCOPE`, verbatim — what the extracted side's R/C model does and does not account for), `critical_nets` (issue #976 — the `--critical-net` request echoed back, `[]` when the flag was never given), `distributed_rc` (issue #977 — `true` only when `--distributed-rc` was given, `false` otherwise), and `mom_rlc_override` (issue #988 — `null` unless `--mom-rlc-net` was given, in which case `klt extract`'s own substitution report; see [`extract.md`](extract.md)'s "Substitute a caller-supplied `klt mom` R/L/C for a critical net" section for the field list). Pins the extraction method alongside `provenance.deck`'s content-hash version pin. |
 | `body_bias`          | object            | Issue #1983 (additive field). Whether the extracted netlist this run re-simulated actually had a **DC bias path for every device body**: `status` (`"biased"`/`"unbiased"`), `unbiased_device_count`, `unbiased_nets` (the distinct synthesized net names, sorted), and `unbiased_pmos_body_nets` (`klt extract`'s own `{"device", "net"}` entries, verbatim). See "Unbiased device bodies invalidate the comparison" above. Reduced from the extraction this command drove itself; it never changes `status`. |
-| `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. |
+| `measurement`        | object            | Issue #2478 (additive field, always present). How this run's two legs were measured, so a reader of a committed record never has to infer it from the presence/absence of `testbenches[]`. `mode` is `"testbench"` (the default path — `command`/`timeout_s`/`sides` are then all `null`) or `"command"` (a caller-supplied `--measure-command` produced both legs). For `"command"`: `command` is the argv **list** verbatim (never a shell string — it is never run through a shell), `timeout_s` the per-invocation cap in force, and `sides` an object keyed `schematic`/`extracted`, each carrying `netlist` (`{path, scope}`, the exact netlist that side was measured on), `exit_status`, `corner_count` and `measurement_names`. See "Measuring with a caller-supplied command" above. |
+| `testbenches`        | array\<object\>   | One entry per `<testbench>`: `request` (`{path, scope}` — the `<testbench>` argument, normalised the same way as `layout`; issue #1261), `schematic_netlist` (`{path, scope}` — the resolved DUT path it `.include`d, normalised the same way), `corner_count`, and `measurement_names`. Informational — the full per-corner detail lives in `delta[]`. **Empty (`[]`) for a `--measure-command` run**, which has no testbenches at all; `measurement.sides` carries the equivalent per-leg detail there. |
 | `corner_count`       | integer           | Number of distinct `corner_id` values across every `delta[]` row.                       |
 | `delta`              | array\<object\>   | One entry per `(testbench, corner, spec row)` — see "`delta[]` entries" below.          |
 | `passed`/`failed`/`errored` | integer    | `delta[]` row counts by `status`.                                                       |
@@ -683,7 +891,7 @@ full `repo`/`external`/`absent` scope meanings.
 
 | Field             | Type            | Description                                                                          |
 | ----------------- | --------------- | --------------------------------------------------------------------------------------- |
-| `spec_row`        | string          | The measurement name, from the testbench's own `measurements[].name` (see [`sim.md`](sim.md)). When more than one `<testbench>` is given, prefixed `<testbench file stem>.<name>` to disambiguate reused measurement names across testbenches; bare `<name>` for a single testbench. |
+| `spec_row`        | string          | The measurement name, from the testbench's own `measurements[].name` (see [`sim.md`](sim.md)) — or, for a `--measure-command` run, from the measurement document's own `measurements[].name`. When more than one `<testbench>` is given, prefixed `<testbench file stem>.<name>` to disambiguate reused measurement names across testbenches; bare `<name>` for a single testbench, and for a `--measure-command` run (there is exactly one measurement pair). |
 | `corner_id`       | string          | `klt sim`'s own corner id (`<process>/<supply>V/<temp>C`, see [`sim.md`](sim.md#corners-entries)) — identical on both sides, since the extracted-side request differs from the schematic-side one *only* in its `.include`d DUT file. |
 | `schematic_value` | number \| null  | The measurement's value on the schematic-side run, or `null` if that corner/measurement was missing or itself errored. |
 | `extracted_value` | number \| null  | The measurement's value on the extracted-side run, or `null` if it was unextractable (a `klt sim` `"error"`-status measurement). |
@@ -713,7 +921,7 @@ comparisons remain disclosed for the Phase 2 success policy.
 | Exit code | Meaning                                                                                     |
 | --------- | -------------------------------------------------------------------------------------------- |
 | `0`       | At least one actual comparison ran and every `delta[]` row passed.                                                                   |
-| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. Documented error shape on stderr (`--format json`). |
+| `1`       | Failed to run at all — bad layout/testbench, unresolvable deck/PDK, a testbench with no `.include`/`.inc` DUT reference **or more than one** or one that does not plausibly name the DUT (issue #1255, Gap 1), testbenches disagreeing on their schematic DUT, or an extraction/simulation failure. For a `--measure-command` run (issue #2478): also a mis-combined invocation (`--measure-command` with a `<testbench>`, or without `--reference-netlist`; `--reference-netlist`/`--measure-timeout-s` without `--measure-command`), a `--reference-netlist` that is missing or is not a DUT, and any measurement-command failure — unrunnable, non-zero exit, timeout, non-JSON stdout, or a malformed measurement document. Documented error shape on stderr (`--format json`). |
 | `3`       | Ran successfully; at least one `delta[]` row's `status` is `"fail"`.                           |
 | `4`       | No actual comparison ran (`status: "not_checked"`), or at least one `delta[]` row's `status` is `"error"` — including a schematic/extracted pin-list mismatch, which reports a named `pin_count_mismatch` block here rather than aborting with exit `1`, and a flat-schematic-DUT-vs-`.SUBCKT`-wrapped-extraction mismatch, which reports a named `flat_dut_mismatch` block the same way (issue #1255, Gap 2). |
 
@@ -735,6 +943,15 @@ authoritative. See [`docs/json-contract.md`](../json-contract.md#exit-codes)'s
 This command's `--format json` output classifies as that kind (a top-level
 `delta[]` list plus `reference_netlist`) and passes item 7 on `status:
 "pass"`, exactly as that document describes.
+
+**A `--measure-command` run is graded identically** (issue #2478). It emits
+the same envelope — same `delta[]`, same `reference_netlist`, same
+`extraction`/`body_bias`/`provenance` — so it classifies as `pex` and grades
+`"met"` with no change to item 7's kind restriction, and no new envelope
+kind. That is the point: the restriction exists so a clean DRC cannot
+masquerade as a post-layout re-simulation, not so that a block with a genuine
+post-layout re-simulation is locked out for using a measurement `klt sim`'s
+request schema cannot express.
 
 ## Relationship to Epic #709's later phases
 

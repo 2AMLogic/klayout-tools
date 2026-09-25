@@ -61,6 +61,39 @@ not `klt --version`, if you need to detect this kind of drift. See
   `declared_pins` scoping). That behaviour is now pinned by a regression
   test. See `docs/cli/place-and-route.md`'s "IO pin layers" section and
   `docs/cli/extract.md`'s "DEF-derived declared pins" section.
+- **Added** (#2478, `klt pex` — additive, no `schema_version` bump):
+  `--measure-command` measures both legs of the schematic-vs-extracted
+  comparison with a **caller-supplied command** instead of a `klt sim`
+  request testbench set. A `klt sim` request's `measurements[]` entries are
+  verbatim `.meas` cards, so a spec row whose figure needs caller-side
+  post-processing — a threshold-crossing search, a statistic computed across
+  a Monte Carlo family with a fitted rescale, a measurement on a
+  derived/loop-broken netlist, an injection-based estimator — could not
+  produce a `klt pex` envelope at all, and therefore could never cite
+  `klt signoff`'s T1 item 7 ("Post-layout verification"), which accepts only
+  a `pex`-kind envelope for an analog partition (#871). The command is run
+  **twice** — once with the new (required) `--reference-netlist`, once with
+  the netlist `klt pex` extracted itself — with the netlist path as its final
+  argument plus `$KLT_PEX_SIDE`/`$KLT_PEX_NETLIST`/`$KLT_PEX_ARTIFACTS_DIR`
+  in its environment, and prints a measurement document (`corners[].corner_id`
+  + `measurements[].name`/`value`/`status`, a strict subset of `klt sim`'s own
+  response shape) on stdout. `klt pex` still drives extraction, still picks
+  both netlists, and still computes every `delta[]` row itself — a caller
+  supplies measurements, never a finished comparison — so the envelope is an
+  ordinary `pex` envelope carrying the same `extraction.model`/`body_bias`
+  disclosures, and item 7 grades it with **no change to the kind restriction
+  and no new envelope kind**. `--measure-timeout-s` caps one invocation
+  (default `1800`s). New additive top-level response field `measurement`
+  (`mode`, `command`, `timeout_s`, `sides`), present on **both** paths —
+  `mode: "testbench"` with the other three `null` on the default path — so a
+  committed record discloses which way it was measured. `pin_count_mismatch`
+  and `flat_dut_mismatch` are always `null` in the new mode (both diagnose
+  the testbench-`X…`-line-reuse contract it does not use); `model_mismatch`
+  is computed as before. `<testbench>` became optional at the argparse level
+  (`nargs="*"`); naming neither it nor `--measure-command` is still an
+  exit-1 error. Worked example:
+  `examples/design-pipeline/12-pex-external.probe.py` (a threshold-crossing
+  search on the sky130 5T OTA, −1.9 % measured post-layout delta).
 - **Changed** (#2465, `scripts/install-openroad-docker.sh` — provisioning
   only, no `klt` runtime behaviour or JSON shape change): the `openroad/orfs`
   Docker image is now **pinned by digest** rather than pulled as `:latest`.
