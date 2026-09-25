@@ -906,7 +906,9 @@ regeneration/corner-sim *gates* — a command-backed evidence entry actually
 runs, rather than only reading a file someone else already produced.
 **Phase 2a (issue #870)** extends the same evidence model to item 6, the
 statistical-evidence item, binding a `klt yield`
-([`yield.md`](yield.md), epic #710) campaign report the same way. **Phase 2b
+([`yield.md`](yield.md), epic #710) campaign report the same way — the one
+bound verb that is not reachable from a published release (see "Item 6's
+evidence needs a from-source toolchain" below). **Phase 2b
 (issue #871)** binds item 7, the post-layout-verification item, to a `klt
 pex` report — and, unlike every other item, restricts which envelope
 *kinds* satisfy it (see "Item 7 is kind-restricted, per block kind"
@@ -1705,6 +1707,28 @@ envelope graded all three `met`. Issue #2044 closes that:
 A citation of any other kind renders `"unmet"` with `reason: "wrong_kind"`,
 exactly as it already did for items 3, 4 and 7 — the cited check did not
 fail on its own terms, it simply does not prove what the item requires.
+
+#### Item 6's evidence needs a from-source toolchain (issue #2466)
+
+Item 6 accepts only a `yield` envelope, and `klt yield` requires the
+`klt_yield_native` Rust extension — which is **not** published as a
+prebuilt wheel. Neither `pip install klayout-tools`/`uv tool install
+klayout-tools` nor the git-pinned (`@git+…`) form builds it; getting it
+needs a full repo checkout with a Rust toolchain (see
+[`yield.md`](yield.md)'s "Not reachable from a single-package install"
+callout for the full statement and the build steps). Every *other* T1
+item's evidence verb — `drc`, `lvs`, `extract`, `sim`, `pex`, `sta`,
+`functional-verification`, `erc`, `place-and-route` — is reachable from a
+published release, so item 6 is the one row a consumer pinning a published
+version cannot produce evidence for, or re-derive an already-committed
+report for, from that pin alone. Worth knowing *before* planning a T1
+campaign around it.
+
+This changes nothing about how the item grades: a `klt yield` report cites,
+hashes, and grades exactly as described here and in "Worked example:
+binding the statistical-evidence item to `klt yield`" below, whatever
+toolchain produced it — `klt signoff` itself needs no Rust extension to
+read one.
 
 **What this does not change.** `klt extract` is untouched everywhere else:
 its envelope still aggregates normally in envelope-aggregation mode (it
