@@ -2743,6 +2743,79 @@ them is harmless (the below-top-label pass is a structural no-op on a
 DEF-merged layout, see above) but does not need to be done, since
 `--def-pins` alone already covers the DEF-merge case fully.
 
+### `def_pin_promotion`: how the declared port set actually landed (issue #2473)
+
+`--def-pins` also reports its own outcome as a machine-readable top-level
+field, `null` unless the flag was given:
+
+```json
+"def_pin_promotion": {
+  "declared": 48,
+  "promoted": 2,
+  "unmatched": ["A", "B", "..."],
+  "findings": [
+    {
+      "severity": "error",
+      "code": "def_pin_geometry_outside_connectivity_graph",
+      "layer": 67,
+      "datatype": 16,
+      "pins": ["A", "B", "..."],
+      "declared_pin_count": 48,
+      "promoted_pin_count": 2,
+      "message": "..."
+    }
+  ]
+}
+```
+
+`declared` is the size of the DEF's own `PINS` set, `promoted` how many of
+those names matched a promoted net's label set, and `unmatched` (sorted) the
+residue — the same names the "matched no promoted net's label set" warning
+already lists, without parsing prose.
+
+**`findings` is the `error`-severity part**, and it is scoped to one specific
+defect rather than to every unmatched name: a declared port whose pin-name
+label is *measured* to name no net at all (`LayoutToNetlist.probe_net` at the
+label's own composed-frame position, the same probe `--pin-source-cells`
+uses) while geometry does sit under it on a layer/datatype this deck's
+connectivity graph never reads. That port does not electrically exist in the
+extracted netlist, and nothing else in the chain catches it: `klt drc` has no
+rule against a label drawn over no conductor, and `klt lvs`'s structural
+comparer reports `status: "match"` for a layout missing top-level pins
+(pinned deliberately — gating LVS on a layout-vs-reference pin-count
+disparity would false-positive on every legitimate design whose counts differ
+for other reasons). Each finding is mirrored into `warnings[]` prefixed
+`ERROR:`, so a `--format text` caller sees it too.
+
+The offending geometry is looked for on a deliberately narrow candidate set:
+a **different purpose (datatype) of a GDS layer number this deck does read**
+— `67/16` when the deck reads `67/20`/`67/5`, say. That is exactly the
+mechanism being diagnosed (the port rectangle landed on its own layer's LEF
+`PIN`/`LEFPIN` purpose instead of its conductor purpose), and it keeps the
+full-die marker polygon every real DEF→GDS merge carries out of the findings
+list: open_pdks' own `sky130A.map` ends with `DIEAREA ALL 235 4`, so `235/4`
+covers the whole die, is equally invisible to the connectivity graph, and
+sits under every pin label — reporting it would attach a second, misleading
+`(layer, datatype)` to the very case this check exists for.
+
+The observed trigger (issue #2473) is a `klt place-and-route` request whose
+`io.layer_h`/`io.layer_v` named a layer the router never draws signal
+conductor on — sky130's `li1`. OpenROAD writes that port's DEF `PINS`
+rectangle to li1's `LEFPIN,PIN` layer-map row (GDS `67/16`), not its `NET`
+row (`67/20`, li1's conductor), and reaches the cell pin from above through
+`mcon`; the pin-name text lands on `67/5` over nothing the deck reads. The
+reported design produced `pin_count: 2` against a DEF declaring 48 pins, with
+a clean DRC and a `"match"` LVS. `klt place-and-route` now rejects such a
+request up front — see
+[`docs/cli/place-and-route.md`](place-and-route.md)'s "IO pin layers must be
+inside the signal-routing range" section — and this finding covers a layout
+that already exists.
+
+An ordinary unmatched-name miss (a DEF typo, a port renamed by synthesis, a
+name that only ever existed in the reference netlist) leaves `findings` empty
+and keeps only its long-standing prose warning: nothing in the layout is
+invisible, the name simply is not there.
+
 ## Pin-source cells (`--pin-source-cells`, issue #1513)
 
 `--top-cell-pins` and `--def-pins` both cover a *single* governing DEF's

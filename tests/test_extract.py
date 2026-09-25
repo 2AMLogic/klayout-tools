@@ -1764,6 +1764,7 @@ def test_gf180mcu_nmos_body_isolation_scoping_is_opt_in(tmp_path):
         _mom_crosscheck,
         _net_label_positions,
         _device_instance_paths,
+        _def_pin_promotion,
     ) = _extract_netlist(layout, layout.top_cell(), disabled_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -2340,6 +2341,191 @@ def test_declared_pins_no_duplicate_label_warning_on_ordinary_fixture(tmp_path):
         def_pins=frozenset({"VGND", "VPWR", "VPB", "A"}),
     )
     assert not any("physically disconnected nets" in w for w in report["warnings"])
+
+
+# --------------------------------------------------------------------------- #
+# DEF port geometry the deck's connectivity graph cannot see (issue #2473)
+#
+# `klt place-and-route` accepts `io.layer_v: "li1"`, and OpenROAD then writes
+# each DEF `PINS` port rectangle to li1's LEF PIN/LEFPIN purpose -- GDS 67/16,
+# not the 67/20 conductor this deck reads -- with the route reaching the cell
+# pin from above through `mcon`. The pin-name text still lands on 67/5, so the
+# layout *looks* labelled: the label simply sits over no li1 conductor, names
+# no net, and the port never promotes. `klt drc` is clean (no rule forbids a
+# label over nothing) and `klt lvs` reports "match" (its structural comparer
+# does not need pins), so nothing downstream catches it.
+#
+# `_make_li1_style_def_port` reproduces exactly that geometry on top of the
+# ordinary inverter fixture: a port rectangle on 67/16 with its pin-name text
+# on 67/5 and deliberately no 67/20 under either.
+#
+# `_make_die_area_boundary` adds the other half of what a real DEF->GDS merge
+# always carries: open_pdks' own `sky130A.map` ends with `DIEAREA ALL 235 4`,
+# so a full-die marker polygon on 235/4 -- which this deck's connectivity
+# graph also never reads -- sits under *every* pin label. It is here so the
+# finding set below is asserted against the geometry a real merge produces,
+# not against a stripped-down fixture.
+# --------------------------------------------------------------------------- #
+
+
+def _make_li1_style_def_port(
+    layout: kdb.Layout, name: str, x0: int = 3000, y0: int = 0
+) -> None:
+    layout.top_cell().shapes(layout.layer(67, 16)).insert(
+        kdb.Box(x0, y0, x0 + 400, y0 + 400)
+    )
+    layout.top_cell().shapes(layout.layer(67, 5)).insert(
+        kdb.Text(name, kdb.Trans(x0 + 200, y0 + 200))
+    )
+
+
+def _make_die_area_boundary(layout: kdb.Layout) -> None:
+    layout.top_cell().shapes(layout.layer(235, 4)).insert(
+        kdb.Box(-2000, -2000, 8000, 8000)
+    )
+
+
+def test_def_pins_port_geometry_outside_connectivity_graph_is_an_error(tmp_path):
+    """Issue #2473's core regression: a declared DEF `PINS` port whose
+    geometry is drawn on a layer/datatype the deck never reads produces an
+    `error`-severity `def_pin_promotion` finding naming that layer/datatype
+    and the declared-vs-promoted disparity -- not just another prose
+    "matched no promoted net's label set" warning."""
+    layout = _make_inverter_layout()
+    _make_li1_style_def_port(layout, "IO_A")
+    _make_die_area_boundary(layout)
+    path = _write_gds(layout, tmp_path / "li1_io.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "li1_io.spice"),
+        def_pins=frozenset({"VGND", "VPWR", "VPB", "A", "IO_A"}),
+    )
+
+    promotion = report["def_pin_promotion"]
+    assert promotion["declared"] == 5
+    assert promotion["promoted"] == 4
+    assert promotion["unmatched"] == ["IO_A"]
+
+    findings = promotion["findings"]
+    # Exactly one -- the full-die 235/4 DIEAREA marker drawn above is just as
+    # invisible to this deck's connectivity graph and sits under the same
+    # label, but it is not another *purpose of a layer the deck reads*, so it
+    # earns no second, misleading finding.
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["severity"] == "error"
+    assert finding["code"] == "def_pin_geometry_outside_connectivity_graph"
+    # The offending layer/datatype is named: li1's LEFPIN purpose, the layer
+    # OpenROAD writes a li1 DEF port rectangle to.
+    assert (finding["layer"], finding["datatype"]) == (67, 16)
+    assert finding["pins"] == ["IO_A"]
+    assert finding["declared_pin_count"] == 5
+    assert finding["promoted_pin_count"] == 4
+
+    # Mirrored into `warnings[]` so a `--format text` caller sees it too.
+    assert any(w.startswith("ERROR: ") and "67/16" in w for w in report["warnings"])
+
+
+def test_def_pins_unmatched_name_without_geometry_is_not_an_error(tmp_path):
+    """The guard is scoped to the *defect*, not to every unmatched name
+    (issue #2473). A declared name that is simply absent from the layout (a
+    DEF typo, a port renamed by synthesis) still gets its long-standing
+    prose warning and still appears in `def_pin_promotion.unmatched`, but
+    raises no `error` finding -- nothing in the layout is invisible, the
+    name just is not there."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "typo.spice"),
+        def_pins=frozenset({"VGND", "VPWR", "VPB", "A", "NOPE"}),
+    )
+
+    promotion = report["def_pin_promotion"]
+    assert promotion["unmatched"] == ["NOPE"]
+    assert promotion["findings"] == []
+    assert any("matched no promoted net's label set" in w for w in report["warnings"])
+    assert not any(w.startswith("ERROR: ") for w in report["warnings"])
+
+
+def test_def_pins_promotion_block_clean_on_a_real_conductor_layer(tmp_path):
+    """The happy path is unchanged (issue #2473): the same port drawn on
+    li1's *conductor* datatype (67/20, what the router draws when
+    `io.layer_v` names a layer inside the signal-routing range) promotes
+    normally -- `declared == promoted`, no findings, no new warning."""
+    layout = _make_inverter_layout()
+    # Same port, drawn the way a routable io layer lands it: real conductor
+    # under the pin-name label instead of a LEFPIN-purpose rectangle.
+    layout.top_cell().shapes(layout.layer(67, 20)).insert(kdb.Box(3000, 0, 3400, 400))
+    layout.top_cell().shapes(layout.layer(67, 5)).insert(
+        kdb.Text("IO_A", kdb.Trans(3200, 200))
+    )
+    path = _write_gds(layout, tmp_path / "met_io.gds")
+
+    report = run_extract(
+        path,
+        "sky130",
+        output=str(tmp_path / "met_io.spice"),
+        def_pins=frozenset({"VGND", "VPWR", "VPB", "A", "IO_A"}),
+    )
+
+    promotion = report["def_pin_promotion"]
+    assert promotion["declared"] == promotion["promoted"] == 5
+    assert promotion["unmatched"] == []
+    assert promotion["findings"] == []
+    assert not any(w.startswith("ERROR: ") for w in report["warnings"])
+    assert "IO_A" in {n["name"] for n in report["nets"] if n["pin"]}
+
+
+def test_def_pin_promotion_is_null_without_def_pins(tmp_path):
+    """`def_pin_promotion` follows the module's own null-unless-asked
+    convention: omitting `def_pins` leaves every other field byte-identical
+    to before issue #2473."""
+    path = _write_gds(_make_inverter_layout(), tmp_path / "inv.gds")
+    report = run_extract(path, "sky130", output=str(tmp_path / "plain.spice"))
+
+    assert report["def_pin_promotion"] is None
+
+
+def test_cli_def_pin_promotion_error_is_visible_in_text_output(tmp_path, capsys):
+    """A `--format text` caller sees the finding too (issue #2473) -- the
+    at-a-glance promoted-of-declared count and the offending layer/datatype
+    in the `def_pin_promotion` block, plus the full prose under `warnings`."""
+    layout = _make_inverter_layout()
+    _make_li1_style_def_port(layout, "io_a")
+    _make_die_area_boundary(layout)
+    path = str(_write_gds(layout, tmp_path / "li1_io.gds"))
+    def_path = tmp_path / "design.def"
+    def_path.write_text(
+        "DESIGN top ;\nPINS 1 ;\n    - io_a + NET io_a ;\nEND PINS\nEND DESIGN\n"
+    )
+
+    exit_code = main(["extract", path, "--deck", "sky130", "--def-pins", str(def_path)])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+
+    assert "def_pin_promotion (--def-pins): 0 of 1 declared" in out
+    assert "ERROR: " in out
+    finding_lines = [line for line in out.splitlines() if "[error]" in line]
+    # Exactly one finding line, and it names li1's LEFPIN purpose -- not the
+    # full-die 235/4 DIEAREA marker, which `ignored_layers` above legitimately
+    # lists but which is no port geometry.
+    assert len(finding_lines) == 1
+    assert "67/16" in finding_lines[0]
+    assert "235/4" not in finding_lines[0]
+
+
+def test_cli_def_pin_promotion_block_absent_from_clean_text_output(tmp_path, capsys):
+    """The block is a no-op on the common case: no `--def-pins`, no
+    `def_pin_promotion` section in `--format text` at all (issue #2473)."""
+    path = str(_write_gds(_make_inverter_layout(), tmp_path / "inv.gds"))
+
+    exit_code = main(["extract", path, "--deck", "sky130"])
+    assert exit_code == 0
+    assert "def_pin_promotion (--def-pins)" not in capsys.readouterr().out
 
 
 def test_cli_def_pins_flag_derives_pins_from_a_def_file(tmp_path, capsys):
@@ -4569,6 +4755,7 @@ def test_capacitor_default_perim_cap_f_um_reports_area_only_c_f(tmp_path):
         _mom_crosscheck,
         _net_label_positions,
         _device_instance_paths,
+        _def_pin_promotion,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)
@@ -7348,6 +7535,7 @@ def test_resistor_default_fixed_offset_ohm_reports_unchanged_r_ohm(tmp_path):
         _mom_crosscheck,
         _net_label_positions,
         _device_instance_paths,
+        _def_pin_promotion,
     ) = _extract_netlist(layout, layout.top_cell(), uncorrected_deck)
     circuit = netlist.circuit_by_name(layout.top_cell().name)
     devices, _device_counts = _describe_devices(circuit)

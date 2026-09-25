@@ -652,12 +652,38 @@ def _print_text(report: dict) -> None:
     # Additive (issue #2245): a no-op unless --subcircuit was given.
     _print_subcircuit_text(report.get("subcircuit"))
 
+    # Additive (issue #2473): a no-op unless --def-pins was given and its
+    # declared-vs-promoted reconciliation raised an error-severity finding.
+    _print_def_pin_promotion_text(report.get("def_pin_promotion"))
+
     warnings = report["warnings"]
     if warnings:
         print()
         print("warnings:")
         for warning in warnings:
             print(f"  {warning}")
+
+
+def _print_def_pin_promotion_text(promotion: dict | None) -> None:
+    """Render the `def_pin_promotion` block's `error`-severity findings
+    (issue #2473) -- nothing at all when `--def-pins` was never given, and
+    nothing when every declared DEF `PINS` name either promoted or missed
+    for an ordinary (non-geometry) reason, which is the common case. The
+    full prose for each finding is already in `warnings[]` below; this block
+    is the at-a-glance count and layer/datatype summary."""
+    if promotion is None or not promotion["findings"]:
+        return
+    print()
+    print(
+        f"def_pin_promotion (--def-pins): {promotion['promoted']} of "
+        f"{promotion['declared']} declared DEF PINS name(s) promoted"
+    )
+    for finding in promotion["findings"]:
+        print(
+            f"  [{finding['severity']}] {finding['layer']}/"
+            f"{finding['datatype']} (outside this deck's connectivity "
+            f"graph): {', '.join(finding['pins'])}"
+        )
 
 
 def _print_subcircuit_text(subcircuit: dict | None) -> None:

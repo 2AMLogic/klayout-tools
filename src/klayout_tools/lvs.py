@@ -2830,7 +2830,10 @@ def _resolve_layout(
             # (device_instance_paths, #1666) likewise feeds `klt extract`'s
             # own `devices[].instance_path`; `klt lvs` compares by device
             # class/parameter equivalence, not by originating GDS-level
-            # instance, so it has no use here either.
+            # instance, so it has no use here either. The 15th return
+            # (def_pin_promotion, #2473) reports how a `def_pins` declared
+            # port set landed; `klt lvs` has no `--def-pins` equivalent
+            # request field, so it is always `None` here.
             (
                 netlist,
                 top_cell_name,
@@ -2846,6 +2849,7 @@ def _resolve_layout(
                 _mom_crosscheck,
                 _net_label_positions,
                 _device_instance_paths,
+                _def_pin_promotion,
             ) = extract_netlist_from_layout(
                 layout_file,
                 deck_name,

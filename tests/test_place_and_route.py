@@ -668,6 +668,81 @@ def test_run_target_stage_place_requires_io(tmp_path, monkeypatch):
         run_place_and_route(request_path)
 
 
+def test_run_io_layer_below_signal_routing_range_rejected(tmp_path, monkeypatch):
+    """Issue #2473: `io.layer_v: "li1"` is a real sky130 routing layer, but
+    it sits *below* this library's own signal-routing range (`met1-met5`),
+    so the router never draws signal conductor on it. OpenROAD still places
+    the pins -- writing each DEF `PINS` port rectangle to li1's LEF
+    PIN/LEFPIN purpose (GDS 67/16), with the actual route reaching the cell
+    pin from above through `mcon` -- producing a DRC-clean GDS whose
+    top-level pins do not electrically exist in `klt extract`'s output.
+    Rejected at request time, before two minutes of routing."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        io={"layer_h": "met1", "layer_v": "li1"},
+    )
+    with pytest.raises(
+        PlaceAndRouteError,
+        match=r"request\.io\.layer_v 'li1' is outside the signal routing range",
+    ):
+        run_place_and_route(request_path)
+
+
+def test_run_io_layer_rejection_names_the_usable_layers(tmp_path, monkeypatch):
+    """The rejection is actionable: it names the concrete layer set
+    `set_routing_layers -signal` opens for this library, not just the range
+    string (issue #2473)."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        io={"layer_h": "li1", "layer_v": "met2"},
+    )
+    with pytest.raises(PlaceAndRouteError) as excinfo:
+        run_place_and_route(request_path)
+
+    message = str(excinfo.value)
+    assert "request.io.layer_h 'li1'" in message
+    assert "met1, met2, met3, met4, met5" in message
+
+
+def test_run_io_layer_unknown_name_is_left_to_the_engine(tmp_path, monkeypatch):
+    """Deliberately narrow (issue #2473): only a layer this library's own
+    routing stack declares but its *signal* range excludes is rejected here.
+    A name the stack does not know at all is not this validator's business
+    -- it reaches OpenROAD, whose own error is already loud -- so the guard
+    can never reject a request on a guess about an unmodelled layer."""
+    request_path = _setup_success_env(
+        tmp_path,
+        monkeypatch,
+        target_stage="floorplan",
+        io={"layer_h": "met3", "layer_v": "not_a_real_layer"},
+    )
+    _stub_openroad_success(monkeypatch, stages=("floorplan",))
+
+    report = run_place_and_route(request_path)
+
+    assert report["status"] == "ok"
+
+
+def test_signal_routing_layers_covers_every_supported_library():
+    """The two reference tables must agree: every `_ROUTING_LAYER_RANGE`
+    entry's endpoints have to exist, in order, in that library's own
+    `_ROUTING_LAYER_STACK` -- otherwise `_signal_routing_layers` silently
+    returns `None` and issue #2473's guard quietly stops guarding."""
+    for cell_library, layer_range in place_and_route._ROUTING_LAYER_RANGE.items():
+        routable = place_and_route._signal_routing_layers(cell_library)
+        assert routable is not None, cell_library
+        low, _, high = layer_range.partition("-")
+        assert routable[0] == low
+        assert routable[-1] == high
+        stack = place_and_route._ROUTING_LAYER_STACK[cell_library]
+        # Every library reserves at least its bottom layer for pin access,
+        # which is exactly the class of io-layer mistake #2473 reports.
+        assert set(routable).issubset(stack)
+        assert stack[0] not in routable
+
+
 def test_run_target_stage_floorplan_does_not_require_clock(tmp_path, monkeypatch):
     """A `target_stage: "floorplan"` request needs no clock/io -- those are
     only meaningful from the "place" stage onward."""
@@ -8996,11 +9071,16 @@ def _write_li1_layer_map(path: Path) -> None:
     """The three `li1` rows a real open_pdks `sky130A.map` carries, in the
     same whitespace-delimited `<lef layer> <purposes> <gds layer> <gds
     datatype>` shape -- the `NET` purpose (67/20) is what the merge resolves
-    a LEF `PORT`'s own layer name through."""
+    a LEF `PORT`'s own layer name through -- plus that file's own trailing
+    `DIEAREA ALL 235 4` row, so every merge through this fixture carries the
+    full-die boundary polygon a real merge always does (issue #2473: it sits
+    under every pin label and is likewise invisible to the sky130 extraction
+    deck, so leaving it out would make the fixture easier than reality)."""
     path.write_text(
         "li1     NET,SPNET,VIA            67  20\n"
         "li1     LEFPIN,PIN               67  16\n"
-        "NAME    li1/LABEL,li1/LEFPIN     67  5\n",
+        "NAME    li1/LABEL,li1/LEFPIN     67  5\n"
+        "DIEAREA ALL                      235 4\n",
         encoding="utf-8",
     )
 
@@ -9145,6 +9225,118 @@ def test_merge_single_pin_net_markers_survive_extraction(tmp_path):
 
     assert not {"net_hi_1", "net_hi_2"} & default_names
     assert {"net_hi_1", "net_hi_2"} <= def_names
+
+
+def _write_li1_pin_def(path: Path) -> None:
+    """One placed tie cell plus a top-level DEF `PINS` port declared on
+    `li1` -- the exact shape OpenROAD's `place_pins` writes for an
+    `io.layer_*` naming a layer below the signal-routing range (issue
+    #2473). The port's own rectangle is a `+ LAYER li1` clause, which the
+    open_pdks layer map resolves through li1's `LEFPIN,PIN` row (67/16), not
+    its `NET` row (67/20)."""
+    path.write_text(
+        "VERSION 5.8 ;\n"
+        'DIVIDERCHAR "/" ;\n'
+        'BUSBITCHARS "[]" ;\n'
+        "DESIGN top ;\n"
+        "UNITS DISTANCE MICRONS 1000 ;\n"
+        "DIEAREA ( -1000 -1000 ) ( 20000 20000 ) ;\n"
+        "ROW ROW_0 unithd 0 0 N DO 10 BY 1 STEP 2000 0 ;\n"
+        "COMPONENTS 1 ;\n"
+        "- u_tie1 tiecell + PLACED ( 0 0 ) N ;\n"
+        "END COMPONENTS\n"
+        "PINS 1 ;\n"
+        "- io_a + NET io_a + DIRECTION OUTPUT + USE SIGNAL\n"
+        "  + LAYER li1 ( -70 -300 ) ( 70 300 )\n"
+        "  + PLACED ( 5000 4000 ) N ;\n"
+        "END PINS\n"
+        "NETS 1 ;\n"
+        "- io_a ( PIN io_a ) ( u_tie1 HI ) + USE SIGNAL ;\n"
+        "END NETS\n"
+        "END DESIGN\n",
+        encoding="utf-8",
+    )
+
+
+def test_li1_def_pin_geometry_is_invisible_to_extraction(tmp_path):
+    """Issue #2473, measured end to end through the real DEF->GDS merge: a
+    DEF `PINS` port declared on `li1` lands its rectangle on li1's
+    LEFPIN/PIN purpose (67/16) and its pin-name text on 67/5, with **no**
+    li1 conductor (67/20) under either -- so the label names no net and the
+    declared port promotes to no top-level pin at all (`pin_count: 0` here).
+
+    `klt extract --def-pins` now reports that as an `error`-severity
+    `def_pin_promotion` finding naming the offending layer/datatype and the
+    declared-vs-promoted disparity, instead of leaving it to a prose warning
+    nobody downstream reads: `klt drc` has no rule against a label over no
+    conductor, and `klt lvs` still reports `"match"` for a layout missing
+    top-level pins (see `tests/test_lvs.py`'s
+    `test_missing_top_level_pin_alone_still_reports_match`). The request-time
+    guard in `_validate_io` stops a *new* run from reaching this state; this
+    test covers a layout that already exists."""
+    inputs = _tie_cell_merge_inputs(tmp_path)
+    def_path = tmp_path / "design.def"
+    _write_li1_pin_def(def_path)
+    out_path = tmp_path / "out.gds"
+
+    place_and_route._merge_def_to_gds(
+        def_path=str(def_path), out_path=str(out_path), **inputs
+    )
+
+    # The merge put the port rectangle on li1's LEFPIN purpose, and nothing
+    # on li1's conductor purpose at the port's own position.
+    merged = kdb.Layout()
+    merged.read(str(out_path))
+    port_box = kdb.Box(4930, 3700, 5070, 4300)
+    lefpin_layer = merged.find_layer(67, 16)
+    assert lefpin_layer is not None
+    assert merged.top_cell().shapes(lefpin_layer).size() == 1
+    conductor_layer = merged.find_layer(67, 20)
+    assert (
+        merged.top_cell().begin_shapes_rec_touching(conductor_layer, port_box).at_end()
+    )
+    # And the full-die DIEAREA marker (`DIEAREA ALL 235 4` in open_pdks' own
+    # layer map) really is there, covering the port position -- the extract
+    # finding below is asserted against that, not against a fixture that
+    # quietly omits the one other invisible layer a real merge always has.
+    die_area_layer = merged.find_layer(235, 4)
+    assert die_area_layer is not None
+    assert (
+        not merged.top_cell()
+        .begin_shapes_rec_touching(die_area_layer, port_box)
+        .at_end()
+    )
+
+    def_pins = place_and_route.def_pin_names(str(def_path))
+    assert def_pins == frozenset({"io_a"})
+
+    report = extract_module.run_extract(
+        str(out_path),
+        "sky130",
+        output=str(tmp_path / "out.spice"),
+        def_pins=def_pins,
+    )
+
+    # The silent symptom the issue reports: the declared port does not
+    # electrically exist in the extracted netlist.
+    assert report["pin_count"] == 0
+
+    promotion = report["def_pin_promotion"]
+    assert promotion["declared"] == 1
+    assert promotion["promoted"] == 0
+    assert promotion["unmatched"] == ["io_a"]
+    # Exactly one -- 235/4 above is equally unreadable by this deck and sits
+    # under the same label, but it is not another purpose of a layer number
+    # the deck reads, so it earns no second, misleading finding.
+    assert len(promotion["findings"]) == 1
+    finding = promotion["findings"][0]
+    assert finding["severity"] == "error"
+    assert finding["code"] == "def_pin_geometry_outside_connectivity_graph"
+    assert (finding["layer"], finding["datatype"]) == (67, 16)
+    assert finding["pins"] == ["io_a"]
+    assert finding["declared_pin_count"] == 1
+    assert finding["promoted_pin_count"] == 0
+    assert any(w.startswith("ERROR: ") and "67/16" in w for w in report["warnings"])
 
 
 def test_merge_leaves_routed_single_pin_nets_to_their_own_routed_metal(tmp_path):

@@ -1805,6 +1805,36 @@ def run_extract(
     comparison. Always a list, empty when ``matched_device_groups`` (the
     ``--matched-group`` flag) was never given.
 
+    ``def_pin_promotion`` (issue #2473) reports how the ``def_pins``
+    (``--def-pins``) declared-port set actually landed: ``{"declared":
+    <int>, "promoted": <int>, "unmatched": [<declared name>, ...],
+    "findings": [...]}``, and ``None`` when ``def_pins`` was never given.
+    ``declared`` is the size of the DEF's own ``PINS`` set, ``promoted`` how
+    many of those names matched a promoted net's label set, and ``unmatched``
+    (sorted) the residue -- the same names the "matched no promoted net's
+    label set" warning already lists, now also machine-readable without
+    parsing prose.
+
+    ``findings`` is the ``error``-severity part: one entry per offending
+    ``(layer, datatype)``, ``{"severity": "error", "code":
+    "def_pin_geometry_outside_connectivity_graph", "layer": <int>,
+    "datatype": <int>, "pins": [<declared name>, ...],
+    "declared_pin_count": <int>, "promoted_pin_count": <int>, "message":
+    <str>}``. An entry means a declared port's pin-name label is drawn over
+    geometry on a layer this deck's connectivity graph never reads, with no
+    conductor under it -- the port does not electrically exist in the
+    extracted netlist, and nothing else in the chain catches that (``klt
+    drc`` has no rule against a label over no conductor, and `klt lvs`'s
+    structural comparer reports ``"match"`` without needing pins). The
+    observed trigger is a ``klt place-and-route`` request whose
+    ``io.layer_h``/``io.layer_v`` names a layer the router never draws signal
+    conductor on -- see :func:`_unpromoted_def_pin_geometry` and
+    ``docs/cli/extract.md``'s "DEF-derived declared pins" section. Each
+    finding is also mirrored into ``warnings`` (prefixed ``ERROR:``), so a
+    caller reading only that still sees it. Always a list, empty -- the
+    overwhelmingly common case -- whenever every unmatched declared name is
+    an ordinary naming miss rather than invisible geometry.
+
     ``parasitics.metals_without_coefficient`` (issue #547) lists every metal
     stack level the deck's ``ExtractionDeck.metals`` declares that has no
     matching entry in the deck's ``ParasiticsDeck.metals`` -- the
@@ -2010,6 +2040,7 @@ def run_extract(
         mom_crosscheck,
         net_label_positions,
         device_instance_paths,
+        def_pin_promotion,
     ) = extract_netlist_from_layout(
         path,
         deck_name,
@@ -2789,6 +2820,11 @@ def run_extract(
         # run_extract's docstring and `_describe_matched_device_groups` for
         # the field's full meaning.
         "matched_device_groups": matched_device_groups_report,
+        # Additive field (issue #2473): `null` unless `def_pins`
+        # (--def-pins) was given, the declared-vs-promoted DEF `PINS`
+        # reconciliation summary otherwise -- see run_extract's docstring and
+        # `_unpromoted_def_pin_geometry` for the field's full meaning.
+        "def_pin_promotion": def_pin_promotion,
     }
     if pdk_info is not None:
         result["pdk"] = {
@@ -3451,15 +3487,18 @@ def extract_netlist_from_layout(
     dict[str, Any] | None,
     dict[int, list[dict[str, Any]]],
     dict[int, list[dict[str, Any]]],
+    dict[str, Any] | None,
 ]:
     """Core extraction: read ``path``, resolve ``deck_name`` and the top
     cell, and run flat device + connectivity extraction. Returns
     ``(netlist, top_cell_name, dbu_um, warnings, parasitic_nets,
     black_box_regions, dummy_devices_dropped, unmodelled_poly,
     voltage_domain_warnings, abstracted_cells, dead_metal, mom_crosscheck,
-    net_label_positions, device_instance_paths)`` -- see
+    net_label_positions, device_instance_paths, def_pin_promotion)`` -- see
     :func:`_extract_netlist`'s own docstring for ``net_label_positions``
-    (issue #1540) and ``device_instance_paths`` (issue #1666).
+    (issue #1540), ``device_instance_paths`` (issue #1666) and
+    ``def_pin_promotion`` (issue #2473, ``None`` unless ``def_pins`` was
+    given).
 
     ``abstract_cell_patterns``/``abstract_cell_lef_paths`` (the
     ``--abstract-cells``/``--abstract-cell-lef`` flags, issue #620): when
@@ -3739,6 +3778,7 @@ def extract_netlist_from_layout(
         mom_crosscheck,
         net_label_positions,
         device_instance_paths,
+        def_pin_promotion,
     ) = _extract_netlist(
         layout,
         top_cell,
@@ -3792,6 +3832,7 @@ def extract_netlist_from_layout(
         mom_crosscheck,
         net_label_positions,
         device_instance_paths,
+        def_pin_promotion,
     )
 
 
@@ -4223,6 +4264,289 @@ def _duplicated_declared_pin_names(
     return sorted(name for name, ids in name_net_ids.items() if len(ids) > 1)
 
 
+def _unpromoted_def_pin_geometry(
+    l2n: kdb.LayoutToNetlist,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+    names: frozenset[str],
+) -> list[dict[str, Any]]:
+    """Diagnose *why* each declared DEF ``PINS`` name in ``names`` promoted
+    to no top-level pin, for the one cause that is a hard defect rather than
+    a naming miss: the port's own geometry is drawn on a layer/datatype this
+    deck's connectivity graph never reads (issue #2473).
+
+    ``names`` is ``def_pins``'s own "matched no promoted net's label set"
+    residue (:func:`_extract_netlist`'s ``unmatched_def_pins``). That residue
+    has several innocent causes -- a typo in the DEF, a port renamed by
+    synthesis, a name that only ever existed in the reference netlist -- all
+    of which this function deliberately reports *nothing* for: none of them
+    leaves a drawn, named label sitting over geometry the deck cannot see.
+
+    The defect it does catch is the one issue #2473 reports. OpenROAD writes
+    a DEF ``PINS`` port's rectangle to the LEF ``PIN``/``LEFPIN`` purpose of
+    the named ``io.layer_h``/``io.layer_v`` layer -- for sky130's ``li1``
+    that is GDS ``67/16``, while this deck's ``li1`` *conductor* is ``67/20``
+    and its label layer is ``67/5``. A port placed on a layer the router
+    never draws signal conductor on therefore ends up as a pin-name text on
+    ``67/5`` sitting over a rectangle on ``67/16`` with **no** ``67/20``
+    under it: the label names nothing, the net is never promoted, and
+    nothing downstream notices (DRC has no rule against a label over no
+    conductor, and `klt lvs`'s structural comparer does not need pins to
+    report ``"match"``).
+
+    Each candidate label is probed exactly the way
+    :func:`_pin_source_cell_net_names` probes a ``--pin-source-cells`` label
+    -- ``LayoutToNetlist.probe_net`` on the label layer's own conductor
+    region, at the label's composed-frame position -- so "this label names no
+    net" is *measured* against the live connectivity graph rather than
+    inferred from the name miss alone. Only when that probe comes back empty
+    is the same position tested against the stream layers
+    :func:`_unread_stream_layers` selects -- a *different purpose* (datatype)
+    of a GDS layer number this deck's connectivity graph does read -- and
+    only a non-``Text`` shape found there counts: that shape is the port
+    geometry the extraction cannot see.
+
+    Returns one entry per offending ``(layer, datatype)``, sorted, each
+    ``{"layer": int, "datatype": int, "pins": [str, ...]}`` -- and ``[]``
+    (no finding) whenever every unmatched name is an ordinary naming miss,
+    which is the overwhelmingly common case and the one every pre-existing
+    ``--def-pins`` caller is already in.
+    """
+    if not names:
+        return []
+
+    unread_layers = _unread_stream_layers(layout, deck)
+    if not unread_layers:
+        return []
+
+    targets = _label_probe_targets(deck, poly, nwell, tap, metals)
+    pins_by_layer: dict[tuple[int, int], set[str]] = {}
+    for name, point in _unnamed_label_positions(l2n, layout, top_cell, targets, names):
+        for pair in _unread_layers_under(top_cell, point, unread_layers):
+            pins_by_layer.setdefault(pair, set()).add(name)
+
+    return [
+        {"layer": pair[0], "datatype": pair[1], "pins": sorted(pins)}
+        for pair, pins in sorted(pins_by_layer.items())
+    ]
+
+
+def _unread_stream_layers(
+    layout: kdb.Layout, deck: ExtractionDeck
+) -> list[tuple[int, tuple[int, int]]]:
+    """Every ``(layer_index, (layer, datatype))`` present in ``layout`` that
+    is a **different purpose of a GDS layer number this deck does read** --
+    the candidate set :func:`_unpromoted_def_pin_geometry` tests a label's
+    position against (issue #2473).
+
+    Not simply "everything in ``run_extract``'s stream-side
+    ``ignored_layers``", deliberately. A real DEF->GDS merge always carries
+    at least one full-die marker polygon that the connectivity graph also
+    never reads -- open_pdks' own ``sky130A.map`` ends with ``DIEAREA ALL
+    235 4``, so ``235/4`` covers the whole die and therefore sits under
+    *every* pin label. Reporting it would attach a second, misleading
+    ``(layer, datatype)`` to the very scenario this check exists for.
+
+    Restricting to another datatype of a layer number already in
+    :attr:`ExtractionDeck.connectivity_layers` is exactly the mechanism
+    being diagnosed: the port rectangle lands on its own layer's LEF
+    ``PIN``/``LEFPIN`` *purpose* instead of its conductor purpose (sky130's
+    ``li1``: ``67/16`` rather than ``67/20``, both layer ``67``; the same
+    holds for ``met1``..``met5`` at ``68/16``..``72/16``). A die outline,
+    an ``areaid``, or any other marker on a layer number the deck has no
+    conductor on is excluded by construction."""
+    connectivity = deck.connectivity_layers
+    read_layer_numbers = {layer for layer, _datatype in connectivity}
+    unread: list[tuple[int, tuple[int, int]]] = []
+    for layer_index in layout.layer_indexes():
+        info = layout.get_info(layer_index)
+        pair = (info.layer, info.datatype)
+        if pair not in connectivity and info.layer in read_layer_numbers:
+            unread.append((layer_index, pair))
+    return unread
+
+
+def _label_probe_targets(
+    deck: ExtractionDeck,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+) -> list[tuple[tuple[int, int] | None, list[kdb.Region]]]:
+    """Each of ``deck``'s own label layers paired with the conductor
+    region(s) a text drawn on it can name -- ``nwell``/``tap`` for
+    ``well_label``, ``poly`` for ``poly_label``, ``metals[i]`` for
+    ``metal_labels[i]``. The input to every ``LayoutToNetlist.probe_net``
+    label probe in this module (:func:`_pin_source_cell_net_names`,
+    :func:`_unpromoted_def_pin_geometry`), so the two cannot drift apart."""
+    return [
+        (deck.well_label, [nwell, tap]),
+        (deck.poly_label, [poly]),
+    ] + [
+        (layer, [metals[index]])
+        for index, layer in enumerate(deck.metal_labels)
+        if index < len(metals)
+    ]
+
+
+def _probe_named_net(
+    l2n: kdb.LayoutToNetlist, regions: list[kdb.Region], point: kdb.Point
+) -> bool:
+    """Whether the first conductor region in ``regions`` with a net at
+    ``point`` gives that net a *name* -- i.e. whether a label drawn here
+    actually names something (issue #2473)."""
+    for region in regions:
+        net = l2n.probe_net(region, point)
+        if net is not None:
+            return bool(net.name)
+    return False
+
+
+def _unnamed_label_positions(
+    l2n: kdb.LayoutToNetlist,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    targets: list[tuple[tuple[int, int] | None, list[kdb.Region]]],
+    names: frozenset[str],
+) -> list[tuple[str, kdb.Point]]:
+    """``(text string, composed-frame position)`` for every text under
+    ``top_cell`` whose string is in ``names`` and whose own label layer's
+    conductor region carries no *named* net at that position -- a label that
+    names nothing (issue #2473)."""
+    import klayout.db as kdb
+
+    found: list[tuple[str, kdb.Point]] = []
+    for layer_pair, probe_regions in targets:
+        if layer_pair is None:
+            continue
+        label_layer_index = layout.find_layer(*layer_pair)
+        if label_layer_index is None:
+            continue
+        iterator = top_cell.begin_shapes_rec(label_layer_index)
+        while not iterator.at_end():
+            shape = iterator.shape()
+            if shape.is_text() and shape.text_string in names:
+                local = shape.text_trans.disp
+                point = iterator.trans() * kdb.Point(local.x, local.y)
+                if not _probe_named_net(l2n, probe_regions, point):
+                    found.append((shape.text_string, point))
+            iterator.next()
+    return found
+
+
+def _unread_layers_under(
+    top_cell: kdb.Cell,
+    point: kdb.Point,
+    unread_layers: list[tuple[int, tuple[int, int]]],
+) -> list[tuple[int, int]]:
+    """The ``(layer, datatype)`` pairs from ``unread_layers`` carrying a
+    non-``Text`` shape at ``point`` -- the geometry an extraction on this
+    deck cannot see, sitting exactly where a label expected conductor (issue
+    #2473)."""
+    import klayout.db as kdb
+
+    probe_box = kdb.Box(point.x, point.y, point.x, point.y)
+    hits: list[tuple[int, int]] = []
+    for layer_index, pair in unread_layers:
+        iterator = top_cell.begin_shapes_rec_touching(layer_index, probe_box)
+        while not iterator.at_end():
+            if not iterator.shape().is_text():
+                hits.append(pair)
+                break
+            iterator.next()
+    return hits
+
+
+def _def_pin_promotion_report(
+    l2n: kdb.LayoutToNetlist,
+    layout: kdb.Layout,
+    top_cell: kdb.Cell,
+    deck: ExtractionDeck,
+    poly: kdb.Region,
+    nwell: kdb.Region,
+    tap: kdb.Region,
+    metals: list[kdb.Region],
+    *,
+    def_pins: frozenset[str],
+    matched: set[str],
+    unmatched: list[str],
+) -> tuple[dict[str, Any], list[str]]:
+    """Assemble ``run_extract``'s ``def_pin_promotion`` block plus the prose
+    ``warnings[]`` lines that mirror its ``error``-severity findings (issue
+    #2473).
+
+    ``def_pins``/``matched``/``unmatched`` are the ``--def-pins``
+    reconciliation's own three sets, already computed by
+    :func:`_extract_netlist`: the declared DEF ``PINS`` name set, the subset
+    that matched a promoted net's label set, and the sorted residue. The
+    findings come from :func:`_unpromoted_def_pin_geometry` -- see its
+    docstring for why only *measured* invisible geometry earns one, and why
+    an ordinary unmatched-name miss earns none.
+
+    Returns ``({"declared", "promoted", "unmatched", "findings"}, prose)``.
+    """
+    unpromoted_geometry = (
+        _unpromoted_def_pin_geometry(
+            l2n, layout, top_cell, deck, poly, nwell, tap, metals, frozenset(unmatched)
+        )
+        if unmatched
+        else []
+    )
+
+    findings: list[dict[str, Any]] = []
+    prose: list[str] = []
+    for entry in unpromoted_geometry:
+        pin_count = len(entry["pins"])
+        plural = "s" if pin_count != 1 else ""
+        message = (
+            f"{pin_count} declared DEF PINS name{plural} (--def-pins) promoted "
+            f"to no top-level pin because the port geometry under "
+            f"{'its' if pin_count == 1 else 'their'} drawn pin-name label is "
+            f"on {entry['layer']}/{entry['datatype']}, a layer/datatype "
+            f"outside this deck's connectivity graph: "
+            f"{', '.join(entry['pins'])} -- the label names no net, so the "
+            f"port{plural} do{'es' if pin_count == 1 else ''} not electrically "
+            f"exist in the extracted netlist ({len(matched)} of "
+            f"{len(def_pins)} declared DEF pin name(s) promoted). The usual "
+            f"cause is a `klt place-and-route` request whose "
+            f"io.layer_h/io.layer_v names a layer the router never draws "
+            f"signal conductor on (sky130's li1: the DEF port rectangle lands "
+            f"on li1's LEFPIN datatype 67/16, not its 67/20 conductor) -- "
+            f"issue #2473"
+        )
+        findings.append(
+            {
+                "severity": "error",
+                "code": "def_pin_geometry_outside_connectivity_graph",
+                "layer": entry["layer"],
+                "datatype": entry["datatype"],
+                "pins": entry["pins"],
+                "declared_pin_count": len(def_pins),
+                "promoted_pin_count": len(matched),
+                "message": message,
+            }
+        )
+        # Mirrored into `warnings[]` so a caller reading only the documented
+        # minimal self-check (and `--format text`) still sees it, the same way
+        # `ignored_layers[]` mirrors its own aggregate entry.
+        prose.append("ERROR: " + message)
+
+    return (
+        {
+            "declared": len(def_pins),
+            "promoted": len(matched),
+            "unmatched": list(unmatched),
+            "findings": findings,
+        },
+        prose,
+    )
+
+
 def _pin_source_cell_net_names(
     l2n: kdb.LayoutToNetlist,
     layout: kdb.Layout,
@@ -4302,14 +4626,7 @@ def _pin_source_cell_net_names(
     if not cell_names:
         return set(), []
 
-    probe_targets: list[tuple[tuple[int, int] | None, list[kdb.Region]]] = [
-        (deck.well_label, [nwell, tap]),
-        (deck.poly_label, [poly]),
-    ] + [
-        (layer, [metals[index]])
-        for index, layer in enumerate(deck.metal_labels)
-        if index < len(metals)
-    ]
+    probe_targets = _label_probe_targets(deck, poly, nwell, tap, metals)
 
     promoted_names: set[str] = set()
     unresolved_labels: set[str] = set()
@@ -6534,6 +6851,7 @@ def _extract_netlist(
     dict[str, Any] | None,
     dict[int, list[dict[str, Any]]],
     dict[int, list[dict[str, Any]]],
+    dict[str, Any] | None,
 ]:
     """Build a flat ``LayoutToNetlist`` connectivity graph for ``deck`` and
     run device + netlist extraction.
@@ -8199,6 +8517,10 @@ def _extract_netlist(
                 f"exceed the declared set's size -- issue #2000"
             )
 
+    # `None` unless `def_pins` was given (issue #2473's `def_pin_promotion`
+    # response block, assembled inside the pass below).
+    def_pin_promotion: dict[str, Any] | None = None
+
     # Issue #1390: `def_pins`'s own DEF-merge-aware declared-pin
     # reconciliation -- the *automatic* counterpart to `declared_pins`
     # above, for a layout `klt place-and-route`'s DEF->GDS merge produced.
@@ -8266,6 +8588,30 @@ def _extract_netlist(
                 f"{count} declared DEF PINS name{plural} (--def-pins) "
                 f"matched no promoted net's label set in the layout: {joined}"
             )
+
+        # Issue #2473: the one cause of that miss that is a hard defect
+        # rather than a naming slip -- the port's own geometry is drawn on a
+        # layer/datatype this deck's connectivity graph never reads, so the
+        # pin has no extractable conductor at all. Reported as an
+        # `error`-severity finding (not another prose-only warning) because
+        # every other check in the chain reads clean on it: `klt drc` has no
+        # rule against a label over no conductor, and `klt lvs`'s structural
+        # comparer reports `"match"` without needing pins. See
+        # `_def_pin_promotion_report`/`_unpromoted_def_pin_geometry`.
+        def_pin_promotion, def_pin_prose = _def_pin_promotion_report(
+            l2n,
+            layout,
+            top_cell,
+            deck,
+            poly,
+            nwell,
+            tap,
+            metals,
+            def_pins=def_pins,
+            matched=matched_def_pins,
+            unmatched=unmatched_def_pins,
+        )
+        warnings.extend(def_pin_prose)
 
         # Issue #2000: same duplicate-match diagnostic as `declared_pins`'s
         # own pass above, for `--def-pins` -- see
@@ -8622,6 +8968,7 @@ def _extract_netlist(
         mom_crosscheck,
         net_label_positions,
         device_instance_paths,
+        def_pin_promotion,
     )
 
 
