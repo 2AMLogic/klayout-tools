@@ -10046,6 +10046,30 @@ def test_normalize_device_map_object_non_mos_malformed_terminal_count_still_erro
             {"kind": "resistor", "class": "res_x", "width_param": 5},
             "'width_param' must be a non-empty string",
         ),
+        (
+            {"kind": "resistor", "class": "res_x", "width_um": "2.85"},
+            "'width_um' must be a number",
+        ),
+        (
+            {"kind": "resistor", "class": "res_x", "width_um": True},
+            "'width_um' must be a number",
+        ),
+        (
+            {"kind": "capacitor", "class": "cap_x", "length_um": 0},
+            "'length_um' must be a positive number",
+        ),
+        (
+            {"kind": "capacitor", "class": "cap_x", "length_um": -1.0},
+            "'length_um' must be a positive number",
+        ),
+        (
+            {"kind": "mos", "class": "nfet_custom", "width_um": 1.0},
+            "only supported for kind 'resistor'/'capacitor'",
+        ),
+        (
+            {"kind": "bipolar", "class": "pnp_custom", "length_um": 1.0},
+            "only supported for kind 'resistor'/'capacitor'",
+        ),
     ],
 )
 def test_normalize_device_map_object_malformed_entry_rejected(value, match):
@@ -10452,6 +10476,113 @@ def test_normalize_resistor_multiplicity_gt_one_rejected():
         )
 
 
+# --- issue #2459: fixed-width PDK device-flavour wrapper subcircuits ------- #
+
+
+def test_normalize_sky130_fixed_width_resistor_wrapper_curated():
+    # sky130_fd_pr__res_high_po_0p35 is the real xschem/ngspice
+    # schematic-flow instantiation shape from issue #2459: the wrapper
+    # bakes w=0.35 into its own name and only accepts `l` (plus `mult`/`m`)
+    # at the call site -- no `w=` on the card at all. Curated: resolves from
+    # `deck="sky130"` alone, converting to the same `res_high_po` class the
+    # generic parent binds to.
+    out = normalize_reference_netlist(
+        "XR_LP OUTN1 VDD GND sky130_fd_pr__res_high_po_0p35 L=22 mult=1 m=1\n",
+        deck="sky130",
+    )
+    assert out.strip() == "R_LP OUTN1 VDD GND 0 res_high_po L=22U W=0.35U"
+
+
+def test_normalize_sky130_fixed_width_xhigh_resistor_wrapper_curated():
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 sub sky130_fd_pr__res_xhigh_po_2p85 l=5u mult=1\n",
+        deck="sky130",
+    )
+    assert out.strip() == "R1 r0 r1 sub 0 res_xhigh_po L=5U W=2.85U"
+
+
+def test_normalize_fixed_width_wrapper_call_site_width_still_wins():
+    # A call-site value for the fixed dimension still wins over the curated
+    # constant -- matching a real override's precedence over a subcircuit
+    # default (issue #2459).
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 sub sky130_fd_pr__res_high_po_2p85 l=10u w=99u mult=1\n",
+        deck="sky130",
+    )
+    assert out.strip() == "R1 r0 r1 sub 0 res_high_po L=10U W=99U"
+
+
+def test_normalize_device_map_fixed_width_um_fills_missing_dimension():
+    # The generic device_map mechanism (issue #2459) for a fixed-geometry
+    # wrapper the curated table does not (yet) cover.
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 my_fixed_res l=22u mult=1\n",
+        device_map={
+            "my_fixed_res": {
+                "kind": "resistor",
+                "class": "res_high_po",
+                "width_um": 2.85,
+            }
+        },
+    )
+    assert out.strip() == "R1 r0 r1 0 res_high_po L=22U W=2.85U"
+
+
+def test_normalize_device_map_fixed_length_um_fills_missing_dimension():
+    # The symmetric fixed-length shape (issue #2459's DeviceLookup doc note).
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 my_fixed_res w=5u mult=1\n",
+        device_map={
+            "my_fixed_res": {
+                "kind": "resistor",
+                "class": "res_custom",
+                "length_um": 3.0,
+            }
+        },
+    )
+    assert out.strip() == "R1 r0 r1 0 res_custom L=3U W=5U"
+
+
+def test_normalize_device_map_fixed_width_um_yields_to_call_site_value():
+    out = normalize_reference_netlist(
+        "XR1 r0 r1 my_fixed_res l=10u w=99u\n",
+        device_map={
+            "my_fixed_res": {
+                "kind": "resistor",
+                "class": "res_high_po",
+                "width_um": 2.85,
+            }
+        },
+    )
+    assert out.strip() == "R1 r0 r1 0 res_high_po L=10U W=99U"
+
+
+def test_normalize_device_map_capacitor_fixed_width_um():
+    # area = l*w = 5*2 = 10 um^2; perimeter = 2*(5+2) = 14 um.
+    out = normalize_reference_netlist(
+        "XC1 c0 c1 my_fixed_cap l=5u\n",
+        device_map={
+            "my_fixed_cap": {
+                "kind": "capacitor",
+                "class": "cap_custom",
+                "width_um": 2,
+            }
+        },
+    )
+    assert out.strip() == "C1 c0 c1 0 cap_custom A=10P P=14U"
+
+
+def test_normalize_fixed_geometry_missing_dimension_still_errors_with_hint():
+    # Neither a curated fixed constant nor a device_map override covers the
+    # missing dimension here (res_generic_po has no fixed geometry at all)
+    # -- still a hard error, but the message now points at the escape hatch
+    # instead of leaving the caller to invent a sentinel parameter name.
+    with pytest.raises(NormalizeError, match="device_map's 'length_um'/'width_um'"):
+        normalize_reference_netlist(
+            "XR1 r0 r1 sky130_fd_pr__res_generic_po l=1u\n", deck="sky130"
+        )
+
+
 def test_normalize_sky130_capacitor_derives_area_perimeter():
     # A 5x5 um plate: area = 25 um^2, perimeter = 2*(5+5) = 20 um.
     out = normalize_reference_netlist(
@@ -10814,6 +10945,19 @@ def test_build_device_binding_map_derived_fallback_shape():
         "sky130_fd_pr__res_generic_po",
         "sky130_fd_pr__res_high_po",
         "sky130_fd_pr__res_xhigh_po",
+        # Fixed-width wrapper family (issue #2459) -- curated, not derived,
+        # same discipline as gf180mcu's metal-resistor flavours above (see
+        # `_RESISTOR_FIXED_WIDTH_TABLE`).
+        "sky130_fd_pr__res_high_po_0p35",
+        "sky130_fd_pr__res_high_po_0p69",
+        "sky130_fd_pr__res_high_po_1p41",
+        "sky130_fd_pr__res_high_po_2p85",
+        "sky130_fd_pr__res_high_po_5p73",
+        "sky130_fd_pr__res_xhigh_po_0p35",
+        "sky130_fd_pr__res_xhigh_po_0p69",
+        "sky130_fd_pr__res_xhigh_po_1p41",
+        "sky130_fd_pr__res_xhigh_po_2p85",
+        "sky130_fd_pr__res_xhigh_po_5p73",
         "sky130_fd_pr__cap_mim_m3_1",
         "sky130_fd_pr__cap_mim_m3_2",
         "sky130_fd_pr__pnp_05v5_W0p68L0p68",

@@ -441,6 +441,45 @@ XC1 PLUS MINUS cap_rfcmim w=5u l=5u
 converts to `C1 PLUS MINUS 0 rfcmim A=25P P=20U` with no `reference.device_map`
 entry at all.
 
+**Fixed-width resistor wrappers** (issue #2459): some PDKs ship a family of
+`.subckt`s whose width is fixed by the *name* rather than accepted as a
+call-site parameter — sky130's `sky130_fd_pr__res_high_po_0p35`/`_0p69`/
+`_1p41`/`_2p85`/`_5p73` (and the `res_xhigh_po` equivalents) are each their
+own subcircuit that bakes in one of those five widths, taking only `l`
+(and `mult`) at the call site. A real xschem/ngspice schematic-flow netlist
+instantiating one of these emits an `X` card carrying `L` but no `W`:
+
+```
+XR_LP OUTN1 VDD GND sky130_fd_pr__res_high_po_0p35 L=22 mult=1 m=1
+```
+
+All ten of these sky130 wrapper names are curated (`reference.deck:
+"sky130"` alone resolves them, converting to the *same* `res_high_po`/
+`res_xhigh_po` class the generic parent binds to, matching the deck's own
+extraction side, which reports one class per family regardless of which
+fixed-width cell was drawn) — this converts with no `reference.device_map`
+entry at all, to `R_LP OUTN1 VDD GND 0 res_high_po L=22U W=0.35U`.
+
+For a PDK-generic fixed-width wrapper the curated table does not (yet)
+cover, `reference.device_map`'s object form accepts `"length_um"`/
+`"width_um"` (only for `kind: "resistor"`/`"capacitor"`) to state the
+constant dimension the wrapper's name bakes in, e.g.:
+
+```json
+{"reference": {"device_map": {"some_pdk_res_w2p85": {
+  "kind": "resistor", "class": "res_high_po", "width_um": 2.85
+}}}}
+```
+
+A call-site value for the *same* dimension still wins when the reference
+netlist happens to supply one — the fixed value only fills the dimension
+the call omits, matching a real override's precedence over a subcircuit
+default. Before this, the only ways to convert such a call were rewriting
+the reference netlist to the generic parent form (losing the
+schematic-derived artifact `environment.reference_sha256` is meant to
+cite) or naming call-site parameters that do not exist as a sentinel (an
+unreadable trick that also silently dropped the `L` the card did carry).
+
 **gf180mcu MOS flavour subcircuits** (issue #1111): the curated table also
 recognises `nfet_06v0`/`pfet_06v0` (gf180mcu's `Dualgate`-scoped 5V/6V MOS
 flavour `klt extract --pdk` binds a transistor drawn inside `Dualgate` to —
@@ -1388,7 +1427,7 @@ each resolves relative paths inside the document.
 | `reference.top` | string | The subcircuit in the reference netlist to compare. Omit when the reference file has exactly one top-level circuit (auto-selected, same convention as `layout.top`/`klt extract`'s `--top`). |
 | `reference.form` | string | `"plain-element"` (default), `"subckt-call"`, or `"gate-level-verilog"` (issue #1336). `"plain-element"` reads the reference as the schematic-equivalent form `klt lvs` requires, and detects/errors on a misfiled simulation-form netlist. `"subckt-call"` converts a PDK schematic flow's simulation-form netlist to the plain-element form first — see "Netlist form" above. `"gate-level-verilog"` reads `reference.netlist` as a `klt place-and-route` `verilog_path` gate-level Verilog netlist instead of SPICE and converts it to plain-element-shaped SPICE first — see "Digital gate-level LVS" above. |
 | `reference.deck` | string | Only used with `form: "subckt-call"`. `"sky130"`/`"gf180mcu"`/`"sg13g2"`/`"sg13cmos5l"` — selects that deck's device-name map for the conversion (and validates device names against it). That map is the curated subcircuit-name tables plus, for a resistor/capacitor family those tables do not cover for this deck, one assumed-identity binding per class the deck's own `ExtractionDeck` declares (issue #1464) — see "Per-deck coverage" above. Omit to auto-resolve each device subcircuit name against the whole curated table (curated names only — the per-deck derived bindings are not part of that cross-deck table, so a deck-declared class it does not cover needs `reference.deck` or `reference.device_map`). |
-| `reference.device_map` | object\<string, string \| object\> | Only used with `form: "subckt-call"`. Explicit `{ "<subckt-name>": <override> }` overrides, merged on top of `reference.deck`'s map — for a device subcircuit name the curated table does not cover. Two `<override>` shapes (issue #1271): a bare string (`"<nfet\|pfet>"`, e.g. `"nfet"`) always means a 4-terminal MOS (`d g s b`) `l`/`w` binding — the original shape, unchanged, so every existing caller's `device_map` keeps working exactly as before. An object `{ "kind": "mos"\|"resistor"\|"capacitor"\|"bipolar", "class": "<device-class>", "length_param": "<param>", "width_param": "<param>" }` opts into an explicit non-MOS (or MOS) binding: `kind` and `class` (the plain-element device-class label, e.g. `"res_generic_po"`) are required; `length_param`/`width_param` (the real subcircuit's own call-site geometry parameter spellings, e.g. gf180mcu's `"r_length"`/`"r_width"`) default to `"l"`/`"w"` and are ignored for `kind: "bipolar"` (no geometry call-site parameter at all) and `kind: "mos"` (the MOS conversion always reads the literal `l`/`w` parameter keys). A malformed object entry (an unrecognised `kind`, a missing/empty `class`, or an empty `length_param`/`width_param`) is an application error (exit 1) naming the offending entry, never a silent fallback. A bare-string entry naming a subcircuit that is not actually MOS-shaped (wrong terminal count) still fails with the original `device_map only supports MOS-shaped ...` error — pass the object form naming the real `kind` instead, or `reference.deck` when the device is one of a registered deck's curated classes. |
+| `reference.device_map` | object\<string, string \| object\> | Only used with `form: "subckt-call"`. Explicit `{ "<subckt-name>": <override> }` overrides, merged on top of `reference.deck`'s map — for a device subcircuit name the curated table does not cover. Two `<override>` shapes (issue #1271): a bare string (`"<nfet\|pfet>"`, e.g. `"nfet"`) always means a 4-terminal MOS (`d g s b`) `l`/`w` binding — the original shape, unchanged, so every existing caller's `device_map` keeps working exactly as before. An object `{ "kind": "mos"\|"resistor"\|"capacitor"\|"bipolar", "class": "<device-class>", "length_param": "<param>", "width_param": "<param>", "length_um": <number>, "width_um": <number> }` opts into an explicit non-MOS (or MOS) binding: `kind` and `class` (the plain-element device-class label, e.g. `"res_generic_po"`) are required; `length_param`/`width_param` (the real subcircuit's own call-site geometry parameter spellings, e.g. gf180mcu's `"r_length"`/`"r_width"`) default to `"l"`/`"w"` and are ignored for `kind: "bipolar"` (no geometry call-site parameter at all) and `kind: "mos"` (the MOS conversion always reads the literal `l`/`w` parameter keys). `length_um`/`width_um` (issue #2459, `kind: "resistor"`/`"capacitor"` only) state a constant micrometre value for the dimension a fixed-geometry wrapper subcircuit bakes into its *name* rather than a call-site parameter (e.g. sky130's `res_high_po_0p35` fixes `w=0.35`, only `l` is a real call-site parameter) — a call-site value for that dimension still wins when the reference netlist happens to supply one; omitted (the default) means both dimensions must come from the call site exactly as before this issue. A malformed object entry (an unrecognised `kind`, a missing/empty `class`, an empty `length_param`/`width_param`, a non-numeric/non-positive `length_um`/`width_um`, or `length_um`/`width_um` on `kind: "mos"`/`"bipolar"`) is an application error (exit 1) naming the offending entry, never a silent fallback. A bare-string entry naming a subcircuit that is not actually MOS-shaped (wrong terminal count) still fails with the original `device_map only supports MOS-shaped ...` error — pass the object form naming the real `kind` instead, or `reference.deck` when the device is one of a registered deck's curated classes. |
 | `reference.library` | string | Required with `form: "gate-level-verilog"` (issue #1336); ignored otherwise. Names the standard-cell library (e.g. `"sky130_fd_sc_hd"`, `"gf180mcu_fd_sc_mcu9t5v0"`) whose real `libs.ref/<library>/spice/<library>.spice` (falling back to `.../cdl/<library>.cdl`) file resolves each instantiated cell type's pin order. Omitting it is an application error (exit 1). |
 | `reference.pdk` / `reference.pdk_root` | string | Only used with `form: "gate-level-verilog"`. Forwarded verbatim to `klt pdk`'s resolver (`find_pdk(variant=reference.pdk, root=reference.pdk_root)`) exactly like `klt extract`'s own `--pdk`/`--pdk-root` flags — see `docs/cli/pdk.md`. Omit both to fall back to `$PDK_ROOT`/the ciel/volare store search. An unresolvable PDK, or a resolved variant with no `libs.ref` asset, is an application error (exit 1). |
 | `reference.device_bulk` | object\<string, string\> | Optional `{ "<device-class / model name>": "<reference net name>" }` — declares that the reference netlist's device class of that name carries an *implicit* bulk/well/collector terminal on the named net, which the layout side's same-named class declares explicitly (issue #506). `klt lvs` adds that one terminal to the reference class and ties it to the named net on every reference-side instance before `NetlistComparer.compare()` runs, so a deck's bulk-terminal device flavour can match a schematic reference that does not model the terminal at all — the reconciliation `device.class_arity` only diagnoses. The net is looked up on each circuit that instantiates the class (matched exactly, then case-insensitively) and **created** there when the reference does not model that node; to bind the added terminal to a layout-side net of a different name, compose with a `hints.same_nets` pair. Every reconciled class emits a `severity: "warning"`, `category: "device.bulk_reconciled"` disclosure entry — see "`device.bulk_reconciled`" below. Model names are matched exactly first and then case-insensitively (`NetlistSpiceReader` upper-cases `res_x` to `RES_X`). A name that resolves on neither side, a class the reference is *not* actually missing a terminal from, and a class two or more terminals apart (this hook reconciles exactly one extra terminal per class, since the entry names exactly one net) are each an application error (exit 1), not a silent no-op. `"engine": "klayout"` only. |
