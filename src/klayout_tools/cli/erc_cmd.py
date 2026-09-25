@@ -66,6 +66,31 @@ def run(args: argparse.Namespace) -> int:
     return _EXIT_CODE_BY_STATUS[report["status"]]
 
 
+def _print_declared_nets(report: dict) -> None:
+    """The island count each declared net was actually graded on (issue
+    #2497), rendered even when it passed -- the JSON payload's ``nets[]``.
+
+    A clean ``erc.unconnected_net`` verdict is a statement about islands
+    *carrying the declared label*, not about the islands the net's conductor
+    geometry forms, so the courtesy view names the number it rests on rather
+    than leaving a reader to assume the whole net was measured. ``.get``
+    because this renderer is also pointed at stored payloads produced before
+    the field existed; the block is skipped entirely when the spec declared
+    no ``nets``, so text output is byte-identical for every spec that does
+    not use the section.
+    """
+    declared_nets = report.get("nets") or []
+    if not declared_nets:
+        return
+    print(f"declared nets: {len(declared_nets)}")
+    for entry in declared_nets:
+        print(
+            f"  {entry['name']}: matched_islands={entry['matched_islands']} "
+            f"(expected {entry['expected_islands']}, "
+            "counted over islands carrying the label)"
+        )
+
+
 def _print_text(report: dict) -> None:
     print(f"file: {report['file']}")
     print(f"spec: {report['spec']}")
@@ -134,6 +159,7 @@ def _print_text(report: dict) -> None:
             else f"ties_disclosure ({kind})"
         )
         print(f"{label}: {disclosure['reason']}")
+    _print_declared_nets(report)
     print(f"erc_findings: {report['erc_finding_count']}")
     for finding in report["erc_findings"]:
         subject = finding["net"] or finding["gate_id"] or finding["layer"] or "?"

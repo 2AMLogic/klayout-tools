@@ -1336,6 +1336,13 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   `{"bbox", "layer", "shape_count"}` entry per island, and the finding's
   own `bbox` spans all of them — see "Locating the islands of a
   multi-island `erc.unconnected_net`" below.
+  **The islands counted are the ones carrying the declared label, not the
+  islands the net's conductor geometry forms** — the same number only when
+  the stream labels every piece, so a clean verdict on a single-label net
+  is not evidence against a severed rail. The count is now reported on the
+  passing path too (`nets[].matched_islands`, issue #2497) — see
+  "`erc.unconnected_net` counts labelled islands, not conductor islands"
+  below.
 - **`erc.multiply_driven_net`** / **`erc.supply_short`** — two *different*
   declared `nets[]` names whose matched geometry resolves to the very same
   electrical island (a short), reported per unordered pair. When both
@@ -1379,6 +1386,76 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   net) are reported under this one rule id. A well holding several taps
   passes as soon as *one* of them reaches the net; see "Well/tap
   connectivity" above for what this check does and does not model.
+
+### `erc.unconnected_net` counts labelled islands, not conductor islands (issue #2497)
+
+**The rule detects a split only among *labelled* islands. A single-label
+net's clean verdict is therefore not evidence against a severed rail.**
+
+`erc.unconnected_net` is implemented by collecting every extracted net whose
+label set includes the declared name, and grading that count against
+`nets[].islands`. The count is the number of islands **carrying the label**,
+which equals the number of electrical islands the net's conductor geometry
+forms only when the stream labels every piece. A stream that draws **one**
+text per net — normal for a hand-built or generated analog block, where the
+label names a port rather than annotating every rail segment — cannot report
+the failure this rule exists to catch:
+
+| Stream | Islands carrying the label | Verdict |
+|--------|----------------------------|---------|
+| one label, rail intact | 1 | clean (correct) |
+| one label, rail severed in two | 1 | **clean** — the orphaned piece is unlabelled, so it is not a match and is invisible to the rule |
+| two labels, rail severed in two | 2 | `erc.unconnected_net` (correct) |
+
+The middle row is the bound. Removing the via role that joins two routing
+layers — which genuinely severs every rail at every layer change — produces
+**no** `erc.unconnected_net` at all on a single-label block. In the run that
+motivated this section the defect surfaced only on `erc.missing_tie`, and
+only because the taps happened to sit on the far side of the cut from the
+labelled island; had they been on the labelled side, the severed rail would
+have graded entirely clean.
+
+So the "exactly one electrical island per declared supply" property — the
+one `klt signoff`'s T1 item 11 quotes verbatim — rests, as graded today, on
+a stream property nobody declares: **how many islands of that net carry its
+label**.
+
+Since issue #2497 the report makes the measurement explicit instead of
+leaving it unstated. Every declared net gets a `nets[]` entry carrying the
+count the verdict was decided on, including when it passed:
+
+```json
+"nets": [
+  {"name": "VDD", "matched_islands": 1, "expected_islands": 1},
+  {"name": "VSS", "matched_islands": 2, "expected_islands": 2}
+]
+```
+
+- `matched_islands` is the count **over labelled islands**. A committed
+  clean report can now be audited — "this `1` was measured over the
+  declared label, not over the whole net" — without re-deriving the
+  connectivity graph from the stream.
+- `expected_islands` echoes the entry's own `nets[].islands` declaration
+  (issue #2400, default 1), so the grading comparison is readable from the
+  report alone.
+- This is **reporting only**: it changes no verdict. A severed
+  single-label rail still grades clean — the rule genuinely sees one
+  labelled island — and the field is what makes that bound visible rather
+  than removing it.
+
+**What to do about it.** Until the unlabelled remainder is measured
+directly, the coverage this rule gives you is bounded by your own stream:
+
+- **Label every piece you expect to be one net.** A second text on what
+  should be the same rail costs nothing and converts the middle row above
+  into the third row — the finding fires, with both islands located.
+- **Declare `nets[].islands` deliberately** (issue #2400) rather than
+  leaving the default to stand in for "I checked". A declared count is
+  falsifiable in both directions; an undeclared one only says "1 label was
+  found once".
+- **Do not cite a clean `erc.unconnected_net` as a severed-rail negative**
+  in a sign-off narrative for a single-label block. Cite
+  `nets[].matched_islands` alongside it so the reader can see the bound.
 
 ### Locating the islands of a multi-island `erc.unconnected_net` (issue #2194)
 
@@ -1799,6 +1876,7 @@ the shared envelope (`schema_version`, error shape, exit codes).
       ]
     }
   ],
+  "nets": [],
   "erc_findings": [
     {
       "rule": "erc.floating_gate",
@@ -1947,6 +2025,10 @@ forward regardless (a `diode_insertion` remedy):
 | `remedy.layer`   | string          | The violating `levels[].layer` value — identical to the entry this remedy is attached to.        |
 | `remedy.target_layer` | string \| null | For `"layer_jumping"`, the adjacent `stackup` role name to route through instead; `null` for `"diode_insertion"`. |
 | `remedy.justification` | string    | Human-readable explanation citing the specific ratio/limit values and (for `"layer_jumping"`) the target layer's own margin.     |
+| `nets`           | array\<object\> | (issue #2497) One entry per declared `nets[]` spec entry, in spec order — the island count `erc.unconnected_net` actually graded that net on, retained **whether or not it produced a finding**. `[]` when the spec declares no `nets`. Reporting only: neither value is an input to any finding, roll-up, or `status`/`erc_status`. See "`erc.unconnected_net` counts labelled islands, not conductor islands" above. |
+| `nets[].name`    | string          | The declared `nets[].name`, echoed verbatim.                                                     |
+| `nets[].matched_islands` | integer | How many disconnected electrical islands **carry this net's declared label** — `0` when nothing in the layout carries the name at all. This is the number the `erc.unconnected_net` verdict is decided on, and it equals the number of islands the net's conductor geometry forms **only when the stream labels every piece** (see the bound above). On a failing multi-island finding it equals `len(erc_findings[].islands)` for that net. |
+| `nets[].expected_islands` | integer | The entry's own `nets[].islands` declaration (issue #2400), default `1` — echoed so a committed report can be graded (`matched_islands == expected_islands` is clean) without the spec document in hand. |
 | `erc_findings`   | array\<object\> | One entry per ERC violation found by the checks in "ERC finding checks" above (issue #861) — empty when clean, or when no `nets`/`ties` spec sections were provided (the `erc.floating_gate` check still always runs). |
 | `erc_findings[].rule` | string     | One of `erc.floating_gate`, `erc.unconnected_net`, `erc.multiply_driven_net`, `erc.missing_tie`, `erc.supply_short`, `erc.expected_short_missing` (issue #2463) — matching `klt drc`'s `violations[].rule` convention. A new rule id is an additive value-set change (`docs/json-contract.md`), not a `schema_version` bump. |
 | `erc_findings[].description` | string | Human-readable explanation of this specific finding.                                       |

@@ -14,6 +14,23 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2497, `klt erc`; additive — **no** `schema_version` bump): a
+  top-level `nets[]` report section, one entry per declared `nets[]` spec
+  entry in spec order, carrying `{name, matched_islands,
+  expected_islands}`. `erc.unconnected_net` counts the islands **carrying
+  the declared label**, not the islands the net's conductor geometry forms
+  — the same number only when the stream labels every piece — so a
+  single-label net whose rail is severed into a labelled piece and an
+  unlabelled orphan still grades clean, and the clean verdict carried no
+  evidence of what it was measured over. The count now exists on the
+  passing path too, so a committed report can be audited without
+  re-deriving the connectivity graph. Reporting only: no verdict,
+  roll-up, `status`/`erc_status`, or exit code changes, and `nets` is `[]`
+  for a spec that declares no `nets`. The `klt erc` text output gains a
+  matching `declared nets:` block, skipped entirely when the section is
+  empty. The bound itself is now documented in `docs/cli/erc.md`
+  ("`erc.unconnected_net` counts labelled islands, not conductor
+  islands").
 - **Fixed** (#2496, `klt signoff`; additive — **no** `schema_version` bump,
   no field changed): T1 item 11's ERC half (`_erc_supply_spec`) re-reads the
   spec document a cited `klt erc` run names off disk, to recover the
