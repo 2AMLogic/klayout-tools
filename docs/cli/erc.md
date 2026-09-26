@@ -382,7 +382,9 @@ draws that the spec never declared" below.
     layer to name. Valid **only** with `well_layer: null`, and required
     with it (an empty/omitted list there is a spec error, not a tie that
     quietly checks nothing); declaring it alongside a drawn `well_layer` is
-    an error too — to narrow a drawn well's taps, use `tap_boxes`. Unlike
+    an error too — to narrow a drawn well's taps, use `tap_boxes`, and to say
+    which of its shapes this entry is about, use `well_requires_boxes` /
+    `well_excludes_boxes` below. Unlike
     every other optional key on this entry, this one *substitutes* for a
     required field rather than narrowing one, so it is graded under its own
     coverage classification (`erc_coverage.checked_by_well_assertion`,
@@ -413,6 +415,27 @@ draws that the spec never declared" below.
     to the same falsifiability test every narrowing form here is: a
     declared selection that keeps *every* drawn shape, or none of them, is
     recorded as skipped work (`degenerate_well_selection`).
+  - `well_requires_boxes` / `well_excludes_boxes` (optional arrays of
+    `[left, bottom, right, top]` micrometre boxes, default `[]`, issue #2540)
+    — the same well-side class selection, expressed in **literal geometry**
+    instead of a marker layer, for a two-class tub the PDK draws no layer to
+    separate. Each merged shape of `well_layer` is kept only when it interacts
+    with the **union** of `well_requires_boxes` (when that list is non-empty)
+    and with **none** of the `well_excludes_boxes` union — note the union: a
+    box list is one region named in pieces, unlike `well_requires`, where each
+    *layer* is a separate condition. The well-side counterpart of `tap_boxes`,
+    and there for the same reason: the marker form needs a PDK layer that
+    distinguishes the classes, and a single-tub PDK with no per-class marker
+    draws none (see "A two-class tub with no marker layer to separate them"
+    below). Composes with `well_requires`/`well_excludes` — all four narrow the
+    same selection — and requires a drawn `well_layer` exactly as they do.
+    Because *which shapes belong to this entry* then rests on the caller's
+    word, a tie graded through one is additionally named in
+    `erc_coverage.checked_by_well_assertion`; the well itself is still drawn
+    geometry, still measured, and each selected shape is still independently
+    graded. Same falsifiability test, same reason token: a selection keeping
+    every drawn shape, or none of them (including boxes matching no shape at
+    all), is recorded as skipped work (`degenerate_well_selection`).
   - `tap_layer` (string, `"<layer>/<datatype>"`, required) — the tap
     (substrate/well contact) layer expected inside each well shape.
   - `tap_requires` (optional array of `"<layer>/<datatype>"`, default
@@ -960,7 +983,11 @@ corroborates the region at all. Three consequences follow, all deliberate:
   `checked_by_assertion`. A tie can appear in both (an asserted substrate
   region whose tap is also caller-named), in either, or in neither. They are
   not merged because they are different claims: one says *which drawn
-  geometry is the tap*, the other says *where the substrate is*.
+  geometry is the tap*, the other says the **well side** of this verdict rested
+  on caller-named coordinates. Since issue #2540 that second list has two
+  members: this form, and a drawn well whose *class selection* was named in
+  boxes (`well_requires_boxes`/`well_excludes_boxes`) — see "A two-class tub
+  with no marker layer to separate them" below.
 - **It has its own falsifiability test**, and it is not `tap_narrowed`.
   That test measures what an assertion removes from a drawn baseline; here
   there is no baseline to remove from. The equivalent bar is
@@ -1115,6 +1142,125 @@ independently: one can be `checked` while the other is skipped.
 read anything in `erc_coverage.skipped` as a clean missing-tie verdict, and
 it matches on the `erc.missing_tie:` work-identity prefix rather than on the
 skip reason, so the new token is covered by construction.
+
+#### A two-class tub with no marker layer to separate them (`well_requires_boxes`/`well_excludes_boxes`, issue #2540)
+
+Both selectors above work by intersecting a **marker layer** into the derived
+well region, so they are only reachable for a stream that happens to draw a
+layer separating the classes. That is the ordinary case — a PDK marks its
+special device — but it is not the only one. A stream whose one drawn tub layer
+carries two deliberately differently-biased classes and draws **no** layer that
+distinguishes them (an analog bias, charge-pump or level-shifter block on any
+PDK with a single n-tub layer and no per-class marker) could declare neither
+class in any non-degenerate form. Every route ended somewhere unusable:
+
+- **one unselected entry** grades every merged shape of `well_layer` against
+  its own `net`, so it reports a false `erc.missing_tie` on every well of the
+  class it did not name (the defect `well_requires` removes *when a marker
+  exists*);
+- **a `well_requires`/`well_excludes` selection** built from any layer present
+  in both classes keeps every shape, and one built from a layer present in
+  neither keeps none — both endpoints are `degenerate_well_selection`, skipped
+  work rather than a graded check;
+- **`well_boxes`**, the one key that names well geometry outright, is rejected
+  beside a drawn `well_layer`, and before this issue its rejection message
+  pointed only at `well_requires`/`well_excludes` — advice this stream cannot
+  take;
+- **`well_layer: null`** instead is not an alternative either: the wells *are*
+  drawn, and an assertion over the whole extent grades
+  `degenerate_well_assertion`.
+
+The two box selectors are the well-side counterpart of `tap_boxes` — the same
+literal-geometry escape hatch, for the same reason (no PDK marker exists to
+narrow by), one level up. The caller names the coordinates of the shapes their
+class owns:
+
+```json
+{
+  "ties": [
+    {
+      "name": "device_body_wells",
+      "well_layer": "64/20",
+      "well_excludes_boxes": [[18.4, 3.2, 26.0, 11.9]],
+      "tap_layer": "65/44",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VPWR"
+    },
+    {
+      "name": "bias_tub",
+      "well_layer": "64/20",
+      "well_requires_boxes": [[18.4, 3.2, 26.0, 11.9]],
+      "tap_layer": "65/44",
+      "tap_is_dedicated": true,
+      "connect_to": "li1",
+      "net": "VBIAS"
+    }
+  ]
+}
+```
+
+The two entries are complementary by construction in exactly the way the
+marker-layer pair is: whatever the boxes touch belongs to one, everything else
+to the other, and every well on the layer is graded exactly once.
+
+**This selects whole drawn shapes too.** Everything the previous section says
+about selection-vs-intersection applies unchanged, and matters more here: a
+caller naming the tub they mean has no reason to also enclose its tap ring, so
+intersecting would routinely push a real, correctly-wired tap outside the
+graded region. A box need only *interact* with (touch or overlap) a shape to
+select it, and the shape that survives is the whole merged shape the layout
+draws — which is also what each finding's `bbox` reports.
+
+**A box list is a union; a layer list is a conjunction.** Three
+`well_requires_boxes` boxes select the shapes touching *any* of them (three
+wells of this class), the same way `tap_boxes` and `well_boxes` form one region
+out of a box list. Each `well_requires` **layer**, by contrast, is a separate
+condition a shape must satisfy. Both readings are deliberate and neither is
+negotiable per-spec: coordinates come in pieces, conditions come in lists.
+
+**All four selectors compose.** `well_requires_boxes` alongside `well_requires`
+is neither rejected nor ignored — they narrow the same selection, as `tap_boxes`
+composes with `tap_requires` — and the degeneracy verdict is measured on the
+**combined** result. A marker that selects a tub plus an exclusion box that
+removes it again keeps nothing, and is graded `degenerate_well_selection` on
+that combined answer rather than on either key read alone.
+
+**It is graded as a well-side assertion**, so a tie scoped this way appears in
+`erc_coverage.checked_by_well_assertion` as well as in `checked`. That list's
+question is "did the well side of this verdict rest on the caller's word?", and
+here it did — not about where the well *is* (the layer draws that, and it is
+still what gets measured), but about which of its shapes this entry's bias class
+owns. Three strengths of the same claim, and the envelope distinguishes them:
+
+| Well side declared by | In `checked_by_well_assertion`? | Why |
+|---|---|---|
+| `well_layer` alone, or with `well_requires`/`well_excludes` | No | the stream draws both the well and the partition |
+| `well_layer` + `well_requires_boxes`/`well_excludes_boxes` | Yes | the well is drawn and measured; the partition is the caller's |
+| `well_layer: null` + `well_boxes` | Yes | nothing in the stream corroborates the region at all |
+
+The list does not say *which* of the two asserted forms was used. It answers the
+one question above; a reader needing the finer distinction has the spec
+document, which is the artifact that records the claim.
+
+**The falsifiability test is unchanged and shared**, reusing
+`degenerate_well_selection` rather than adding a token: a declared box selection
+that keeps every merged shape of the drawn layer, or none of them, is recorded
+in `erc_coverage.skipped` and the roll-up reports
+`erc_status: "clean_partial"`. The "keeps none" endpoint is the one a
+literal-geometry key makes easy to hit by accident — a stale coordinate, a spec
+written against a different origin — and it is refused rather than read as a
+clean run over an empty set. As with the marker form, the test is
+presence-gated (a tie with no selector claims every shape, the strongest claim
+available) and geometric within a declared selection (boxes that happen to
+touch every well in *this* stream are as degenerate as naming the layer
+itself).
+
+`klt signoff`'s T1 item 11 needs no change for this either. A tie scoped by
+boxes is `checked`, not skipped, so it can reach **met**; the citation's
+`power_delivery.ties_checked_by_well_assertion` quotes the widened list, so the
+weaker well-side provenance is stated in the verdict of record rather than
+reachable only by re-opening the ERC envelope.
 
 #### A well layer with no geometry at all (issue #2377)
 
@@ -1390,8 +1536,9 @@ with a golden violate/pass layout pair in `tests/test_erc.py`.
   all.
 - **`erc.missing_tie`** — for every physically distinct well/tub shape
   (one per merged polygon of a `ties[]` entry's `well_layer` — narrowed to
-  the shapes its `well_requires`/`well_excludes` class selection keeps,
-  issue #2339 — or of its
+  the shapes its class selection keeps —
+  `well_requires`/`well_excludes`, issue #2339, or
+  `well_requires_boxes`/`well_excludes_boxes`, issue #2540 — or of its
   asserted `well_boxes`, issue #2255, for a block that draws none), a tap must
   be drawn inside it (`tap_layer`, narrowed by `tap_requires`) *and* at
   least one such tap must be electrically connected — via the tie
@@ -1793,8 +1940,9 @@ whatsoever, and run to completion on any PDK. `erc_status` is their verdict:
   `degenerate_well_assertion` — a caller-asserted substrate region
   indistinguishable from the whole top-cell extent), a degenerate *well
   selection* (issue #2339, `degenerate_well_selection` — a declared
-  `well_requires`/`well_excludes` that kept every merged shape of the drawn
-  `well_layer`, or none of them), and an *empty well region* (issue #2377,
+  `well_requires`/`well_excludes`, or issue #2540's literal-geometry
+  `well_requires_boxes`/`well_excludes_boxes`, that kept every merged shape of
+  the drawn `well_layer`, or none of them), and an *empty well region* (issue #2377,
   `empty_well_region` — a *drawn* `well_layer` that draws no geometry at all
   in this stream: a typo'd layer/datatype, a PDK whose tub layer number
   changed, a GDS written without the tub layer; never applicable to an
@@ -2164,7 +2312,9 @@ indistinguishable from an ordinary source/drain contact),
 `degenerate_well_assertion` (issue #2255: a caller-asserted substrate region
 is indistinguishable from the whole top-cell extent),
 `degenerate_well_selection` (issue #2339: a declared well-side class
-selection kept every merged shape of the drawn `well_layer`, or none of
+selection — marker layers, or issue #2540's literal-geometry
+`well_requires_boxes`/`well_excludes_boxes`, one test for all four — kept every
+merged shape of the drawn `well_layer`, or none of
 them), and `empty_well_region` (issue #2377: a *drawn* `well_layer` that
 draws no geometry at all in this stream — a typo'd layer/datatype, a PDK
 whose tub layer number changed, a GDS written without the tub layer; never
@@ -2178,8 +2328,12 @@ drawn well at all", and "One well layer, two bias classes" above.
 **No new coverage list for a well-side selection.** `well_requires`/
 `well_excludes` narrow *drawn* geometry, exactly as `tap_requires` does, so
 a tie graded through one is an ordinary geometrically-derived pass and
-appears only in `checked`. The two lists below exist because a caller
-*assertion* is not corroborated by the stream; a selection is.
+appears only in `checked`. Their literal-geometry counterparts
+(`well_requires_boxes`/`well_excludes_boxes`, issue #2540) add no list either
+— but they *do* land the tie in the existing `checked_by_well_assertion`, since
+the partition they express is the caller's word rather than something the
+stream draws. The two lists below exist because a caller *assertion* is not
+corroborated by the stream; a marker-layer selection is.
 
 `erc_coverage` additionally carries two assertion lists, both subsets of
 `checked`, both `[]` when unused, and both purely informational — additive
@@ -2191,13 +2345,18 @@ any other checked, non-degenerate tie:
   identities whose **tap** region was derived (at least in part) from a
   caller assertion (`ties[].tap_boxes`) rather than pure PDK-marker
   narrowing.
-- `checked_by_well_assertion` (array\<string\>, issue #2255) — the work
-  identities whose **well** region was itself asserted
-  (`ties[].well_layer: null` + `ties[].well_boxes`), because the block
-  draws no well/tub layer at all. Deliberately a separate list rather than
-  more entries in the first: asserting which drawn geometry counts as the
-  tap and asserting where the substrate is are different claims, and the
-  second is the weaker one. A tie may appear in both.
+- `checked_by_well_assertion` (array\<string\>, issues #2255 and #2540) — the
+  work identities whose **well side** rested on caller-named coordinates, in
+  either of two forms: the region itself asserted (`ties[].well_layer: null` +
+  `ties[].well_boxes`, because the block draws no well/tub layer at all), or a
+  drawn well whose *class selection* was named in boxes
+  (`ties[].well_requires_boxes` / `ties[].well_excludes_boxes`, because no drawn
+  layer separates the tub's two bias classes). Deliberately a separate list
+  rather than more entries in the first: asserting which drawn geometry counts
+  as the tap and naming the well side in coordinates are different claims, and
+  the second is the weaker one. A tie may appear in both. The list does not
+  distinguish its own two forms — it answers "did the well side rest on the
+  caller's word?", and the spec document records which way it was said.
 
 `erc_coverage` carries one further key that is not a work-item list at all:
 

@@ -461,7 +461,7 @@ written to every block.
       that catches a degenerate tap). What a grader gains is the
       provenance, not a weaker bar: a met citation's
       `power_delivery.ties_checked_by_well_assertion` names which ties
-      rested on an asserted well, beside
+      rested on the caller's word about the well side, beside
       `ties_checked_by_assertion` for the tap side — two distinct claims,
       reported distinctly, so "the well itself was the caller's word" never
       hides inside "a tap box was asserted".
@@ -484,6 +484,28 @@ written to every block.
       `degenerate_well_selection` — caught by the same gate, which matches
       on the `erc.missing_tie:` work-identity prefix rather than on the
       reason token.
+      **…and when no drawn layer separates those two classes** — a PDK with
+      a single n-tub layer and no per-class marker, ordinary in analog bias,
+      charge-pump and level-shifter circuits — the selection above has
+      nothing to name, and every route (one unselected entry, a selection
+      built from a layer present in both classes or in neither, or
+      `well_boxes` beside a drawn well) ended in a false finding or skipped
+      work. Such a block reaches **met** by scoping each class with
+      `ties[].well_requires_boxes`/`well_excludes_boxes` (issue #2540): the
+      same selection, expressed in literal micrometre boxes instead of a
+      marker layer — the well-side counterpart of `tap_boxes`. The well is
+      still drawn and still measured, and each selected shape is still
+      independently graded, so the bar is unchanged: the same
+      `degenerate_well_selection` skip catches a box selection that kept
+      every shape of the layer or none of them. What differs from the
+      marker form is the provenance, and it is stated: because *which
+      shapes belong to this entry* rests on the caller's word, the tie is
+      named in the met citation's
+      `power_delivery.ties_checked_by_well_assertion` beside the
+      native-substrate form. That list therefore answers one question —
+      "did the well side of this verdict rest on the caller's word?" — with
+      a marker-layer selection (the stream draws its own partition) staying
+      out of it.
       When a stream genuinely cannot express a tap at all, a top-level
       `ties_disclosure` declares that explicitly; the item still renders
       `supply_spec_disclosed_unexpressible` rather than a met item — a

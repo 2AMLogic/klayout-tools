@@ -3298,9 +3298,17 @@ def test_an_empty_well_boxes_list_on_a_null_well_layer_is_rejected(tmp_path):
 
 
 def test_well_boxes_alongside_a_drawn_well_layer_is_rejected(tmp_path):
-    """The two well forms are mutually exclusive: a box list applied to a
-    drawn well is either a tap narrowing (`tap_boxes` already expresses
-    that, better) or a second, unstated claim."""
+    """The two *well-region* forms stay mutually exclusive: `well_boxes` says
+    where the well **is**, and a drawn `well_layer` already answers that. A box
+    list applied to a drawn well is therefore never that claim -- it is either
+    a tap narrowing (`tap_boxes`) or a statement about *which of the layer's
+    shapes* this entry is about.
+
+    Issue #2540 gave the second reading its own keys, so this rejection's
+    advice must now name a route a stream with no per-class marker layer can
+    actually take: before it, the message pointed only at
+    `well_requires`/`well_excludes`, which such a stream cannot use -- circular
+    advice that left the shape unreachable in every direction."""
     gds, spec = _native_substrate_spec_error(
         tmp_path,
         "boxes_and_layer",
@@ -3312,8 +3320,17 @@ def test_well_boxes_alongside_a_drawn_well_layer_is_rejected(tmp_path):
             "net": "VSS",
         },
     )
-    with pytest.raises(ErcError, match="well_layer.*must be null"):
+    with pytest.raises(ErcError, match="well_layer.*must be null") as excinfo:
         run_erc(str(gds), str(spec))
+
+    message = str(excinfo.value)
+    # The reachable route for a tub whose classes no drawn layer separates.
+    assert "well_requires_boxes" in message
+    assert "well_excludes_boxes" in message
+    # …still alongside the marker-layer route, for a stream that has one, and
+    # the tap-side one.
+    assert "'well_requires'/'well_excludes'" in message
+    assert "tap_boxes" in message
 
 
 def test_an_omitted_well_layer_key_is_still_missing_not_asserted(tmp_path):
@@ -3382,7 +3399,7 @@ def test_well_boxes_rejects_an_inverted_box(tmp_path):
 # is about.
 
 
-def _two_class_well_layout(*, base_tub_tap: bool = True):
+def _two_class_well_layout(*, base_tub_tap: bool = True, marker: bool = True):
     """`_routed_tie_layout`'s routed two-gate block plus a second n-tub on
     the **same** `nwell` layer (10/0), biased to the *other* rail: the
     base tub of a diode-connected vertical bipolar, sitting in the p-well
@@ -3405,6 +3422,16 @@ def _two_class_well_layout(*, base_tub_tap: bool = True):
 
     `base_tub_tap=False` omits the tub's implant-marked tap, leaving the
     untied-well case for the falsifiability tests.
+
+    `marker=False` (issue #2540) omits the class marker entirely: the same two
+    deliberately differently-biased classes on the same one drawn tub layer,
+    on a PDK that draws **no** layer distinguishing them. Every other layer in
+    the stream (contact 11/0, tap implant 12/0) is present in both classes, so
+    no `well_requires`/`well_excludes` selection over this stream can partition
+    it -- which is the state `well_requires_boxes`/`well_excludes_boxes` exist
+    for. The marker's own footprint is what those boxes name, so a
+    `marker=False` run with box selectors and a `marker=True` run with layer
+    selectors grade the identical geometry.
     """
     layout, top = _routed_tie_layout()
     nwell = layout.layer(10, 0)
@@ -3413,7 +3440,10 @@ def _two_class_well_layout(*, base_tub_tap: bool = True):
     bjt_marker = layout.layer(14, 0)
 
     top.shapes(nwell).insert(kdb.Box.new(_um(3), _um(0.4), _um(6.5), _um(2.8)))
-    top.shapes(bjt_marker).insert(kdb.Box.new(_um(5.2), _um(0.8), _um(6.2), _um(2.4)))
+    if marker:
+        top.shapes(bjt_marker).insert(
+            kdb.Box.new(_um(5.2), _um(0.8), _um(6.2), _um(2.4))
+        )
     if base_tub_tap:
         top.shapes(contact).insert(kdb.Box.new(_um(4), _um(1.2), _um(4.6), _um(1.8)))
         top.shapes(tap_implant).insert(kdb.Box.new(_um(3.8), _um(1), _um(4.8), _um(2)))
@@ -3421,8 +3451,8 @@ def _two_class_well_layout(*, base_tub_tap: bool = True):
     return layout, top
 
 
-def _run_two_class_well(tmp_path, stem, ties, *, base_tub_tap=True):
-    layout, _top = _two_class_well_layout(base_tub_tap=base_tub_tap)
+def _run_two_class_well(tmp_path, stem, ties, *, base_tub_tap=True, marker=True):
+    layout, _top = _two_class_well_layout(base_tub_tap=base_tub_tap, marker=marker)
     gds = tmp_path / f"{stem}.gds"
     layout.write(str(gds))
     spec = tmp_path / f"{stem}.erc.json"
@@ -3737,6 +3767,412 @@ def test_a_null_well_selection_is_the_same_as_omitting_it(tmp_path, key):
 
     assert report["erc_coverage"]["skipped"] == []
     assert _BASE_ID in report["erc_coverage"]["checked"]
+
+
+# --- ties: literal-geometry well-side class selection (issue #2540) ------
+#
+# The selectors above narrow by *marker layer*, so they are only reachable
+# for a stream that draws a layer separating the well classes. A PDK with a
+# single n-tub layer and no per-class marker draws none: every layer in the
+# stream is present in both classes, so every marker-driven selection over it
+# keeps every shape or none -- degenerate either way -- a single unselected
+# entry reports a false `erc.missing_tie` on every well of the class it did
+# not name, and `well_boxes` is rejected beside a drawn `well_layer`. Every
+# route ended in a false finding or skipped work.
+#
+# `well_requires_boxes`/`well_excludes_boxes` are the well-side counterpart of
+# `tap_boxes` (issue #2234): the caller names the coordinates of the shapes
+# their class owns. The layouts below are `marker=False` -- the marker shape
+# removed, its footprint named as a box instead -- so these tests grade the
+# identical geometry the #2339 tests above do, reached without a marker layer.
+
+# The bipolar base tub's own footprint, in micrometres: exactly the box the
+# 14/0 marker occupies in the `marker=True` layout, and deliberately *not*
+# covering that tub's tap contact (x in [4.0, 4.6]) -- so a selection that
+# intersected this box into the well layer instead of selecting whole shapes
+# of it would push the tub's real tap outside the graded region.
+_BASE_TUB_BOX = [5.2, 0.8, 6.2, 2.4]
+# A box spanning the whole block: interacts with both classes.
+_WHOLE_BLOCK_BOX = [0.0, 0.0, 20.0, 12.0]
+
+
+def test_a_two_class_tub_with_no_separating_marker_reports_a_false_missing_tie(
+    tmp_path,
+):
+    """The reproduction from issue #2540, step 1. Same shape as
+    `test_one_tub_layer_two_bias_classes_is_unsatisfiable_without_selection`
+    above, but on a stream that draws *no* layer separating the classes -- so
+    unlike that case, #2339's selectors cannot rescue it."""
+    report = _run_two_class_well(
+        tmp_path, "no_marker_before", _two_class_ties(), marker=False
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 2
+    assert {f["layer"] for f in missing} == {"device_body_wells", "bipolar_base_tub"}
+    assert report["erc_status"] == "violations"
+
+
+def test_a_marker_layer_selection_cannot_partition_a_marker_free_tub(tmp_path):
+    """Why the box form is needed rather than better advice about the layer
+    form: on this stream every candidate marker layer is present in *both*
+    classes, so naming one keeps every shape (degenerate) and naming anything
+    else keeps none (degenerate). Both endpoints are skipped work, never a
+    graded check -- the dead end issue #2540 is about."""
+    keeps_all = _run_two_class_well(
+        tmp_path,
+        "no_marker_keeps_all",
+        [_two_class_ties(base_overrides={"well_requires": ["12/0"]})[1]],
+        marker=False,
+    )
+    keeps_none = _run_two_class_well(
+        tmp_path,
+        "no_marker_keeps_none",
+        [_two_class_ties(base_overrides={"well_requires": ["14/0"]})[1]],
+        marker=False,
+    )
+
+    assert _tie_skips(keeps_all) == {_BASE_ID: "degenerate_well_selection"}
+    assert _tie_skips(keeps_none) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_well_selection_boxes_partition_a_tub_with_no_separating_marker(tmp_path):
+    """Issue #2540's acceptance criterion, and the shape #2339 named as its own
+    unimplemented "suggested shape 2": the two classes of one drawn tub layer,
+    on a stream with no layer separating them, each scoped by literal geometry
+    -- one naming the base tub's coordinates, the complementary one excluding
+    them -- report **zero** `erc.missing_tie` findings, with both ties graded
+    as real, checked work rather than skipped."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        marker=False,
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert {_BODY_ID, _BASE_ID} <= set(report["erc_coverage"]["checked"])
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_status"] == "clean"
+    assert report["gate_count"] == 2
+
+
+def test_box_selected_ties_are_graded_as_a_well_side_assertion(tmp_path):
+    """The classification: the well *is* drawn and still measured, but which of
+    its shapes belongs to this entry rested on the caller's word, so the tie is
+    named in `checked_by_well_assertion` beside the `well_boxes` form -- and
+    the tap side, which named no boxes, stays out of `checked_by_assertion`.
+
+    This is what `klt signoff`'s T1 item 11 reads: both identities are in
+    `checked`, neither is in `skipped`, and the citation's
+    `power_delivery.ties_checked_by_well_assertion` quotes this list, so the
+    weaker well-side provenance is stated in the verdict of record."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_coverage",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        marker=False,
+    )
+
+    coverage = report["erc_coverage"]
+    assert coverage["checked_by_well_assertion"] == sorted([_BODY_ID, _BASE_ID])
+    # A subset of `checked`, never a separate kind of work.
+    assert set(coverage["checked_by_well_assertion"]) <= set(coverage["checked"])
+    assert coverage["checked_by_assertion"] == []
+
+
+def test_a_marker_layer_selection_is_still_not_a_well_side_assertion(tmp_path):
+    """The control for the test above, and the line the widened list must not
+    blur: a *marker-layer* selection narrows geometry the stream itself draws,
+    so it stays an ordinary geometrically-derived pass. Only caller-named
+    coordinates land in the assertion list."""
+    report = _run_two_class_well(
+        tmp_path,
+        "marker_not_asserted",
+        _two_class_ties(
+            body_overrides={"well_excludes": ["14/0"]},
+            base_overrides={"well_requires": ["14/0"]},
+        ),
+    )
+
+    assert {_BODY_ID, _BASE_ID} <= set(report["erc_coverage"]["checked"])
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
+
+
+def test_well_requires_boxes_selects_whole_shapes_not_the_box_footprint(tmp_path):
+    """The same reason the marker form selects rather than intersects, now for
+    a caller-named box: `_BASE_TUB_BOX` deliberately does not cover the base
+    tub's tap contact. Intersecting it into `well_layer` would shrink the
+    graded region to the box, with the tub's real, correctly-wired tap outside
+    it, and report "no tap contact drawn inside it"."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_whole_shape",
+        [_two_class_ties(base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]})[1]],
+        marker=False,
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _BASE_ID in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["skipped"] == []
+
+
+def test_a_box_selected_well_class_still_reports_its_own_untied_well(tmp_path):
+    """The falsifiability that earns the box selection its `checked` grade: it
+    narrows *what is graded*, never what a finding may say. Drop the base tub's
+    tap and the box-scoped entry reports that tub -- and only that tub -- with
+    the finding's `bbox` the whole drawn shape rather than the caller's box,
+    which is the observable difference between selecting and intersecting."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_untied",
+        _two_class_ties(
+            body_overrides={"well_excludes_boxes": [_BASE_TUB_BOX]},
+            base_overrides={"well_requires_boxes": [_BASE_TUB_BOX]},
+        ),
+        base_tub_tap=False,
+        marker=False,
+    )
+
+    missing = [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"]
+    assert len(missing) == 1
+    assert missing[0]["layer"] == "bipolar_base_tub"
+    assert missing[0]["net"] == "VSS"
+    assert "no 'bipolar_base_tub' tap contact drawn" in missing[0]["description"]
+    assert missing[0]["bbox"]["left"] == _um(3.0)
+    assert missing[0]["bbox"]["right"] == _um(6.5)
+    assert report["erc_status"] == "violations"
+
+
+def test_a_box_selection_that_keeps_every_well_is_degenerate(tmp_path):
+    """The #2199 bar, unchanged for the new spelling: a box list that every
+    drawn well shape interacts with partitions nothing, so the entry grades the
+    other bias class against its own net exactly as an unselected tie would.
+    Skipped work under the *same* reason the marker form uses -- one defect,
+    one token, whichever key named it."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_keeps_all",
+        [
+            _two_class_ties(base_overrides={"well_requires_boxes": [_WHOLE_BLOCK_BOX]})[
+                1
+            ]
+        ],
+        marker=False,
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+    assert _BASE_ID not in report["erc_coverage"]["checked"]
+    assert _BASE_ID not in report["erc_coverage"]["checked_by_well_assertion"]
+    assert report["erc_status"] == "violations"
+
+
+def test_box_selection_matching_no_drawn_shape_is_degenerate(tmp_path):
+    """The other endpoint, and the one a literal-geometry key makes easy to hit
+    by accident: boxes naming empty space (a stale coordinate, a spec written
+    against a different origin) select no well at all, so the per-well loop
+    runs zero times and zero findings mean "nothing was examined". Refused as
+    an absence-of-evidence pass, not accepted because the boxes parsed."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_keeps_none",
+        [
+            _two_class_ties(
+                base_overrides={"well_requires_boxes": [[30.0, 30.0, 31.0, 31.0]]}
+            )[1]
+        ],
+        marker=False,
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+    assert report["erc_status"] == "clean_partial"
+
+
+def test_an_excludes_boxes_that_removes_every_well_is_degenerate(tmp_path):
+    """Held to the same bar from the other side: an exclusion box every drawn
+    shape interacts with selects nothing."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_excludes_all",
+        [
+            _two_class_ties(base_overrides={"well_excludes_boxes": [_WHOLE_BLOCK_BOX]})[
+                1
+            ]
+        ],
+        marker=False,
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_selection_boxes_are_a_union_not_a_conjunction(tmp_path):
+    """Two disjoint boxes select the shapes touching *either* of them, the way
+    every other literal-geometry key on this entry forms one region out of a
+    box list. Read as a conjunction (each box a separate condition, as each
+    `well_requires` **layer** is) two disjoint boxes would select nothing and
+    grade degenerate -- so this is a behaviour a reader has to be able to rely
+    on, not an implementation detail."""
+    report = _run_two_class_well(
+        tmp_path,
+        "no_marker_boxes_union",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires_boxes": [_BASE_TUB_BOX, [1.0, 9.0, 2.0, 10.0]]
+                }
+            )[1]
+        ],
+        marker=False,
+    )
+
+    # Both classes selected -> keeps every shape -> degenerate, which is only
+    # reachable if the two boxes were unioned rather than intersected.
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+def test_selection_boxes_compose_with_a_marker_layer_selection(tmp_path):
+    """All four selectors narrow the same selection, exactly as `tap_boxes`
+    composes with `tap_requires` on the tap side. Combining them is neither
+    rejected nor silently ignored: the marker keeps the base tub, the box
+    keeps it too, and the result is still one graded class -- carrying the
+    well-side assertion classification, because a box took part."""
+    report = _run_two_class_well(
+        tmp_path,
+        "marker_plus_boxes",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires": ["14/0"],
+                    "well_requires_boxes": [_BASE_TUB_BOX],
+                }
+            )[1]
+        ],
+    )
+
+    assert [f for f in report["erc_findings"] if f["rule"] == "erc.missing_tie"] == []
+    assert report["erc_coverage"]["skipped"] == []
+    assert report["erc_coverage"]["checked_by_well_assertion"] == [_BASE_ID]
+
+
+def test_composed_selectors_are_graded_on_their_combined_result(tmp_path):
+    """The composition is geometric, not "which key was given": a marker that
+    selects the base tub combined with an exclusion box that removes it again
+    keeps nothing, and is graded degenerate on that combined answer rather than
+    on either key in isolation."""
+    report = _run_two_class_well(
+        tmp_path,
+        "marker_minus_boxes",
+        [
+            _two_class_ties(
+                base_overrides={
+                    "well_requires": ["14/0"],
+                    "well_excludes_boxes": [_BASE_TUB_BOX],
+                }
+            )[1]
+        ],
+    )
+
+    assert _tie_skips(report) == {_BASE_ID: "degenerate_well_selection"}
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_selection_boxes_on_an_asserted_substrate_region_are_rejected(tmp_path, key):
+    """A selection picks among *drawn* shapes, in either spelling. An asserted
+    substrate region (`well_layer: null` + `well_boxes`) already names exactly
+    the region it claims, box by box, so narrowing it further -- by a marker
+    layer or by a second box list -- would be a second, unstated claim."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"assertion_{key}",
+        {
+            "well_layer": None,
+            "well_boxes": [[0.0, 0.0, 4.0, 4.0]],
+            key: [[1.0, 1.0, 2.0, 2.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=f"{key} selects among the drawn"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_a_non_array_well_selection_box_list_is_rejected(tmp_path, key):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"non_array_{key}",
+        {
+            "well_layer": "10/0",
+            key: "4.0",
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=f"{key} must be an array"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_a_malformed_well_selection_box_is_rejected(tmp_path, key):
+    """The same per-box validation `tap_boxes`/`well_boxes` apply: a
+    silently-dropped box would weaken a selection the caller believes they
+    declared -- and here that shows up as a *wider* graded class, not a
+    narrower one."""
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"malformed_{key}",
+        {
+            "well_layer": "10/0",
+            key: [[1.0, 2.0, 3.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match=rf"{key}\[0\]"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_an_inverted_well_selection_box_is_rejected(tmp_path, key):
+    gds, spec = _native_substrate_spec_error(
+        tmp_path,
+        f"inverted_{key}",
+        {
+            "well_layer": "10/0",
+            key: [[3.0, 2.0, 1.0, 4.0]],
+            "tap_layer": "11/0",
+            "connect_to": "li1",
+            "net": "VSS",
+        },
+    )
+    with pytest.raises(ErcError, match="left < right and bottom < top"):
+        run_erc(str(gds), str(spec))
+
+
+@pytest.mark.parametrize("key", ["well_requires_boxes", "well_excludes_boxes"])
+def test_a_null_well_selection_box_list_is_the_same_as_omitting_it(tmp_path, key):
+    """`null` is the documented "omitted" spelling for every optional list on
+    this entry -- it must not become an empty selection that matches nothing,
+    nor put the tie in the well-side assertion list."""
+    report = _run_two_class_well(
+        tmp_path,
+        f"null_{key}",
+        [_two_class_ties(base_overrides={key: None})[1]],
+    )
+
+    assert report["erc_coverage"]["skipped"] == []
+    assert _BASE_ID in report["erc_coverage"]["checked"]
+    assert report["erc_coverage"]["checked_by_well_assertion"] == []
 
 
 # --- ties: a well layer with no geometry at all (issue #2377) ------------

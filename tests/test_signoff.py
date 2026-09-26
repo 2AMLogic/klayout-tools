@@ -9236,6 +9236,131 @@ def test_item_11_met_for_a_native_substrate_tie_naming_the_asserted_well(tmp_pat
     assert item["citation"]["power_delivery"]["ties_checked_by_assertion"] == []
 
 
+#: Issue #2540: one *drawn* tub layer carrying two deliberately
+#: differently-biased well classes that no drawn layer separates, each class
+#: scoped by the literal-geometry well-side selectors. The shape that could
+#: previously reach only `supply_spec_disclosed_tool_limitation`.
+ERC_BOX_SELECTED_WELL_CLASS_SPEC = {
+    **ERC_SUPPLY_SPEC,
+    "ties": [
+        {
+            "name": "device_body_wells",
+            "well_layer": "64/20",
+            "well_excludes_boxes": [[5.2, 0.8, 6.2, 2.4]],
+            "tap_layer": "65/44",
+            "tap_is_dedicated": True,
+            "connect_to": "li1",
+            "net": "VPWR",
+        },
+        {
+            "name": "bias_tub",
+            "well_layer": "64/20",
+            "well_requires_boxes": [[5.2, 0.8, 6.2, 2.4]],
+            "tap_layer": "65/44",
+            "tap_is_dedicated": True,
+            "connect_to": "li1",
+            "net": "VGND",
+        },
+    ],
+}
+
+
+def test_item_11_met_for_a_drawn_well_whose_class_selection_was_named_in_boxes(
+    tmp_path,
+):
+    """Issue #2540, from the consumer side: a block whose one drawn tub layer
+    carries two bias classes that no drawn layer separates scopes each class
+    with `ties[].well_requires_boxes`/`well_excludes_boxes`, and reaches `met`
+    on the same terms as a marker-selected or native-substrate one.
+
+    This is the state the issue was filed about. Before it, such a block had no
+    reachable spec at all: one unselected entry reported a false
+    `erc.missing_tie` on every well of the class it did not name, any
+    marker-layer selection over a marker-free stream kept every shape or none
+    (`degenerate_well_selection`, skipped work this item refuses to read as a
+    clean verdict), and `well_boxes` was rejected beside a drawn `well_layer` —
+    so item 11 could reach only `supply_spec_disclosed_tool_limitation`, unmet.
+
+    What the verdict of record gains, as for #2255's native-substrate form, is
+    the provenance: both ties are named in
+    `power_delivery.ties_checked_by_well_assertion`, because *which shapes
+    belong to this entry* rested on the caller's word even though the well
+    itself is drawn and still measured."""
+    checked = [
+        'erc.missing_tie:["device_body_wells"]',
+        'erc.missing_tie:["bias_tub"]',
+    ]
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(
+            checked=checked,
+            checked_by_well_assertion=checked,
+        ),
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=envelope,
+                    erc_spec=ERC_BOX_SELECTED_WELL_CLASS_SPEC,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "met"
+    assert item["reason"] is None
+    assert (
+        item["citation"]["power_delivery"]["ties_checked_by_well_assertion"] == checked
+    )
+    # The tap side stayed marker-derived (`tap_is_dedicated`), so the two
+    # assertion classes remain distinguishable.
+    assert item["citation"]["power_delivery"]["ties_checked_by_assertion"] == []
+
+
+def test_item_11_unmet_when_a_box_selected_well_class_was_skipped(tmp_path):
+    """The falsifiability bar for issue #2540's keys, from the consumer side: a
+    box selection that kept every merged shape of the drawn `well_layer`, or
+    none of them, is `degenerate_well_selection` in `erc_coverage.skipped` —
+    and this item already refuses to read a skipped `erc.missing_tie` as a
+    clean verdict, matching on the work-identity prefix rather than the reason
+    token, so the literal-geometry form needed no new gate."""
+    envelope = {
+        **ERC_CLEAN_ENVELOPE,
+        "erc_coverage": _erc_coverage_block(
+            checked=['erc.missing_tie:["device_body_wells"]'],
+            skipped=[
+                {
+                    "id": 'erc.missing_tie:["bias_tub"]',
+                    "reason": "degenerate_well_selection",
+                }
+            ],
+        ),
+    }
+    result = build_tier_report(
+        _manifest(
+            kind="analog",
+            evidence={
+                "11": _power_delivery_evidence(
+                    tmp_path,
+                    kind="analog",
+                    erc_envelope=envelope,
+                    erc_spec=ERC_BOX_SELECTED_WELL_CLASS_SPEC,
+                )
+            },
+        )
+    )
+
+    item = _item_11(result)
+    assert item["status"] == "unmet"
+    assert item["reason"] == "supply_spec_incomplete"
+    assert item["citation"] is None
+
+
 def test_item_11_unmet_when_the_asserted_well_was_skipped_as_degenerate(tmp_path):
     """The falsifiability bar, seen from the consumer side: an assertion
     `klt erc` could not distinguish from "the whole die is the substrate" is
@@ -10802,7 +10927,7 @@ def test_cli_item_11_text_output_names_caller_asserted_taps(tmp_path, capsys):
     out = capsys.readouterr().out
     assert 'taps asserted by the caller: 1 (erc.missing_tie:["nwell_tie"])' in out
     # Issue #2255: the well side is a separate claim and was not made here.
-    assert "substrate regions asserted by the caller" not in out
+    assert "well side rested on the caller's word" not in out
 
 
 def test_cli_item_11_text_output_names_caller_asserted_substrate_regions(
@@ -10811,7 +10936,13 @@ def test_cli_item_11_text_output_names_caller_asserted_substrate_regions(
     """Issue #2255: a native-substrate block's tie rests on an asserted
     *well* region, not just an asserted tap. That is the weaker of the two
     claims, so the rendering a reviewer actually reads says so on its own
-    line rather than leaving it to the JSON."""
+    line rather than leaving it to the JSON.
+
+    The line names the claim generically (issue #2540): this list now also
+    carries a *drawn* well whose bias class was selected by caller-named boxes
+    (`well_requires_boxes`/`well_excludes_boxes`), so wording it as "substrate
+    regions asserted (no drawn well)" would have stated something the spec did
+    not claim for half the ties it counts."""
     envelope = {
         **ERC_CLEAN_ENVELOPE,
         "erc_coverage": _erc_coverage_block(
@@ -10839,8 +10970,8 @@ def test_cli_item_11_text_output_names_caller_asserted_substrate_regions(
 
     out = capsys.readouterr().out
     assert (
-        "substrate regions asserted by the caller (no drawn well): 1 "
-        '(erc.missing_tie:["substrate_tie"])'
+        "well side rested on the caller's word (asserted region, or a "
+        'box-selected class): 1 (erc.missing_tie:["substrate_tie"])'
     ) in out
     # The tap side stayed marker-derived (`tap_is_dedicated`), so its own
     # line is absent -- the two are reported independently.

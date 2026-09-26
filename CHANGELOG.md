@@ -32,6 +32,34 @@ not `klt --version`, if you need to detect this kind of drift. See
   implant on those families needs a real PDK enclosure rule the curated
   decks do not carry (sg13g2's, for one, transcribes no implant rule of any
   kind) and is left as separately-filed follow-up work.
+- **Added** (#2540, `klt erc`; additive — `schema_version` unchanged): two new
+  optional `ties[]` spec keys, `well_requires_boxes` and
+  `well_excludes_boxes` — the **literal-geometry** form of #2339's well-side
+  class selectors, for one drawn tub layer carrying two deliberately
+  differently-biased well classes that **no drawn layer separates** (ordinary
+  in analog bias, charge-pump and level-shifter circuits on any PDK with a
+  single n-tub layer and no per-class marker). Each merged shape of
+  `well_layer` is kept when it interacts with the union of
+  `well_requires_boxes` and with none of the `well_excludes_boxes` union — the
+  well-side counterpart of `tap_boxes`, selecting whole drawn shapes exactly as
+  the marker-layer form does. Both require a drawn `well_layer`, compose with
+  `well_requires`/`well_excludes` (all four narrow the same selection, and the
+  degeneracy verdict is measured on the combined result), and reuse the
+  existing `degenerate_well_selection` skip reason: a selection keeping every
+  drawn shape or none of them — including boxes matching no shape at all — is
+  skipped work, not a pass. Before this, such a block could only report a false
+  `erc.missing_tie` on every well of the class it did not name, or skipped
+  work, so `klt signoff`'s T1 item 11 was unreachable for it
+  (`supply_spec_disclosed_tool_limitation` at best). A tie scoped this way is
+  additionally named in the already-shipped
+  `erc_coverage.checked_by_well_assertion`, whose documented meaning widens
+  from "the well region was itself asserted" to "the well side of this verdict
+  rested on caller-named coordinates" — a marker-layer selection still stays
+  out of it. No new output field, coverage list, or skip reason; a spec
+  declaring neither key produces byte-identical output. The rejection message
+  for `well_boxes` beside a drawn `well_layer` now names these keys, so it
+  points at a route a marker-free stream can actually take.
+
 - **Fixed** (#2546, `klt sim`; additive — **no** `schema_version` bump, but
   user-visible: a corner that previously reported `status: "error"` can now
   report a real grade): a `spice`-form `measurements[].name` was looked up
