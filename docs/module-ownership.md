@@ -137,6 +137,14 @@ The `sta` verb runs gate-level static timing analysis over a routed DEF, backed 
 
 **Naming trap**: `src/klayout_tools/sta.py` also exists but is a *different*, unrelated module — a native-Rust critical-path library that backs `klt synthesize`'s integrated `sta` report (a different verb entirely). `klt sta` itself does not import `sta.py`.
 
+### synthesize
+
+The `synthesize` verb maps RTL to a standard-cell netlist against a resolved liberty via Yosys, headless.
+
+- **synthesize_cmd** (`cli/synthesize_cmd.py`): CLI interface, JSON envelope output, request document handling
+- **synthesize** (`synthesize.py`): Core synthesis engine — request/PDK/liberty resolution, `.ys` script generation and Yosys invocation, `stat`/ABC/`sta` report parsing, the `klt equiv` acceptance gate, and the timing-restructuring pass
+- **synthesize_arithmetic** (`synthesize_arithmetic.py`): Arithmetic-architecture selection subsystem (`request.arithmetic`, issue #1722) — `$add` width probing, per-architecture adder generation and its `klt equiv` proof, per-candidate trial synthesis, and the winner-selection rule
+
 ### yield
 
 `klt yield` turns a Monte Carlo sample set plus spec limits into a yield estimate (confidence interval, Cpk/sigma-to-spec).
@@ -157,7 +165,7 @@ Both fit the single-implementation-module pattern (see "Single-File Verbs" below
 
 The following verbs have all their implementation in a single module (`src/klayout_tools/<verb>.py`) with a corresponding CLI module (`src/klayout_tools/cli/<verb>_cmd.py`):
 
-arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, ring_check, size, socket_check, stats, synthesize, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
+arith_gen, cells, clip, components, design_centering, draw, drc, economy, env_provenance, equiv, erc, eval, kb, layers, layout_metrics, lef_abstract, mom, pex, power, precheck, render, report, ring_check, size, socket_check, stats, techmap, trajectory, version, wave, yield_campaign, yield_sensitivity
 
 These verbs follow the simpler pattern: a single implementation module (e.g., `extract.py`) paired with a CLI command module (e.g., `cli/extract_cmd.py`).
 
