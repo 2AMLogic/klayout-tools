@@ -26,6 +26,7 @@ import pytest
 
 from klayout_tools.cli import main
 from klayout_tools.yield_analysis import (
+    _SIM_INCONCLUSIVE_STATUS,
     YieldError,
     _measurements_from_sim_report,
     _read_samples,
@@ -605,6 +606,229 @@ def test_a_non_integer_censored_is_an_error(tmp_path):
         },
     )
     with pytest.raises(YieldError, match="censored must be a"):
+        _read_samples(path)
+
+
+# --------------------------------------------------------------------------- #
+# `inconclusive` exclusion + parsing (issue #2507 -- `klt sim`'s plausibility
+# bounds / `options.fail_on_diagnostic` grading, mirrored into `klt yield`'s
+# population. No native extension needed -- these are input-reader-tier
+# checks across both extraction paths.)
+# --------------------------------------------------------------------------- #
+
+
+def _sim_report_with_statuses(tmp_path, rows, limits=None):
+    """A minimal `klt sim` MC report whose corners carry explicit statuses.
+
+    ``rows`` is a list of ``(value, corner_status, measurement_status)``
+    triples -- the two levels `klt sim` grades `"inconclusive"` at
+    independently (see `sim.py`'s `_monte_carlo_rollup._stats`).
+    """
+    corners = [
+        {
+            "corner_id": f"tt/1.800V/27C/mc{i}",
+            "status": corner_status,
+            "measurements": [
+                {"name": "vref", "value": value, "unit": "V", "status": m_status}
+            ],
+            "monte_carlo": {"sample_index": i, "seed": 1000 + i},
+        }
+        for i, (value, corner_status, m_status) in enumerate(rows)
+    ]
+    report = {
+        "schema_version": 1,
+        "netlist": "tb.spice",
+        "status": "pass",
+        "environment": {"monte_carlo": {"n": len(rows), "seed": 1000}},
+        "measurements": [{"name": "vref", "unit": "V", "limits": limits or {}}],
+        "corners": corners,
+    }
+    path = tmp_path / "sim.json"
+    path.write_text(json.dumps(report))
+    return str(path)
+
+
+def test_the_inconclusive_status_token_matches_klt_sims_own():
+    """`yield_analysis` repeats the token rather than importing `sim` (which
+    would drag in that whole module just to read a report). Assert the two
+    agree, so a rename on either side fails loudly here instead of silently
+    letting distrusted samples back into the population."""
+    from klayout_tools.sim import _INCONCLUSIVE_STATUS
+
+    assert _SIM_INCONCLUSIVE_STATUS == _INCONCLUSIVE_STATUS
+
+
+def test_sim_report_excludes_a_measurement_graded_inconclusive(tmp_path):
+    """The measurement-level half of the two-level check: a plausibility-bound
+    violation (issue #2493) grades the *measurement* `"inconclusive"` while
+    its corner still reads `pass`. The value is real and non-null, so the
+    pre-existing `value is not None` filter never caught it."""
+    path = _sim_report_with_statuses(
+        tmp_path,
+        [
+            (1.0, "pass", "pass"),
+            (9.9e9, "pass", "inconclusive"),
+            (3.0, "pass", "pass"),
+        ],
+        limits={"min": 0.5, "max": 3.5},
+    )
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["samples"] == [1.0, 3.0]
+    assert measurements[0]["inconclusive"] == 1
+    assert measurements[0]["errored"] == 0
+
+
+def test_sim_report_excludes_a_corner_graded_inconclusive(tmp_path):
+    """The corner-level half: `options.fail_on_diagnostic` (issue #2492)
+    disqualifies the sample's whole *corner*; its measurement's own
+    pass/fail grading is intact, since it was graded against `limits`
+    before the corner was disqualified."""
+    path = _sim_report_with_statuses(
+        tmp_path,
+        [
+            (1.0, "pass", "pass"),
+            (2.0, "inconclusive", "pass"),
+            (3.0, "pass", "pass"),
+        ],
+        limits={"min": 0.5, "max": 3.5},
+    )
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["samples"] == [1.0, 3.0]
+    assert measurements[0]["inconclusive"] == 1
+
+
+def test_sim_report_inconclusive_is_zero_when_no_status_is_graded(tmp_path):
+    """A report predating the status grading (or a hand-authored one) carries
+    no `status` on its corner measurements at all -- absent is not
+    `"inconclusive"`, so nothing is excluded."""
+    path = _sim_report(tmp_path, [1.0, 2.0, 3.0], limits={"min": 0.5, "max": 3.5})
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["samples"] == [1.0, 2.0, 3.0]
+    assert measurements[0]["inconclusive"] == 0
+
+
+def test_sim_report_an_inconclusive_sample_is_counted_once_not_twice(tmp_path):
+    """A draw disqualified at *both* levels is one excluded sample, not two --
+    `n + errored + inconclusive` must still account for the full draw."""
+    path = _sim_report_with_statuses(
+        tmp_path,
+        [
+            (1.0, "pass", "pass"),
+            (2.0, "inconclusive", "inconclusive"),
+            (None, "pass", "error"),
+            (3.0, "pass", "pass"),
+        ],
+        limits={"min": 0.5, "max": 3.5},
+    )
+    _kind, measurements, _source = _read_samples(path)
+    m = measurements[0]
+    assert m["samples"] == [1.0, 3.0]
+    assert m["errored"] == 1
+    assert m["inconclusive"] == 1
+    # The full draw is accounted for: 2 usable + 1 errored + 1 inconclusive.
+    assert len(m["samples"]) + m["errored"] + m["inconclusive"] == 4
+
+
+def test_sim_report_an_inconclusive_sample_with_a_null_value_is_not_errored(tmp_path):
+    """An inconclusive draw that also produced no value is inconclusive, not
+    errored -- the distrust verdict outranks the missing-value bookkeeping,
+    exactly as `sim.py`'s `_stats` sets the sample aside before its own
+    `value is not None` filter runs."""
+    path = _sim_report_with_statuses(
+        tmp_path,
+        [
+            (1.0, "pass", "pass"),
+            (None, "pass", "inconclusive"),
+            (3.0, "pass", "pass"),
+        ],
+        limits={"min": 0.5, "max": 3.5},
+    )
+    m = _read_samples(path)[1][0]
+    assert m["samples"] == [1.0, 3.0]
+    assert m["errored"] == 0
+    assert m["inconclusive"] == 1
+
+
+def test_sim_report_an_inconclusive_sample_is_never_validated_as_numeric(tmp_path):
+    """A distrusted value is set aside *before* the numeric-type check -- it
+    is not part of the population, so its shape is not this reader's
+    business (and a non-numeric sentinel must not become a hard error)."""
+    path = _sim_report_with_statuses(
+        tmp_path,
+        [
+            (1.0, "pass", "pass"),
+            ("no-solution", "pass", "inconclusive"),
+            (3.0, "pass", "pass"),
+        ],
+        limits={"min": 0.5, "max": 3.5},
+    )
+    m = _read_samples(path)[1][0]
+    assert m["samples"] == [1.0, 3.0]
+    assert m["inconclusive"] == 1
+
+
+def test_inconclusive_is_parsed_from_a_sample_set(tmp_path):
+    """A plain sample-set document has no per-sample status channel, so the
+    count is caller-supplied -- the same shape `errored`/
+    `failed_unmeasurable`/`censored` already use."""
+    entry = {
+        "name": "m",
+        "samples": [1.0, 2.0, 3.0],
+        "errored": 2,
+        "inconclusive": 4,
+        "limits": {"max": 5.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["errored"] == 2
+    assert measurements[0]["inconclusive"] == 4
+
+
+def test_inconclusive_defaults_to_zero_on_a_sample_set(tmp_path):
+    path = _sample_set(tmp_path, [1.0, 2.0], limits={"max": 5.0})
+    _kind, measurements, _source = _read_samples(path)
+    assert measurements[0]["inconclusive"] == 0
+
+
+def test_sample_set_inconclusive_accounts_for_the_full_draw(tmp_path):
+    entry = {
+        "name": "m",
+        "samples": [1.0, None, 3.0],
+        "errored": 1,
+        "inconclusive": 5,
+        "limits": {"max": 5.0},
+    }
+    path = _sample_set_doc(tmp_path, entry)
+    m = _read_samples(path)[1][0]
+    # 3 declared samples (one null) + 1 extra errored + 5 inconclusive = 9.
+    assert len(m["samples"]) + m["errored"] + m["inconclusive"] == 9
+
+
+def test_a_negative_inconclusive_is_an_error(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "inconclusive": -1,
+        },
+    )
+    with pytest.raises(YieldError, match="inconclusive must be a"):
+        _read_samples(path)
+
+
+def test_a_non_integer_inconclusive_is_an_error(tmp_path):
+    path = _sample_set_doc(
+        tmp_path,
+        {
+            "name": "m",
+            "samples": [1.0, 2.0],
+            "limits": {"max": 5.0},
+            "inconclusive": "lots",
+        },
+    )
+    with pytest.raises(YieldError, match="inconclusive must be a"):
         _read_samples(path)
 
 

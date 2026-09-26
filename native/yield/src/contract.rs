@@ -80,6 +80,20 @@ pub struct MeasurementRequest {
     /// exactly like both existing categories (there is no value to fit).
     #[serde(default)]
     pub censored: u64,
+    /// Draws whose value *exists* but is not trustworthy, so it must not be
+    /// graded against `limits` as if it were a result -- `klt sim`'s
+    /// `"inconclusive"` status, from either an `options.fail_on_diagnostic`
+    /// corner disqualification (issue #2492) or a plausibility-bound
+    /// violation (issue #2493). Unlike the three categories above, this is
+    /// not a *missing* value: the Python layer has already set the value
+    /// aside before it reached `samples`, because the number is real and
+    /// would otherwise move the mean/sigma a verdict rests on (issue #2507).
+    /// Gets `errored`'s denominator treatment -- excluded from both the
+    /// numerator and denominator of `yield.empirical`, and from the
+    /// distribution fit and Cp/Cpk -- since a distrusted number carries no
+    /// verdict in either direction.
+    #[serde(default)]
+    pub inconclusive: u64,
     pub limits: Limits,
     /// Originating (pre-sampling) corner ids this measurement's samples were
     /// pooled from -- informational, echoed back so a pooled multi-corner
@@ -280,6 +294,12 @@ pub struct MeasurementReport {
     /// like `errored`, but with its own label/warning text distinguishing
     /// "measurement precondition not met" from "tooling failed".
     pub censored: u64,
+    /// Echoes the request's `inconclusive` (issue #2507) -- draws whose value
+    /// existed but was not trustworthy, excluded from `yield.empirical` and
+    /// from `distribution`/`capability` exactly like `errored`, with its own
+    /// warning text distinguishing "the number is real but distrusted" from
+    /// all three no-value categories.
+    pub inconclusive: u64,
     pub limits: Limits,
     pub source_corners: Vec<String>,
     pub distribution: Distribution,

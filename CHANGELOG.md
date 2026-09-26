@@ -48,6 +48,36 @@ not `klt --version`, if you need to detect this kind of drift. See
   [`docs/cli/characterize.md`](docs/cli/characterize.md) and the worked
   example in [`examples/characterize/`](examples/characterize/) (needs only
   `ngspice` — no PDK, no Docker).
+- **Fixed** (#2507, `klt yield` / `klt yield-campaign`; additive — **no**
+  `schema_version` bump): `klt yield`'s two sample-extraction paths keyed
+  only on `value is not None`, so a draw `klt sim` had already graded
+  `"inconclusive"` — a value outside a declared
+  `measurements[].plausible_range`/`options.node_voltage_bounds` (#2493), or
+  one from a corner disqualified by `options.fail_on_diagnostic` (#2492) —
+  still entered the yield population with its real, distrusted number
+  intact. `klt sim`'s own Monte Carlo rollup excluded exactly those samples,
+  so the same report produced two different populations depending on which
+  verb read it; a compact model that converged to a 500 V node voltage could
+  move the mean, inflate the sigma, and collapse the Cpk a spec verdict rests
+  on. `_measurements_from_sim_report` now applies the same **two-level**
+  check `sim.py`'s `_monte_carlo_rollup._stats` does (corner-level
+  `corners[].status` **or** measurement-level
+  `corners[].measurements[].status`; a draw disqualified at both levels
+  counts once), and `_measurements_from_sample_set` gains an optional
+  caller-supplied `inconclusive` count for a hand-authored document with no
+  status channel. A new `measurements[].inconclusive` field reports the
+  excluded count on both paths — the population is never silently reduced,
+  and `n + errored + failed_unmeasurable + censored + inconclusive` accounts
+  for the full draw. `inconclusive` gets `errored`'s denominator treatment
+  (excluded from both the numerator and denominator of `yield.empirical`, and
+  from `distribution`/`capability`) rather than `failed_unmeasurable`'s,
+  because a distrusted number is evidence of neither a pass nor a fail;
+  non-zero adds a distinct per-measurement warning plus a matching run-level
+  one. Reachable only for a request that opts into a plausibility bound or
+  `fail_on_diagnostic`: a run that declares neither reports `inconclusive: 0`
+  and is byte-identical to before. Denominator rationale and the two-level
+  derivation are documented in `docs/cli/yield.md` ("Errored samples and
+  conditional yield").
 - **Added** (#2497, `klt erc`; additive — **no** `schema_version` bump): a
   top-level `nets[]` report section, one entry per declared `nets[]` spec
   entry in spec order, carrying `{name, matched_islands,
