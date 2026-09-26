@@ -1072,9 +1072,20 @@ def test_example_tables_grow_with_output_load(example_run):
                 assert row[-1] > row[0], (name, row)
 
 
+#: Relative tolerance for the slew-monotonicity assertion below. At a heavy
+#: output load the cell's own drive strength, not the input edge, sets the
+#: output transition, so consecutive rows of a `*_transition` column are
+#: equal *to within the transient solver's tolerance* -- and which side of
+#: that noise floor a given row lands on differs between ngspice builds
+#: (observed: this repo's CI runners disagreed with a dev host by ~1e-7 on a
+#: 0.389 ns value, a 2.6e-7 relative difference). 0.1% is several orders of
+#: magnitude above that noise and still far below any real inversion.
+_SLEW_MONOTONIC_REL_TOL = 1e-3
+
+
 @_SKIP_NO_NGSPICE
 def test_example_transitions_grow_with_input_slew(example_run):
-    """A slower input edge cannot produce a faster output edge.
+    """A slower input edge cannot produce a *meaningfully* faster output edge.
 
     Deliberately asserted for the *transition* tables only: `cell_rise`/
     `cell_fall` are 50%-to-50% delays, which legitimately **shrink** (and can
@@ -1083,14 +1094,18 @@ def test_example_transitions_grow_with_input_slew(example_run):
     `docs/cli/characterize.md`'s "Negative delays are legitimate". The
     synthetic NAND in this example exhibits exactly that, so asserting
     slew-monotonic delay here would encode a physical falsehood.
+
+    Compared with `_SLEW_MONOTONIC_REL_TOL` rather than exactly, for the
+    solver-noise reason documented on that constant.
     """
     report, _ = example_run
 
     for arc in report["arcs"]:
         for name in ("rise_transition", "fall_transition"):
-            columns = zip(*arc[name]["values"], strict=True)
-            for column in columns:
-                assert list(column) == sorted(column), (name, column)
+            for column in zip(*arc[name]["values"], strict=True):
+                for earlier, later in zip(column, column[1:], strict=False):
+                    floor = earlier * (1.0 - _SLEW_MONOTONIC_REL_TOL)
+                    assert later >= floor, (name, column, earlier, later)
 
 
 @_SKIP_NO_NGSPICE
