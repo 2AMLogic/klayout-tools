@@ -1,0 +1,11 @@
+* klt characterize worked example -- tiny synthetic model library
+* (not a real PDK -- see this directory's generate.py docstring)
+.lib tt
+.model nfet_demo nmos level=1 vto=0.4 kp=200u lambda=0.05 cgso=1.5n cgdo=1.5n cj=1m cjsw=200p
+.model pfet_demo pmos level=1 vto=-0.4 kp=80u lambda=0.05 cgso=1.5n cgdo=1.5n cj=1m cjsw=200p
+.endl tt
+
+.lib ss
+.model nfet_demo nmos level=1 vto=0.48 kp=160u lambda=0.05 cgso=1.5n cgdo=1.5n cj=1m cjsw=200p
+.model pfet_demo pmos level=1 vto=-0.48 kp=64u lambda=0.05 cgso=1.5n cgdo=1.5n cj=1m cjsw=200p
+.endl ss

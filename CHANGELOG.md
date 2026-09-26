@@ -14,6 +14,40 @@ not `klt --version`, if you need to detect this kind of drift. See
 
 ## Unreleased
 
+- **Added** (#2502, new verb `klt characterize`; `schema_version: 1` — a new
+  command, so nothing existing changed shape): `klt` can now *emit* a Liberty
+  model, not only consume one. `klt sta`, `klt synthesize` and
+  `klt place-and-route` all resolve a `.lib`
+  (`pdk_cells.resolve_liberty_for_cell_library`) and `native/statime` parses
+  one (`liberty.rs`/`nldm.rs`), but nothing in the tree produced one —
+  characterization was the last stage of the cell flow with no open answer.
+
+  Given **one** combinational cell's SPICE netlist (post-`klt pex` where
+  available) plus pin/`function` metadata, **one** PVT corner, and an
+  input-slew × output-load grid, the verb drives the whole grid through
+  `klt sim` as a *single* transient deck (one cell instance per (arc, slew,
+  load) triple — never one simulator invocation per grid point), extracts
+  propagation delay and transition time per combinational arc, and writes a
+  `.lib` carrying `cell_rise`/`cell_fall`/`rise_transition`/`fall_transition`
+  with `related_pin` and `timing_sense`. Timing arcs and their side-input
+  states are **derived from each output pin's Liberty `function`**, so a
+  NAND's A→Y arc is measured with B at its non-controlling value rather than
+  at a value where nothing propagates.
+
+  The emitted file is parsed back through `native/statime`'s own Liberty
+  reader before the run reports success; a machine without the
+  `klt_statime_native` extension reports `roundtrip.status: "skipped"` with
+  the reason, never a fabricated pass.
+
+  Scope of this increment: no power/energy tables
+  (`rise_power`/`fall_power`/`leakage_power`), one cell and one corner per
+  invocation, combinational arcs only — a sequential cell's `function` is
+  refused with a named error rather than characterized as if it were
+  combinational. Power, multi-cell batching, and arc-by-arc vendor-`.lib`
+  accuracy validation are #2503; multi-corner is #1871. See
+  [`docs/cli/characterize.md`](docs/cli/characterize.md) and the worked
+  example in [`examples/characterize/`](examples/characterize/) (needs only
+  `ngspice` — no PDK, no Docker).
 - **Added** (#2497, `klt erc`; additive — **no** `schema_version` bump): a
   top-level `nets[]` report section, one entry per declared `nets[]` spec
   entry in spec order, carrying `{name, matched_islands,

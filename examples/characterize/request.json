@@ -1,0 +1,57 @@
+{
+  "cell": {
+    "name": "nand2_demo",
+    "netlist": "cells.spice",
+    "pins": [
+      {
+        "name": "A",
+        "direction": "input",
+        "capacitance_pf": 0.002
+      },
+      {
+        "name": "B",
+        "direction": "input",
+        "capacitance_pf": 0.002
+      },
+      {
+        "name": "Y",
+        "direction": "output",
+        "function": "!(A*B)"
+      }
+    ],
+    "power_pins": {
+      "vdd": "VDD",
+      "gnd": "VSS"
+    },
+    "area": 3.6
+  },
+  "corner": {
+    "name": "tt_1p80V_25C",
+    "process": "tt",
+    "supply_v": 1.8,
+    "temperature_c": 25
+  },
+  "grid": {
+    "input_transition_ns": [
+      0.02,
+      0.08,
+      0.24,
+      0.72
+    ],
+    "output_load_pf": [
+      0.005,
+      0.03,
+      0.1,
+      0.3
+    ]
+  },
+  "models": {
+    "lib": "models.lib"
+  },
+  "library": {
+    "name": "characterize_demo_tt_1p80V_25C"
+  },
+  "options": {
+    "timeout_s": 600
+  }
+}

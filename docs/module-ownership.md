@@ -23,6 +23,15 @@ Run the script to validate the *unambiguous* entries (verb name == core module n
 
 The following verbs are implemented across more than one source file. Each entry lists the module name (as a Python `import` path) and a one-line description of its role.
 
+### characterize
+
+The `characterize` verb turns one standard cell's SPICE netlist, at one PVT corner, into an NLDM Liberty (`.lib`) timing model — the write side of the Liberty path `sta`/`synthesize`/`place_and_route` already read.
+
+- **characterize_cmd** (`cli/characterize_cmd.py`): CLI interface, JSON envelope output, request document handling
+- **characterize** (`characterize.py`): Core extraction engine — request resolution, single-deck grid stimulus generation, `klt sim` driving, `.meas` reshape into NLDM tables, and the `native/statime` round-trip check
+- **characterize_arcs** (`characterize_arcs.py`): Liberty boolean-`function` parsing and combinational timing-arc derivation — which arcs exist, each arc's `timing_sense`, and the side-input state it must be measured under. Pure logic, no simulation
+- **liberty_writer** (`liberty_writer.py`): Liberty **write** path — the NLDM data model (`Library`/`Cell`/`Pin`/`TimingArc`/`Table2D`) and its renderer. The counterpart to `native/statime/src/liberty.rs`'s reader; deliberately Python rather than Rust (see that module's docstring for the rationale)
+
 ### deck
 
 The `deck` verb identifies a built-in DRC/LVS rule deck and resolves it back to the release that shipped it.
