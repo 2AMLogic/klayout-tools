@@ -350,10 +350,10 @@ def _add_characterize_parser(subparsers: argparse._SubParsersAction) -> None:
     """
     characterize_parser = subparsers.add_parser(
         "characterize",
-        help="characterize one standard cell into an NLDM Liberty (.lib) model",
+        help="characterize standard cells into one NLDM Liberty (.lib) model",
         description=(
-            "Characterize ONE standard cell at ONE PVT corner from its SPICE "
-            "netlist (post-`klt pex` where available) plus pin/function "
+            "Characterize one standard cell (or a batch) at ONE PVT corner "
+            "from its SPICE netlist (post-`klt pex` where available) plus pin/function "
             "metadata, and emit a syntactically valid NLDM `.lib` carrying "
             "`cell_rise`/`cell_fall`/`rise_transition`/`fall_transition` per "
             "combinational timing arc. This is the write side of the Liberty "
@@ -367,8 +367,12 @@ def _add_characterize_parser(subparsers: argparse._SubParsersAction) -> None:
             "drives every instance -- never one simulator invocation per grid "
             "point. The emitted file is parsed back through "
             "`native/statime`'s own Liberty reader before the run reports "
-            "success. Scope of this command: no power/energy tables, one "
-            "cell and one corner per invocation, combinational arcs only. "
+            "success. Every arc also carries `rise_power`/`fall_power` "
+            "internal-energy tables and each cell its per-state "
+            "`leakage_power` (issue #2503). A request's `cells` array "
+            "characterizes several cells into ONE `.lib`; `--compare-to` "
+            "diffs the result against a reference (vendor) library. Scope: "
+            "one corner per invocation, combinational arcs only. "
             "Takes a request-document path (like `klt sim`/`klt sta`), not "
             "positional file args."
         ),
@@ -411,6 +415,28 @@ def _add_characterize_parser(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "keep the per-corner ngspice log/deck under <outdir>/sim/ "
             "(overrides the request's own options.keep_artifacts)"
+        ),
+    )
+    characterize_parser.add_argument(
+        "--cell",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "characterize only the named cell out of a batch request's "
+            "`cells` array (repeatable; default: every cell the request "
+            "declares). A name the request does not declare is an error."
+        ),
+    )
+    characterize_parser.add_argument(
+        "--compare-to",
+        default=None,
+        metavar="LIB",
+        help=(
+            "compare the emitted `.lib` arc by arc against this reference "
+            "Liberty file (typically the vendor library for the same corner) "
+            "and report per-point delay/transition/power/leakage deltas in "
+            "the response's `comparison` block"
         ),
     )
     _add_format_arg(characterize_parser)

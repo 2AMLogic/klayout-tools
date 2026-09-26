@@ -1,11 +1,13 @@
 # `klt characterize`
 
-SPICE-driven NLDM timing characterization of **one** standard cell at **one**
-PVT corner, emitting a Liberty (`.lib`) model (issue #2502).
+SPICE-driven NLDM timing **and power** characterization of one standard cell
+-- or a batch of them -- at **one** PVT corner, emitting a single Liberty
+(`.lib`) model (issues #2502, #2503).
 
 ```
 klt characterize <request> [-o OUTDIR] [--lib PATH] [--backend BACKEND]
-                          [--keep-artifacts] [--format text|json]
+                          [--keep-artifacts] [--cell NAME ...]
+                          [--compare-to LIB] [--format text|json]
 ```
 
 ## Why this exists
@@ -45,6 +47,14 @@ positional file args. Relative paths inside it (`cell.netlist`,
   **single corner**, so the default `local` is normally correct.
 - `--keep-artifacts` — keep the per-corner ngspice log/deck under
   `<outdir>/sim/`.
+- `--cell` — characterize only the named cell out of a batch request's
+  `cells` array. Repeatable; default every declared cell. A name the request
+  does not declare is an error (never a silent no-op), and `--cell` on a
+  single-cell (`cell`) request is an error too.
+- `--compare-to` — a reference Liberty file (typically the vendor library for
+  the same corner) to compare the emitted `.lib` against arc by arc. The
+  result lands in the response's `comparison` block; see "Accuracy against a
+  vendor library".
 - `--format` — `text` (default) or `json`.
 
 Requires `ngspice` on `$PATH` (it is `klt sim` that runs it — see
@@ -53,22 +63,22 @@ request's `models` block names one.
 
 ## Scope of this command
 
-**In scope**: one cell; one PVT corner; every *combinational* timing arc of
-that cell; `cell_rise`, `cell_fall`, `rise_transition`, `fall_transition`,
-`related_pin`, `timing_sense`, `timing_type : combinational`.
+**In scope**: one cell or a batch of cells (one combined `.lib`); one PVT
+corner; every *combinational* timing arc of each cell; `cell_rise`,
+`cell_fall`, `rise_transition`, `fall_transition`, `related_pin`,
+`timing_sense`, `timing_type : combinational`; per-arc `internal_power()`
+with `rise_power`/`fall_power`; per-cell `cell_leakage_power` and one
+`leakage_power()` group per input state.
 
 **Out of scope**, deliberately — read the absence of a group as "this
 command did not measure it", never as an assertion about the cell:
 
 | Not emitted | Where it belongs |
 |---|---|
-| `rise_power` / `fall_power` / `leakage_power` | issue #2503 |
-| more than one cell per invocation (batch mode) | issue #2503 |
-| vendor-`.lib` arc-by-arc accuracy validation | issue #2503 |
 | more than one corner per invocation / per file | invoke once per corner; see "Multiple corners" below |
 | sequential-cell constraint arcs (`setup_*`/`hold_*`/`recovery_*`), `ff`/`latch` groups | not yet filed — a sequential cell is **refused**, not mis-characterized (see "Sequential cells are refused") |
 | measured pin capacitance | issue #2512 — `pins[].capacitance_pf` is echoed from the request when given and the attribute is omitted when it is not |
-| `when`-qualified arc splitting, `bus`/`bundle` pins, `internal_power` | not yet filed |
+| `when`-qualified arc/power splitting, `bus`/`bundle` pins, input-pin (hidden) `internal_power` | not yet filed |
 
 ## How it works
 
@@ -94,16 +104,28 @@ command did not measure it", never as an assertion about the cell:
    one `klt sim` corner, not 98 simulator invocations. (That is also why this
    verb is safe on a shared host: there is no hand-rolled `ngspice` grid to
    fan out.)
-3. **Four `.meas` cards per grid point.** Delay is measured
+3. **Four timing `.meas` cards per grid point.** Delay is measured
    input-threshold → output-threshold; transition is measured between the
    library's own slew thresholds on the output edge. Which *input* edge
    produces the rising output edge follows the arc's measured polarity, so a
    `negative_unate` arc's `cell_rise` is correctly triggered by the input's
    *falling* edge.
-4. **Emit and verify.** Tables are reshaped into a Liberty NLDM library
+4. **Four power `INTEG` cards per grid point, on the same instances.** Each
+   instance reaches the shared rails through its own 0 V ammeter pair, so
+   the charge each rail delivers to *that* instance over *that* edge is one
+   `.meas tran ... INTEG` card away -- additive instrumentation on the same
+   run, not a second simulation campaign. See "Power and leakage".
+5. **Leakage on `2**n` static instances, same deck.** One never-switching
+   instance per input state, its supply through its own ammeter; the average
+   supply current over the run is that state's static current.
+6. **Emit and verify.** Tables are reshaped into a Liberty NLDM library
    (`src/klayout_tools/liberty_writer.py`) and written, then the emitted file
    is parsed back through `native/statime`'s own Liberty reader before the
    run reports success.
+
+In batch mode steps 1-5 run once **per cell** (one `klt sim` corner per
+cell, artifacts under `<outdir>/cells/<cell>/`), and step 6 runs once over
+the combined library. See "Batch mode".
 
 ### Input slew: what `index_1` means and what is applied
 
@@ -123,8 +145,8 @@ stimulus a commercial characterizer applies (those drive the pin from a
 *driving cell* of a declared size, which gives a realistically curved edge),
 so expect a small, systematic difference from a vendor table — measured
 against IHP's own `sg13g2_inv_1` typ corner it was within a few percent
-across the 7x7 grid (see "Sanity check against a vendor `.lib`" below).
-Quantifying that arc-by-arc is issue #2503's job, not this command's claim.
+across the 7x7 grid. "Accuracy against a vendor library" below quantifies
+it arc by arc for a handful of cells.
 
 ### Transient window and the settle check
 
@@ -178,6 +200,103 @@ with its own `corner` block and `output.lib`, and let the consumer pick the
 file — exactly how a vendor library ships (`sg13g2_stdcell_typ_1p20V_25C.lib`
 and friends are separate files). Multi-corner Liberty is not a shape this
 command emits.
+
+## Power and leakage
+
+### Internal energy: `rise_power` / `fall_power`
+
+Every arc carries an `internal_power()` group on its output pin, with
+`related_pin` equal to the arc's and `rise_power`/`fall_power` tables over the
+**same** `index_1` x `index_2` axes as the timing tables (emitted against a
+`power_lut_template`, `input_transition_time` x
+`total_output_net_capacitance`). Values are in Liberty's internal-energy unit,
+`voltage_unit**2 * capacitive_load_unit` -- **pJ** for this command's fixed
+1 V / 1 pF units.
+
+The tables hold **internal** energy, not total energy: a Liberty power
+consumer (`klt power`, OpenSTA) adds the load's own `C_load * V**2 / 2` per
+output transition on top of the table, so the table must exclude it or the
+load would be counted twice. Per output edge:
+
+```
+E_edge = V * (Q_vdd + Q_gnd) / 2  -  C_load * V**2 / 2
+```
+
+`Q_vdd` is the charge drawn from the vdd rail and `Q_gnd` the charge returned
+to the gnd rail over the window of the *input* edge that produces that output
+edge (the same trigger choice the delay cards use, so a table never pairs one
+edge's delay with the other edge's energy). Averaging the two rails is what
+makes the rise/fall split symmetric: on an output rise `Q_vdd` carries the
+load *and* internal-node charge while `Q_gnd` carries only short-circuit
+current, and on a fall the reverse -- so each edge owns half the
+internal-node energy plus its own short-circuit energy, and the two edges sum
+to the whole-cycle internal energy exactly. (The alternative -- "vdd rail
+only, subtract `C_load * V**2` on the rise" -- sums to the same cycle total
+but piles all internal-node energy onto the rise edge. Measured against
+IHP's `sg13g2_stdcell` it is the worse fit: mean per-point error ~2-5 fJ
+against ~0.2-1.3 fJ for the symmetric split. The vendor split does differ on
+arcs through a series stack -- see "Accuracy against a vendor library".)
+
+Consequences worth knowing:
+
+- At heavy loads an entry is a small difference of two large numbers (a
+  ~2 fJ internal energy out of ~220 fJ of rail energy at 0.3 pF / 1.2 V), so
+  it carries the integration's noise; nothing is clamped, and a slightly
+  negative entry would be emitted as measured (none occurred on the
+  `sg13g2_stdcell` comparison below).
+- Supply leakage integrated over the (settle-dominated) window is left in:
+  tens to ~100 pW over a 7x7 grid's ~17 ns window is a few attojoules, three
+  orders of magnitude below the femtojoule internal energy.
+
+### Leakage: `cell_leakage_power` / `leakage_power`
+
+For each of the cell's `2**n` input states a never-switching instance is
+added to the same deck, its vdd terminal -- and every input held **high** --
+fed through one ammeter; low inputs are tied to ground. The state's static
+power is `V * I_avg` (in pW, the library's `leakage_power_unit`). Routing the
+high inputs through the ammeter matters: their gate leakage is drawn from the
+supply too, and measured on `sg13g2_inv_1` with `A` high, leaving it out
+under-reports the state by roughly a third.
+
+Each state becomes a `leakage_power()` group whose `when` is the conjunction
+of its input literals (`"A&!B"`), and `cell_leakage_power` is the unweighted
+mean over all states -- the convention IHP's own library uses (its
+`sg13g2_inv_1` reports 63.0032 = the mean of 82.469 and 43.5374).
+
+## Batch mode
+
+A request carries either `cell` (one object) **or** `cells` (a non-empty
+array of the same objects) -- both, or neither, is an error. Every cell in a
+batch shares the request's one `corner`, `grid`, `thresholds`, `models`, and
+`options`, which is what lets their tables live in one library:
+
+```json
+{
+  "cells": [
+    { "name": "sg13g2_inv_1",   "netlist": "sg13g2_stdcell.spice", "pins": [...], "power_pins": {...} },
+    { "name": "sg13g2_nand2_1", "netlist": "sg13g2_stdcell.spice", "pins": [...], "power_pins": {...} }
+  ],
+  "corner": { ... },
+  "grid": { ... }
+}
+```
+
+- The mechanism is #2502's single-cell run **in a loop**: one `klt sim` corner
+  per cell, each cell's testbench/sim request/sim report under
+  `<outdir>/cells/<cell>/`, then one combined `.lib` and one round-trip check
+  over it.
+- **Every cell is validated before any is simulated** -- a typo in the fifth
+  cell's pin list does not cost the first four cells' simulation time.
+- **All or nothing.** If any cell fails, nothing is emitted and the error
+  names the cell (`cell 'sg13g2_nor2_1': ...`). Validation errors name the
+  entry (`request.cells[3].pins ...`).
+- Cell names must be unique (a library holds one `cell()` group per name).
+- The single-cell `request.arcs` override is refused in batch mode; put an
+  `arcs` array on the `cells[]` entry it applies to instead.
+- `library.name` defaults to `klt_characterize_<corner name>` (the
+  single-cell default names the cell).
+- `--cell NAME` (repeatable) characterizes a subset of the declared cells, in
+  request order.
 
 ## OSDI (Verilog-A) model preload
 
@@ -239,7 +358,11 @@ a first-class model-preload option so this deck stops needing one.
 }
 ```
 
-### `cell` (required)
+### `cell` / `cells` (exactly one required)
+
+`cell` is one cell object; `cells` is a non-empty array of them (see "Batch
+mode"). In batch mode each entry may also carry its own `arcs` override (same
+shape as the request-level one below). The object's fields:
 
 | Field | Type | Description |
 |---|---|---|
@@ -312,6 +435,7 @@ silent no-op.
 
 ### `arcs` (optional override)
 
+Single-cell form only (in batch mode, put `arcs` on the `cells[]` entry).
 Normally omitted — arcs are derived from `function`. Given, it replaces
 derivation entirely, for a cell whose function this command cannot derive
 from or a caller who wants a specific side-input state measured:
@@ -337,7 +461,7 @@ says which input edge produces the *rising* output edge under this arc's own
 
 | Field | Type | Description |
 |---|---|---|
-| `library.name` | string | The `library()` group name. Default `<cell name>_<corner name>`. |
+| `library.name` | string | The `library()` group name. Default `<cell name>_<corner name>` (single cell) or `klt_characterize_<corner name>` (batch). |
 | `output.outdir` | string | Where generated artifacts go. Default `.klt/characterize/` next to the request. `-o` overrides. |
 | `output.lib` | string | The emitted `.lib` path. Default `<outdir>/<library name>.lib`. `--lib` overrides. |
 | `options.settle_ns` | number | Settle window per edge. Default `max(2, 3 x longest ramp)`. See "Transient window". |
@@ -383,7 +507,10 @@ state it measured so the limitation is visible rather than implied.
     "output_load_pf": [0.005, 0.03, 0.1, 0.3],
     "points": 16,
     "arc_count": 2,
-    "measurement_count": 128
+    "measurement_count": 128,
+    "power_measurement_count": 128,
+    "leakage_measurement_count": 4,
+    "total_measurement_count": 260
   },
   "thresholds": {
     "input_threshold_pct_rise": 50.0,
@@ -392,6 +519,7 @@ state it measured so the limitation is visible rather than implied.
     "slew_upper_threshold_pct_rise": 80.0,
     "slew_derate_from_library": 1.0
   },
+  "units": { "time": "ns", "capacitance": "pF", "internal_energy": "pJ", "leakage_power": "pW" },
   "arcs": [
     {
       "output_pin": "Y",
@@ -406,8 +534,26 @@ state it measured so the limitation is visible rather than implied.
       },
       "cell_fall": { "index_1": [], "index_2": [], "values": [] },
       "rise_transition": { "index_1": [], "index_2": [], "values": [] },
-      "fall_transition": { "index_1": [], "index_2": [], "values": [] }
+      "fall_transition": { "index_1": [], "index_2": [], "values": [] },
+      "rise_power": {
+        "index_1": [0.02, 0.08, 0.24, 0.72],
+        "index_2": [0.005, 0.03, 0.1, 0.3],
+        "values": [[0.0185, 0.0223, 0.0248, 0.0259]]
+      },
+      "fall_power": { "index_1": [], "index_2": [], "values": [] }
     }
+  ],
+  "leakage": {
+    "cell_leakage_power_pw": 104.3,
+    "states": [
+      { "when": "!A&!B", "inputs": { "A": false, "B": false }, "value_pw": 3.25 },
+      { "when": "!A&B", "inputs": { "A": false, "B": true }, "value_pw": 3.25 },
+      { "when": "A&!B", "inputs": { "A": true, "B": false }, "value_pw": 404.2 },
+      { "when": "A&B", "inputs": { "A": true, "B": true }, "value_pw": 6.51 }
+    ]
+  },
+  "cells": [
+    { "cell": { "name": "nand2_demo", "...": "..." }, "arcs": [], "leakage": {}, "simulation": {} }
   ],
   "liberty": {
     "path": "/abs/path/.klt/characterize/characterize_demo_tt_1p80V_25C.lib",
@@ -433,6 +579,7 @@ state it measured so the limitation is visible rather than implied.
     "engine_version": "46",
     "window": { "settle_ns": 3.6, "tran_step_ns": 0.001 }
   },
+  "comparison": null,
   "provenance": {
     "klt_version": "0.6.0",
     "klayout_version": "0.30.10",
@@ -443,21 +590,38 @@ state it measured so the limitation is visible rather than implied.
 }
 ```
 
-(The `arcs[]` block above is trimmed — every entry carries all four tables,
-each a full `len(index_1) x len(index_2)` `values` matrix.)
+(The `arcs[]` block above is trimmed — every entry carries all six tables,
+each a full `len(index_1) x len(index_2)` `values` matrix — and so is
+`cells[]`, whose single entry here is the same `cell`/`arcs`/`leakage`/
+`simulation` shown at top level.)
 
 | Field | Type | Description |
 |---|---|---|
 | `schema_version` | integer | Version of this command's JSON shape (`1`), per-command per [`../json-contract.md`](../json-contract.md). |
-| `cell` | object | Echo of the resolved cell: `name`, `subckt`, `netlist` (the `{path, scope}` envelope — an *input*, same shape as `klt sim`'s own `netlist`), and `pins[]` as resolved. |
 | `corner` | object | Echo of the characterized corner. |
-| `grid` | object | The two index axes plus derived counts: `points` (`len(index_1) * len(index_2)`), `arc_count`, `measurement_count` (`points * arc_count * 4`). |
+| `grid` | object | The two index axes plus derived counts, summed over every cell: `points` (`len(index_1) * len(index_2)`), `arc_count`, `measurement_count` (timing cards, `points * arc_count * 4` -- unchanged from #2502), `power_measurement_count` (`INTEG` rail-charge cards, `points * arc_count * 4`), `leakage_measurement_count` (one per input state per cell), and `total_measurement_count` (their sum). |
 | `thresholds` | object | Every resolved Liberty threshold, defaults included — the definitions the tables mean. |
-| `arcs` | array | One entry per characterized arc: `output_pin`, `related_pin`, `timing_sense`, `measured_sense`, `side_inputs` (the full held state, including inputs the function does not reference), and the four tables as `{index_1, index_2, values}` in the library's own units (ns / pF). Same numbers as the `.lib`, so a consumer need not re-parse Liberty to read them. |
+| `units` | object | The units of every value in this response and the `.lib`: `time` `ns`, `capacitance` `pF`, `internal_energy` `pJ`, `leakage_power` `pW`. |
+| `cells` | array | One entry per characterized cell, in request order: `{cell, arcs, leakage, simulation}`, each shaped exactly like the single-cell top-level fields below. **This is the batch-mode data.** |
+| `cell` | object \| null | Single-cell form: `cells[0].cell`. `null` in batch mode (there is no one cell to describe). |
+| `arcs` | array \| null | Single-cell form: `cells[0].arcs`; `null` in batch mode. One entry per characterized arc: `output_pin`, `related_pin`, `timing_sense`, `measured_sense`, `side_inputs` (the full held state, including inputs the function does not reference), and the six tables `cell_rise`/`cell_fall`/`rise_transition`/`fall_transition`/`rise_power`/`fall_power` as `{index_1, index_2, values}` in the library's own units. Same numbers as the `.lib`, so a consumer need not re-parse Liberty to read them. |
+| `leakage` | object \| null | Single-cell form: `cells[0].leakage`; `null` in batch mode. `cell_leakage_power_pw` (the mean over states) and `states[]` of `{when, inputs, value_pw}`, one per input state. |
 | `liberty` | object | `path` (the emitted file — a **plain absolute string**, see below), `library_name`, `cell_count`, `time_unit`, `capacitive_load_unit`, and `roundtrip`. |
 | `liberty.roundtrip` | object | `{engine, status, message, probe_netlist}`. See "Round-trip verification". |
-| `simulation` | object | The generated artifacts (plain absolute strings) plus the `klt sim` corner's own `corner_id`/`status`/`runtime_s`, the engine and its version, and the resolved transient `window`. |
-| `provenance` | object | The shared reproducibility block from [`../json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk`/`pdk_root` (else `null`); `input` pins the cell netlist (`role: "netlist"`). |
+| `simulation` | object \| null | Single-cell form: `cells[0].simulation`; `null` in batch mode. The generated artifacts (plain absolute strings) plus the `klt sim` corner's own `corner_id`/`status`/`runtime_s`, the engine and its version, and the resolved transient `window`. |
+| `comparison` | object \| null | The `--compare-to` report (see "Accuracy against a vendor library"); `null` when not asked for. |
+| `provenance` | object | The shared reproducibility block from [`../json-contract.md`](../json-contract.md). `pdk` is best-effort from `models.pdk`/`pdk_root` (else `null`); `input` pins the (first) cell's netlist (`role: "netlist"`). |
+
+`cells[].cell` is the echo of the resolved cell: `name`, `subckt`, `netlist`
+(the `{path, scope}` envelope — an *input*, same shape as `klt sim`'s own
+`netlist`), and `pins[]` as resolved.
+
+**Compatibility.** Every #2502 field is still present with its #2502 meaning
+for a single-cell (`cell`) request; power tables, `leakage`, `units`,
+`cells`, `comparison`, and the extra `grid` counts are additions. The
+top-level `cell`/`arcs`/`leakage`/`simulation` are `null` only for a batch
+(`cells`) request -- a request shape that did not exist before #2503, so no
+existing consumer meets the nulls unawares.
 
 **Path-field shapes.** `cell.netlist` uses the `{path, scope}` envelope
 because it is an *input* being pinned (matching `klt sim`'s own `netlist`).
@@ -481,9 +645,12 @@ Before reporting success, the emitted `.lib` is parsed back through
 `native/statime`'s own Liberty reader — the same `liberty.rs`/`nldm.rs` that
 `klt synthesize`'s `sta` field already depends on. The extension's only
 Python entry point is `critical_path_json(netlist, liberty, top, …)`, so the
-check writes a one-instance structural-Verilog wrapper around the
-characterized cell (`roundtrip-probe.v`, kept for inspection) and asks the
-engine to analyse it. That exercises strictly more than a bare parse:
+check writes a structural-Verilog wrapper instantiating **every**
+characterized cell once (`roundtrip-probe.v`, kept for inspection; batch
+instances get private `u<i>_<pin>` ports) and asks the engine to analyse it.
+A combined library the reader resolves fewer cells of than were
+characterized fails the check, rather than passing on the strength of its
+first cell. That exercises strictly more than a bare parse:
 `liberty.rs` must parse the file, `sta.rs` must find the cell and its pins,
 and `nldm.rs` must interpolate each table to produce a delay — so a file that
 parses structurally but carries a malformed table still fails.
@@ -498,31 +665,190 @@ To get `pass` on a dev machine, build the extension:
 `uv sync --extra dev --group statime` (or `maturin develop --release` inside
 `native/statime/`).
 
-## Sanity check against a vendor `.lib`
+## Accuracy against a vendor library
 
-Characterizing IHP's own `sg13g2_inv_1` at `typ_1p20V_25C` on the vendor's
-own 7x7 grid, against `sg13g2_stdcell_typ_1p20V_25C.lib`'s `cell_rise`
-(ns, `index_1` = 0.0186 row and 2.5074 row):
+`--compare-to LIB` diffs the emitted `.lib` against a reference Liberty file
+arc by arc (`src/klayout_tools/liberty_compare.py`, usable on its own:
+`liberty_compare.compare_libraries(ours, reference)`). IHP ships a vendor
+`.lib` per corner for `sg13g2_stdcell`, characterized from the same SPICE
+netlists and model cards this repo fetches, so characterizing a handful of
+those cells and diffing against the vendor file is a self-checking accuracy
+test that needs no new library (#2498's first milestone).
 
-| | `index_2` = 0.001 | 0.0234 | 0.039 | 0.0648 | 0.108 | 0.18 | 0.3 |
-|---|---|---|---|---|---|---|---|
-| vendor, slew 0.0186 | 0.02056 | 0.08490 | 0.12814 | 0.19952 | 0.31891 | 0.51817 | 0.84949 |
-| `klt characterize` | 0.01941 | 0.08266 | 0.12574 | 0.19684 | 0.31580 | 0.51398 | 0.84426 |
-| vendor, slew 2.5074 | 0.10308 | 0.50730 | 0.68076 | 0.90493 | 1.19043 | 1.56201 | 2.05537 |
-| `klt characterize` | 0.10320 | 0.50494 | 0.67300 | 0.88860 | 1.16262 | 1.50333 | 1.92456 |
+### What is compared
 
-Deltas run from +0.1% to −6.4%, largest at the slow-slew / heavy-load corner
-— consistent with the linear-ramp-vs-driving-cell stimulus difference noted
-above. **This is an eyeball sanity check, not an accuracy claim**; the
-arc-by-arc comparison against a vendor library is issue #2503's acceptance
-criterion.
+Per cell in the emitted file:
+
+- every `timing()` group, matched by `(output pin, related_pin)`:
+  `cell_rise`, `cell_fall`, `rise_transition`, `fall_transition`;
+- every `internal_power()` group, matched the same way: `rise_power`,
+  `fall_power`;
+- every `leakage_power()` group, matched by **input state** — our `when`
+  (`"A&!B"`) is expanded to the input assignments it covers and matched to the
+  reference group whose own `when` holds there. A vendor `when` may name the
+  output too (IHP writes `"A&!Y"`), so output values are computed from the
+  reference cell's own `function`;
+- `cell_leakage_power`.
+
+Tables are compared point by point on **our** grid. A point on a reference
+grid node (our axes equal to, or a subset of, the vendor's) reads the vendor
+value directly; any other point is bilinearly interpolated from the
+reference table, and that table reports `interpolated: true`.
+
+**Nothing is silently omitted.** A group present on one side and not the
+other lands in `missing`; every field reports how many points it actually
+`compared`; and `summary.within_tolerance` is `true` only when every field
+was compared at least once, every point is inside its bound, and `missing`
+is empty — "never compared" is not "within tolerance". The text report prints
+`NOT COMPARED` for a field with no compared points.
+
+### The `comparison` block
+
+```json
+{
+  "schema_version": 1,
+  "ours": "/abs/out/klt_characterize_typ_1p20V_25C.lib",
+  "reference": "/abs/.../sg13g2_stdcell_typ_1p20V_25C.lib",
+  "tolerances": { "cell_rise": { "rel": 0.15, "abs": 0.005 }, "...": {} },
+  "cells": [
+    {
+      "name": "sg13g2_nand2_1",
+      "arcs": [
+        {
+          "output_pin": "Y",
+          "related_pin": "A",
+          "tables": {
+            "cell_rise": {
+              "interpolated": false, "points": 49, "violations": 0,
+              "max_abs_delta": 0.14, "max_rel_delta": 0.092, "mean_rel_delta": 0.044,
+              "worst": { "index_1": 1.263, "index_2": 0.3, "ours": 1.3906, "reference": 1.5308,
+                         "delta": -0.1401, "rel_delta": -0.0915, "bound": 0.2296,
+                         "tolerance_used": 0.610, "within_tolerance": true },
+              "within_tolerance": true
+            }
+          }
+        }
+      ],
+      "leakage": {
+        "states": [ { "when": "A&!B", "reference_when": "A*!B", "ours": 38.31, "reference": 43.36, "...": "..." } ],
+        "cell_leakage_power": { "ours": 77.37, "reference": 81.25, "...": "..." }
+      },
+      "missing": [],
+      "notes": []
+    }
+  ],
+  "summary": {
+    "cell_count": 4,
+    "fields": {
+      "cell_rise": { "compared": 294, "violations": 0, "max_abs_delta": 0.215,
+                     "max_rel_delta": 0.099, "worst": { "where": "sg13g2_nand2_1 B->Y cell_rise", "...": "..." },
+                     "tolerance": { "rel": 0.15, "abs": 0.005 }, "within_tolerance": true }
+    },
+    "missing": [],
+    "within_tolerance": true
+  }
+}
+```
+
+Every point entry carries `ours`, `reference`, `delta` (`ours - reference`),
+`rel_delta` (`null` for a zero reference), `bound`
+(`max(rel * |reference|, abs)`), `tolerance_used` (`|delta| / bound`; `<= 1`
+passes), and `within_tolerance`. `notes` records anything the reader had to
+choose (e.g. a second `when`-qualified group for one pin pair: the first is
+compared, and the note says so). `ours`/`reference` are plain absolute
+strings.
+
+### The documented tolerance
+
+A point passes when `|ours - reference| <= max(rel * |reference|, abs)` — a
+relative bound with an absolute floor, because NLDM entries near zero (a 50%
+delay at a slow edge into a light load; a femtojoule internal energy) make a
+purely relative bound meaningless. The bounds are
+`liberty_compare.DEFAULT_TOLERANCES`, and they are **not picked from thin
+air**: #2503 asked for the bound an external reference (the EZ130 8T
+characterization, arXiv:2609.29965v1) reports if it states one, else the
+spread observed on the first comparison run. That paper was not available to
+this build, so each bound below is the observed worst case, rounded up with
+headroom, from characterizing `sg13g2_inv_1`, `sg13g2_buf_1`,
+`sg13g2_nand2_1`, and `sg13g2_nor2_1` at `typ_1p20V_25C` on IHP's full 7x7
+grid (294 points per table field, 12 leakage states, 4 cell totals) against
+`sg13g2_stdcell_typ_1p20V_25C.lib`:
+
+| Field | `rel` | `abs` | Observed worst | Observed p95 / median | Signed mean |
+|---|---|---|---|---|---|
+| `cell_rise` | 0.15 | 0.005 ns | 9.9% | 8.5% / 2.6% | −2.3% |
+| `cell_fall` | 0.15 | 0.005 ns | 12.3% | 11.4% / 3.8% | −3.3% |
+| `rise_transition` | 0.25 | 0.005 ns | 13.5% | 12.3% / 2.5% | −3.0% |
+| `fall_transition` | 0.25 | 0.005 ns | 20.7% | 18.1% / 3.6% | −4.9% |
+| `rise_power` | 0.50 | 0.003 pJ | 2.37 fJ | 90% / 16% (rel) | +21% |
+| `fall_power` | 0.50 | 0.003 pJ | 2.44 fJ | 90% / 9% (rel) | +18% |
+| `leakage_power` | 0.15 | 5 pW | 11.6% | — | −5% |
+| `cell_leakage_power` | 0.10 | 5 pW | 5.2% | — | −4.9% |
+
+What the residuals are, so a reader can tell a regression from the known
+difference:
+
+- **Timing is systematically a few percent fast, worst at slow input slews.**
+  This command drives a *linear* rail-to-rail ramp; a commercial
+  characterizer drives the pin from a driving cell, whose curved edge spends
+  longer near the threshold. The gap grows with the input transition, which
+  is where every worst-case point sits (the `index_1` = 1.263 / 2.5074 rows).
+- **Internal energy agrees to ~2.5 fJ absolute, but its rise/fall split
+  differs on arcs through a series stack.** For `sg13g2_nand2_1 B->Y` (B
+  drives the bottom NMOS, so the stack's internal node is charged and
+  discharged with the output) and `sg13g2_nor2_1 A->Y` (the PMOS mirror), the
+  vendor attributes most of the internal node's energy to one edge while this
+  command's symmetric split (see "Power and leakage") gives each edge half.
+  The two arcs' vendor rise/fall pairs are about 1.9 / 4.1 fJ and 4.3 /
+  2.0 fJ; ours are about 3.4 / 3.4 fJ — a similar cycle total, a different
+  split, and relative deltas near 200% on the small entry (per-table
+  medians ~80%). The other arcs (`inv_1`, `buf_1`, `nand2_1 A->Y`,
+  `nor2_1 B->Y`) agree to a per-table median of 2-10% (26% for
+  `nand2_1 A->Y` `rise_power`). Separately, entries at the heaviest load
+  read 0.4-1.2 fJ high on those arcs: there the table is a ~2 fJ
+  difference of two ~220 fJ quantities (rail energy minus
+  `C_load * V**2 / 2`), so a 0.5% disagreement in the load charge
+  dominates. Hence a relative bound with a 3 fJ absolute floor: it
+  holds every observed point without pretending the per-edge split is a
+  settled question. The cause of the stacked-arc split is tracked in issue
+  #2527 rather than tuned away here.
+- **Leakage is a few percent low**, consistently across states; the worst
+  state (`sg13g2_nand2_1` `A&!B`, −11.6%) is the one whose static current
+  flows through a partially-on stack.
+
+### Enforced by a test
+
+`tests/test_characterize_vendor_comparison.py` has two tiers:
+
+- **Harness unit tests** (always run, no simulator): the reader, point-by-point
+  deltas, the tolerance formula, grid subsets vs. interpolation, leakage
+  matching against a vendor `when` that names the output, and — the "no field
+  silently omitted" concern — that a reference lacking power or leakage
+  groups reports them `missing` with `compared: 0` and fails the overall
+  verdict.
+- **The vendor comparison** characterizes the four cells above in one batch
+  run (on a 3x3 subset of the vendor's 7x7 axes, so every point reads a
+  vendor value directly and the run is minutes rather than a quarter hour),
+  asserts every field of every arc and every leakage state was compared, and
+  asserts **each field is within `DEFAULT_TOLERANCES`** (parametrized per
+  field, so a regression names the field it broke). It also checks the
+  combined `.lib` round-trips through `native/statime` and the
+  `--compare-to` CLI text path. It needs `ngspice` plus a fetched IHP PDK with
+  compiled OSDI models (`scripts/fetch-ihp-sg13g2.sh` +
+  `scripts/fetch-sg13g2-sim-toolchain.sh`, or `KLT_IHP_SG13G2_ROOT` pointing
+  at the `ihp-sg13g2` directory) and is skipped otherwise — CI does not fetch
+  the PDK, the same local-only posture as `tests/test_pdk.py`'s real-PDK
+  tier.
+
+A change that moves any field outside its bound fails that test; widening a
+bound means updating this table with the new observed spread and its cause.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | The cell was characterized and the `.lib` was written. |
-| `1` | Failed to run: malformed request, unresolvable/unparseable netlist, pin metadata that does not describe a combinational cell, a simulation that did not complete, a grid point with no measured value, a transient window too short, or an emitted `.lib` the round-trip reader rejects. |
+| `0` | Every requested cell was characterized and the `.lib` was written. With `--compare-to`, regardless of whether the comparison is within tolerance — the comparison is data, reported in `comparison.summary.within_tolerance`; the enforced bar is the automated test (see below). |
+| `1` | Failed to run: malformed request, unresolvable/unparseable netlist, pin metadata that does not describe a combinational cell, a simulation that did not complete, a grid point with no measured value, a transient window too short, an emitted `.lib` the round-trip reader rejects, an unknown `--cell` name, or an unreadable `--compare-to` library. |
 | `2` | Argparse usage error (as with every other `klt` subcommand). |
 
 There is no pass/fail code — see "no top-level `status`" above.
@@ -530,10 +856,12 @@ There is no pass/fail code — see "no top-level `status`" above.
 ## Worked example
 
 [`examples/characterize/`](../../examples/characterize/) characterizes a
-synthetic 2-input NAND with no PDK and no Docker — just `ngspice`:
+synthetic 2-input NAND with no PDK and no Docker — just `ngspice` — and, in
+batch mode, an inverter plus the NAND into one library:
 
 ```bash
 klt characterize examples/characterize/request.json
+klt characterize examples/characterize/request-batch.json
 ```
 
 See its [README](../../examples/characterize/README.md) for what to look at
@@ -552,7 +880,11 @@ pointing at
 `libs.ref/sg13g2_stdcell/spice/sg13g2_stdcell.spice`, `models.lib` at
 `libs.tech/ngspice/models/cornerMOSlv.lib`, `corner.process` at `mos_tt`, and
 `options.osdi_preload` listing the four compiled `.osdi` files. A 7x7 grid
-for a 2-input cell is roughly a minute of ngspice on one core.
+for a 2-input cell is roughly a minute of ngspice on one core. Add
+`--compare-to .../libs.ref/sg13g2_stdcell/lib/sg13g2_stdcell_typ_1p20V_25C.lib`
+to diff the result against IHP's own library;
+`tests/test_characterize_vendor_comparison.py`'s `_vendor_request` builds
+exactly this request for four cells.
 
 ## See also
 

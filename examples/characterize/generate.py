@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Generate the `klt characterize` worked example fixtures: a tiny synthetic
 CMOS inverter/NAND2 cell netlist wrapping bare SPICE ``level=1`` MOSFET
-models, a two-corner model library, and the request JSON that characterizes
-the NAND2 into an NLDM Liberty model (see `docs/cli/characterize.md`).
+models, a two-corner model library, the request JSON that characterizes
+the NAND2 into an NLDM Liberty model, and a batch request that characterizes
+both cells into one combined library (see `docs/cli/characterize.md`).
 
 These fixtures are deliberately **not** a real PDK deck -- CLAUDE.md's "open
 PDKs only" rule is about design-rule/model data this repo *vendors*; a worked
@@ -133,11 +134,66 @@ def write_request() -> None:
         handle.write("\n")
 
 
+def write_batch_request() -> None:
+    """The batch-mode request (issue #2503): both cells, one corner, one
+    combined ``.lib``.
+
+    Same corner/grid/models as ``request.json``; the only structural
+    difference is ``cells`` (an array of the same cell objects) in place of
+    ``cell``. A 3x3 grid keeps the two sequential ngspice runs (one per cell)
+    fast.
+    """
+    request = {
+        "cells": [
+            {
+                "name": "inv_demo",
+                "netlist": "cells.spice",
+                "pins": [
+                    {"name": "A", "direction": "input", "capacitance_pf": 0.001},
+                    {"name": "Y", "direction": "output", "function": "!A"},
+                ],
+                "power_pins": {"vdd": "VDD", "gnd": "VSS"},
+                "area": 2.4,
+            },
+            {
+                "name": "nand2_demo",
+                "netlist": "cells.spice",
+                "pins": [
+                    {"name": "A", "direction": "input", "capacitance_pf": 0.002},
+                    {"name": "B", "direction": "input", "capacitance_pf": 0.002},
+                    {"name": "Y", "direction": "output", "function": "!(A*B)"},
+                ],
+                "power_pins": {"vdd": "VDD", "gnd": "VSS"},
+                "area": 3.6,
+            },
+        ],
+        "corner": {
+            "name": "tt_1p80V_25C",
+            "process": "tt",
+            "supply_v": 1.8,
+            "temperature_c": 25,
+        },
+        "grid": {
+            "input_transition_ns": [0.02, 0.08, 0.24],
+            "output_load_pf": [0.005, 0.03, 0.1],
+        },
+        "models": {"lib": "models.lib"},
+        "library": {"name": "characterize_demo_batch_tt_1p80V_25C"},
+        "output": {"outdir": ".klt/characterize-batch"},
+        "options": {"timeout_s": 600},
+    }
+    path = os.path.join(_DIR, "request-batch.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(request, handle, indent=2)
+        handle.write("\n")
+
+
 def main() -> None:
     write_models_lib()
     write_cells_spice()
     write_request()
-    print(f"wrote models.lib, cells.spice, request.json to {_DIR}")
+    write_batch_request()
+    print(f"wrote models.lib, cells.spice, request.json, request-batch.json to {_DIR}")
 
 
 if __name__ == "__main__":

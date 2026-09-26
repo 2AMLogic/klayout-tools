@@ -51,6 +51,7 @@ _SKIP_NO_NGSPICE = pytest.mark.skipif(
 EXAMPLES_DIR = Path(__file__).parent.parent / "examples" / "characterize"
 
 _TABLES = ("cell_rise", "cell_fall", "rise_transition", "fall_transition")
+_POWER_TABLES = ("rise_power", "fall_power")
 
 
 # --------------------------------------------------------------------------- #
@@ -660,17 +661,25 @@ def test_stimulus_plan_is_one_deck_covering_the_whole_grid(tmp_path):
     request = _inverter_request(tmp_path)
     plan, _ = _plan_for(tmp_path, request)
 
-    # 1 arc x 2 slews x 2 loads = 4 grid points, 4 tables each.
+    # 1 arc x 2 slews x 2 loads = 4 grid points: 4 timing cards and 4
+    # supply-charge cards each, plus one leakage card per input state (2).
     assert len(plan["points"]) == 4
-    assert len(plan["measurements"]) == 16
-    # One cell instance per grid point, all in the one deck.
+    assert len(plan["measurements"]) == 4 * 4 + 4 * 4 + 2
+    # One cell instance per grid point plus one per leakage state, all in
+    # the one deck.
     lines = plan["netlist_text"].splitlines()
-    assert sum(1 for line in lines if line.startswith("X")) == 4
+    assert sum(1 for line in lines if line.startswith("Xa")) == 4
+    assert sum(1 for line in lines if line.startswith("Xlk")) == 2
     assert sum(1 for line in lines if line.startswith("C")) == 4  # private load
-    # One private ramp source per point, plus the single shared supply.
-    ramps = [line for line in lines if line.startswith("V")]
-    assert len(ramps) == 5
-    assert sum(1 for line in ramps if line.startswith("Vdd ")) == 1
+    # One private ramp source per point, a vdd/gnd ammeter pair per point, a
+    # supply ammeter per leakage state, and the single shared supply.
+    sources = [line for line in lines if line.startswith("V")]
+    assert sum(1 for line in sources if line.startswith("Vdd ")) == 1
+    assert sum(1 for line in sources if "PWL(" in line) == 4
+    assert sum(1 for line in sources if line.startswith("Vpd")) == 4
+    assert sum(1 for line in sources if line.startswith("Vpg")) == 4
+    assert sum(1 for line in sources if line.startswith("Vpl")) == 2
+    assert len(sources) == 1 + 4 + 8 + 2
 
 
 def test_stimulus_plan_binds_subcircuit_terminals_positionally(tmp_path):
@@ -687,7 +696,13 @@ def test_stimulus_plan_binds_subcircuit_terminals_positionally(tmp_path):
     assert subckt == "inv_demo"
     assert out_node.startswith("o_")
     assert in_node.startswith("i_")
-    assert (vdd_node, vss_node) == ("vdd", "0")
+    # The supply terminals reach the rails through the instance's own
+    # ammeter pair (issue #2503's power instrumentation).
+    tag = instance.split()[0][1:]
+    assert (vdd_node, vss_node) == (f"pd_{tag}", f"pg_{tag}")
+    text = plan["netlist_text"]
+    assert f"Vpd{tag} vdd pd_{tag} DC 0" in text
+    assert f"Vpg{tag} pg_{tag} 0 DC 0" in text
 
 
 def test_stimulus_plan_holds_side_inputs_at_their_derived_rails(tmp_path):
@@ -722,13 +737,15 @@ def test_measurement_cards_cover_all_four_nldm_quantities(tmp_path):
     request = _inverter_request(tmp_path)
     plan, _ = _plan_for(tmp_path, request)
 
-    suffixes = sorted(
-        {entry["name"].rsplit("_", 1)[1] for entry in plan["measurements"]}
-    )
-    assert suffixes == ["df", "dr", "tf", "tr"]
+    grid_cards = [e for e in plan["measurements"] if e["name"].startswith("a")]
+    suffixes = sorted({entry["name"].rsplit("_", 1)[1] for entry in grid_cards})
+    # Four timing quantities plus four per-edge rail charges (issue #2503).
+    assert suffixes == ["df", "dr", "qgf", "qgr", "qvf", "qvr", "tf", "tr"]
     for entry in plan["measurements"]:
         assert entry["spice"].startswith(f".meas tran {entry['name']} ")
-        assert entry["unit"] == "s"
+        suffix = entry["name"].rsplit("_", 1)[1]
+        expected = {"i": "A"}.get(suffix, "C" if suffix.startswith("q") else "s")
+        assert entry["unit"] == expected
 
 
 def test_measurement_cards_use_the_library_thresholds(tmp_path):
@@ -992,11 +1009,19 @@ def test_example_lib_carries_every_required_nldm_group(example_run):
 
     assert "library (characterize_demo_tt_1p80V_25C) {" in text
     assert "cell (nand2_demo) {" in text
-    for group in _TABLES:
+    for group in _TABLES + _POWER_TABLES:
         # Two arcs (A->Y, B->Y), one of each table per arc.
         assert text.count(f"{group} (") == 2
-    assert text.count('related_pin : "A";') == 1
-    assert text.count('related_pin : "B";') == 1
+    # Each arc's related_pin appears once in its timing() group and once in
+    # its internal_power() group (issue #2503).
+    assert text.count('related_pin : "A";') == 2
+    assert text.count('related_pin : "B";') == 2
+    assert text.count("timing () {") == 2
+    assert text.count("internal_power () {") == 2
+    assert "power_lut_template (" in text
+    # One leakage_power group per input state, plus their mean.
+    assert text.count("leakage_power () {") == 4
+    assert text.count("cell_leakage_power :") == 1
     assert text.count("timing_sense : negative_unate;") == 2
     assert text.count("timing_type : combinational;") == 2
     assert text.count("{") == text.count("}")
@@ -1018,11 +1043,24 @@ def test_example_response_matches_the_documented_envelope(example_run):
         "corner",
         "grid",
         "thresholds",
+        "units",
         "arcs",
+        "leakage",
+        "cells",
         "liberty",
         "simulation",
+        "comparison",
         "provenance",
     }
+    # Single-cell form: the top-level cell/arcs/leakage/simulation mirror the
+    # one `cells[]` entry, and no comparison was asked for.
+    assert len(report["cells"]) == 1
+    entry = report["cells"][0]
+    assert entry["cell"] == report["cell"]
+    assert entry["arcs"] == report["arcs"]
+    assert entry["leakage"] == report["leakage"]
+    assert entry["simulation"] == report["simulation"]
+    assert report["comparison"] is None
     # `cell.netlist` is an *input* being pinned -> {path, scope} envelope.
     assert set(report["cell"]["netlist"]) == {"path", "scope"}
     # Generated artifacts are plain absolute strings (json-contract.md's
@@ -1135,7 +1173,18 @@ def test_example_writes_its_artifacts_next_to_the_request(example_run):
     sim_request = json.loads(Path(report["simulation"]["request"]).read_text())
     assert sim_request["engine"] == "ngspice"
     assert sim_request["analysis"]["kind"] == "tran"
-    assert len(sim_request["measurements"]) == report["grid"]["measurement_count"]
+    grid = report["grid"]
+    assert len(sim_request["measurements"]) == grid["total_measurement_count"]
+    # `measurement_count` keeps its #2502 meaning (timing cards only); the
+    # power and leakage cards are counted beside it, not folded into it.
+    assert grid["measurement_count"] == grid["points"] * grid["arc_count"] * 4
+    assert grid["power_measurement_count"] == grid["points"] * grid["arc_count"] * 4
+    assert grid["leakage_measurement_count"] == 4  # 2**2 input states
+    assert grid["total_measurement_count"] == (
+        grid["measurement_count"]
+        + grid["power_measurement_count"]
+        + grid["leakage_measurement_count"]
+    )
 
 
 @_SKIP_NO_NGSPICE
@@ -1263,8 +1312,499 @@ def test_example_generator_reproduces_the_committed_fixtures(tmp_path, monkeypat
     spec.loader.exec_module(module)
     module.main()
 
-    for name in ("cells.spice", "models.lib", "request.json"):
+    for name in ("cells.spice", "models.lib", "request.json", "request-batch.json"):
         assert (workdir / name).read_text() == (EXAMPLES_DIR / name).read_text(), name
+
+
+# --------------------------------------------------------------------------- #
+# Power extraction (issue #2503; no simulator required)
+# --------------------------------------------------------------------------- #
+
+
+def _cards_by_name(plan: dict) -> dict[str, str]:
+    return {entry["name"]: entry["spice"] for entry in plan["measurements"]}
+
+
+def test_power_cards_integrate_each_rail_over_its_output_edge_window(tmp_path):
+    """For the inverter (negative unate) the output RISES on the input's
+    FALLING edge, so the output-rise charges integrate over the second
+    window -- pairing one edge's energy with the other edge's delay would
+    swap the rise/fall power tables."""
+    request = _inverter_request(tmp_path)
+    plan, _ = _plan_for(tmp_path, request)
+    window = plan["window"]
+    cards = _cards_by_name(plan)
+
+    fall_window = (
+        f"FROM={characterize._spice_number(window['fall_start_ns'])}n "
+        f"TO={characterize._spice_number(window['stop_ns'])}n"
+    )
+    rise_window = (
+        f"FROM={characterize._spice_number(window['rise_start_ns'])}n "
+        f"TO={characterize._spice_number(window['fall_start_ns'])}n"
+    )
+    assert cards["a0s0l0_qvr"].endswith(fall_window)
+    assert cards["a0s0l0_qgr"].endswith(fall_window)
+    assert cards["a0s0l0_qvf"].endswith(rise_window)
+    assert cards["a0s0l0_qgf"].endswith(rise_window)
+    assert "INTEG i(Vpda0s0l0)" in cards["a0s0l0_qvr"]
+    assert "INTEG i(Vpga0s0l0)" in cards["a0s0l0_qgr"]
+
+
+def test_power_cards_follow_a_positive_unate_polarity(tmp_path):
+    request = _inverter_request(tmp_path)
+    request["cell"]["pins"][1]["function"] = "A"  # buffer: output rises with A
+    plan, _ = _plan_for(tmp_path, request)
+    rise_start = characterize._spice_number(plan["window"]["rise_start_ns"])
+
+    assert f"FROM={rise_start}n" in _cards_by_name(plan)["a0s0l0_qvr"]
+
+
+def test_leakage_instances_cover_every_input_state(tmp_path):
+    """One never-switching instance per input state; a HIGH input is tied to
+    the metered supply node so its gate leakage is counted, a LOW input to
+    ground (a 0 V source delivers no power)."""
+    request = _inverter_request(tmp_path)
+    request["cell"].update(
+        {
+            "name": "nand2_demo",
+            "pins": [
+                {"name": "A", "direction": "input"},
+                {"name": "B", "direction": "input"},
+                {"name": "Y", "direction": "output", "function": "!(A*B)"},
+            ],
+        }
+    )
+    plan, _ = _plan_for(tmp_path, request)
+
+    assert [dict(state) for state in plan["leakage_states"]] == [
+        {"A": False, "B": False},
+        {"A": False, "B": True},
+        {"A": True, "B": False},
+        {"A": True, "B": True},
+    ]
+    lines = plan["netlist_text"].splitlines()
+    # `.subckt nand2_demo Y A B VDD VSS`
+    instance = next(line for line in lines if line.startswith("Xlk2 "))
+    _, out_node, a_node, b_node, vdd_node, vss_node, _ = instance.split()
+    assert out_node == "o_lk2_Y"
+    assert (a_node, b_node) == ("pl_lk2", "0")  # A high (metered), B low
+    assert (vdd_node, vss_node) == ("pl_lk2", "0")
+    assert "Vpllk2 vdd pl_lk2 DC 0" in lines
+    cards = _cards_by_name(plan)
+    assert cards["lk2_i"].startswith(".meas tran lk2_i AVG i(Vpllk2) FROM=0 TO=")
+
+
+def test_build_power_tables_is_the_symmetric_internal_energy(tmp_path):
+    """rise/fall_power = V * (Q_vdd + Q_gnd) / 2 - C_load * V**2 / 2, in pJ.
+
+    With Q_vdd = C_load*V + q_int and Q_gnd = q_int on the output rise (and
+    mirrored on the fall), the load's own charge cancels exactly and each
+    edge reports V * q_int -- the internal energy only."""
+    request = _inverter_request(tmp_path)
+    plan, resolved = _plan_for(tmp_path, request)
+    corner = characterize._resolve_corner(request)
+    vdd = corner["supply_v"]
+    q_int = 2e-15  # coulombs
+    values = {}
+    for point in plan["points"]:
+        tag = point["tag"]
+        q_load = point["output_load_pf"] * 1e-12 * vdd
+        values[f"{tag}_qvr"] = q_load + q_int
+        values[f"{tag}_qgr"] = q_int
+        values[f"{tag}_qvf"] = q_int
+        values[f"{tag}_qgf"] = q_load + q_int
+
+    tables = characterize._build_power_tables(plan, resolved["grid"], values, corner)
+
+    expected = vdd * q_int * 1e12  # pJ
+    for name in ("rise_power", "fall_power"):
+        table = tables[0][name]
+        assert table.index_1 == (0.02, 0.08)
+        assert table.index_2 == (0.005, 0.03)
+        for row in table.values:
+            assert row == pytest.approx((expected, expected))
+
+
+def test_build_power_tables_refuses_a_grid_hole(tmp_path):
+    request = _inverter_request(tmp_path)
+    plan, resolved = _plan_for(tmp_path, request)
+    corner = characterize._resolve_corner(request)
+    values = {entry["name"]: 1e-15 for entry in plan["measurements"]}
+    del values["a0s1l1_qgf"]
+
+    with pytest.raises(characterize.CharacterizeError, match="a0s1l1_qgf"):
+        characterize._build_power_tables(plan, resolved["grid"], values, corner)
+
+
+def test_build_leakage_reports_every_state_and_their_mean(tmp_path):
+    request = _inverter_request(tmp_path)
+    plan, _ = _plan_for(tmp_path, request)
+    corner = characterize._resolve_corner(request)
+    # 10 pA and 30 pA at 1.8 V -> 18 pW and 54 pW.
+    values = {"lk0_i": 10e-12, "lk1_i": 30e-12}
+
+    leakage = characterize._build_leakage(plan, values, corner)
+
+    assert [state["when"] for state in leakage["states"]] == ["!A", "A"]
+    assert [state["inputs"] for state in leakage["states"]] == [
+        {"A": False},
+        {"A": True},
+    ]
+    assert [state["value_pw"] for state in leakage["states"]] == pytest.approx(
+        [18.0, 54.0]
+    )
+    assert leakage["cell_leakage_power_pw"] == pytest.approx(36.0)
+
+
+def test_render_library_emits_power_and_leakage_groups():
+    power = liberty_writer.InternalPower(
+        related_pin="A", rise_power=_table(), fall_power=_table()
+    )
+    cell = _library().cells[0]
+    pins = (
+        cell.pins[0],
+        liberty_writer.Pin(
+            name="Y",
+            direction="output",
+            function="!A",
+            arcs=cell.pins[1].arcs,
+            internal_power=(power,),
+        ),
+    )
+    text = liberty_writer.render_library(
+        _library(
+            cells=(
+                liberty_writer.Cell(
+                    name="inv_demo",
+                    pins=pins,
+                    cell_leakage_power=36.0,
+                    leakage_power=(
+                        liberty_writer.LeakagePower(when="!A", value=18.0),
+                        liberty_writer.LeakagePower(when="A", value=54.0),
+                    ),
+                ),
+            )
+        )
+    )
+
+    assert "power_lut_template (klt_char_power_template) {" in text
+    assert "variable_1 : input_transition_time;" in text
+    assert "internal_power () {" in text
+    assert text.count("rise_power (klt_char_power_template) {") == 1
+    assert text.count("fall_power (klt_char_power_template) {") == 1
+    assert "cell_leakage_power : 36;" in text
+    assert 'when : "!A";' in text and "value : 54;" in text
+    assert text.count("{") == text.count("}")
+
+
+def test_render_library_omits_the_power_template_without_power_tables():
+    text = liberty_writer.render_library(_library())
+
+    assert "power_lut_template" not in text
+    assert "internal_power" not in text
+    assert "leakage_power ()" not in text
+
+
+def test_render_library_rejects_a_ragged_power_table():
+    ragged = liberty_writer.Table2D(
+        index_1=(0.01, 0.02), index_2=(0.005, 0.01), values=((1.0, 2.0),)
+    )
+    base = _library()
+    pin = base.cells[0].pins[1]
+    library = _library(
+        cells=(
+            liberty_writer.Cell(
+                name="inv_demo",
+                pins=(
+                    base.cells[0].pins[0],
+                    liberty_writer.Pin(
+                        name=pin.name,
+                        direction=pin.direction,
+                        function=pin.function,
+                        arcs=pin.arcs,
+                        internal_power=(
+                            liberty_writer.InternalPower(
+                                related_pin="A",
+                                rise_power=_table(),
+                                fall_power=ragged,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+    with pytest.raises(liberty_writer.LibertyWriteError, match="fall_power"):
+        liberty_writer.render_library(library)
+
+
+# --------------------------------------------------------------------------- #
+# Batch mode: request validation (issue #2503; no simulator required)
+# --------------------------------------------------------------------------- #
+
+
+def _batch_request(tmp_path: Path) -> dict:
+    request = _inverter_request(tmp_path)
+    inverter = request.pop("cell")
+    nand = {
+        "name": "nand2_demo",
+        "netlist": inverter["netlist"],
+        "pins": [
+            {"name": "A", "direction": "input"},
+            {"name": "B", "direction": "input"},
+            {"name": "Y", "direction": "output", "function": "!(A*B)"},
+        ],
+        "power_pins": {"vdd": "VDD", "gnd": "VSS"},
+    }
+    request["cells"] = [inverter, nand]
+    return request
+
+
+def test_cell_and_cells_are_mutually_exclusive(tmp_path):
+    request = _batch_request(tmp_path)
+    request["cell"] = request["cells"][0]
+    _expect_error(tmp_path, request, "mutually exclusive")
+
+
+def test_cells_must_be_a_non_empty_array(tmp_path):
+    request = _batch_request(tmp_path)
+    request["cells"] = []
+    _expect_error(tmp_path, request, "non-empty array")
+
+
+def test_cells_entries_must_be_objects(tmp_path):
+    request = _batch_request(tmp_path)
+    request["cells"][1] = "nand2_demo"
+    _expect_error(tmp_path, request, r"request\.cells\[1\] must be an object")
+
+
+def test_cells_may_not_repeat_a_name(tmp_path):
+    request = _batch_request(tmp_path)
+    request["cells"][1] = dict(request["cells"][0])
+    _expect_error(tmp_path, request, "more than once")
+
+
+def test_batch_errors_name_the_offending_entry(tmp_path):
+    request = _batch_request(tmp_path)
+    request["cells"][1]["pins"][2].pop("function")
+    _expect_error(tmp_path, request, r"request\.cells\[1\]\.pins\[2\]")
+
+
+def test_batch_mode_takes_arc_overrides_per_cell_not_request_wide(tmp_path):
+    request = _batch_request(tmp_path)
+    request["arcs"] = [
+        {"output_pin": "Y", "related_pin": "A", "timing_sense": "negative_unate"}
+    ]
+    _expect_error(tmp_path, request, "single-cell override")
+
+
+def test_batch_arc_override_is_validated_against_its_own_cell(tmp_path):
+    request = _batch_request(tmp_path)
+    request["cells"][0]["arcs"] = [
+        {"output_pin": "Y", "related_pin": "B", "timing_sense": "negative_unate"}
+    ]
+    _expect_error(tmp_path, request, r"request\.cells\[0\]\.arcs\[0\]\.related_pin")
+
+
+def test_cell_filter_rejects_an_undeclared_name(tmp_path):
+    path = _write_request(tmp_path, _batch_request(tmp_path))
+    with pytest.raises(characterize.CharacterizeError, match="nor2_demo"):
+        characterize.run_characterize(str(path), cells=["nor2_demo"])
+
+
+def test_cell_filter_needs_a_batch_request(tmp_path):
+    path = _write_request(tmp_path, _inverter_request(tmp_path))
+    with pytest.raises(characterize.CharacterizeError, match="single-cell"):
+        characterize.run_characterize(str(path), cells=["inv_demo"])
+
+
+def test_cell_entries_filter_keeps_request_order(tmp_path):
+    request = _batch_request(tmp_path)
+    entries = characterize._cell_entries(request, ("nand2_demo",))
+    assert [(where, spec["name"]) for where, spec in entries] == [
+        ("request.cells[1]", "nand2_demo")
+    ]
+
+
+def test_probe_netlist_instantiates_every_batch_cell_on_private_ports():
+    text = characterize._probe_netlist_cells(
+        [("inv_demo", ("A",), ("Y",)), ("nand2_demo", ("A", "B"), ("Y",))]
+    )
+    assert "module klt_characterize_probe(u0_A, u1_A, u1_B, u0_Y, u1_Y);" in text
+    assert "inv_demo u0 (" in text and "nand2_demo u1 (" in text
+    assert ".A(u1_A)" in text and ".Y(u0_Y)" in text
+
+
+def test_cli_parses_repeated_cell_and_compare_to():
+    from klayout_tools.cli.parser import create_parser
+
+    args = create_parser().parse_args(
+        [
+            "characterize",
+            "request.json",
+            "--cell",
+            "inv_demo",
+            "--cell",
+            "nand2_demo",
+            "--compare-to",
+            "vendor.lib",
+        ]
+    )
+    assert args.cell == ["inv_demo", "nand2_demo"]
+    assert args.compare_to == "vendor.lib"
+
+
+# --------------------------------------------------------------------------- #
+# Power + batch mode, end to end through a real ngspice (issue #2503)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def batch_run(tmp_path):
+    """Run the committed batch worked example (`request-batch.json`) in an
+    isolated copy of its directory."""
+    workdir = tmp_path / "characterize"
+    shutil.copytree(EXAMPLES_DIR, workdir)
+    report = characterize.run_characterize(str(workdir / "request-batch.json"))
+    return report, workdir
+
+
+@_SKIP_NO_NGSPICE
+def test_example_emits_power_fields_for_every_arc(example_run):
+    """Acceptance: `rise_power`/`fall_power` for every arc characterized,
+    and `leakage_power` for the cell."""
+    report, _ = example_run
+
+    for arc in report["arcs"]:
+        for name in _POWER_TABLES:
+            values = arc[name]["values"]
+            assert len(values) == 4 and all(len(row) == 4 for row in values)
+            assert arc[name]["index_1"] == report["grid"]["input_transition_ns"]
+    # A slower input edge keeps both devices conducting longer -- more
+    # short-circuit energy. The one monotonicity every internal-energy table
+    # has along its slew axis at the lightest load.
+    for arc in report["arcs"]:
+        for name in _POWER_TABLES:
+            column = [row[0] for row in arc[name]["values"]]
+            assert column[-1] > column[0], (name, column)
+
+    leakage = report["leakage"]
+    assert [state["when"] for state in leakage["states"]] == [
+        "!A&!B",
+        "!A&B",
+        "A&!B",
+        "A&B",
+    ]
+    assert all(state["value_pw"] >= 0 for state in leakage["states"])
+    mean = sum(state["value_pw"] for state in leakage["states"]) / 4
+    assert leakage["cell_leakage_power_pw"] == pytest.approx(mean)
+    assert report["units"]["internal_energy"] == "pJ"
+
+
+@_SKIP_NO_NGSPICE
+def test_example_json_power_tables_match_the_lib(example_run):
+    report, _ = example_run
+    text = Path(report["liberty"]["path"]).read_text()
+
+    for arc in report["arcs"]:
+        for name in _POWER_TABLES:
+            for row in arc[name]["values"]:
+                rendered = ", ".join(
+                    liberty_writer.format_number(value) for value in row
+                )
+                assert f'"{rendered}"' in text
+
+
+@_SKIP_NO_NGSPICE
+def test_batch_emits_one_combined_lib_that_round_trips(batch_run):
+    """Acceptance: N>1 cells in one invocation produce ONE `.lib` covering all
+    of them, and it round-trips through `native/statime`'s reader."""
+    report, _ = batch_run
+    text = Path(report["liberty"]["path"]).read_text()
+
+    assert report["liberty"]["cell_count"] == 2
+    assert text.count("library (") == 1
+    assert "cell (inv_demo) {" in text and "cell (nand2_demo) {" in text
+    roundtrip = report["liberty"]["roundtrip"]
+    assert roundtrip["status"] != "fail", roundtrip["message"]
+    if _have_statime():
+        assert roundtrip["status"] == "pass", roundtrip["message"]
+        assert "through 2 cell(s)" in roundtrip["message"]
+
+
+@_SKIP_NO_NGSPICE
+def test_batch_response_carries_one_entry_per_cell(batch_run):
+    report, workdir = batch_run
+
+    assert report["schema_version"] == 1
+    json.dumps(report)
+    # No one cell to describe: the single-cell mirrors are null.
+    for field in ("cell", "arcs", "leakage", "simulation"):
+        assert report[field] is None
+    names = [entry["cell"]["name"] for entry in report["cells"]]
+    assert names == ["inv_demo", "nand2_demo"]
+    assert [len(entry["arcs"]) for entry in report["cells"]] == [1, 2]
+    assert report["grid"]["arc_count"] == 3
+    assert report["grid"]["leakage_measurement_count"] == 2 + 4
+    for entry in report["cells"]:
+        for arc in entry["arcs"]:
+            assert set(_TABLES + _POWER_TABLES) <= set(arc)
+        # Each cell ran its own simulation, in its own directory.
+        testbench = Path(entry["simulation"]["testbench"])
+        assert testbench.parent == (
+            workdir / ".klt" / "characterize-batch" / "cells" / entry["cell"]["name"]
+        )
+        assert testbench.is_file()
+
+
+@_SKIP_NO_NGSPICE
+def test_batch_cell_filter_characterizes_only_the_named_cells(tmp_path):
+    workdir = tmp_path / "characterize"
+    shutil.copytree(EXAMPLES_DIR, workdir)
+
+    report = characterize.run_characterize(
+        str(workdir / "request-batch.json"), cells=["nand2_demo"]
+    )
+
+    assert [entry["cell"]["name"] for entry in report["cells"]] == ["nand2_demo"]
+    text = Path(report["liberty"]["path"]).read_text()
+    assert "cell (inv_demo)" not in text
+
+
+@_SKIP_NO_NGSPICE
+def test_batch_compare_to_itself_is_exact(batch_run, tmp_path):
+    """The harness wired through `--compare-to`: a library compared against
+    a copy of itself has zero delta on every field it compared, and says it
+    compared every field."""
+    report, workdir = batch_run
+    reference = tmp_path / "reference.lib"
+    shutil.copy(report["liberty"]["path"], reference)
+
+    rerun = characterize.run_characterize(
+        str(workdir / "request-batch.json"), compare_to=str(reference)
+    )
+    summary = rerun["comparison"]["summary"]
+    assert summary["missing"] == []
+    for name, field in summary["fields"].items():
+        assert field["compared"] > 0, name
+    # Same netlist, same deck, same simulator: bit-identical tables.
+    assert summary["within_tolerance"] is True
+    assert all(field["max_abs_delta"] == 0 for field in summary["fields"].values())
+
+
+@_SKIP_NO_NGSPICE
+def test_cli_batch_text_output_lists_every_cell(tmp_path, capsys):
+    workdir = tmp_path / "characterize"
+    shutil.copytree(EXAMPLES_DIR, workdir)
+
+    exit_code = main(["characterize", str(workdir / "request-batch.json")])
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "cell: inv_demo" in out and "cell: nand2_demo" in out
+    assert "rise_power:" in out and "cell_leakage_power:" in out
+    assert "cell_count: 2" in out
 
 
 def _have_statime() -> bool:
