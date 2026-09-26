@@ -235,7 +235,9 @@ only, subtract `C_load * V**2` on the rise" -- sums to the same cycle total
 but piles all internal-node energy onto the rise edge. Measured against
 IHP's `sg13g2_stdcell` it is the worse fit: mean per-point error ~2-5 fJ
 against ~0.2-1.3 fJ for the symmetric split. The vendor split does differ on
-arcs through a series stack -- see "Accuracy against a vendor library".)
+arcs through a series stack, but not because it picks a different rail --
+see "Accuracy against a vendor library" for why neither convention fixes
+that, and issue #2527 for the node-voltage evidence.)
 
 Consequences worth knowing:
 
@@ -812,8 +814,34 @@ difference:
   `C_load * V**2 / 2`), so a 0.5% disagreement in the load charge
   dominates. Hence a relative bound with a 3 fJ absolute floor: it
   holds every observed point without pretending the per-edge split is a
-  settled question. The cause of the stacked-arc split is tracked in issue
-  #2527 rather than tuned away here.
+  settled question.
+
+  Issue #2527 investigated the stacked-arc split by tracing the internal
+  node's own voltage (`x1.net1` on a standalone `sg13g2_nand2_1` /
+  `sg13g2_nor2_1` instance, input held at each steady state for a long
+  settle first) rather than reasoning from the rail charges alone. Both
+  cells show the same asymmetry: the internal node *discharges* through
+  the switching transistor in well under a nanosecond (driven hard on:
+  `net1` was 1.03 V on `nand2_1`, 0 V within 0.5 ns of `B` rising) but
+  *recharges* through the other, permanently-on transistor over a
+  many-tens-of-ns subthreshold tail (`net1` is still only at 0.94 V, not
+  its ~1.03 V steady state, 140 ns after `B` falls) — because that second
+  transistor's gate never switches, so it never turns fully on either;
+  `sg13g2_nor2_1`'s PMOS stack mirrors this exactly, with the roles of
+  rise and fall swapped. Any window short enough to be practical for a
+  characterization grid -- this command's included, `settle_ns` is a few
+  input ramps' worth, not the ~100 ns the tail needs -- captures the fast
+  discharge in full but only the leading edge of the slow recharge, so the
+  recharge edge (`B->Y`'s rise, `A->Y`'s fall) reads low relative to its
+  true, infinite-settle energy. That is a window-*length* effect: it
+  shows up identically on `Q_vdd` and `Q_gnd`, so no per-edge
+  rail-attribution convention -- symmetric or "vdd/gnd only" -- corrects
+  it (see "Power and leakage" above for why the alternative convention is
+  rejected on separate, stronger grounds anyway). Reproducing the vendor's
+  own split would mean guessing the length of a characterization window
+  IHP's tooling does not document, not adopting a principled rule, so the
+  symmetric split stays and the tolerance above stays as the observed
+  worst case rather than being tightened.
 - **Leakage is a few percent low**, consistently across states; the worst
   state (`sg13g2_nand2_1` `A&!B`, −11.6%) is the one whose static current
   flows through a partially-on stack.
